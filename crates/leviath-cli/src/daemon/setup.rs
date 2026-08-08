@@ -18,7 +18,6 @@ use tokio::sync::Mutex;
 
 use leviath_runtime::fanout::FanOutSpawnerRes;
 
-use crate::commands::run::session::build_provider_registry_from_config;
 use crate::config::Config;
 use crate::daemon::fanout_spawner::DaemonFanOutSpawner;
 use crate::daemon::spawn::build_agent;
@@ -85,13 +84,33 @@ pub async fn setup_daemon_host(
     config: Config,
     runs_dir: std::path::PathBuf,
     runtime: Handle,
-) -> WorldHost {
+) -> anyhow::Result<WorldHost> {
+    setup_daemon_host_with(
+        config,
+        runs_dir,
+        runtime,
+        &leviath_providers::provider::build_http_client,
+    )
+    .await
+}
+
+/// [`setup_daemon_host`], with outbound-client construction injected so the
+/// start-up failure path is reachable from a test.
+pub async fn setup_daemon_host_with(
+    config: Config,
+    runs_dir: std::path::PathBuf,
+    runtime: Handle,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> anyhow::Result<WorldHost> {
     // Apply the machine-wide outbound-network policy before anything can fetch.
     // It lives in a process-wide atomic because the shared blocking HTTP client's
     // redirect policy has no per-agent context to consult; see
     // `script_host::set_local_network_allowed`.
     crate::daemon::script_host::set_local_network_allowed(config.security.allow_local_network);
-    let providers = build_provider_registry_from_config(&config);
+    let providers = crate::commands::run::session::build_provider_registry_from_config_with(
+        &config,
+        build_client,
+    )?;
     // MCP connections are shared across agents; the workdir here only seeds the
     // (discarded) built-ins - each agent gets its own over its own workdir.
     let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
@@ -108,7 +127,7 @@ pub async fn setup_daemon_host(
         config.limits.mcp_idle_disconnect_secs,
     );
     mcp_pool.warm_recovered(&runs_dir).await;
-    build_host(HostParts {
+    Ok(build_host(HostParts {
         config,
         providers,
         runs_dir,
@@ -117,7 +136,7 @@ pub async fn setup_daemon_host(
         mcp_pool,
         runtime,
         now_secs: || chrono::Utc::now().timestamp(),
-    })
+    }))
 }
 
 /// The reap hook installed on the host: drops a reaped agent's tool state and
@@ -684,7 +703,8 @@ mod tests {
             runs.path().to_path_buf(),
             Handle::current(),
         )
-        .await;
+        .await
+        .expect("the daemon host builds in tests");
 
         // Spawning through the wired host exercises the real setup end to end
         // (including the now_secs timestamp closure).
@@ -728,7 +748,8 @@ mod tests {
             runs.path().to_path_buf(),
             Handle::current(),
         )
-        .await;
+        .await
+        .expect("the daemon host builds in tests");
         let (reply, rx) = oneshot::channel();
         host.handle(ControlOp::Spawn {
             args: Box::new(SpawnArgs {
@@ -820,7 +841,8 @@ mod tests {
                     runs.path().to_path_buf(),
                     Handle::current(),
                 )
-                .await;
+                .await
+                .expect("the daemon host builds in tests");
                 let (reply, rx) = oneshot::channel();
                 host.handle(ControlOp::Spawn {
                     args: Box::new(SpawnArgs {
@@ -865,7 +887,8 @@ mod tests {
             runs.path().to_path_buf(),
             Handle::current(),
         )
-        .await;
+        .await
+        .expect("the daemon host builds in tests");
 
         // Staked out *after* startup, so the recovery sweep (which marks
         // un-reloadable runs as crashed) hasn't already dealt with it - this is
@@ -1621,5 +1644,22 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             // A daemon that wrote the current build is not stale.
             assert!(!daemon_build_is_stale(read_build_marker().as_deref()));
         });
+    }
+
+    #[tokio::test]
+    async fn the_daemon_refuses_to_start_without_a_usable_https_client() {
+        // Better than accepting runs it could never infer for: the error names
+        // the cause, where the previous behaviour was a panic at start-up.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.providers.anthropic_api_key = Some("k".to_string());
+        let err =
+            setup_daemon_host_with(config, dir.path().to_path_buf(), Handle::current(), &|_t| {
+                Err(leviath_providers::provider::malformed_url_error())
+            })
+            .await
+            .err()
+            .expect("a failing client factory should stop the daemon starting");
+        assert!(err.to_string().contains("root certificate store"));
     }
 }

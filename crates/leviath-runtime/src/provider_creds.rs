@@ -80,9 +80,58 @@ impl ProviderCreds {
     }
 }
 
+/// Outbound HTTPS clients, one per distinct request timeout.
+#[derive(Default)]
+struct ClientCache {
+    by_timeout: std::collections::HashMap<Option<u64>, leviath_providers::provider::HttpClient>,
+}
+
+impl ClientCache {
+    /// The client for `timeout`, building it on first request.
+    ///
+    /// Providers sharing a timeout share a connection pool; before this, each
+    /// provider built its own client, so a daemon with five configured held
+    /// five pools.
+    fn get_or_build(
+        &mut self,
+        timeout: Option<u64>,
+        build: leviath_providers::provider::HttpClientFactory<'_>,
+    ) -> Result<leviath_providers::provider::HttpClient, leviath_providers::ProviderError> {
+        if let Some(client) = self.by_timeout.get(&timeout) {
+            return Ok(client.clone());
+        }
+        let built = build(timeout)
+            .map_err(|e| leviath_providers::ProviderError::ClientBuild(e.to_string()))?;
+        self.by_timeout.insert(timeout, built.clone());
+        Ok(built)
+    }
+}
+
 /// Build a [`ProviderRegistry`] from decoupled [`ProviderCreds`].
-pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
+pub fn build_provider_registry(
+    creds: &[ProviderCreds],
+) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
+    build_provider_registry_with(creds, &leviath_providers::provider::build_http_client)
+}
+
+/// [`build_provider_registry`], with client construction injected.
+///
+/// One client per distinct request timeout, shared by every provider that wants
+/// it. Previously each provider built its own, so a daemon with five providers
+/// configured held five connection pools; the timeout is part of the key because
+/// `apply_request_timeout` deliberately defers to the client-level timeout when
+/// a stage sets none, so collapsing distinct timeouts onto one client would
+/// silently retime requests.
+pub fn build_provider_registry_with(
+    creds: &[ProviderCreds],
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
     let mut registry = ProviderRegistry::new();
+    // One client per distinct timeout, built on first use. Lazy because
+    // `claude-code` drives a local CLI and needs no HTTP client at all - eager
+    // construction would let a certificate-store failure block a provider that
+    // never touches a certificate.
+    let mut clients = ClientCache::default();
 
     for c in creds {
         let caps = c.model_capabilities.clone();
@@ -93,9 +142,9 @@ pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
                     registry.register(
                         "anthropic".to_string(),
                         Arc::new(leviath_providers::AnthropicProvider::with_overrides(
+                            clients.get_or_build(timeout, build_client)?,
                             key.clone(),
                             caps,
-                            timeout,
                             c.rate_limit.as_ref(),
                         )),
                     );
@@ -106,9 +155,9 @@ pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
                     registry.register(
                         "openai".to_string(),
                         Arc::new(leviath_providers::OpenAIProvider::with_overrides(
+                            clients.get_or_build(timeout, build_client)?,
                             key.clone(),
                             caps,
-                            timeout,
                             c.rate_limit.as_ref(),
                         )),
                     );
@@ -119,9 +168,9 @@ pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
                     registry.register(
                         "google".to_string(),
                         Arc::new(leviath_providers::GeminiProvider::with_overrides(
+                            clients.get_or_build(timeout, build_client)?,
                             key.clone(),
                             caps,
-                            timeout,
                             c.rate_limit.as_ref(),
                         )),
                     );
@@ -132,9 +181,9 @@ pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
                     registry.register(
                         "openrouter".to_string(),
                         Arc::new(leviath_providers::OpenRouterProvider::with_overrides(
+                            clients.get_or_build(timeout, build_client)?,
                             key.clone(),
                             caps,
-                            timeout,
                             c.rate_limit.as_ref(),
                         )),
                     );
@@ -148,7 +197,9 @@ pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
                 registry.register(
                     "ollama".to_string(),
                     Arc::new(leviath_providers::OllamaProvider::with_overrides(
-                        url, caps, timeout,
+                        clients.get_or_build(timeout, build_client)?,
+                        url,
+                        caps,
                     )),
                 );
             }
@@ -174,7 +225,7 @@ pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
         }
     }
 
-    registry
+    Ok(registry)
 }
 
 #[cfg(test)]
@@ -203,7 +254,7 @@ mod tests {
 
     #[test]
     fn build_provider_registry_from_creds_slice() {
-        // Drives `build_provider_registry(&[ProviderCreds])` directly:
+        // Drives `build_provider_registry(&[ProviderCreds]).expect("an HTTPS client builds in tests")` directly:
         // every keyed provider, the ollama-with-default-url arm, claude-code,
         // and an unknown provider name (the catch-all no-op arm).
         let caps = std::collections::HashMap::new();
@@ -272,7 +323,7 @@ mod tests {
                 options: Default::default(),
             },
         ];
-        let registry = build_provider_registry(&creds);
+        let registry = build_provider_registry(&creds).expect("an HTTPS client builds in tests");
         assert!(registry.has("anthropic"));
         assert!(registry.has("openai"));
         assert!(registry.has("google"));
@@ -300,7 +351,7 @@ mod tests {
                 options: Default::default(),
             })
             .collect();
-        let registry = build_provider_registry(&creds);
+        let registry = build_provider_registry(&creds).expect("an HTTPS client builds in tests");
         assert!(!registry.has("anthropic"));
         assert!(!registry.has("openai"));
         assert!(!registry.has("google"));
@@ -319,7 +370,8 @@ mod tests {
         creds
             .options
             .insert("effort".to_string(), "low".to_string());
-        let registry = build_provider_registry(std::slice::from_ref(&creds));
+        let registry = build_provider_registry(std::slice::from_ref(&creds))
+            .expect("an HTTPS client builds in tests");
         assert!(registry.has("claude-code"));
 
         // Options are consumed by the provider constructor, which is where the
@@ -327,7 +379,11 @@ mod tests {
         creds
             .options
             .insert("effort".to_string(), "warp-speed".to_string());
-        assert!(build_provider_registry(&[creds]).has("claude-code"));
+        assert!(
+            build_provider_registry(&[creds])
+                .expect("an HTTPS client builds in tests")
+                .has("claude-code")
+        );
     }
 
     #[test]
@@ -339,5 +395,87 @@ mod tests {
         assert!(creds.options.is_empty());
         assert!(creds.model_capabilities.is_empty());
         assert!(creds.request_timeout_secs.is_none());
+    }
+
+    // ─── The client-build failure path ──────────────────────────────────────
+
+    /// A factory that always fails, standing in for a machine whose root
+    /// certificate store cannot be read.
+    fn failing_client(
+        _timeout: Option<u64>,
+    ) -> std::result::Result<
+        leviath_providers::provider::HttpClient,
+        leviath_providers::provider::HttpError,
+    > {
+        // The only way to obtain a `reqwest::Error` is to have reqwest produce
+        // one; a request to an unroutable scheme does that without any I/O.
+        Err(leviath_providers::provider::malformed_url_error())
+    }
+
+    #[test]
+    fn every_http_provider_fails_the_registry_when_its_client_will_not_build() {
+        // One case per branch that needs a client. A single provider would leave
+        // the other arms' error paths unproven, which is exactly the hole this
+        // seam exists to close.
+        for name in ["anthropic", "openai", "google", "openrouter", "ollama"] {
+            let mut cred = ProviderCreds::simple(name);
+            cred.api_key = Some("k".to_string());
+            let err = build_provider_registry_with(&[cred], &failing_client)
+                .err()
+                .expect("a failing client factory should fail the registry");
+            // Discriminant rather than `matches!`: the macro expands to a
+            // match with a `_ => false` arm that nothing reaches, which the
+            // 100% gate reads as an uncovered region.
+            assert_eq!(
+                std::mem::discriminant(&err),
+                std::mem::discriminant(&leviath_providers::ProviderError::ClientBuild(
+                    String::new()
+                ))
+            );
+            // The message has to name the cause; a bare "request failed" would
+            // send someone looking at their network, not their cert store.
+            assert!(err.to_string().contains("root certificate store"));
+        }
+    }
+
+    #[test]
+    fn a_provider_that_needs_no_http_client_is_unaffected() {
+        // `claude-code` drives a local CLI. Building its entry must not depend
+        // on an HTTPS client, so a failing factory leaves it registered.
+        let registry =
+            build_provider_registry_with(&[ProviderCreds::simple("claude-code")], &failing_client)
+                .expect("claude-code needs no HTTPS client");
+        assert!(registry.has("claude-code"));
+    }
+
+    #[test]
+    fn providers_sharing_a_timeout_share_one_client() {
+        // Atomic rather than `Cell`: the factory is `Send + Sync`, because the
+        // one in `verify` is held across an await.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let builds = AtomicUsize::new(0);
+        let counting = |timeout: Option<u64>| {
+            builds.fetch_add(1, Ordering::SeqCst);
+            leviath_providers::provider::build_http_client(timeout)
+        };
+        let creds: Vec<ProviderCreds> = [("anthropic", 30), ("openai", 30), ("google", 60)]
+            .into_iter()
+            .map(|(name, secs)| {
+                let mut c = ProviderCreds::simple(name);
+                c.api_key = Some("k".to_string());
+                c.request_timeout_secs = Some(secs);
+                c
+            })
+            .collect();
+        let registry =
+            build_provider_registry_with(&creds, &counting).expect("clients build in tests");
+        assert!(registry.has("anthropic") && registry.has("openai") && registry.has("google"));
+        // Two distinct timeouts, so two clients - not one per provider, which is
+        // what this crate did before and what the connection pools paid for.
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            2,
+            "expected one client per distinct timeout"
+        );
     }
 }

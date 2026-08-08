@@ -210,7 +210,7 @@ impl LintEnv {
                 .iter()
                 .flat_map(|s| s.model.models.iter())
                 .map(|e| e.provider.clone())
-                .filter(|p| registry.has(p))
+                .filter(|p| registry.as_ref().is_ok_and(|r| r.has(p)))
                 .collect(),
         );
         self

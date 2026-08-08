@@ -128,9 +128,9 @@ pub struct AnthropicProvider {
 
 impl AnthropicProvider {
     /// Create a new Anthropic provider.
-    pub fn new(api_key: String) -> Self {
+    pub fn new(client: reqwest::Client, api_key: String) -> Self {
         Self {
-            client: crate::provider::build_http_client(None),
+            client,
             api_key,
             base_url: "https://api.anthropic.com/v1".to_string(),
             rate_limiter: None,
@@ -140,9 +140,8 @@ impl AnthropicProvider {
     }
 
     /// Create a new Anthropic provider with full configuration.
-    pub fn with_config(config: ProviderConfig) -> Self {
+    pub fn with_config(client: reqwest::Client, config: ProviderConfig) -> Self {
         let rate_limiter = config.rate_limit.as_ref().map(RateLimiter::new);
-        let client = crate::provider::build_http_client(config.request_timeout_secs);
         Self {
             client,
             api_key: config.api_key,
@@ -157,13 +156,13 @@ impl AnthropicProvider {
 
     /// Create a new Anthropic provider with per-model capability overrides.
     pub fn with_overrides(
+        client: reqwest::Client,
         api_key: String,
         overrides: HashMap<String, ModelCapabilities>,
-        timeout_secs: Option<u64>,
         rate_limit: Option<&crate::provider::RateLimitConfig>,
     ) -> Self {
         Self {
-            client: crate::provider::build_http_client(timeout_secs),
+            client,
             api_key,
             base_url: "https://api.anthropic.com/v1".to_string(),
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
@@ -938,7 +937,10 @@ mod tests {
 
     #[test]
     fn test_provider_creation() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         assert_eq!(provider.name(), "anthropic");
     }
 
@@ -987,13 +989,19 @@ mod tests {
 
     #[test]
     fn test_context_limits() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         assert_eq!(provider.max_context_tokens("claude-sonnet-4-6"), 1_000_000);
     }
 
     #[test]
     fn test_build_request_body() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![crate::SystemBlock {
                 text: "You are helpful.".to_string(),
@@ -1028,7 +1036,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_passes_through_extra_params() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -1050,7 +1061,10 @@ mod tests {
 
     #[test]
     fn test_parse_response() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let body = serde_json::json!({
             "content": [
                 { "type": "text", "text": "Hello!" }
@@ -1071,7 +1085,10 @@ mod tests {
 
     #[test]
     fn test_parse_response_with_tool_calls() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let body = serde_json::json!({
             "content": [
                 { "type": "text", "text": "Let me search." },
@@ -1095,7 +1112,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_opus48() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("claude-opus-4-8");
         assert!(!caps.supports_temperature);
         assert!(caps.supports_streaming);
@@ -1106,7 +1126,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_opus5() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("claude-opus-5");
         assert!(!caps.supports_temperature);
         assert!(caps.supports_streaming);
@@ -1117,7 +1140,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_sonnet46() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("claude-sonnet-4-6");
         assert!(caps.supports_temperature);
         assert!(caps.supports_streaming);
@@ -1128,7 +1154,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_sonnet5() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("claude-sonnet-5");
         assert!(!caps.supports_temperature);
         assert!(caps.supports_streaming);
@@ -1139,7 +1168,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_fable_and_opus46() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         for m in ["claude-fable-5", "claude-mythos-5", "claude-opus-4-6"] {
             let caps = provider.builtin_capabilities(m);
             assert!(caps.supports_streaming);
@@ -1149,7 +1181,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_haiku45() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("claude-haiku-4-5-20251001");
         assert!(caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 200_000);
@@ -1158,7 +1193,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_fable5() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("claude-fable-5");
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1_000_000);
@@ -1167,7 +1205,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_sonnet_46() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("claude-sonnet-4-6");
         assert!(caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1_000_000);
@@ -1188,8 +1229,12 @@ mod tests {
                 max_output_tokens: 32_768,
             },
         );
-        let provider =
-            AnthropicProvider::with_overrides("test-key".to_string(), overrides, None, None);
+        let provider = AnthropicProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+            overrides,
+            None,
+        );
         let caps = provider.capabilities("claude-sonnet-4-6");
         // Override should take precedence over built-in
         assert!(!caps.supports_temperature);
@@ -1198,7 +1243,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_with_cache_breakpoint() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![crate::SystemBlock {
                 text: "You are helpful.".to_string(),
@@ -1240,7 +1288,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_max_4_breakpoints() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let mut messages: Vec<crate::provider::Message> = (0..6)
             .map(|i| crate::provider::Message {
                 role: "user".to_string(),
@@ -1372,7 +1423,10 @@ mod tests {
         // program_flows/plan/task pinned + files hashmap) must consolidate
         // within the 4-block total `cache_control` budget; emitting 5
         // `cache_control` blocks is a hard Anthropic 400.
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let system = vec![
             crate::SystemBlock {
                 text: "architecture".into(),
@@ -1432,7 +1486,10 @@ mod tests {
         use leviath_core::CacheHint;
         // 3 distinct system tiers claim 3 of the 4 breakpoints; the lone message
         // that requests one gets the last slot - and never more than 4 total.
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let system = vec![
             crate::SystemBlock {
                 text: "a".into(),
@@ -1494,7 +1551,10 @@ mod tests {
         use leviath_core::CacheHint;
         // A lone Never block carries no cache_control, so the compact plain-string
         // system form is still used (back-compat).
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![crate::SystemBlock {
                 text: "ephemeral".into(),
@@ -1518,7 +1578,10 @@ mod tests {
 
     #[test]
     fn test_parse_response_with_cache_metrics() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let body = serde_json::json!({
             "content": [
                 { "type": "text", "text": "Hello!" }
@@ -1659,7 +1722,10 @@ mod tests {
 
     #[test]
     fn test_name() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         assert_eq!(provider.name(), "anthropic");
     }
 
@@ -1671,7 +1737,10 @@ mod tests {
             rate_limit: None,
             request_timeout_secs: None,
         };
-        let provider = AnthropicProvider::with_config(config);
+        let provider = AnthropicProvider::with_config(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            config,
+        );
         assert_eq!(provider.base_url, "https://api.anthropic.com/v1");
     }
 
@@ -1683,7 +1752,10 @@ mod tests {
             rate_limit: None,
             request_timeout_secs: None,
         };
-        let provider = AnthropicProvider::with_config(config);
+        let provider = AnthropicProvider::with_config(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            config,
+        );
         assert_eq!(provider.base_url, "https://custom.api.com");
     }
 
@@ -1698,13 +1770,19 @@ mod tests {
             }),
             request_timeout_secs: None,
         };
-        let provider = AnthropicProvider::with_config(config);
+        let provider = AnthropicProvider::with_config(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            config,
+        );
         assert!(provider.rate_limiter.is_some());
     }
 
     #[test]
     fn test_builtin_capabilities_opus46() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("claude-opus-4-6");
         assert!(caps.supports_temperature);
         assert!(caps.supports_streaming);
@@ -1716,7 +1794,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_opus47() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("claude-opus-4-7");
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1_000_000);
@@ -1725,7 +1806,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_mythos5() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("claude-mythos-5");
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1_000_000);
@@ -1734,7 +1818,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_generic_claude4_fallback() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         // Uses generic claude-4.x fallback (not matching specific model patterns above)
         let caps = provider.builtin_capabilities("claude-haiku-4");
         assert!(!caps.supports_temperature);
@@ -1744,7 +1831,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_unknown_model() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("some-unknown-model");
         // Should return ModelCapabilities::default()
         let default = ModelCapabilities::default();
@@ -1765,7 +1855,12 @@ mod tests {
                 max_output_tokens: 10,
             },
         );
-        let provider = AnthropicProvider::with_overrides("key".to_string(), overrides, None, None);
+        let provider = AnthropicProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+            overrides,
+            None,
+        );
         let caps = provider.capabilities("custom-model");
         assert_eq!(caps.max_context_tokens, 42);
         assert!(!caps.supports_streaming);
@@ -1773,15 +1868,22 @@ mod tests {
 
     #[test]
     fn test_capabilities_falls_through_to_builtin() {
-        let provider =
-            AnthropicProvider::with_overrides("key".to_string(), HashMap::new(), None, None);
+        let provider = AnthropicProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+            HashMap::new(),
+            None,
+        );
         let caps = provider.capabilities("claude-sonnet-4-6");
         assert_eq!(caps.max_context_tokens, 1_000_000);
     }
 
     #[test]
     fn test_max_context_tokens_delegates_to_capabilities() {
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         assert_eq!(provider.max_context_tokens("claude-haiku-4-5"), 200_000);
         assert_eq!(provider.max_context_tokens("claude-opus-4-8"), 1_000_000);
     }
@@ -1812,7 +1914,10 @@ mod tests {
 
     #[test]
     fn test_parse_response_empty_content_blocks() {
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let body = serde_json::json!({
             "content": [],
             "stop_reason": "end_turn",
@@ -1825,7 +1930,10 @@ mod tests {
 
     #[test]
     fn test_parse_response_no_content_field() {
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let body = serde_json::json!({
             "stop_reason": "end_turn",
             "usage": { "input_tokens": 5, "output_tokens": 0 }
@@ -1836,7 +1944,10 @@ mod tests {
 
     #[test]
     fn test_parse_response_no_usage_field() {
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let body = serde_json::json!({
             "content": [{ "type": "text", "text": "Hello" }],
             "stop_reason": "end_turn"
@@ -1848,7 +1959,10 @@ mod tests {
 
     #[test]
     fn test_parse_response_unknown_content_type_ignored() {
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let body = serde_json::json!({
             "content": [
                 { "type": "image", "data": "abc" },
@@ -1863,7 +1977,10 @@ mod tests {
 
     #[test]
     fn test_parse_response_tool_call_missing_fields() {
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let body = serde_json::json!({
             "content": [
                 { "type": "tool_use" }
@@ -1879,7 +1996,10 @@ mod tests {
 
     #[test]
     fn test_parse_response_total_tokens_computed() {
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let body = serde_json::json!({
             "content": [{ "type": "text", "text": "ok" }],
             "stop_reason": "end_turn",
@@ -1891,7 +2011,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_with_tools() {
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -1920,7 +2043,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_no_temperature_for_opus48() {
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -1943,7 +2069,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_temperature_for_sonnet46() {
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -1965,7 +2094,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_multiple_system_messages() {
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![
                 crate::SystemBlock {
@@ -1998,7 +2130,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_no_system_messages() {
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -2022,7 +2157,10 @@ mod tests {
     fn test_build_request_body_system_block_never_hint_omits_cache_control() {
         // A system block with CacheHint::Never exercises the false branch of
         // the `cache_hint != Never` guard, so no cache_control is attached.
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![crate::SystemBlock {
                 text: "No caching here.".to_string(),
@@ -2052,7 +2190,10 @@ mod tests {
         // A message with cache_breakpoint = true AND block (non-Text) content
         // exercises the MessageContent::Blocks arm of the breakpoint handling,
         // which serializes the content normally rather than wrapping it.
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -2223,7 +2364,10 @@ mod tests {
     fn test_parse_response_text_block_missing_text_field_is_skipped() {
         // A text block with no "text" key - exercises the if-let None branch
         // in parse_response's content iteration.
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let body = serde_json::json!({
             "content": [
                 { "type": "text" },
@@ -2384,7 +2528,10 @@ mod tests {
 
     #[test]
     fn test_parse_response_no_stop_reason_defaults_to_complete() {
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let body = serde_json::json!({
             "content": [{ "type": "text", "text": "hi" }],
             "usage": { "input_tokens": 5, "output_tokens": 2 }
@@ -2397,7 +2544,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_exactly_4_cache_breakpoints() {
-        let provider = AnthropicProvider::new("key".to_string());
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         // Exactly 4 messages with cache_breakpoint = true
         let messages: Vec<crate::provider::Message> = (0..4)
             .map(|i| crate::provider::Message {
@@ -2443,12 +2593,15 @@ mod tests {
     // without a real network call.
 
     fn provider_with_url(url: String) -> AnthropicProvider {
-        AnthropicProvider::with_config(ProviderConfig {
-            api_key: "test-key".to_string(),
-            base_url: Some(url),
-            rate_limit: None,
-            request_timeout_secs: None,
-        })
+        AnthropicProvider::with_config(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            ProviderConfig {
+                api_key: "test-key".to_string(),
+                base_url: Some(url),
+                rate_limit: None,
+                request_timeout_secs: None,
+            },
+        )
     }
 
     fn simple_request() -> InferenceRequest {
@@ -2853,11 +3006,19 @@ mod tests {
             requests_per_minute: 5,
             tokens_per_minute: 1_000,
         };
-        let limited =
-            AnthropicProvider::with_overrides("k".to_string(), HashMap::new(), None, Some(&cfg));
+        let limited = AnthropicProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+            HashMap::new(),
+            Some(&cfg),
+        );
         assert!(limited.rate_limiter.is_some());
-        let unlimited =
-            AnthropicProvider::with_overrides("k".to_string(), HashMap::new(), None, None);
+        let unlimited = AnthropicProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+            HashMap::new(),
+            None,
+        );
         assert!(unlimited.rate_limiter.is_none());
     }
 }

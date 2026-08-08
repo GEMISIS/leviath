@@ -54,31 +54,58 @@ pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
 /// Builds the real provider registry from a loaded [`Config`] - the
 /// production `build_registry` passed to [`execute_with_registry`] by
 /// [`execute`].
-fn build_registry_from_config(config: &Config) -> ProviderRegistry {
+fn build_registry_from_config(
+    config: &Config,
+) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
+    build_registry_from_config_with(config, &leviath_providers::provider::build_http_client)
+}
+
+/// [`build_registry_from_config`], with client construction injected so the
+/// failure path is reachable from a test.
+fn build_registry_from_config_with(
+    config: &Config,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
     let mut reg = ProviderRegistry::new();
+    // `lev test` uses one client for every provider it registers: the command
+    // has no per-provider timeout to honour, so there is nothing to key on.
+    let client = build_client(None)
+        .map_err(|e| leviath_providers::ProviderError::ClientBuild(e.to_string()))?;
 
     if let Some(ref key) = config.providers.anthropic_api_key {
         reg.register(
             "anthropic".to_string(),
-            Arc::new(leviath_providers::AnthropicProvider::new(key.clone())),
+            Arc::new(leviath_providers::AnthropicProvider::new(
+                client.clone(),
+                key.clone(),
+            )),
         );
     }
     if let Some(ref key) = config.providers.openai_api_key {
         reg.register(
             "openai".to_string(),
-            Arc::new(leviath_providers::OpenAIProvider::new(key.clone())),
+            Arc::new(leviath_providers::OpenAIProvider::new(
+                client.clone(),
+                key.clone(),
+            )),
         );
     }
     if let Some(ref key) = config.providers.google_api_key {
         reg.register(
             "google".to_string(),
-            Arc::new(leviath_providers::GeminiProvider::new(key.clone())),
+            Arc::new(leviath_providers::GeminiProvider::new(
+                client.clone(),
+                key.clone(),
+            )),
         );
     }
     if let Some(ref key) = config.openrouter_api_key {
         reg.register(
             "openrouter".to_string(),
-            Arc::new(leviath_providers::OpenRouterProvider::new(key.clone())),
+            Arc::new(leviath_providers::OpenRouterProvider::new(
+                client.clone(),
+                key.clone(),
+            )),
         );
     }
     let ollama_url = config
@@ -88,12 +115,21 @@ fn build_registry_from_config(config: &Config) -> ProviderRegistry {
     reg.register(
         "ollama".to_string(),
         Arc::new(leviath_providers::OllamaProvider::with_base_url(
+            client.clone(),
             ollama_url.to_string(),
         )),
     );
 
-    reg
+    Ok(reg)
 }
+
+/// How `lev test` gets its provider registry.
+///
+/// Fallible because constructing a provider's outbound HTTPS client reads the
+/// machine's root certificate store and can fail; boxed for the
+/// monomorphization reason spelled out on [`execute_with_registry`].
+type RegistryBuilder =
+    Box<dyn FnOnce(&Config) -> Result<ProviderRegistry, leviath_providers::ProviderError>>;
 
 /// Core of [`execute`], with provider-registry construction injected so
 /// tests can drive the non-dry-run path with a mock [`Provider`] instead of
@@ -101,9 +137,8 @@ fn build_registry_from_config(config: &Config) -> ProviderRegistry {
 /// through whatever the developer's real `~/.leviath/config.toml` happens to
 /// contain.
 ///
-/// `build_registry` is a boxed trait object (`Box<dyn FnOnce(&Config) ->
-/// ProviderRegistry>`) rather than `impl FnOnce(&Config) -> ProviderRegistry`
-/// so every caller - production's `build_registry_from_config` and every
+/// `build_registry` is a boxed trait object ([`RegistryBuilder`]) rather than an
+/// `impl FnOnce` bound so every caller - production's `build_registry_from_config` and every
 /// test's distinct `mock_registry_builder(...)` closure - shares exactly
 /// ONE monomorphization of this (large, many-branch) function instead of
 /// one per closure type. This was a confirmed generic-monomorphization
@@ -114,7 +149,7 @@ fn build_registry_from_config(config: &Config) -> ProviderRegistry {
 /// in this crate.
 async fn execute_with_registry(
     args: TestArgs,
-    build_registry: Box<dyn FnOnce(&Config) -> ProviderRegistry>,
+    build_registry: RegistryBuilder,
 ) -> anyhow::Result<()> {
     let path = args.path.unwrap_or_else(|| ".".to_string());
     tracing::info!(path = %path, "Running agent tests");
@@ -164,7 +199,7 @@ async fn execute_with_registry(
 
     let registry = if !args.dry_run {
         let config = Config::load()?;
-        Some(build_registry(&config))
+        Some(build_registry(&config)?)
     } else {
         None
     };
@@ -2091,7 +2126,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     fn mock_registry_builder(
         content: &'static str,
         tool_calls: Vec<ToolCall>,
-    ) -> impl FnOnce(&Config) -> ProviderRegistry {
+    ) -> impl FnOnce(&Config) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
         move |_config: &Config| {
             let mut reg = ProviderRegistry::new();
             reg.register(
@@ -2101,7 +2136,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
                     tool_calls,
                 }),
             );
-            reg
+            Ok(reg)
         }
     }
 
@@ -2584,7 +2619,8 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             ..Config::default()
         };
 
-        let registry = build_registry_from_config(&config);
+        let registry =
+            build_registry_from_config(&config).expect("an HTTPS client builds in tests");
         assert!(registry.has("anthropic"));
         assert!(registry.has("openai"));
         assert!(registry.has("google"));
@@ -2595,7 +2631,8 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     #[test]
     fn build_registry_from_config_no_keys_still_registers_ollama_with_default_url() {
         let config = Config::default();
-        let registry = build_registry_from_config(&config);
+        let registry =
+            build_registry_from_config(&config).expect("an HTTPS client builds in tests");
         assert!(!registry.has("anthropic"));
         assert!(!registry.has("openai"));
         assert!(!registry.has("google"));
@@ -2658,5 +2695,48 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         assert_eq!(provider.count_tokens("hello", "any-model").await, 5);
         assert_eq!(provider.max_context_tokens("any-model"), 8192);
         assert_eq!(provider.name(), "mock");
+    }
+
+    #[test]
+    fn a_registry_needs_an_https_client_it_can_build() {
+        // `lev test` registers every configured provider against one client;
+        // if that client cannot be built there is nothing to test against.
+        let mut config = Config::default();
+        config.providers.anthropic_api_key = Some("k".to_string());
+        let err = build_registry_from_config_with(&config, &|_t| {
+            Err(leviath_providers::provider::malformed_url_error())
+        })
+        .err()
+        .expect("a failing client factory should fail the registry");
+        assert!(err.to_string().contains("root certificate store"));
+    }
+
+    #[tokio::test]
+    async fn a_real_run_stops_when_the_registry_will_not_build() {
+        // Not a dry run, so the registry is built - and a machine that cannot
+        // build an HTTPS client has nothing to run the cases against.
+        crate::config::with_isolated_config_path_async(
+            "test-a_real_run_stops_when_the_registry_will_not_build",
+            |_fake_dir| async move {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let project = dir.path();
+                write_project_with_test_file(project, "[[test]]\nname = \"t\"\ninput = \"hi\"\n");
+                let args = TestArgs {
+                    path: Some(project.to_str().expect("utf-8 path").to_string()),
+                    filter: None,
+                    dry_run: false,
+                };
+                let failing: RegistryBuilder = Box::new(|_config: &Config| {
+                    Err(leviath_providers::ProviderError::ClientBuild(
+                        "no roots".to_string(),
+                    ))
+                });
+                let err = execute_with_registry(args, failing)
+                    .await
+                    .expect_err("a failing registry builder should stop the run");
+                assert!(err.to_string().contains("no roots"), "{err}");
+            },
+        )
+        .await;
     }
 }

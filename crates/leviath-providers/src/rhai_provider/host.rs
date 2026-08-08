@@ -106,10 +106,8 @@ impl ReqwestExecutor {
     /// Build an executor with a fresh-connection-per-request client (the
     /// `pool_max_idle_per_host(0)` fix); per-request deadlines come from
     /// [`HostRequest::timeout_secs`].
-    pub fn new() -> Self {
-        Self {
-            client: crate::provider::build_http_client(None),
-        }
+    pub fn new(client: reqwest::Client) -> Self {
+        Self { client }
     }
 
     /// Build the `reqwest::RequestBuilder` for a [`HostRequest`].
@@ -125,12 +123,6 @@ impl ReqwestExecutor {
             rb = rb.body(body.clone());
         }
         crate::provider::apply_request_timeout(rb, req.timeout_secs)
-    }
-}
-
-impl Default for ReqwestExecutor {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

@@ -17,6 +17,11 @@ pub enum EmbedError {
     Blueprint(String),
     /// The spawn was rejected (bad workdir, unresolvable seeds, and so on).
     Spawn(String),
+    /// A configured provider's outbound HTTPS client could not be built, so
+    /// that provider could never reach its API. In practice the machine's root
+    /// certificate store could not be read; it is unrelated to any TLS
+    /// certificate the host itself serves.
+    ProviderClient(String),
     /// The world's serve loop is gone (already shut down), so the request
     /// could not be delivered or answered.
     ChannelClosed,
@@ -33,6 +38,9 @@ impl std::fmt::Display for EmbedError {
             }
             EmbedError::Blueprint(msg) => write!(f, "blueprint error: {msg}"),
             EmbedError::Spawn(msg) => write!(f, "spawn error: {msg}"),
+            EmbedError::ProviderClient(msg) => {
+                write!(f, "provider HTTPS client error: {msg}")
+            }
             EmbedError::ChannelClosed => write!(f, "the world has shut down"),
         }
     }
@@ -54,6 +62,10 @@ mod tests {
                 "blueprint error: bad",
             ),
             (EmbedError::Spawn("nope".to_string()), "spawn error: nope"),
+            (
+                EmbedError::ProviderClient("no roots".to_string()),
+                "provider HTTPS client error: no roots",
+            ),
             (EmbedError::ChannelClosed, "shut down"),
         ];
         for (err, needle) in cases {

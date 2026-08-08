@@ -35,9 +35,9 @@ pub struct OpenAIProvider {
 
 impl OpenAIProvider {
     /// Create a new OpenAI provider.
-    pub fn new(api_key: String) -> Self {
+    pub fn new(client: reqwest::Client, api_key: String) -> Self {
         Self {
-            client: crate::provider::build_http_client(None),
+            client,
             api_key,
             base_url: "https://api.openai.com/v1".to_string(),
             rate_limiter: None,
@@ -46,9 +46,8 @@ impl OpenAIProvider {
     }
 
     /// Create a new OpenAI provider with full configuration.
-    pub fn with_config(config: ProviderConfig) -> Self {
+    pub fn with_config(client: reqwest::Client, config: ProviderConfig) -> Self {
         let rate_limiter = config.rate_limit.as_ref().map(RateLimiter::new);
-        let client = crate::provider::build_http_client(config.request_timeout_secs);
         Self {
             client,
             api_key: config.api_key,
@@ -62,13 +61,13 @@ impl OpenAIProvider {
 
     /// Create a new OpenAI provider with per-model capability overrides.
     pub fn with_overrides(
+        client: reqwest::Client,
         api_key: String,
         overrides: HashMap<String, ModelCapabilities>,
-        timeout_secs: Option<u64>,
         rate_limit: Option<&crate::provider::RateLimitConfig>,
     ) -> Self {
         Self {
-            client: crate::provider::build_http_client(timeout_secs),
+            client,
             api_key,
             base_url: "https://api.openai.com/v1".to_string(),
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
@@ -277,13 +276,19 @@ mod tests {
 
     #[test]
     fn test_provider_creation() {
-        let provider = OpenAIProvider::new("test-key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         assert_eq!(provider.name(), "openai");
     }
 
     #[test]
     fn test_context_limits() {
-        let provider = OpenAIProvider::new("test-key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         assert_eq!(provider.max_context_tokens("gpt-5.4-mini"), 400_000);
     }
 
@@ -368,7 +373,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_gpt55() {
-        let provider = OpenAIProvider::new("test-key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("gpt-5.5");
         assert!(caps.supports_temperature);
         assert!(caps.supports_streaming);
@@ -378,7 +386,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_gpt54_mini() {
-        let provider = OpenAIProvider::new("test-key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("gpt-5.4-mini");
         assert!(caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 400_000);
@@ -387,7 +398,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_gpt54_nano() {
-        let provider = OpenAIProvider::new("test-key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("gpt-5.4-nano");
         assert!(caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 400_000);
@@ -396,7 +410,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_gpt41() {
-        let provider = OpenAIProvider::new("test-key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("gpt-4.1");
         assert!(caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1_047_576);
@@ -405,7 +422,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_o4_mini() {
-        let provider = OpenAIProvider::new("test-key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("o4-mini");
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 200_000);
@@ -414,7 +434,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_o3() {
-        let provider = OpenAIProvider::new("test-key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("o3-mini");
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 200_000);
@@ -435,8 +458,12 @@ mod tests {
                 max_output_tokens: 1,
             },
         );
-        let provider =
-            OpenAIProvider::with_overrides("test-key".to_string(), overrides, None, None);
+        let provider = OpenAIProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+            overrides,
+            None,
+        );
         let caps = provider.capabilities("gpt-5.4-mini");
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1);
@@ -493,7 +520,10 @@ mod tests {
 
     #[test]
     fn test_name() {
-        let provider = OpenAIProvider::new("key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         assert_eq!(provider.name(), "openai");
     }
 
@@ -505,7 +535,10 @@ mod tests {
             rate_limit: None,
             request_timeout_secs: None,
         };
-        let provider = OpenAIProvider::with_config(config);
+        let provider = OpenAIProvider::with_config(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            config,
+        );
         assert_eq!(provider.base_url, "https://api.openai.com/v1");
     }
 
@@ -517,13 +550,19 @@ mod tests {
             rate_limit: None,
             request_timeout_secs: None,
         };
-        let provider = OpenAIProvider::with_config(config);
+        let provider = OpenAIProvider::with_config(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            config,
+        );
         assert_eq!(provider.base_url, "https://custom.openai.com");
     }
 
     #[tokio::test]
     async fn test_count_tokens_uses_tiktoken() {
-        let provider = OpenAIProvider::new("key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let tokens = provider.count_tokens("Hello, world!", "gpt-5.4-mini").await;
         assert!(tokens > 0);
         assert!(tokens < 20);
@@ -531,14 +570,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_count_tokens_empty() {
-        let provider = OpenAIProvider::new("key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let tokens = provider.count_tokens("", "gpt-5.4-mini").await;
         assert_eq!(tokens, 0);
     }
 
     #[test]
     fn test_max_context_tokens_delegates_to_capabilities() {
-        let provider = OpenAIProvider::new("key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         assert_eq!(provider.max_context_tokens("gpt-5.5"), 1_050_000);
         assert_eq!(provider.max_context_tokens("gpt-4.1"), 1_047_576);
         assert_eq!(provider.max_context_tokens("o3-mini"), 200_000);
@@ -546,7 +591,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_unknown_model() {
-        let provider = OpenAIProvider::new("key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.builtin_capabilities("totally-unknown");
         let default = ModelCapabilities::default();
         assert_eq!(caps.max_context_tokens, default.max_context_tokens);
@@ -566,7 +614,12 @@ mod tests {
                 max_output_tokens: 1,
             },
         );
-        let provider = OpenAIProvider::with_overrides("key".to_string(), overrides, None, None);
+        let provider = OpenAIProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+            overrides,
+            None,
+        );
         let caps = provider.capabilities("gpt-5.5");
         assert_eq!(caps.max_context_tokens, 1);
     }
@@ -606,7 +659,10 @@ mod tests {
 
     #[test]
     fn test_gpt5_family_context() {
-        let provider = OpenAIProvider::new("key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         // gpt-5.4, gpt-5-mini, etc. should all match gpt-5 pattern
         assert_eq!(provider.max_context_tokens("gpt-5.4"), 400_000);
         assert_eq!(provider.max_context_tokens("gpt-5-mini"), 400_000);
@@ -614,7 +670,10 @@ mod tests {
 
     #[test]
     fn test_o4_mini_capabilities() {
-        let provider = OpenAIProvider::new("key".to_string());
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.builtin_capabilities("o4-mini");
         assert!(!caps.supports_temperature);
         assert!(caps.supports_tools);
@@ -625,12 +684,15 @@ mod tests {
     // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
 
     fn provider_with_url(url: String) -> OpenAIProvider {
-        OpenAIProvider::with_config(ProviderConfig {
-            api_key: "test-key".to_string(),
-            base_url: Some(url),
-            rate_limit: None,
-            request_timeout_secs: None,
-        })
+        OpenAIProvider::with_config(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            ProviderConfig {
+                api_key: "test-key".to_string(),
+                base_url: Some(url),
+                rate_limit: None,
+                request_timeout_secs: None,
+            },
+        )
     }
 
     fn simple_request() -> InferenceRequest {
@@ -806,10 +868,19 @@ mod tests {
             requests_per_minute: 5,
             tokens_per_minute: 1_000,
         };
-        let limited =
-            OpenAIProvider::with_overrides("k".to_string(), HashMap::new(), None, Some(&cfg));
+        let limited = OpenAIProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+            HashMap::new(),
+            Some(&cfg),
+        );
         assert!(limited.rate_limiter.is_some());
-        let unlimited = OpenAIProvider::with_overrides("k".to_string(), HashMap::new(), None, None);
+        let unlimited = OpenAIProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+            HashMap::new(),
+            None,
+        );
         assert!(unlimited.rate_limiter.is_none());
     }
 }

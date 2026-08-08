@@ -46,7 +46,7 @@ use crate::rate_limit::RateLimiter;
 
 use convert::{map_rhai_err, parse_inference_dynamic};
 use engine::{ExecConfig, build_exec_engine, build_init_engine};
-use host::{BrokerJob, HostHttpError, HttpExecutor, ReqwestExecutor};
+use host::{BrokerJob, HostHttpError, HttpExecutor};
 
 pub use meta::{ProviderMeta, parse_provider_annotations};
 
@@ -97,18 +97,18 @@ pub struct ScriptProviderSettings {
 }
 
 impl RhaiProvider {
-    /// Load a provider from a script file, using the production reqwest-backed
-    /// HTTP executor. Reads + compiles the script and runs `initialize(config)`
-    /// **offline**; any failure (missing file, compile error, `initialize`
-    /// throw) is returned as an error so the caller can skip-with-warning.
+    /// Load a provider from a script file. Reads + compiles the script and runs
+    /// `initialize(config)` **offline**; any failure (missing file, compile
+    /// error, `initialize` throw) is returned as an error so the caller can
+    /// skip-with-warning.
+    ///
+    /// The HTTP executor is supplied rather than built here: constructing one
+    /// can fail (it reads the machine's root certificate store), and the caller
+    /// builds it once for every script provider instead of once per script.
     pub fn from_script(
-        name: String,
         script_path: &Path,
-        init_config: serde_json::Value,
-        caps: HashMap<String, ModelCapabilities>,
-        rate_limit: Option<RateLimitConfig>,
-        request_timeout_secs: Option<u64>,
-        env_allowlist: Arc<Vec<String>>,
+        executor: Arc<dyn HttpExecutor>,
+        settings: ScriptProviderSettings,
     ) -> Result<Self> {
         let src = std::fs::read_to_string(script_path).map_err(|e| {
             ProviderError::Other(format!(
@@ -116,18 +116,7 @@ impl RhaiProvider {
                 script_path.display()
             ))
         })?;
-        Self::from_source(
-            &src,
-            Arc::new(ReqwestExecutor::new()),
-            ScriptProviderSettings {
-                name,
-                init_config,
-                caps,
-                rate_limit,
-                request_timeout_secs,
-                env_allowlist,
-            },
-        )
+        Self::from_source(&src, executor, settings)
     }
 
     /// Build a provider from in-memory source with an injected [`HttpExecutor`]

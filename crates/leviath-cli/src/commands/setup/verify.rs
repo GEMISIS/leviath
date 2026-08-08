@@ -98,8 +98,28 @@ impl ProviderVerifier for SkipVerifier {
 /// credentials for a provider name nothing recognises is empty, which drives
 /// the `None` arm, and every other arm is the provider's own I/O.
 pub async fn verify_via_registry(creds: &ProviderCreds) -> Outcome {
-    let registry =
-        leviath_runtime::provider_creds::build_provider_registry(std::slice::from_ref(creds));
+    verify_via_registry_with(creds, &leviath_providers::provider::build_http_client).await
+}
+
+/// [`verify_via_registry`], with client construction injected so the
+/// "no usable HTTPS client" outcome is reachable from a test.
+pub async fn verify_via_registry_with(
+    creds: &ProviderCreds,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> Outcome {
+    // A registry that cannot be built is exactly the failure this command
+    // exists to report, so it is an outcome rather than a panic.
+    let registry = match leviath_runtime::provider_creds::build_provider_registry_with(
+        std::slice::from_ref(creds),
+        build_client,
+    ) {
+        Ok(registry) => registry,
+        Err(e) => {
+            return Outcome::Failed {
+                message: e.to_string(),
+            };
+        }
+    };
     let Some(provider) = registry.get(&creds.name) else {
         return Outcome::Failed {
             message: format!("no provider named '{}'", creds.name),
@@ -372,5 +392,23 @@ mod tests {
                 message: "no provider named 'not-a-real-provider'".to_string()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_machine_with_no_usable_https_client_reports_a_failed_outcome() {
+        // Needs a key: a keyed provider with none is skipped before any client
+        // is built, which would test the wrong branch.
+        let mut creds = leviath_runtime::provider_creds::ProviderCreds::simple("anthropic");
+        creds.api_key = Some("k".to_string());
+        let outcome = super::verify_via_registry_with(&creds, &|_t| {
+            Err(leviath_providers::provider::malformed_url_error())
+        })
+        .await;
+        // Asserted through `Debug` rather than a `let ... else`: the else arm
+        // is unreachable, and an unreachable arm is an uncovered region under
+        // the 100% gate.
+        let rendered = format!("{outcome:?}");
+        assert!(rendered.starts_with("Failed"), "{rendered}");
+        assert!(rendered.contains("root certificate store"), "{rendered}");
     }
 }

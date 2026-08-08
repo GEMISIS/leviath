@@ -25,21 +25,21 @@ pub struct OllamaProvider {
 
 impl OllamaProvider {
     /// Create a new Ollama provider.
-    pub fn new() -> Self {
+    pub fn new(client: reqwest::Client) -> Self {
         Self {
-            client: crate::provider::build_http_client(None),
+            client,
             base_url: "http://localhost:11434".to_string(),
             capability_overrides: HashMap::new(),
         }
     }
 
     /// Create a new Ollama provider with custom base URL.
-    pub fn with_base_url(base_url: String) -> Self {
+    pub fn with_base_url(client: reqwest::Client, base_url: String) -> Self {
         if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
             tracing::warn!(url = %base_url, "Ollama base URL should start with http:// or https://");
         }
         Self {
-            client: crate::provider::build_http_client(None),
+            client,
             base_url,
             capability_overrides: HashMap::new(),
         }
@@ -47,15 +47,15 @@ impl OllamaProvider {
 
     /// Create a new Ollama provider with a custom base URL and per-model capability overrides.
     pub fn with_overrides(
+        client: reqwest::Client,
         base_url: String,
         overrides: HashMap<String, ModelCapabilities>,
-        timeout_secs: Option<u64>,
     ) -> Self {
         if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
             tracing::warn!(url = %base_url, "Ollama base URL should start with http:// or https://");
         }
         Self {
-            client: crate::provider::build_http_client(timeout_secs),
+            client,
             base_url,
             capability_overrides: overrides,
         }
@@ -264,12 +264,6 @@ impl OllamaProvider {
             },
             finish_reason,
         })
-    }
-}
-
-impl Default for OllamaProvider {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -573,20 +567,27 @@ mod tests {
 
     #[test]
     fn test_provider_creation() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         assert_eq!(provider.name(), "ollama");
         assert!(provider.base_url.contains("localhost"));
     }
 
     #[test]
     fn test_custom_base_url() {
-        let provider = OllamaProvider::with_base_url("http://custom:11434".to_string());
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "http://custom:11434".to_string(),
+        );
         assert_eq!(provider.base_url, "http://custom:11434");
     }
 
     #[test]
     fn test_parse_response() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let body = serde_json::json!({
             "message": {
                 "role": "assistant",
@@ -607,7 +608,9 @@ mod tests {
 
     #[test]
     fn test_default() {
-        let provider = OllamaProvider::default();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         assert_eq!(provider.name(), "ollama");
         assert!(provider.base_url.contains("localhost"));
     }
@@ -626,8 +629,11 @@ mod tests {
                 max_output_tokens: 10,
             },
         );
-        let provider =
-            OllamaProvider::with_overrides("http://localhost:11434".to_string(), overrides, None);
+        let provider = OllamaProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "http://localhost:11434".to_string(),
+            overrides,
+        );
         let caps = provider.capabilities("custom-model");
         assert_eq!(caps.max_context_tokens, 42);
         assert!(!caps.supports_temperature);
@@ -636,9 +642,9 @@ mod tests {
     #[test]
     fn test_capabilities_falls_through_to_builtin() {
         let provider = OllamaProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
             "http://localhost:11434".to_string(),
             HashMap::new(),
-            None,
         );
         let caps = provider.capabilities("llama3-8b");
         assert_eq!(caps.max_context_tokens, 131_072);
@@ -646,7 +652,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_count_tokens() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let tokens = provider.count_tokens("Hello, world!", "llama3").await;
         assert!(tokens > 0);
         // ceil(13 / 4): the shared estimate rounds up
@@ -655,20 +663,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_count_tokens_empty() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         assert_eq!(provider.count_tokens("", "llama3").await, 0);
     }
 
     #[test]
     fn test_max_context_tokens() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         assert_eq!(provider.max_context_tokens("llama3-8b"), 131_072);
         assert_eq!(provider.max_context_tokens("mistral-7b"), 32_768);
     }
 
     #[test]
     fn test_builtin_capabilities_llama3() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let caps = provider.builtin_capabilities("llama3-8b");
         assert!(caps.supports_temperature);
         assert!(caps.supports_streaming);
@@ -678,7 +692,9 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_qwen2() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let caps = provider.builtin_capabilities("qwen2-7b");
         assert!(caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 131_072);
@@ -686,7 +702,9 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_qwen25() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let caps = provider.builtin_capabilities("qwen2.5-coder");
         assert!(caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 131_072);
@@ -694,7 +712,9 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_qwen3() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let caps = provider.builtin_capabilities("qwen3-30b");
         assert!(caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 131_072);
@@ -702,7 +722,9 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_mistral() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let caps = provider.builtin_capabilities("mistral-7b");
         assert!(caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 32_768);
@@ -711,7 +733,9 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_mixtral() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let caps = provider.builtin_capabilities("mixtral-8x7b");
         assert!(caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 32_768);
@@ -719,7 +743,9 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_phi4() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let caps = provider.builtin_capabilities("phi-4");
         assert!(caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 131_072);
@@ -727,7 +753,9 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_phi4_variant() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let caps = provider.builtin_capabilities("phi4-mini");
         assert!(caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 131_072);
@@ -735,7 +763,9 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_deepseek_r1() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let caps = provider.builtin_capabilities("deepseek-r1:latest");
         assert!(!caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 131_072);
@@ -743,7 +773,9 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_deepseek_general() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let caps = provider.builtin_capabilities("deepseek-v3");
         assert!(caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 131_072);
@@ -751,7 +783,9 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_gemma() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let caps = provider.builtin_capabilities("gemma-7b");
         assert!(!caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 131_072);
@@ -759,7 +793,9 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_codellama() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         // Note: "codellama-34b" contains "llama-3" so it matches llama-3 branch.
         // Use a model name without a dash-number suffix.
         let caps = provider.builtin_capabilities("codellama:latest");
@@ -770,7 +806,9 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_unknown() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let caps = provider.builtin_capabilities("totally-unknown-model");
         assert!(!caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 8192);
@@ -779,7 +817,9 @@ mod tests {
 
     #[test]
     fn test_parse_response_no_message_returns_error() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let body = serde_json::json!({ "done": true });
         let result = provider.parse_response(&body);
         assert!(result.is_err());
@@ -787,7 +827,9 @@ mod tests {
 
     #[test]
     fn test_parse_response_with_tool_calls() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let body = serde_json::json!({
             "message": {
                 "role": "assistant",
@@ -815,7 +857,9 @@ mod tests {
 
     #[test]
     fn test_parse_response_total_tokens() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let body = serde_json::json!({
             "message": { "role": "assistant", "content": "ok" },
             "eval_count": 30,
@@ -830,7 +874,9 @@ mod tests {
 
     #[test]
     fn test_parse_response_missing_counts_default_zero() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let body = serde_json::json!({
             "message": { "role": "assistant", "content": "hi" },
             "done": true
@@ -842,7 +888,9 @@ mod tests {
 
     #[test]
     fn test_build_request_body_basic() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![
@@ -876,7 +924,9 @@ mod tests {
 
     #[test]
     fn test_build_request_body_passes_extra_params_into_options() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -899,7 +949,9 @@ mod tests {
 
     #[test]
     fn test_build_request_body_prepends_system_blocks() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let request = InferenceRequest {
             system: vec![crate::provider::SystemBlock {
                 text: "You are a local assistant.".to_string(),
@@ -928,7 +980,9 @@ mod tests {
 
     #[test]
     fn test_build_request_body_serializes_tool_history() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![
@@ -985,7 +1039,9 @@ mod tests {
 
     #[test]
     fn test_build_request_body_with_tools() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -1016,7 +1072,9 @@ mod tests {
 
     #[test]
     fn test_parse_response_empty_content() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let body = serde_json::json!({
             "message": { "role": "assistant", "content": "" },
             "eval_count": 0,
@@ -1030,7 +1088,9 @@ mod tests {
 
     #[test]
     fn test_parse_response_missing_content_field() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let body = serde_json::json!({
             "message": { "role": "assistant" },
             "done": true
@@ -1041,7 +1101,9 @@ mod tests {
 
     #[test]
     fn test_parse_response_multiple_tool_calls() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let body = serde_json::json!({
             "message": {
                 "role": "assistant",
@@ -1077,7 +1139,9 @@ mod tests {
 
     #[test]
     fn test_parse_response_tool_call_missing_function() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let body = serde_json::json!({
             "message": {
                 "role": "assistant",
@@ -1096,7 +1160,9 @@ mod tests {
 
     #[test]
     fn test_parse_response_tool_call_missing_arguments() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let body = serde_json::json!({
             "message": {
                 "role": "assistant",
@@ -1122,7 +1188,9 @@ mod tests {
 
     #[test]
     fn test_build_request_body_no_tools_no_tools_key() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -1145,7 +1213,9 @@ mod tests {
 
     #[test]
     fn test_build_request_body_deepseek_r1_no_temperature() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -1170,7 +1240,9 @@ mod tests {
 
     #[test]
     fn test_build_request_body_multiple_messages() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![
@@ -1208,7 +1280,9 @@ mod tests {
 
     #[test]
     fn test_build_request_body_multiple_tools() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -1258,8 +1332,11 @@ mod tests {
                 max_output_tokens: 99,
             },
         );
-        let provider =
-            OllamaProvider::with_overrides("http://localhost:11434".to_string(), overrides, None);
+        let provider = OllamaProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "http://localhost:11434".to_string(),
+            overrides,
+        );
         let caps = provider.capabilities("llama3-8b");
         assert_eq!(caps.max_context_tokens, 99);
         assert!(!caps.supports_temperature);
@@ -1268,8 +1345,11 @@ mod tests {
     #[test]
     fn test_capabilities_no_override_uses_builtin() {
         let overrides = HashMap::new();
-        let provider =
-            OllamaProvider::with_overrides("http://localhost:11434".to_string(), overrides, None);
+        let provider = OllamaProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "http://localhost:11434".to_string(),
+            overrides,
+        );
         let caps = provider.capabilities("llama3-8b");
         assert_eq!(caps.max_context_tokens, 131_072); // builtin
     }
@@ -1278,7 +1358,9 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_llama_3_with_dash() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let caps = provider.builtin_capabilities("llama-3.1-70b");
         assert!(caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 131_072);
@@ -1288,7 +1370,9 @@ mod tests {
 
     #[test]
     fn test_name() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         assert_eq!(provider.name(), "ollama");
     }
 
@@ -1296,7 +1380,9 @@ mod tests {
 
     #[test]
     fn test_max_context_tokens_unknown_model() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         assert_eq!(provider.max_context_tokens("unknown-model"), 8192);
     }
 
@@ -1304,7 +1390,10 @@ mod tests {
 
     #[test]
     fn test_with_base_url_stores_url() {
-        let provider = OllamaProvider::with_base_url("https://remote:11434".to_string());
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "https://remote:11434".to_string(),
+        );
         assert_eq!(provider.base_url, "https://remote:11434");
     }
 
@@ -1312,7 +1401,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_infer_connection_refused() {
-        let provider = OllamaProvider::with_base_url("http://127.0.0.1:19998".to_string());
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "http://127.0.0.1:19998".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -1335,7 +1427,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_infer_stream_connection_refused() {
-        let provider = OllamaProvider::with_base_url("http://127.0.0.1:19998".to_string());
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "http://127.0.0.1:19998".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -1362,7 +1457,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_models_connection_refused() {
-        let provider = OllamaProvider::with_base_url("http://127.0.0.1:19998".to_string());
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "http://127.0.0.1:19998".to_string(),
+        );
         let err = provider.list_models().await.unwrap_err();
         assert!(err.to_string().contains("Request failed:"));
     }
@@ -1377,7 +1475,10 @@ mod tests {
         // enabled" check with no subscriber installed.
         let _guard = always_on_tracing_guard();
         // Should log a warning but not panic
-        let provider = OllamaProvider::with_base_url("ftp://invalid:11434".to_string());
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "ftp://invalid:11434".to_string(),
+        );
         assert_eq!(provider.base_url, "ftp://invalid:11434");
     }
 
@@ -1387,8 +1488,11 @@ mod tests {
         // arguments in with_overrides's "bad protocol" branch are actually
         // exercised.
         let _guard = always_on_tracing_guard();
-        let provider =
-            OllamaProvider::with_overrides("ftp://invalid:11434".to_string(), HashMap::new(), None);
+        let provider = OllamaProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "ftp://invalid:11434".to_string(),
+            HashMap::new(),
+        );
         assert_eq!(provider.base_url, "ftp://invalid:11434");
     }
 
@@ -1396,7 +1500,9 @@ mod tests {
 
     #[test]
     fn test_parse_response_tool_call_null_function_field() {
-        let provider = OllamaProvider::new();
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
         let body = serde_json::json!({
             "message": {
                 "role": "assistant",
@@ -1831,8 +1937,11 @@ mod tests {
                 max_output_tokens: 4096,
             },
         );
-        let provider =
-            OllamaProvider::with_overrides("http://localhost:11434".to_string(), overrides, None);
+        let provider = OllamaProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "http://localhost:11434".to_string(),
+            overrides,
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -1874,7 +1983,10 @@ mod tests {
     #[tokio::test]
     async fn infer_non_success_status_returns_api_error() {
         let url = spawn_mock_server(500, "Internal Server Error", b"boom").await;
-        let provider = OllamaProvider::with_base_url(url);
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
         let err = provider.infer(&mock_request()).await.unwrap_err();
         assert!(err.to_string().contains("API error:"));
     }
@@ -1884,7 +1996,10 @@ mod tests {
         // The body never arrives, so the shared helper substitutes the read
         // error for it. The status is what matters and must survive.
         let url = spawn_mock_server_truncated_error_body(500, "Internal Server Error").await;
-        let provider = OllamaProvider::with_base_url(url);
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
         let err = provider.infer(&mock_request()).await.unwrap_err();
         assert!(err.to_string().contains("500"), "{err}");
     }
@@ -1892,7 +2007,10 @@ mod tests {
     #[tokio::test]
     async fn infer_malformed_json_returns_invalid_response() {
         let url = spawn_mock_server(200, "OK", b"not json").await;
-        let provider = OllamaProvider::with_base_url(url);
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
         let err = provider.infer(&mock_request()).await.unwrap_err();
         assert!(err.to_string().contains("Invalid response:"));
     }
@@ -1900,7 +2018,10 @@ mod tests {
     #[tokio::test]
     async fn infer_stream_non_success_status_returns_api_error() {
         let url = spawn_mock_server(503, "Service Unavailable", b"down").await;
-        let provider = OllamaProvider::with_base_url(url);
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
         let result = provider.infer_stream(&mock_request()).await;
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("API error:"));
@@ -1909,7 +2030,10 @@ mod tests {
     #[tokio::test]
     async fn infer_stream_non_success_status_body_read_error_still_reports_the_status() {
         let url = spawn_mock_server_truncated_error_body(503, "Service Unavailable").await;
-        let provider = OllamaProvider::with_base_url(url);
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
         let result = provider.infer_stream(&mock_request()).await;
         let err = result
             .err()
@@ -1922,7 +2046,10 @@ mod tests {
         let ndjson_body =
             b"{\"message\":{\"content\":\"hi\"},\"done\":true,\"eval_count\":1,\"prompt_eval_count\":1}\n";
         let url = spawn_mock_server(200, "OK", ndjson_body).await;
-        let provider = OllamaProvider::with_base_url(url);
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
         let mut stream = provider.infer_stream(&mock_request()).await.unwrap();
         use tokio_stream::StreamExt;
         let chunk = stream.next().await.unwrap().unwrap();
@@ -1950,7 +2077,10 @@ mod tests {
             let _ = socket.flush().await;
             let _ = socket.shutdown().await;
         });
-        let provider = OllamaProvider::with_base_url(format!("http://{}", addr));
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            format!("http://{}", addr),
+        );
         let mut stream = provider.infer_stream(&mock_request()).await.unwrap();
         use tokio_stream::StreamExt;
         let mut saw_error = false;
@@ -1966,7 +2096,10 @@ mod tests {
     #[tokio::test]
     async fn list_models_non_success_status_returns_error() {
         let url = spawn_mock_server(401, "Unauthorized", b"nope").await;
-        let provider = OllamaProvider::with_base_url(url);
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
         let err = provider.list_models().await.unwrap_err();
         // Was `RequestFailed`, which reads as retryable; a rejected key is not.
         assert_eq!(
@@ -1979,7 +2112,10 @@ mod tests {
     #[tokio::test]
     async fn list_models_non_success_status_body_read_error_still_reports_the_status() {
         let url = spawn_mock_server_truncated_error_body(401, "Unauthorized").await;
-        let provider = OllamaProvider::with_base_url(url);
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
         let err = provider.list_models().await.unwrap_err();
         assert!(err.to_string().contains("401"), "{err}");
     }
@@ -1987,7 +2123,10 @@ mod tests {
     #[tokio::test]
     async fn list_models_malformed_json_returns_error() {
         let url = spawn_mock_server(200, "OK", b"not json").await;
-        let provider = OllamaProvider::with_base_url(url);
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
         let err = provider.list_models().await.unwrap_err();
         assert!(err.to_string().contains("Invalid response:"));
     }
@@ -1996,7 +2135,10 @@ mod tests {
     async fn list_models_success_returns_models() {
         let body = br#"{"models":[{"name":"llama3-8b"},{"name":"mistral-7b"}]}"#;
         let url = spawn_mock_server(200, "OK", body).await;
-        let provider = OllamaProvider::with_base_url(url);
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "llama3-8b");
@@ -2007,7 +2149,10 @@ mod tests {
     #[tokio::test]
     async fn list_models_missing_data_field_returns_empty() {
         let url = spawn_mock_server(200, "OK", b"{}").await;
-        let provider = OllamaProvider::with_base_url(url);
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
         let models = provider.list_models().await.unwrap();
         assert!(models.is_empty());
     }
@@ -2016,7 +2161,10 @@ mod tests {
     async fn list_models_entry_without_name_is_skipped() {
         let body = br#"{"models":[{"foo":"bar"},{"name":"llama3-8b"}]}"#;
         let url = spawn_mock_server(200, "OK", body).await;
-        let provider = OllamaProvider::with_base_url(url);
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "llama3-8b");
@@ -2027,7 +2175,10 @@ mod tests {
         // covers the `.as_str()?` None branch in the filter_map
         let body = br#"{"models":[{"name":42},{"name":"llama3-8b"}]}"#;
         let url = spawn_mock_server(200, "OK", body).await;
-        let provider = OllamaProvider::with_base_url(url);
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "llama3-8b");

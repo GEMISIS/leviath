@@ -16,7 +16,7 @@ use crate::host::{ControlOp, SpawnArgs, WorldEvent, WorldHost};
 use crate::inference_pool::InferencePoolConfig;
 use crate::interaction_hub::InteractionHub;
 use crate::pipeline::{ModelDefaults, ToolService};
-use crate::provider_creds::{ProviderCreds, build_provider_registry};
+use crate::provider_creds::ProviderCreds;
 use crate::providers::ProviderRegistry;
 use crate::world::PipelineWorld;
 
@@ -237,6 +237,18 @@ impl AgentWorldBuilder {
 
     /// Assemble the world and start its serve loop on the Tokio runtime.
     pub fn build(self) -> Result<AgentWorld, EmbedError> {
+        self.build_with(&leviath_providers::provider::build_http_client)
+    }
+
+    /// [`build`](Self::build), with outbound-HTTPS-client construction injected.
+    ///
+    /// Exists so the "no usable client" path is reachable from a test: `reqwest`
+    /// cannot be made to fail from the outside, so without a seam this error
+    /// would be unreachable code.
+    pub fn build_with(
+        self,
+        build_client: leviath_providers::provider::HttpClientFactory<'_>,
+    ) -> Result<AgentWorld, EmbedError> {
         if self.creds.is_empty() && self.custom_providers.is_empty() {
             return Err(EmbedError::NoProviders);
         }
@@ -245,7 +257,9 @@ impl AgentWorldBuilder {
             None => Handle::try_current().map_err(|_| EmbedError::NoRuntime)?,
         };
 
-        let mut registry: ProviderRegistry = build_provider_registry(&self.creds);
+        let mut registry: ProviderRegistry =
+            crate::provider_creds::build_provider_registry_with(&self.creds, build_client)
+                .map_err(|e| EmbedError::ProviderClient(e.to_string()))?;
         for (name, provider) in self.custom_providers {
             registry.register(name, provider);
         }
@@ -1462,5 +1476,29 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         let id = RunId("coder-1-2".to_string());
         assert_eq!(id.to_string(), "coder-1-2");
         assert_eq!(id.as_ref(), "coder-1-2");
+    }
+
+    #[tokio::test]
+    async fn a_world_whose_provider_client_will_not_build_reports_it() {
+        // The failure a machine with an unreadable root certificate store would
+        // hit. Reachable only through the injected factory: reqwest cannot be
+        // made to fail from the outside.
+        let failing = |_t: Option<u64>| Err(leviath_providers::provider::malformed_url_error());
+        let mut cred = ProviderCreds::simple("anthropic");
+        cred.api_key = Some("k".to_string());
+        let err = AgentWorld::builder()
+            .provider(cred)
+            .build_with(&failing)
+            .err()
+            .expect("a failing client factory should fail the build");
+        // Discriminant rather than `matches!`: the macro expands to a match
+        // with a `_ => false` arm that nothing reaches, which the 100% gate
+        // reads as an uncovered region. Static assert messages for the same
+        // reason - an interpolated one is only evaluated on failure.
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&EmbedError::ProviderClient(String::new()))
+        );
+        assert!(err.to_string().contains("provider HTTPS client error"));
     }
 }

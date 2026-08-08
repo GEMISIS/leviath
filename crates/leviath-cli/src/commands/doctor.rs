@@ -641,7 +641,9 @@ pub enum DaemonTarget<'a> {
 /// requires it. Every caller passes a plain `fn` item, which always is.
 pub async fn run_checks(
     args: &DoctorArgs,
-    build_registry: &(dyn Fn(&Config) -> ProviderRegistry + Sync),
+    build_registry: &(
+         dyn Fn(&Config) -> Result<ProviderRegistry, leviath_providers::ProviderError> + Sync
+     ),
     daemon: DaemonTarget<'_>,
 ) -> Vec<Check> {
     let mut checks = Vec::new();
@@ -659,7 +661,18 @@ pub async fn run_checks(
         eprintln!("Warning: {warning}");
     }
 
-    let registry = build_registry(&config);
+    // A registry that will not build is the most basic thing `doctor` can
+    // report, so it becomes a failed check rather than stopping the run.
+    let registry = match build_registry(&config) {
+        Ok(registry) => registry,
+        Err(e) => {
+            checks.push(Check::fail(
+                "providers",
+                format!("could not build any provider client: {e}"),
+            ));
+            return checks;
+        }
+    };
     checks.push(config_check(&config, &registry));
 
     let (check, resolved) = resolve_check(&config, args.model.as_deref(), &registry);
@@ -704,7 +717,9 @@ pub async fn run_checks(
 /// process exits non-zero and `lev doctor` works as a CI gate.
 async fn execute_with_registry(
     args: DoctorArgs,
-    build_registry: &(dyn Fn(&Config) -> ProviderRegistry + Sync),
+    build_registry: &(
+         dyn Fn(&Config) -> Result<ProviderRegistry, leviath_providers::ProviderError> + Sync
+     ),
     daemon: DaemonTarget<'_>,
 ) -> anyhow::Result<()> {
     let checks = run_checks(&args, build_registry, daemon).await;
