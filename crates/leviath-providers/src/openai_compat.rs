@@ -271,20 +271,56 @@ fn drop_unpaired_tool_turns(messages: Vec<serde_json::Value>) -> Vec<serde_json:
         .collect()
 }
 
+/// Which key an OpenAI-dialect server expects the output-token cap under.
+///
+/// The dialect forked. OpenAI itself now *rejects* `max_tokens` on every current
+/// model with `HTTP 400 unsupported_parameter`, while OpenRouter and Gemini's
+/// compatibility endpoint still take it - so the field cannot simply be renamed
+/// for everyone without breaking the two that work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenLimitField {
+    /// `max_tokens`: the original spelling, and what every compatibility server
+    /// in this workspace other than OpenAI accepts.
+    MaxTokens,
+    /// `max_completion_tokens`: what OpenAI requires.
+    MaxCompletionTokens,
+}
+
+impl TokenLimitField {
+    /// The JSON key this variant writes.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::MaxTokens => "max_tokens",
+            Self::MaxCompletionTokens => "max_completion_tokens",
+        }
+    }
+}
+
 /// Render a request as an OpenAI chat-completions body.
 ///
 /// Shared by every provider speaking that dialect - OpenAI itself, OpenRouter,
 /// and any `base_url` pointed at a compatible server - so one change to the wire
 /// shape reaches all of them rather than three copies drifting apart.
+///
+/// Uses [`TokenLimitField::MaxTokens`], which is what a compatibility server
+/// expects; OpenAI itself goes through [`build_openai_request_body_with`].
 pub fn build_openai_request_body(request: &InferenceRequest) -> serde_json::Value {
+    build_openai_request_body_with(request, TokenLimitField::MaxTokens)
+}
+
+/// [`build_openai_request_body`], naming the output-cap key explicitly.
+pub fn build_openai_request_body_with(
+    request: &InferenceRequest,
+    token_limit: TokenLimitField,
+) -> serde_json::Value {
     let messages = openai_messages(request);
 
     let mut body = serde_json::json!({
         "model": request.model,
-        "max_tokens": request.max_tokens,
         "temperature": request.temperature,
         "messages": messages,
     });
+    body[token_limit.key()] = serde_json::json!(request.max_tokens);
 
     if !request.tools.is_empty() {
         let tools: Vec<serde_json::Value> = request
@@ -2173,5 +2209,40 @@ mod tests {
             None,
         )
         .await;
+    }
+
+    // ─── The output-cap key is per provider ─────────────────────────────────
+
+    #[test]
+    fn a_compatibility_server_still_gets_max_tokens() {
+        let req = sample_request();
+        let body = build_openai_request_body(&req);
+        assert_eq!(body["max_tokens"], 1024);
+        assert!(
+            body.get("max_completion_tokens").is_none(),
+            "a compatibility server must not be sent the OpenAI-only key"
+        );
+    }
+
+    #[test]
+    fn openai_gets_max_completion_tokens_instead() {
+        // OpenAI rejects `max_tokens` outright on every current model:
+        // HTTP 400 unsupported_parameter. Sending both would be rejected too.
+        let req = sample_request();
+        let body = build_openai_request_body_with(&req, TokenLimitField::MaxCompletionTokens);
+        assert_eq!(body["max_completion_tokens"], 1024);
+        assert!(
+            body.get("max_tokens").is_none(),
+            "OpenAI must not be sent the key it rejects"
+        );
+    }
+
+    #[test]
+    fn each_variant_names_its_own_key() {
+        assert_eq!(TokenLimitField::MaxTokens.key(), "max_tokens");
+        assert_eq!(
+            TokenLimitField::MaxCompletionTokens.key(),
+            "max_completion_tokens"
+        );
     }
 }
