@@ -13,6 +13,8 @@ same list.
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-08
+
 - **Security.** `uniq`, `tree` and `rg` are no longer on the default safe-command
   list. Each violated the rule that list states about itself - an entry "must
   not be able to write a file, execute another program, or open a network
@@ -258,6 +260,17 @@ same list.
   name check the caller already does, and `ToolRegistry`'s `all_tools`,
   `find_tool` and `server_tools` were superseded by the advertised-name map.
   Callers of `add_client` want `add_client_advertised(name, client, &advertised)`.
+- Breaking: giving an agent a task it declares no region for is an error rather
+  than a silent drop. Such a run used to spawn anyway and answer a question
+  nobody asked, having spent the tokens to do it, and report `complete`. The
+  error names the caller input the agent does take. Of the shipped agents only
+  `reviewer` is affected, and only when passed `--task`: it takes `--diff` and
+  `--criteria`. `lev run` no longer demands a task for an agent that takes none
+  either, so `lev run reviewer --diff @x.patch` is now a complete command line.
+- `lev validate` reports `region-seed-not-understood` for a `seed` that matches
+  none of the recognized forms. Such a seed is ignored and the region starts
+  empty, which is what a typo looks like: it is `{ caller = "task" }`, and
+  `{ caller_input = "task" }` silently seeds nothing.
 
 ## 0.2.0 - 2026-08-04
 
