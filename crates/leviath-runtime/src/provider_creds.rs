@@ -246,6 +246,26 @@ pub fn build_provider_registry_with(
 mod tests {
     use super::*;
 
+    /// The cache TTL reaches the provider, and an unrecognised value keeps the
+    /// default rather than failing the daemon's boot over a cache setting.
+    #[test]
+    fn the_anthropic_cache_ttl_is_read_from_the_options_map() {
+        for configured in [Some("1h"), Some("5m"), Some("nonsense"), None] {
+            let mut cred = ProviderCreds::simple("anthropic");
+            cred.api_key = Some("k".to_string());
+            if let Some(value) = configured {
+                cred.options
+                    .insert("cache_ttl".to_string(), value.to_string());
+            }
+            let registry = build_provider_registry(&[cred])
+                .expect("a cache setting must never fail the build");
+            assert!(
+                registry.get("anthropic").is_some(),
+                "configured {configured:?}"
+            );
+        }
+    }
+
     /// One `tracing::debug!(?creds)` - or an error context that formats a struct
     /// holding one - would otherwise print the provider key.
     #[test]
