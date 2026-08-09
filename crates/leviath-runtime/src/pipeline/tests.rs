@@ -5244,6 +5244,123 @@ fn transition_visit_exhausted_edge_is_a_dead_end_error() {
     assert!(message.contains("'a'"), "{message}");
 }
 
+// ─── condition = "dead_end" ──────────────────────────────────────────────────
+
+/// The stranding case the condition exists for: the stage finished, every
+/// normal target is out of revisits, and the run continues instead of dying
+/// with everything it established thrown away.
+#[test]
+fn a_dead_end_edge_catches_the_strand() {
+    use leviath_core::blueprint::TransitionCondition;
+    let bp = blueprint(vec![
+        stage_named(
+            "a",
+            Some(vec![
+                edge("b", TransitionCondition::Always),
+                edge("answer", TransitionCondition::DeadEnd),
+            ]),
+            false,
+            None,
+        ),
+        stage_named("b", None, false, Some(0)),
+        stage_named("answer", None, false, None),
+    ]);
+    let mut visits = VisitCounts::default();
+    visits.0.insert("b".to_string(), 1);
+    let mut world = World::new();
+    let e = spawn_transition_agent(&mut world, bp, vec![si("m0"), si("m1"), si("m2")], visits);
+
+    run_transition(&mut world);
+
+    let state = world.get::<AgentState>(e).unwrap();
+    assert!(
+        !matches!(state.status, AgentStatus::Error { .. }),
+        "the escape should have been taken, got {:?}",
+        state.status
+    );
+    assert_eq!(
+        world.get::<StageCursor>(e).map(|c| c.index),
+        Some(2),
+        "should have entered the stage the dead_end edge names"
+    );
+}
+
+/// The whole point of a separate condition: it is *not* a route the model can
+/// take while the graph is healthy. An ordinary edge to the same stage is
+/// offered on every visit, which is what collapsed the measured pipelines.
+#[test]
+fn a_dead_end_edge_is_not_offered_while_the_graph_is_healthy() {
+    use leviath_core::blueprint::TransitionCondition;
+    let bp = blueprint(vec![
+        stage_named(
+            "a",
+            Some(vec![
+                edge("b", TransitionCondition::Always),
+                edge("answer", TransitionCondition::DeadEnd),
+            ]),
+            false,
+            None,
+        ),
+        // `b` has budget left this time, so nothing is stranded.
+        stage_named("b", None, false, Some(5)),
+        stage_named("answer", None, false, None),
+    ]);
+    let mut world = World::new();
+    let e = spawn_transition_agent(
+        &mut world,
+        bp,
+        vec![si("m0"), si("m1"), si("m2")],
+        VisitCounts::default(),
+    );
+
+    run_transition(&mut world);
+
+    assert_eq!(
+        world.get::<StageCursor>(e).map(|c| c.index),
+        Some(1),
+        "the normal edge should win while it still has budget"
+    );
+}
+
+/// Both declared: the one written for this situation wins, because an `error`
+/// edge is also carrying provider failures and may want to go elsewhere.
+#[test]
+fn a_dead_end_edge_wins_over_an_error_edge() {
+    use leviath_core::blueprint::TransitionCondition;
+    let bp = blueprint(vec![
+        stage_named(
+            "a",
+            Some(vec![
+                edge("b", TransitionCondition::Always),
+                edge("recover", TransitionCondition::Error),
+                edge("answer", TransitionCondition::DeadEnd),
+            ]),
+            false,
+            None,
+        ),
+        stage_named("b", None, false, Some(0)),
+        stage_named("recover", None, false, None),
+        stage_named("answer", None, false, None),
+    ]);
+    let mut visits = VisitCounts::default();
+    visits.0.insert("b".to_string(), 1);
+    let mut world = World::new();
+    let e = spawn_transition_agent(
+        &mut world,
+        bp,
+        vec![si("m0"), si("m1"), si("m2"), si("m3")],
+        visits,
+    );
+
+    run_transition(&mut world);
+
+    assert_eq!(
+        world.get::<StageCursor>(e).map(|c| c.index),
+        Some(3),
+        "the dead_end edge, not the error edge"
+    );
+}
+
 /// A dead end with an `error` edge in budget routes down it - exhaustion is
 /// now a failure mode `error_recovery` can actually catch.
 #[test]

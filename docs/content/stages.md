@@ -67,8 +67,8 @@ Every edge is one of two kinds:
 - A **hint** edge is chosen by the agent. When it decides the stage's goal is met, it picks the edge
   whose hint best matches what it just did.
 - A **conditional** edge fires on its own, on a signal from the runtime rather than the agent's
-  choice. The signals are `error`, `stuck`, `max_iterations` (the stage hit its iteration cap), and
-  `always` (an unconditional edge).
+  choice. The signals are `error`, `stuck`, `max_iterations` (the stage hit its iteration cap),
+  `dead_end` (the graph would otherwise strand here), and `always` (an unconditional edge).
 
 ```toml
 [stages.implement.transitions.review]
@@ -80,8 +80,38 @@ condition = "stuck"          # a runtime signal, not the agent's choice
 
 An edge with a `hint` and no `condition` is routed by the model, exactly as though you had written
 `condition = "llm_choice"`. The full set of values is `always`, `llm_choice`, `error`,
-`max_iterations`, and `stuck`. Anything else is a parse error rather than an edge that quietly does
-nothing, so a typo fails at `lev validate` instead of at 2am.
+`max_iterations`, `stuck`, and `dead_end`. Anything else is a parse error rather than an edge that
+quietly does nothing, so a typo fails at `lev validate` instead of at 2am.
+
+### The escape that is not also a shortcut
+
+`condition = "dead_end"` fires in one situation: the stage finished, and every normal edge's target
+has spent its `max_revisits`. Without it the run errors out and everything it established - a
+profiled dataset, a plan, two rounds of critique - is discarded.
+
+```toml
+[stages.plan.transitions.review]
+hint = "Plan is ready for review"
+
+# Taken only when `review` is out of revisits and there is nowhere legal to go.
+[stages.plan.transitions.answer]
+condition = "dead_end"
+```
+
+The reason this is its own condition, rather than "add an ordinary edge to the output stage": an
+ordinary edge is offered to the model at the end of **every** visit, so it becomes a shortcut past
+the rest of the pipeline. Measured on four agents, that shortcut was taken in 10 of 24 runs of one
+and 21 of 36 of another, computing nothing on the way. A `dead_end` edge is invisible to the model's
+choice and reachable only when the alternative is dying.
+
+`error` edges are also consulted on this path, so a stage that already has one is covered. When both
+are declared, `dead_end` wins: an `error` edge is carrying provider failures too and may want to go
+somewhere else.
+
+> [!NOTE]
+> `condition = "max_iterations"` does **not** cover this. It fires when a stage burns its iteration
+> budget, which is a different event - on the stranding path it is never consulted. `lev validate`
+> reflects that: a `max_iterations` edge does not silence `dead-end-possible`.
 
 ### Stage keys that shape routing
 

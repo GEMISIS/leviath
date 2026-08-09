@@ -602,6 +602,7 @@ pub(super) fn parse_transitions(
             Some("max_iterations") => TransitionCondition::MaxIterations,
             Some("llm_choice") => TransitionCondition::LlmChoice,
             Some("stuck") => TransitionCondition::Stuck,
+            Some("dead_end") => TransitionCondition::DeadEnd,
             Some("always") | None => TransitionCondition::Always,
             // Reject unknown conditions rather than silently building a
             // `Custom(..)` edge the runtime never evaluates (a dead edge).
@@ -609,7 +610,7 @@ pub(super) fn parse_transitions(
                 return Err(Error::Other(format!(
                     "transition to '{target_name}' has unknown condition \
                      '{other}' (valid: always, error, max_iterations, \
-                     llm_choice, stuck)"
+                     llm_choice, stuck, dead_end)"
                 )));
             }
         };

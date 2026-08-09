@@ -445,7 +445,21 @@ pub fn resolve_transition(
                      its max_revisits budget before an output or terminal stage was reached",
                     stage.name
                 );
-                match find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::Error) {
+                // A `dead_end` edge first, then the `error` edge. Both are
+                // escapes from this exact situation, but one was declared *for*
+                // it: an author who wrote both means the specific one to win,
+                // and an `error` edge is also carrying provider failures.
+                let escape =
+                    find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::DeadEnd)
+                        .or_else(|| {
+                            find_conditioned_edge(
+                                &bp.0,
+                                stage,
+                                &visits.0,
+                                TransitionCondition::Error,
+                            )
+                        });
+                match escape {
                     Some((i, t)) => {
                         note_error(&mut window, &stage.name, &message);
                         StageResolution::Next(i, t, None)
