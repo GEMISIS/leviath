@@ -257,6 +257,7 @@ impl Default for Config {
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             agent_paths: Vec::new(),
@@ -2077,6 +2078,7 @@ google_api_key = "AIza-existing"
             claude_code_enabled: true,
             claude_code_binary: None,
             claude_code_effort: None,
+            anthropic_cache_ttl: None,
             fallback_order: Vec::new(),
         };
         let rendered = format!("{providers:?}");
@@ -2094,6 +2096,7 @@ google_api_key = "AIza-existing"
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             }
         );
@@ -2142,6 +2145,7 @@ google_api_key = "AIza-existing"
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             ..Config::default()
@@ -2159,6 +2163,7 @@ google_api_key = "AIza-existing"
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             ..Config::default()
@@ -2178,6 +2183,7 @@ google_api_key = "AIza-existing"
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             ..Config::default()
@@ -2195,6 +2201,7 @@ google_api_key = "AIza-existing"
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             ..Config::default()
@@ -2511,6 +2518,7 @@ max_contxt_tokens = 1048576
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             ..Config::default()
@@ -2547,6 +2555,7 @@ max_contxt_tokens = 1048576
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             tool_permissions: {
@@ -2582,6 +2591,7 @@ max_contxt_tokens = 1048576
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             ..Config::default()
@@ -2601,6 +2611,7 @@ max_contxt_tokens = 1048576
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             ..Config::default()
@@ -2802,6 +2813,7 @@ enabled = false
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             openrouter_api_key: Some("sk-or-test".to_string()),
@@ -2864,6 +2876,7 @@ enabled = false
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             agent_paths: vec![std::path::PathBuf::from("/my/agents")],

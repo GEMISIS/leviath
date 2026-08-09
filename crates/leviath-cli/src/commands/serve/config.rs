@@ -210,6 +210,7 @@ mod tests {
                     claude_code_enabled: false,
                     claude_code_binary: None,
                     claude_code_effort: None,
+                    anthropic_cache_ttl: None,
                     fallback_order: Vec::new(),
                 },
                 openrouter_api_key: Some("sk-or-test".to_string()),
@@ -553,6 +554,7 @@ mod tests {
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             ..Default::default()

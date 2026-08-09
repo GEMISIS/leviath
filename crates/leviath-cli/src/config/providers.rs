@@ -47,6 +47,15 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub claude_code_effort: Option<String>,
 
+    /// Prompt-cache lifetime for Anthropic: `"5m"` (default) or `"1h"`.
+    ///
+    /// The longer one costs more to write and needs a beta header, which is
+    /// sent for you. Worth it for a staged agent: stages routinely take longer
+    /// than five minutes, so a prefix cached at the start of a run is cold by
+    /// the time a later stage could have reused it.
+    #[serde(default)]
+    pub anthropic_cache_ttl: Option<leviath_providers::anthropic::CacheTtl>,
+
     /// Host-wide failover chain, as `"provider/model"` entries, best first.
     ///
     /// Tried after a stage's own `models` list and the default model when the
@@ -81,6 +90,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("claude_code_enabled", &self.claude_code_enabled)
             .field("claude_code_binary", &self.claude_code_binary)
             .field("claude_code_effort", &self.claude_code_effort)
+            .field("anthropic_cache_ttl", &self.anthropic_cache_ttl)
             .field("fallback_order", &self.fallback_order)
             .finish()
     }

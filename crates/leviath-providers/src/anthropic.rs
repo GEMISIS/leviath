@@ -97,12 +97,23 @@ fn dump_request(body: &serde_json::Value, dir: Option<&str>) {
 }
 
 /// Cache TTL for Anthropic prompt caching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// Settable as `[providers] anthropic_cache_ttl`. The 1-hour option was
+/// implemented and unreachable: no config key, no blueprint field, no env var,
+/// so every run took the 5-minute default however long its stages ran. Staged
+/// agents routinely take longer than five minutes between reuses of the same
+/// prefix - a compute stage running scripts is the normal case - so the cache
+/// written at the start of a run was usually cold by the time a later stage
+/// could have reused it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CacheTtl {
     /// 5-minute ephemeral cache (default, no extra cost).
     #[default]
+    #[serde(rename = "5m")]
     Ephemeral5m,
-    /// 1-hour extended cache (requires beta header, higher write cost).
+    /// 1-hour extended cache. Costs more to write and needs a beta header,
+    /// which is sent automatically when this is selected.
+    #[serde(rename = "1h")]
     Ephemeral1h,
 }
 
@@ -269,6 +280,16 @@ impl AnthropicProvider {
     }
 
     /// Return the `cache_control` JSON value for the configured TTL.
+    /// Select the prompt-cache TTL.
+    ///
+    /// A builder rather than another constructor parameter: this is the only
+    /// provider with the setting, and the alternative grows the signature of
+    /// all three of its constructors for one field.
+    pub fn with_cache_ttl(mut self, ttl: CacheTtl) -> Self {
+        self.cache_ttl = ttl;
+        self
+    }
+
     fn cache_control_value(&self) -> serde_json::Value {
         match self.cache_ttl {
             CacheTtl::Ephemeral5m => serde_json::json!({ "type": "ephemeral" }),
@@ -399,11 +420,30 @@ impl AnthropicProvider {
                         }));
                     }
                     crate::MessageContent::Blocks(_) => {
-                        // For block content, serialize normally (cache on blocks is complex)
-                        messages.push(serde_json::json!({
+                        // The marker goes on the last content block. The API
+                        // takes `cache_control` there, and in an agent run
+                        // nearly every message is a tool turn - so serializing
+                        // these "normally" spent a breakpoint from a budget of
+                        // four and wrote nothing, leaving the tail uncached.
+                        // The breakpoint is chosen by index
+                        // (`assemble_with_meta`), so it lands here most of the
+                        // time.
+                        let mut message = serde_json::json!({
                             "role": msg.role,
                             "content": msg.content,
-                        }));
+                        });
+                        match message["content"]
+                            .as_array_mut()
+                            .and_then(|blocks| blocks.last_mut())
+                        {
+                            Some(last) => {
+                                last["cache_control"] = self.cache_control_value();
+                            }
+                            // No blocks to mark: give the budget back rather
+                            // than spending it on nothing.
+                            None => breakpoint_count -= 1,
+                        }
+                        messages.push(message);
                     }
                 }
             } else {
@@ -929,6 +969,141 @@ fn parse_sse_event(buffer: &mut String, tool_index: &mut usize) -> Option<Stream
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── A breakpoint on a tool turn is not thrown away ─────────────────────
+
+    /// The body this provider would send, with a breakpoint on `flagged`.
+    fn body_with_breakpoint_on(content: crate::MessageContent) -> serde_json::Value {
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![crate::provider::Message {
+                role: "assistant".to_string(),
+                content,
+                cache_breakpoint: true,
+            }],
+            model: "claude-sonnet-5".to_string(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+        provider.build_request_body(&request)
+    }
+
+    #[test]
+    fn a_breakpoint_on_a_tool_turn_reaches_the_wire() {
+        // In an agent run nearly every message is a tool turn, and the
+        // breakpoint is chosen by index, so this is where it usually lands.
+        // It used to decrement a budget of four and write nothing.
+        let content = crate::MessageContent::Blocks(vec![
+            crate::provider::ContentBlock::Text {
+                text: "thinking".to_string(),
+            },
+            crate::provider::ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "x"}),
+                thought_signature: None,
+            },
+        ]);
+        let body = body_with_breakpoint_on(content);
+        let blocks = body["messages"][0]["content"]
+            .as_array()
+            .expect("blocks serialize as an array");
+        assert!(
+            blocks
+                .last()
+                .is_some_and(|b| b.get("cache_control").is_some()),
+            "the marker belongs on the last block: {blocks:?}"
+        );
+        // And on exactly one block, or the budget is spent several times over.
+        let marked = blocks
+            .iter()
+            .filter(|b| b.get("cache_control").is_some())
+            .count();
+        assert_eq!(marked, 1, "{blocks:?}");
+    }
+
+    #[test]
+    fn a_breakpoint_on_a_text_turn_still_reaches_the_wire() {
+        let body = body_with_breakpoint_on(crate::MessageContent::Text("hi".to_string()));
+        assert!(
+            body["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_some(),
+            "{body}"
+        );
+    }
+
+    /// A flagged message with no blocks at all hands its budget back rather
+    /// than spending it on nothing.
+    #[test]
+    fn an_empty_block_list_does_not_spend_the_budget() {
+        let body = body_with_breakpoint_on(crate::MessageContent::Blocks(vec![]));
+        let blocks = body["messages"][0]["content"].as_array().expect("array");
+        assert!(blocks.is_empty());
+    }
+
+    // ─── The 1-hour TTL is reachable ────────────────────────────────────────
+
+    #[test]
+    fn the_default_ttl_is_five_minutes_and_sends_no_beta_header() {
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+        );
+        assert_eq!(
+            provider.cache_control_value(),
+            serde_json::json!({"type": "ephemeral"})
+        );
+        assert!(
+            !provider
+                .header_pairs()
+                .iter()
+                .any(|(_, v)| v.contains("extended-cache-ttl")),
+            "the beta header is for the extended TTL only"
+        );
+    }
+
+    #[test]
+    fn selecting_the_hour_ttl_marks_it_and_sends_the_beta_header() {
+        // Implemented but unreachable before this: no config key, no blueprint
+        // field, no env var, so every run took the five-minute default.
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+        )
+        .with_cache_ttl(CacheTtl::Ephemeral1h);
+        assert_eq!(
+            provider.cache_control_value(),
+            serde_json::json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        assert!(
+            provider
+                .header_pairs()
+                .iter()
+                .any(|(_, v)| v.contains("extended-cache-ttl")),
+            "the extended TTL needs its beta header or the API ignores it"
+        );
+    }
+
+    #[test]
+    fn the_ttl_spellings_are_the_ones_the_config_accepts() {
+        assert_eq!(
+            serde_json::from_str::<CacheTtl>("\"1h\"").unwrap(),
+            CacheTtl::Ephemeral1h
+        );
+        assert_eq!(
+            serde_json::from_str::<CacheTtl>("\"5m\"").unwrap(),
+            CacheTtl::Ephemeral5m
+        );
+        assert!(serde_json::from_str::<CacheTtl>("\"2h\"").is_err());
+    }
     use crate::test_support::always_on_tracing_guard;
     use leviath_testkit::{
         spawn_mock_server,

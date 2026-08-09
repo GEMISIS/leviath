@@ -86,8 +86,14 @@ google_api_key      = "..."          # env fallback: GOOGLE_API_KEY
 claude_code_enabled = false          # opt in to the Claude Code CLI transport
 claude_code_binary  = "/usr/local/bin/claude"   # unset resolves `claude` on PATH
 claude_code_effort  = "medium"       # low | medium | high | xhigh | max
+anthropic_cache_ttl = "5m"           # 5m (default) | 1h
 fallback_order      = ["anthropic/claude-sonnet-5", "openai/gpt-5.6-mini"]
 ```
+
+`anthropic_cache_ttl` is how long a cached prompt prefix survives. The default `5m` is free; `1h`
+costs more to write and sends the beta header it needs. It is worth the write cost for a staged
+agent: stages routinely take longer than five minutes when one of them is running scripts, so a
+prefix cached at the start of a run is cold by the time a later stage could have reused it.
 
 `claude_code_enabled` is off unless you turn it on. See
 [Providers](/docs/providers#claude-code-transport) for the terms note that goes with it.
