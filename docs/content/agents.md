@@ -175,6 +175,15 @@ kind = "pinned"
 budget = "10%"
 ```
 
+**A region the stage leaves out is hidden, not destroyed.** It keeps its contents, is left out of
+that stage's prompt, and comes back with everything in it as soon as a later stage declares it
+again. That is what makes this usable for narrowing: a compute stage need not carry a large data
+preview through every one of its calls, and a summary stage further on can still read it.
+
+`conversation`, `tool_results` and `final_output` are always visible, whatever a stage declares.
+The first two hold the typed tool-call turns the next stage's own turns attach to, and an answer
+submitted early has to survive to the end.
+
 ## Seed commands
 
 A region can be seeded before the run starts:

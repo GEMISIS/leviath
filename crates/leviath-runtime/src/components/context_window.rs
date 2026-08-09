@@ -111,6 +111,19 @@ pub struct ContextWindow {
         String,
         std::sync::Arc<leviath_scripting::region_hook::RegionScript>,
     >,
+
+    /// Regions the current stage does not attend to.
+    ///
+    /// Held, not deleted. A stage layout that omits a region used to have it
+    /// dropped from the window entirely, so re-declaring it in a later stage
+    /// brought it back empty - which made the feature unusable for the thing it
+    /// looks designed for, narrowing what one stage sees in a pipeline whose
+    /// later stages still need the data. Omission now means "not assembled for
+    /// this stage" and nothing else.
+    ///
+    /// Reset on every stage entry by [`crate::context_setup::apply_layout`], so
+    /// it describes the stage in front of it rather than accumulating.
+    pub hidden: std::collections::HashSet<String>,
 }
 
 impl ContextWindow {
@@ -118,6 +131,7 @@ impl ContextWindow {
     pub fn new(max_tokens: usize) -> Self {
         Self {
             regions: Vec::new(),
+            hidden: std::collections::HashSet::new(),
             current_tokens: 0,
             max_tokens,
             region_scripts: std::collections::HashMap::new(),
@@ -528,6 +542,12 @@ impl ContextWindow {
         let mut messages: Vec<leviath_providers::Message> = Vec::new();
 
         for region in &self.regions {
+            // A region this stage does not attend to is held but not shown.
+            // Skipped here rather than dropped from the window, so a later
+            // stage that declares it again gets its contents back.
+            if self.hidden.contains(&region.name) {
+                continue;
+            }
             // Custom regions render even when empty - a script may emit
             // static scaffolding. Every other kind skips an empty region.
             let is_custom = matches!(region.kind, leviath_core::RegionKind::Custom { .. });

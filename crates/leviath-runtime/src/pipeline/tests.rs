@@ -5684,8 +5684,132 @@ fn enter_stage_swaps_context_layout() {
     run_transition(&mut world);
 
     let w = world.get::<ContextWindow>(e).unwrap();
-    assert!(w.get_region("scratch").is_some()); // swapped in
-    assert!(w.get_region("sys").is_none()); // old layout dropped
+    assert!(w.get_region("scratch").is_some(), "the stage's own region");
+    // The region the stage did not declare is HELD, not dropped. It used to be
+    // deleted, which made a per-stage layout unusable for narrowing a view in a
+    // pipeline whose later stages still need the data: re-declaring it
+    // downstream brought it back empty.
+    assert!(
+        w.get_region("sys").is_some(),
+        "an omitted region must survive the stage it is not shown to"
+    );
+    assert!(
+        w.hidden.contains("sys"),
+        "and it must not be assembled into this stage's prompt"
+    );
+}
+
+/// The point of holding it: a later stage that declares it again gets its
+/// contents back, rather than an empty region.
+#[test]
+fn a_region_hidden_by_one_stage_comes_back_with_its_content() {
+    use leviath_core::layout::{ContextLayout, RegionDefinition};
+
+    let mut w = pinned_window();
+    w.add_to_region("sys", "the data preview".to_string(), 4)
+        .expect("seeded");
+
+    // A stage that does not declare `sys`.
+    crate::context_setup::apply_layout(
+        &mut w,
+        &ContextLayout::new(
+            vec![RegionDefinition::new(
+                "scratch".to_string(),
+                RegionKind::Clearable,
+                5000,
+            )],
+            8000,
+        ),
+    );
+    assert!(w.hidden.contains("sys"));
+    assert!(
+        w.get_region("sys").is_some_and(|r| !r.content.is_empty()),
+        "held with its content while hidden"
+    );
+
+    // A later stage that declares it again.
+    crate::context_setup::apply_layout(
+        &mut w,
+        &ContextLayout::new(
+            vec![RegionDefinition::new(
+                "sys".to_string(),
+                RegionKind::Pinned,
+                5000,
+            )],
+            8000,
+        ),
+    );
+    assert!(!w.hidden.contains("sys"), "declared again, so shown again");
+    let restored = w.get_region("sys").expect("still there");
+    assert_eq!(
+        restored.content.first().map(|e| e.content.as_str()),
+        Some("the data preview"),
+        "and it is the same content, not an empty region with the same name"
+    );
+}
+
+/// A hidden region is held but does not reach the model.
+///
+/// The other half of the contract: holding it would be pointless if it were
+/// still assembled, and hiding it would be data loss if it were dropped.
+#[test]
+fn a_hidden_region_is_not_assembled_into_the_prompt() {
+    let mut w = ContextWindow::new(10_000);
+    w.add_region(Region::new("notes".to_string(), RegionKind::Pinned, 5000));
+    w.add_to_region("notes", "SECRET-MARKER".to_string(), 4)
+        .expect("seeded");
+
+    let meta = crate::custom_region::AssembleMeta::default();
+    let visible = w.assemble_with_meta(&meta);
+    assert!(
+        format!("{visible:?}").contains("SECRET-MARKER"),
+        "precondition: it assembles while visible"
+    );
+
+    w.hidden.insert("notes".to_string());
+    let hidden = w.assemble_with_meta(&meta);
+    assert!(
+        !format!("{hidden:?}").contains("SECRET-MARKER"),
+        "a region this stage does not attend to must not reach the model"
+    );
+    assert!(
+        w.get_region("notes").is_some_and(|r| !r.content.is_empty()),
+        "and it is still held"
+    );
+}
+
+/// The message-stream regions are carried *visible* even when a stage omits
+/// them: hiding `conversation` would strand a history the next stage's own
+/// typed turns have to attach to.
+#[test]
+fn the_message_regions_are_never_hidden() {
+    use leviath_core::layout::{ContextLayout, RegionDefinition};
+
+    let mut w = ContextWindow::new(10_000);
+    w.add_region(Region::new(
+        "conversation".to_string(),
+        RegionKind::SlidingWindow {
+            max_items: 10,
+            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+        },
+        5000,
+    ));
+    w.add_region(Region::new("notes".to_string(), RegionKind::Pinned, 5000));
+
+    crate::context_setup::apply_layout(
+        &mut w,
+        &ContextLayout::new(
+            vec![RegionDefinition::new(
+                "scratch".to_string(),
+                RegionKind::Clearable,
+                5000,
+            )],
+            8000,
+        ),
+    );
+
+    assert!(!w.hidden.contains("conversation"));
+    assert!(w.hidden.contains("notes"));
 }
 
 #[test]
