@@ -352,6 +352,7 @@ type ResolveTransitionQuery = (
     Option<&'static StageOutcome>,
     Option<&'static mut crate::persistence::RunOutcomeFlags>,
     Option<&'static crate::persistence::RunMetadata>,
+    Option<&'static crate::persistence::FinalOutput>,
 );
 
 /// Transition-resolution system: for each `ResolveTransition` agent, resolve the
@@ -379,6 +380,7 @@ pub fn resolve_transition(
         outcome,
         mut flags,
         metadata,
+        submitted,
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -474,7 +476,24 @@ pub fn resolve_transition(
         };
         match resolution {
             StageResolution::Terminal => {
-                state.status = AgentStatus::Complete;
+                // A run that owed a final output and never produced one is not
+                // a success. `require_final_output` forces past the obligation
+                // rather than stranding the run - correct, since a later stage
+                // may still answer - but nothing downgraded the *terminal*
+                // status, so a run ended `complete` with no `final_output` on
+                // disk. `lev result` already exits non-zero there, so the two
+                // disagreed in exactly the case a caller most needs to know
+                // about, and anything polling `status` read it as success.
+                let owed_output = bp.0.stages.iter().any(|s| s.require_output);
+                state.status = match owed_output && submitted.is_none() {
+                    true => AgentStatus::Error {
+                        message: "the run finished without the final output it \
+                                  requires; the stage that owes one never called \
+                                  submit_output"
+                            .to_string(),
+                    },
+                    false => AgentStatus::Complete,
+                };
                 commands
                     .entity(entity)
                     .remove::<ResolveTransition>()
