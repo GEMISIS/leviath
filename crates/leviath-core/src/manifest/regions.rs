@@ -135,6 +135,7 @@ pub(super) fn parse_region_layout(
                     source_region: source,
                 }
             }
+            "checklist" => RegionKind::Checklist,
             "hashmap" | "hash_map" => {
                 let max_entries = region_value
                     .get("max_entries")

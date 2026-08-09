@@ -13,7 +13,11 @@ use crate::components::ContextWindow;
 
 /// Whether a tool name is a context self-management tool this module handles.
 pub fn is_context_tool(name: &str) -> bool {
-    name.starts_with("context_")
+    // `todo_*` are context tools by every property that matters here: they
+    // write to a region, need no workspace, and are answered by this module
+    // rather than the tool executor. Only the prefix differs, and it differs
+    // because `context_todo_add` reads worse than `todo_add`.
+    name.starts_with("context_") || name.starts_with("todo_")
 }
 
 /// Build the "section not found" error listing the writable regions.
@@ -32,6 +36,25 @@ fn region_not_found(name: &str, window: &ContextWindow) -> String {
     )
 }
 
+/// The named region, when it exists and is a checklist.
+///
+/// A `todo_*` call against an ordinary region is an error rather than a write:
+/// the item state has nowhere to live there, so accepting it would record
+/// something the checklist tools could never read back.
+fn checklist_region<'w>(
+    window: &'w mut ContextWindow,
+    name: &str,
+) -> Result<&'w mut leviath_core::Region, String> {
+    match window.get_region(name) {
+        None => Err(region_not_found(name, window)),
+        Some(r) if !matches!(r.kind, RegionKind::Checklist) => Err(format!(
+            "[error] region '{name}' is not a checklist; declare it as \
+             kind = \"checklist\" to track items in it"
+        )),
+        Some(_) => Ok(window.get_region_mut(name).expect("region present")),
+    }
+}
+
 /// Apply one `context_*` tool call to `window`, returning the result text the
 /// model sees. Unknown tools and missing arguments yield `[error] …` strings
 /// (never a hard failure - the model reads and adjusts).
@@ -41,6 +64,59 @@ pub fn handle_context_tool(
     window: &mut ContextWindow,
 ) -> String {
     match name {
+        // ── checklist items ────────────────────────────────────────────────
+        //
+        // Written through tools rather than as free text so the state cannot
+        // drift from what the model believes it wrote: a region holding three
+        // unfinished items and one holding three finished ones are the same
+        // string to every other region kind, which is why no gate could ask.
+        "todo_add" => {
+            let Some(region_name) = args.get("region").and_then(|v| v.as_str()) else {
+                return "[error] missing 'region' argument".to_string();
+            };
+            let Some(item) = args.get("item").and_then(|v| v.as_str()) else {
+                return "[error] missing 'item' argument".to_string();
+            };
+            let tokens = leviath_core::estimate_tokens(item);
+            match checklist_region(window, region_name) {
+                Err(e) => e,
+                Ok(region) => match region.add_checklist_item(item.to_string(), tokens) {
+                    Ok(id) => format!("[ok] added item {id}"),
+                    Err(e) => format!("[error] {e}"),
+                },
+            }
+        }
+        "todo_done" | "todo_note" => {
+            let Some(region_name) = args.get("region").and_then(|v| v.as_str()) else {
+                return "[error] missing 'region' argument".to_string();
+            };
+            let Some(id) = args.get("id").and_then(|v| v.as_u64()) else {
+                return "[error] missing 'id' argument".to_string();
+            };
+            let note = args.get("note").and_then(|v| v.as_str());
+            if name == "todo_note" && note.is_none() {
+                return "[error] missing 'note' argument".to_string();
+            }
+            match checklist_region(window, region_name) {
+                Err(e) => e,
+                Ok(region) => {
+                    let id = id as usize;
+                    let found = match note {
+                        // `todo_done` and `todo_note` differ only in which field
+                        // they write, so they share everything up to here.
+                        Some(text) if name == "todo_note" => region.note_checklist_item(id, text),
+                        _ => region.complete_checklist_item(id),
+                    };
+                    match found {
+                        // Named rather than silently ignored: an id that
+                        // matches nothing usually means the model invented one,
+                        // and it needs to know its list is not what it thinks.
+                        false => format!("[error] no item {id} in '{region_name}'"),
+                        true => format!("[ok] item {id} updated"),
+                    }
+                }
+            }
+        }
         "context_write" => {
             let Some(region_name) = args.get("region").and_then(|v| v.as_str()) else {
                 return "[error] missing 'region' argument".to_string();
@@ -216,6 +292,7 @@ pub fn handle_context_tool(
                         RegionKind::Compacting { .. } => "summarized when full",
                         RegionKind::Clearable => "temporary",
                         RegionKind::CompactHistory { .. } => "summary archive",
+                        RegionKind::Checklist => "checklist",
                         RegionKind::HashMap { .. } => "key-value store",
                         RegionKind::Custom { .. } => "scripted",
                     };
@@ -242,6 +319,187 @@ pub fn handle_context_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── todo_* ─────────────────────────────────────────────────────────────
+
+    fn window_with_checklist() -> ContextWindow {
+        let mut w = ContextWindow::new(10_000);
+        w.add_region(leviath_core::Region::new(
+            "todos".to_string(),
+            RegionKind::Checklist,
+            5000,
+        ));
+        w
+    }
+
+    #[test]
+    fn todo_add_reports_the_id_the_other_tools_take() {
+        let mut w = window_with_checklist();
+        let out = handle_context_tool(
+            "todo_add",
+            &serde_json::json!({ "region": "todos", "item": "compute the fee table" }),
+            &mut w,
+        );
+        assert!(out.contains("added item 1"), "{out}");
+        assert_eq!(
+            w.get_region("todos").unwrap().open_checklist_items().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn todo_done_closes_the_item() {
+        let mut w = window_with_checklist();
+        handle_context_tool(
+            "todo_add",
+            &serde_json::json!({ "region": "todos", "item": "one" }),
+            &mut w,
+        );
+        let out = handle_context_tool(
+            "todo_done",
+            &serde_json::json!({ "region": "todos", "id": 1 }),
+            &mut w,
+        );
+        assert!(out.starts_with("[ok]"), "{out}");
+        assert!(
+            w.get_region("todos")
+                .unwrap()
+                .open_checklist_items()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn todo_note_records_without_closing() {
+        let mut w = window_with_checklist();
+        handle_context_tool(
+            "todo_add",
+            &serde_json::json!({ "region": "todos", "item": "one" }),
+            &mut w,
+        );
+        let out = handle_context_tool(
+            "todo_note",
+            &serde_json::json!({ "region": "todos", "id": 1, "note": "blocked" }),
+            &mut w,
+        );
+        assert!(out.starts_with("[ok]"), "{out}");
+        assert_eq!(
+            w.get_region("todos").unwrap().open_checklist_items().len(),
+            1,
+            "a note is not a completion"
+        );
+    }
+
+    #[test]
+    fn an_unknown_id_is_an_error_the_model_can_read() {
+        let mut w = window_with_checklist();
+        let out = handle_context_tool(
+            "todo_done",
+            &serde_json::json!({ "region": "todos", "id": 7 }),
+            &mut w,
+        );
+        assert!(out.contains("no item 7"), "{out}");
+    }
+
+    /// A `todo_*` call against an ordinary region is refused: the item state has
+    /// nowhere to live there, so accepting it would record something the
+    /// checklist tools could never read back.
+    #[test]
+    fn todo_tools_refuse_a_region_that_is_not_a_checklist() {
+        let mut w = ContextWindow::new(10_000);
+        w.add_region(leviath_core::Region::new(
+            "notes".to_string(),
+            RegionKind::Pinned,
+            5000,
+        ));
+        let out = handle_context_tool(
+            "todo_add",
+            &serde_json::json!({ "region": "notes", "item": "x" }),
+            &mut w,
+        );
+        assert!(out.contains("not a checklist"), "{out}");
+    }
+
+    /// An item that will not fit is reported rather than silently dropped: the
+    /// model has to know its list is not what it thinks.
+    #[test]
+    fn todo_add_reports_a_region_that_is_full() {
+        let mut w = ContextWindow::new(10_000);
+        w.add_region(leviath_core::Region::new(
+            "todos".to_string(),
+            RegionKind::Checklist,
+            1,
+        ));
+        let out = handle_context_tool(
+            "todo_add",
+            &serde_json::json!({ "region": "todos", "item": "a long item that will not fit" }),
+            &mut w,
+        );
+        assert!(out.starts_with("[error]"), "{out}");
+    }
+
+    /// The same refusal for the closing tools, not only for `todo_add`: an id
+    /// written into an ordinary region could never be read back.
+    #[test]
+    fn todo_done_also_refuses_a_region_that_is_not_a_checklist() {
+        let mut w = ContextWindow::new(10_000);
+        w.add_region(leviath_core::Region::new(
+            "notes".to_string(),
+            RegionKind::Pinned,
+            5000,
+        ));
+        let out = handle_context_tool(
+            "todo_done",
+            &serde_json::json!({ "region": "notes", "id": 1 }),
+            &mut w,
+        );
+        assert!(out.contains("not a checklist"), "{out}");
+    }
+
+    /// `context_list` names a checklist as one, so an agent reading its own
+    /// window can tell which region takes the `todo_*` tools.
+    #[test]
+    fn context_list_names_a_checklist() {
+        let mut w = window_with_checklist();
+        let out = handle_context_tool("context_list", &serde_json::json!({}), &mut w);
+        assert!(out.contains("checklist"), "{out}");
+    }
+
+    #[test]
+    fn todo_tools_report_a_missing_region() {
+        let mut w = window_with_checklist();
+        let out = handle_context_tool(
+            "todo_add",
+            &serde_json::json!({ "region": "nope", "item": "x" }),
+            &mut w,
+        );
+        assert!(out.contains("[error]"), "{out}");
+    }
+
+    #[test]
+    fn todo_tools_report_missing_arguments() {
+        let mut w = window_with_checklist();
+        for (tool, args) in [
+            ("todo_add", serde_json::json!({ "item": "x" })),
+            ("todo_add", serde_json::json!({ "region": "todos" })),
+            ("todo_done", serde_json::json!({ "region": "todos" })),
+            (
+                "todo_note",
+                serde_json::json!({ "region": "todos", "id": 1 }),
+            ),
+            ("todo_done", serde_json::json!({ "id": 1 })),
+        ] {
+            let out = handle_context_tool(tool, &args, &mut w);
+            assert!(out.contains("[error] missing"), "{tool}: {out}");
+        }
+    }
+
+    #[test]
+    fn the_todo_tools_are_routed_here() {
+        for name in ["todo_add", "todo_done", "todo_note"] {
+            assert!(is_context_tool(name), "{name}");
+        }
+    }
     use leviath_core::{EvictionStrategy, Region};
     use serde_json::json;
 

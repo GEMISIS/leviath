@@ -569,6 +569,20 @@ impl ContextWindow {
                         cache_hint: CacheHint::Always,
                     });
                 }
+                // A checklist renders as instruction rather than history: one
+                // stable block, open items first, so what is left to do is at
+                // the top of what the model reads every turn. The whole value
+                // of the state being real is that this block is derived from
+                // it rather than from whatever prose the model last wrote.
+                leviath_core::RegionKind::Checklist => {
+                    let text = region.render_checklist();
+                    if !text.is_empty() {
+                        system_blocks.push(leviath_providers::SystemBlock {
+                            text,
+                            cache_hint: CacheHint::UntilChanged,
+                        });
+                    }
+                }
                 leviath_core::RegionKind::CompactHistory { .. } => {
                     let text = region
                         .content

@@ -218,9 +218,11 @@ pub fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPolicy {
         // filesystem. They fell through to `Ask` below, so a run that used them
         // to keep notes paid a prompt per note: 25 of them on the run that
         // prompted this work, none of which a person could act on.
-        "context_write" | "context_append" | "context_read" | "context_delete" | "context_list" => {
-            ToolPolicy::Allow
-        }
+        "context_write" | "context_append" | "context_read" | "context_delete" | "context_list"
+        // The same reasoning for the checklist tools: they write to the agent's
+        // own context and touch nothing outside it, and prompting per item
+        // would make tracking work cost more than not tracking it.
+        | "todo_add" | "todo_done" | "todo_note" => ToolPolicy::Allow,
         "write_file" | "edit_file" | "shell" => ToolPolicy::Ask,
         // The sub-agent tools default to `Allow`, and the point of routing them
         // through this function at all is the *config*, not the prompt.
@@ -2280,6 +2282,14 @@ mod policy_tests {
         "context_read",
         "context_delete",
         "context_list",
+        // Reviewed: these write item state into the agent's own checklist
+        // region and reach nothing outside the context window - the same
+        // standard the `context_*` tools above are held to. Prompting per item
+        // would make tracking work cost more than not tracking it, which is how
+        // the feature would end up unused.
+        "todo_add",
+        "todo_done",
+        "todo_note",
         "spawn_agent",
         "check_agent",
         "wait_for_agent",

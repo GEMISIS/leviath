@@ -3865,6 +3865,42 @@ mode = "autonomous"
     assert!(!gate.require_modifications);
 }
 
+/// A checklist region and its gate both parse. Without the parse the key is
+/// accepted and ignored, which is a gate that silently blocks nothing.
+#[test]
+fn parse_manifest_reads_a_checklist_and_its_gate() {
+    let toml = r#"
+[agent]
+name = "tracking"
+
+[stages.implement]
+mode = "autonomous"
+
+[stages.implement.transitions.review]
+gate = { require_no_open_items = "todos" }
+
+[stages.review]
+mode = "autonomous"
+
+[context.regions]
+todos = { kind = "checklist", max_tokens = 2000 }
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    assert_eq!(
+        bp.context_layout
+            .get_region("todos")
+            .map(|r| r.kind.clone()),
+        Some(crate::RegionKind::Checklist)
+    );
+    let gate = bp
+        .find_stage("implement")
+        .and_then(|s| s.transitions.as_ref())
+        .and_then(|t| t.get("review"))
+        .and_then(|e| e.gate.as_ref())
+        .expect("the gate survives");
+    assert_eq!(gate.require_no_open_items.as_deref(), Some("todos"));
+}
+
 #[test]
 fn parse_manifest_sandbox_unknown_on_unavailable_errors() {
     let toml = r#"

@@ -7974,6 +7974,229 @@ fn a_zero_baseline_cannot_run_away() {
     assert!(!rec.runaway_warned);
 }
 
+// ── transition gates: require_no_open_items (#342) ──
+
+/// A window whose checklist holds `open` open items and `done` closed ones.
+fn checklist_window(open: usize, done: usize) -> ContextWindow {
+    let mut w = ContextWindow::new(10_000);
+    w.add_region(Region::new(
+        "todos".to_string(),
+        RegionKind::Checklist,
+        5000,
+    ));
+    let region = w.get_region_mut("todos").expect("region");
+    for i in 0..open {
+        region.add_checklist_item(format!("open {i}"), 2).unwrap();
+    }
+    for i in 0..done {
+        let id = region.add_checklist_item(format!("done {i}"), 2).unwrap();
+        region.complete_checklist_item(id);
+    }
+    w
+}
+
+fn items_gate() -> leviath_core::blueprint::TransitionGate {
+    leviath_core::blueprint::TransitionGate {
+        require_no_open_items: Some("todos".to_string()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn open_items_block_the_edge_and_the_nudge_names_them() {
+    let w = checklist_window(2, 1);
+    let stage = stage_named("implement", None, false, None);
+    let GateDecision::Block(nudge) =
+        gate_blocks(Some(&items_gate()), &stage, &StageProgress::default(), &w)
+    else {
+        panic!("open items must hold the stage");
+    };
+    assert!(nudge.contains("2 item(s)"), "{nudge}");
+    assert!(
+        nudge.contains("open 0"),
+        "naming them is the useful part: {nudge}"
+    );
+}
+
+/// The distinction no other gate could make: three finished items look exactly
+/// like three unfinished ones to a presence check.
+#[test]
+fn a_fully_ticked_checklist_passes() {
+    let w = checklist_window(0, 3);
+    let stage = stage_named("implement", None, false, None);
+    assert!(matches!(
+        gate_blocks(Some(&items_gate()), &stage, &StageProgress::default(), &w),
+        GateDecision::Pass
+    ));
+}
+
+#[test]
+fn an_empty_checklist_gate_passes() {
+    let w = checklist_window(0, 0);
+    let stage = stage_named("implement", None, false, None);
+    assert!(matches!(
+        gate_blocks(Some(&items_gate()), &stage, &StageProgress::default(), &w),
+        GateDecision::Pass
+    ));
+}
+
+/// It cannot wedge a run: after the shared budget the edge is taken with a
+/// warning, like every other gate.
+#[test]
+fn open_items_give_up_after_the_budget() {
+    let w = checklist_window(2, 0);
+    let progress = StageProgress {
+        gate_reentries: leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS,
+        ..Default::default()
+    };
+    let stage = stage_named("implement", None, false, None);
+    assert!(matches!(
+        gate_blocks(Some(&items_gate()), &stage, &progress, &w),
+        GateDecision::Forced
+    ));
+}
+
+/// A gate naming a region the window does not hold passes rather than
+/// stranding the run over a typo in a region name.
+#[test]
+fn a_gate_on_a_missing_checklist_passes() {
+    let w = ContextWindow::new(10_000);
+    let stage = stage_named("implement", None, false, None);
+    assert!(matches!(
+        gate_blocks(Some(&items_gate()), &stage, &StageProgress::default(), &w),
+        GateDecision::Pass
+    ));
+}
+
+// ── a checklist assembles as one stable block ──
+
+#[test]
+fn a_checklist_assembles_as_a_system_block() {
+    let w = checklist_window(2, 1);
+    let assembled = w.assemble_with_meta(&crate::custom_region::AssembleMeta::default());
+    let text = format!("{assembled:?}");
+    assert!(text.contains("2 open, 1 done"), "{text}");
+    // Instruction, not history: it belongs in the system section rather than
+    // as a message the model could mistake for something it said.
+    assert!(!assembled.system_blocks.is_empty());
+}
+
+/// A checklist holding entries that are not items renders nothing.
+///
+/// The empty-region skip above this arm handles a region with no entries at
+/// all, so this is the only way the guard inside it is reached: a seed, a
+/// carried entry, or a `context_append` landing in a checklist region.
+#[test]
+fn a_checklist_of_non_items_assembles_nothing() {
+    let mut w = ContextWindow::new(10_000);
+    w.add_region(Region::new(
+        "todos".to_string(),
+        RegionKind::Checklist,
+        5000,
+    ));
+    w.add_to_region("todos", "a plain note, not an item".to_string(), 6)
+        .expect("seeded");
+
+    let assembled = w.assemble_with_meta(&crate::custom_region::AssembleMeta::default());
+    assert!(
+        !format!("{assembled:?}").contains("Checklist ("),
+        "nothing to show is nothing to send"
+    );
+}
+
+#[test]
+fn an_empty_checklist_assembles_nothing() {
+    let w = checklist_window(0, 0);
+    let assembled = w.assemble_with_meta(&crate::custom_region::AssembleMeta::default());
+    assert!(
+        !format!("{assembled:?}").contains("Checklist ("),
+        "an empty checklist should not render"
+    );
+}
+
+// ── the whole checklist path, end to end ──
+
+/// Tool call -> region state -> what the model sees -> what the gate decides.
+///
+/// Written as one test on purpose. Each half of this feature is tested in
+/// isolation elsewhere, and each of those could pass while the path between
+/// them is broken - which is exactly the shape of a feature that looks
+/// implemented and does nothing.
+#[test]
+fn the_checklist_path_holds_together() {
+    use crate::context_tools::handle_context_tool;
+
+    let mut w = ContextWindow::new(10_000);
+    w.add_region(Region::new(
+        "todos".to_string(),
+        RegionKind::Checklist,
+        5000,
+    ));
+    let stage = stage_named("implement", None, false, None);
+    let gate = items_gate();
+
+    // 1. The model records three things through the tool.
+    for item in [
+        "check the fee table",
+        "read the manual",
+        "write the summary",
+    ] {
+        let out = handle_context_tool(
+            "todo_add",
+            &serde_json::json!({ "region": "todos", "item": item }),
+            &mut w,
+        );
+        assert!(out.contains("added item"), "{out}");
+    }
+    assert_eq!(
+        w.get_region("todos").unwrap().open_checklist_items().len(),
+        3
+    );
+
+    // 2. They reach the model as one system block, open items first.
+    let assembled = w.assemble_with_meta(&crate::custom_region::AssembleMeta::default());
+    let seen = format!("{assembled:?}");
+    assert!(seen.contains("3 open, 0 done"), "{seen}");
+    assert!(seen.contains("check the fee table"), "{seen}");
+
+    // 3. The gate holds the stage while any of them is open.
+    let GateDecision::Block(nudge) =
+        gate_blocks(Some(&gate), &stage, &StageProgress::default(), &w)
+    else {
+        panic!("three open items must hold the stage");
+    };
+    assert!(nudge.contains("3 item(s)"), "{nudge}");
+
+    // 4. Two done is still not done.
+    for id in [1, 2] {
+        handle_context_tool(
+            "todo_done",
+            &serde_json::json!({ "region": "todos", "id": id }),
+            &mut w,
+        );
+    }
+    assert!(matches!(
+        gate_blocks(Some(&gate), &stage, &StageProgress::default(), &w),
+        GateDecision::Block(_)
+    ));
+
+    // 5. The last one closes it, and the edge opens.
+    handle_context_tool(
+        "todo_done",
+        &serde_json::json!({ "region": "todos", "id": 3 }),
+        &mut w,
+    );
+    assert!(matches!(
+        gate_blocks(Some(&gate), &stage, &StageProgress::default(), &w),
+        GateDecision::Pass
+    ));
+
+    // 6. And nothing was thrown away on the way.
+    let region = w.get_region("todos").unwrap();
+    assert_eq!(region.checklist_items().len(), 3);
+    assert!(region.render_checklist().contains("0 open, 3 done"));
+}
+
 // ── transition gates: require_modifications (#107) ──
 
 fn gate(region: Option<&str>, message: Option<&str>) -> leviath_core::blueprint::TransitionGate {
@@ -7984,6 +8207,7 @@ fn gate(region: Option<&str>, message: Option<&str>) -> leviath_core::blueprint:
         tools: Vec::new(),
         max_attempts: None,
         require_region_updated: None,
+        require_no_open_items: None,
     }
 }
 

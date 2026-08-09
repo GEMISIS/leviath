@@ -45,7 +45,7 @@ conversation = { kind = "sliding_window", budget = "33%", max_items = 20 }
 history      = { kind = "compact_history", budget = "15%", source_region = "codebase" }
 ```
 
-## The eight region kinds
+## The nine region kinds
 
 | Kind | Behavior |
 |---|---|
@@ -56,6 +56,7 @@ history      = { kind = "compact_history", budget = "15%", source_region = "code
 | `compact_history` | Carries summaries from earlier stages forward, so a later stage knows what happened without holding the raw content. Names the region it summarizes with `source_region`. |
 | `clearable` | Wiped in one shot when space is needed (scratch). |
 | `hashmap` | Keyed entries (alias `hash_map`); a write to a key replaces it. |
+| `checklist` | A task list whose entries carry state. Written through `todo_add` / `todo_done` / `todo_note`, never evicted, and rendered open-items-first. |
 | `custom` | Behavior defined by a Rhai script (see [Rhai regions](/docs/rhai-regions)). |
 
 An unrecognized `kind` is a hard parse error, not a silently ignored region.
@@ -91,6 +92,44 @@ kind       = "custom"
 script     = "context_hooks/brain.rhai"   # relative to the agent directory
 persistent = false             # true behaves pinned-like: never evicted
 ```
+
+### Tracking work with a checklist
+
+A pinned region plus `context_append` gives persistence, which is the easy half. What it does not
+give is *state*: "compute the fee table" and "~~compute the fee table~~ done" are two different
+strings, so nothing can count what is left and no gate can ask.
+
+```toml
+[context.regions]
+todos = { kind = "checklist", budget = "3%" }
+```
+
+The agent writes to it through tools rather than free text, so the state cannot drift from what the
+model believes it wrote:
+
+| Tool | Effect |
+|---|---|
+| `todo_add(region, item)` | Adds an open item, returns its id |
+| `todo_done(region, id)` | Ticks it off |
+| `todo_note(region, id, note)` | Records a note **without** closing it |
+
+It renders as one stable block with open items first, because the value of it being in the system
+section is that it stays in front of the model every turn as instruction rather than history.
+
+An id is never reused, so a `todo_done` cannot land on a different item than the one it names, and
+an id that matches nothing is an error the model can read rather than a silent no-op.
+
+The gate is the part that makes any of this enforceable:
+
+```toml
+[stages.implement.transitions.review]
+gate = { require_no_open_items = "todos",
+         message = "Finish or explicitly drop the open items first." }
+```
+
+The nudge names the items that are still open. It shares the same `max_attempts` budget as every
+other gate, so it cannot wedge a run, and a gate naming a region that does not exist passes rather
+than stranding one.
 
 ### Keys every region accepts
 
