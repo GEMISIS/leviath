@@ -132,6 +132,7 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 | warning | `unknown-model` | A model this build has not heard of, checked only against providers with a closed catalog. Ollama, OpenRouter and script providers are never checked. |
 | warning | `no-reachable-provider` | Nothing in the stage's models list is configured here, so it falls through to your default model. |
 | warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `[read_paths]` shape. |
+| warning | `dead-end-possible` | Every normal edge's target has a `max_revisits` budget, so the run errors once they are spent. Add a `condition = "dead_end"` edge to a stage without one. A `max_iterations` edge does not count: it fires on the iteration cap, never on this path. |
 | warning | `read-paths-not-granted` | The blueprint declares `[read_paths]` your `config.toml` does not grant. Declaring is not granting, so those reads are refused; the fix line carries the stanza to add. |
 | warning | `read-paths-grant-invalid` | A `read_paths` grant in your own config will not compile. It is a hard spawn error, named here first. |
 | note | `holds-under-yolo` | A checkpoint that still stops an unattended run for a person: an interaction point declaring `unattended = "ask"`, or a blocking tool a stage keeps in `required_tools`. Deliberate where it appears; noted because `--yolo` reads as "run without me". |

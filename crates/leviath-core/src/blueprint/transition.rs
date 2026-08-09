@@ -278,6 +278,22 @@ pub enum TransitionCondition {
     MaxIterations,
     /// LLM picks from available transitions (default for multi-transition stages)
     LlmChoice,
+    /// Fires when the graph would otherwise strand here: the stage finished, and
+    /// every normal (`always`/`llm_choice`) edge's target has spent its
+    /// `max_revisits`.
+    ///
+    /// Exists because the alternatives were both bad. Declaring an ordinary edge
+    /// to the output stage silences the `dead-end-possible` lint by adding a
+    /// route the model can take at the end of *every* visit - measured, that
+    /// collapsed pipelines in 10 of 24 runs of one agent and 21 of 36 of
+    /// another. Declaring nothing leaves the run to die with everything it
+    /// established thrown away. This edge is reachable when stuck and invisible
+    /// the rest of the time, which is what "escape" actually means.
+    ///
+    /// Deliberately not `max_iterations`: that fires when a stage burns its
+    /// iteration budget, which is a different event and does not fire here at
+    /// all.
+    DeadEnd,
     /// Fires *mid-stage* when the stage's runtime metrics cross this edge's
     /// [`StuckConfig`] thresholds - the agent is burning iterations, wall clock,
     /// or edits to one file without finishing. Unlike every other condition this

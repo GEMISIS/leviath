@@ -292,6 +292,36 @@ mode = "autonomous"
     assert!(err.contains("whenever_i_feel_like_it"), "got: {err}");
     // The rejection message must list every condition that IS valid.
     assert!(err.contains("stuck"), "got: {err}");
+    assert!(err.contains("dead_end"), "got: {err}");
+}
+
+/// `condition = "dead_end"` parses. It is the escape the `dead-end-possible`
+/// lint recommends, so a manifest that follows the advice has to load.
+#[test]
+fn parse_manifest_accepts_a_dead_end_condition() {
+    let toml = r#"
+[agent]
+name = "escapes"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.transitions.answer]
+condition = "dead_end"
+
+[stages.answer]
+mode = "autonomous"
+"#;
+    let bp = parse_manifest(toml).expect("dead_end is a valid condition");
+    let edge = bp
+        .find_stage("work")
+        .and_then(|s| s.transitions.as_ref())
+        .and_then(|t| t.get("answer"))
+        .expect("the edge survives");
+    assert_eq!(
+        edge.condition,
+        crate::blueprint::TransitionCondition::DeadEnd
+    );
 }
 
 // ─── stuck detection (#106) ─────────────────────────────────────────────

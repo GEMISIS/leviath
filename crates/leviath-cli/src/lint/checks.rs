@@ -276,7 +276,21 @@ pub(super) fn lint_dead_end_possible(blueprint: &Blueprint) -> Vec<LintFinding> 
                 .find_stage(&e.target)
                 .is_none_or(|t| t.max_revisits.is_some())
         });
-        if all_exhaustible {
+        // An escape the runtime actually consults on this path. `resolve_transition`
+        // resolves a dead end down a `dead_end` edge, then an `error` edge, so
+        // either satisfies the check - provided its own target can still be
+        // entered, or it is no escape at all.
+        let has_escape = transitions.values().any(|e| {
+            matches!(
+                e.condition,
+                leviath_core::blueprint::TransitionCondition::DeadEnd
+                    | leviath_core::blueprint::TransitionCondition::Error
+            ) && blueprint
+                .find_stage(&e.target)
+                .is_some_and(|t| t.max_revisits.is_none())
+        });
+
+        if all_exhaustible && !has_escape {
             findings.push(
                 LintFinding::new(
                     LintSeverity::Warning,
@@ -287,9 +301,10 @@ pub(super) fn lint_dead_end_possible(blueprint: &Blueprint) -> Vec<LintFinding> 
                 )
                 .in_stage(&stage.name)
                 .with_fix(
-                    "add one un-exhaustible way forward - an edge to a stage without \
-                     max_revisits (the output stage, usually), or a condition = \
-                     \"max_iterations\" escape",
+                    "add a condition = \"dead_end\" edge to a stage without max_revisits \
+                     (the output stage, usually). It is taken only when the graph would \
+                     otherwise strand, so it is not a route the model can choose early - \
+                     unlike a plain edge to the same stage, which is offered on every visit",
                 ),
             );
         }

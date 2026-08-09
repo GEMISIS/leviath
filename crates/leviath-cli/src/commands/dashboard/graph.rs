@@ -55,6 +55,7 @@ pub(super) fn load_graph_info(agent_path: &str) -> Option<GraphTransitionInfo> {
                         TransitionCondition::MaxIterations => "max_iterations".to_string(),
                         TransitionCondition::LlmChoice => "llm_choice".to_string(),
                         TransitionCondition::Stuck => "stuck".to_string(),
+                        TransitionCondition::DeadEnd => "dead_end".to_string(),
                     };
                     let transform = match &edge.transform {
                         EdgeTransform::Direct => "direct".to_string(),
@@ -287,6 +288,77 @@ mod tests {
     #[test]
     fn load_graph_info_missing_directory_returns_none() {
         assert!(load_graph_info("/nonexistent/path/to/agent").is_none());
+    }
+
+    /// Every condition renders under its own name in the dashboard graph, so an
+    /// edge the model cannot choose is not shown as one it can.
+    #[test]
+    fn load_graph_info_names_each_condition() {
+        let dir = tempfile::tempdir().unwrap();
+        write_test_agent(
+            dir.path(),
+            r#"
+[agent]
+name = "conds"
+version = "0.0.1"
+description = "d"
+entry_stage = "a"
+
+[stages.a]
+mode = "autonomous"
+system_prompt = "x"
+
+[stages.a.transitions.b]
+transform = "direct"
+[stages.a.transitions.c]
+condition = "llm_choice"
+[stages.a.transitions.d]
+condition = "error"
+[stages.a.transitions.e]
+condition = "max_iterations"
+[stages.a.transitions.f]
+condition = "stuck"
+stuck_after_iterations = 3
+[stages.a.transitions.g]
+condition = "dead_end"
+
+[stages.b]
+mode = "autonomous"
+system_prompt = "y"
+[stages.c]
+mode = "autonomous"
+system_prompt = "y"
+[stages.d]
+mode = "autonomous"
+system_prompt = "y"
+[stages.e]
+mode = "autonomous"
+system_prompt = "y"
+[stages.f]
+mode = "autonomous"
+system_prompt = "y"
+[stages.g]
+mode = "autonomous"
+system_prompt = "y"
+"#,
+        );
+        let info = load_graph_info(dir.path().to_str().unwrap()).expect("a graph agent");
+        let mut conditions: Vec<&str> = info.edges["a"]
+            .iter()
+            .map(|e| e.condition.as_str())
+            .collect();
+        conditions.sort_unstable();
+        assert_eq!(
+            conditions,
+            [
+                "always",
+                "dead_end",
+                "error",
+                "llm_choice",
+                "max_iterations",
+                "stuck"
+            ]
+        );
     }
 
     #[test]

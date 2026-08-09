@@ -184,6 +184,156 @@ fn an_agent_level_model_block_is_warned_about() {
     assert!(findings[0].stage.is_none(), "{findings:?}");
 }
 
+// ─── dead-end-possible ────────────────────────────────────────────────────────
+
+/// A graph whose only way on is a stage with a spendable revisit budget.
+fn strandable(extra_edge: &str) -> String {
+    format!(
+        r#"
+[agent]
+name = "strandable"
+version = "0.1.0"
+description = "a fixture"
+
+[stages.work]
+mode = "autonomous"
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
+description = "Work"
+max_iterations = 10
+available_tools = ["read_file"]
+[stages.work.transitions.review]
+transform = "direct"
+{extra_edge}
+
+[stages.review]
+mode = "autonomous"
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
+description = "Review"
+max_iterations = 10
+max_revisits = 2
+available_tools = ["read_file"]
+
+[stages.answer]
+mode = "output"
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
+description = "Answer"
+max_iterations = 10
+
+[context.regions]
+system = {{ kind = "pinned", max_tokens = 1000 }}
+conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
+"#
+    )
+}
+
+#[test]
+fn a_strandable_stage_is_warned_about() {
+    let findings = lint(&strandable(""), &LintEnv::default());
+    assert!(
+        codes(&findings).contains(&"dead-end-possible"),
+        "{:?}",
+        codes(&findings)
+    );
+}
+
+/// The remedy the message names has to be one that silences it, or an author
+/// who follows the advice literally is left reaching for the other one - which
+/// is a route the model can take on every visit.
+#[test]
+fn a_dead_end_edge_satisfies_the_check() {
+    let toml = strandable(
+        "\n[stages.work.transitions.answer]\ncondition = \"dead_end\"\ntransform = \"direct\"\n",
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    assert!(
+        !codes(&findings).contains(&"dead-end-possible"),
+        "the recommended fix should silence it: {:?}",
+        codes(&findings)
+    );
+}
+
+/// An `error` edge is the other escape the runtime consults on this path.
+#[test]
+fn an_error_edge_also_satisfies_the_check() {
+    let toml = strandable(
+        "\n[stages.work.transitions.answer]\ncondition = \"error\"\ntransform = \"direct\"\n",
+    );
+    assert!(!codes(&lint(&toml, &LintEnv::default())).contains(&"dead-end-possible"));
+}
+
+/// `max_iterations` does **not**, and the message no longer suggests it. It
+/// fires when a stage burns its iteration budget, which is a different event:
+/// on the stranding path `resolve_transition` never consults it, so counting it
+/// would silence the warning without preventing the strand.
+#[test]
+fn a_max_iterations_edge_does_not_satisfy_the_check() {
+    let toml = strandable(
+        "\n[stages.work.transitions.answer]\ncondition = \"max_iterations\"\ntransform = \"direct\"\n",
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    assert!(
+        codes(&findings).contains(&"dead-end-possible"),
+        "{:?}",
+        codes(&findings)
+    );
+    let fix = with_code(&findings, "dead-end-possible")[0]
+        .fix
+        .clone()
+        .expect("the finding carries a fix");
+    assert!(fix.contains("dead_end"), "{fix}");
+    assert!(
+        !fix.contains("max_iterations"),
+        "it should no longer recommend an inert remedy: {fix}"
+    );
+}
+
+/// An escape to a stage that can itself run out is no escape, so it does not
+/// silence the warning.
+#[test]
+fn a_dead_end_edge_to_an_exhaustible_stage_does_not_count() {
+    let toml = r#"
+[agent]
+name = "strandable"
+version = "0.1.0"
+description = "a fixture"
+
+[stages.work]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Work"
+max_iterations = 10
+available_tools = ["read_file"]
+[stages.work.transitions.review]
+transform = "direct"
+[stages.work.transitions.fallback]
+condition = "dead_end"
+transform = "direct"
+
+[stages.review]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Review"
+max_iterations = 10
+max_revisits = 2
+available_tools = ["read_file"]
+
+# The escape's own target can run out too, so following it only defers the
+# strand rather than resolving it.
+[stages.fallback]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Fallback"
+max_iterations = 10
+max_revisits = 1
+available_tools = ["read_file"]
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
+"#;
+    assert!(codes(&lint(toml, &LintEnv::default())).contains(&"dead-end-possible"));
+}
+
 // ─── Seeds the parser threw away ──────────────────────────────────────────────
 
 /// A seed table with no key the parser recognizes leaves the region empty.
