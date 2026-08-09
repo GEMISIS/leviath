@@ -3835,6 +3835,36 @@ grep = 500
     );
 }
 
+/// `require_region_updated` parses onto the edge gate. Without this the key is
+/// accepted and ignored, which is how a gate silently blocks nothing.
+#[test]
+fn parse_manifest_reads_a_region_update_gate() {
+    let toml = r#"
+[agent]
+name = "revising"
+
+[stages.plan]
+mode = "autonomous"
+
+[stages.plan.transitions.compute]
+gate = { require_region_updated = "plan", message = "Change it first." }
+
+[stages.compute]
+mode = "autonomous"
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    let gate = bp
+        .find_stage("plan")
+        .and_then(|s| s.transitions.as_ref())
+        .and_then(|t| t.get("compute"))
+        .and_then(|e| e.gate.as_ref())
+        .expect("the gate survives");
+    assert_eq!(gate.require_region_updated.as_deref(), Some("plan"));
+    assert_eq!(gate.message.as_deref(), Some("Change it first."));
+    // And it does not silently turn on the other gate.
+    assert!(!gate.require_modifications);
+}
+
 #[test]
 fn parse_manifest_sandbox_unknown_on_unavailable_errors() {
     let toml = r#"

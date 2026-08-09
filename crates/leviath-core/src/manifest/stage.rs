@@ -747,6 +747,9 @@ pub(super) fn parse_transition_gate(
     if let Some(region) = table.get("region").and_then(|v| v.as_str()) {
         gate.region = Some(region.to_string());
     }
+    if let Some(region) = table.get("require_region_updated").and_then(|v| v.as_str()) {
+        gate.require_region_updated = Some(region.to_string());
+    }
     if let Some(tools) = table.get("tools").and_then(|v| v.as_array()) {
         gate.tools = tools
             .iter()

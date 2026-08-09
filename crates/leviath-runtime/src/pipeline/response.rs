@@ -267,6 +267,13 @@ pub struct StageProgress {
     /// gate lets the transition through when this is non-zero: the agent is
     /// trying to write and cannot, so re-running the stage only burns budget.
     pub blocked_modification_calls: usize,
+    /// Content digests of the regions this stage's outgoing gates watch, as
+    /// they stood when the stage was entered.
+    ///
+    /// Only the watched regions: hashing every region on every entry would
+    /// cost the whole window for a feature most stages do not use. Empty for a
+    /// stage with no `require_region_updated` gate, which is the common case.
+    pub entry_region_digests: std::collections::HashMap<String, u64>,
     /// How many times a transition gate has already sent this stage back for
     /// another pass. Bounded by the gate's `max_attempts`.
     pub gate_reentries: usize,

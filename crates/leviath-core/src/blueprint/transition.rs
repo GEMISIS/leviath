@@ -163,6 +163,20 @@ pub struct TransitionGate {
     /// [`DEFAULT_GATE_ATTEMPTS`].
     #[serde(default)]
     pub max_attempts: Option<usize>,
+
+    /// Region that must have *changed* during this stage, not merely be present.
+    ///
+    /// Every other gate asks whether something exists. That cannot express a
+    /// revise loop: a stage sent back to redo its work satisfies a presence
+    /// check by re-emitting what it already wrote, so a reviewer's rejection
+    /// can be answered with the same plan and the loop spins until it runs out
+    /// of revisits. Measured, a plan that overrode a documented definition was
+    /// re-confirmed by a verify stage and the run ended confidently wrong.
+    ///
+    /// Compared against the region's content as it stood when the stage was
+    /// entered, so "changed" means changed by *this* pass.
+    #[serde(default)]
+    pub require_region_updated: Option<String>,
 }
 
 /// Default re-run budget for an unsatisfied [`TransitionGate`].
