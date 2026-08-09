@@ -438,8 +438,19 @@ Script providers configure theirs under `[model_providers.<name>.rate_limit]` in
 
 ## `[model_capabilities.<model_id>]`
 
-Per-model overrides that take precedence over the provider's built-in capability table. Useful for
-a local or self-hosted model Leviath does not know.
+Per-model corrections to the provider's built-in capability table. Useful for a local or
+self-hosted model Leviath does not know, or one whose window it has wrong.
+
+**Name only what you are changing.** Every field is optional and an unnamed one keeps whatever the
+provider already reports for that model, so the common case is one line:
+
+```toml
+[model_capabilities."moonshotai/kimi-k3"]
+max_context_tokens = 1048576
+```
+
+A misspelled key is refused at load rather than ignored, so a typo cannot look like a working
+override. The full set, when you do want to state all of it:
 
 ```toml
 [model_capabilities.my-local-llama]
@@ -450,6 +461,16 @@ supports_system_prompt = true
 max_context_tokens   = 32768
 max_output_tokens    = 4096
 ```
+
+`lev models show <model>` prints the values a run will actually use, with any correction already
+applied.
+
+> [!NOTE]
+> Region budgets written as percentages resolve against `max_context_tokens`, so a wrong window is
+> not cosmetic: a `budget = "30%"` region on a model assumed to be 128k gets 38 400 tokens instead
+> of the 314 572 a 1M-token model would give it. OpenRouter fronts far more models than any built-in
+> table names, so Leviath warns once per model when it falls back to a conservative window and tells
+> you the line to add here.
 
 <a id="model_providersname"></a>
 

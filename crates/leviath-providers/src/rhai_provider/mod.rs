@@ -39,8 +39,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::provider::{
-    InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider, ProviderError,
-    RateLimitConfig, Result, StreamChunk, ToolCallDelta,
+    InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride, ModelInfo,
+    Provider, ProviderError, RateLimitConfig, Result, StreamChunk, ToolCallDelta,
 };
 use crate::rate_limit::RateLimiter;
 
@@ -65,7 +65,7 @@ pub struct RhaiProvider {
     rate_limiter: Option<RateLimiter>,
     request_timeout_secs: Option<u64>,
     meta: ProviderMeta,
-    capability_overrides: HashMap<String, ModelCapabilities>,
+    capability_overrides: HashMap<String, ModelCapabilityOverride>,
     has_stream: bool,
     has_count_tokens: bool,
     has_list_models: bool,
@@ -87,7 +87,7 @@ pub struct ScriptProviderSettings {
     /// The `initialize` block from the config.
     pub init_config: serde_json::Value,
     /// Per-model capabilities the config declares.
-    pub caps: HashMap<String, ModelCapabilities>,
+    pub caps: HashMap<String, ModelCapabilityOverride>,
     /// Rate limiting, when configured.
     pub rate_limit: Option<RateLimitConfig>,
     /// Per-request timeout, when configured.
@@ -431,7 +431,7 @@ impl Provider for RhaiProvider {
     fn max_context_tokens(&self, model: &str) -> usize {
         self.capability_overrides
             .get(model)
-            .map(|c| c.max_context_tokens)
+            .and_then(|c| c.max_context_tokens)
             .unwrap_or(self.meta.max_context_tokens)
     }
 
@@ -440,14 +440,17 @@ impl Provider for RhaiProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
-        if let Some(c) = self.capability_overrides.get(model) {
-            return c.clone();
-        }
-        ModelCapabilities {
+        // What the script itself declares, before any `[model_capabilities]`
+        // entry is merged onto it.
+        let base = ModelCapabilities {
             max_context_tokens: self.meta.max_context_tokens,
             max_output_tokens: self.meta.max_output_tokens,
             supports_streaming: true,
             ..Default::default()
+        };
+        match self.capability_overrides.get(model) {
+            Some(o) => o.apply_to(base),
+            None => base,
         }
     }
 

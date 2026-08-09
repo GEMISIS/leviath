@@ -120,6 +120,8 @@ allow_blueprint = true
 requests_per_minute = 50
 tokens_per_minute = 100000
 
+# Every field is optional: name only what you are correcting, and the rest keeps
+# whatever the provider reports for that model.
 [model_capabilities."my-local-llama"]
 supports_temperature = true
 supports_streaming = true
@@ -127,6 +129,10 @@ supports_tools = false
 supports_system_prompt = true
 max_context_tokens = 32768
 max_output_tokens = 4096
+
+# The common shape - one wrong number, one line.
+[model_capabilities."moonshotai/kimi-k3"]
+max_context_tokens = 1048576
 
 [model_providers.groq]
 script = "groq.rhai"

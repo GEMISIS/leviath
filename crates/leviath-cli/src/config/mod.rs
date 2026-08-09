@@ -1,7 +1,7 @@
 //! CLI configuration management.
 
 use leviath_mcp::MCPServerConfig;
-use leviath_providers::ModelCapabilities;
+use leviath_providers::ModelCapabilityOverride;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -52,7 +52,7 @@ pub struct Config {
     /// Per-model capability overrides. Key is model ID (e.g. "my-local-llama").
     /// Takes precedence over the provider's built-in capability table.
     #[serde(default)]
-    pub model_capabilities: HashMap<String, ModelCapabilities>,
+    pub model_capabilities: HashMap<String, ModelCapabilityOverride>,
 
     /// Optional overrides for Rhai *script providers*. Key is the
     /// provider name an agent references (e.g. `"groq"`). A script activates by
@@ -2458,33 +2458,38 @@ url = "https://mcp.example.com/mcp"
 
     #[test]
     fn config_from_toml_with_model_capabilities() {
-        let toml_content = r#"
-default_provider = "anthropic"
-agent_paths = []
-
-[providers]
-
+        // A one-field entry, which is what someone correcting a wrong context
+        // window actually writes. It used to fail to deserialize and be dropped
+        // in silence (#338); now it parses and names only that field, so
+        // everything it did not mention comes from the provider.
+        let toml = r#"
 [model_capabilities."my-custom-model"]
-supports_temperature = true
-supports_streaming = false
-supports_tools = true
-supports_system_prompt = true
-max_context_tokens = 4096
-max_output_tokens = 2048
+max_context_tokens = 1048576
 "#;
-        let config: Config = toml::from_str(toml_content).unwrap();
-        let caps = config.model_capabilities.get("my-custom-model").unwrap();
-        assert!(caps.supports_temperature);
-        assert!(!caps.supports_streaming);
-        assert_eq!(caps.max_context_tokens, 4096);
-        assert_eq!(caps.max_output_tokens, 2048);
+        let config: Config = toml::from_str(toml).expect("a partial entry parses");
+        let entry = config
+            .model_capabilities
+            .get("my-custom-model")
+            .expect("the entry survives");
+        assert_eq!(entry.max_context_tokens, Some(1_048_576));
+        assert_eq!(
+            entry.max_output_tokens, None,
+            "an unmentioned field stays unset rather than defaulting"
+        );
+        assert_eq!(entry.supports_tools, None);
     }
 
-    // ─── validate_keys with both keys ──────────────────────────────────────
+    /// A misspelled key is refused rather than ignored, so a typo cannot look
+    /// like a working override.
+    #[test]
+    fn config_model_capabilities_rejects_an_unknown_key() {
+        let toml = r#"
+[model_capabilities."my-custom-model"]
+max_contxt_tokens = 1048576
+"#;
+        assert!(toml::from_str::<Config>(toml).is_err());
+    }
 
-    /// A blank key means "not configured" (what `lev setup` writes for a
-    /// skipped provider), so it must not draw a shape warning - noise about
-    /// keys nobody set trains users to ignore the warnings that matter.
     #[test]
     fn validate_keys_is_quiet_about_blank_keys() {
         let mut config = Config::default();
@@ -2838,13 +2843,13 @@ enabled = false
         let mut model_caps = HashMap::new();
         model_caps.insert(
             "my-model".to_string(),
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 8192,
-                max_output_tokens: 4096,
+            ModelCapabilityOverride {
+                supports_temperature: Some(true),
+                supports_streaming: Some(true),
+                supports_tools: Some(true),
+                supports_system_prompt: Some(true),
+                max_context_tokens: Some(8192),
+                max_output_tokens: Some(4096),
             },
         );
         let mut tool_perms = HashMap::new();
@@ -3058,10 +3063,10 @@ max_output_tokens = 1024
         let config: Config = toml::from_str(toml_content).unwrap();
         assert_eq!(config.model_capabilities.len(), 2);
         let caps_a = config.model_capabilities.get("model-a").unwrap();
-        assert!(caps_a.supports_temperature);
-        assert_eq!(caps_a.max_context_tokens, 8192);
+        assert_eq!(caps_a.supports_temperature, Some(true));
+        assert_eq!(caps_a.max_context_tokens, Some(8192));
         let caps_b = config.model_capabilities.get("model-b").unwrap();
-        assert!(!caps_b.supports_temperature);
-        assert_eq!(caps_b.max_context_tokens, 2048);
+        assert_eq!(caps_b.supports_temperature, Some(false));
+        assert_eq!(caps_b.max_context_tokens, Some(2048));
     }
 }

@@ -5,8 +5,8 @@
 
 use crate::openai_compat::{OpenAiSseStream, parse_openai_response, send_chat_request};
 use crate::provider::{
-    InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider, ProviderConfig,
-    ProviderError, Result, StreamChunk,
+    InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride, ModelInfo,
+    Provider, ProviderConfig, ProviderError, Result, StreamChunk,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -29,7 +29,11 @@ pub struct OpenRouterProvider {
     rate_limiter: Option<RateLimiter>,
 
     /// Per-model capability overrides
-    capability_overrides: HashMap<String, ModelCapabilities>,
+    capability_overrides: HashMap<String, ModelCapabilityOverride>,
+
+    /// Models already reported as falling back, so the warning is once per
+    /// model per process rather than once per inference.
+    warned_unknown: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl OpenRouterProvider {
@@ -41,6 +45,7 @@ impl OpenRouterProvider {
             base_url: "https://openrouter.ai/api/v1".to_string(),
             rate_limiter: None,
             capability_overrides: HashMap::new(),
+            warned_unknown: Default::default(),
         }
     }
 
@@ -55,6 +60,7 @@ impl OpenRouterProvider {
                 .unwrap_or_else(|| "https://openrouter.ai/api/v1".to_string()),
             rate_limiter,
             capability_overrides: HashMap::new(),
+            warned_unknown: Default::default(),
         }
     }
 
@@ -62,7 +68,7 @@ impl OpenRouterProvider {
     pub fn with_overrides(
         client: reqwest::Client,
         api_key: String,
-        overrides: HashMap<String, ModelCapabilities>,
+        overrides: HashMap<String, ModelCapabilityOverride>,
         rate_limit: Option<&crate::provider::RateLimitConfig>,
     ) -> Self {
         Self {
@@ -71,6 +77,7 @@ impl OpenRouterProvider {
             base_url: "https://openrouter.ai/api/v1".to_string(),
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
             capability_overrides: overrides,
+            warned_unknown: Default::default(),
         }
     }
 
@@ -155,6 +162,212 @@ impl OpenRouterProvider {
             &request.extra,
         );
         body
+    }
+}
+
+/// OpenRouter's own answer for a model, before any `[model_capabilities]`
+/// entry is merged onto it.
+///
+/// A free function rather than a method: it reads nothing from the provider,
+/// and lifting it out is what lets `capabilities` merge an override onto it
+/// instead of replacing it wholesale.
+fn builtin_capabilities(model: &str) -> ModelCapabilities {
+    // ── Google Gemini ─────────────────────────────────────────────────────
+    if model.starts_with("google/gemini") {
+        return ModelCapabilities {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 1_048_576,
+            max_output_tokens: 65_536,
+        };
+    }
+    // ── Meta Llama 4 Scout - 10M context ─────────────────────────────────
+    if model.contains("llama-4-scout") {
+        return ModelCapabilities {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 10_000_000,
+            max_output_tokens: 32_768,
+        };
+    }
+    // ── Meta Llama 4 (Maverick + others) - 1M context ────────────────────
+    if model.starts_with("meta-llama/llama-4") {
+        return ModelCapabilities {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 1_048_576,
+            max_output_tokens: 32_768,
+        };
+    }
+    // ── DeepSeek R1 - reasoning-only, no tools, no temperature ───────────
+    if model.contains("deepseek-r1") {
+        return ModelCapabilities {
+            supports_temperature: false,
+            supports_streaming: true,
+            supports_tools: false,
+            supports_system_prompt: true,
+            max_context_tokens: 163_840,
+            max_output_tokens: 32_768,
+        };
+    }
+    // ── DeepSeek V4 Pro - 1M context, 384K output ────────────────────────
+    if model.contains("deepseek-v4-pro") {
+        return ModelCapabilities {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 1_048_576,
+            max_output_tokens: 393_216,
+        };
+    }
+    // ── DeepSeek V4 Flash / V3.x ─────────────────────────────────────────
+    if model.starts_with("deepseek/deepseek-v") {
+        return ModelCapabilities {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 1_048_576,
+            max_output_tokens: 65_536,
+        };
+    }
+    // ── Mistral Large ─────────────────────────────────────────────────────
+    if model.contains("mistral-large") {
+        return ModelCapabilities {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 262_144,
+            max_output_tokens: 32_768,
+        };
+    }
+    // ── Mistral Medium / Small ────────────────────────────────────────────
+    if model.starts_with("mistralai/") {
+        return ModelCapabilities {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 131_072,
+            max_output_tokens: 32_768,
+        };
+    }
+    // ── Qwen 3.6+ / Qwen3 Coder - 1M context ────────────────────────────
+    if model.contains("qwen3.6") || model.contains("qwen3-coder") {
+        return ModelCapabilities {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 1_048_576,
+            max_output_tokens: 65_536,
+        };
+    }
+    // ── Qwen3 general ─────────────────────────────────────────────────────
+    if model.starts_with("qwen/") {
+        return ModelCapabilities {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 131_072,
+            max_output_tokens: 32_768,
+        };
+    }
+    // ── Anthropic models via OpenRouter - inherit direct-provider flags ───
+    let anthropic_no_temp = model.contains("claude-opus-4-8")
+        || model.contains("claude-opus-4-7")
+        || model.contains("claude-fable-5")
+        || model.contains("claude-mythos-5");
+    if model.starts_with("anthropic/") {
+        return ModelCapabilities {
+            supports_temperature: !anthropic_no_temp,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 1_000_000,
+            max_output_tokens: 128_000,
+        };
+    }
+    // ── OpenAI o-series via OpenRouter - no temperature ───────────────────
+    if model.starts_with("openai/o") {
+        return ModelCapabilities {
+            supports_temperature: false,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 200_000,
+            max_output_tokens: 100_000,
+        };
+    }
+    // ── OpenAI GPT-5.x via OpenRouter ────────────────────────────────────
+    if model.starts_with("openai/gpt-5") {
+        return ModelCapabilities {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 1_050_000,
+            max_output_tokens: 128_000,
+        };
+    }
+    // ── Conservative fallback for unknown OpenRouter models ───────────────
+    FALLBACK_CAPABILITIES
+}
+
+/// What an OpenRouter model this build has never heard of is assumed to be.
+///
+/// Deliberately conservative: guessing high would size regions past what the
+/// model accepts and turn a quiet inefficiency into an API error. The cost of
+/// guessing low is that percentage budgets resolve against a window eight times
+/// smaller than a 1M-token model really has, which is why reaching this is
+/// worth saying out loud - see [`OpenRouterProvider::warn_if_unknown`].
+const FALLBACK_CAPABILITIES: ModelCapabilities = ModelCapabilities {
+    supports_temperature: true,
+    supports_streaming: true,
+    supports_tools: true,
+    supports_system_prompt: true,
+    max_context_tokens: 128_000,
+    max_output_tokens: 8_192,
+};
+
+impl OpenRouterProvider {
+    /// Say so when a model fell through to [`FALLBACK_CAPABILITIES`].
+    ///
+    /// OpenRouter fronts hundreds of models and this build's table names a few
+    /// dozen, so an unlisted model is ordinary rather than exceptional - and it
+    /// silently got a 128 000-token window. Region budgets are percentages of
+    /// that window, so a `budget = "30%"` region on a model that really has
+    /// 1M tokens was being sized at 38 400 instead of 314 572: no error, no
+    /// warning, just an agent that evicts working material early and looks like
+    /// a worse model.
+    ///
+    /// Reported once per model rather than per inference, and it names the
+    /// stanza that fixes it, which is now a partial entry (#338).
+    fn warn_if_unknown(&self, model: &str, resolved: &ModelCapabilities) {
+        if resolved.max_context_tokens != FALLBACK_CAPABILITIES.max_context_tokens {
+            return;
+        }
+        let mut warned = leviath_core::sync::lock(&self.warned_unknown);
+        if !warned.insert(model.to_string()) {
+            return;
+        }
+        tracing::warn!(
+            model = %model,
+            assumed_context_tokens = FALLBACK_CAPABILITIES.max_context_tokens,
+            "this build has no context window for this OpenRouter model, so it is \
+             assuming a conservative one; percentage region budgets resolve against \
+             it. Set the real window with [model_capabilities.\"{model}\"] \
+             max_context_tokens = <n> (see `lev models show {model}`)",
+        );
     }
 }
 
@@ -261,164 +474,14 @@ impl Provider for OpenRouterProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
-        if let Some(overrides) = self.capability_overrides.get(model) {
-            return overrides.clone();
-        }
-        // ── Google Gemini ─────────────────────────────────────────────────────
-        if model.starts_with("google/gemini") {
-            return ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_048_576,
-                max_output_tokens: 65_536,
-            };
-        }
-        // ── Meta Llama 4 Scout - 10M context ─────────────────────────────────
-        if model.contains("llama-4-scout") {
-            return ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 10_000_000,
-                max_output_tokens: 32_768,
-            };
-        }
-        // ── Meta Llama 4 (Maverick + others) - 1M context ────────────────────
-        if model.starts_with("meta-llama/llama-4") {
-            return ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_048_576,
-                max_output_tokens: 32_768,
-            };
-        }
-        // ── DeepSeek R1 - reasoning-only, no tools, no temperature ───────────
-        if model.contains("deepseek-r1") {
-            return ModelCapabilities {
-                supports_temperature: false,
-                supports_streaming: true,
-                supports_tools: false,
-                supports_system_prompt: true,
-                max_context_tokens: 163_840,
-                max_output_tokens: 32_768,
-            };
-        }
-        // ── DeepSeek V4 Pro - 1M context, 384K output ────────────────────────
-        if model.contains("deepseek-v4-pro") {
-            return ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_048_576,
-                max_output_tokens: 393_216,
-            };
-        }
-        // ── DeepSeek V4 Flash / V3.x ─────────────────────────────────────────
-        if model.starts_with("deepseek/deepseek-v") {
-            return ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_048_576,
-                max_output_tokens: 65_536,
-            };
-        }
-        // ── Mistral Large ─────────────────────────────────────────────────────
-        if model.contains("mistral-large") {
-            return ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 262_144,
-                max_output_tokens: 32_768,
-            };
-        }
-        // ── Mistral Medium / Small ────────────────────────────────────────────
-        if model.starts_with("mistralai/") {
-            return ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 131_072,
-                max_output_tokens: 32_768,
-            };
-        }
-        // ── Qwen 3.6+ / Qwen3 Coder - 1M context ────────────────────────────
-        if model.contains("qwen3.6") || model.contains("qwen3-coder") {
-            return ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_048_576,
-                max_output_tokens: 65_536,
-            };
-        }
-        // ── Qwen3 general ─────────────────────────────────────────────────────
-        if model.starts_with("qwen/") {
-            return ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 131_072,
-                max_output_tokens: 32_768,
-            };
-        }
-        // ── Anthropic models via OpenRouter - inherit direct-provider flags ───
-        let anthropic_no_temp = model.contains("claude-opus-4-8")
-            || model.contains("claude-opus-4-7")
-            || model.contains("claude-fable-5")
-            || model.contains("claude-mythos-5");
-        if model.starts_with("anthropic/") {
-            return ModelCapabilities {
-                supports_temperature: !anthropic_no_temp,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_000_000,
-                max_output_tokens: 128_000,
-            };
-        }
-        // ── OpenAI o-series via OpenRouter - no temperature ───────────────────
-        if model.starts_with("openai/o") {
-            return ModelCapabilities {
-                supports_temperature: false,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 200_000,
-                max_output_tokens: 100_000,
-            };
-        }
-        // ── OpenAI GPT-5.x via OpenRouter ────────────────────────────────────
-        if model.starts_with("openai/gpt-5") {
-            return ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_050_000,
-                max_output_tokens: 128_000,
-            };
-        }
-        // ── Conservative fallback for unknown OpenRouter models ───────────────
-        ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 128_000,
-            max_output_tokens: 8_192,
+        let base = builtin_capabilities(model);
+        // Merged, not swapped: an entry names only what it corrects.
+        match self.capability_overrides.get(model) {
+            Some(o) => o.apply_to(base),
+            None => {
+                self.warn_if_unknown(model, &base);
+                base
+            }
         }
     }
 
@@ -726,6 +789,75 @@ mod tests {
         assert_eq!(provider.base_url, "https://custom.openrouter.ai");
     }
 
+    // ─── The conservative fallback is no longer silent ──────────────────────
+
+    #[test]
+    fn a_known_model_keeps_its_own_window() {
+        // The table is what makes the warning meaningful: if everything fell
+        // through, warning would be noise.
+        let caps = builtin_capabilities("google/gemini-3.5-flash");
+        assert_ne!(
+            caps.max_context_tokens, FALLBACK_CAPABILITIES.max_context_tokens,
+            "a listed model should not be resolving to the fallback"
+        );
+    }
+
+    #[test]
+    fn an_unlisted_model_lands_on_the_fallback() {
+        // The reported models. OpenRouter fronts hundreds and this table names
+        // a few dozen, so this is the ordinary case rather than the odd one.
+        for model in ["moonshotai/kimi-k3", "meta/muse-spark-1.2"] {
+            assert_eq!(
+                builtin_capabilities(model).max_context_tokens,
+                FALLBACK_CAPABILITIES.max_context_tokens,
+                "{model}"
+            );
+        }
+    }
+
+    /// The warning fires once per model, not once per inference.
+    ///
+    /// Asserted through the public path because that is where the run reaches
+    /// it: `capabilities` is called for every call a stage makes.
+    #[test]
+    fn the_fallback_warning_is_once_per_model() {
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
+        for _ in 0..3 {
+            provider.capabilities("moonshotai/kimi-k3");
+            provider.capabilities("meta/muse-spark-1.2");
+        }
+        let warned = leviath_core::sync::lock(&provider.warned_unknown);
+        assert_eq!(warned.len(), 2, "one entry per model: {warned:?}");
+    }
+
+    /// An override silences it, because the window is then known.
+    #[test]
+    fn a_corrected_window_does_not_warn() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "moonshotai/kimi-k3".to_string(),
+            ModelCapabilityOverride {
+                max_context_tokens: Some(1_048_576),
+                ..Default::default()
+            },
+        );
+        let provider = OpenRouterProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+            overrides,
+            None,
+        );
+        let caps = provider.capabilities("moonshotai/kimi-k3");
+        assert_eq!(caps.max_context_tokens, 1_048_576);
+        assert!(
+            leviath_core::sync::lock(&provider.warned_unknown).is_empty(),
+            "nothing to warn about once the window is known"
+        );
+    }
+
     #[test]
     fn test_with_overrides() {
         let mut overrides = HashMap::new();
@@ -738,7 +870,8 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 99,
                 max_output_tokens: 10,
-            },
+            }
+            .into(),
         );
         let provider = OpenRouterProvider::with_overrides(
             crate::provider::build_http_client(None).expect("a test client builds"),

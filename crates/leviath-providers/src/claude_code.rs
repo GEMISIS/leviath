@@ -66,7 +66,7 @@ pub struct ClaudeCodeProvider {
     /// Reasoning effort passed as `--effort`.
     effort: String,
     /// Model capability overrides
-    capability_overrides: HashMap<String, ModelCapabilities>,
+    capability_overrides: HashMap<String, ModelCapabilityOverride>,
     /// Source of tool-call ids. The CLI gives us no ids of its own, and ids must
     /// stay unique for the life of a transcript, so they are handed out
     /// monotonically rather than restarting at zero each response.
@@ -93,7 +93,7 @@ impl ClaudeCodeProvider {
     pub fn with_overrides(
         binary: String,
         effort: Option<String>,
-        overrides: Option<HashMap<String, ModelCapabilities>>,
+        overrides: Option<HashMap<String, ModelCapabilityOverride>>,
     ) -> Self {
         let effort = effort
             .filter(|e| EFFORT_LEVELS.contains(&e.as_str()))
@@ -450,8 +450,12 @@ impl Provider for ClaudeCodeProvider {
     }
 
     fn max_context_tokens(&self, model: &str) -> usize {
-        if let Some(caps) = self.capability_overrides.get(model) {
-            return caps.max_context_tokens;
+        if let Some(tokens) = self
+            .capability_overrides
+            .get(model)
+            .and_then(|o| o.max_context_tokens)
+        {
+            return tokens;
         }
         200_000 - INJECTION_RESERVE_TOKENS
     }
@@ -461,10 +465,11 @@ impl Provider for ClaudeCodeProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
-        if let Some(caps) = self.capability_overrides.get(model) {
-            return caps.clone();
+        // Merged, not swapped: an entry names only what it corrects.
+        match self.capability_overrides.get(model) {
+            Some(o) => o.apply_to(self.builtin_capabilities(model)),
+            None => self.builtin_capabilities(model),
         }
-        self.builtin_capabilities(model)
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
@@ -548,7 +553,8 @@ mod tests {
                 supports_system_prompt: true,
                 max_context_tokens: 100_000,
                 max_output_tokens: 8_000,
-            },
+            }
+            .into(),
         );
         let provider =
             ClaudeCodeProvider::with_overrides("claude".to_string(), None, Some(overrides));

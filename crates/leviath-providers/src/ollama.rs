@@ -3,8 +3,8 @@
 //! Ollama provides local LLM execution via NDJSON streaming.
 
 use crate::provider::{
-    FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider,
-    ProviderError, Result, StreamChunk, TokenUsage,
+    FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride,
+    ModelInfo, Provider, ProviderError, Result, StreamChunk, TokenUsage,
 };
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -20,7 +20,7 @@ pub struct OllamaProvider {
     base_url: String,
 
     /// Per-model capability overrides
-    capability_overrides: HashMap<String, ModelCapabilities>,
+    capability_overrides: HashMap<String, ModelCapabilityOverride>,
 }
 
 impl OllamaProvider {
@@ -49,7 +49,7 @@ impl OllamaProvider {
     pub fn with_overrides(
         client: reqwest::Client,
         base_url: String,
-        overrides: HashMap<String, ModelCapabilities>,
+        overrides: HashMap<String, ModelCapabilityOverride>,
     ) -> Self {
         if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
             tracing::warn!(url = %base_url, "Ollama base URL should start with http:// or https://");
@@ -341,10 +341,11 @@ impl Provider for OllamaProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
-        if let Some(overridden) = self.capability_overrides.get(model) {
-            return overridden.clone();
+        // Merged, not swapped: an entry names only what it corrects.
+        match self.capability_overrides.get(model) {
+            Some(o) => o.apply_to(self.builtin_capabilities(model)),
+            None => self.builtin_capabilities(model),
         }
-        self.builtin_capabilities(model)
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
@@ -632,7 +633,8 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 42,
                 max_output_tokens: 10,
-            },
+            }
+            .into(),
         );
         let provider = OllamaProvider::with_overrides(
             crate::provider::build_http_client(None).expect("a test client builds"),
@@ -1335,7 +1337,8 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 99,
                 max_output_tokens: 99,
-            },
+            }
+            .into(),
         );
         let provider = OllamaProvider::with_overrides(
             crate::provider::build_http_client(None).expect("a test client builds"),
@@ -1940,7 +1943,8 @@ mod tests {
                 supports_system_prompt: true,
                 max_context_tokens: 8192,
                 max_output_tokens: 4096,
-            },
+            }
+            .into(),
         );
         let provider = OllamaProvider::with_overrides(
             crate::provider::build_http_client(None).expect("a test client builds"),
