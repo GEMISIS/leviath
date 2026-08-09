@@ -271,6 +271,10 @@ mod tests {
             prompt_tokens: 100,
             completion_tokens: 50,
             cached_tokens: 0,
+            cache_write_tokens: 0,
+            region_tokens: Default::default(),
+            first_call_prompt_tokens: None,
+            runaway_warned: false,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ended_at: if status == StageRunStatus::Complete {
                 Some(chrono::Utc::now().timestamp())

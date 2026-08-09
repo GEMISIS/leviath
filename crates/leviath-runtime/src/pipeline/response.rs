@@ -42,6 +42,7 @@ type InferenceQuery = (
     &'static mut AgentState,
     Option<&'static mut crate::persistence::TokenTotals>,
     Option<&'static StageCursor>,
+    Option<&'static ContextWindow>,
     Option<&'static mut StageLedger>,
     Option<&'static mut StageIoBuffer>,
     Option<&'static mut StageInference>,
@@ -64,7 +65,7 @@ pub fn collect_inference(
     let policy = policy.map(|p| *p).unwrap_or_default();
     let now = chrono::Utc::now().timestamp();
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((mut state, totals, cursor, mut ledger, buffer, mut inference, activity)) =
+        let Ok((mut state, totals, cursor, window, mut ledger, buffer, mut inference, activity)) =
             agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -145,6 +146,17 @@ pub fn collect_inference(
                     rec.prompt_tokens += response.tokens_used.prompt_tokens;
                     rec.completion_tokens += response.tokens_used.completion_tokens;
                     rec.cached_tokens += response.tokens_used.cached_tokens;
+                    rec.cache_write_tokens += response.tokens_used.cache_write_tokens;
+                    // The high-water mark rather than a sum: a region is
+                    // re-sent whole on every call, so summing would report a
+                    // number that is neither what it costs per call nor what it
+                    // holds. The largest it reached is the one that says
+                    // whether it is earning its place.
+                    for region in window.iter().flat_map(|w| w.regions.iter()) {
+                        let seen = rec.region_tokens.entry(region.name.clone()).or_insert(0);
+                        *seen = (*seen).max(region.current_tokens);
+                    }
+                    warn_if_context_is_running_away(rec, response.tokens_used.prompt_tokens);
                 }
                 // Buffer the readable output + a token line for the stage's logs.
                 if let Some(mut buffer) = buffer {
@@ -248,6 +260,52 @@ pub struct ReadyForTransition;
 /// next stage (or completion).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolveTransition;
+
+/// How much bigger than its first call a stage's prompt may get before the run
+/// says so.
+///
+/// The runtime notices a stalled run and a stuck one; it noticed nothing about
+/// the failure that actually costs money - a region filling up and being
+/// re-sent on every call. Measured, a profile stage capped at 10 iterations
+/// billed 1,135,289 tokens, roughly 113k per call, because an uncapped read had
+/// filled its region. Nothing warned, and the run looked healthy from the
+/// outside until the bill arrived.
+///
+/// Four rather than two: a stage that reads a file and then works with it has
+/// genuinely grown, and warning about that would be noise. Four is past the
+/// point where growth is explained by ordinary accumulation.
+const RUNAWAY_CONTEXT_FACTOR: usize = 4;
+
+/// Say so when a stage's per-call prompt has grown past
+/// [`RUNAWAY_CONTEXT_FACTOR`] times its first call.
+///
+/// Once per stage, on the crossing. Repeating it every call afterwards would
+/// bury the run's other output in exactly the situation where that output
+/// matters.
+pub(crate) fn warn_if_context_is_running_away(
+    rec: &mut leviath_core::run_meta::StageRecord,
+    prompt_tokens: usize,
+) {
+    let first = match rec.first_call_prompt_tokens {
+        Some(first) => first,
+        None => {
+            rec.first_call_prompt_tokens = Some(prompt_tokens);
+            return;
+        }
+    };
+    if rec.runaway_warned || first == 0 || prompt_tokens < first * RUNAWAY_CONTEXT_FACTOR {
+        return;
+    }
+    rec.runaway_warned = true;
+    tracing::warn!(
+        stage = %rec.name,
+        first_call_prompt_tokens = first,
+        this_call_prompt_tokens = prompt_tokens,
+        "this stage's context has grown past {RUNAWAY_CONTEXT_FACTOR}x its first call and is \
+         re-sent on every call; check whether a region is accumulating without a cap \
+         (`lev stages <run-id>` shows the per-region sizes)"
+    );
+}
 
 /// Per-stage progress counters, reset when an agent enters a stage.
 #[derive(Component, Debug, Clone, Default)]

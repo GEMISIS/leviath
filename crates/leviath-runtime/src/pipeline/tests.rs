@@ -7922,6 +7922,58 @@ fn only_watched_regions_get_a_baseline() {
     assert!(crate::pipeline::transition::watched_region_digests(&missing, &w).is_empty());
 }
 
+// ── the runaway-context warning (#347) ──
+
+fn ledger_record() -> leviath_core::run_meta::StageRecord {
+    leviath_core::run_meta::StageRecord::new("profile".to_string(), 0)
+}
+
+#[test]
+fn the_first_call_only_sets_the_baseline() {
+    let mut rec = ledger_record();
+    crate::pipeline::response::warn_if_context_is_running_away(&mut rec, 1000);
+    assert_eq!(rec.first_call_prompt_tokens, Some(1000));
+    assert!(!rec.runaway_warned, "one call cannot have run away yet");
+}
+
+#[test]
+fn ordinary_growth_does_not_warn() {
+    // A stage that reads a file and then works with it has genuinely grown.
+    // Warning about that would be noise, which is why the factor is not 2.
+    let mut rec = ledger_record();
+    crate::pipeline::response::warn_if_context_is_running_away(&mut rec, 1000);
+    crate::pipeline::response::warn_if_context_is_running_away(&mut rec, 3999);
+    assert!(!rec.runaway_warned);
+}
+
+#[test]
+fn a_runaway_warns_once() {
+    // The measured shape: a profile stage billing ~113k per call because an
+    // uncapped read had filled its region, with nothing noticing.
+    let mut rec = ledger_record();
+    crate::pipeline::response::warn_if_context_is_running_away(&mut rec, 1000);
+    crate::pipeline::response::warn_if_context_is_running_away(&mut rec, 113_000);
+    assert!(rec.runaway_warned);
+
+    // And not again: repeating it every call would bury the run's other output
+    // in exactly the situation where that output matters.
+    rec.runaway_warned = false;
+    let mut rec2 = rec.clone();
+    rec2.runaway_warned = true;
+    crate::pipeline::response::warn_if_context_is_running_away(&mut rec2, 200_000);
+    assert!(rec2.runaway_warned, "still set, and no second warning");
+}
+
+#[test]
+fn a_zero_baseline_cannot_run_away() {
+    // Guards the multiplication: every prompt is >= 0 * 4, so without this a
+    // stage whose first call billed nothing would warn immediately.
+    let mut rec = ledger_record();
+    crate::pipeline::response::warn_if_context_is_running_away(&mut rec, 0);
+    crate::pipeline::response::warn_if_context_is_running_away(&mut rec, 1);
+    assert!(!rec.runaway_warned);
+}
+
 // ── transition gates: require_modifications (#107) ──
 
 fn gate(region: Option<&str>, message: Option<&str>) -> leviath_core::blueprint::TransitionGate {
