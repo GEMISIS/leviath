@@ -230,7 +230,7 @@ impl BuiltinTools {
         };
 
         match std::fs::read_to_string(&path) {
-            Ok(content) => content,
+            Ok(content) => cap_file_content(&content, MAX_READ_FILE_BYTES),
             Err(e) => format!("[error] Failed to read '{}': {}", path_str, e),
         }
     }
@@ -652,6 +652,39 @@ impl BuiltinTools {
 /// shell output already overruns any region budget an agent has; keeping more
 /// of it helps nobody downstream.
 pub(crate) const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+
+/// Most of a file `read_file` returns.
+///
+/// `shell` has been capped since it existed; `read_file` had no bound at all,
+/// so a large file went whole into the routed region and the ladder in
+/// `tool_results` either truncated it or dropped it as `[result omitted]` -
+/// which of the two you got depended on how full the region already was. That
+/// is an all-or-nothing cliff rather than a limit.
+///
+/// Sized below [`MAX_CAPTURE_BYTES`] on purpose: shell output is usually a
+/// filtered answer, while a file read is raw material and a 256 KiB file is
+/// already far past any region budget an agent has. A stage that genuinely
+/// wants more sets `max_result_tokens` for the tool.
+pub(crate) const MAX_READ_FILE_BYTES: usize = 256 * 1024;
+
+/// `content` truncated to `cap` bytes, with a line saying so when it was.
+///
+/// Said rather than silently dropped, for the reason [`capture_note`] gives: an
+/// agent reading a truncated file as the whole file draws a wrong conclusion
+/// from it, and the conclusion is worse than the gap.
+pub(crate) fn cap_file_content(content: &str, cap: usize) -> String {
+    if content.len() <= cap {
+        return content.to_string();
+    }
+    // On a char boundary, or the result is not a `String` at all.
+    let kept = leviath_core::text::substring(content, 0, cap);
+    format!(
+        "{kept}\n[truncated] The file is {} bytes; the first {} are shown. Read a range, or \
+         narrow with a search, rather than re-reading the whole file.",
+        content.len(),
+        kept.len(),
+    )
+}
 
 /// What one stream produced, and how much of it was kept.
 #[derive(Debug)]

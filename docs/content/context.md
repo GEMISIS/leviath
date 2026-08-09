@@ -201,9 +201,23 @@ than scratch:
 ```toml
 [stages.analyze.tool_routing]
 default_region = "scratch"
+max_result_tokens = 4000          # ceiling for any tool without one of its own
 [stages.analyze.tool_routing.overrides]
 read_file = "codebase"
+# A stage that both greps and reads files needs two numbers, not one: a cap
+# sized for the file read lets every grep through untouched, and one sized for
+# the grep truncates every file.
+[stages.analyze.tool_routing.max_result_tokens_per_tool]
+read_file = 20000
 ```
+
+Both tables are keyed by tool name, and an alias matches the tool it aliases - writing `bash` covers
+the `shell` the model actually calls.
+
+`read_file` also has a hard byte cap of its own, independent of any of this, and says so in the
+result when it applies. Without one, a large file went into its region whole and was either
+truncated or dropped as `[result omitted]` depending on how full the region already was - a cliff
+rather than a limit.
 
 ## Budgets travel across models
 
