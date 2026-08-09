@@ -263,6 +263,33 @@ pub(crate) fn gate_blocks(
     let Some(gate) = gate else {
         return GateDecision::Pass;
     };
+    // Checked before `require_modifications` and independently of it: an edge
+    // may ask for a changed region without asking for a file write, and a
+    // revise loop usually does exactly that.
+    //
+    // A missing baseline means the gate names a region the window does not
+    // hold. A gate cannot demand an update to something that does not exist,
+    // and blocking on it would strand the run, so it passes.
+    if let Some(name) = &gate.require_region_updated
+        && let (Some(before), Some(region)) = (
+            progress.entry_region_digests.get(name),
+            window.get_region(name),
+        )
+        && *before == region_digest(region)
+    {
+        return spend_gate_attempt(
+            gate,
+            stage,
+            progress,
+            gate.message.clone().unwrap_or_else(|| {
+                format!(
+                    "The `{name}` region is unchanged since this stage began. Whatever sent \
+                     you back here was not answered by repeating the same content - revise it \
+                     before moving on."
+                )
+            }),
+        );
+    }
     if !gate.require_modifications {
         return GateDecision::Pass;
     }
@@ -295,6 +322,31 @@ pub(crate) fn gate_blocks(
     {
         return GateDecision::Pass;
     }
+    spend_gate_attempt(
+        gate,
+        stage,
+        progress,
+        gate.message.clone().unwrap_or_else(|| {
+            "No file modifications were recorded in this stage. Changes made through the shell \
+             (sed -i, tee, >, >>) are not tracked by the framework. Re-apply your changes with \
+             edit_file or write_file before moving on."
+                .to_string()
+        }),
+    )
+}
+
+/// Block with `nudge`, or give up and let the edge through once the gate's
+/// re-run budget is spent.
+///
+/// Shared by every gate condition so one blueprint key (`max_attempts`) bounds
+/// all of them: a gate that could block forever would strand the run, which is
+/// worse than letting a questionable transition through with a warning.
+fn spend_gate_attempt(
+    gate: &leviath_core::blueprint::TransitionGate,
+    stage: &leviath_core::Stage,
+    progress: &StageProgress,
+    nudge: String,
+) -> GateDecision {
     let cap = gate
         .max_attempts
         .unwrap_or(leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS);
@@ -302,16 +354,11 @@ pub(crate) fn gate_blocks(
         tracing::warn!(
             stage = %stage.name,
             attempts = cap,
-            "stage still has no file modifications after re-run attempts; proceeding"
+            "transition gate still unsatisfied after re-run attempts; proceeding"
         );
         return GateDecision::Forced;
     }
-    GateDecision::Block(gate.message.clone().unwrap_or_else(|| {
-        "No file modifications were recorded in this stage. Changes made through the shell \
-         (sed -i, tee, >, >>) are not tracked by the framework. Re-apply your changes with \
-         edit_file or write_file before moving on."
-            .to_string()
-    }))
+    GateDecision::Block(nudge)
 }
 
 /// Hold an agent in its current stage after a gate refused the transition: inject
@@ -640,7 +687,55 @@ pub(crate) fn enter_stage(
     *visit += 1;
     let visit = *visit;
 
-    apply_stage_context(setup, window).map(|()| visit)
+    let result = apply_stage_context(setup, window).map(|()| visit);
+    // After the layout swap, so the digest is of the region this stage will
+    // actually work on rather than the one the previous stage left behind.
+    progress.entry_region_digests = watched_region_digests(&blueprint.stages[idx], window);
+    result
+}
+
+/// Content digests of the regions this stage's outgoing gates watch.
+///
+/// Keyed by region name and taken at stage entry, so [`gate_blocks`] can ask
+/// whether *this pass* changed anything rather than whether the region merely
+/// has content. A region a gate names but the window does not hold is absent
+/// here, and an absent digest reads as "no baseline", which the gate treats as
+/// changed - a gate cannot demand an update to something that does not exist.
+pub(crate) fn watched_region_digests(
+    stage: &leviath_core::Stage,
+    window: &ContextWindow,
+) -> std::collections::HashMap<String, u64> {
+    let mut digests = std::collections::HashMap::new();
+    let Some(transitions) = &stage.transitions else {
+        return digests;
+    };
+    for edge in transitions.values() {
+        let Some(name) = edge
+            .gate
+            .as_ref()
+            .and_then(|g| g.require_region_updated.as_ref())
+        else {
+            continue;
+        };
+        if let Some(region) = window.get_region(name) {
+            digests.insert(name.clone(), region_digest(region));
+        }
+    }
+    digests
+}
+
+/// A hash of everything a region currently holds.
+///
+/// Content only: token counts and timestamps would make an unchanged region
+/// look changed, which is the failure this gate exists to prevent.
+pub(crate) fn region_digest(region: &leviath_core::Region) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for entry in &region.content {
+        entry.content.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Push a [`StageTransition`](crate::host::WorldEvent::StageTransition) event

@@ -7769,6 +7769,159 @@ fn require_context_regions_proceeds_when_met_capped_or_errored() {
     }
 }
 
+// ── transition gates: require_region_updated (#343) ──
+
+/// A gate that watches a region for change rather than for content.
+fn change_gate(region: &str) -> leviath_core::blueprint::TransitionGate {
+    leviath_core::blueprint::TransitionGate {
+        require_region_updated: Some(region.to_string()),
+        ..Default::default()
+    }
+}
+
+/// A window holding `plan` with the given text.
+fn plan_window(text: &str) -> ContextWindow {
+    let mut w = ContextWindow::new(10_000);
+    w.add_region(Region::new("plan".to_string(), RegionKind::Pinned, 5000));
+    if !text.is_empty() {
+        w.add_to_region("plan", text.to_string(), 4)
+            .expect("seeded");
+    }
+    w
+}
+
+/// Progress whose baseline is the plan as it stood on entry.
+fn progress_with_baseline(w: &ContextWindow) -> StageProgress {
+    let mut p = StageProgress::default();
+    if let Some(region) = w.get_region("plan") {
+        p.entry_region_digests.insert(
+            "plan".to_string(),
+            crate::pipeline::transition::region_digest(region),
+        );
+    }
+    p
+}
+
+#[test]
+fn an_unchanged_region_blocks_the_edge() {
+    // The failure this exists for: a stage sent back to revise satisfies every
+    // other gate by re-emitting what it already wrote, so a reviewer's
+    // rejection can be answered with the same plan. Measured, a plan that
+    // overrode a documented definition was re-confirmed and the run ended
+    // confidently wrong.
+    let w = plan_window("fraud = largest count");
+    let progress = progress_with_baseline(&w);
+    let stage = stage_named("plan", None, false, None);
+
+    let decision = gate_blocks(Some(&change_gate("plan")), &stage, &progress, &w);
+    let GateDecision::Block(nudge) = decision else {
+        panic!("an unchanged plan must not pass, got {decision:?}");
+    };
+    assert!(nudge.contains("plan"), "{nudge}");
+}
+
+#[test]
+fn a_changed_region_passes() {
+    let before = plan_window("fraud = largest count");
+    let progress = progress_with_baseline(&before);
+
+    // The same stage, having actually revised the plan.
+    let after = plan_window("fraud = fraudulent volume / total volume");
+    let stage = stage_named("plan", None, false, None);
+
+    assert!(matches!(
+        gate_blocks(Some(&change_gate("plan")), &stage, &progress, &after),
+        GateDecision::Pass
+    ));
+}
+
+/// A gate naming a region the window does not hold cannot be satisfied by any
+/// amount of work, so it passes rather than stranding the run.
+#[test]
+fn a_gate_on_a_missing_region_passes() {
+    let w = ContextWindow::new(10_000);
+    let stage = stage_named("plan", None, false, None);
+    assert!(matches!(
+        gate_blocks(
+            Some(&change_gate("nope")),
+            &stage,
+            &StageProgress::default(),
+            &w
+        ),
+        GateDecision::Pass
+    ));
+}
+
+/// It shares the one re-run budget every other gate uses: a gate that could
+/// hold a stage forever would strand the run.
+#[test]
+fn an_unchanged_region_gives_up_after_the_budget() {
+    let w = plan_window("unchanged");
+    let mut progress = progress_with_baseline(&w);
+    progress.gate_reentries = leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS;
+    let stage = stage_named("plan", None, false, None);
+
+    assert!(matches!(
+        gate_blocks(Some(&change_gate("plan")), &stage, &progress, &w),
+        GateDecision::Forced
+    ));
+}
+
+/// The author's own wording wins, as it does for every other gate.
+#[test]
+fn a_custom_message_is_used() {
+    let w = plan_window("unchanged");
+    let progress = progress_with_baseline(&w);
+    let stage = stage_named("plan", None, false, None);
+    let mut gate = change_gate("plan");
+    gate.message = Some("The check rejected this plan.".to_string());
+
+    let GateDecision::Block(nudge) = gate_blocks(Some(&gate), &stage, &progress, &w) else {
+        panic!("should block");
+    };
+    assert_eq!(nudge, "The check rejected this plan.");
+}
+
+/// The baseline is taken only for the regions a gate actually watches.
+///
+/// Hashing every region on every stage entry would cost the whole window for a
+/// feature most stages do not use, so the collector is selective - and that
+/// selectivity is what these four cases pin.
+#[test]
+fn only_watched_regions_get_a_baseline() {
+    use leviath_core::blueprint::TransitionCondition;
+
+    let w = plan_window("the plan");
+
+    // No transitions at all.
+    let bare = stage_named("plan", None, false, None);
+    assert!(crate::pipeline::transition::watched_region_digests(&bare, &w).is_empty());
+
+    // An edge with no gate.
+    let ungated = stage_named(
+        "plan",
+        Some(vec![edge("compute", TransitionCondition::Always)]),
+        false,
+        None,
+    );
+    assert!(crate::pipeline::transition::watched_region_digests(&ungated, &w).is_empty());
+
+    // An edge whose gate watches a region the window holds.
+    let mut watching_edge = edge("compute", TransitionCondition::Always);
+    watching_edge.1.gate = Some(change_gate("plan"));
+    let watching = stage_named("plan", Some(vec![watching_edge]), false, None);
+    let digests = crate::pipeline::transition::watched_region_digests(&watching, &w);
+    assert_eq!(digests.len(), 1);
+    assert!(digests.contains_key("plan"));
+
+    // And one that watches a region it does not hold: no baseline, which the
+    // gate reads as "cannot demand an update to something absent".
+    let mut missing_edge = edge("compute", TransitionCondition::Always);
+    missing_edge.1.gate = Some(change_gate("nope"));
+    let missing = stage_named("plan", Some(vec![missing_edge]), false, None);
+    assert!(crate::pipeline::transition::watched_region_digests(&missing, &w).is_empty());
+}
+
 // ── transition gates: require_modifications (#107) ──
 
 fn gate(region: Option<&str>, message: Option<&str>) -> leviath_core::blueprint::TransitionGate {
@@ -7778,6 +7931,7 @@ fn gate(region: Option<&str>, message: Option<&str>) -> leviath_core::blueprint:
         region: region.map(str::to_string),
         tools: Vec::new(),
         max_attempts: None,
+        require_region_updated: None,
     }
 }
 

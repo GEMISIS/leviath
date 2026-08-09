@@ -190,9 +190,29 @@ gate = { require_modifications = true, max_attempts = 3 }
 | Field | Default | Meaning |
 |---|---|---|
 | `require_modifications` | `false` | Require at least one successful file-modifying tool call in the stage being left |
+| `require_region_updated` | unset | Require that a named region **changed** during this stage, not merely that it has content. See below |
 | `message` | generated | The nudge shown when the gate blocks |
 | `region` | unset | A region that also satisfies the gate by being non-empty |
 | `tools` | `[]` | Extra tool names to count as modifying, beyond `write_file` and `edit_file` |
+
+### Requiring a revision, not a repetition
+
+Every other gate asks whether something *exists*, which a stage sent back to redo its work can
+satisfy by re-emitting what it already wrote. On a `review -> plan` back-edge that means a
+reviewer's rejection can be answered with the same plan, and the loop spins until the stage runs
+out of revisits.
+
+```toml
+[stages.plan.transitions.compute]
+gate = { require_region_updated = "plan",
+         message = "The check rejected this plan. Change it before computing again." }
+```
+
+The region's content is hashed when the stage is entered and compared when it tries to leave, so
+"changed" means changed by *this* pass. It shares the same `max_attempts` budget as every other
+gate: a gate that could hold a stage forever would strand the run, so after the budget the edge is
+taken with a warning. A gate naming a region the window does not hold passes rather than blocking,
+since no amount of work could satisfy it.
 | `max_attempts` | `3` | How many times the stage re-runs before the gate gives up and lets the transition through with a warning |
 
 Per-stage tool counters reset when a stage is entered, and they are not restored when a run resumes
