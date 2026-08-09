@@ -8,12 +8,40 @@ use super::resolve_cwd;
 use crate::config::Config;
 use leviath_core::manifest::parse_manifest;
 
+/// Which half of the catalog `lev list` reports.
+///
+/// A `ValueEnum` rather than a string: the flag accepted anything and read
+/// nothing, so `--filter agants` was indistinguishable from `--filter agents`
+/// and both printed everything. clap now rejects a spelling it does not know,
+/// naming the ones it does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+pub enum ListFilter {
+    /// Everything: runnable agents, then the bundled catalog.
+    All,
+    /// Only agents you can run right now - installed, configured, or local.
+    Agents,
+    /// Only the blueprints bundled with this binary, which `lev setup` installs.
+    Blueprints,
+}
+
+impl ListFilter {
+    /// Whether runnable agents (installed, configured, local) are reported.
+    fn shows_agents(self) -> bool {
+        matches!(self, Self::All | Self::Agents)
+    }
+
+    /// Whether the bundled blueprint catalog is reported.
+    fn shows_blueprints(self) -> bool {
+        matches!(self, Self::All | Self::Blueprints)
+    }
+}
+
 /// Arguments for `lev list`.
 #[derive(Args)]
 pub struct ListArgs {
-    /// Filter by type (agents, blueprints, all)
-    #[arg(short, long, default_value = "all")]
-    pub filter: String,
+    /// Filter by type
+    #[arg(short, long, value_enum, default_value_t = ListFilter::All)]
+    pub filter: ListFilter,
 
     /// Report the catalog as JSON instead of prose, with each agent's source
     /// named rather than implied by a heading.
@@ -150,8 +178,8 @@ pub async fn execute(args: ListArgs) -> anyhow::Result<()> {
         .and_then(|p| p.parent().map(|p| p.to_path_buf()));
 
     match args.json {
-        true => json_agent_listing(&agents_dir, &cwd, &config),
-        false => print_agent_listing(&agents_dir, &cwd, exe_dir.as_deref(), &config),
+        true => json_agent_listing(&agents_dir, &cwd, &config, args.filter),
+        false => print_agent_listing(&agents_dir, &cwd, exe_dir.as_deref(), &config, args.filter),
     }
 }
 
@@ -161,8 +189,13 @@ pub async fn execute(args: ListArgs) -> anyhow::Result<()> {
 /// The on-disk `<exe_dir>/agents` scan the prose report folds into its bundled
 /// line is left out: those entries are not installed, and merging them into a
 /// name-and-version list loses which of the two a name came from.
-fn json_agent_listing(agents_dir: &Path, cwd: &Path, config: &Config) -> anyhow::Result<()> {
-    let report = build_list_report(agents_dir, cwd, config);
+fn json_agent_listing(
+    agents_dir: &Path,
+    cwd: &Path,
+    config: &Config,
+    filter: ListFilter,
+) -> anyhow::Result<()> {
+    let report = build_list_report(agents_dir, cwd, config, filter);
     // Owned strings with no map keys to reject, so this cannot fail.
     println!(
         "{}",
@@ -173,7 +206,20 @@ fn json_agent_listing(agents_dir: &Path, cwd: &Path, config: &Config) -> anyhow:
 
 /// The report [`json_agent_listing`] prints. Split out so its contents are
 /// assertable without capturing stdout.
-fn build_list_report(agents_dir: &Path, cwd: &Path, config: &Config) -> ListReport {
+fn build_list_report(
+    agents_dir: &Path,
+    cwd: &Path,
+    config: &Config,
+    filter: ListFilter,
+) -> ListReport {
+    // An excluded half is reported as an empty list rather than a missing key,
+    // so a consumer indexes the same shape whatever the filter was.
+    if !filter.shows_agents() {
+        return ListReport {
+            agents: Vec::new(),
+            bundled: bundled_entries(),
+        };
+    }
     let installed = scan_directory_for_agents(agents_dir, config, cwd);
     let local = read_agent_info(&cwd.join("agent.leviath"), config, cwd);
     let configured: Vec<(PathBuf, AgentInfo)> = config
@@ -202,14 +248,22 @@ fn build_list_report(agents_dir: &Path, cwd: &Path, config: &Config) -> ListRepo
 
     ListReport {
         agents,
-        bundled: crate::bundled::BUNDLED_AGENTS
-            .iter()
-            .map(|a| BundledEntry {
-                name: a.name.to_string(),
-                version: a.version.to_string(),
-            })
-            .collect(),
+        bundled: match filter.shows_blueprints() {
+            true => bundled_entries(),
+            false => Vec::new(),
+        },
     }
+}
+
+/// The embedded blueprint catalog, as report entries.
+fn bundled_entries() -> Vec<BundledEntry> {
+    crate::bundled::BUNDLED_AGENTS
+        .iter()
+        .map(|a| BundledEntry {
+            name: a.name.to_string(),
+            version: a.version.to_string(),
+        })
+        .collect()
 }
 
 /// Core `lev list` logic, parameterized by every real-environment source it
@@ -220,6 +274,7 @@ fn print_agent_listing(
     cwd: &Path,
     exe_dir: Option<&Path>,
     config: &Config,
+    filter: ListFilter,
 ) -> anyhow::Result<()> {
     // Tracks whether the user has any agent they can actually *run*. The
     // bundled catalog deliberately does not count: it is always non-empty, and
@@ -229,7 +284,10 @@ fn print_agent_listing(
     let mut found_runnable = false;
 
     // 1. Installed agents (~/.leviath/agents/)
-    let installed = scan_directory_for_agents(agents_dir, config, cwd);
+    let installed = match filter.shows_agents() {
+        true => scan_directory_for_agents(agents_dir, config, cwd),
+        false => Vec::new(),
+    };
     if !installed.is_empty() {
         found_runnable = true;
         println!("Installed agents (~/.leviath/agents/):");
@@ -241,7 +299,8 @@ fn print_agent_listing(
 
     // 2. Local (current directory)
     let local_manifest = cwd.join("agent.leviath");
-    if local_manifest.exists()
+    if filter.shows_agents()
+        && local_manifest.exists()
         && let Some(info) = read_agent_info(&local_manifest, config, cwd)
     {
         found_runnable = true;
@@ -252,9 +311,11 @@ fn print_agent_listing(
 
     // 3. Config's agent_paths directories
     let mut config_agents = Vec::new();
-    for agent_path in &config.agent_paths {
-        let found = scan_directory_for_agents(agent_path, config, cwd);
-        config_agents.extend(found);
+    if filter.shows_agents() {
+        for agent_path in &config.agent_paths {
+            let found = scan_directory_for_agents(agent_path, config, cwd);
+            config_agents.extend(found);
+        }
     }
     if !config_agents.is_empty() {
         found_runnable = true;
@@ -272,11 +333,16 @@ fn print_agent_listing(
     // git checkout - a directory no real install has. The on-disk scan stays as
     // a second source so a checkout or a packaging layout that *does* ship an
     // `agents/` dir next to the binary still shows up.
-    let mut builtin_names: Vec<String> = crate::bundled::BUNDLED_AGENTS
-        .iter()
-        .map(|a| format!("{} (v{})", a.name, a.version))
-        .collect();
-    if let Some(exe_dir) = exe_dir {
+    let mut builtin_names: Vec<String> = match filter.shows_blueprints() {
+        true => crate::bundled::BUNDLED_AGENTS
+            .iter()
+            .map(|a| format!("{} (v{})", a.name, a.version))
+            .collect(),
+        false => Vec::new(),
+    };
+    if filter.shows_blueprints()
+        && let Some(exe_dir) = exe_dir
+    {
         for (_path, info) in scan_directory_for_agents(&exe_dir.join("agents"), config, cwd) {
             let entry = format!("{} (v{})", info.name, info.version);
             if !builtin_names.contains(&entry) {
@@ -284,15 +350,21 @@ fn print_agent_listing(
             }
         }
     }
-    // No emptiness guard: the embedded catalog is always populated (a build
-    // that found no blueprints fails `bundled`'s own invariant test), so an
-    // `if !builtin_names.is_empty()` here would be a branch that can never be
-    // false - unreachable code dressed up as a handled case.
-    println!("Bundled agents (install with `lev setup`):");
-    println!("  {}", builtin_names.join(", "));
-    println!();
+    // The embedded catalog is always populated (a build that found no
+    // blueprints fails `bundled`'s own invariant test), so this is keyed on the
+    // filter rather than on emptiness - the latter would be a branch that can
+    // never be false.
+    if filter.shows_blueprints() {
+        println!("Bundled agents (install with `lev setup`):");
+        println!("  {}", builtin_names.join(", "));
+        println!();
+    }
 
-    if !found_runnable {
+    // Only when the listing was reporting runnable agents at all. Under
+    // `--filter blueprints` there is nothing to conclude from their absence,
+    // and telling someone to run `lev setup` because they asked to see the
+    // catalog would be a non sequitur.
+    if filter.shows_agents() && !found_runnable {
         println!("No agents installed yet.");
         println!();
         println!("To install the bundled agents:");
@@ -555,13 +627,81 @@ allow = ["/data/runs"]
         assert!(agents.is_empty());
     }
 
+    // ─── --filter actually filters ──────────────────────────────────────
+
+    /// The report a filter produces, from a directory holding one agent.
+    fn report_under(filter: ListFilter) -> ListReport {
+        let agents_dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let sub = agents_dir.path().join("installed-agent");
+        fs::create_dir_all(&sub).unwrap();
+        write_manifest(&sub, "installed-agent");
+        build_list_report(agents_dir.path(), cwd.path(), &Config::default(), filter)
+    }
+
+    #[test]
+    fn filter_agents_reports_agents_and_no_blueprints() {
+        // The flag parsed and was then never read, so all three spellings
+        // printed the same thing. Assert the halves are actually separable.
+        let report = report_under(ListFilter::Agents);
+        assert!(!report.agents.is_empty(), "runnable agents are the point");
+        assert!(report.bundled.is_empty(), "blueprints were not asked for");
+    }
+
+    #[test]
+    fn filter_blueprints_reports_blueprints_and_no_agents() {
+        let report = report_under(ListFilter::Blueprints);
+        assert!(report.agents.is_empty(), "agents were not asked for");
+        assert!(!report.bundled.is_empty(), "the catalog is never empty");
+    }
+
+    #[test]
+    fn filter_all_reports_both() {
+        let report = report_under(ListFilter::All);
+        assert!(!report.agents.is_empty());
+        assert!(!report.bundled.is_empty());
+    }
+
+    /// An excluded half is an empty list, not a missing key, so a `--json`
+    /// consumer indexes the same shape whatever the filter was.
+    #[test]
+    fn an_excluded_half_is_present_and_empty_in_json() {
+        let json = serde_json::to_value(report_under(ListFilter::Agents)).unwrap();
+        assert!(
+            json.get("bundled")
+                .is_some_and(|b| b.as_array().is_some_and(Vec::is_empty))
+        );
+        let json = serde_json::to_value(report_under(ListFilter::Blueprints)).unwrap();
+        assert!(
+            json.get("agents")
+                .is_some_and(|a| a.as_array().is_some_and(Vec::is_empty))
+        );
+    }
+
+    /// clap rejects a spelling it does not know. The old `String` accepted
+    /// anything and read none of it, so a typo silently printed everything.
+    #[test]
+    fn an_unknown_filter_is_refused() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: ListArgs,
+        }
+
+        assert!(Cli::try_parse_from(["lev", "--filter", "agants"]).is_err());
+        let ok = Cli::try_parse_from(["lev", "--filter", "agents"]).expect("a known spelling");
+        assert_eq!(ok.args.filter, ListFilter::Agents);
+    }
+
     #[test]
     fn list_args_default_filter() {
         let args = ListArgs {
-            filter: "all".to_string(),
+            filter: ListFilter::All,
             json: false,
         };
-        assert_eq!(args.filter, "all");
+        assert_eq!(args.filter, ListFilter::All);
     }
 
     // ─── read_agent_info: description and version ───────────────────────
@@ -675,7 +815,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             // Touches the real environment (home dir / CWD / exe location /
             // config) but must always succeed regardless of what it finds.
             let args = ListArgs {
-                filter: "all".to_string(),
+                filter: ListFilter::All,
                 json: false,
             };
             let result = execute(args).await;
@@ -695,7 +835,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             // implementation's failure can't be forced directly).
             FORCE_AGENTS_DIR_ERROR.with(|f| f.set(true));
             let args = ListArgs {
-                filter: "all".to_string(),
+                filter: ListFilter::All,
                 json: false,
             };
             let result = execute(args).await;
@@ -736,7 +876,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             std::fs::remove_dir_all(&dir).unwrap();
 
             let args = ListArgs {
-                filter: "all".to_string(),
+                filter: ListFilter::All,
                 json: false,
             };
             let result = execute(args).await;
@@ -758,7 +898,7 @@ system = { kind = "pinned", max_tokens = 1000 }
         crate::config::with_isolated_config_path_async("list-cwd-forced", |_fake_dir| async move {
             crate::commands::force_cwd_error(true);
             let args = ListArgs {
-                filter: "all".to_string(),
+                filter: ListFilter::All,
                 json: false,
             };
             let result = execute(args).await;
@@ -780,7 +920,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             |fake_dir| async move {
                 std::fs::write(fake_dir.join("config.toml"), "not = valid = toml").unwrap();
                 let args = ListArgs {
-                    filter: "all".to_string(),
+                    filter: ListFilter::All,
                     json: false,
                 };
                 let err = execute(args).await.expect_err("broken config must error");
@@ -812,7 +952,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             agent_paths: vec![configured.path().to_path_buf()],
             ..Config::default()
         };
-        let report = build_list_report(agents_dir.path(), cwd.path(), &config);
+        let report = build_list_report(agents_dir.path(), cwd.path(), &config, ListFilter::All);
 
         let sourced: Vec<(&str, &str)> = report
             .agents
@@ -831,7 +971,12 @@ system = { kind = "pinned", max_tokens = 1000 }
         let agents_dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
 
-        let report = build_list_report(agents_dir.path(), cwd.path(), &Config::default());
+        let report = build_list_report(
+            agents_dir.path(),
+            cwd.path(),
+            &Config::default(),
+            ListFilter::All,
+        );
         assert!(report.agents.is_empty());
         assert_eq!(report.bundled.len(), crate::bundled::BUNDLED_AGENTS.len());
     }
@@ -844,7 +989,12 @@ system = { kind = "pinned", max_tokens = 1000 }
         let cwd = tempfile::tempdir().unwrap();
         write_manifest(cwd.path(), "flat-agent");
 
-        let report = build_list_report(agents_dir.path(), cwd.path(), &Config::default());
+        let report = build_list_report(
+            agents_dir.path(),
+            cwd.path(),
+            &Config::default(),
+            ListFilter::All,
+        );
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
         assert_eq!(value["agents"][0]["name"], serde_json::json!("flat-agent"));
@@ -856,7 +1006,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     async fn execute_with_json_runs_without_error() {
         crate::config::with_isolated_config_path_async("list-json-ok", |_fake_dir| async move {
             let args = ListArgs {
-                filter: "all".to_string(),
+                filter: ListFilter::All,
                 json: true,
             };
             assert!(execute(args).await.is_ok());
@@ -873,8 +1023,65 @@ system = { kind = "pinned", max_tokens = 1000 }
         let cwd = tempfile::tempdir().unwrap();
         let config = Config::default();
 
-        let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &config);
+        let result = print_agent_listing(
+            agents_dir.path(),
+            cwd.path(),
+            None,
+            &config,
+            ListFilter::All,
+        );
         assert!(result.is_ok());
+    }
+
+    /// The prose report honours the filter too, including its configured-paths
+    /// scan and the get-started guidance, which would be a non sequitur under
+    /// `--filter blueprints`.
+    #[test]
+    fn print_agent_listing_honours_each_filter() {
+        let agents_dir = tempfile::tempdir().unwrap();
+        let sub = agents_dir.path().join("installed-agent");
+        fs::create_dir_all(&sub).unwrap();
+        write_manifest(&sub, "installed-agent");
+        let cwd = tempfile::tempdir().unwrap();
+
+        // A configured path with an agent in it, so section 3 is non-empty and
+        // its skip-under-filter arm is a real choice rather than a no-op.
+        let configured = tempfile::tempdir().unwrap();
+        let other = configured.path().join("configured-agent");
+        fs::create_dir_all(&other).unwrap();
+        write_manifest(&other, "configured-agent");
+        let config = Config {
+            agent_paths: vec![configured.path().to_path_buf()],
+            ..Config::default()
+        };
+
+        for filter in [ListFilter::All, ListFilter::Agents, ListFilter::Blueprints] {
+            let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &config, filter);
+            assert!(result.is_ok(), "{filter:?}");
+        }
+    }
+
+    /// The bundled section's second source is the on-disk `<exe_dir>/agents`
+    /// scan, which must also be skipped when blueprints were not asked for.
+    #[test]
+    fn print_agent_listing_skips_the_exe_dir_scan_for_agents_only() {
+        let agents_dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let exe_dir = tempfile::tempdir().unwrap();
+        let bundled = exe_dir.path().join("agents").join("side-loaded");
+        fs::create_dir_all(&bundled).unwrap();
+        write_manifest(&bundled, "side-loaded");
+
+        for filter in [ListFilter::All, ListFilter::Agents, ListFilter::Blueprints] {
+            let result = print_agent_listing(
+                agents_dir.path(),
+                cwd.path(),
+                Some(exe_dir.path()),
+                &Config::default(),
+                filter,
+            );
+            assert!(result.is_ok(), "{filter:?}");
+        }
     }
 
     #[test]
@@ -887,7 +1094,13 @@ system = { kind = "pinned", max_tokens = 1000 }
         let cwd = tempfile::tempdir().unwrap();
         let config = Config::default();
 
-        let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &config);
+        let result = print_agent_listing(
+            agents_dir.path(),
+            cwd.path(),
+            None,
+            &config,
+            ListFilter::All,
+        );
         assert!(result.is_ok());
     }
 
@@ -898,7 +1111,13 @@ system = { kind = "pinned", max_tokens = 1000 }
         write_manifest(cwd.path(), "local-agent");
         let config = Config::default();
 
-        let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &config);
+        let result = print_agent_listing(
+            agents_dir.path(),
+            cwd.path(),
+            None,
+            &config,
+            ListFilter::All,
+        );
         assert!(result.is_ok());
     }
 
@@ -914,7 +1133,13 @@ system = { kind = "pinned", max_tokens = 1000 }
         fs::write(cwd.path().join("agent.leviath"), "not valid toml {{{{").unwrap();
         let config = Config::default();
 
-        let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &config);
+        let result = print_agent_listing(
+            agents_dir.path(),
+            cwd.path(),
+            None,
+            &config,
+            ListFilter::All,
+        );
         assert!(result.is_ok());
     }
 
@@ -932,7 +1157,13 @@ system = { kind = "pinned", max_tokens = 1000 }
             ..Config::default()
         };
 
-        let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &config);
+        let result = print_agent_listing(
+            agents_dir.path(),
+            cwd.path(),
+            None,
+            &config,
+            ListFilter::All,
+        );
         assert!(result.is_ok());
     }
 
@@ -949,8 +1180,13 @@ system = { kind = "pinned", max_tokens = 1000 }
         write_manifest(&sub, "builtin-agent");
         let config = Config::default();
 
-        let result =
-            print_agent_listing(agents_dir.path(), cwd.path(), Some(exe_dir.path()), &config);
+        let result = print_agent_listing(
+            agents_dir.path(),
+            cwd.path(),
+            Some(exe_dir.path()),
+            &config,
+            ListFilter::All,
+        );
         assert!(result.is_ok());
     }
 
@@ -964,7 +1200,13 @@ system = { kind = "pinned", max_tokens = 1000 }
         write_read_paths_manifest(&agent, "cto");
         let cwd = tempfile::tempdir().unwrap();
 
-        let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &Config::default());
+        let result = print_agent_listing(
+            agents_dir.path(),
+            cwd.path(),
+            None,
+            &Config::default(),
+            ListFilter::All,
+        );
 
         assert!(result.is_ok());
         // The line itself is asserted where it is built, without capturing
@@ -991,8 +1233,13 @@ system = { kind = "pinned", max_tokens = 1000 }
         crate::bundled::install_bundled(bundled, &exe_dir.path().join("agents")).unwrap();
         let config = Config::default();
 
-        let result =
-            print_agent_listing(agents_dir.path(), cwd.path(), Some(exe_dir.path()), &config);
+        let result = print_agent_listing(
+            agents_dir.path(),
+            cwd.path(),
+            Some(exe_dir.path()),
+            &config,
+            ListFilter::All,
+        );
 
         assert!(result.is_ok());
         // The same name+version pair the catalog already holds resolves to one
@@ -1028,8 +1275,13 @@ system = { kind = "pinned", max_tokens = 1000 }
             ..Config::default()
         };
 
-        let result =
-            print_agent_listing(agents_dir.path(), cwd.path(), Some(exe_dir.path()), &config);
+        let result = print_agent_listing(
+            agents_dir.path(),
+            cwd.path(),
+            Some(exe_dir.path()),
+            &config,
+            ListFilter::All,
+        );
         assert!(result.is_ok());
     }
 
@@ -1055,7 +1307,13 @@ system = { kind = "pinned", max_tokens = 1000 }
             ..Config::default()
         };
 
-        let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &config);
+        let result = print_agent_listing(
+            agents_dir.path(),
+            cwd.path(),
+            None,
+            &config,
+            ListFilter::All,
+        );
         assert!(result.is_ok());
     }
 

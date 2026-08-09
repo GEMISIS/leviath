@@ -511,7 +511,7 @@ mod tests {
         // environment. Unisolated it races every `temp_env` test in the binary.
         crate::config::with_isolated_config_path_async("dispatch-list", |_fake_dir| async move {
             let args = commands::list::ListArgs {
-                filter: "all".to_string(),
+                filter: commands::list::ListFilter::All,
                 json: false,
             };
             let result = dispatch(Commands::List(args), &MockRisky).await;
