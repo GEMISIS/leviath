@@ -20,6 +20,8 @@ anthropic_api_key = "sk-ant-example"
 openai_api_key = "sk-example"
 google_api_key = "AIza-example"
 claude_code_enabled = false
+# How long a cached prompt prefix survives: "5m" (free, default) or "1h".
+anthropic_cache_ttl = "5m"
 claude_code_binary = "/usr/local/bin/claude"
 claude_code_effort = "medium"
 fallback_order = ["anthropic/claude-sonnet-5", "openai/gpt-5.4-mini"]

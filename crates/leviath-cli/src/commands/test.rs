@@ -2612,6 +2612,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             openrouter_api_key: Some("fake-openrouter-key".to_string()),

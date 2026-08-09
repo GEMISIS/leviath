@@ -14,6 +14,17 @@ use leviath_runtime::ProviderRegistry;
 // below because they need the CLI's `Config`.
 pub use leviath_runtime::provider_creds::{ProviderCreds, build_provider_registry};
 
+/// The `options` spelling of a cache TTL, matching what the config accepts.
+///
+/// The map is `String -> String`, so the enum has to be named somehow; using
+/// the same spelling the TOML uses keeps one vocabulary rather than two.
+fn cache_ttl_key(ttl: leviath_providers::anthropic::CacheTtl) -> &'static str {
+    match ttl {
+        leviath_providers::anthropic::CacheTtl::Ephemeral5m => "5m",
+        leviath_providers::anthropic::CacheTtl::Ephemeral1h => "1h",
+    }
+}
+
 /// Build the list of [`ProviderCreds`] a [`Config`] implies. `ollama` is always
 /// present (it needs no key); the API-key providers are included only when their
 /// key is configured, and `claude-code` only when explicitly enabled. This is the
@@ -34,6 +45,15 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
         // providers the user skipped, and registering one produces a provider
         // that authenticates as nobody and fails at the first call.
         if let Some(key) = key.map(str::trim).filter(|k| !k.is_empty()) {
+            // The options map rather than a named field, for the reason it
+            // exists: one provider's settings should not accrete onto every
+            // provider's struct.
+            let mut options = std::collections::HashMap::new();
+            if name == "anthropic"
+                && let Some(ttl) = config.providers.anthropic_cache_ttl
+            {
+                options.insert("cache_ttl".to_string(), cache_ttl_key(ttl).to_string());
+            }
             creds.push(ProviderCreds {
                 name: name.to_string(),
                 api_key: Some(key.to_string()),
@@ -41,7 +61,7 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
                 model_capabilities: caps.clone(),
                 request_timeout_secs: timeout,
                 rate_limit: config.rate_limits.get(name).cloned(),
-                options: std::collections::HashMap::new(),
+                options,
             });
         }
     }
@@ -239,6 +259,7 @@ mod tests {
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 ..Config::default().providers
             },
             ..Config::default()
@@ -340,6 +361,7 @@ mod tests {
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             openrouter_api_key: Some("sk-or-test".to_string()),
@@ -358,6 +380,55 @@ mod tests {
     }
 
     // ─── ProviderCreds seam ─────────────────────────────────────────────
+
+    /// The cache TTL reaches the provider through the creds, which is the whole
+    /// path #345 was missing: the enum existed and nothing could select it.
+    #[test]
+    fn provider_creds_carry_the_anthropic_cache_ttl() {
+        use leviath_providers::anthropic::CacheTtl;
+
+        let mut config = Config::default();
+        config.providers.anthropic_api_key = Some("k".to_string());
+        config.providers.openai_api_key = Some("k".to_string());
+        config.providers.anthropic_cache_ttl = Some(CacheTtl::Ephemeral1h);
+
+        let creds = provider_creds_from_config(&config);
+        let anthropic = creds
+            .iter()
+            .find(|c| c.name == "anthropic")
+            .expect("anthropic is registered");
+        assert_eq!(
+            anthropic.options.get("cache_ttl").map(String::as_str),
+            Some("1h")
+        );
+
+        // Only Anthropic's, since only Anthropic reads it.
+        let openai = creds.iter().find(|c| c.name == "openai").expect("openai");
+        assert!(!openai.options.contains_key("cache_ttl"));
+    }
+
+    #[test]
+    fn the_five_minute_ttl_is_carried_explicitly_too() {
+        use leviath_providers::anthropic::CacheTtl;
+
+        let mut config = Config::default();
+        config.providers.anthropic_api_key = Some("k".to_string());
+        config.providers.anthropic_cache_ttl = Some(CacheTtl::Ephemeral5m);
+        let creds = provider_creds_from_config(&config);
+        assert_eq!(
+            creds[0].options.get("cache_ttl").map(String::as_str),
+            Some("5m")
+        );
+    }
+
+    /// Unset means unset: no entry, so the provider keeps its own default.
+    #[test]
+    fn no_configured_ttl_carries_nothing() {
+        let mut config = Config::default();
+        config.providers.anthropic_api_key = Some("k".to_string());
+        let creds = provider_creds_from_config(&config);
+        assert!(!creds[0].options.contains_key("cache_ttl"));
+    }
 
     #[test]
     fn provider_creds_from_config_includes_defaults_and_keyed() {
@@ -526,6 +597,7 @@ mod tests {
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
             },
             ..crate::config::Config::default()

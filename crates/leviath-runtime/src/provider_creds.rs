@@ -142,12 +142,25 @@ pub fn build_provider_registry_with(
                 if let Some(ref key) = c.api_key {
                     registry.register(
                         "anthropic".to_string(),
-                        Arc::new(leviath_providers::AnthropicProvider::with_overrides(
-                            clients.get_or_build(timeout, build_client)?,
-                            key.clone(),
-                            caps,
-                            c.rate_limit.as_ref(),
-                        )),
+                        Arc::new(
+                            leviath_providers::AnthropicProvider::with_overrides(
+                                clients.get_or_build(timeout, build_client)?,
+                                key.clone(),
+                                caps,
+                                c.rate_limit.as_ref(),
+                            )
+                            // An unrecognised value keeps the default rather
+                            // than failing the daemon's boot over a cache
+                            // setting; the config layer is what validates it.
+                            .with_cache_ttl(
+                                match c.options.get("cache_ttl").map(String::as_str) {
+                                    Some("1h") => {
+                                        leviath_providers::anthropic::CacheTtl::Ephemeral1h
+                                    }
+                                    _ => leviath_providers::anthropic::CacheTtl::Ephemeral5m,
+                                },
+                            ),
+                        ),
                     );
                 }
             }

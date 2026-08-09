@@ -74,6 +74,13 @@
             "max"
           ]
         },
+        "anthropic_cache_ttl": {
+          "description": "How long a cached prompt prefix survives. \"1h\" costs more to write and sends the beta header it needs.",
+          "enum": [
+            "5m",
+            "1h"
+          ]
+        },
         "fallback_order": {
           "type": "array",
           "description": "Host-wide failover chain, best first, as \"provider/model\" strings. Tried after the blueprint's own list.",
