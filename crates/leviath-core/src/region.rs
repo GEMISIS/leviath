@@ -157,6 +157,17 @@ pub enum RegionKind {
         max_entries: Option<usize>,
     },
 
+    /// A task list whose entries carry state: open or done.
+    ///
+    /// Never evicted, like [`Self::Pinned`] - a checklist that quietly loses
+    /// items is worse than no checklist. What it adds over a pinned region is
+    /// that the state is *real*: "compute the fee table" and "~~compute the fee
+    /// table~~ done" are two different strings to every other region kind, so
+    /// nothing could count what was left and no gate could ask. Written through
+    /// the `todo_*` tools rather than free text, so the state cannot drift from
+    /// what the model believes it wrote.
+    Checklist,
+
     /// Script-backed region: a user-authored Rhai script owns how the region
     /// renders into the assembled context (`render`), may transform or reject
     /// each incoming entry (`on_write`), and may choose what to drop under
@@ -211,6 +222,7 @@ impl PartialEq for RegionKind {
                 Self::CompactHistory { source_region: b },
             ) => a == b,
             (Self::HashMap { max_entries: a }, Self::HashMap { max_entries: b }) => a == b,
+            (Self::Checklist, Self::Checklist) => true,
             (
                 Self::Custom {
                     script: a,
@@ -227,6 +239,152 @@ impl PartialEq for RegionKind {
 }
 impl Eq for RegionKind {}
 
+/// One row of a [`RegionKind::Checklist`] region.
+///
+/// A projection of a [`RegionEntry`], not a second storage: the item's text is
+/// the entry's content and its state is the entry's metadata, so a checklist
+/// persists, carries across a stage swap and restores from a snapshot with no
+/// extra plumbing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChecklistItem {
+    /// Stable identifier the `todo_*` tools address, assigned on add.
+    pub id: usize,
+    /// What the item says.
+    pub text: String,
+    /// Whether it has been ticked off.
+    pub done: bool,
+    /// Anything the agent recorded against it.
+    pub note: Option<String>,
+}
+
+/// The metadata key holding a checklist item's id.
+const ITEM_ID: &str = "checklist_id";
+/// The metadata key holding whether a checklist item is done.
+const ITEM_DONE: &str = "checklist_done";
+/// The metadata key holding a checklist item's note.
+const ITEM_NOTE: &str = "checklist_note";
+
+impl RegionEntry {
+    /// Read this entry as a checklist item, when it is one.
+    pub fn as_checklist_item(&self) -> Option<ChecklistItem> {
+        let meta = self.metadata.as_ref()?;
+        Some(ChecklistItem {
+            id: meta.get(ITEM_ID)?.as_u64()? as usize,
+            text: self.content.clone(),
+            done: meta
+                .get(ITEM_DONE)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            note: meta
+                .get(ITEM_NOTE)
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        })
+    }
+}
+
+impl Region {
+    /// Every checklist item this region holds, in the order they were added.
+    pub fn checklist_items(&self) -> Vec<ChecklistItem> {
+        self.content
+            .iter()
+            .filter_map(RegionEntry::as_checklist_item)
+            .collect()
+    }
+
+    /// Items still open. The number a gate asks about.
+    pub fn open_checklist_items(&self) -> Vec<ChecklistItem> {
+        self.checklist_items()
+            .into_iter()
+            .filter(|i| !i.done)
+            .collect()
+    }
+
+    /// Append an item and return its id.
+    ///
+    /// Ids come from a counter over what is already there rather than the
+    /// entry count, so an id stays valid for the life of the region even if an
+    /// entry is dropped under budget pressure - a `todo_done(3)` that silently
+    /// ticked off a different item would be worse than one that failed.
+    pub fn add_checklist_item(
+        &mut self,
+        text: String,
+        tokens: usize,
+    ) -> crate::error::Result<usize> {
+        let id = self
+            .checklist_items()
+            .iter()
+            .map(|i| i.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        self.add_entry_with_metadata(
+            text,
+            tokens,
+            serde_json::json!({ ITEM_ID: id, ITEM_DONE: false }),
+        )?;
+        Ok(id)
+    }
+
+    /// Tick an item off. `false` when no item carries that id.
+    pub fn complete_checklist_item(&mut self, id: usize) -> bool {
+        self.set_item_field(id, ITEM_DONE, serde_json::Value::Bool(true))
+    }
+
+    /// Record a note against an item. `false` when no item carries that id.
+    pub fn note_checklist_item(&mut self, id: usize, note: &str) -> bool {
+        self.set_item_field(id, ITEM_NOTE, serde_json::Value::String(note.to_string()))
+    }
+
+    /// Write one metadata field of the item carrying `id`.
+    fn set_item_field(&mut self, id: usize, key: &str, value: serde_json::Value) -> bool {
+        for entry in &mut self.content {
+            let is_target = entry
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get(ITEM_ID))
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|found| found as usize == id);
+            if is_target && let Some(serde_json::Value::Object(meta)) = entry.metadata.as_mut() {
+                meta.insert(key.to_string(), value);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The checklist as the model sees it: open items first, then done.
+    ///
+    /// Ordering is the point. This region's value is that it stays in front of
+    /// the model every turn as *instruction* rather than history, and what is
+    /// left to do belongs at the top of an instruction.
+    pub fn render_checklist(&self) -> String {
+        let items = self.checklist_items();
+        if items.is_empty() {
+            return String::new();
+        }
+        let (open, done): (Vec<_>, Vec<_>) = items.into_iter().partition(|i| !i.done);
+        let mut out = String::new();
+        for item in open.iter().chain(done.iter()) {
+            let box_ = match item.done {
+                true => "[x]",
+                false => "[ ]",
+            };
+            out.push_str(&format!("{box_} {} {}", item.id, item.text));
+            if let Some(note) = &item.note {
+                out.push_str(&format!("\n    note: {note}"));
+            }
+            out.push('\n');
+        }
+        format!(
+            "Checklist ({} open, {} done):\n{}",
+            open.len(),
+            done.len(),
+            out.trim_end()
+        )
+    }
+}
+
 impl RegionKind {
     /// Return the cache hint appropriate for this region kind.
     pub fn cache_hint(&self) -> crate::cache::CacheHint {
@@ -239,6 +397,9 @@ impl RegionKind {
                 stable_fraction: 0.75,
             },
             RegionKind::HashMap { .. } => crate::cache::CacheHint::UntilChanged,
+            // Changes only when an item is added or ticked off, which is rarer
+            // than a tool result and far rarer than a turn.
+            RegionKind::Checklist => crate::cache::CacheHint::UntilChanged,
             RegionKind::Temporary | RegionKind::Clearable => crate::cache::CacheHint::Never,
             // A persistent custom region is Pinned-like: its rendered output is
             // expected to be stable. Non-persistent custom content changes on
@@ -921,6 +1082,171 @@ pub trait Validator: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── Checklist items ────────────────────────────────────────────────────
+
+    fn checklist() -> Region {
+        Region::new("todos".to_string(), RegionKind::Checklist, 10_000)
+    }
+
+    /// Anything in the region that is not a well-formed item is not an item.
+    ///
+    /// A checklist region can still receive an ordinary write - a seed, a
+    /// carried entry from an older run, a `context_append` - and counting one
+    /// of those as an open item would hold a stage on work nobody recorded.
+    #[test]
+    fn a_malformed_entry_is_not_an_item() {
+        let mut r = checklist();
+        // No metadata at all.
+        r.add_entry("a plain note".to_string(), 3).unwrap();
+        // Metadata, but not an item's.
+        r.add_entry_with_metadata(
+            "something else".to_string(),
+            3,
+            serde_json::json!({ "unrelated": true }),
+        )
+        .unwrap();
+        // An id of the wrong type.
+        r.add_entry_with_metadata(
+            "bad id".to_string(),
+            3,
+            serde_json::json!({ "checklist_id": "one" }),
+        )
+        .unwrap();
+
+        assert!(r.checklist_items().is_empty(), "none of those are items");
+        assert!(r.open_checklist_items().is_empty());
+        assert!(
+            r.render_checklist().is_empty(),
+            "and they do not render as a checklist"
+        );
+    }
+
+    /// A checklist is cached like a hashmap, not like a turn: it changes only
+    /// when an item is added or ticked off.
+    #[test]
+    fn a_checklist_caches_until_it_changes() {
+        assert_eq!(
+            RegionKind::Checklist.cache_hint(),
+            crate::cache::CacheHint::UntilChanged
+        );
+    }
+
+    #[test]
+    fn a_note_appears_in_the_render() {
+        let mut r = checklist();
+        let id = r.add_checklist_item("blocked".to_string(), 2).unwrap();
+        r.note_checklist_item(id, "waiting on the manual");
+        let rendered = r.render_checklist();
+        assert!(
+            rendered.contains("note: waiting on the manual"),
+            "{rendered}"
+        );
+    }
+
+    /// An item that will not fit is refused rather than silently dropped: a
+    /// checklist that loses items is worse than no checklist.
+    #[test]
+    fn an_item_over_budget_is_refused() {
+        let mut r = Region::new("todos".to_string(), RegionKind::Checklist, 4);
+        assert!(r.add_checklist_item("x".to_string(), 99).is_err());
+        assert!(r.checklist_items().is_empty());
+    }
+
+    #[test]
+    fn an_added_item_starts_open_and_gets_an_id() {
+        let mut r = checklist();
+        let first = r
+            .add_checklist_item("compute the fee table".to_string(), 5)
+            .unwrap();
+        let second = r
+            .add_checklist_item("check the manual".to_string(), 5)
+            .unwrap();
+        assert_eq!((first, second), (1, 2), "ids are stable and sequential");
+        assert_eq!(r.open_checklist_items().len(), 2);
+    }
+
+    #[test]
+    fn completing_an_item_closes_it_and_nothing_else() {
+        let mut r = checklist();
+        let id = r.add_checklist_item("one".to_string(), 2).unwrap();
+        r.add_checklist_item("two".to_string(), 2).unwrap();
+
+        assert!(r.complete_checklist_item(id));
+        let open = r.open_checklist_items();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].text, "two");
+        assert_eq!(
+            r.checklist_items().len(),
+            2,
+            "done items are kept, not deleted"
+        );
+    }
+
+    #[test]
+    fn an_unknown_id_reports_failure_rather_than_ticking_something_else() {
+        // A `todo_done(3)` that silently closed a different item would be worse
+        // than one that fails: the model would believe work was finished.
+        let mut r = checklist();
+        r.add_checklist_item("one".to_string(), 2).unwrap();
+        assert!(!r.complete_checklist_item(99));
+        assert!(!r.note_checklist_item(99, "x"));
+        assert_eq!(r.open_checklist_items().len(), 1);
+    }
+
+    #[test]
+    fn a_note_records_without_closing() {
+        let mut r = checklist();
+        let id = r
+            .add_checklist_item("blocked thing".to_string(), 2)
+            .unwrap();
+        assert!(r.note_checklist_item(id, "waiting on the manual"));
+        let item = &r.checklist_items()[0];
+        assert!(!item.done, "a note is not a completion");
+        assert_eq!(item.note.as_deref(), Some("waiting on the manual"));
+    }
+
+    /// Ordering is the point: this region is instruction, not history, so what
+    /// is left to do belongs at the top of what the model reads every turn.
+    #[test]
+    fn the_render_puts_open_items_first() {
+        let mut r = checklist();
+        let done = r
+            .add_checklist_item("already finished".to_string(), 2)
+            .unwrap();
+        r.add_checklist_item("still to do".to_string(), 2).unwrap();
+        r.complete_checklist_item(done);
+
+        let rendered = r.render_checklist();
+        let open_at = rendered.find("still to do").expect("open item rendered");
+        let done_at = rendered
+            .find("already finished")
+            .expect("done item rendered");
+        assert!(open_at < done_at, "open before done:\n{rendered}");
+        assert!(rendered.contains("1 open, 1 done"), "{rendered}");
+        assert!(
+            rendered.contains("[x]") && rendered.contains("[ ]"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn an_empty_checklist_renders_nothing() {
+        // Rather than an empty heading taking up the window every turn.
+        assert!(checklist().render_checklist().is_empty());
+    }
+
+    /// Ids survive an entry being dropped, so a later `todo_done` cannot land on
+    /// the wrong item.
+    #[test]
+    fn ids_do_not_get_reused_after_a_drop() {
+        let mut r = checklist();
+        r.add_checklist_item("one".to_string(), 2).unwrap();
+        let second = r.add_checklist_item("two".to_string(), 2).unwrap();
+        r.content.remove(0);
+        let third = r.add_checklist_item("three".to_string(), 2).unwrap();
+        assert!(third > second, "a reused id would tick off the wrong item");
+    }
 
     #[test]
     fn test_region_creation() {

@@ -166,11 +166,11 @@ mod tests {
     // ── Tool definitions ──────────────────────────────────────────────────
 
     #[test]
-    fn tool_defs_returns_seventeen_tools() {
+    fn tool_defs_returns_twenty_tools() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         let defs = tools.tool_defs();
-        assert_eq!(defs.len(), 17);
+        assert_eq!(defs.len(), 20);
     }
 
     #[test]
@@ -419,10 +419,10 @@ mod tests {
     }
 
     #[test]
-    fn names_returns_eighteen_entries() {
+    fn names_returns_twenty_one_entries() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
-        assert_eq!(tools.names().len(), 18);
+        assert_eq!(tools.names().len(), 21);
     }
 
     // ── Sub-agent tool definitions ────────────────────────────────────────
@@ -2097,7 +2097,7 @@ mod tests {
         let names: Vec<String> = tools.tool_defs().iter().map(|t| t.name.clone()).collect();
         assert!(!names.contains(&"shell".to_string()));
         // The other 16 built-ins remain.
-        assert_eq!(tools.tool_defs().len(), 16);
+        assert_eq!(tools.tool_defs().len(), 19);
         assert!(names.contains(&"read_file".to_string()));
         assert!(names.contains(&"context_write".to_string()));
         assert!(names.contains(&"present_for_review".to_string()));

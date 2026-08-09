@@ -273,6 +273,64 @@ impl BuiltinTools {
                 }),
             },
             Tool {
+                name: "todo_add".to_string(),
+                description: "Add an item to a checklist region. Returns the item's id, which todo_done and todo_note take. Use this for work you have identified but not finished, so that what is left is tracked rather than remembered.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "region": {
+                            "type": "string",
+                            "description": "Name of the checklist region (e.g. 'todos')"
+                        },
+                        "item": {
+                            "type": "string",
+                            "description": "What needs doing, in one line"
+                        }
+                    },
+                    "required": ["region", "item"]
+                }),
+            },
+            Tool {
+                name: "todo_done".to_string(),
+                description: "Mark a checklist item finished, by the id todo_add returned. Items you have finished must be ticked off: a stage can be held until its checklist has no open items.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "region": {
+                            "type": "string",
+                            "description": "Name of the checklist region"
+                        },
+                        "id": {
+                            "type": "integer",
+                            "description": "The item's id, as returned by todo_add"
+                        }
+                    },
+                    "required": ["region", "id"]
+                }),
+            },
+            Tool {
+                name: "todo_note".to_string(),
+                description: "Record a note against a checklist item without closing it - what you tried, what blocked you, what it depends on.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "region": {
+                            "type": "string",
+                            "description": "Name of the checklist region"
+                        },
+                        "id": {
+                            "type": "integer",
+                            "description": "The item's id"
+                        },
+                        "note": {
+                            "type": "string",
+                            "description": "The note to record"
+                        }
+                    },
+                    "required": ["region", "id", "note"]
+                }),
+            },
+            Tool {
                 name: "context_append".to_string(),
                 description: "Add content to an existing section of your context window without replacing what's already there.".to_string(),
                 parameters: json!({
@@ -517,6 +575,9 @@ impl BuiltinTools {
             "context_read",
             "context_delete",
             "context_list",
+            "todo_add",
+            "todo_done",
+            "todo_note",
             crate::SUBMIT_OUTPUT_TOOL,
         ]
         .iter()

@@ -177,6 +177,14 @@ pub struct TransitionGate {
     /// entered, so "changed" means changed by *this* pass.
     #[serde(default)]
     pub require_region_updated: Option<String>,
+    /// Checklist region that must have no open items before this edge is taken.
+    ///
+    /// The other gates ask whether a region has content, which cannot tell a
+    /// list of three unfinished items from a list of three finished ones. This
+    /// is the gate a checklist exists for: it makes "did you actually finish"
+    /// a mechanical question rather than one the model answers about itself.
+    #[serde(default)]
+    pub require_no_open_items: Option<String>,
 }
 
 /// Default re-run budget for an unsatisfied [`TransitionGate`].

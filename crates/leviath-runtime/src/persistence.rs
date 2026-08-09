@@ -219,6 +219,7 @@ fn region_kind_str(kind: &RegionKind) -> &'static str {
         RegionKind::Compacting { .. } => "compacting",
         RegionKind::CompactHistory { .. } => "history",
         RegionKind::HashMap { .. } => "hashmap",
+        RegionKind::Checklist => "checklist",
         RegionKind::Custom { .. } => "custom",
     }
 }
@@ -920,6 +921,7 @@ mod tests {
             },
             100,
         ));
+        w.add_region(Region::new("todos".to_string(), RegionKind::Checklist, 100));
         let _ = w.add_to_region("pin", "hello".to_string(), 3);
         w.current_tokens = w.calculate_tokens();
 
@@ -937,7 +939,8 @@ mod tests {
                 "compacting",
                 "history",
                 "hashmap",
-                "custom"
+                "custom",
+                "checklist"
             ]
         );
         // The pinned region's entry is captured.

@@ -191,6 +191,7 @@ gate = { require_modifications = true, max_attempts = 3 }
 |---|---|---|
 | `require_modifications` | `false` | Require at least one successful file-modifying tool call in the stage being left |
 | `require_region_updated` | unset | Require that a named region **changed** during this stage, not merely that it has content. See below |
+| `require_no_open_items` | unset | Name a [checklist region](/docs/context) that must have no open items before this edge is taken |
 | `message` | generated | The nudge shown when the gate blocks |
 | `region` | unset | A region that also satisfies the gate by being non-empty |
 | `tools` | `[]` | Extra tool names to count as modifying, beyond `write_file` and `edit_file` |

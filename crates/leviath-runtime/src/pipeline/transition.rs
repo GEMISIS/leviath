@@ -79,10 +79,14 @@ pub(crate) enum StageResolution {
     DeadEnd,
     /// Advance to this stage index, applying the edge's context transform once
     /// the edge's gate (if any) is satisfied.
+    /// Boxed rather than inline: `TransitionGate` grows every time a gate
+    /// condition is added, and this variant is otherwise a `usize` and a small
+    /// enum - carrying it by value made every `StageResolution` the size of the
+    /// largest gate, including the five variants that hold nothing.
     Next(
         usize,
         leviath_core::blueprint::EdgeTransform,
-        Option<leviath_core::blueprint::TransitionGate>,
+        Option<Box<leviath_core::blueprint::TransitionGate>>,
     ),
     /// Multiple candidate edges - an LLM must choose among them.
     Choose(Vec<leviath_core::blueprint::TransitionEdge>),
@@ -208,7 +212,7 @@ pub(crate) fn resolve_transition_sync(
                     StageResolution::Next(
                         idx,
                         choosable[0].transform.clone(),
-                        choosable[0].gate.clone(),
+                        choosable[0].gate.clone().map(Box::new),
                     )
                 }
                 _ => StageResolution::Choose(choosable.into_iter().cloned().collect()),
@@ -289,6 +293,43 @@ pub(crate) fn gate_blocks(
                 )
             }),
         );
+    }
+    // Checked before `require_modifications` and independently of it: a stage
+    // whose work is a set of items usually has no file write to require.
+    //
+    // A gate naming a region the window does not hold passes rather than
+    // blocking - no amount of work could satisfy it, and stranding the run over
+    // a typo in a region name would be worse than the missing check.
+    if let Some(name) = &gate.require_no_open_items
+        && let Some(region) = window.get_region(name)
+    {
+        let open = region.open_checklist_items();
+        if !open.is_empty() {
+            let cap = gate
+                .max_attempts
+                .unwrap_or(leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS);
+            if progress.gate_reentries >= cap {
+                tracing::warn!(
+                    stage = %stage.name,
+                    open = open.len(),
+                    attempts = cap,
+                    "stage still has open checklist items after re-run attempts; proceeding"
+                );
+                return GateDecision::Forced;
+            }
+            let listed = open
+                .iter()
+                .map(|i| format!("{} {}", i.id, i.text))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return GateDecision::Block(gate.message.clone().unwrap_or_else(|| {
+                format!(
+                    "{} item(s) are still open in `{name}`: {listed}. Finish them, or use \
+                     todo_done to drop the ones that no longer apply, before moving on.",
+                    open.len()
+                )
+            }));
+        }
     }
     if !gate.require_modifications {
         return GateDecision::Pass;
@@ -560,7 +601,7 @@ pub fn resolve_transition(
                 // Check the edge's gate BEFORE the transform runs: the transform
                 // compacts/clears regions, and a held stage must keep its context.
                 let gate = outcome.is_none().then_some(gate).flatten();
-                match gate_blocks(gate.as_ref(), stage, &progress, &window) {
+                match gate_blocks(gate.as_deref(), stage, &progress, &window) {
                     GateDecision::Block(nudge) => {
                         hold_for_gate(entity, &nudge, &mut progress, &mut window, &mut commands);
                         continue;
