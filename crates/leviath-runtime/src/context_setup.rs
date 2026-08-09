@@ -179,41 +179,49 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
         new_regions.push(new_region);
     }
 
-    // Carry the message-stream regions across the transition even when the new
-    // stage layout doesn't declare them. Dropping `conversation` (the sole
-    // SlidingWindow that holds typed turns) would strand the whole message history -
-    // the next stage would assemble with no messages, and its typed tool_use/
-    // tool_result turns would have nowhere to land. `tool_results` likewise. A
-    // blueprint that DOES declare them keeps its own budget (handled above).
+    // Everything the stage layout did not declare is carried anyway, and
+    // hidden instead of deleted.
     //
-    // `final_output` carries for a different reason: an answer submitted in one
-    // stage must still be there when a later stage runs, or a blueprint that
-    // submits early and then routes onward would silently lose it. The
-    // authoritative copy lives on the `FinalOutput` component either way, so
-    // this keeps the agent's own view of its answer consistent with what the
-    // caller will receive.
-    for infra in [
+    // Dropping them made `[stages.X.context.regions]` unusable for the thing it
+    // looks designed for: narrowing what one stage attends to, in a pipeline
+    // whose later stages still need the data. Re-declaring a region downstream
+    // brought it back empty, so an author had to choose between carrying a
+    // 6,700-token data preview through every call of every stage and destroying
+    // it. Omission now means "not assembled for this stage" and nothing else.
+    //
+    // `conversation`, `tool_results` and `final_output` are carried *visible*
+    // regardless: the first two hold the typed tool_use/tool_result turns, and
+    // hiding them would strand a message history the next stage's own turns
+    // have to attach to. An answer submitted early has to survive to the end
+    // for the same reason.
+    let always_visible = [
         "conversation",
         "tool_results",
         crate::output_tool::FINAL_OUTPUT_REGION,
-    ] {
-        if !kept.contains(infra)
-            && let Some(existing) = window.get_region(infra)
-        {
-            let mut carried = Region::new(
-                existing.name.clone(),
-                existing.kind.clone(),
-                existing.max_tokens,
-            );
-            // Same verbatim carry as above: these are exactly the regions whose
-            // typed turns the transition must not flatten.
-            for entry in &existing.content {
-                let _ = carried.carry_entry(entry.clone());
-            }
-            carried.taint = existing.taint.clone();
-            new_regions.push(carried);
+    ];
+    let mut hidden = std::collections::HashSet::new();
+    for existing in &window.regions {
+        if kept.contains(existing.name.as_str()) {
+            continue;
         }
+        let mut carried = Region::new(
+            existing.name.clone(),
+            existing.kind.clone(),
+            existing.max_tokens,
+        );
+        // Verbatim, exactly as above: these are the regions whose typed turns
+        // a rebuild would flatten.
+        for entry in &existing.content {
+            let _ = carried.carry_entry(entry.clone());
+        }
+        carried.taint = existing.taint.clone();
+        if !always_visible.contains(&existing.name.as_str()) {
+            hidden.insert(existing.name.clone());
+        }
+        new_regions.push(carried);
     }
+    // Describes the stage being entered, so it replaces rather than accumulates.
+    window.hidden = hidden;
 
     window.regions = new_regions;
     window.current_tokens = window.calculate_tokens();
