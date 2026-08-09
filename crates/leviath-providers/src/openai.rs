@@ -151,6 +151,19 @@ impl OpenAIProvider {
             ("Content-Type", "application/json".to_string()),
         ];
 
+        // A model that takes no temperature is sent none, rather than being sent
+        // zero. `build_openai_request_body_with` always writes the key and the
+        // runtime substitutes `0.0` where a model declares no support, but "not
+        // supported" is not a value: the o-series accepts only its default and
+        // rejects `0.0` exactly as firmly as `0.7`, so the one flag that exists
+        // to protect these models was what broke them. Omitting is what the
+        // OpenRouter provider has always done for the same models.
+        if !self.capabilities(&request.model).supports_temperature
+            && let Some(fields) = body.as_object_mut()
+        {
+            fields.remove("temperature");
+        }
+
         // Already learned for this model: pay nothing and send it up front.
         if self.needs_reasoning_effort_none(&request.model) {
             set_reasoning_effort_none(&mut body);
@@ -773,6 +786,62 @@ mod tests {
             extra: serde_json::Value::Null,
             request_timeout_secs: None,
         }
+    }
+
+    // ─── A model that takes no temperature ──────────────────────────────────
+
+    #[tokio::test]
+    async fn a_model_taking_no_temperature_is_sent_none() {
+        // o3 declares `supports_temperature: false`, and the runtime turns that
+        // into `0.0` - a value it rejects as firmly as any other, since it takes
+        // only its own default. Omitting is the only thing that works.
+        let (url, bodies) =
+            leviath_testkit::spawn_mock_sequence(vec![(200, "OK", OK_BODY.to_vec())]).await;
+        let provider = provider_with_url(url);
+        let request = InferenceRequest {
+            model: "o3".to_string(),
+            ..simple_request()
+        };
+        provider.infer(&request).await.unwrap();
+
+        let sent = bodies.lock().expect("recorder").clone();
+        let body = &sent[0];
+        assert!(!body.contains("temperature"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_model_taking_a_temperature_still_gets_one() {
+        // The other half, so "omit it" cannot quietly become "omit it always".
+        let (url, bodies) =
+            leviath_testkit::spawn_mock_sequence(vec![(200, "OK", OK_BODY.to_vec())]).await;
+        let provider = provider_with_url(url);
+        let request = InferenceRequest {
+            model: "gpt-4o".to_string(),
+            temperature: 0.5,
+            ..simple_request()
+        };
+        provider.infer(&request).await.unwrap();
+
+        let sent = bodies.lock().expect("recorder").clone();
+        let body = &sent[0];
+        assert!(body.contains(r#""temperature":0.5"#), "{body}");
+    }
+
+    #[tokio::test]
+    async fn streaming_omits_it_too() {
+        let sse = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+        let (url, bodies) =
+            leviath_testkit::spawn_mock_sequence(vec![(200, "OK", sse.to_vec())]).await;
+        let provider = provider_with_url(url);
+        let request = InferenceRequest {
+            model: "o4-mini".to_string(),
+            ..simple_request()
+        };
+        assert!(provider.infer_stream(&request).await.is_ok());
+
+        let sent = bodies.lock().expect("recorder").clone();
+        let body = &sent[0];
+        assert!(!body.contains("temperature"), "{body}");
     }
 
     // ─── Tools refused over a reasoning effort ──────────────────────────────

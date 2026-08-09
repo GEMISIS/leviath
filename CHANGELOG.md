@@ -13,6 +13,13 @@ same list.
 
 ## Unreleased
 
+- Fixed: `o3` and `o4` could not run at all through the `openai` provider (#335).
+  A model declaring no temperature support was sent `temperature: 0.0` rather
+  than having the field left out, and the o-series accepts only its own default,
+  rejecting `0.0` as firmly as any other value - so the one flag that exists to
+  protect those models was what broke them. The field is now omitted, which is
+  what the OpenRouter provider has always done for the same models.
+
 ## 0.3.1 - 2026-08-09
 
 - Fixed: tool-using agents could not run on OpenAI's current reasoning models
