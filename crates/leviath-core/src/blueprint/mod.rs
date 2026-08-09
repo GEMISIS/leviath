@@ -1734,6 +1734,7 @@ criteria = { kind = "pinned", max_tokens = 10, seed = "criteria" }"#,
                 tool_overrides: HashMap::new(),
                 persist: true,
                 max_result_tokens: Some(2048),
+                tool_max_result_tokens: HashMap::new(),
             });
             s
         }];

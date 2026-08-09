@@ -1517,7 +1517,10 @@ mod tests {
 
     // ─── Bounded shell capture (issue #252) ──────────────────────────────────
 
-    use crate::exec::{Captured, MAX_CAPTURE_BYTES, capture_capped, capture_note};
+    use crate::exec::{
+        Captured, MAX_CAPTURE_BYTES, MAX_READ_FILE_BYTES, cap_file_content, capture_capped,
+        capture_note,
+    };
 
     /// A reader that hands back `chunk` `count` times and records how many
     /// reads it was asked for, standing in for a child's pipe.
@@ -1618,6 +1621,54 @@ mod tests {
     #[test]
     fn capture_note_is_silent_when_nothing_was_dropped() {
         assert!(capture_note(&captured(10, 10), &captured(0, 0), 10).is_none());
+    }
+
+    // ─── read_file has a bound ──────────────────────────────────────────────
+
+    #[test]
+    fn a_file_under_the_cap_comes_back_whole() {
+        let content = "hello".repeat(10);
+        assert_eq!(cap_file_content(&content, 1024), content);
+    }
+
+    #[test]
+    fn a_file_over_the_cap_is_truncated_and_says_so() {
+        // The old behaviour was an all-or-nothing cliff: the whole file went
+        // into the routed region, and the ladder in `tool_results` either
+        // truncated it or dropped it as `[result omitted]` depending on how
+        // full the region already was.
+        let content = "x".repeat(5000);
+        let capped = cap_file_content(&content, 1000);
+        assert!(capped.starts_with(&"x".repeat(1000)));
+        assert!(capped.contains("[truncated]"), "{capped}");
+        assert!(
+            capped.contains("5000"),
+            "the real size is the useful part: {capped}"
+        );
+    }
+
+    #[test]
+    fn truncation_lands_on_a_char_boundary() {
+        // The cap is a byte count and file content is arbitrary text, so a
+        // naive slice would panic on the way back to a `String`.
+        let content = "é".repeat(100);
+        let capped = cap_file_content(&content, 51);
+        assert!(capped.starts_with("é"));
+        assert!(capped.contains("[truncated]"));
+    }
+
+    #[tokio::test]
+    async fn read_file_applies_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("big.txt"),
+            "y".repeat(MAX_READ_FILE_BYTES + 4096),
+        )
+        .unwrap();
+        let tools = make_tools(dir.path());
+        let out = tools.read_file(&json!({ "path": "big.txt" })).await;
+        assert!(out.contains("[truncated]"), "an unbounded read is the bug");
+        assert!(out.len() < MAX_READ_FILE_BYTES + 4096);
     }
 
     #[test]

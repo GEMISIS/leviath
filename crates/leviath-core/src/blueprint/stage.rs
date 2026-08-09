@@ -67,6 +67,16 @@ pub struct ToolResultRouting {
     pub persist: bool,
     /// Max tokens per tool result (truncate if larger)
     pub max_result_tokens: Option<usize>,
+    /// Per-tool ceilings, by canonical tool name, overriding
+    /// [`Self::max_result_tokens`] for those tools.
+    ///
+    /// One number for a whole stage cannot fit a stage that both greps (small,
+    /// wants all of it) and reads files (potentially enormous, wants a cap):
+    /// picking a number for the second starves the first. Keyed by canonical
+    /// name for the same reason [`Self::tool_overrides`] is - `bash` is an
+    /// alias of `shell`, and a literal lookup would silently miss.
+    #[serde(default)]
+    pub tool_max_result_tokens: HashMap<String, usize>,
 }
 
 impl Default for ToolResultRouting {
@@ -76,6 +86,7 @@ impl Default for ToolResultRouting {
             tool_overrides: HashMap::new(),
             persist: true,
             max_result_tokens: None,
+            tool_max_result_tokens: HashMap::new(),
         }
     }
 }

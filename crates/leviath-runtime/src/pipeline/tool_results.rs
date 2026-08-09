@@ -50,9 +50,19 @@ pub(crate) fn apply_tool_results(
             .map(|tc| tc.name.clone())
             .unwrap_or_default();
 
-        if let Some(routing) = routing
-            && let Some(max_tokens) = routing.max_result_tokens
-        {
+        // The tool's own ceiling when it has one, else the stage's.
+        let tool_cap = routing.and_then(|r| {
+            // Both sides canonicalized, exactly as `tool_overrides` below: the
+            // author writes `bash`, the model calls `shell`, and a literal
+            // comparison would silently miss in either direction.
+            let canon = leviath_tools::canonical_tool_name(&tool_name);
+            r.tool_max_result_tokens
+                .iter()
+                .find(|(k, _)| leviath_tools::canonical_tool_name(k) == canon)
+                .map(|(_, v)| *v)
+                .or(r.max_result_tokens)
+        });
+        if let Some(max_tokens) = tool_cap {
             let max_chars = max_tokens * 4;
             if result_text.len() > max_chars {
                 result_text = truncate_on_char_boundary(&result_text, max_chars);

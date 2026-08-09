@@ -90,6 +90,20 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
                 }
             }
         }
+        // Per-tool ceilings, spelled like the region overrides above so the two
+        // tables read as the same idea applied to two different limits.
+        if let Some(limits) = routing_table
+            .get("max_result_tokens_per_tool")
+            .and_then(|v| v.as_table())
+        {
+            for (tool_name, max_val) in limits {
+                if let Some(max) = max_val.as_integer() {
+                    routing
+                        .tool_max_result_tokens
+                        .insert(tool_name.clone(), max as usize);
+                }
+            }
+        }
 
         stage.tool_result_routing = Some(routing);
     }

@@ -3774,6 +3774,66 @@ kind = "vm"
     let err = parse_manifest(toml).unwrap_err().to_string();
     assert!(err.contains("unknown kind 'vm'"), "got: {err}");
 }
+/// Per-tool result ceilings parse, spelled like the region overrides beside
+/// them. Without this the table is accepted and ignored, which is the shape of
+/// bug #338 was.
+#[test]
+fn parse_manifest_reads_per_tool_result_ceilings() {
+    let toml = r#"
+[agent]
+name = "capped"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.tool_routing]
+default_region = "results"
+max_result_tokens = 4000
+
+[stages.work.tool_routing.max_result_tokens_per_tool]
+read_file = 20000
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    let routing = bp
+        .find_stage("work")
+        .and_then(|s| s.tool_result_routing.as_ref())
+        .expect("routing survives");
+    assert_eq!(routing.max_result_tokens, Some(4000));
+    assert_eq!(
+        routing.tool_max_result_tokens.get("read_file").copied(),
+        Some(20000)
+    );
+}
+
+/// A non-integer ceiling is skipped rather than failing the manifest, matching
+/// how the region overrides beside it treat a non-string.
+#[test]
+fn parse_manifest_skips_a_non_integer_per_tool_ceiling() {
+    let toml = r#"
+[agent]
+name = "capped"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.tool_routing]
+default_region = "results"
+
+[stages.work.tool_routing.max_result_tokens_per_tool]
+read_file = "lots"
+grep = 500
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    let routing = bp
+        .find_stage("work")
+        .and_then(|s| s.tool_result_routing.as_ref())
+        .expect("routing survives");
+    assert!(!routing.tool_max_result_tokens.contains_key("read_file"));
+    assert_eq!(
+        routing.tool_max_result_tokens.get("grep").copied(),
+        Some(500)
+    );
+}
 
 #[test]
 fn parse_manifest_sandbox_unknown_on_unavailable_errors() {

@@ -4350,7 +4350,72 @@ fn routing(
             .collect(),
         persist,
         max_result_tokens: max_result,
+        tool_max_result_tokens: std::collections::HashMap::new(),
     }
+}
+
+// ── Per-tool result ceilings ──
+
+/// The text a tool's result ends up as, after routing applied its ceiling.
+fn routed_result(
+    routing: &leviath_core::blueprint::ToolResultRouting,
+    tool: &str,
+    text: &str,
+) -> String {
+    let mut w = ctx(&[("conversation", 1_000_000), ("results", 1_000_000)]);
+    apply_tool_results(
+        &mut w,
+        "resp",
+        &[tc("c1", tool)],
+        &[("c1".to_string(), text.to_string())],
+        Some(routing),
+        None,
+    );
+    // Whichever region it was routed to, the entry text is what matters here.
+    ["results", "conversation", "tool_results"]
+        .iter()
+        .filter_map(|name| w.get_region(name))
+        .flat_map(|r| r.content.iter())
+        .map(|e| e.content.clone())
+        .find(|c| c.starts_with("aaa"))
+        .unwrap_or_default()
+}
+
+/// A stage that both greps and reads files cannot express itself with one
+/// number: a cap sized for the file read lets a grep through untouched, and one
+/// sized for the grep truncates every file.
+#[test]
+fn a_per_tool_ceiling_overrides_the_stage_one() {
+    let mut routing = routing("results", &[], true, Some(10));
+    routing
+        .tool_max_result_tokens
+        .insert("read_file".to_string(), 1000);
+
+    // 400 chars is ~100 tokens: over the stage's 10, under read_file's 1000.
+    let text = "a".repeat(400);
+    assert!(
+        !routed_result(&routing, "read_file", &text).contains("[...truncated]"),
+        "the tool's own ceiling should win"
+    );
+    assert!(
+        routed_result(&routing, "grep", &text).contains("[...truncated]"),
+        "a tool with no ceiling of its own still gets the stage's"
+    );
+}
+
+/// Keyed by canonical name, like `tool_overrides`: `bash` is an alias of
+/// `shell`, and a literal lookup would silently miss the tool the model calls.
+#[test]
+fn a_per_tool_ceiling_is_matched_by_canonical_name() {
+    let mut routing = routing("results", &[], true, Some(10));
+    routing
+        .tool_max_result_tokens
+        .insert("bash".to_string(), 1000);
+    let text = "a".repeat(400);
+    assert!(
+        !routed_result(&routing, "shell", &text).contains("[...truncated]"),
+        "an alias should match the tool it aliases"
+    );
 }
 
 #[test]
