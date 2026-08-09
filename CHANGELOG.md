@@ -13,6 +13,8 @@ same list.
 
 ## Unreleased
 
+## 0.3.1 - 2026-08-09
+
 - Fixed: tool-using agents could not run on OpenAI's current reasoning models
   (#333). Those models apply a reasoning effort by default and reject function
   tools alongside one on `/v1/chat/completions`, so every such run failed on its
