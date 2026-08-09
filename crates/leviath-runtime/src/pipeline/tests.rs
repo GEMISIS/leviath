@@ -5278,6 +5278,87 @@ fn transition_allow_complete_single_edge_awaits_choice() {
     assert!(world.get::<AwaitingTransitionChoice>(e).is_some());
 }
 
+// ─── A run that owed an answer and gave none is not complete ─────────────────
+
+/// A stage requiring an output that no stage ever produced.
+fn owing_output(require: bool) -> leviath_core::Blueprint {
+    let mut stages = vec![stage_named("only", None, false, None)];
+    stages[0].require_output = require;
+    blueprint(stages)
+}
+
+#[test]
+fn a_run_that_never_produced_its_required_output_errors() {
+    // `require_final_output` forces past the obligation rather than stranding
+    // the run - right, since a later stage may still answer - but nothing
+    // downgraded the terminal status, so the run reported `complete` with no
+    // `final_output` on disk. `lev result` already exited non-zero there, so
+    // status and result disagreed in exactly the case a caller most needs.
+    let mut world = World::new();
+    let e = spawn_transition_agent(
+        &mut world,
+        owing_output(true),
+        vec![si("m0")],
+        VisitCounts::default(),
+    );
+
+    run_transition(&mut world);
+
+    let status = world.get::<AgentState>(e).unwrap().status.clone();
+    let AgentStatus::Error { message } = status else {
+        panic!("a run with no answer must not read as success, got {status:?}");
+    };
+    assert!(message.contains("final output"), "{message}");
+}
+
+#[test]
+fn a_run_that_produced_its_required_output_completes() {
+    let mut world = World::new();
+    let e = spawn_transition_agent(
+        &mut world,
+        owing_output(true),
+        vec![si("m0")],
+        VisitCounts::default(),
+    );
+    world.entity_mut(e).insert(crate::persistence::FinalOutput(
+        leviath_core::output::FinalOutput {
+            stage: "only".to_string(),
+            content: "the answer".to_string(),
+            format: None,
+            submitted_at: 0,
+            truncated: false,
+            artifacts: Vec::new(),
+        },
+    ));
+
+    run_transition(&mut world);
+
+    assert!(matches!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Complete
+    ));
+}
+
+/// A run that never owed one is untouched: this must not turn every ordinary
+/// agent into a failure.
+#[test]
+fn a_run_that_owed_no_output_still_completes() {
+    let mut world = World::new();
+    let e = spawn_transition_agent(
+        &mut world,
+        owing_output(false),
+        vec![si("m0")],
+        VisitCounts::default(),
+    );
+
+    run_transition(&mut world);
+
+    assert!(matches!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Complete
+    ));
+}
+
 #[test]
 fn transition_visit_exhausted_edge_is_a_dead_end_error() {
     use leviath_core::blueprint::TransitionCondition;
@@ -10274,6 +10355,42 @@ fn a_stage_that_owes_nothing_is_never_held() {
 
 /// A missing output never strands a run. When the budget is spent the
 /// transition proceeds and the run says so, the way a forced edge gate does.
+/// The retry budget is its own, not the stage's `max_revisits`.
+///
+/// Those are different questions - how many times the graph may re-enter a
+/// stage, and how many times a model that owes an answer is nudged - and
+/// borrowing the first for the second let a routing setting silently multiply
+/// an inference bill. Each retry re-sends the whole stage context, and an
+/// output stage runs last, when that context is largest.
+#[test]
+fn a_generous_max_revisits_does_not_buy_more_output_retries() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            owing_bp(Some(20)),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+            OutputReentries(leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
+            crate::persistence::RunOutcomeFlags::default(),
+        ))
+        .id();
+    run_require_output(&mut world);
+    assert!(
+        world.get::<ReadyToInfer>(e).is_none(),
+        "max_revisits = 20 must not buy 20 retries of a missing output"
+    );
+    assert_eq!(
+        world
+            .get::<crate::persistence::RunOutcomeFlags>(e)
+            .expect("flags")
+            .0
+            .output_forced,
+        1
+    );
+}
+
 #[test]
 fn an_exhausted_budget_proceeds_and_records_that_it_was_forced() {
     let mut world = World::new();
@@ -10284,7 +10401,7 @@ fn an_exhausted_budget_proceeds_and_records_that_it_was_forced() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            OutputReentries(2),
+            OutputReentries(leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
             crate::persistence::RunOutcomeFlags::default(),
         ))
         .id();
@@ -10317,7 +10434,7 @@ fn an_exhausted_budget_proceeds_even_with_nowhere_to_record_it() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            OutputReentries(2),
+            OutputReentries(leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
         ))
         .id();
     run_require_output(&mut world);

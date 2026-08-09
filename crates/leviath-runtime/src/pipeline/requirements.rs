@@ -294,9 +294,15 @@ pub fn require_final_output(
             }
             continue;
         }
-        let cap = stage
-            .max_revisits
-            .unwrap_or(leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP);
+        // Its own budget, not the stage's `max_revisits`. Those are different
+        // questions - "how many times may the graph re-enter this stage" and
+        // "how many times do we nudge a model that owes an answer" - and
+        // borrowing the first for the second made a routing setting silently
+        // multiply an inference bill. Each retry re-sends the whole stage
+        // context, and an output stage runs last, when that context is at its
+        // largest: an agent with `max_revisits = 10` billed ten full prompts to
+        // fail to say one word.
+        let cap = leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP;
         let round = reentries.map_or(0, |r| r.0);
         if round >= cap {
             tracing::warn!(
