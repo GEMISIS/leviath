@@ -139,6 +139,59 @@ pub async fn spawn_mock_server_with_headers(
     spawn_mock_raw(response).await
 }
 
+/// The request bodies a [`spawn_mock_sequence`] server has received, in order.
+pub type RecordedBodies = std::sync::Arc<Mutex<Vec<String>>>;
+
+/// An HTTP server that answers a *series* of requests, one canned response
+/// each, and records every request body it was sent.
+///
+/// The one-shot helpers above cannot express "fails, then succeeds", which is
+/// what a retry looks like from the outside. Recording the bodies is the other
+/// half: a retry test that only asserts the call eventually succeeded would
+/// pass against a retry that resent the identical request, so what has to be
+/// asserted is that the *second* body differs in the intended way.
+///
+/// Requests beyond the last response get a 500. Each response closes its
+/// connection, so `reqwest` opens a fresh one per request.
+pub async fn spawn_mock_sequence(
+    responses: Vec<(u16, &'static str, Vec<u8>)>,
+) -> (String, RecordedBodies) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies: RecordedBodies = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let recorder = std::sync::Arc::clone(&bodies);
+    tokio::spawn(async move {
+        for (status, reason, body) in responses {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 65536];
+            let read = socket.read(&mut buf).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..read]).to_string();
+            // The body is whatever follows the header terminator. Good enough
+            // for a test client that always sends its JSON in one write.
+            let recorded = match request.split_once("\r\n\r\n") {
+                Some((_, body)) => body.to_string(),
+                None => String::new(),
+            };
+            recorder.lock().expect("recorder lock").push(recorded);
+            let mut response = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                status,
+                reason,
+                body.len()
+            )
+            .into_bytes();
+            response.extend_from_slice(&body);
+            let _ = socket.write_all(&response).await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    (format!("http://{}", addr), bodies)
+}
+
 /// A one-shot HTTP server that declares a `Content-Length` far larger than
 /// the bytes it actually sends, then closes - forcing a genuine I/O error
 /// when the caller reads the response body, so `.text()`-failure fallbacks

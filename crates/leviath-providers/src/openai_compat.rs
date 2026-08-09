@@ -397,6 +397,27 @@ pub fn build_openai_request_body_with(
     body
 }
 
+/// Whether an API error is OpenAI refusing tools *because* a reasoning effort
+/// is in play, which it resolves by being sent `reasoning_effort: "none"`.
+///
+/// The current reasoning models reject function tools together with a reasoning
+/// effort on `/v1/chat/completions`, and they apply an effort by default - so a
+/// request that never mentions `reasoning_effort` is refused for a field it did
+/// not set. The error says exactly that, and names the remedy.
+///
+/// Keyed on what the API said rather than on which model was asked, and
+/// deliberately: a model list is what failed here. Nothing in this crate knew
+/// `gpt-5.6` existed, and nothing should have to before it works.
+///
+/// The pairing is what makes this precise. A model that supports a reasoning
+/// effort but not the value `none` reports a different problem in a message
+/// that never mentions tools, and retrying *that* with `none` would resend the
+/// same rejection.
+pub(crate) fn tools_refused_over_reasoning_effort(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("reasoning_effort") && detail.contains("function tool")
+}
+
 /// Merge a request's pass-through `extra` params (the manifest's
 /// `[model.parameters]` beyond temperature/max_output_tokens - `top_p`, `stop`,
 /// `seed`, `frequency_penalty`, …) into an OpenAI-shaped request `target`.

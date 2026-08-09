@@ -13,6 +13,17 @@ same list.
 
 ## Unreleased
 
+- Fixed: tool-using agents could not run on OpenAI's current reasoning models
+  (#333). Those models apply a reasoning effort by default and reject function
+  tools alongside one on `/v1/chat/completions`, so every such run failed on its
+  first inference over a field Leviath never set. It now retries once with
+  `reasoning_effort: "none"` when the API says that is the remedy, and remembers
+  the model so later calls in the same process pay nothing. Keyed on what the
+  API reports rather than on a list of model names, since an out-of-date model
+  list is what broke this. Models that reject the field outright, or reject the
+  value `none`, are untouched: neither ever sees it. A `reasoning_effort` you set
+  yourself in `[model.parameters]` is left exactly as written.
+
 ## 0.3.0 - 2026-08-08
 
 - **Security.** `uniq`, `tree` and `rg` are no longer on the default safe-command

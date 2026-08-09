@@ -2,7 +2,7 @@
 
 use crate::openai_compat::{
     OpenAiSseStream, TokenLimitField, build_openai_request_body_with, parse_openai_response,
-    send_chat_request,
+    send_chat_request, tools_refused_over_reasoning_effort,
 };
 #[cfg(test)]
 use crate::provider::FinishReason;
@@ -32,6 +32,15 @@ pub struct OpenAIProvider {
 
     /// Per-model capability overrides
     capability_overrides: HashMap<String, ModelCapabilities>,
+
+    /// Models the API has refused tools for until told `reasoning_effort:
+    /// "none"`, learned from its own error rather than declared up front.
+    ///
+    /// Remembered so the cost is one extra round trip per model per process,
+    /// not one per inference: a run makes many calls and they would each pay it.
+    /// A `HashSet` behind a lock rather than a field on the request, because the
+    /// provider is shared across every agent talking to it.
+    reasoning_effort_none: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl OpenAIProvider {
@@ -43,6 +52,7 @@ impl OpenAIProvider {
             base_url: "https://api.openai.com/v1".to_string(),
             rate_limiter: None,
             capability_overrides: HashMap::new(),
+            reasoning_effort_none: Default::default(),
         }
     }
 
@@ -57,6 +67,7 @@ impl OpenAIProvider {
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             rate_limiter,
             capability_overrides: HashMap::new(),
+            reasoning_effort_none: Default::default(),
         }
     }
 
@@ -73,6 +84,7 @@ impl OpenAIProvider {
             base_url: "https://api.openai.com/v1".to_string(),
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
             capability_overrides: overrides,
+            reasoning_effort_none: Default::default(),
         }
     }
 
@@ -122,6 +134,83 @@ impl OpenAIProvider {
             ModelCapabilities::default()
         }
     }
+
+    /// POST a chat-completions body, teaching the retry described on
+    /// [`tools_refused_over_reasoning_effort`].
+    ///
+    /// Shared by both entry points so streaming and non-streaming cannot learn
+    /// different things about the same model.
+    async fn post_chat(
+        &self,
+        request: &InferenceRequest,
+        mut body: serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let headers = [
+            ("Authorization", format!("Bearer {}", self.api_key)),
+            ("Content-Type", "application/json".to_string()),
+        ];
+
+        // Already learned for this model: pay nothing and send it up front.
+        if self.needs_reasoning_effort_none(&request.model) {
+            set_reasoning_effort_none(&mut body);
+        }
+        // A caller who set `reasoning_effort` themselves (via the manifest's
+        // `[model.parameters]`) has said what they want. Overriding it, or
+        // retrying to override it, would quietly ignore them - so the retry is
+        // only for a body that never mentioned the field.
+        let ours_to_set = body.get("reasoning_effort").is_none();
+
+        let sent = send_chat_request(
+            &self.client,
+            "openai",
+            &url,
+            &headers,
+            &body,
+            self.rate_limiter.as_ref(),
+            request.request_timeout_secs,
+        )
+        .await;
+
+        match sent {
+            Err(ProviderError::ApiError(detail))
+                if ours_to_set && tools_refused_over_reasoning_effort(&detail) =>
+            {
+                tracing::debug!(
+                    model = %request.model,
+                    "OpenAI refused tools alongside a reasoning effort; retrying with none"
+                );
+                self.remember_reasoning_effort_none(&request.model);
+                set_reasoning_effort_none(&mut body);
+                send_chat_request(
+                    &self.client,
+                    "openai",
+                    &url,
+                    &headers,
+                    &body,
+                    self.rate_limiter.as_ref(),
+                    request.request_timeout_secs,
+                )
+                .await
+            }
+            other => other,
+        }
+    }
+
+    /// Whether this model has already refused tools over a reasoning effort.
+    fn needs_reasoning_effort_none(&self, model: &str) -> bool {
+        leviath_core::sync::lock(&self.reasoning_effort_none).contains(model)
+    }
+
+    /// Record that it did, for the rest of this process.
+    fn remember_reasoning_effort_none(&self, model: &str) {
+        leviath_core::sync::lock(&self.reasoning_effort_none).insert(model.to_string());
+    }
+}
+
+/// Say "no reasoning" in the field the API rejected the request over.
+fn set_reasoning_effort_none(body: &mut serde_json::Value) {
+    body["reasoning_effort"] = serde_json::Value::String("none".to_string());
 }
 
 #[async_trait]
@@ -134,21 +223,7 @@ impl Provider for OpenAIProvider {
         }
 
         let body = build_openai_request_body_with(request, TokenLimitField::MaxCompletionTokens);
-        let url = format!("{}/chat/completions", self.base_url);
-
-        let response = send_chat_request(
-            &self.client,
-            "openai",
-            &url,
-            &[
-                ("Authorization", format!("Bearer {}", self.api_key)),
-                ("Content-Type", "application/json".to_string()),
-            ],
-            &body,
-            self.rate_limiter.as_ref(),
-            request.request_timeout_secs,
-        )
-        .await?;
+        let response = self.post_chat(request, body).await?;
 
         let response_body: serde_json::Value = response
             .json()
@@ -178,21 +253,7 @@ impl Provider for OpenAIProvider {
             build_openai_request_body_with(request, TokenLimitField::MaxCompletionTokens);
         body["stream"] = serde_json::Value::Bool(true);
         body["stream_options"] = serde_json::json!({ "include_usage": true });
-        let url = format!("{}/chat/completions", self.base_url);
-
-        let response = send_chat_request(
-            &self.client,
-            "openai",
-            &url,
-            &[
-                ("Authorization", format!("Bearer {}", self.api_key)),
-                ("Content-Type", "application/json".to_string()),
-            ],
-            &body,
-            self.rate_limiter.as_ref(),
-            request.request_timeout_secs,
-        )
-        .await?;
+        let response = self.post_chat(request, body).await?;
 
         let byte_stream = response.bytes_stream();
         let stream = OpenAiSseStream::new(byte_stream);
@@ -712,6 +773,141 @@ mod tests {
             extra: serde_json::Value::Null,
             request_timeout_secs: None,
         }
+    }
+
+    // ─── Tools refused over a reasoning effort ──────────────────────────────
+
+    /// Verbatim from `api.openai.com`, captured while reproducing #333.
+    const TOOLS_REFUSED: &[u8] = br#"{"error":{"message":"Function tools with reasoning_effort are not supported for gpt-5.6-terra in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.","type":"invalid_request_error","param":"reasoning_effort","code":null}}"#;
+
+    const OK_BODY: &[u8] = br#"{"choices":[{"message":{"content":"hi there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#;
+
+    fn request_with_a_tool() -> InferenceRequest {
+        InferenceRequest {
+            tools: vec![crate::provider::Tool {
+                name: "get_time".to_string(),
+                description: "Get the time".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+            ..simple_request()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_over_reasoning_effort_is_retried_with_none() {
+        let _guard = always_on_tracing_guard();
+        let (url, bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (400, "Bad Request", TOOLS_REFUSED.to_vec()),
+            (200, "OK", OK_BODY.to_vec()),
+        ])
+        .await;
+        let provider = provider_with_url(url);
+        let resp = provider.infer(&request_with_a_tool()).await.unwrap();
+        assert_eq!(resp.content, "hi there");
+
+        // The assertion that matters. "It eventually succeeded" would also pass
+        // against a retry that resent the identical body.
+        let sent = bodies.lock().expect("recorder").clone();
+        assert_eq!(sent.len(), 2, "expected exactly one retry: {sent:?}");
+        // Bound rather than indexed inside the message: a message expression
+        // only runs when the assert fails, so `sent[0]` there would be a region
+        // no passing run ever reaches.
+        let (first, retry) = (&sent[0], &sent[1]);
+        assert!(
+            !first.contains("reasoning_effort"),
+            "the first attempt should not mention the field: {first}"
+        );
+        assert!(
+            retry.contains(r#""reasoning_effort":"none""#),
+            "the retry should carry it: {retry}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_second_call_for_a_learned_model_asks_once() {
+        // The point of remembering: a run makes many inferences and only the
+        // first should pay for the discovery.
+        let (url, bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (400, "Bad Request", TOOLS_REFUSED.to_vec()),
+            (200, "OK", OK_BODY.to_vec()),
+            (200, "OK", OK_BODY.to_vec()),
+        ])
+        .await;
+        let provider = provider_with_url(url);
+        provider.infer(&request_with_a_tool()).await.unwrap();
+        provider.infer(&request_with_a_tool()).await.unwrap();
+
+        let sent = bodies.lock().expect("recorder").clone();
+        assert_eq!(
+            sent.len(),
+            3,
+            "the second inference should not retry: {sent:?}"
+        );
+        let third = &sent[2];
+        assert!(
+            third.contains(r#""reasoning_effort":"none""#),
+            "the learned setting should be sent up front: {third}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_bad_request_is_not_retried() {
+        // A model that takes a reasoning effort but not the value `none` says so
+        // in a message that never mentions tools. Retrying it with `none` would
+        // resend the same rejection.
+        let other = br#"{"error":{"message":"Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'low', 'medium', 'high', and 'xhigh'.","type":"invalid_request_error","param":"reasoning_effort"}}"#;
+        let (url, bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (400, "Bad Request", other.to_vec()),
+            (200, "OK", OK_BODY.to_vec()),
+        ])
+        .await;
+        let provider = provider_with_url(url);
+        let err = provider.infer(&request_with_a_tool()).await.unwrap_err();
+        assert!(err.to_string().contains("API error:"), "{err}");
+        assert_eq!(
+            bodies.lock().expect("recorder").len(),
+            1,
+            "should not retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_caller_supplied_reasoning_effort_is_left_alone() {
+        // `[model.parameters] reasoning_effort = "low"` is the caller saying
+        // what they want. Overriding it would ignore them silently.
+        let (url, bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (400, "Bad Request", TOOLS_REFUSED.to_vec()),
+            (200, "OK", OK_BODY.to_vec()),
+        ])
+        .await;
+        let provider = provider_with_url(url);
+        let request = InferenceRequest {
+            extra: serde_json::json!({ "reasoning_effort": "low" }),
+            ..request_with_a_tool()
+        };
+        let err = provider.infer(&request).await.unwrap_err();
+        assert!(err.to_string().contains("API error:"), "{err}");
+        let sent = bodies.lock().expect("recorder").clone();
+        assert_eq!(sent.len(), 1, "should not retry over the caller's setting");
+        let first = &sent[0];
+        assert!(first.contains(r#""reasoning_effort":"low""#), "{first}");
+    }
+
+    #[tokio::test]
+    async fn streaming_learns_the_same_thing() {
+        let _guard = always_on_tracing_guard();
+        let sse = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+        let (url, bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (400, "Bad Request", TOOLS_REFUSED.to_vec()),
+            (200, "OK", sse.to_vec()),
+        ])
+        .await;
+        let provider = provider_with_url(url);
+        assert!(provider.infer_stream(&request_with_a_tool()).await.is_ok());
+        let sent = bodies.lock().expect("recorder").clone();
+        assert_eq!(sent.len(), 2);
+        let retry = &sent[1];
+        assert!(retry.contains(r#""reasoning_effort":"none""#), "{retry}");
     }
 
     #[tokio::test]
