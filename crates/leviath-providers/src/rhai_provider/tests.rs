@@ -409,10 +409,11 @@ fn capabilities_and_metadata() {
          // @default_model dm\n{NOOP_INIT}fn inference(s, r) {{ #{{}} }}"
     );
     let mut caps = HashMap::new();
+    // Names one field, which is what a `[model_capabilities]` entry looks like.
     caps.insert(
         "special".to_string(),
-        crate::provider::ModelCapabilities {
-            max_context_tokens: 999,
+        crate::provider::ModelCapabilityOverride {
+            max_context_tokens: Some(999),
             ..Default::default()
         },
     );
@@ -432,9 +433,15 @@ fn capabilities_and_metadata() {
 
     assert_eq!(p.name(), "test");
     assert_eq!(p.meta().default_model.as_deref(), Some("dm"));
-    // override wins
+    // The named field wins, and the ones it did not name are the script's own
+    // rather than `Default`'s - a partial entry corrects, it does not replace.
     assert_eq!(p.max_context_tokens("special"), 999);
-    assert_eq!(p.capabilities("special").max_context_tokens, 999);
+    let special = p.capabilities("special");
+    assert_eq!(special.max_context_tokens, 999);
+    assert_eq!(
+        special.max_output_tokens, 8000,
+        "the script's own output cap should survive an entry that never mentioned it"
+    );
     // metadata default for an unknown model
     assert_eq!(p.max_context_tokens("other"), 40000);
     let c = p.capabilities("other");

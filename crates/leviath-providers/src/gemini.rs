@@ -6,8 +6,8 @@ use crate::openai_compat::{
 #[cfg(test)]
 use crate::provider::FinishReason;
 use crate::provider::{
-    InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider, ProviderConfig,
-    ProviderError, Result, StreamChunk,
+    InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride, ModelInfo,
+    Provider, ProviderConfig, ProviderError, Result, StreamChunk,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -83,7 +83,7 @@ pub struct GeminiProvider {
     rate_limiter: Option<RateLimiter>,
 
     /// Per-model capability overrides
-    capability_overrides: HashMap<String, ModelCapabilities>,
+    capability_overrides: HashMap<String, ModelCapabilityOverride>,
 }
 
 impl GeminiProvider {
@@ -116,7 +116,7 @@ impl GeminiProvider {
     pub fn with_overrides(
         client: reqwest::Client,
         api_key: String,
-        overrides: HashMap<String, ModelCapabilities>,
+        overrides: HashMap<String, ModelCapabilityOverride>,
         rate_limit: Option<&crate::provider::RateLimitConfig>,
     ) -> Self {
         Self {
@@ -298,10 +298,10 @@ impl Provider for GeminiProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
-        if let Some(caps) = self.capability_overrides.get(model) {
-            caps.clone()
-        } else {
-            self.builtin_capabilities(model)
+        // Merged, not swapped: an entry names only what it corrects.
+        match self.capability_overrides.get(model) {
+            Some(o) => o.apply_to(self.builtin_capabilities(model)),
+            None => self.builtin_capabilities(model),
         }
     }
 
@@ -518,7 +518,8 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 1,
                 max_output_tokens: 1,
-            },
+            }
+            .into(),
         );
         let provider = GeminiProvider::with_overrides(
             crate::provider::build_http_client(None).expect("a test client builds"),
@@ -788,7 +789,8 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 42,
                 max_output_tokens: 10,
-            },
+            }
+            .into(),
         );
         let provider = GeminiProvider::with_overrides(
             crate::provider::build_http_client(None).expect("a test client builds"),

@@ -299,6 +299,68 @@ impl Default for ModelCapabilities {
     }
 }
 
+/// A `[model_capabilities]` entry: the fields an operator chose to change.
+///
+/// Every field is optional and unset means "leave it alone", so an entry names
+/// only what it is correcting. The alternative - deserializing straight into
+/// [`ModelCapabilities`] - has two failure modes, and this repo has now seen
+/// both. Without field defaults a partial table fails to deserialize and the
+/// override is dropped in silence (#338). With `#[serde(default)]` it succeeds
+/// and quietly substitutes [`ModelCapabilities::default`] for everything the
+/// operator did not mention, so correcting one boolean would drop a 400 000
+/// token window to 8 192.
+///
+/// Merging onto the provider's own answer for that model is the only reading
+/// that matches what the table looks like it does.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelCapabilityOverride {
+    /// See [`ModelCapabilities::supports_temperature`].
+    pub supports_temperature: Option<bool>,
+    /// See [`ModelCapabilities::supports_streaming`].
+    pub supports_streaming: Option<bool>,
+    /// See [`ModelCapabilities::supports_tools`].
+    pub supports_tools: Option<bool>,
+    /// See [`ModelCapabilities::supports_system_prompt`].
+    pub supports_system_prompt: Option<bool>,
+    /// See [`ModelCapabilities::max_context_tokens`].
+    pub max_context_tokens: Option<usize>,
+    /// See [`ModelCapabilities::max_output_tokens`].
+    pub max_output_tokens: Option<usize>,
+}
+
+impl ModelCapabilityOverride {
+    /// `base` with every field this entry names replaced.
+    pub fn apply_to(&self, base: ModelCapabilities) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_temperature: self
+                .supports_temperature
+                .unwrap_or(base.supports_temperature),
+            supports_streaming: self.supports_streaming.unwrap_or(base.supports_streaming),
+            supports_tools: self.supports_tools.unwrap_or(base.supports_tools),
+            supports_system_prompt: self
+                .supports_system_prompt
+                .unwrap_or(base.supports_system_prompt),
+            max_context_tokens: self.max_context_tokens.unwrap_or(base.max_context_tokens),
+            max_output_tokens: self.max_output_tokens.unwrap_or(base.max_output_tokens),
+        }
+    }
+}
+
+impl From<ModelCapabilities> for ModelCapabilityOverride {
+    /// Every field named, for a caller that already has a complete set.
+    fn from(c: ModelCapabilities) -> Self {
+        Self {
+            supports_temperature: Some(c.supports_temperature),
+            supports_streaming: Some(c.supports_streaming),
+            supports_tools: Some(c.supports_tools),
+            supports_system_prompt: Some(c.supports_system_prompt),
+            max_context_tokens: Some(c.max_context_tokens),
+            max_output_tokens: Some(c.max_output_tokens),
+        }
+    }
+}
+
 /// Information about a model offered by a provider.
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
@@ -913,6 +975,71 @@ mod stream_once {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── A partial [model_capabilities] entry corrects, it does not replace ──
+
+    /// A model whose built-in answer is nothing like `Default`.
+    fn base() -> ModelCapabilities {
+        ModelCapabilities {
+            supports_temperature: false,
+            supports_streaming: false,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 400_000,
+            max_output_tokens: 64_000,
+        }
+    }
+
+    #[test]
+    fn an_entry_naming_one_field_leaves_the_rest_alone() {
+        // The reported case: correcting a wrong context window and nothing else.
+        let over = ModelCapabilityOverride {
+            max_context_tokens: Some(1_048_576),
+            ..Default::default()
+        };
+        let merged = over.apply_to(base());
+        assert_eq!(merged.max_context_tokens, 1_048_576);
+        // Everything unmentioned is the provider's, not `Default`'s. Taking
+        // `Default` here would have dropped a 64k output cap to 4096 and turned
+        // two `false`s into `true`.
+        assert_eq!(merged.max_output_tokens, 64_000);
+        assert!(!merged.supports_temperature);
+        assert!(!merged.supports_streaming);
+    }
+
+    #[test]
+    fn an_entry_naming_nothing_changes_nothing() {
+        let merged = ModelCapabilityOverride::default().apply_to(base());
+        assert_eq!(merged.max_context_tokens, base().max_context_tokens);
+        assert_eq!(merged.max_output_tokens, base().max_output_tokens);
+        assert_eq!(merged.supports_tools, base().supports_tools);
+    }
+
+    #[test]
+    fn every_field_is_individually_overridable() {
+        // Each field on its own, so a typo in `apply_to` that read the wrong
+        // one cannot hide behind a neighbour that happens to match.
+        let full = ModelCapabilityOverride::from(ModelCapabilities {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: false,
+            supports_system_prompt: false,
+            max_context_tokens: 7,
+            max_output_tokens: 9,
+        });
+        let merged = full.apply_to(base());
+        assert!(merged.supports_temperature);
+        assert!(merged.supports_streaming);
+        assert!(!merged.supports_tools);
+        assert!(!merged.supports_system_prompt);
+        assert_eq!(merged.max_context_tokens, 7);
+        assert_eq!(merged.max_output_tokens, 9);
+    }
+
+    // The TOML shapes this type exists for - a one-field table, and a
+    // misspelled key - are asserted where the config is actually loaded, in
+    // `leviath-cli`'s `config` tests, rather than pulling a TOML parser into
+    // this crate's dev-dependencies to say the same thing twice.
 
     // ─── redirect policy ──────────────────────────────────────────────────
 

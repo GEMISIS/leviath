@@ -514,7 +514,8 @@ mod tests {
                 supports_system_prompt: true,
                 max_context_tokens: 9999,
                 max_output_tokens: 999,
-            },
+            }
+            .into(),
         );
         let config = crate::config::Config {
             model_capabilities: caps,
@@ -552,7 +553,8 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 99,
                 max_output_tokens: 99,
-            },
+            }
+            .into(),
         );
         let config = crate::config::Config {
             ollama_base_url: Some("http://custom-ollama:11434".to_string()),

@@ -547,7 +547,7 @@ async fn list_with_registry(
 
     for entry in entries.iter_mut() {
         if let Some(user_caps) = config.model_capabilities.get(&entry.id) {
-            entry.capabilities = user_caps.clone();
+            entry.capabilities = user_caps.apply_to(entry.capabilities.clone());
         }
     }
 
@@ -639,15 +639,28 @@ async fn show_with_registry(
 
     let model_id = &args.model;
 
-    // 1. Check user overrides first (highest precedence).
-    if let Some(user_caps) = config.model_capabilities.get(model_id) {
-        print_model_detail(model_id, None, "config (user override)", user_caps, true);
+    // 1. The built-in row, which a `[model_capabilities]` entry corrects rather
+    //    than replaces - so it has to be found before the override is applied.
+    //    Printing the override alone would report `Default` for every field the
+    //    operator did not mention, which is not what the run will use.
+    let builtin = builtin_table();
+    let builtin_entry = builtin.iter().find(|e| e.model_id == model_id);
+    let user_caps = config.model_capabilities.get(model_id);
+
+    if let Some(user_caps) = user_caps {
+        let base = builtin_entry.map(|e| e.caps.clone()).unwrap_or_default();
+        print_model_detail(
+            model_id,
+            builtin_entry.map(|e| e.display_name),
+            "config (user override)",
+            &user_caps.apply_to(base),
+            true,
+        );
         return Ok(());
     }
 
-    // 2. Check built-in table.
-    let builtin = builtin_table();
-    if let Some(entry) = builtin.iter().find(|e| e.model_id == model_id) {
+    // 2. The built-in table on its own.
+    if let Some(entry) = builtin_entry {
         print_model_detail(
             model_id,
             Some(entry.display_name),
@@ -1783,7 +1796,7 @@ mod tests {
                 let mut config = Config::default();
                 config.model_capabilities.insert(
                     "claude-sonnet-5".to_string(),
-                    leviath_providers::ModelCapabilities::default(),
+                    leviath_providers::ModelCapabilityOverride::default(),
                 );
                 config
                     .save_to_path(&Config::config_path())
@@ -1944,7 +1957,8 @@ mod tests {
                         supports_system_prompt: false,
                         max_context_tokens: 1,
                         max_output_tokens: 1,
-                    },
+                    }
+                    .into(),
                 );
                 std::fs::write(
                     Config::config_path(),
@@ -1982,7 +1996,8 @@ mod tests {
                         supports_system_prompt: false,
                         max_context_tokens: 1,
                         max_output_tokens: 1,
-                    },
+                    }
+                    .into(),
                 );
                 std::fs::write(
                     Config::config_path(),

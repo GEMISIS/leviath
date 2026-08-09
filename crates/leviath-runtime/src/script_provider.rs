@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 use leviath_providers::rhai_provider::host::{HttpExecutor, ReqwestExecutor};
-use leviath_providers::{ModelCapabilities, Provider, RateLimitConfig, RhaiProvider};
+use leviath_providers::{ModelCapabilityOverride, Provider, RateLimitConfig, RhaiProvider};
 
 /// Per-provider configuration from `[model_providers.<name>]`. All fields are
 /// optional overrides - a script activates by an agent referencing its name and
@@ -48,7 +48,7 @@ struct Cached {
 pub struct ScriptProviderLayer {
     dir: PathBuf,
     overrides: HashMap<String, ScriptProviderSpec>,
-    default_caps: HashMap<String, ModelCapabilities>,
+    default_caps: HashMap<String, ModelCapabilityOverride>,
     request_timeout_secs: Option<u64>,
     /// `[security] allow_env_vars`: credential-shaped environment variables a
     /// provider script may read. Empty by default - a provider script runs
@@ -73,7 +73,7 @@ impl ScriptProviderLayer {
     pub fn new(
         dir: PathBuf,
         overrides: HashMap<String, ScriptProviderSpec>,
-        default_caps: HashMap<String, ModelCapabilities>,
+        default_caps: HashMap<String, ModelCapabilityOverride>,
         request_timeout_secs: Option<u64>,
         env_allowlist: Vec<String>,
     ) -> Self {
@@ -97,7 +97,7 @@ impl ScriptProviderLayer {
     pub fn with_executor(
         dir: PathBuf,
         overrides: HashMap<String, ScriptProviderSpec>,
-        default_caps: HashMap<String, ModelCapabilities>,
+        default_caps: HashMap<String, ModelCapabilityOverride>,
         request_timeout_secs: Option<u64>,
         env_allowlist: Vec<String>,
         executor: std::result::Result<

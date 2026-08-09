@@ -1,8 +1,9 @@
 //! Anthropic Claude provider implementation.
 
 use crate::provider::{
-    FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider,
-    ProviderConfig, ProviderError, Result, StreamChunk, TokenUsage, ToolCall, ToolCallDelta,
+    FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride,
+    ModelInfo, Provider, ProviderConfig, ProviderError, Result, StreamChunk, TokenUsage, ToolCall,
+    ToolCallDelta,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -120,7 +121,7 @@ pub struct AnthropicProvider {
     rate_limiter: Option<RateLimiter>,
 
     /// Per-model capability overrides
-    capability_overrides: HashMap<String, ModelCapabilities>,
+    capability_overrides: HashMap<String, ModelCapabilityOverride>,
 
     /// Cache TTL for prompt caching breakpoints.
     cache_ttl: CacheTtl,
@@ -158,7 +159,7 @@ impl AnthropicProvider {
     pub fn with_overrides(
         client: reqwest::Client,
         api_key: String,
-        overrides: HashMap<String, ModelCapabilities>,
+        overrides: HashMap<String, ModelCapabilityOverride>,
         rate_limit: Option<&crate::provider::RateLimitConfig>,
     ) -> Self {
         Self {
@@ -648,10 +649,10 @@ impl Provider for AnthropicProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
-        if let Some(overridden) = self.capability_overrides.get(model) {
-            overridden.clone()
-        } else {
-            self.builtin_capabilities(model)
+        // Merged, not swapped: an entry names only what it corrects.
+        match self.capability_overrides.get(model) {
+            Some(o) => o.apply_to(self.builtin_capabilities(model)),
+            None => self.builtin_capabilities(model),
         }
     }
 
@@ -1227,7 +1228,8 @@ mod tests {
                 supports_system_prompt: true,
                 max_context_tokens: 1_000_000,
                 max_output_tokens: 32_768,
-            },
+            }
+            .into(),
         );
         let provider = AnthropicProvider::with_overrides(
             crate::provider::build_http_client(None).expect("a test client builds"),
@@ -1853,7 +1855,8 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 42,
                 max_output_tokens: 10,
-            },
+            }
+            .into(),
         );
         let provider = AnthropicProvider::with_overrides(
             crate::provider::build_http_client(None).expect("a test client builds"),

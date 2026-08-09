@@ -24,7 +24,8 @@ pub struct ProviderCreds {
     /// Base URL override (used by `ollama`; `None` uses the built-in default).
     pub base_url: Option<String>,
     /// Per-model capability overrides forwarded to the provider.
-    pub model_capabilities: std::collections::HashMap<String, leviath_providers::ModelCapabilities>,
+    pub model_capabilities:
+        std::collections::HashMap<String, leviath_providers::ModelCapabilityOverride>,
     /// HTTP request timeout in seconds (`None` uses the provider default).
     pub request_timeout_secs: Option<u64>,
     /// Client-side rate limit (requests/tokens per minute) enforced before
