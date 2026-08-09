@@ -497,6 +497,31 @@ pub struct StageRecord {
     /// Tokens read from provider cache in this stage.
     #[serde(default)]
     pub cached_tokens: usize,
+    /// Tokens *written* to provider cache in this stage.
+    ///
+    /// Without it only half of a cache decision was visible: a stage showing
+    /// no reads might be paying to write a prefix nothing reuses, or might not
+    /// be caching at all, and the ledger could not tell those apart.
+    #[serde(default)]
+    pub cache_write_tokens: usize,
+    /// Per-region token contribution to this stage's calls, by region name.
+    ///
+    /// The central question of a structured layout is "what am I paying to
+    /// carry, and where", and answering it meant replaying the context history
+    /// and grouping by stage - archaeology for something the runtime already
+    /// knows. Recorded as the largest each region reached while the stage was
+    /// active, which is the number that decides whether a region is earning its
+    /// place.
+    #[serde(default)]
+    pub region_tokens: std::collections::BTreeMap<String, usize>,
+    /// Prompt tokens billed by this stage's first call, the baseline the
+    /// runaway-context check compares against. `None` until it runs once.
+    #[serde(default)]
+    pub first_call_prompt_tokens: Option<usize>,
+    /// Whether the runaway-context warning has already fired for this stage, so
+    /// it is said once on the crossing rather than on every call afterwards.
+    #[serde(default)]
+    pub runaway_warned: bool,
     /// Unix timestamp (seconds); None until the stage starts.
     pub started_at: Option<i64>,
     /// Unix timestamp (seconds); None until the stage ends.
@@ -514,6 +539,10 @@ impl StageRecord {
             prompt_tokens: 0,
             completion_tokens: 0,
             cached_tokens: 0,
+            cache_write_tokens: 0,
+            region_tokens: std::collections::BTreeMap::new(),
+            first_call_prompt_tokens: None,
+            runaway_warned: false,
             started_at: None,
             ended_at: None,
         }

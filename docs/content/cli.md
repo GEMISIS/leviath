@@ -102,6 +102,37 @@ path" means no spaces, plus a `/`, a `\`, or a leading `~`. Region flags work th
 explicit `@` before a path, because a region seed is usually a file while a task is usually a
 sentence.
 
+### `lev stages <RUN-ID>`
+
+The per-stage token ledger, which is where a staged agent's cost lives. A single loop has one
+number you can eyeball; a staged agent has a different window per stage, regions that persist
+across stages, and per-stage models with different prices.
+
+| Flag | Purpose |
+|---|---|
+| `--regions` | Also show each stage's per-region token high-water mark, largest first |
+| `--json` | Print the ledger as JSON |
+
+```
+STAGE                STATUS         PROMPT     OUTPUT   CACHE RD   CACHE WR
+ingest               complete        16832       2249          0          0
+report               complete        37644        493          0          0
+summary              complete       252848        648          0          0
+TOTAL                               307324       3390          0          0
+```
+
+`CACHE WR` is the write half of a cache decision. Without it a stage showing no reads might be
+paying to write a prefix nothing reuses, or might not be caching at all, and the ledger could not
+tell those apart.
+
+`--regions` answers the question a structured layout is really asking: what am I paying to carry,
+and where. The number shown is the largest each region reached while the stage was active, since a
+region is re-sent whole on every call.
+
+Leviath also warns once when a stage's per-call prompt grows past four times its first call. That
+is the shape of a region accumulating without a cap, which is the failure that costs money and the
+one nothing used to notice.
+
 ### `lev create <NAME>`
 
 Scaffold a new [blueprint](/docs/agents) directory.

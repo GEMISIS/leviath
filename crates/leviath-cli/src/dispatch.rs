@@ -104,6 +104,9 @@ pub enum Commands {
     /// Show a run's context-window history (from its run.lvr archive)
     Context(commands::context::ContextArgs),
 
+    /// Show a run's per-stage token ledger, where a staged agent's cost lives
+    Stages(commands::stages::StagesArgs),
+
     /// Print what an agent handed back when a run finished
     Result(commands::result::ResultArgs),
 
@@ -253,6 +256,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::AgentClient(args) => ex.agent_client(args).await,
         Commands::Daemon(args) => ex.daemon(args).await,
         Commands::Context(args) => commands::context::execute(args).await,
+        Commands::Stages(args) => commands::stages::execute(args).await,
         Commands::Result(args) => commands::result::execute(args).await,
         Commands::Mcp(args) => ex.mcp(args).await,
         Commands::Auth(args) => ex.auth(args).await,
@@ -621,6 +625,22 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_routes_stages() {
+        // A run id that does not exist: the point is that the arm is wired to
+        // the command, not what the command finds.
+        let result = dispatch(
+            Commands::Stages(commands::stages::StagesArgs {
+                run_id: "no-such-run".to_string(),
+                json: false,
+                regions: false,
+            }),
+            &MockRisky,
+        )
+        .await;
+        assert!(result.is_err(), "no ledger for a run that never ran");
     }
 
     #[tokio::test]
