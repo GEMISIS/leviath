@@ -377,6 +377,7 @@ mod tests {
             name: "main".to_string(),
             index: 0,
             status: crate::runstate::StageRunStatus::Active,
+            entered: true,
             prompt_tokens: 200,
             completion_tokens: 80,
             cached_tokens: 0,

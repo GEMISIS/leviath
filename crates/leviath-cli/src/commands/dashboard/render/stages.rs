@@ -197,6 +197,11 @@ impl Dashboard {
             StageRunStatus::WaitingInput => (GLYPH_WAITING, Style::default().fg(C_WARN)),
             StageRunStatus::Complete => (GLYPH_COMPLETE, Style::default().fg(C_SUCCESS)),
             StageRunStatus::Error => (GLYPH_ERROR, Style::default().fg(C_ERROR)),
+            // A branch the run finished without taking. Drawn like a pending
+            // stage rather than a completed one, because that is what it is:
+            // the pending glyph on a finished run reads as "never reached",
+            // and the complete glyph read as "ran and did nothing".
+            StageRunStatus::Skipped => (GLYPH_PENDING, Style::default().fg(C_DIM)),
         };
         let is_live = i == agent.stage_index
             && !matches!(
@@ -267,6 +272,7 @@ mod tests {
         StageRecord {
             name: name.to_string(),
             index: 0,
+            entered: !matches!(status, StageRunStatus::Pending | StageRunStatus::Skipped),
             status: status.clone(),
             prompt_tokens: 100,
             completion_tokens: 50,
@@ -334,8 +340,11 @@ mod tests {
             make_stage_record("s3", StageRunStatus::Active),
             make_stage_record("s4", StageRunStatus::Pending),
             make_stage_record("s5", StageRunStatus::Error),
+            // A branch the run finished without taking. Drawn like a pending
+            // stage, since that is what "never reached" looks like.
+            make_stage_record("s6", StageRunStatus::Skipped),
         ];
-        agent.num_stages = 5;
+        agent.num_stages = 6;
         agent.stage_index = 2;
         terminal
             .draw(|f| {

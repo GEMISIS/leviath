@@ -1051,9 +1051,11 @@ fn reconcile_stage_ledger_sets_past_active_future_once() {
         leviath_core::run_meta::StageRecord::new("b".to_string(), 1),
         leviath_core::run_meta::StageRecord::new("c".to_string(), 2),
     ]);
+    // A linear run passes through each stage, so `a` is the cursor first.
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 90);
     reconcile_stage_ledger(&mut led, 1, &AgentStatus::Active, 100);
     assert_eq!(led.0[0].status, StageRunStatus::Complete);
-    assert_eq!(led.0[0].started_at, Some(100));
+    assert_eq!(led.0[0].started_at, Some(90));
     assert_eq!(led.0[0].ended_at, Some(100));
     assert_eq!(led.0[1].status, StageRunStatus::Active);
     assert_eq!(led.0[1].started_at, Some(100));
@@ -1064,6 +1066,104 @@ fn reconcile_stage_ledger_sets_past_active_future_once() {
     reconcile_stage_ledger(&mut led, 1, &AgentStatus::Active, 200);
     assert_eq!(led.0[0].ended_at, Some(100));
     assert_eq!(led.0[1].started_at, Some(100));
+}
+
+// ─── A stage that never ran says so (#372) ───────────────────────────────────
+
+fn three_stage_ledger() -> StageLedger {
+    StageLedger(vec![
+        leviath_core::run_meta::StageRecord::new("plan".to_string(), 0),
+        leviath_core::run_meta::StageRecord::new("error_recovery".to_string(), 1),
+        leviath_core::run_meta::StageRecord::new("answer".to_string(), 2),
+    ])
+}
+
+/// A graph reaches its stages in whatever order its edges describe, so a branch
+/// the run went past without taking is not "finished". It used to be recorded
+/// `Complete` with an empty `region_tokens`, and because that map is a
+/// snapshot, an empty one in the middle made the *next* real stage look like it
+/// had written every region from nothing.
+#[test]
+fn a_stage_the_run_never_entered_is_skipped_not_complete() {
+    use leviath_core::run_meta::StageRunStatus;
+    let mut led = three_stage_ledger();
+
+    // plan → answer, stepping straight over error_recovery.
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 10);
+    reconcile_stage_ledger(&mut led, 2, &AgentStatus::Complete, 20);
+
+    assert_eq!(led.0[0].status, StageRunStatus::Complete, "plan ran");
+    assert_eq!(
+        led.0[1].status,
+        StageRunStatus::Skipped,
+        "error_recovery was never entered and must not read as having run"
+    );
+    assert_eq!(led.0[2].status, StageRunStatus::Complete, "answer ran");
+    assert!(!led.0[1].entered);
+}
+
+/// While the run is live an unentered stage is still `Pending`: nothing has
+/// been decided about it yet. `Skipped` is a statement about a finished run.
+#[test]
+fn an_unentered_stage_stays_pending_until_the_run_ends() {
+    use leviath_core::run_meta::StageRunStatus;
+    let mut led = three_stage_ledger();
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 10);
+    assert_eq!(led.0[1].status, StageRunStatus::Pending);
+    assert_eq!(led.0[2].status, StageRunStatus::Pending);
+
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Complete, 20);
+    assert_eq!(led.0[1].status, StageRunStatus::Skipped);
+    assert_eq!(led.0[2].status, StageRunStatus::Skipped);
+}
+
+/// A cancelled or errored run is over too, so its untaken branches are skipped
+/// rather than left looking like work still to come.
+#[test]
+fn an_unentered_stage_is_skipped_on_a_failed_run() {
+    use leviath_core::run_meta::StageRunStatus;
+    for status in [
+        AgentStatus::Error {
+            message: "boom".to_string(),
+        },
+        AgentStatus::Cancelled,
+    ] {
+        let mut led = three_stage_ledger();
+        reconcile_stage_ledger(&mut led, 0, &status, 10);
+        assert_eq!(led.0[1].status, StageRunStatus::Skipped, "{status:?}");
+    }
+}
+
+/// Reconcile runs on the persist tick, not on stage entry, so a stage that did
+/// work must not be called skipped just because no tick observed it as the
+/// cursor. Tokens against its name are the evidence.
+#[test]
+fn a_stage_with_billed_tokens_is_never_reported_skipped() {
+    use leviath_core::run_meta::StageRunStatus;
+    let mut led = three_stage_ledger();
+    led.0[1].prompt_tokens = 400;
+
+    reconcile_stage_ledger(&mut led, 2, &AgentStatus::Complete, 30);
+    assert_eq!(
+        led.0[1].status,
+        StageRunStatus::Complete,
+        "a stage that was billed for inference ran, whatever the ticks saw"
+    );
+}
+
+/// A stage the run loops back into becomes current again rather than staying
+/// complete, which is what makes `entered` sticky rather than terminal.
+#[test]
+fn a_revisited_stage_becomes_active_again() {
+    use leviath_core::run_meta::StageRunStatus;
+    let mut led = three_stage_ledger();
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 10);
+    reconcile_stage_ledger(&mut led, 2, &AgentStatus::Active, 20);
+    assert_eq!(led.0[0].status, StageRunStatus::Complete);
+
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 30);
+    assert_eq!(led.0[0].status, StageRunStatus::Active);
+    assert_eq!(led.0[2].status, StageRunStatus::Complete);
 }
 
 #[test]

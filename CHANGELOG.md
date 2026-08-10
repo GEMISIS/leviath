@@ -13,6 +13,17 @@ same list.
 
 ## Unreleased
 
+- Fixed: a stage the run never entered is recorded `skipped`, not `complete`
+  (#372). The ledger marked every stage positioned before the cursor complete,
+  which is only the same thing in a linear blueprint: a graph reaches its stages
+  in whatever order its edges describe, so every branch a run went past without
+  taking was filed as having run, with an empty `region_tokens`. Since that map
+  is a snapshot, an empty one in the middle of the sequence made the *next* real
+  stage appear to have written every region from nothing - which is how a
+  tool-less output stage came to look like it had written 153,983 tokens. Stage
+  records also carry `entered`, so a consumer can tell the two apart without the
+  "empty map means it did not run" heuristic.
+
 - Breaking: a blueprint value that is not one of the spellings a setting
   accepts is refused, naming what is valid. Four settings took anything and
   quietly used a default instead: `tool_permissions` values, `on_worker_failure`,

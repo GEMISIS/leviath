@@ -167,10 +167,24 @@ pub fn reflect_interaction_status(
 }
 
 /// Reconcile a [`StageLedger`]'s per-stage `status` + timestamps against the
-/// agent's current stage index and status: stages before the cursor are
-/// `Complete`, the cursor stage takes the mapped agent status, later stages stay
-/// `Pending`. `started_at`/`ended_at` are stamped once and never overwritten, so
-/// repeated calls are idempotent.
+/// agent's current stage index and status.
+///
+/// The cursor stage takes the mapped agent status and is marked entered. Every
+/// other stage is judged on whether it has *ever* been entered, not on where it
+/// sits relative to the cursor: one the run has been in and left is `Complete`,
+/// one it has not is `Pending` while the run is live and
+/// [`Skipped`](leviath_core::run_meta::StageRunStatus::Skipped) once the run is
+/// over.
+///
+/// Position used to stand in for "has run", which is only true of a linear
+/// blueprint. A graph reaches its stages in whatever order its edges describe,
+/// so every branch the run went past without taking was filed as `Complete`
+/// with an empty `region_tokens` - and since that map is a snapshot, an empty
+/// one in the middle of the sequence made the next real stage appear to have
+/// written every region from nothing (#372).
+///
+/// `started_at`/`ended_at` are stamped once and never overwritten, so repeated
+/// calls are idempotent.
 pub(crate) fn reconcile_stage_ledger(
     ledger: &mut StageLedger,
     cursor_index: usize,
@@ -179,29 +193,41 @@ pub(crate) fn reconcile_stage_ledger(
 ) {
     use leviath_core::run_meta::StageRunStatus;
     let active = crate::persistence::stage_status_from(status);
+    let run_is_over = matches!(
+        status,
+        AgentStatus::Complete | AgentStatus::Error { .. } | AgentStatus::Cancelled
+    );
     for rec in ledger.0.iter_mut() {
-        match rec.index.cmp(&cursor_index) {
-            std::cmp::Ordering::Less => {
-                if rec.started_at.is_none() {
-                    rec.started_at = Some(now);
-                }
-                rec.status = StageRunStatus::Complete;
-                if rec.ended_at.is_none() {
-                    rec.ended_at = Some(now);
-                }
+        if rec.index == cursor_index {
+            rec.entered = true;
+            if rec.started_at.is_none() {
+                rec.started_at = Some(now);
             }
-            std::cmp::Ordering::Equal => {
-                if rec.started_at.is_none() {
-                    rec.started_at = Some(now);
-                }
-                if active == StageRunStatus::Complete && rec.ended_at.is_none() {
-                    rec.ended_at = Some(now);
-                }
-                rec.status = active.clone();
+            if active == StageRunStatus::Complete && rec.ended_at.is_none() {
+                rec.ended_at = Some(now);
             }
-            std::cmp::Ordering::Greater => {
-                rec.status = StageRunStatus::Pending;
-            }
+            rec.status = active.clone();
+            continue;
+        }
+        // Billed tokens count as evidence as well as the flag. Reconcile runs
+        // on the persist tick rather than on stage entry, so resting "did this
+        // run" entirely on having been observed as the cursor would report a
+        // stage that somehow slipped between two ticks as never entered - and
+        // calling a stage that did work `Skipped` is a worse error than the one
+        // being fixed. A stage with tokens against its name ran.
+        rec.entered |= rec.prompt_tokens > 0 || rec.completion_tokens > 0;
+        if !rec.entered {
+            rec.status = match run_is_over {
+                true => StageRunStatus::Skipped,
+                false => StageRunStatus::Pending,
+            };
+            continue;
+        }
+        // Entered earlier and not the current stage, so it has been left. A
+        // stage that loops back becomes the cursor again and is re-marked.
+        rec.status = StageRunStatus::Complete;
+        if rec.ended_at.is_none() {
+            rec.ended_at = Some(now);
         }
     }
 }

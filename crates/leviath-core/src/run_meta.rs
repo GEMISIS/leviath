@@ -465,12 +465,24 @@ pub enum StageRunStatus {
     Complete,
     /// Ended in a failure. The run's own `error` carries the message.
     Error,
+    /// The run finished without ever entering this stage.
+    ///
+    /// Distinct from [`Pending`](Self::Pending), which means "not yet" while a
+    /// run is live, and from [`Complete`](Self::Complete), which these used to
+    /// be recorded as: the ledger marked every stage positioned before the
+    /// cursor complete, and a graph does not visit its stages in index order,
+    /// so an error-recovery branch nothing reached was filed as having run
+    /// (#372). Its `region_tokens` is empty because nothing ever wrote it,
+    /// which made the next real stage look like it had written every region
+    /// from zero.
+    Skipped,
 }
 
 impl std::fmt::Display for StageRunStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StageRunStatus::Pending => write!(f, "Pending"),
+            StageRunStatus::Skipped => write!(f, "Skipped"),
             StageRunStatus::Active => write!(f, "Active"),
             StageRunStatus::WaitingInput => write!(f, "WaitingInput"),
             StageRunStatus::Complete => write!(f, "Complete"),
@@ -488,6 +500,16 @@ pub struct StageRecord {
     pub index: usize,
     /// Where this stage stands.
     pub status: StageRunStatus,
+    /// Whether the run has ever actually been in this stage.
+    ///
+    /// Position cannot answer this. A graph blueprint reaches its stages in
+    /// whatever order its edges describe, so "index below the cursor" includes
+    /// every branch the run went past without taking - and reading it as
+    /// "finished" is what filed never-entered stages as `Complete` (#372).
+    /// Sticky once set, so a stage the run has left and may re-enter stays
+    /// entered.
+    #[serde(default)]
+    pub entered: bool,
     /// Input tokens billed while this stage was active. A revisited stage keeps
     /// accumulating rather than resetting, so the run's total is the sum.
     pub prompt_tokens: usize,
@@ -536,6 +558,7 @@ impl StageRecord {
             name,
             index,
             status: StageRunStatus::Pending,
+            entered: false,
             prompt_tokens: 0,
             completion_tokens: 0,
             cached_tokens: 0,
@@ -754,6 +777,7 @@ mod tests {
     #[test]
     fn stage_run_status_display_all_variants() {
         assert_eq!(StageRunStatus::Pending.to_string(), "Pending");
+        assert_eq!(StageRunStatus::Skipped.to_string(), "Skipped");
         assert_eq!(StageRunStatus::Active.to_string(), "Active");
         assert_eq!(StageRunStatus::WaitingInput.to_string(), "WaitingInput");
         assert_eq!(StageRunStatus::Complete.to_string(), "Complete");

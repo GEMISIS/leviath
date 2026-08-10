@@ -1090,6 +1090,7 @@ mod tests {
             name: name.to_string(),
             index,
             status: leviath_core::run_meta::StageRunStatus::Complete,
+            entered: true,
             prompt_tokens: 0,
             completion_tokens: 0,
             cached_tokens: 0,
