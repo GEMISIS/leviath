@@ -13,6 +13,73 @@ same list.
 
 ## Unreleased
 
+## 0.3.2 - 2026-08-10
+
+- Breaking: a run that required a final output and never produced one now ends
+  as an error rather than `complete` (#339). The requirement gate forces past
+  the obligation once its retries are spent, which is right - a later stage may
+  still answer - but nothing downgraded the terminal status, so a run reported
+  success with no `final_output` on disk while `lev result` exited non-zero on
+  the same run. The output-retry budget is also no longer borrowed from the
+  stage's `max_revisits`: those are different questions, and conflating them let
+  a routing setting silently multiply an inference bill, since each retry
+  re-sends the whole stage context and an output stage runs last.
+- Breaking: `read_file` is capped at 256 KiB and says so in the result when it
+  applies (#344). It had no bound at all, so a large file went into its region
+  whole and was either truncated or dropped as `[result omitted]` depending on
+  how full the region already was - a cliff rather than a limit. `shell` has
+  been capped since it existed.
+- Changed: a stage that omits a region from `[stages.X.context.regions]` now
+  hides it rather than destroying it (#341). Omitted regions were dropped from
+  the window, so re-declaring one downstream brought it back empty, and an
+  author had to choose between carrying a large preview through every call of
+  every stage and losing it. `conversation`, `tool_results` and `final_output`
+  stay visible whatever a stage declares.
+- New: `condition = "dead_end"` fires when the graph would otherwise strand -
+  the stage finished and every normal edge's target has spent its
+  `max_revisits` (#346). The alternatives were a plain edge to the output stage,
+  which the model can take at the end of every visit (measured: pipelines
+  collapsed in 10 of 24 runs of one agent and 21 of 36 of another), or nothing,
+  which kills the run with everything it established. `lev validate`'s
+  `dead-end-possible` now counts what the runtime actually consults and stops
+  recommending `condition = "max_iterations"`, which never fires on that path
+  (#340).
+- New: a `checklist` region kind whose items carry state, with `todo_add`,
+  `todo_done` and `todo_note`, and a `require_no_open_items` gate (#342). A
+  pinned region plus `context_append` gives persistence and no state: "compute
+  the fee table" and "~~compute the fee table~~ done" are two different strings,
+  so nothing could count what was left and no gate could ask.
+- New: `gate = { require_region_updated = "plan" }` requires a region to have
+  *changed* during the stage rather than merely to exist (#343). Every other
+  gate can be satisfied by re-emitting what was already written, so a reviewer's
+  rejection could be answered with the same plan until the stage ran out of
+  revisits.
+- New: `lev stages <run-id>` prints the per-stage token ledger, with
+  `--regions` for each stage's per-region high-water marks (#347). The ledger
+  has existed for a while with no CLI reader. It also now records
+  `cache_write_tokens`, without which a stage showing no cache reads could not
+  be told apart from one paying to write a prefix nothing reuses, and Leviath
+  warns once when a stage's per-call prompt passes four times its first call -
+  the shape of a region accumulating without a cap.
+- Fixed: a `[model_capabilities]` entry naming only the field you want to change
+  was silently dropped (#338). Entries are now merged onto the provider's own
+  answer for that model, so `max_context_tokens = 1048576` on its own works and
+  leaves everything else alone. A misspelled key is refused rather than ignored.
+- Fixed: an OpenRouter model this build's table does not name was silently given
+  a 128 000-token window (#337). Percentage region budgets resolve against that,
+  so a `budget = "30%"` region on a 1M-token model was sized at 38 400 instead
+  of 314 573. It now warns once per model, naming the assumed window and the
+  line that corrects it.
+- Fixed: an Anthropic cache breakpoint landing on a tool turn consumed budget
+  and wrote nothing (#345). In an agent run nearly every message is a tool turn,
+  and the breakpoint is chosen by index, so the slot was usually spent on a
+  message that could not carry it - measured against the API, the difference
+  between no cache at all and a 4 458-token prefix. `[providers]
+  anthropic_cache_ttl = "1h"` also makes the extended TTL reachable; it was
+  implemented with no way to select it.
+- Fixed: `lev list --filter` was declared, parsed and never read, so every
+  spelling printed the same thing, and an unknown value was accepted in silence
+  (#327). It now filters, and clap rejects a spelling it does not know.
 - Fixed: `o3` and `o4` could not run at all through the `openai` provider (#335).
   A model declaring no temperature support was sent `temperature: 0.0` rather
   than having the field left out, and the o-series accepts only its own default,
