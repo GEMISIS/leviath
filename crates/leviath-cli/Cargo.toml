@@ -37,7 +37,7 @@ mimalloc-allocator = ["dep:mimalloc", "dep:leviath-alloc", "leviath-alloc/mimall
 # table on purpose: only the composition-root binary should pick an allocator,
 # never a library crate.
 mimalloc = { version = "0.1", optional = true }
-leviath-alloc = { path = "../leviath-alloc", version = "0.3.1", optional = true }
+leviath-alloc = { path = "../leviath-alloc", version = "0.3.2", optional = true }
 leviath-core = { workspace = true }
 leviath-agent-client = { workspace = true }
 leviath-runtime = { workspace = true, features = ["control-socket"] }
