@@ -170,8 +170,8 @@ lev result <run-id>       # the answer, once a run is complete
 Files the agent created are in the workdir you ran it from. See [Outputs](/docs/outputs) for
 structured answers.
 
-Expect one interruption: the agent **stops and asks** before it writes a file or runs a shell
-command. Answer in `lev dash` (select the run, `Enter`, then `i`) or with
+Expect to be asked things along the way. The agent **stops and waits** before it writes a file or
+runs a shell command. Answer in `lev dash` (select the run, `Enter`, then `i`) or with
 [`lev respond`](/docs/interaction), or pass `--yolo` to pre-approve everything for an unattended
 run.
 
