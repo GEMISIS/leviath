@@ -48,6 +48,19 @@ same list.
   and says to use a path inside it. "Denied" on its own sends an agent looking
   for a different way out, and the turns it spends doing that are charged to the
   stage's iteration budget.
+- New: `gate = { require_regions = ["plan"] }` holds an edge until every named
+  region has content, ANDed with the gate's other conditions (#371). `region`
+  reads as though it says this and does not: it is one of several *alternative*
+  ways to satisfy `require_modifications`, so a stage that wrote any file at all
+  satisfied it with the named region still empty. That is the right shape for
+  what `region` is for - a restart-durable stand-in for per-stage counters - and
+  there was no way to express the conjunction.
+- New: `flags.required_regions_abandoned` in `meta.json` names any
+  `required = true` region a stage gave up on after its re-run budget (#371).
+  The mechanism logged and recorded nothing, so a run whose agent wrote its plan
+  and one where it was asked twice and moved on both finished `complete` with
+  nothing to tell them apart. Its counterpart `flags.gates_forced` already
+  counted forced transitions.
 
 - Breaking: a blueprint value that is not one of the spellings a setting
   accepts is refused, naming what is valid. Four settings took anything and

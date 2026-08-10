@@ -72,6 +72,7 @@ const GATE_KEYS: &[&str] = &[
     "require_modifications",
     "require_no_open_items",
     "require_region_updated",
+    "require_regions",
     "tools",
 ];
 
@@ -1033,6 +1034,12 @@ pub(super) fn parse_transition_gate(
     }
     if let Some(region) = table.get("require_region_updated").and_then(|v| v.as_str()) {
         gate.require_region_updated = Some(region.to_string());
+    }
+    if let Some(regions) = table.get("require_regions").and_then(|v| v.as_array()) {
+        gate.require_regions = regions
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
     }
     if let Some(region) = table.get("require_no_open_items").and_then(|v| v.as_str()) {
         gate.require_no_open_items = Some(region.to_string());

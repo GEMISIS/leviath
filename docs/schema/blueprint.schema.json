@@ -467,8 +467,24 @@
           "additionalProperties": false,
           "properties": {
             "require_modifications": { "type": "boolean" },
+            "require_regions": {
+              "type": "array",
+              "description": "Regions that must all hold content before this edge may be taken. ANDed with every other condition on the gate, unlike `region`.",
+              "items": { "type": "string" }
+            },
+            "require_region_updated": {
+              "type": "string",
+              "description": "A region that must have changed during this stage, not merely be present. For a revise loop, where re-emitting the same content would satisfy a presence check."
+            },
+            "require_no_open_items": {
+              "type": "string",
+              "description": "A checklist region that must have no open items before this edge is taken."
+            },
             "message": { "type": "string" },
-            "region": { "type": "string" },
+            "region": {
+              "type": "string",
+              "description": "An alternative way to satisfy require_modifications: the gate also passes when this region is non-empty. A restart-durable stand-in for the per-stage counters, not a requirement - use require_regions for that."
+            },
             "tools": { "type": "array", "items": { "type": "string" } },
             "max_attempts": { "type": "integer", "minimum": 1 }
           }

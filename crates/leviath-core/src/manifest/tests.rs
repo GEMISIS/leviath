@@ -4047,11 +4047,11 @@ fn parse_manifest_rejects_an_unknown_tool_routing_key() {
 #[test]
 fn parse_manifest_rejects_an_unknown_gate_key() {
     let err = parse_manifest(&keys_fixture(
-        "[stages.work.transitions.work]\ncondition = \"always\"\ngate = { require_regions = \"bulk\" }",
+        "[stages.work.transitions.work]\ncondition = \"always\"\ngate = { require_writes = \"bulk\" }",
     ))
     .unwrap_err()
     .to_string();
-    assert!(err.contains("unknown key 'require_regions'"), "got: {err}");
+    assert!(err.contains("unknown key 'require_writes'"), "got: {err}");
 }
 
 #[test]
@@ -4491,6 +4491,43 @@ mode = "autonomous"
     assert_eq!(gate.require_region_updated.as_deref(), Some("plan"));
     assert_eq!(gate.message.as_deref(), Some("Change it first."));
     // And it does not silently turn on the other gate.
+    assert!(!gate.require_modifications);
+}
+
+/// `require_regions` parses onto the edge gate as a list.
+///
+/// The key exists because `region` reads as though it says this and does not:
+/// it is one of several *alternative* ways to satisfy `require_modifications`,
+/// so a stage that wrote any file at all satisfied it with the named region
+/// still empty (#371).
+#[test]
+fn parse_manifest_reads_a_required_regions_gate() {
+    let toml = r#"
+[agent]
+name = "planning"
+
+[context.regions]
+plan = { kind = "pinned", max_tokens = 2000 }
+risks = { kind = "pinned", max_tokens = 2000 }
+
+[stages.plan]
+mode = "autonomous"
+
+[stages.plan.transitions.compute]
+gate = { require_regions = ["plan", "risks"] }
+
+[stages.compute]
+mode = "autonomous"
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    let gate = bp
+        .find_stage("plan")
+        .and_then(|s| s.transitions.as_ref())
+        .and_then(|t| t.get("compute"))
+        .and_then(|e| e.gate.as_ref())
+        .expect("the gate survives");
+    assert_eq!(gate.require_regions, vec!["plan", "risks"]);
+    // And it does not silently turn on the condition it exists to replace.
     assert!(!gate.require_modifications);
 }
 

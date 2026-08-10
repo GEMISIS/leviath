@@ -331,6 +331,48 @@ pub(crate) fn gate_blocks(
             }));
         }
     }
+    // Conjunctive, and checked before `require_modifications` so it holds
+    // whatever else the gate asks for. `gate.region` below is one of several
+    // *alternative* ways to satisfy `require_modifications`, which is why it
+    // cannot express "do not leave without writing this" (#371).
+    let missing: Vec<&str> = gate
+        .require_regions
+        .iter()
+        .filter(|name| {
+            match window.get_region(name) {
+                Some(region) => region.content.is_empty(),
+                // Not held by the window at all. `lev validate` refuses a gate
+                // naming a region no stage declares, so this means a layout
+                // moved underneath the edge; blocking would strand the run over
+                // something no amount of work could satisfy.
+                None => {
+                    tracing::warn!(
+                        stage = %stage.name,
+                        region = %name,
+                        "gate requires a region this stage's window does not hold; \
+                         letting the transition through"
+                    );
+                    false
+                }
+            }
+        })
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        let listed = missing.join(", ");
+        return spend_gate_attempt(
+            gate,
+            stage,
+            progress,
+            gate.message.clone().unwrap_or_else(|| {
+                format!(
+                    "This stage is not finished: the `{listed}` region is still empty. \
+                     Write it with context_write before moving on - later stages read \
+                     from it, and there is nothing there yet."
+                )
+            }),
+        );
+    }
     if !gate.require_modifications {
         return GateDecision::Pass;
     }
