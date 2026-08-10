@@ -34,6 +34,29 @@ pub struct OpenRouterProvider {
     /// Models already reported as falling back, so the warning is once per
     /// model per process rather than once per inference.
     warned_unknown: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+
+    /// What OpenRouter's own `/models` endpoint says each model's window is,
+    /// filled once by [`Provider::prime_capabilities`].
+    ///
+    /// OpenRouter fronts hundreds of models and this build's table names a few
+    /// dozen, so the table is out of date the day it ships and an unlisted
+    /// model silently got a conservative 128 000 tokens. Region budgets are
+    /// percentages of the window, so that sized a `budget = "30%"` region on a
+    /// 1M-token model at 38 400 instead of 314 572 (#337, #360).
+    ///
+    /// Empty until primed, and empty forever if the endpoint could not be
+    /// reached - both mean "fall back to the built-in table", which is what
+    /// happened before this existed.
+    api_windows: std::sync::Arc<std::sync::Mutex<HashMap<String, ApiWindow>>>,
+}
+
+/// What `/models` reports about one model's sizes.
+#[derive(Debug, Clone, Copy)]
+struct ApiWindow {
+    /// The context window OpenRouter will actually accept for this model.
+    context_length: usize,
+    /// The largest completion it will return, when the endpoint says.
+    max_completion_tokens: Option<usize>,
 }
 
 impl OpenRouterProvider {
@@ -46,6 +69,7 @@ impl OpenRouterProvider {
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             warned_unknown: Default::default(),
+            api_windows: Default::default(),
         }
     }
 
@@ -61,6 +85,7 @@ impl OpenRouterProvider {
             rate_limiter,
             capability_overrides: HashMap::new(),
             warned_unknown: Default::default(),
+            api_windows: Default::default(),
         }
     }
 
@@ -78,6 +103,7 @@ impl OpenRouterProvider {
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
             capability_overrides: overrides,
             warned_unknown: Default::default(),
+            api_windows: Default::default(),
         }
     }
 
@@ -352,8 +378,64 @@ impl OpenRouterProvider {
     ///
     /// Reported once per model rather than per inference, and it names the
     /// stanza that fixes it, which is now a partial entry (#338).
+    /// `base` with the sizes OpenRouter reported for this model, if it did.
+    ///
+    /// Only the two sizes. The rest of `ModelCapabilities` is about how a
+    /// request must be *shaped* - whether temperature is accepted, whether
+    /// tools work - and `/models` describes what a model is, not the quirks of
+    /// talking to it. Taking sizes from the live answer and shape from the
+    /// compiled table gives each the question it can answer.
+    fn api_corrected(&self, model: &str, base: ModelCapabilities) -> ModelCapabilities {
+        let windows = leviath_core::sync::lock(&self.api_windows);
+        let Some(api) = windows.get(model) else {
+            return base;
+        };
+        ModelCapabilities {
+            max_context_tokens: api.context_length,
+            max_output_tokens: api.max_completion_tokens.unwrap_or(base.max_output_tokens),
+            ..base
+        }
+    }
+
+    /// GET `/models`, shared by [`Provider::list_models`] and
+    /// [`Provider::prime_capabilities`] so the two cannot disagree about what
+    /// the endpoint is or how its failures read.
+    async fn fetch_models_json(&self) -> Result<serde_json::Value> {
+        let response = self
+            .client
+            .get(format!("{}/models", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await
+            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            return Err(ProviderError::ApiError(format!(
+                "HTTP {}: {}",
+                status, error_body
+            )));
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))
+    }
+
     fn warn_if_unknown(&self, model: &str, resolved: &ModelCapabilities) {
         if resolved.max_context_tokens != FALLBACK_CAPABILITIES.max_context_tokens {
+            return;
+        }
+        // The test is "did we end up on the fallback number", which cannot tell
+        // a guess apart from a model that genuinely has a 128 000-token window.
+        // If the API told us about this model, we are not guessing, whatever
+        // the number came out as.
+        if leviath_core::sync::lock(&self.api_windows).contains_key(model) {
             return;
         }
         let mut warned = leviath_core::sync::lock(&self.warned_unknown);
@@ -474,7 +556,9 @@ impl Provider for OpenRouterProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
-        let base = builtin_capabilities(model);
+        // Three answers, narrowest first: what the user wrote, what OpenRouter
+        // says, what this build was compiled with.
+        let base = self.api_corrected(model, builtin_capabilities(model));
         // Merged, not swapped: an entry names only what it corrects.
         match self.capability_overrides.get(model) {
             Some(o) => o.apply_to(base),
@@ -485,31 +569,45 @@ impl Provider for OpenRouterProvider {
         }
     }
 
-    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        let response = self
-            .client
-            .get(format!("{}/models", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .send()
-            .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+    async fn prime_capabilities(&self) -> Result<()> {
+        let body = self.fetch_models_json().await?;
+        let data = body
+            .get("data")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| ProviderError::InvalidResponse("Missing 'data' array".to_string()))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(ProviderError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
+        let mut windows = HashMap::with_capacity(data.len());
+        for entry in data {
+            let Some(id) = entry.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            // No `context_length` means the endpoint is telling us nothing
+            // useful; skipping leaves the built-in table in charge rather than
+            // recording a guess that outranks it.
+            let Some(context_length) = entry.get("context_length").and_then(|v| v.as_u64()) else {
+                continue;
+            };
+            windows.insert(
+                id.to_string(),
+                ApiWindow {
+                    context_length: context_length as usize,
+                    max_completion_tokens: entry
+                        .get("top_provider")
+                        .and_then(|tp| tp.get("max_completion_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as usize),
+                },
+            );
         }
 
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        let count = windows.len();
+        *leviath_core::sync::lock(&self.api_windows) = windows;
+        tracing::debug!(models = count, "learned OpenRouter model windows");
+        Ok(())
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let body = self.fetch_models_json().await?;
 
         let data = body
             .get("data")
@@ -1336,6 +1434,171 @@ mod tests {
         use tokio_stream::StreamExt;
         let chunk = stream.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "hi");
+    }
+
+    // ─── Windows come from the API, not the compiled table (#360) ────────────
+
+    /// The reported case, end to end: a model this build's table does not name,
+    /// which OpenRouter says has a 1M-token window. Before priming it resolved
+    /// to the 128 000-token fallback, and every percentage region budget was
+    /// sized against that.
+    #[tokio::test]
+    async fn priming_takes_the_window_from_the_models_api() {
+        let body = br#"{"data":[{"id":"moonshotai/kimi-k3","context_length":1048576,"top_provider":{"max_completion_tokens":32768}}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+
+        let before = provider.capabilities("moonshotai/kimi-k3");
+        assert_eq!(
+            before.max_context_tokens, 128_000,
+            "unprimed, the conservative fallback still applies"
+        );
+
+        provider.prime_capabilities().await.expect("primes");
+
+        let after = provider.capabilities("moonshotai/kimi-k3");
+        assert_eq!(after.max_context_tokens, 1_048_576);
+        assert_eq!(after.max_output_tokens, 32_768);
+    }
+
+    /// Sizes come from the API; how a request must be shaped stays with the
+    /// compiled table, which is the only thing that knows it.
+    #[tokio::test]
+    async fn priming_leaves_request_shape_alone() {
+        let body = br#"{"data":[{"id":"openai/o3","context_length":200000}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+
+        let before = provider.capabilities("openai/o3");
+        provider.prime_capabilities().await.expect("primes");
+        let after = provider.capabilities("openai/o3");
+
+        assert_eq!(after.max_context_tokens, 200_000, "the size moved");
+        assert_eq!(
+            after.supports_temperature, before.supports_temperature,
+            "the shape did not"
+        );
+        assert_eq!(after.supports_tools, before.supports_tools);
+    }
+
+    /// A `[model_capabilities]` entry still wins. The user's own number is the
+    /// last word - it is how someone corrects an API that is itself wrong.
+    #[tokio::test]
+    async fn an_explicit_override_outranks_the_api() {
+        let body = br#"{"data":[{"id":"some/model","context_length":1048576}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "some/model".to_string(),
+            ModelCapabilityOverride {
+                max_context_tokens: Some(64_000),
+                ..Default::default()
+            },
+        );
+        let mut provider = OpenRouterProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+            overrides,
+            None,
+        );
+        provider.base_url = url;
+
+        provider.prime_capabilities().await.expect("primes");
+        assert_eq!(
+            provider.capabilities("some/model").max_context_tokens,
+            64_000
+        );
+    }
+
+    /// An entry with no `context_length` is skipped rather than recorded, so
+    /// the built-in table stays in charge instead of being outranked by a
+    /// guess.
+    #[tokio::test]
+    async fn a_model_without_a_context_length_is_not_recorded() {
+        let body =
+            br#"{"data":[{"id":"openai/gpt-4o"},{"id":"other/model","context_length":300000}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+
+        let compiled = provider.capabilities("openai/gpt-4o").max_context_tokens;
+        provider.prime_capabilities().await.expect("primes");
+
+        assert_eq!(
+            provider.capabilities("openai/gpt-4o").max_context_tokens,
+            compiled,
+            "the table still answers for a model the API said nothing about"
+        );
+        assert_eq!(
+            provider.capabilities("other/model").max_context_tokens,
+            300_000,
+            "and the one it did describe is recorded"
+        );
+    }
+
+    /// An unreachable endpoint degrades to the built-in table, which is the
+    /// behaviour that existed before priming did.
+    #[tokio::test]
+    async fn a_failed_prime_leaves_the_builtin_table_in_charge() {
+        let url = spawn_mock_server(500, "Internal Server Error", b"boom").await;
+        let provider = provider_with_url(url);
+        assert!(provider.prime_capabilities().await.is_err());
+        assert_eq!(
+            provider
+                .capabilities("moonshotai/kimi-k3")
+                .max_context_tokens,
+            128_000
+        );
+    }
+
+    /// A body that is not the documented shape is an error, not a silently
+    /// empty table that reads as "the API said nothing".
+    #[tokio::test]
+    async fn priming_rejects_a_body_with_no_data_array() {
+        let url = spawn_mock_server(200, "OK", br#"{"models":[]}"#).await;
+        let provider = provider_with_url(url);
+        let err = provider.prime_capabilities().await.unwrap_err();
+        assert!(err.to_string().contains("data"), "got: {err}");
+    }
+
+    /// A model the API describes as having exactly the fallback window is not
+    /// a guess, and must not be reported as one. The warning tests the
+    /// resolved number, which cannot tell those apart on its own.
+    #[tokio::test]
+    async fn a_model_the_api_reports_at_the_fallback_size_is_not_warned_about() {
+        let _guard = always_on_tracing_guard();
+        let body = br#"{"data":[{"id":"some/128k-model","context_length":128000}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+        provider.prime_capabilities().await.expect("primes");
+
+        assert_eq!(
+            provider.capabilities("some/128k-model").max_context_tokens,
+            128_000
+        );
+        assert!(
+            !leviath_core::sync::lock(&provider.warned_unknown).contains("some/128k-model"),
+            "the API answered for this model, so nothing was assumed"
+        );
+        // The control: a model it said nothing about is still reported.
+        let _ = provider.capabilities("nobody/knows");
+        assert!(
+            leviath_core::sync::lock(&provider.warned_unknown).contains("nobody/knows"),
+            "a model with no answer anywhere is still called out"
+        );
+    }
+
+    /// An entry with no `id` cannot be looked up by one, so it is skipped.
+    #[tokio::test]
+    async fn a_model_without_an_id_is_skipped() {
+        let body =
+            br#"{"data":[{"context_length":999},{"id":"real/model","context_length":300000}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+        provider.prime_capabilities().await.expect("primes");
+        assert_eq!(
+            provider.capabilities("real/model").max_context_tokens,
+            300_000
+        );
     }
 
     #[tokio::test]

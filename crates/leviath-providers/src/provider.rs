@@ -884,6 +884,23 @@ pub trait Provider: Send + Sync {
     /// Get the capabilities of the given model.
     fn capabilities(&self, model: &str) -> ModelCapabilities;
 
+    /// Learn what this provider's own API says about its models, before any
+    /// inference asks.
+    ///
+    /// [`Self::capabilities`] is synchronous and called on the inference path,
+    /// so it cannot go and ask. A provider whose real answer lives behind a
+    /// network call needs somewhere to fetch it once, and this is that
+    /// somewhere: the daemon awaits it at start-up, beside the other warm-up
+    /// steps, so the first run already has the answer rather than racing it.
+    ///
+    /// Providers whose capability table is compiled in need nothing here, which
+    /// is why this defaults to doing nothing. Failure is the caller's to
+    /// tolerate: a provider that cannot reach its own API should degrade to its
+    /// built-in table, not stop a daemon from starting.
+    async fn prime_capabilities(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// List models available from this provider.
     ///
     /// Returns an empty list by default; providers may override to enumerate
@@ -1629,6 +1646,16 @@ mod tests {
         fn capabilities(&self, _model: &str) -> ModelCapabilities {
             ModelCapabilities::default()
         }
+    }
+
+    /// A provider whose capability table is compiled in has nothing to fetch,
+    /// and must not have to say so.
+    #[tokio::test]
+    async fn default_prime_capabilities_does_nothing_and_succeeds() {
+        MinimalProvider
+            .prime_capabilities()
+            .await
+            .expect("a provider that needs no priming reports success");
     }
 
     #[tokio::test]

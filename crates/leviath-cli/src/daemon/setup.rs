@@ -94,6 +94,14 @@ pub async fn setup_daemon_host(
     .await
 }
 
+/// How long one provider gets to report its model list at start-up.
+///
+/// Short on purpose: this is the daemon's start-up path, and the answer is an
+/// optimisation over the table compiled into this build, not a requirement. A
+/// provider that cannot answer in this long is better skipped than allowed to
+/// hold up every command waiting on the daemon.
+const PROVIDER_PRIME_TIMEOUT_SECS: u64 = 10;
+
 /// [`setup_daemon_host`], with outbound-client construction injected so the
 /// start-up failure path is reachable from a test.
 pub async fn setup_daemon_host_with(
@@ -111,6 +119,16 @@ pub async fn setup_daemon_host_with(
         &config,
         build_client,
     )?;
+    // Ask each provider what its models are before anything runs on one.
+    // `capabilities()` is synchronous and sits on the inference path, so a
+    // provider whose real answer needs a network call has to be told here or
+    // never - and "never" meant an OpenRouter model this build's table does not
+    // name silently got a 128 000-token window, with every percentage region
+    // budget sized against it (#360). Awaited rather than spawned so the first
+    // run has the answer instead of racing it; failures are warnings.
+    providers
+        .prime_capabilities(std::time::Duration::from_secs(PROVIDER_PRIME_TIMEOUT_SECS))
+        .await;
     // MCP connections are shared across agents; the workdir here only seeds the
     // (discarded) built-ins - each agent gets its own over its own workdir.
     let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;

@@ -45,6 +45,18 @@ same list.
   every command reads that file, so refusing to load it over one stale key
   would take the CLI down rather than the one thing the key was meant to
   affect.
+- Fixed: an OpenRouter model's context window comes from OpenRouter, not from
+  the table compiled into this build (#360, and the half of #337 that was left
+  undone). The daemon reads `/models` once at start-up and uses the
+  `context_length` it reports; the 128 000-token fallback now applies only to a
+  model that neither the API nor the table describes. Region budgets are
+  percentages of the window, so a `budget = "30%"` region on a 1M-token model
+  was being sized at 38 400 instead of 314 572, silently. A
+  `[model_capabilities]` entry still outranks both, and only the two sizes come
+  from the API - whether a model accepts temperature or tools is about the
+  shape of a request, which the compiled table is the only thing that knows.
+  Reading it is bounded and never fatal: a provider that cannot answer in ten
+  seconds keeps the built-in table and the daemon starts anyway.
 
 ## 0.3.2 - 2026-08-10
 
