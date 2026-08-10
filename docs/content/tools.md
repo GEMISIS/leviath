@@ -111,6 +111,9 @@ back into the system prompt on later turns.
 | `context_read` | Read a section, or a specific keyed entry within it. | `region`, `key` (optional) |
 | `context_delete` | Remove a specific keyed entry from a section. | `region`, `key` |
 | `context_list` | List sections with their token counts and entry counts. | `region` (optional) |
+| `todo_add` | Add an open item to a [checklist region](/docs/context#tracking-work-with-a-checklist), returning its id. | `region`, `item` |
+| `todo_done` | Tick a checklist item off. | `region`, `id` |
+| `todo_note` | Record a note against an item without closing it. | `region`, `id`, `note` |
 
 ## Final output
 
@@ -260,6 +263,7 @@ With nothing configured, tools fall back to these:
 | `read_file`, `read_files`, `list_dir` | `allow` |
 | `write_file`, `edit_file`, `shell` (and its `bash` alias) | `ask` |
 | `context_read`, `context_write`, `context_append`, `context_delete`, `context_list` | `allow` |
+| `todo_add`, `todo_done`, `todo_note` | `allow` |
 | `ask_user_text`, `ask_user_choice`, `ask_user_confirm`, `edit_document` | `allow` |
 | `spawn_agent`, `check_agent`, `wait_for_agent`, `send_to_agent`, `kill_agent` | `allow` |
 | Everything else, built-in or MCP | `ask` |
