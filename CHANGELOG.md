@@ -13,6 +13,26 @@ same list.
 
 ## Unreleased
 
+- Breaking: a blueprint value that is not one of the spellings a setting
+  accepts is refused, naming what is valid. Four settings took anything and
+  quietly used a default instead: `tool_permissions` values, `on_worker_failure`,
+  an interaction point's `style`, and a sliding window's `strategy`. The first
+  is the sharp one - anything unrecognised resolved to `ask`, so a misspelled
+  `deny` produced a prompt where a refusal was written, and a prompt can be
+  answered by a session grant or `--yolo`. The same typo in `config.toml` has
+  always been refused, because that side deserializes into an enum; this closes
+  the gap the other way round.
+- Fixed: an unknown key in `config.toml` is reported wherever it sits, not only
+  at the top level (#365). `[limits] max_concurrent_tool` used to be accepted in
+  silence. Keys are now judged by asking serde - deserialize, serialize back,
+  and report what did not survive - so this needs no list to maintain and stays
+  right as fields come and go. It also leaves `[model_providers.<name>]` alone,
+  which deliberately forwards unrecognised keys to a Rhai script.
+- New: `lev doctor` reports the same unread keys, for when the start-up warning
+  scrolls past, and names a `[rate_limits.<provider>]` entry whose provider does
+  not exist - a case the key check cannot see, since that table accepts any name
+  and a misspelled provider simply throttles nothing.
+
 - Breaking: a blueprint key the parser does not read is now refused, naming
   what is valid, in `[stages.X]`, `[stages.X.context]`,
   `[stages.X.tool_routing]`, a transition edge and its `gate` (#362). The

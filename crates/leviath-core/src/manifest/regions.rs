@@ -98,7 +98,16 @@ pub(super) fn parse_region_layout(
                             .unwrap_or(10) as usize;
                         EvictionStrategy::Compact { compact_count }
                     }
-                    _ => EvictionStrategy::PerItem,
+                    Some("per_item") | None => EvictionStrategy::PerItem,
+                    // Unknown used to mean per_item, so `strategy = "per-item"`
+                    // or a mistyped `compact` left the region evicting one
+                    // entry at a time with no sign the setting was read.
+                    Some(other) => {
+                        return Err(Error::Other(format!(
+                            "region '{region_name}': strategy \"{other}\" is not \
+                             valid (valid: per_item, bulk, compact)"
+                        )));
+                    }
                 };
                 RegionKind::SlidingWindow {
                     max_items,

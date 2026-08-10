@@ -163,7 +163,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     if let Some(tp_table) = parsed.get("tool_permissions").and_then(|v| v.as_table()) {
         blueprint
             .metadata
-            .extend(tool_permission_metadata(tp_table));
+            .extend(tool_permission_metadata(tp_table)?);
     }
 
     // Parse file tracking config: [context.file_tracking]

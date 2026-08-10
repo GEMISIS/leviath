@@ -233,7 +233,9 @@ stage control access:
   not listed here is invisible to the LLM. Names may use aliases (e.g. `bash` for `shell`).
 - **`tool_permissions`**: a per-tool map whose values are `allow`, `ask`, or `deny`. `allow` runs
   the call outright, `ask` requires user approval first, and `deny` blocks it. Stage-level entries
-  are narrower than agent-level `[tool_permissions]` and wider than launch-time flags.
+  are narrower than agent-level `[tool_permissions]` and wider than launch-time flags. Any other
+  value is a load error: a misspelled `deny` used to resolve to `ask`, which is the more permissive
+  of the two, so the author of the typo got a prompt where they had written a refusal.
 
 ```toml
 [stages.implement]

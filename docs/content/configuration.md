@@ -442,6 +442,27 @@ tokens_per_minute   = 40000
 This shapes request *rate*. `[limits] max_concurrent_inferences` bounds *concurrency*. Both apply.
 Script providers configure theirs under `[model_providers.<name>.rate_limit]` instead.
 
+## Keys nothing reads
+
+A key Leviath does not recognize is named at start-up rather than ignored, wherever it sits:
+
+```
+WARN config.toml has keys nothing reads; they are being ignored.
+     keys=limits.max_concurrent_tool, cache, providers.anthropic_cach_ttl
+```
+
+`lev doctor` reports the same list, for when that scrolls past. It also names a
+`[rate_limits.<provider>]` entry whose provider does not exist, which is a case the key check cannot
+see: that table takes any name, so a misspelled provider deserializes perfectly and throttles
+nothing.
+
+This is a warning, not an error. Every command reads `config.toml`, so one stale key should not take
+the CLI down - unlike a blueprint, which is authored and validated deliberately and fails on an
+unknown key.
+
+The one place unrecognized keys are *kept*: `[model_providers.<name>]` forwards anything it does not
+recognize to the Rhai script, so those are read and never reported.
+
 ## `[model_capabilities.<model_id>]`
 
 Per-model corrections to the provider's built-in capability table. Useful for a local or

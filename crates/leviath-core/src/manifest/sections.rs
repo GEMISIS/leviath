@@ -78,19 +78,30 @@ pub(super) fn parse_safe_commands(
 }
 
 /// Flatten `[tool_permissions]` into the `tool_perm:<tool>` metadata keys the
-/// permission layer reads. A non-string policy is dropped rather than rejected:
-/// the value's meaning is validated where it is resolved.
+/// permission layer reads.
+///
+/// This used to drop a value it could not read and say "the value's meaning is
+/// validated where it is resolved". It was not: resolution maps anything it
+/// does not recognise to `ask`, so a misspelled `deny` became a prompt.
 pub(super) fn tool_permission_metadata(
     table: &toml::value::Table,
-) -> impl Iterator<Item = (String, serde_json::Value)> + use<'_> {
-    table.iter().filter_map(|(tool_name, policy_val)| {
-        policy_val.as_str().map(|policy| {
-            (
+) -> Result<Vec<(String, serde_json::Value)>> {
+    table
+        .iter()
+        .map(|(tool_name, policy_val)| {
+            let policy = policy_val.as_str().ok_or_else(|| {
+                Error::Other(format!(
+                    "[tool_permissions]: {tool_name} must be one of {}",
+                    TOOL_POLICIES.join(", ")
+                ))
+            })?;
+            validate_tool_policy("[tool_permissions]", tool_name, policy)?;
+            Ok((
                 format!("tool_perm:{}", tool_name),
                 serde_json::Value::String(policy.to_string()),
-            )
+            ))
         })
-    })
+        .collect()
 }
 
 /// Parse `[context.file_tracking]`. Tracking both directions into a `files`

@@ -88,6 +88,30 @@ const EDGE_KEYS: &[&str] = &[
     "transform_config",
 ];
 
+/// The three policies a `tool_permissions` entry may name.
+pub(super) const TOOL_POLICIES: &[&str] = &["allow", "ask", "deny"];
+
+/// Refuse a policy nothing will act on.
+///
+/// Resolution maps any unrecognised spelling to `ask`, so `shell = "denied"`
+/// read as a prompt rather than a refusal - and `ask` is the *more* permissive
+/// of the two, approvable by a session grant or `--yolo`. An author who
+/// misspells a denial gets the opposite of what they wrote, in the layer where
+/// that matters most.
+///
+/// The same typo in `config.toml` has always been refused, because that side
+/// deserializes into an enum. This closes the gap the other way round.
+pub(super) fn validate_tool_policy(where_: &str, tool: &str, policy: &str) -> Result<()> {
+    if TOOL_POLICIES.contains(&policy.to_lowercase().as_str()) {
+        return Ok(());
+    }
+    Err(Error::Other(format!(
+        "{where_}: tool_permissions.{tool} = \"{policy}\" is not a policy \
+         (valid: {})",
+        TOOL_POLICIES.join(", ")
+    )))
+}
+
 /// Refuse a key the parser does not read.
 ///
 /// The manifest parser walks the TOML by hand, so every unrecognised key was
@@ -444,11 +468,17 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         .and_then(|v| v.as_table())
     {
         for (tool_name, policy_val) in tp_table {
-            if let Some(policy_str) = policy_val.as_str() {
-                stage
-                    .tool_permissions
-                    .insert(tool_name.clone(), policy_str.to_string());
-            }
+            let policy_str = policy_val.as_str().ok_or_else(|| {
+                Error::Other(format!(
+                    "stage '{stage_name}': tool_permissions.{tool_name} must be \
+                     one of {}",
+                    TOOL_POLICIES.join(", ")
+                ))
+            })?;
+            validate_tool_policy(&format!("stage '{stage_name}'"), tool_name, policy_str)?;
+            stage
+                .tool_permissions
+                .insert(tool_name.clone(), policy_str.to_string());
         }
     }
 
@@ -652,7 +682,18 @@ pub(super) fn apply_stage_mode(
                             crate::blueprint::InteractionStyle::MultipleChoice
                         }
                         Some("confirm") => crate::blueprint::InteractionStyle::Confirm,
-                        _ => crate::blueprint::InteractionStyle::FreeText,
+                        Some("free_text") | None => crate::blueprint::InteractionStyle::FreeText,
+                        // Its neighbour `unattended` has always rejected an
+                        // unknown value; this arm quietly turned a mistyped
+                        // `confirm` into a free-text question with the options
+                        // still listed and nothing enforcing them.
+                        Some(other) => {
+                            return Err(Error::Other(format!(
+                                "stage '{stage_name}': interaction point style \
+                                 \"{other}\" is not valid (valid: free_text, \
+                                 multiple_choice, confirm)"
+                            )));
+                        }
                     };
                     // Accept either "options" or "choices" key
                     let pt_options: Vec<String> = pt
@@ -735,8 +776,17 @@ pub(super) fn apply_stage_mode(
                 .and_then(|v| v.as_str())
             {
                 Some("fail_all") => crate::blueprint::WorkerFailurePolicy::FailAll,
-                // "continue" / missing / unknown all mean continue.
-                _ => crate::blueprint::WorkerFailurePolicy::Continue,
+                Some("continue") | None => crate::blueprint::WorkerFailurePolicy::Continue,
+                // Unknown used to mean continue, so a misspelled `fail_all`
+                // let a fan-out swallow every worker failure - the opposite of
+                // what was written, and invisible in a run that then merged
+                // nothing.
+                Some(other) => {
+                    return Err(Error::Other(format!(
+                        "stage '{stage_name}': on_worker_failure = \"{other}\" \
+                         is not a policy (valid: continue, fail_all)"
+                    )));
+                }
             };
             let config = crate::blueprint::FanOutConfig {
                 worker_agent: str_field("worker_agent"),
