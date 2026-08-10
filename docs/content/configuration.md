@@ -247,9 +247,7 @@ allow = ["~/.leviath/runs", "glob:~/design-docs/**"]
 
 An agent's declarations mean nothing until one of these grants lands, so `lev validate <agent>`
 checks each declared entry against this file and prints the block above, filled in, for whatever it
-does not find. `lev list` and `lev ps` carry the same counts. If you wrote blueprints against a
-build where the blueprint allowlist stood on its own, read the
-[upgrade note](/docs/security#upgrading-from-011).
+does not find. `lev list` and `lev ps` carry the same counts.
 
 ## Tool permissions
 

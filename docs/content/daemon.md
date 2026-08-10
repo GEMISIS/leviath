@@ -25,13 +25,23 @@ flowchart TB
   end
   RUN & DASH & SERVE -->|"control socket<br/>(peer-cred checked)"| DAEMON
   subgraph DAEMON["Daemon (one process)"]
-    WORLD["Shared ECS world"]
+    WORLD["Shared world<br/>every agent is a row here"]
     WORLD --- A1["agent"]
     WORLD --- A2["agent"]
     WORLD --- A3["sub-agent"]
+    POOLS["Inference pools<br/>shared across agents"]
+    LANE["Tool lane<br/>shared across agents"]
+    WORLD -->|"builds each request"| POOLS
+    WORLD -->|"runs each tool batch"| LANE
   end
-  DAEMON -->|inference| PROV["LLM providers"]
+  POOLS -->|inference| PROV["LLM providers"]
+  LANE -->|"shell, files, MCP"| TOOLS["Tools, in the run's workdir"]
+  DAEMON -->|"journal, context, outputs"| DISK["Disk"]
 ```
+
+Agents never talk to a provider or run a tool themselves. The world builds each request and each
+tool batch on their behalf, which is what lets one process share connections, rate limits, and tool
+capacity across every run instead of duplicating them per agent.
 
 You do not normally start it yourself. It starts the first time a command needs it.
 
@@ -154,8 +164,7 @@ assigned to it and turns it into an ordinary finished run:
 wedge_timeout_secs = 300
 ```
 
-It is `0`, meaning off, by default. It fails runs, and that should be your choice rather than
-something an upgrade does to you.
+It is `0`, meaning off, by default, because it fails runs and that should be your choice.
 
 It never fires on a run that is merely slow. An agent waiting on the model, on a tool, on its
 sub-agents, or on a person is exempt however long it takes. If it does fire, the run's error says

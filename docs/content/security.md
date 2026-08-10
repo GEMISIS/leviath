@@ -20,6 +20,21 @@ Leviath gives you three separate controls, and you can use as few or as many as 
 | Read paths | Which files can it see? | [Reading outside the workdir](#reading-outside-the-workdir) |
 | Taint tracking | Can it send what it read somewhere? | [Taint tracking](#taint-tracking-experimental) |
 
+```mermaid
+flowchart LR
+  C["A tool call"] --> P{"Permission:<br/>allow, ask, or deny"}
+  P -->|deny| X["Refused"]
+  P -->|ask| U["You answer"]
+  U -->|no| X
+  P -->|allow| R{"Reads a path<br/>outside the workdir?"}
+  U -->|yes| R
+  R -->|"not granted"| X
+  R -->|"granted or inside"| T{"Sends data out<br/>above its clearance?"}
+  T -->|yes| U2["Taint gate asks you"]
+  T -->|no| RUN["Runs, in a sandbox<br/>if you configured one"]
+  U2 --> RUN
+```
+
 Tool permissions are a fourth, and they live in [Built-in tools](/docs/tools). Where API keys are
 stored is `[security] credential_store` in [Configuration](/docs/configuration#security).
 
@@ -157,9 +172,12 @@ The rules that keep this safe:
 - **Patterns match the real path**, written with `/` on every OS (on Windows, matching is
   case-insensitive and the `\\?\` prefix is handled for you). On macOS note that `/tmp` is
   really `/private/tmp`; `~/` entries avoid the problem since the home directory is stable.
-- **Regexes are anchored.** `regex:/data/runs` matches exactly that path, not
-  `/data/runs-anything`; end a pattern with `/.*` to grant a subtree. A relative regex is
-  refused; use `glob:` for workdir-relative patterns.
+- **Regexes are anchored and absolute.** `regex:/data/runs` matches exactly that path, not
+  `/data/runs-anything`; end a pattern with `/.*` to grant a subtree. A pattern must start with
+  `/`, a drive letter, or `~/`, so a catch-all like `regex:.*` is refused when the blueprint is
+  parsed. Use `glob:` for anything relative to the workdir.
+- **Globs cannot contain `.` or `..`**, except in a relative entry's leading run, which is folded
+  into the workdir when the pattern is compiled.
 - **Taint rises.** When a grant is active, the read tools are classified `Private` for that
   agent, so taint tracking treats out-of-workdir content with more suspicion, not less.
 - Rhai script tools have their own `read_file` and it stays workdir-confined; `[read_paths]`
@@ -211,23 +229,3 @@ lev policy test bash --target example.com
 [SECURITY.md](https://github.com/GEMISIS/leviath/blob/main/SECURITY.md) for the full threat
 model, what Leviath defends against, and how to report a vulnerability (GitHub private advisories).
 
-## Upgrading from 0.1.1
-
-`[read_paths]` changed shape after 0.1.1. Skip this unless you wrote blueprints against an earlier
-build.
-
-**A blueprint's `[read_paths]` is now a declaration, not a grant.** An agent that used to read
-outside its workdir on the strength of its own blueprint now reads nothing outside it, until your
-`config.toml` grants the same paths. Add the `[agent_read_paths.<name>]` block shown above, or set
-`allow_blueprint_read_paths = true` if you would rather trust your blueprints wholesale.
-
-**`regex:` entries must be absolute.** They have to start with `/`, a drive letter, or `~/`, and
-they are anchored end to end. A catch-all like `regex:.*` is refused when the blueprint is parsed,
-so `lev validate` fails rather than the agent quietly losing access. Write the subtree you mean,
-such as `regex:~/design-docs/.*`, or use `glob:` for anything relative to the workdir.
-
-**Glob patterns cannot contain `.` or `..`**, except in a relative entry's leading run, which is
-folded into the workdir when the pattern is compiled.
-
-Run `lev validate <agent>` against each of your blueprints after upgrading. It names every entry
-that is now inert and prints the config block that would fix it.

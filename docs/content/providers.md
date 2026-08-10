@@ -204,7 +204,7 @@ model = { models = [
 > [!WARNING]
 > Ollama needs no key, so it is registered whether or not a server is running. Leave
 > `default_model` unset on a machine with no Ollama and every stage that lists it starts against
-> `http://localhost:11434`. The run now moves on to its next candidate instead of dying there, but
+> `http://localhost:11434`. The run moves on to its next candidate rather than dying there, but
 > it still spends four attempts finding out.
 
 ## Where credentials live

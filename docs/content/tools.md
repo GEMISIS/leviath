@@ -96,8 +96,8 @@ command never blocks on a full one, which would turn a truncated answer into a t
 
 The cap is a memory bound, not a context bound. A megabyte of shell output already overruns any
 region budget an agent has, so what survives this cap gets trimmed again by the region it lands in.
-The reason it exists is that the daemon used to hold a command's entire output in memory with
-nothing to stop it, and a command printing at local-pipe speed for its full 60 seconds is gigabytes.
+The cap exists because a command printing at local-pipe speed for its full 60 seconds is
+gigabytes, and the daemon holds that output in memory.
 
 ## Context
 
@@ -234,8 +234,8 @@ stage control access:
 - **`tool_permissions`**: a per-tool map whose values are `allow`, `ask`, or `deny`. `allow` runs
   the call outright, `ask` requires user approval first, and `deny` blocks it. Stage-level entries
   are narrower than agent-level `[tool_permissions]` and wider than launch-time flags. Any other
-  value is a load error: a misspelled `deny` used to resolve to `ask`, which is the more permissive
-  of the two, so the author of the typo got a prompt where they had written a refusal.
+  value is a load error, because a misspelled `deny` that quietly resolved to `ask` would hand
+  the author of the typo a prompt where they had written a refusal.
 
 ```toml
 [stages.implement]

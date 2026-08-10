@@ -106,9 +106,14 @@ The CLI is one of four front doors, and they all drive the same daemon.
 | You are | Use | Covered in |
 |---|---|---|
 | At a terminal, or scripting one | `lev` with `--json` | [CLI reference](/docs/cli) |
-| A service that speaks HTTP | `lev serve` | [HTTP API](/docs/api) |
+| A service built on Leviath | `lev serve` | [HTTP API](/docs/api) |
 | An editor or orchestrator that spawns processes | `lev agent-client` | [Agent Client Protocol](/docs/agent-client-protocol) |
 | A Rust program | the `leviath` crate | [Embedding](/docs/embedding) |
+
+For anything long-lived, prefer the HTTP API over shelling out to the CLI. Its listings are
+paginated, sortable, and searchable, a WebSocket pushes changes so you do not have to poll, and
+webhooks can deliver a finished run to you. See
+[driving Leviath from a work queue](/docs/work-queues#prefer-the-api).
 
 ## Where to go next
 
