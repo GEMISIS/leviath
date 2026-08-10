@@ -3,7 +3,7 @@ title: Sub-agents & fan-out
 description: Start child agents and fan work out across them, so many small jobs run at once.
 group: Concepts
 group_order: 2
-order: 7
+order: 8
 ---
 
 # Sub-agents and fan-out
@@ -14,11 +14,6 @@ full of items one through eight.
 
 A **sub-agent** is a child agent started by another one. Give each item its own sub-agent and they
 run at the same time, each with a clean context, and the parent gets the results back.
-
-> [!NOTE]
-> **Before this page:** [Multi-stage workflows](/docs/stages).
-> **In one line:** a fan-out stage splits a task into items, runs one sub-agent per item, and merges
-> what they produce.
 
 This is how the bundled `data-analyst` agent gathers a broad subject at once, one worker per slice
 of it, and how a wide research sweep covers many sub-topics in parallel. See the

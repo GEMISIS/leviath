@@ -11,11 +11,6 @@ order: 3
 Lots of orchestrators share one shape: a fresh container per unit of work, with a command that is
 expected to do the job and exit. A CI job is the same shape. This page is how Leviath fits it.
 
-> [!NOTE]
-> **Before this page:** [Where Leviath fits](/docs/integrations).
-> **In one line:** the pattern is container-per-job, and the thing to get right is that `lev run`
-> returns before the agent finishes.
-
 ```mermaid
 flowchart LR
   ISSUE["Issue or job"] --> C["Container"]

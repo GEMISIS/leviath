@@ -15,11 +15,6 @@ child process and talks to it over that process's stdin and stdout.
 `lev agent-client` is Leviath speaking it. The host sends protocol messages, and the command turns
 those into runs on the shared-world [daemon](/docs/daemon), streaming output back as it happens.
 
-> [!NOTE]
-> **Before this page:** [Agent blueprints](/docs/agents).
-> **In one line:** the host launches `lev agent-client`, sends prompts as JSON on stdin, and reads
-> results as JSON on stdout.
-
 > [!WARNING]
 > "ACP" means two unrelated things, so Leviath never writes it unqualified. This is the Agent
 > **Client** Protocol, JSON-RPC over stdio. It is not the Agent *Communication* Protocol, a REST

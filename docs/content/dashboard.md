@@ -15,9 +15,8 @@ of runs, answer their questions, and steer them.
 lev dash
 ```
 
-It reads the same [daemon](/docs/daemon) that [The Lair](https://leviath.dev/lair), the browser
-console, does, just over the local
-control socket instead of HTTP:
+It reads the same [daemon](/docs/daemon) that [The Lair](https://leviath.dev/lair) does, just over
+the local control socket instead of HTTP:
 
 ```mermaid
 flowchart LR

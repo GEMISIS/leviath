@@ -3,7 +3,7 @@ title: ECS engine
 description: The ECS engine that keeps each agent as a row of data, so an agent that is waiting costs almost nothing.
 group: Concepts
 group_order: 2
-order: 2
+order: 3
 ---
 
 # The ECS agent engine
@@ -15,11 +15,6 @@ hundred agents cost a hundred processes whether or not any of them are doing any
 Leviath keeps each agent as a row of data in one shared table. A waiting agent is a row nothing
 touched this pass, which costs close to nothing, so the machine only pays for work that is actually
 in flight.
-
-> [!NOTE]
-> **Before this page:** nothing. It starts from scratch.
-> **In one line:** agents are rows in a table, a fixed list of functions sweeps over the table, and
-> the loop goes to sleep when a whole sweep changes nothing.
 
 ## Entities, components, and systems
 

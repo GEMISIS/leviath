@@ -91,12 +91,11 @@ whole bar. These rules exist because the docs drifted away from it once already.
 
 ## Tone rules
 
-We sell Leviath on what it does well, not on what other tools do badly. Someone who uses Gas City,
-OpenHands, Claude Code, CrewAI, or LangGraph should finish a page here feeling their tool got more
-useful, not that it got insulted.
+These pages describe what Leviath does well, not what other tools do badly. Someone who uses Gas
+City, OpenHands, Claude Code, CrewAI, or LangGraph should finish a page here feeling their tool got
+more useful, not that it got insulted.
 
-1. **Describe, do not rate.** Say what a tool does and where it sits. The comparison page's own
-   line says it best: it compares models, not merit.
+1. **Describe, do not rate.** Say what a tool does and where it sits. Compare models, not merit.
 2. **Every claim about another project comes from that project's docs**, and links them. If we
    cannot source it upstream, it does not ship.
 3. **No strawman openers.** Rule 1 above says open with the problem, and the lazy way to do that is
@@ -106,9 +105,11 @@ useful, not that it got insulted.
 4. **Different bets, not better bets.** Where designs differ, say what each one buys and what it
    costs. A process per agent buys real isolation and a blast radius of one. A shared world buys
    density and pooled rate limits, and gives up that isolation. Say both halves.
-5. **Name our own weaknesses first.** The "why you might not want Leviath" material and the rows we
-   do not pass on the 12-factor scorecard stay, and stay prominent. That honesty is what makes the
-   rest of the page worth believing.
+5. **Name our own weaknesses first.** The "when to use something else" material and any row we do
+   not pass on the 12-factor scorecard stay, and stay prominent. Say it because a reader deciding
+   between tools deserves it, not as a device to sound credible. Never write a sentence that points
+   at our own honesty; state the limit and move on. If a limit is being worked on, say so and link
+   the issue.
 6. **Integration pages exist to make the other tool work better.** Including saying plainly when
    Leviath is the wrong choice for a job.
 7. **No dismissive vocabulary.** Not "just", "merely", "naive", "toy", "the old way", "unlike X",

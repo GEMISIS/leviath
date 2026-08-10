@@ -3,7 +3,7 @@ title: The daemon
 description: The background daemon that owns every run, so agents survive a closed terminal and share one process.
 group: Concepts
 group_order: 2
-order: 1
+order: 2
 ---
 
 # The shared-world daemon
@@ -13,16 +13,8 @@ leaving a window open for hours. Leviath does not work that way. `lev run` hands
 background service called the **daemon**, which owns every run on the machine.
 
 So your runs keep going after you close the terminal, and hundreds of agents share one process
-instead of taking a process each.
-
-> [!NOTE]
-> **Before this page:** [Getting Started](/docs/getting-started). If the daemon is misbehaving, go
-> straight to [Troubleshooting](/docs/troubleshooting).
-> **In one line:** one background process holds every run, and the CLI, dashboard, and API are all
-> ways of talking to it.
->
-> Building Leviath into your own Rust program instead? You can skip the daemon entirely. See
-> [Embedding](/docs/embedding).
+instead of taking a process each. Building Leviath into your own Rust program instead? You can skip
+the daemon entirely. See [Embedding](/docs/embedding).
 
 ```mermaid
 flowchart TB

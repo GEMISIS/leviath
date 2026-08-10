@@ -16,11 +16,6 @@ how a fleet of them is supervised.
 It talks to agents over the **Agent Client Protocol**, which Leviath speaks. So this is a
 configuration change on the Gas City side, not an adapter you have to write.
 
-> [!NOTE]
-> **Before this page:** [Where Leviath fits](/docs/integrations).
-> **In one line:** declare a provider whose command is `lev agent-client`, mark it as speaking ACP,
-> and set your agent's session to `acp`.
-
 ## The vocabulary
 
 Two Gas City words show up below. A **city** is your workspace directory, holding agents, rigs, and

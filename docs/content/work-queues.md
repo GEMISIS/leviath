@@ -15,11 +15,6 @@ Getting that wrong is expensive in both directions. Decide a healthy run is dead
 work. Decide a dead run is healthy and you leak a slot forever. This page covers how to ask, and
 three fields that will mislead you if you read them the obvious way.
 
-> [!NOTE]
-> **Before this page:** [The daemon](/docs/daemon).
-> **In one line:** poll `lev ps --all --json`, act on which list a run appears in, and do nothing at
-> all when the daemon is unreachable.
-
 ## Three things that are not what they look like
 
 **`updated_at` in `meta.json` is a heartbeat, not progress.** The daemon rewrites a run's metadata

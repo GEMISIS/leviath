@@ -3,7 +3,7 @@ title: Final outputs
 description: Get a structured answer out of a run with output formats, schemas, and lev result, instead of scraping its logs.
 group: Concepts
 group_order: 2
-order: 6
+order: 7
 ---
 
 # Final outputs
@@ -15,10 +15,6 @@ not what it concluded.
 So an agent can **submit a final output**: one deliberate answer, produced by a tool call, that
 every surface reports. The API returns it, `lev result` prints it, a parent agent receives it, and
 the completion webhook carries it.
-
-> [!NOTE]
-> **Before this page:** [Multi-stage workflows](/docs/stages).
-> **In one line:** the run's last stage calls one tool, and that call is the answer.
 
 ## The smallest version
 
@@ -72,7 +68,7 @@ into the `submit_output` tool description, and into the stage's system prompt to
 `require_output` is set.
 
 The label travels with the answer so a reader can act on it. [The Lair](https://leviath.dev/lair),
-the browser console, renders a2ui differently from markdown by matching on that string.
+the browser console for Leviath, renders a2ui differently from markdown by matching on that string.
 
 ## Checking the answer
 

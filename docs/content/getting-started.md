@@ -18,8 +18,7 @@ You'll go from nothing to a running agent in four steps:
 flowchart LR
   A["Install<br/>lev"] --> B["Configure<br/>a provider"]
   B --> C["Run<br/>an agent"]
-  C --> D["Daemon hosts<br/>the run"]
-  D --> E["Watch in<br/>lev dash"]
+  C --> D["Read<br/>the result"]
 ```
 
 ## Install
@@ -154,44 +153,27 @@ Leave `--task` off and your editor opens on a template, which is easier than
 fighting shell quoting for anything longer than a sentence. It also takes a
 file: `lev run coder --task ./brief.md`.
 
-`lev run` doesn't run the agent in your terminal. It hands it to a background
-[daemon](/docs/daemon) that hosts every agent in one shared world:
-
-```mermaid
-flowchart LR
-  CLI["lev run"] -->|control socket| D
-  DASH["lev dash"] -->|control socket| D
-  subgraph D["Shared-world daemon (one process)"]
-    A1["agent"]
-    A2["agent"]
-    A3["agent"]
-  end
-  D -->|provider API| P["LLM provider"]
-```
-
-Because the daemon owns the run, it keeps going after your terminal closes. Watch everything
-live with the TUI [dashboard](/docs/dashboard):
-
-```bash
-lev dash
-```
-
-One thing to expect: the agent **stops and asks** before it writes a file or runs a shell command,
-because those tools default to `ask`. Answer in `lev dash` (select the run, `Enter`, then `i`), or
-pass `--yolo` to pre-approve everything for an unattended run. See
-[Interaction](/docs/interaction).
+`lev run` returns as soon as the work is accepted, not when it is done. The agent runs in the
+background and keeps going after you close the terminal, so the next section is how you check on
+it. Real tasks take minutes.
 
 ## Read the result
 
-When the run finishes, the answer is one command away:
+Watch it live, or come back later. Either way:
 
 ```bash
-lev ps                    # every run and its status; finished ones stay listed for a while
-lev result <run-id>       # what the agent handed back
+lev dash                  # live view of every run
+lev ps                    # one-shot list: what is running, what finished
+lev result <run-id>       # the answer, once a run is complete
 ```
 
 Files the agent created are in the workdir you ran it from. See [Outputs](/docs/outputs) for
 structured answers.
+
+Expect one interruption: the agent **stops and asks** before it writes a file or runs a shell
+command. Answer in `lev dash` (select the run, `Enter`, then `i`) or with
+[`lev respond`](/docs/interaction), or pass `--yolo` to pre-approve everything for an unattended
+run.
 
 > [!TIP]
 > Prefer a visual UI? Serve the daemon over HTTP and open
@@ -201,7 +183,7 @@ structured answers.
 > lev serve --token <your-secret> --cors https://leviath.dev
 > ```
 >
-> It shows the same daemon: live runs, context, logs, and interactions, from any browser.
+> It shows the same runs, context, logs, and interactions, from any browser.
 
 On Windows the agent's shell is `cmd.exe`, not a POSIX shell, and Leviath tells the model so. See
 [which shell you get](/docs/tools#which-shell-you-get), and
@@ -222,6 +204,8 @@ and the context regions. See [Agents](/docs/agents) to go deeper.
 ## Where to go next
 
 - The [Agent catalog](/docs/agent-catalog) tours the ten pre-built agents and what each is for.
+- [Overview](/docs/overview) explains what Leviath is doing underneath: stages, context regions,
+  and the shared world your agents run in.
 - [Agent blueprints](/docs/agents) covers what goes in an `agent.leviath` file, for building your
   own.
 - [Troubleshooting](/docs/troubleshooting) has the common snags, and `lev doctor` diagnoses most of

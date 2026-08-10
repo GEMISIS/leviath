@@ -3,7 +3,7 @@ title: Human-in-the-loop
 description: What to do when a run shows waiting: answer agent questions, tool approvals, and checkpoints with lev respond, the dashboard, or the API.
 group: Concepts
 group_order: 2
-order: 8
+order: 9
 ---
 
 # Human-in-the-loop
@@ -23,10 +23,6 @@ A Leviath run does not have to be autonomous. There are three ways a person gets
 You can answer from the [dashboard](/docs/dashboard), from
 [The Lair](https://leviath.dev/lair), the browser console, from the CLI, or the
 [HTTP API](/docs/api).
-
-> [!NOTE]
-> **Before this page:** [Multi-stage workflows](/docs/stages).
-> **In one line:** the agent can ask, the blueprint can insist, and you can interrupt.
 
 ```mermaid
 sequenceDiagram

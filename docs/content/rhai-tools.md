@@ -12,11 +12,6 @@ This page covers two things that both live in Rhai scripts. [Writing a tool](#de
 gives your agents a new capability. [Policy rules](#policy-rules) decide whether a tool call is
 allowed to fire. They are unrelated jobs, so read whichever half you came for.
 
-> [!NOTE]
-> **Before this page:** [Rhai scripting](/docs/scripting) and [Built-in tools](/docs/tools).
-> **In one line:** a `.rhai` file in a tools directory becomes a tool; a `.rhai` file in a rules
-> directory decides whether a call goes through.
-
 Every `.rhai` file in `~/.leviath/tools/` is compiled at spawn and offered as a tool to **every**
 agent. That is how you give all your agents a shared capability without editing each blueprint.
 
