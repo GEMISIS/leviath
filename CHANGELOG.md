@@ -13,6 +13,39 @@ same list.
 
 ## Unreleased
 
+- Breaking: a blueprint key the parser does not read is now refused, naming
+  what is valid, in `[stages.X]`, `[stages.X.context]`,
+  `[stages.X.tool_routing]`, a transition edge and its `gate` (#362). The
+  parser walks the TOML by hand, so anything it did not recognise was accepted
+  and dropped: `lev validate` called the blueprint good and the only symptom
+  was a stage behaving as though the line had not been written. That is worst
+  for the features whose whole value is expressing intent precisely - an
+  ignored gate is a review loop that never gates, which reads as the model
+  behaving well. Region names are checked the same way: routing targets and
+  gate targets must name a region some stage declares, and
+  `require_no_open_items` must name a `checklist` region, since pointed at any
+  other kind it can only ever count zero and pass on the first attempt.
+- Breaking: `[stages.X.tool_routing.overrides]` accepts
+  `tool = { region = "...", max_result_tokens = N }` as well as
+  `tool = "region"`, and refuses anything else (#361). The table form parsed
+  clean and did nothing - and cost more than an unsupported shape should,
+  because the entry fell through the string-only match arm entirely, so the
+  tool lost the region it named *as well as* the cap and landed in
+  `default_region` uncapped. A non-integer or negative ceiling is now an error
+  in both this table and `max_result_tokens_per_tool`, where it used to be
+  skipped in silence.
+- Fixed: a stage's `description` is read. Every bundled agent writes one,
+  `Stage` had the field and a builder for it, and the manifest parser never
+  looked at the key.
+- Fixed: `checklist` is listed among the valid region kinds when a kind is
+  misspelled. It has always parsed; a user who typo'd it was told it does not
+  exist.
+- Fixed: a top-level key in `config.toml` that nothing reads is named in a
+  warning rather than ignored (#362). A warning and not an error on purpose:
+  every command reads that file, so refusing to load it over one stale key
+  would take the CLI down rather than the one thing the key was meant to
+  affect.
+
 ## 0.3.2 - 2026-08-10
 
 - Breaking: a run that required a final output and never produced one now ends

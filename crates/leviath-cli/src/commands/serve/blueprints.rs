@@ -462,7 +462,7 @@ version = "1.0.0"
 description = "{description}"
 
 [stages.zzstage-work]
-prompt = "do it"
+system_prompt = "do it"
 "#
         )
     }
@@ -751,7 +751,7 @@ version = "1.0.0"
 description = "A test blueprint"
 
 [stages.plan]
-prompt = "Plan the work"
+system_prompt = "Plan the work"
 "#
     }
 
@@ -888,7 +888,7 @@ version = "1.0.0"
 description = "Created via API"
 
 [stages.plan]
-prompt = "Plan the work"
+system_prompt = "Plan the work"
 "#
         );
 
@@ -925,7 +925,7 @@ version = "1.0.0"
 description = "d"
 
 [stages.plan]
-prompt = "p"
+system_prompt = "p"
 "#;
         for name in [
             "../../../../tmp/leviath-traversal-probe",
@@ -992,7 +992,7 @@ prompt = "p"
 
         let app = Router::new().route("/api/blueprints", post(create_blueprint));
         let manifest = format!(
-            "\n[agent]\nname = \"{name}\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n[stages.plan]\nprompt = \"p\"\n"
+            "\n[agent]\nname = \"{name}\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n[stages.plan]\nsystem_prompt = \"p\"\n"
         );
         let body = serde_json::json!({ "name": name, "manifest": manifest });
         let req = Request::builder()
@@ -1037,7 +1037,7 @@ prompt = "p"
 
         let app = Router::new().route("/api/blueprints", post(create_blueprint));
         let manifest = format!(
-            "\n[agent]\nname = \"{name}\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n[stages.plan]\nprompt = \"p\"\n"
+            "\n[agent]\nname = \"{name}\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n[stages.plan]\nsystem_prompt = \"p\"\n"
         );
         let body = serde_json::json!({ "name": name, "manifest": manifest });
         let req = Request::builder()
@@ -1109,7 +1109,7 @@ version = "1.0.0"
 description = "Original"
 
 [stages.plan]
-prompt = "Plan"
+system_prompt = "Plan"
 "#
             ),
         )
@@ -1124,10 +1124,10 @@ version = "2.0.0"
 description = "Updated"
 
 [stages.plan]
-prompt = "Plan"
+system_prompt = "Plan"
 
 [stages.implement]
-prompt = "Implement"
+system_prompt = "Implement"
 "#
         );
         let body = serde_json::json!({ "manifest": updated_manifest });
@@ -1181,7 +1181,7 @@ version = "1.0.0"
 description = "d"
 
 [stages.plan]
-prompt = "p"
+system_prompt = "p"
 "#;
         for name in ["..", "%2e%2e", "."] {
             let app = Router::new().route("/api/blueprints/{name}", put(update_blueprint));
@@ -1214,7 +1214,7 @@ version = "1.0.0"
 description = "Missing"
 
 [stages.run]
-prompt = "Run"
+system_prompt = "Run"
 "#
         });
         let req = Request::builder()
@@ -1482,7 +1482,7 @@ description = "Entry stage doesn't exist"
 entry_stage = "does-not-exist"
 
 [stages.plan]
-prompt = "Plan"
+system_prompt = "Plan"
 "#;
         let body = serde_json::json!({"manifest": manifest});
         let req = Request::builder()
@@ -1526,7 +1526,7 @@ version = "1.0.0"
 description = "A test blueprint"
 
 [stages.plan]
-prompt = "Plan the work"
+system_prompt = "Plan the work"
 "#;
         std::fs::write(&manifest_path, content).unwrap();
 
@@ -1566,13 +1566,13 @@ version = "0.2.0"
 description = "Multi-stage"
 
 [stages.plan]
-prompt = "Plan"
+system_prompt = "Plan"
 
 [stages.implement]
-prompt = "Implement"
+system_prompt = "Implement"
 
 [stages.review]
-prompt = "Review"
+system_prompt = "Review"
 "#;
         std::fs::write(&manifest_path, content).unwrap();
 
@@ -1594,7 +1594,7 @@ version = "1.0.0"
 description = "Should be discovered"
 
 [stages.work]
-prompt = "Do work"
+system_prompt = "Do work"
 "#;
         write_test_agent(agent_dir, content);
 
@@ -1651,7 +1651,7 @@ version = "0.1.0"
 description = "Directly in scan dir"
 
 [stages.run]
-prompt = "Run"
+system_prompt = "Run"
 "#;
         write_test_agent(dir.path(), content);
 

@@ -499,7 +499,6 @@ mode = "autonomous"
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "A"
 max_iterations = 5
-entry = true
 max_revisits = 3
 [stages.a.transitions]
 b = "true"
@@ -526,7 +525,6 @@ mode = "autonomous"
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "A"
 max_iterations = 5
-entry = true
 [stages.a.transitions]
 b = "true"
 

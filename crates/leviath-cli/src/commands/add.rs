@@ -430,7 +430,7 @@ mod capability_tests {
     #[test]
     fn an_ordinary_agent_has_nothing_to_report() {
         let manifest = "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n\
-                        [stages.main]\nprompt = \"p\"\n";
+                        [stages.main]\nsystem_prompt = \"p\"\n";
         assert!(describe_capabilities(manifest, &[]).is_empty());
     }
 
@@ -666,7 +666,7 @@ mod capability_tests {
             let plain = tempfile::tempdir().unwrap();
             std::fs::write(
                 plain.path().join("agent.leviath"),
-                "[agent]\nname = \"p\"\n\n[stages.main]\nprompt = \"p\"\n",
+                "[agent]\nname = \"p\"\n\n[stages.main]\nsystem_prompt = \"p\"\n",
             )
             .unwrap();
             super::print_capabilities("p", plain.path(), None);

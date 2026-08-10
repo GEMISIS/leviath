@@ -3612,10 +3612,11 @@ compact_count = { kind = "sliding_window", max_items = 20, max_tokens = 3000, st
 }
 
 #[test]
-fn parse_manifest_tool_routing_override_non_string_value_is_skipped() {
-    // A non-string override value fails `region_val.as_str()` and is
-    // skipped, exercising the `if let Some(region_name)` false path; the
-    // string-valued override is still inserted.
+fn parse_manifest_tool_routing_override_non_string_value_is_rejected() {
+    // This asserted the opposite until #361: a non-string value was skipped,
+    // so `write_file` kept neither the region named here nor any cap, and the
+    // manifest still parsed. Silently discarding the line an author wrote is
+    // the failure, not the recovery.
     let toml = r#"
 [agent]
 name = "routing-nonstring"
@@ -3630,14 +3631,11 @@ default_region = "temp"
 read_file = "files"
 write_file = 123
 "#;
-    let bp = parse_manifest(toml).unwrap();
-    let stage = bp.find_stage("main").unwrap();
-    let routing = stage.tool_result_routing.as_ref().unwrap();
-    assert_eq!(
-        routing.tool_overrides.get("read_file").map(|s| s.as_str()),
-        Some("files")
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(
+        err.contains("write_file"),
+        "names the offending tool: {err}"
     );
-    assert!(!routing.tool_overrides.contains_key("write_file"));
 }
 
 #[test]
@@ -3805,10 +3803,15 @@ read_file = 20000
     );
 }
 
-/// A non-integer ceiling is skipped rather than failing the manifest, matching
-/// how the region overrides beside it treat a non-string.
+/// A non-integer ceiling fails the manifest.
+///
+/// This test used to assert the opposite - that the entry was skipped and the
+/// rest of the table survived - on the grounds that it matched how the region
+/// overrides beside it treated a non-string. Both were wrong for the same
+/// reason (#361, #362): the author wrote a ceiling, no ceiling was applied, and
+/// nothing said so.
 #[test]
-fn parse_manifest_skips_a_non_integer_per_tool_ceiling() {
+fn parse_manifest_rejects_a_non_integer_per_tool_ceiling() {
     let toml = r#"
 [agent]
 name = "capped"
@@ -3823,16 +3826,483 @@ default_region = "results"
 read_file = "lots"
 grep = 500
 "#;
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(err.contains("read_file"), "names the offending tool: {err}");
+    assert!(err.contains("must be a number"), "got: {err}");
+}
+
+// ─── Keys that do not exist (#362) ───────────────────────────────────────────
+//
+// Every one of these parsed clean before, which is what made a typo in any
+// 0.3.2 feature indistinguishable from a working config.
+
+/// The smallest manifest with a `bulk` region and one stage, for the key tests.
+fn keys_fixture(stage_extra: &str) -> String {
+    format!(
+        r#"
+[agent]
+name = "keys"
+entry_stage = "work"
+
+[context.regions]
+bulk = {{ kind = "pinned", max_tokens = 1000 }}
+
+[stages.work]
+mode = "autonomous"
+system_prompt = "go"
+{stage_extra}
+"#
+    )
+}
+
+#[test]
+fn parse_manifest_rejects_an_unknown_stage_key() {
+    let err = parse_manifest(&keys_fixture("totally_made_up_key = 42"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("unknown key 'totally_made_up_key'"),
+        "got: {err}"
+    );
+    // The valid list is the message, same as region kinds and conditions.
+    assert!(err.contains("system_prompt"), "lists what is valid: {err}");
+}
+
+/// The reporter's case: a stage narrows its window by listing what it wants,
+/// so there is no `hidden` key - and guessing one used to mean the stage
+/// carried the region it meant to drop, at full cost, silently.
+#[test]
+fn parse_manifest_rejects_an_unknown_context_key() {
+    let err = parse_manifest(&keys_fixture("[stages.work.context]\nhidden = [\"bulk\"]"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unknown key 'hidden'"), "got: {err}");
+    assert!(err.contains("valid: regions"), "got: {err}");
+}
+
+#[test]
+fn parse_manifest_rejects_an_unknown_tool_routing_key() {
+    let err = parse_manifest(&keys_fixture(
+        "[stages.work.tool_routing]\nmax_tokens = 100",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("unknown key 'max_tokens'"), "got: {err}");
+}
+
+#[test]
+fn parse_manifest_rejects_an_unknown_gate_key() {
+    let err = parse_manifest(&keys_fixture(
+        "[stages.work.transitions.work]\ncondition = \"always\"\ngate = { require_regions = \"bulk\" }",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("unknown key 'require_regions'"), "got: {err}");
+}
+
+#[test]
+fn parse_manifest_rejects_an_unknown_transition_key() {
+    let err = parse_manifest(&keys_fixture(
+        "[stages.work.transitions.work]\nconditon = \"always\"",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("unknown key 'conditon'"), "got: {err}");
+}
+
+/// A stage `description` is now read. Every bundled agent writes one and the
+/// parser never looked at the key, so the field was permanently `None`.
+#[test]
+fn parse_manifest_reads_a_stage_description() {
+    let bp = parse_manifest(&keys_fixture("description = \"map the codebase\"")).expect("parses");
+    assert_eq!(
+        bp.find_stage("work").and_then(|s| s.description.as_deref()),
+        Some("map the codebase")
+    );
+}
+
+// ─── Region names that match nothing (#362) ──────────────────────────────────
+
+#[test]
+fn validate_rejects_a_routing_override_naming_no_region() {
+    let bp = parse_manifest(&keys_fixture(
+        "[stages.work.tool_routing.overrides]\nread_file = \"ghost\"",
+    ))
+    .expect("parses");
+    let err = bp.validate().unwrap_err().to_string();
+    assert!(err.contains("'ghost'"), "names the region: {err}");
+}
+
+#[test]
+fn validate_rejects_a_gate_naming_no_region() {
+    let bp = parse_manifest(&keys_fixture(
+        "[stages.work.transitions.done]\ncondition = \"always\"\ngate = { require_region_updated = \"nope\" }\n\n[stages.done]\nmode = \"autonomous\"\nsystem_prompt = \"end\"",
+    ))
+    .expect("parses");
+    let err = bp.validate().unwrap_err().to_string();
+    assert!(err.contains("'nope'"), "names the region: {err}");
+}
+
+/// A checklist gate counts open items, which only a checklist region has.
+/// Pointed at a text region it reads zero every time, so it passes on the
+/// first attempt - a gate that looks armed and holds nothing.
+#[test]
+fn validate_rejects_a_checklist_gate_on_a_non_checklist_region() {
+    let bp = parse_manifest(&keys_fixture(
+        "[stages.work.transitions.done]\ncondition = \"always\"\ngate = { require_no_open_items = \"bulk\" }\n\n[stages.done]\nmode = \"autonomous\"\nsystem_prompt = \"end\"",
+    ))
+    .expect("parses");
+    let err = bp.validate().unwrap_err().to_string();
+    assert!(err.contains("not a checklist region"), "got: {err}");
+}
+
+/// A stage may name a region another stage declares: omitting a region hides
+/// it rather than destroying it, so this is legitimate and must not be
+/// mistaken for a typo.
+#[test]
+fn validate_allows_a_region_declared_by_another_stage() {
+    let toml = r#"
+[agent]
+name = "keys"
+entry_stage = "work"
+
+[stages.work]
+mode = "autonomous"
+system_prompt = "go"
+
+[stages.work.tool_routing.overrides]
+read_file = "notes"
+
+[stages.other]
+mode = "autonomous"
+system_prompt = "go"
+
+[stages.other.context.regions]
+notes = { kind = "pinned", max_tokens = 1000 }
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    bp.validate()
+        .expect("a cross-stage region reference is fine");
+}
+
+#[test]
+fn validate_rejects_a_default_region_naming_no_region() {
+    let bp = parse_manifest(&keys_fixture(
+        "[stages.work.tool_routing]\ndefault_region = \"ghost\"",
+    ))
+    .expect("parses");
+    let err = bp.validate().unwrap_err().to_string();
+    assert!(err.contains("'ghost'"), "names the region: {err}");
+}
+
+/// A checklist gate pointed at a real checklist region validates, which is
+/// what makes the rejection beside it mean something.
+#[test]
+fn validate_allows_a_checklist_gate_on_a_checklist_region() {
+    let toml = r#"
+[agent]
+name = "keys"
+entry_stage = "work"
+
+[context.regions]
+todos = { kind = "checklist", max_tokens = 2000 }
+
+[stages.work]
+mode = "autonomous"
+system_prompt = "go"
+
+[stages.work.transitions.done]
+condition = "always"
+gate = { require_no_open_items = "todos" }
+
+[stages.done]
+mode = "autonomous"
+system_prompt = "end"
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    bp.validate()
+        .expect("a checklist gate on a checklist region is fine");
+}
+
+/// The three the runtime adds when nobody declares them stay addressable.
+#[test]
+fn validate_allows_the_auto_added_regions() {
+    let bp = parse_manifest(&keys_fixture(
+        "[stages.work.tool_routing]\ndefault_region = \"tool_results\"",
+    ))
+    .expect("parses");
+    bp.validate().expect("tool_results always exists");
+}
+
+/// The `{ region, max_result_tokens }` shape routes *and* caps.
+///
+/// The reachable spelling of #361: this parsed clean and did nothing, and the
+/// tool lost its region as well as its cap because the entry fell through the
+/// string-only match arm entirely.
+#[test]
+fn parse_manifest_reads_a_tool_override_table() {
+    let toml = r#"
+[agent]
+name = "capped"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.tool_routing]
+default_region = "conversation"
+
+[stages.work.tool_routing.overrides]
+read_file = { region = "bulk", max_result_tokens = 500 }
+grep = "conversation"
+"#;
     let bp = parse_manifest(toml).expect("parses");
     let routing = bp
         .find_stage("work")
         .and_then(|s| s.tool_result_routing.as_ref())
         .expect("routing survives");
-    assert!(!routing.tool_max_result_tokens.contains_key("read_file"));
     assert_eq!(
-        routing.tool_max_result_tokens.get("grep").copied(),
+        routing.tool_overrides.get("read_file").map(String::as_str),
+        Some("bulk"),
+        "the table form must still route"
+    );
+    assert_eq!(
+        routing.tool_max_result_tokens.get("read_file").copied(),
+        Some(500),
+        "and must carry the cap"
+    );
+    // The bare-string form beside it is untouched.
+    assert_eq!(
+        routing.tool_overrides.get("grep").map(String::as_str),
+        Some("conversation")
+    );
+}
+
+/// Either half of the table on its own is meaningful.
+#[test]
+fn parse_manifest_reads_a_half_filled_tool_override_table() {
+    let toml = r#"
+[agent]
+name = "capped"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.tool_routing]
+default_region = "conversation"
+
+[stages.work.tool_routing.overrides]
+read_file = { max_result_tokens = 500 }
+grep = { region = "bulk" }
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    let routing = bp
+        .find_stage("work")
+        .and_then(|s| s.tool_result_routing.as_ref())
+        .expect("routing survives");
+    // Capped, but left in the stage's default region.
+    assert_eq!(
+        routing.tool_max_result_tokens.get("read_file").copied(),
         Some(500)
     );
+    assert!(!routing.tool_overrides.contains_key("read_file"));
+    // Routed, but uncapped.
+    assert_eq!(
+        routing.tool_overrides.get("grep").map(String::as_str),
+        Some("bulk")
+    );
+    assert!(!routing.tool_max_result_tokens.contains_key("grep"));
+}
+
+/// A misspelled key inside the table is refused, naming what is valid.
+#[test]
+fn parse_manifest_rejects_an_unknown_tool_override_key() {
+    let toml = r#"
+[agent]
+name = "capped"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.tool_routing.overrides]
+read_file = { region = "bulk", max_tokens = 500 }
+"#;
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(err.contains("unknown key 'max_tokens'"), "got: {err}");
+    assert!(
+        err.contains("valid: region, max_result_tokens"),
+        "names what is valid: {err}"
+    );
+}
+
+/// A value that is neither a region name nor a table is refused rather than
+/// skipped.
+#[test]
+fn parse_manifest_rejects_a_tool_override_of_the_wrong_type() {
+    let toml = r#"
+[agent]
+name = "capped"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.tool_routing.overrides]
+read_file = 500
+"#;
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(
+        err.contains("tool_routing.overrides.read_file"),
+        "got: {err}"
+    );
+    assert!(err.contains("integer"), "names the type it got: {err}");
+}
+
+/// A negative ceiling is refused rather than wrapping.
+///
+/// `as usize` on a negative turns 500 tokens into 18 exabytes, which reads at a
+/// glance like "no limit" - the opposite of what was written.
+#[test]
+fn parse_manifest_rejects_a_negative_tool_override_ceiling() {
+    let toml = r#"
+[agent]
+name = "capped"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.tool_routing.overrides]
+read_file = { max_result_tokens = -1 }
+"#;
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(err.contains("must not be negative"), "got: {err}");
+}
+
+/// A `region` that is not a name.
+#[test]
+fn parse_manifest_rejects_a_non_string_region_in_a_tool_override() {
+    let toml = r#"
+[agent]
+name = "capped"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.tool_routing.overrides]
+read_file = { region = 5 }
+"#;
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(err.contains("must be a region name"), "got: {err}");
+}
+
+/// A cap inside the table that is not a number.
+#[test]
+fn parse_manifest_rejects_a_non_integer_cap_in_a_tool_override() {
+    let toml = r#"
+[agent]
+name = "capped"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.tool_routing.overrides]
+read_file = { max_result_tokens = "lots" }
+"#;
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(err.contains("must be a number"), "got: {err}");
+}
+
+/// The same negative guard on the sibling table.
+#[test]
+fn parse_manifest_rejects_a_negative_per_tool_ceiling() {
+    let toml = r#"
+[agent]
+name = "capped"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.tool_routing.max_result_tokens_per_tool]
+read_file = -1
+"#;
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(err.contains("must not be negative"), "got: {err}");
+}
+
+/// A stage that is not a table at all has no keys to check, and still parses
+/// into a default stage as it always did.
+#[test]
+fn parse_manifest_tolerates_a_stage_that_is_not_a_table() {
+    let toml = r#"
+[agent]
+name = "odd"
+
+[stages]
+work = 5
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    assert!(bp.find_stage("work").is_some());
+}
+
+/// `[stages.X.context]` with no `regions` leaves the stage on the global
+/// layout rather than an empty one.
+#[test]
+fn parse_manifest_tolerates_a_context_table_without_regions() {
+    let toml = r#"
+[agent]
+name = "ctx"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.context]
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    assert!(
+        bp.find_stage("work")
+            .expect("stage")
+            .context_layout
+            .is_none()
+    );
+}
+
+/// A string edge (`b = "true"`) carries no keys to check.
+#[test]
+fn parse_manifest_tolerates_a_string_transition_edge() {
+    let toml = r#"
+[agent]
+name = "edge"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.transitions]
+done = "true"
+
+[stages.done]
+mode = "autonomous"
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    assert!(
+        bp.find_stage("work")
+            .and_then(|s| s.transitions.as_ref())
+            .is_some_and(|t| t.contains_key("done"))
+    );
+}
+
+/// An empty table says nothing, so it is a mistake rather than a default.
+#[test]
+fn parse_manifest_rejects_an_empty_tool_override_table() {
+    let toml = r#"
+[agent]
+name = "capped"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.tool_routing.overrides]
+read_file = {}
+"#;
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(err.contains("is empty"), "got: {err}");
 }
 
 /// `require_region_updated` parses onto the edge gate. Without this the key is

@@ -3,11 +3,206 @@
 
 use super::*;
 
+/// Every key `parse_stage` reads off a `[stages.<name>]` table.
+///
+/// Kept beside the parser because it is only true of the parser: a key added
+/// below and not added here is refused, which is the failure mode worth having
+/// - the alternative was accepting it and doing nothing, forever.
+const STAGE_KEYS: &[&str] = &[
+    "accepts_messages",
+    "allow_as_worker",
+    "allow_blocking_tools",
+    "allow_complete",
+    "available_tools",
+    "batch_tool_hint",
+    "context",
+    "description",
+    "hooks",
+    "interaction_points",
+    "max_items",
+    "max_iterations",
+    "max_revisits",
+    "max_workers",
+    "merge_stage",
+    "mode",
+    "model",
+    "nudge",
+    "on_worker_failure",
+    "output",
+    "require_output",
+    "required_tools",
+    "requires_children",
+    "results_region",
+    "sandbox",
+    "security",
+    "shell_hint",
+    "split_prompt",
+    "system_prompt",
+    "tool_permissions",
+    "tool_routing",
+    "transition_prompt",
+    "transitions",
+    "worker_agent",
+    "worker_query",
+    "worker_stage",
+];
+
+/// Every key read off `[stages.<name>.context]`.
+///
+/// Just the one. A stage narrows its window by listing the regions it wants;
+/// what it leaves out is hidden rather than destroyed, so there is no separate
+/// `hidden`/`visible` key to write - and an author who guesses one now hears
+/// about it instead of quietly carrying the region they meant to drop.
+const CONTEXT_KEYS: &[&str] = &["regions"];
+
+/// Every key read off `[stages.<name>.tool_routing]`.
+const TOOL_ROUTING_KEYS: &[&str] = &[
+    "default_region",
+    "max_result_tokens",
+    "max_result_tokens_per_tool",
+    "overrides",
+    "persist",
+];
+
+/// Every key read off a transition edge's `gate = { ... }`.
+const GATE_KEYS: &[&str] = &[
+    "max_attempts",
+    "message",
+    "region",
+    "require_modifications",
+    "require_no_open_items",
+    "require_region_updated",
+    "tools",
+];
+
+/// Every key read off one `[stages.<name>.transitions.<target>]` edge.
+const EDGE_KEYS: &[&str] = &[
+    "condition",
+    "gate",
+    "hint",
+    "stuck_after_iterations",
+    "stuck_after_minutes",
+    "stuck_after_same_file_edits",
+    "stuck_after_tool_calls",
+    "transform",
+    "transform_config",
+];
+
+/// Refuse a key the parser does not read.
+///
+/// The manifest parser walks the TOML by hand, so every unrecognised key was
+/// accepted and ignored: a blueprint could be wrong in a way `lev validate`
+/// called good, and the only symptom was a stage behaving as though the line
+/// had not been written - which is what it was doing (#362). Region kinds and
+/// transition conditions have always been strict; this extends that to the
+/// tables holding them, with the same "valid: …" phrasing.
+fn reject_unknown_keys(where_: &str, table: &toml::value::Table, allowed: &[&str]) -> Result<()> {
+    for key in table.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(Error::Other(format!(
+                "{where_} has unknown key '{key}' (valid: {})",
+                allowed.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Parse one entry of `[stages.<name>.tool_routing.overrides]`.
+///
+/// Two shapes, because the table answers two questions that authors reach for
+/// together:
+///
+/// ```toml
+/// read_file = "bulk"                                  # route it
+/// read_file = { region = "bulk", max_result_tokens = 500 }   # route and cap it
+/// ```
+///
+/// Anything else is an error. It used to be silently skipped, which cost more
+/// than the unsupported shape did: the entry fell through, so the tool lost the
+/// region it named *as well as* the cap, and landed in `default_region`
+/// uncapped - while `lev validate` called the blueprint good. A config that
+/// reads as if two limits are in force while neither is costs real money before
+/// anyone thinks to check (#361).
+fn parse_tool_override(
+    stage_name: &str,
+    tool_name: &str,
+    value: &toml::Value,
+    routing: &mut crate::blueprint::ToolResultRouting,
+) -> Result<()> {
+    let where_ = || format!("stage '{stage_name}': tool_routing.overrides.{tool_name}");
+
+    if let Some(region_name) = value.as_str() {
+        routing
+            .tool_overrides
+            .insert(tool_name.to_string(), region_name.to_string());
+        return Ok(());
+    }
+
+    let Some(table) = value.as_table() else {
+        return Err(Error::Other(format!(
+            "{} must be a region name or a table of \
+             {{ region, max_result_tokens }}, not {}",
+            where_(),
+            value.type_str()
+        )));
+    };
+
+    for key in table.keys() {
+        if !matches!(key.as_str(), "region" | "max_result_tokens") {
+            return Err(Error::Other(format!(
+                "{} has unknown key '{key}' (valid: region, max_result_tokens)",
+                where_()
+            )));
+        }
+    }
+
+    if let Some(region) = table.get("region") {
+        let region = region
+            .as_str()
+            .ok_or_else(|| Error::Other(format!("{}.region must be a region name", where_())))?;
+        routing
+            .tool_overrides
+            .insert(tool_name.to_string(), region.to_string());
+    }
+
+    if let Some(max) = table.get("max_result_tokens") {
+        let max = max.as_integer().ok_or_else(|| {
+            Error::Other(format!("{}.max_result_tokens must be a number", where_()))
+        })?;
+        // `as usize` on a negative would wrap to an astronomically large cap,
+        // which reads at a glance like "no limit" and is the opposite of what
+        // was written.
+        let max = usize::try_from(max).map_err(|_| {
+            Error::Other(format!(
+                "{}.max_result_tokens must not be negative (got {max})",
+                where_()
+            ))
+        })?;
+        routing
+            .tool_max_result_tokens
+            .insert(tool_name.to_string(), max);
+    }
+
+    if table.is_empty() {
+        return Err(Error::Other(format!(
+            "{} is empty (set region, max_result_tokens, or both)",
+            where_()
+        )));
+    }
+
+    Ok(())
+}
+
 /// Parse one `[stages.<name>]` table into a [`Stage`].
 ///
 /// Reads nothing outside its own table, so the manifest's stage order is the
 /// only thing the caller contributes.
 pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result<Stage> {
+    if let Some(table) = stage_value.as_table() {
+        reject_unknown_keys(&format!("stage '{stage_name}'"), table, STAGE_KEYS)?;
+    }
+
     let model_config = parse_stage_model(stage_value);
 
     let mut stage = Stage::new(stage_name.to_string(), model_config);
@@ -40,6 +235,14 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
             .collect();
     }
 
+    // Every bundled agent writes one and nothing read it: `Stage::description`
+    // had a field and a builder, but the parser never looked at the key, so the
+    // line was accepted and dropped. Found while enumerating the keys above,
+    // and the same bug in miniature.
+    if let Some(desc) = stage_value.get("description").and_then(|v| v.as_str()) {
+        stage.description = Some(desc.trim().to_string());
+    }
+
     if let Some(sp) = stage_value.get("system_prompt").and_then(|v| v.as_str()) {
         stage.config.insert(
             "system_prompt".to_string(),
@@ -67,6 +270,11 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
 
     // Parse tool_routing configuration
     if let Some(routing_table) = stage_value.get("tool_routing").and_then(|v| v.as_table()) {
+        reject_unknown_keys(
+            &format!("stage '{stage_name}': tool_routing"),
+            routing_table,
+            TOOL_ROUTING_KEYS,
+        )?;
         let mut routing = crate::blueprint::ToolResultRouting::default();
 
         if let Some(dr) = routing_table.get("default_region").and_then(|v| v.as_str()) {
@@ -83,11 +291,7 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         }
         if let Some(overrides_table) = routing_table.get("overrides").and_then(|v| v.as_table()) {
             for (tool_name, region_val) in overrides_table {
-                if let Some(region_name) = region_val.as_str() {
-                    routing
-                        .tool_overrides
-                        .insert(tool_name.clone(), region_name.to_string());
-                }
+                parse_tool_override(stage_name, tool_name, region_val, &mut routing)?;
             }
         }
         // Per-tool ceilings, spelled like the region overrides above so the two
@@ -97,11 +301,23 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
             .and_then(|v| v.as_table())
         {
             for (tool_name, max_val) in limits {
-                if let Some(max) = max_val.as_integer() {
-                    routing
-                        .tool_max_result_tokens
-                        .insert(tool_name.clone(), max as usize);
-                }
+                let max = max_val.as_integer().ok_or_else(|| {
+                    Error::Other(format!(
+                        "stage '{stage_name}': \
+                         tool_routing.max_result_tokens_per_tool.{tool_name} \
+                         must be a number"
+                    ))
+                })?;
+                let max = usize::try_from(max).map_err(|_| {
+                    Error::Other(format!(
+                        "stage '{stage_name}': \
+                         tool_routing.max_result_tokens_per_tool.{tool_name} \
+                         must not be negative (got {max})"
+                    ))
+                })?;
+                routing
+                    .tool_max_result_tokens
+                    .insert(tool_name.clone(), max);
             }
         }
 
@@ -243,13 +459,16 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     // inherits the global [context.regions] layout. NOTE (TOML nesting):
     // like [stages.<name>.model], this must be its own `[...]` section;
     // don't place `context = ...` inline keys after other sub-tables.
-    if let Some(regions_table) = stage_value
-        .get("context")
-        .and_then(|v| v.get("regions"))
-        .and_then(|v| v.as_table())
-    {
-        let (stage_regions, stage_total) = parse_region_layout(regions_table)?;
-        stage.context_layout = Some(ContextLayout::new(stage_regions, stage_total));
+    if let Some(context_table) = stage_value.get("context").and_then(|v| v.as_table()) {
+        reject_unknown_keys(
+            &format!("stage '{stage_name}': context"),
+            context_table,
+            CONTEXT_KEYS,
+        )?;
+        if let Some(regions_table) = context_table.get("regions").and_then(|v| v.as_table()) {
+            let (stage_regions, stage_total) = parse_region_layout(regions_table)?;
+            stage.context_layout = Some(ContextLayout::new(stage_regions, stage_total));
+        }
     }
 
     // Parse max_revisits
@@ -606,6 +825,21 @@ pub(super) fn parse_transitions(
 ) -> Result<std::collections::HashMap<String, TransitionEdge>> {
     let mut transitions = std::collections::HashMap::new();
     for (target_name, edge_value) in transitions_table {
+        if let Some(edge_table) = edge_value.as_table() {
+            reject_unknown_keys(
+                &format!("transition to '{target_name}'"),
+                edge_table,
+                EDGE_KEYS,
+            )?;
+            if let Some(gate_table) = edge_table.get("gate").and_then(|v| v.as_table()) {
+                reject_unknown_keys(
+                    &format!("transition to '{target_name}': gate"),
+                    gate_table,
+                    GATE_KEYS,
+                )?;
+            }
+        }
+
         let hint = edge_value
             .get("hint")
             .and_then(|v| v.as_str())

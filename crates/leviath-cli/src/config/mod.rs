@@ -18,6 +18,41 @@ pub use providers::*;
 mod security;
 pub use security::*;
 
+/// Every top-level key `config.toml` may set.
+///
+/// One entry per [`Config`] field. Kept beside the struct so the two are read
+/// together, and held to the shipped example by
+/// `every_config_section_is_a_known_key`.
+const KNOWN_CONFIG_KEYS: &[&str] = &[
+    "agent_paths",
+    "agent_read_paths",
+    "agent_safe_commands",
+    "agent_tool_permissions",
+    "batch_tool_hint",
+    "default_model",
+    "default_provider",
+    "limits",
+    "mcp_servers",
+    "model_capabilities",
+    "model_providers",
+    "nudge",
+    "observability",
+    "ollama_base_url",
+    "openrouter_api_key",
+    "providers",
+    "rate_limits",
+    "request_timeout_secs",
+    "safe_commands",
+    "sandbox",
+    "security",
+    "shell_hint",
+    "taint_tracking",
+    "title",
+    "tool_permissions",
+    "tool_script_permissions",
+    "webhook",
+];
+
 /// CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -407,6 +442,60 @@ impl Config {
         Ok(config)
     }
 
+    /// Say so when the config file holds a key nothing reads.
+    ///
+    /// Serde ignores unknown fields, so a misspelled or long-removed table sat
+    /// in `config.toml` doing nothing and saying nothing - `[cache] ttl` being
+    /// the reported case (#362). A warning rather than a hard error on
+    /// purpose: a blueprint is authored and validated deliberately, but this
+    /// file is long-lived and read by *every* command, so refusing to load it
+    /// over one stale key would take the whole CLI down rather than the one
+    /// thing that key was meant to affect.
+    ///
+    /// The known set is spelled out below rather than derived by serializing
+    /// the default, which was the first attempt: TOML cannot represent null,
+    /// so every `Option` field still at `None` vanishes from the serialized
+    /// form and five real keys would have been reported as unknown.
+    /// `every_config_section_is_a_known_key` holds this list against the
+    /// shipped example, which sets every section.
+    fn warn_unknown_config_keys(content: &str) {
+        let unknown = Self::unknown_config_keys(content);
+        if !unknown.is_empty() {
+            // Joined before the macro, not inside it: a field expression only
+            // runs when a subscriber is interested at the callsite, so as an
+            // argument this read as uncovered under the 100% gate however the
+            // test installed its subscriber.
+            let keys = unknown.join(", ");
+            tracing::warn!(
+                %keys,
+                "config.toml has keys nothing reads; they are being ignored. \
+                 Check the spelling against `lev config schema`."
+            );
+        }
+    }
+
+    /// The decision behind [`Self::warn_unknown_config_keys`], as data.
+    ///
+    /// Split out because the warning-shaped version could only be tested by
+    /// asserting the config still loaded, which it does whether or not a single
+    /// key is ever reported - the first version of this shipped a `parse` that
+    /// silently returned early on every real config, and that test passed
+    /// anyway.
+    ///
+    /// `toml::from_str::<Table>` and not `content.parse::<toml::Value>()`: the
+    /// latter parses a bare TOML *value*, so a document failed at the first
+    /// `=` and this returned empty every time.
+    fn unknown_config_keys(content: &str) -> Vec<String> {
+        let Ok(found) = toml::from_str::<toml::value::Table>(content) else {
+            return Vec::new();
+        };
+        found
+            .keys()
+            .filter(|k| !KNOWN_CONFIG_KEYS.contains(&k.as_str()))
+            .cloned()
+            .collect()
+    }
+
     /// Core of `load()`, parameterized by path so it can be exercised in
     /// tests against a tempfile instead of the real `~/.leviath/config.toml`.
     fn load_from_path(path: &std::path::Path) -> anyhow::Result<Self> {
@@ -421,6 +510,8 @@ impl Config {
 
             let c: Self = toml::from_str(&content)
                 .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
+
+            Self::warn_unknown_config_keys(&content);
 
             // Catch a malformed MCP server entry here, at load, rather than at
             // the first tool call: a typo that drops a server's tools should
@@ -1217,6 +1308,68 @@ mod tests {
             .iter_errors(value)
             .map(|e| format!("{}: {e}", e.instance_path()))
             .collect()
+    }
+
+    /// A key the warning does not know is a key it reports, so a field added
+    /// to `Config` and left out of `KNOWN_CONFIG_KEYS` would tell every user
+    /// who sets it that it does nothing. The shipped example exercises every
+    /// section, which makes it the right thing to hold the list against.
+    #[test]
+    fn every_config_section_is_a_known_key() {
+        // Straight to `Table` rather than `Value` + a match: the match's other
+        // arm can never run, and an arm that cannot run is a coverage hole.
+        let example: toml::value::Table =
+            toml::from_str(CONFIG_EXAMPLE).expect("the example is a TOML table");
+        let unreported: Vec<&str> = example
+            .keys()
+            .filter(|k| !KNOWN_CONFIG_KEYS.contains(&k.as_str()))
+            .map(String::as_str)
+            .collect();
+        assert!(
+            unreported.is_empty(),
+            "the shipped example sets keys the warning would call unknown: {unreported:?}"
+        );
+    }
+
+    /// The reported case: a table nothing reads, in a file that also sets a
+    /// real key. Both halves matter - the unknown one is named, the real one
+    /// is not, and the config still loads because every command reads it.
+    #[test]
+    fn an_unknown_config_key_is_reported_and_the_config_still_loads() {
+        const CONTENT: &str = "default_provider = \"anthropic\"\n\n[cache]\nttl = \"banana\"\n";
+        assert_eq!(
+            Config::unknown_config_keys(CONTENT),
+            vec!["cache".to_string()],
+            "the unknown table is named and the real key is not"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, CONTENT).unwrap();
+        // A subscriber has to be interested at this callsite or the `warn!`
+        // body never runs. `tracing_guard` sets a thread-local default, which
+        // holds whatever another test in this binary did to the global one.
+        let _guard = leviath_testkit::tracing_guard();
+        let config = Config::load_from_path(&path).expect("an unknown key does not stop the load");
+        assert_eq!(config.default_provider, "anthropic");
+    }
+
+    /// A config using only real keys reports nothing. Without this the test
+    /// above passes against a function that calls everything unknown.
+    #[test]
+    fn a_config_of_known_keys_reports_nothing() {
+        assert!(
+            Config::unknown_config_keys(CONFIG_EXAMPLE).is_empty(),
+            "the shipped example must be clean"
+        );
+    }
+
+    /// Content that is not TOML reports nothing rather than guessing. The
+    /// caller has already failed to deserialize it and said so; a second,
+    /// vaguer complaint about every line would only bury the first.
+    #[test]
+    fn unparseable_content_reports_no_unknown_keys() {
+        assert!(Config::unknown_config_keys("this is not [[[ toml").is_empty());
     }
 
     #[test]

@@ -1258,7 +1258,6 @@ fn a_fully_reachable_graph_reports_nothing() {
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
-entry = true
 [stages.entry.transitions]
 b = "true"
 c = "true"
@@ -1299,7 +1298,6 @@ mode = "fan_out"
 worker_stage = "work"
 merge_stage = "merge"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-entry = true
 [stages.split.transitions]
 
 [stages.work]
@@ -1326,7 +1324,6 @@ fn a_stage_the_entry_cannot_reach_is_warned_about() {
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
-entry = true
 [stages.a.transitions]
 b = "true"
 
@@ -1354,7 +1351,6 @@ fn a_cycle_with_no_revisit_cap_is_warned_about() {
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
-entry = true
 [stages.a.transitions]
 b = "true"
 
@@ -1384,7 +1380,6 @@ mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
 max_revisits = 2
-entry = true
 [stages.a.transitions]
 b = "true"
 
@@ -1417,7 +1412,6 @@ fn self_loops_and_terminal_stages_are_not_cycles() {
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
-entry = true
 [stages.a.transitions]
 a = "true"
 b = "true"
