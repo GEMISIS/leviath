@@ -19,10 +19,6 @@ restart.
 Each script stays small, because Leviath keeps the hard parts. Transport, budgets, sandboxing, and
 retries stay with the runtime, and the script gets only the one decision that is specific to you.
 
-> [!NOTE]
-> **Before this page:** [Agent blueprints](/docs/agents).
-> **In one line:** four places you can drop a script, each with a narrow job and its own page.
-
 You do not need to know Rhai to read the pages below. Each one has a complete, working script you
 can copy and change. [rhai.rs](https://rhai.rs) has the language reference if you want it.
 

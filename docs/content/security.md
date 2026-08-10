@@ -3,7 +3,7 @@ title: Security & sandboxing
 description: Sandboxed execution, tool permissions, and taint tracking, for running a blueprint you did not write.
 group: Concepts
 group_order: 2
-order: 9
+order: 10
 ---
 
 # Security: sandboxed execution and taint tracking
@@ -23,11 +23,9 @@ Leviath gives you three separate controls, and you can use as few or as many as 
 Tool permissions are a fourth, and they live in [Built-in tools](/docs/tools). Where API keys are
 stored is `[security] credential_store` in [Configuration](/docs/configuration#security).
 
-> [!NOTE]
-> **Before this page:** [Agent blueprints](/docs/agents).
-> **In one line:** everything here is opt-in, and an installed blueprint can tighten these settings
-> but never loosen them. The one narrow exception: a blueprint may pre-allow `web_search` and
-> `web_fetch` when you have not configured those tools yourself.
+All of it is opt-in, and an installed blueprint can tighten these settings but never loosen them.
+The one narrow exception: a blueprint may pre-allow `web_search` and `web_fetch` when you have not
+configured those tools yourself.
 
 ## Sandboxes
 
@@ -42,15 +40,23 @@ network = false
 kind = "none"             # run discovery on the host…
 ```
 
-The sandbox covers what the agent **executes**: the `shell` tool, a blueprint's seed commands, and
-a Rhai script tool's `shell()` calls. File tools stay on the host and rely on workdir
-[path confinement](#reading-outside-the-workdir) instead; the sandbox bind-mounts the workdir so
-both see the same files. `web_fetch`, `web_search`, and a script's HTTP functions also run on the
-host, so `network = false` fences the sandboxed commands, not those tools. So do
-[MCP servers](/docs/mcp), which are host processes shared across agents. Widening the sandbox to
-cover all of that is tracked in
-[leviath#326](https://github.com/GEMISIS/leviath/issues/326). For a blanket boundary today, run
-the whole daemon in a container.
+> [!IMPORTANT]
+> **Today the sandbox covers what the agent executes**, and that scope is being widened. Read this
+> before you rely on it.
+>
+> Inside the boundary: the `shell` tool, a blueprint's seed commands, and a Rhai script tool's
+> `shell()` calls. Outside it: file tools, which stay on the host and rely on workdir
+> [path confinement](#reading-outside-the-workdir) instead, and `web_fetch`, `web_search`, and a
+> script's HTTP functions, which use the host network, so `network = false` fences the sandboxed
+> commands and not those tools. [MCP servers](/docs/mcp) are host processes shared across agents,
+> so they sit outside too.
+>
+> Covering every side effect, and letting a single run opt into a sandbox, is
+> [issue #326](https://github.com/GEMISIS/leviath/issues/326) and the intended end state. Until it
+> lands, run the whole daemon in a container when you want a blanket boundary.
+
+The sandbox bind-mounts the run's workdir, so sandboxed commands and host-side file tools see the
+same files.
 
 **Containers**, using Docker or Podman, give you the real thing. The daemon keeps a warm container
 per sandbox configuration, so stages with identical settings share one, and tears them down when

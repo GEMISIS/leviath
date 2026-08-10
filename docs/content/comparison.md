@@ -11,13 +11,9 @@ order: 3
 People arrive at Leviath already using something else, and the useful question is usually not "which
 of these is best" but "what job does each of these do, and do I need more than one".
 
-So this page is about layers, not scores. Several of the tools below are worth running *alongside*
-Leviath rather than instead of it.
-
-> [!NOTE]
-> **Before this page:** nothing.
-> **In one line:** a coding agent, an orchestrator, a framework, and a runtime are four different
-> jobs, and Leviath is the runtime.
+A coding agent, an orchestrator, a framework, and a runtime are four different jobs. Leviath is the
+runtime. So this page is about layers, not scores, and several of the tools below are worth running
+*alongside* Leviath rather than instead of it.
 
 ## Four different jobs
 
@@ -57,20 +53,23 @@ description comes from that project's own documentation.
 | **Expects on the machine** | One native binary | A native CLI; the SDKs want Node 18+ or Python 3.10+ | Python 3.10-3.13 | A Python or Node runtime |
 | **Headless surface** | REST, WebSocket, [ACP](/docs/agent-client-protocol) over stdio | `claude -p`, plus the SDKs | `kickoff()` in-process, REST via AMP | Library calls, REST via LangSmith |
 | **Human in the loop** | Mid-run messages, interaction points, ask-user tools | Interactive steering and permission prompts | `human_input` pauses a task | `interrupt()` pauses and resumes |
-| **Isolation** | Per-agent state, workdir, and policy; opt-in containers or namespaces for shell | Opt-in OS sandbox for shell | External sandbox services | Sandbox backends via Deep Agents |
+| **Isolation** | Per-agent state, workdir, and policy; opt-in containers or namespaces for shell (widening) | Opt-in OS sandbox for shell | External sandbox services | Sandbox backends via Deep Agents |
 | **Hosted option** | None | Managed Agents | CrewAI AMP | LangSmith Deployment |
 
-## When to reach for the other one
+## When to use something else
 
-Naming what Leviath is not for is what makes the rest of this page worth believing.
+We would rather you pick the right tool than pick ours, so here is where Leviath is the wrong
+answer and what to reach for instead.
 
 **Use a coding agent like Claude Code or Codex** when you want to sit down and work with something
 polished and interactive. They are better at that than Leviath is, and it is not close. Leviath can
 even run *on top of* Claude Code as a transport, so this is not either/or.
 
 **Use CrewAI or LangGraph** when your orchestration already lives in Python or TypeScript and you
-want the workflow expressed in code, with your own types and your own tests around it. A separate
-runtime configured in TOML is friction you do not need.
+want the workflow expressed in code, with your own types and your own tests around it. A Leviath
+agent is a TOML blueprint plus optional Rhai script tools, so if you want agent logic in a general
+language against an SDK, that model is not here. Other languages drive Leviath through the
+[REST API](/docs/api) instead.
 
 **Use [Gas City](/docs/gas-city) (an orchestration-builder SDK from the
 [Gas Town Hall](https://gastownhall.ai/) project) or [OpenHands](https://docs.all-hands.dev/)**
@@ -78,34 +77,30 @@ when the hard problem is coordinating work across issues, repos, and people. Tha
 inside one agent, and Leviath does not try to solve it. Run Leviath underneath one of them if you
 want both.
 
+**Use a hosted platform** if you want somebody else operating it. You run the Leviath daemon
+yourself. [`lev serve`](/docs/api) and [The Lair](https://leviath.dev/lair) reach it from anywhere,
+but there is no hosted service and no multi-machine scheduling.
+
+You also need a model provider either way: an API key, a local Ollama, or the Claude Code transport
+with its terms-of-service caveat.
+
+One current limit worth knowing before you choose. Every agent has its own state, workdir fence,
+tool policy, and panic boundary, so one agent's crash stays its own. The opt-in
+[OS sandbox](/docs/security) is narrower than that: today it wraps shell execution, seed commands,
+and script shell calls, while file tools rely on path confinement and network tools run on the
+host. Widening it to cover every side effect is
+[in progress](https://github.com/GEMISIS/leviath/issues/326).
+
 **Reach for Leviath** when the hard part is inside a single unit of work: the task has distinct
 phases that want different models and different tools, you care about exactly what is in the context
 window at each phase, or you want many agents running at once without paying for a process each.
 Every run journals to disk as it goes, so a daemon you kill mid-run picks the work back up on its
 next start.
 
-## Why you might not want Leviath
-
-- **It is not a replacement for your favourite coding agent.** Those are polished interactive
-  products at a different layer.
-- **Agents are configuration, not code.** A Leviath agent is a TOML blueprint plus optional Rhai
-  script tools. If you want to write agent logic in Python or TypeScript against an SDK, that model
-  is not here. Other languages drive Leviath through the [REST API](/docs/api) instead.
-- **There is no hosted service.** You run the daemon yourself. One box hosts every agent, which is
-  also why there is no cluster to operate: [`lev serve`](/docs/api) and
-  [The Lair](https://leviath.dev/lair) reach it remotely, but nobody runs it for you, and there is
-  no multi-machine scheduling.
-- **The OS sandbox covers shell, not everything.** Every agent has its own state, workdir fence,
-  tool policy, and panic boundary, so one agent's crash stays its own. But the opt-in
-  [sandbox](/docs/security) wraps shell execution only: file tools rely on path confinement, and
-  network tools run on the host.
-- **You need a model provider**: an API key, a local Ollama, or the Claude Code transport with its
-  terms-of-service caveat.
-
 ## Scored against 12-Factor Agents
 
 [12-Factor Agents](https://github.com/humanlayer/12-factor-agents) is a widely used checklist for
-agent design. Here is Leviath against it, including where it falls short.
+agent design. Here is Leviath against it, factor by factor.
 
 | # | Factor | Status | Notes |
 |---|---|---|---|
@@ -119,7 +114,7 @@ agent design. Here is Leviath against it, including where it falls short.
 | 8 | Own your control flow | ✓ | Graph transitions on error, iteration cap, stuck, and model choice |
 | 9 | Compact errors into context | ✓ | Tool, inference, and iteration-cap errors all land in context |
 | 10 | Small, focused agents | ✓ | Per-stage models, tools, and prompts, plus bounded fan-out |
-| 11 | Trigger from anywhere | partial | CLI, REST, WebSocket, ACP, signed webhooks out. No built-in scheduler, so use cron |
+| 11 | Trigger from anywhere | ✓ | CLI, REST, WebSocket, ACP, and signed webhooks out. Scheduling is your cron or CI, not ours |
 | 12 | Stateless reducer | ✓ | Durable state lives on disk; the process is disposable. Runs resume on restart, and interrupted tool batches replay exactly-once |
 
 ## How we measure

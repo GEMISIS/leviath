@@ -16,11 +16,6 @@ That second job is what Leviath is. Your orchestrator keeps doing the coordinati
 one task and runs it as a multi-stage agent with structured context, its own tools, and whichever
 models you configured.
 
-> [!NOTE]
-> **Before this page:** [Getting Started](/docs/getting-started) and [The daemon](/docs/daemon).
-> **In one line:** pick one of four ways in, point your orchestrator at it, and Leviath handles one
-> unit of work.
-
 ```mermaid
 flowchart TD
   ORCH["Your orchestrator<br/>Gas City / OpenHands / CI"]
@@ -67,15 +62,17 @@ do not mean what they look like.
 
 ## When Leviath is not the right choice
 
-It is worth saying where this does not pay off:
+Three cases where plugging Leviath in does not pay off:
 
 - **For a single quick edit**, a coding agent CLI you already have is less setup and does the job.
-  Leviath earns its keep on work with several distinct phases, or on many agents at once.
+  Leviath is worth the wiring on work with several distinct phases, or on many agents at once.
 - **If your orchestration already lives in Python** and you want the workflow expressed in code
   rather than TOML, a framework you can import is a better fit than a separate runtime.
 - **If you need an OS boundary around every tool an agent has**, note that Leviath's opt-in
-  [sandbox](/docs/security) covers shell execution, and its file tools are path-confined rather
-  than containerized. Running the whole daemon in a container gives you the blanket boundary today,
-  and a container-per-job orchestrator gives you one per unit of work.
+  [sandbox](/docs/security) covers shell execution today, and its file tools are path-confined
+  rather than containerized. Widening it is
+  [in progress](https://github.com/GEMISIS/leviath/issues/326). Meanwhile, running the whole daemon
+  in a container gives you the blanket boundary, and a container-per-job orchestrator gives you one
+  per unit of work.
 
 [Where Leviath sits](/docs/comparison) goes into this properly.

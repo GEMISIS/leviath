@@ -3,7 +3,7 @@ title: Structured context
 description: How structured context regions keep an agent coherent across hundreds of tool calls, where a flat message list drifts.
 group: Concepts
 group_order: 2
-order: 4
+order: 5
 ---
 
 # Structured context memory
@@ -16,10 +16,6 @@ that outcome.
 Leviath splits the window into named **regions** instead. Each one has its own size limit and its
 own rule for what to throw away first, so a big file read can only ever crowd out the region it
 landed in.
-
-> [!NOTE]
-> **Before this page:** [Agent blueprints](/docs/agents).
-> **In one line:** you decide what the window is made of, and what gets dropped when it fills.
 
 ## What that looks like
 

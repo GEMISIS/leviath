@@ -117,9 +117,9 @@ lev serve --host 0.0.0.0 --tls-cert cert.pem --tls-key key.pem --cors https://le
 ```
 
 Then **open `https://192.168.1.50:3000/` in a browser tab and accept the warning.** That is what the
-unauthenticated `GET /` page is for: the console's requests are subresource `fetch` calls, which get
+unauthenticated `GET /` page is for: The Lair's requests are subresource `fetch` calls, which get
 no interstitial to click through, so the exception has to be established in a tab first. Afterwards
-the console works.
+The Lair works.
 
 Chrome discards accepted exceptions when the browser restarts, so this comes back. Firefox keeps
 them. iOS Safari is unreliable about it.
@@ -132,7 +132,7 @@ Nothing to install on either end, and it puts you back inside the loopback exemp
 ssh -N -L 3000:127.0.0.1:3000 you@that-machine
 ```
 
-Then point the console at `http://127.0.0.1:3000`. Leave Leviath on its default `127.0.0.1` bind for
+Then point The Lair at `http://127.0.0.1:3000`. Leave Leviath on its default `127.0.0.1` bind for
 this - `--host 0.0.0.0` is not wanted and only widens the exposure.
 
 ## Auth flow
@@ -207,7 +207,7 @@ repeated. To poll for what changed, use `since=` with no cursor rather than deep
 `server_time` and you may see one item twice, which is the safe direction when the granularity is
 whole seconds.
 
-Two parameters exist so a console does not have to make N requests: `ids=a,b,c` fetches exactly
+Two parameters exist so a browser client does not have to make N requests: `ids=a,b,c` fetches exactly
 those runs, and `fields=run_id,status,title` trims each one. Ids that no longer exist come back in
 `missing` rather than failing the request.
 
@@ -233,7 +233,7 @@ to null, because a count taken from a partial scan would be rendered as fact.
 
 Matching items carry `highlights` saying *why* they matched: the field, a snippet, and the stage
 where there is one, which you can pass straight to `/logs?stage=`. This is the part that cannot be
-done in the browser, because the console never holds a run's transcript.
+done in the browser, because The Lair never holds a run's transcript.
 
 One honest limit: the deep sources match the raw JSON on disk, so a query containing a quote,
 a backslash or a newline may not match text that does contain it.

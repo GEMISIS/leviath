@@ -290,7 +290,7 @@ endpoint, so three things must line up:
 1. **The server is running** with a token: `lev serve --token <t>`.
 2. **CORS allows the site's origin**: add `--cors https://leviath.dev` (or `--cors "*"`). Without
    it, the browser blocks the request before your server ever sees it.
-3. **The token matches** the one you entered in the console.
+3. **The token matches** the one you entered in The Lair.
 
 ```bash
 lev serve --token 6618… --cors https://leviath.dev --allow-admin

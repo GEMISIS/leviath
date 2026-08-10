@@ -16,10 +16,6 @@ what a good answer looks like.
 So write it down. A `.rhai` file beside your blueprint says what valid means. A bad answer then goes
 back to the agent to fix, instead of reaching whoever asked.
 
-> [!NOTE]
-> **Before this page:** [Final outputs](/docs/outputs).
-> **In one line:** one function, returning nothing when the answer is fine.
-
 ## Write one
 
 ```rhai

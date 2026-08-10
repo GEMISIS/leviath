@@ -24,12 +24,8 @@ flowchart LR
 
 Everything hard stays on Leviath's side: HTTP transport, rate limiting, per-stage timeouts, retry
 with backoff, working out which errors are worth retrying, and token counting. You write the mapping
-and nothing else.
-
-> [!NOTE]
-> **Before this page:** [Providers](/docs/providers) and [Rhai scripting](/docs/scripting).
-> **In one line:** name the file after the provider, write an `inference` function, reference it
-> from a stage.
+and nothing else: name the file after the provider, write an `inference` function, and reference it
+from a stage.
 
 Four things about the lifecycle:
 

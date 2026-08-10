@@ -3,7 +3,7 @@ title: Multi-stage workflows
 description: Split an agent into stages so each phase of a task gets its own model, tools, and context.
 group: Concepts
 group_order: 2
-order: 5
+order: 6
 ---
 
 # Multi-stage workflows
@@ -14,11 +14,6 @@ review time its context is full of the work it is supposed to be judging.
 
 So a Leviath agent is split into **stages**. Each stage is one job, with its own model, its own
 tools, and its own context. When a stage is done, an edge decides which stage runs next.
-
-> [!NOTE]
-> **Before this page:** [Agent blueprints](/docs/agents).
-> **In one line:** stages are the boxes, transitions are the arrows, and this page is about the
-> arrows.
 
 ## Graph
 

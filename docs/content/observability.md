@@ -15,11 +15,6 @@ run is stuck" and "is anything actually moving" without you going digging.
 It is off by default. Turning it on is one config block, and nothing about how a run behaves changes
 either way.
 
-> [!NOTE]
-> **Before this page:** [The daemon](/docs/daemon).
-> **In one line:** every run becomes a trace, the daemon publishes health counters every 30 seconds,
-> and two of those counters are the ones worth alerting on.
-
 ## Turning it on
 
 ```toml
