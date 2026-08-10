@@ -811,7 +811,7 @@ pub fn build_http_client(
         // (Anthropic) and `x-goog-api-key` (Gemini), which it would carry
         // straight to whatever a redirect named. `base_url` is user-configured
         // and legitimately points at loopback for Ollama, so this is an origin
-        // check rather than `leviath_core::net`'s SSRF policy, which would
+        // check rather than `leviath-net`'s SSRF policy, which would
         // refuse that.
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             match same_origin_hop(&attempt) && attempt.previous().len() <= 5 {

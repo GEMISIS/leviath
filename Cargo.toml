@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/leviath",
     "crates/leviath-core",
+    "crates/leviath-net",
     "crates/leviath-agent-client",
     "crates/leviath-runtime",
     "crates/leviath-providers",
@@ -97,6 +98,7 @@ allow_attributes_without_reason = "deny"
 # to the repo while every crate that dev-depends on it still publishes.
 leviath = { path = "crates/leviath", version = "0.3.2" }
 leviath-core = { path = "crates/leviath-core", version = "0.3.2" }
+leviath-net = { path = "crates/leviath-net", version = "0.3.2" }
 leviath-agent-client = { path = "crates/leviath-agent-client", version = "0.3.2" }
 leviath-runtime = { path = "crates/leviath-runtime", version = "0.3.2" }
 leviath-providers = { path = "crates/leviath-providers", version = "0.3.2" }

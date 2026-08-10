@@ -1,0 +1,28 @@
+[package]
+name = "leviath-net"
+description = "Outbound-request policy for Leviath: which URLs an agent-driven fetch may reach, and the shared HTTP client that enforces it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+# The whole reason this crate exists. `reqwest` pulls a little over a hundred
+# crates, and it sat in `leviath-core` - a crate whose own module doc says it
+# holds plain serializable data with no async dependencies. Depending on
+# Leviath's data types cost a full HTTP client and everything under it.
+reqwest = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

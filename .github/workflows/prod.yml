@@ -314,7 +314,8 @@ jobs:
           fi
           # Dependency order: cargo publish verifies each crate against the
           # registry, so dependencies must land before their dependents.
-          for c in leviath-core leviath-sys leviath-agent-client leviath-mcp \
+          for c in leviath-net leviath-alloc \
+                   leviath-core leviath-sys leviath-agent-client leviath-mcp \
                    leviath-package leviath-scripting leviath-telemetry \
                    leviath-providers leviath-tools leviath-runtime \
                    leviath leviath-cli; do

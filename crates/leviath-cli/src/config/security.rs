@@ -66,7 +66,7 @@ pub struct SecurityConfig {
     /// Turn this on when the agent is genuinely meant to talk to something local -
     /// a self-hosted model, a dev server under test. It applies to the script
     /// host's `http_get`/`http_post` and to redirect following; see
-    /// [`leviath_core::net`].
+    /// [`leviath_net`].
     #[serde(default)]
     pub allow_local_network: bool,
 

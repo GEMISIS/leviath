@@ -285,7 +285,7 @@ impl ServeLimits {
         let parsed = url
             .parse::<url::Url>()
             .map_err(|e| format!("callback_url is not a URL: {e}"))?;
-        leviath_core::check_url(&parsed, self.allow_local_network)
+        leviath_net::check_url(&parsed, self.allow_local_network)
             .map_err(|e| format!("callback_url is not allowed: {e}"))
     }
 
