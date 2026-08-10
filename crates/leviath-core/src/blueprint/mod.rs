@@ -11,6 +11,20 @@ use crate::lifecycle::CompactionConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Regions every stage can see, whatever its own `[context.regions]` says.
+///
+/// The runtime adds the first three when a blueprint declares none, and carries
+/// all four visible through a stage's layout swap: the first two hold the typed
+/// tool_use/tool_result turns, an answer submitted early has to survive to the
+/// end, and the last holds the instructions of the stage being entered. Mirrors
+/// `context_setup::apply_layout`, which is where the rule is enforced.
+const ALWAYS_VISIBLE_REGIONS: [&str; 4] = [
+    "conversation",
+    "tool_results",
+    "final_output",
+    crate::layout::STAGE_INSTRUCTIONS_REGION,
+];
+
 /// An agent blueprint - the complete definition of an agent type.
 ///
 /// Includes stages, model selection, tools, AND context layout. A blueprint
@@ -315,7 +329,26 @@ impl Blueprint {
         }
         // Added by `setup_context_window` when a blueprint does not declare
         // them, so they are always addressable.
-        names.extend(["conversation", "tool_results", "final_output"]);
+        names.extend(ALWAYS_VISIBLE_REGIONS);
+        names
+    }
+
+    /// The regions `stage` can actually see while it runs.
+    ///
+    /// Its own `[context.regions]` when it declares one, the blueprint's
+    /// otherwise, plus the regions the runtime carries visible whatever a stage
+    /// says. Narrower than [`known_region_names`](Self::known_region_names),
+    /// which asks only whether a name exists somewhere - the difference is the
+    /// whole of #370: a region another stage declares exists, and is still not
+    /// readable from here.
+    fn regions_visible_to<'a>(&'a self, stage: &'a Stage) -> std::collections::HashSet<&'a str> {
+        let layout = stage
+            .context_layout
+            .as_ref()
+            .unwrap_or(&self.context_layout);
+        let mut names: std::collections::HashSet<&str> =
+            layout.regions.iter().map(|r| r.name.as_str()).collect();
+        names.extend(ALWAYS_VISIBLE_REGIONS);
         names
     }
 
@@ -349,19 +382,31 @@ impl Blueprint {
             };
 
             if let Some(routing) = &stage.tool_result_routing {
-                if !known.contains(routing.default_region.as_str()) {
-                    return Err(bad(format!(
-                        "tool_routing.default_region names region '{}', which no \
-                         stage declares",
-                        routing.default_region
-                    )));
+                // Routing is checked against what *this* stage can see, not
+                // against every name in the blueprint. A stage that omits a
+                // region from its own `[context.regions]` hides it, so a result
+                // routed there is written somewhere the stage cannot read - and
+                // the pointer left in `conversation` tells the model to go read
+                // it. There is no reading of a blueprint where that was
+                // intended (#370).
+                let visible = self.regions_visible_to(stage);
+                let dead_drop = |key: &str, region: &str| ValidationError::Stage {
+                    stage: stage.name.clone(),
+                    message: format!(
+                        "tool_routing.{key} sends results to region '{region}', \
+                             which this stage's context does not include, so it \
+                             could not read them back. Add '{region}' to \
+                             [stages.{}.context.regions], or route somewhere the \
+                             stage can see.",
+                        stage.name
+                    ),
+                };
+                if !visible.contains(routing.default_region.as_str()) {
+                    return Err(dead_drop("default_region", &routing.default_region));
                 }
                 for (tool, region) in &routing.tool_overrides {
-                    if !known.contains(region.as_str()) {
-                        return Err(bad(format!(
-                            "tool_routing.overrides.{tool} names region '{region}', \
-                             which no stage declares"
-                        )));
+                    if !visible.contains(region.as_str()) {
+                        return Err(dead_drop(&format!("overrides.{tool}"), region));
                     }
                 }
             }

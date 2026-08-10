@@ -156,9 +156,21 @@ pub(crate) fn apply_tool_results(
             } else {
                 ""
             };
-            let pointer = format!(
-                "[output stored in context region '{target_region}' ({result_tokens} tokens) - read that region for the full result. Preview: {preview}{ellipsis}]"
-            );
+            // A region this stage does not render is one the model cannot go
+            // and read, so telling it to is worse than saying nothing: the
+            // instruction is unfollowable and the model spends turns trying
+            // (#370). `lev validate` refuses a blueprint that routes this way,
+            // so reaching here means a layout swapped underneath a routing rule
+            // rather than an author mistake - but the model still needs to be
+            // told the truth about where its output went.
+            let pointer = match window.hidden.contains(target_region) {
+                false => format!(
+                    "[output stored in context region '{target_region}' ({result_tokens} tokens) - read that region for the full result. Preview: {preview}{ellipsis}]"
+                ),
+                true => format!(
+                    "[output stored in context region '{target_region}' ({result_tokens} tokens), which this stage does not carry - it is kept for a later stage and cannot be read from here. Preview: {preview}{ellipsis}]"
+                ),
+            };
             let pointer_tokens = leviath_core::estimate_tokens(&pointer);
             add_kind(
                 window,

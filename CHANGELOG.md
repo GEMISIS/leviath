@@ -23,6 +23,18 @@ same list.
   tool-less output stage came to look like it had written 153,983 tokens. Stage
   records also carry `entered`, so a consumer can tell the two apart without the
   "empty map means it did not run" heuristic.
+- Breaking: a stage that routes a tool result into a region its own
+  `[context.regions]` omits is refused by `lev validate` (#370). Omitting a
+  region hides it, so the result was written where that stage could not read it
+  - and the pointer left in `conversation` told the model to go and read it
+  anyway. Measured on a scoped agent: a `verify` stage instructed to check rules
+  against the documentation tried in 6 of 20 runs, and the manual landed out of
+  view every time. The message names the region and how to fix it. The four
+  regions the runtime always carries stay valid targets, and a stage that
+  declares no layout of its own is judged against the blueprint's.
+- Changed: when a result does land in a region the stage does not carry, the
+  pointer says so instead of instructing the model to read it. The content is
+  still stored, for a later stage that declares the region.
 
 - Breaking: a blueprint value that is not one of the spellings a setting
   accepts is refused, naming what is valid. Four settings took anything and

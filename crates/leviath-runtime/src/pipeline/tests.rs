@@ -12999,3 +12999,113 @@ fn stage_instructions_survive_a_stage_layout_that_does_not_declare_them() {
         assembled.system_blocks
     );
 }
+
+// ─── The pointer tells the truth about a region the stage cannot see (#370) ──
+
+/// Build a window with `regions` plus `conversation`, hiding `hidden`.
+fn routed_window(regions: &[&str], hidden: &[&str]) -> ContextWindow {
+    let mut window = ContextWindow::new(100_000);
+    window.add_region(leviath_core::Region::new(
+        "conversation".to_string(),
+        leviath_core::RegionKind::SlidingWindow {
+            max_items: 50,
+            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+        },
+        50_000,
+    ));
+    for name in regions {
+        window.add_region(leviath_core::Region::new(
+            (*name).to_string(),
+            leviath_core::RegionKind::Pinned,
+            20_000,
+        ));
+    }
+    window.hidden = hidden.iter().map(|s| (*s).to_string()).collect();
+    window
+}
+
+fn routed_to(region: &str) -> leviath_core::blueprint::ToolResultRouting {
+    leviath_core::blueprint::ToolResultRouting {
+        default_region: region.to_string(),
+        ..Default::default()
+    }
+}
+
+fn one_read_call() -> (Vec<crate::components::ToolCall>, Vec<(String, String)>) {
+    (
+        vec![crate::components::ToolCall {
+            tool_id: "call-1".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "manual.md"}),
+            thought_signature: None,
+        }],
+        vec![("call-1".to_string(), "the manual's full text".to_string())],
+    )
+}
+
+/// The pointer that reaches the model when the region *is* visible: go and read
+/// it, because it can.
+#[test]
+fn a_pointer_to_a_visible_region_says_to_read_it() {
+    let mut window = routed_window(&["data_preview"], &[]);
+    let (calls, results) = one_read_call();
+    apply_tool_results(
+        &mut window,
+        "",
+        &calls,
+        &results,
+        Some(&routed_to("data_preview")),
+        None,
+    );
+    let conversation = window.get_region("conversation").expect("conversation");
+    let text: String = conversation
+        .content
+        .iter()
+        .map(|e| e.content.clone())
+        .collect();
+    assert!(
+        text.contains("read that region for the full result"),
+        "{text}"
+    );
+}
+
+/// And when it is not visible: say so, rather than instructing the model to
+/// read somewhere it has no access to. `verify` in the report tried exactly
+/// that, in 6 of 20 runs, and the manual landed out of view every time.
+#[test]
+fn a_pointer_to_a_hidden_region_says_it_cannot_be_read_here() {
+    let mut window = routed_window(&["data_preview"], &["data_preview"]);
+    let (calls, results) = one_read_call();
+    apply_tool_results(
+        &mut window,
+        "",
+        &calls,
+        &results,
+        Some(&routed_to("data_preview")),
+        None,
+    );
+    let conversation = window.get_region("conversation").expect("conversation");
+    let text: String = conversation
+        .content
+        .iter()
+        .map(|e| e.content.clone())
+        .collect();
+    assert!(
+        text.contains("cannot be read from here"),
+        "the model must not be told to read a region it does not carry: {text}"
+    );
+    assert!(
+        !text.contains("read that region for the full result"),
+        "and must not also be told the opposite: {text}"
+    );
+    // The content is still written, so a later stage that declares the region
+    // gets it - which is the reason this is not simply dropped.
+    let stored = window.get_region("data_preview").expect("target region");
+    assert!(
+        stored
+            .content
+            .iter()
+            .any(|e| e.content.contains("the manual's full text")),
+        "the result is kept for whoever can see it"
+    );
+}
