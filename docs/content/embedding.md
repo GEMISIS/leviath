@@ -15,7 +15,7 @@ file, no socket.
 
 ```toml
 [dependencies]
-leviath = "0.2"
+leviath = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```
 

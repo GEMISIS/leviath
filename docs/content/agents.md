@@ -140,7 +140,7 @@ it is how you say you meant it. See
 
 ## Context regions
 
-`[context.regions]` defines the memory layout. There are eight region kinds (the default is
+`[context.regions]` defines the memory layout. There are nine region kinds (the default is
 `temporary`); see [Structured context](/docs/context) for what each one does. Budgets come in
 three forms:
 
