@@ -639,6 +639,29 @@ mod tests {
         false
     }
 
+    /// Pay an interpreter's cold-start cost before a test's own clock starts.
+    ///
+    /// `connect()` allows 30s for `initialize`. That is generous for an MCP
+    /// server already resident in the page cache and tight for one that is
+    /// not: on a loaded CI runner a first `python3` can spend most of that
+    /// budget in the loader, and on Windows in the virus scanner, before it
+    /// reaches its first read. That is a property of the machine, not of the
+    /// code under test, and it has failed this suite in CI.
+    ///
+    /// Running a trivial program first leaves the image cached, so the
+    /// handshake these tests actually measure starts warm. A machine with no
+    /// `python3` is unaffected: the warm-up fails, and the test that follows
+    /// reports the same spawn failure it always did.
+    async fn warm_interpreter() {
+        let _ = tokio::process::Command::new("python3")
+            .args(["-c", ""])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+    }
+
     fn write_config(ctx: &McpContext, server: MCPServerConfig) {
         let mut config = Config::default();
         config.mcp_servers.push(server);
@@ -883,9 +906,18 @@ for line in sys.stdin:
             &ctx,
             MCPServerConfig::stdio("local", "python3", vec!["-c".to_string(), stub.to_string()]),
         );
+        warm_interpreter().await;
+        let outcome = run_test(&ctx, "local").await;
+        assert!(!outcome.ok, "a tools/list error must be reported");
+        // Not merely `!ok`: this server fails to start on a machine with no
+        // `python3`, and that also reports `!ok`. Naming the server's own error
+        // is what distinguishes "tools/list was answered with an error" from
+        // "nothing ever ran", which is the only thing this test is about.
         assert!(
-            !run_test(&ctx, "local").await.ok,
-            "a tools/list error must be reported"
+            outcome.message.contains("boom"),
+            "the failure must be the server's tools/list error, not a spawn \
+             or handshake failure; got: {}",
+            outcome.message
         );
     }
 
@@ -961,6 +993,7 @@ for line in sys.stdin:
             &ctx,
             MCPServerConfig::stdio("local", "python3", vec!["-c".to_string(), stub.to_string()]),
         );
+        warm_interpreter().await;
         let outcome = run_test(&ctx, "local").await;
         assert!(outcome.ok, "got: {}", outcome.message);
         assert!(
