@@ -112,7 +112,7 @@ pub use host::{ControlOp, SpawnArgs, WorldEvent, WorldHost};
 pub use inference_bridge::RetryPolicy;
 pub use inference_pool::{InferencePoolConfig, InferencePools};
 pub use interaction_hub::InteractionHub;
-pub use pipeline::{ModelDefaults, ResolvedStage, ToolService};
+pub use pipeline::{ModelDefaults, ResolvedStage, ToolService, is_stage_specific};
 pub use provider_creds::{ProviderCreds, build_provider_registry};
 pub use providers::ProviderRegistry;
 pub use taint::TaintGate;

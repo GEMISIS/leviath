@@ -271,6 +271,7 @@ pub fn lint_manifest(content: &str, blueprint: &Blueprint, env: &LintEnv) -> Vec
     findings.extend(lint_graph(blueprint));
     findings.extend(lint_output_reachable(blueprint));
     findings.extend(lint_dead_end_possible(blueprint));
+    findings.extend(lint_compacted_deliverables(blueprint));
 
     let agent_permissions = blueprint.agent_tool_permissions();
 

@@ -159,7 +159,19 @@ transform = "compact"        # direct | clear | compact | summarize | custom
 - `direct` is the default and carries everything as-is.
 - `clear` drops stage-specific regions and keeps pinned ones.
 - `compact`, and its alias `summarize`, sends the stage's content through a summarization pass
-  before the next stage starts.
+  before the next stage starts. **It summarizes every region that is not pinned**, not just the
+  transcript - including the ones holding your results. A region whose content does not survive a
+  rewrite should say so:
+
+  ```toml
+  [context.regions]
+  results = { kind = "sliding_window", budget = "20%", summarizable = false }
+  ```
+
+  That protects it wherever it is used, rather than at each of the edges that might touch it, and it
+  wins over an explicit `compact` list. `lev validate` warns when a bare `compact` edge would
+  summarize a region declared `required`, which is the closest thing a blueprint has to "this is a
+  deliverable".
 - `custom` takes a `transform_config` that names regions one at a time:
 
 ```toml

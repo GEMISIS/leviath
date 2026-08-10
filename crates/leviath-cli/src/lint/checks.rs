@@ -530,3 +530,68 @@ pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lin
 
     findings
 }
+
+/// A bare `compact` edge that would summarize a region holding a deliverable.
+///
+/// `transform = "compact"` reads as "summarize the transcript on the way out"
+/// and means "summarize every region that is not pinned", which includes the
+/// ones holding the run's results. Figures that survive a paraphrase are no
+/// longer figures, and nothing about the blueprint is malformed, so the only
+/// place to say so is here (#369).
+///
+/// Scoped to regions declared `required` rather than every region a bare
+/// compact touches. `required` is the author saying "a stage must populate
+/// this", which is the closest thing a blueprint has to "this is a
+/// deliverable" - warning on all of them would fire on every agent that ever
+/// wrote `transform = "compact"` and teach people to ignore it.
+pub(super) fn lint_compacted_deliverables(blueprint: &Blueprint) -> Vec<LintFinding> {
+    use leviath_core::blueprint::EdgeTransform;
+
+    // Named once per region, however many edges would summarize it: the fix is
+    // on the region, so repeating it per edge is noise.
+    let mut at_risk: Vec<&str> = Vec::new();
+    for stage in &blueprint.stages {
+        let layout = stage
+            .context_layout
+            .as_ref()
+            .unwrap_or(&blueprint.context_layout);
+        let bare_compact = stage
+            .transitions
+            .iter()
+            .flat_map(|edges| edges.values())
+            .any(|e| matches!(e.transform, EdgeTransform::Compact { .. }));
+        if !bare_compact {
+            continue;
+        }
+        for region in &layout.regions {
+            if region.required
+                && region.summarizable
+                && leviath_runtime::is_stage_specific(&region.kind)
+                && !at_risk.contains(&region.name.as_str())
+            {
+                at_risk.push(region.name.as_str());
+            }
+        }
+    }
+
+    at_risk
+        .into_iter()
+        .map(|region| {
+            LintFinding::new(
+                LintSeverity::Warning,
+                "compact-summarizes-deliverable",
+                format!(
+                    "region '{region}' is declared required - a stage must populate it - \
+                     and a `transform = \"compact\"` edge would hand it to the summarizer \
+                     on the way out, so whatever the stage wrote reaches later stages \
+                     paraphrased"
+                ),
+            )
+            .with_fix(format!(
+                "add summarizable = false to [context.regions] {region} if its content \
+                 does not survive a rewrite, or name the regions to summarize with \
+                 transform = \"custom\""
+            ))
+        })
+        .collect()
+}

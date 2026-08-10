@@ -25,11 +25,12 @@ pub fn init_window_seeded(
     seeds: &HashMap<String, String>,
 ) {
     for region_def in &blueprint.context_layout.regions {
-        let region = Region::new(
+        let mut region = Region::new(
             region_def.name.clone(),
             region_def.kind.clone(),
             region_def.max_tokens,
         );
+        region.summarizable = region_def.summarizable;
         window.add_region(region);
     }
 
@@ -160,6 +161,7 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
             region_def.kind.clone(),
             region_def.max_tokens,
         );
+        new_region.summarizable = region_def.summarizable;
 
         if let Some(existing) = window.get_region(&region_def.name) {
             // Carry entries verbatim - kind, metadata, key, timestamp survive
@@ -216,6 +218,7 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
             existing.kind.clone(),
             existing.max_tokens,
         );
+        carried.summarizable = existing.summarizable;
         // Verbatim, exactly as above: these are the regions whose typed turns
         // a rebuild would flatten.
         for entry in &existing.content {

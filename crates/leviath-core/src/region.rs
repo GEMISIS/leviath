@@ -448,6 +448,19 @@ pub struct Region {
     /// performs the compaction externally (requires an LLM call).
     #[serde(default)]
     pub needs_message_compaction: bool,
+
+    /// Whether an edge transform may hand this region to the summarizer.
+    ///
+    /// Carried from the region's declaration so the transform can consult it
+    /// without the layout: `transform = "compact"` summarizes by region *kind*,
+    /// and kind cannot tell a transcript from a table of results (#369).
+    #[serde(default = "crate::region::default_true")]
+    pub summarizable: bool,
+}
+
+/// Serde default for a flag that is on unless a blueprint turns it off.
+pub(crate) fn default_true() -> bool {
+    true
 }
 
 impl Region {
@@ -462,6 +475,7 @@ impl Region {
             schema: None,
             taint: None,
             needs_message_compaction: false,
+            summarizable: true,
         }
     }
 
