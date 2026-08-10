@@ -3009,7 +3009,7 @@ mode = "interactive_points"
 /// Per-stage tool_permissions with a non-string policy value - the inner
 /// `if let Some(policy_str) = policy_val.as_str()` should be skipped.
 #[test]
-fn parse_manifest_stage_tool_permissions_non_string_value_skipped() {
+fn parse_manifest_stage_tool_permissions_non_string_value_is_rejected() {
     let toml = r#"
 [agent]
 name = "non-string-perm"
@@ -3020,10 +3020,8 @@ mode = "autonomous"
 [stages.main.tool_permissions]
 bash = 123
 "#;
-    let bp = parse_manifest(toml).unwrap();
-    let stage = bp.find_stage("main").unwrap();
-    // Non-string value for "bash" is silently skipped.
-    assert!(stage.tool_permissions.is_empty());
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(err.contains("bash"), "names the tool: {err}");
 }
 
 /// Compaction config without `provider` - covers the None-branch at line ~460.
@@ -3101,7 +3099,10 @@ name = "no-security"
 /// Agent-level tool_permissions with a non-string value - the inner
 /// `if let Some(policy_str) = policy_val.as_str()` should be skipped.
 #[test]
-fn parse_manifest_agent_tool_permissions_non_string_value_skipped() {
+fn parse_manifest_agent_tool_permissions_non_string_value_is_rejected() {
+    // Skipped, until it wasn't worth it: a permission that does not survive
+    // parsing is a permission nobody enforces, and the tool falls back to a
+    // default that may be looser than what was written.
     let toml = r#"
 [agent]
 name = "agent-non-string-perm"
@@ -3110,15 +3111,8 @@ name = "agent-non-string-perm"
 bash = 42
 read_file = "allow"
 "#;
-    let bp = parse_manifest(toml).unwrap();
-    // Non-string "bash" is skipped; "read_file" is kept.
-    assert!(!bp.metadata.contains_key("tool_perm:bash"));
-    assert_eq!(
-        bp.metadata
-            .get("tool_perm:read_file")
-            .and_then(|v| v.as_str()),
-        Some("allow")
-    );
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(err.contains("bash"), "names the tool: {err}");
 }
 
 // ─── Models list & allow_user_default tests ─────────────────────────────
@@ -3829,6 +3823,166 @@ grep = 500
     let err = parse_manifest(toml).unwrap_err().to_string();
     assert!(err.contains("read_file"), "names the offending tool: {err}");
     assert!(err.contains("must be a number"), "got: {err}");
+}
+
+// ─── Values that quietly became a default ────────────────────────────────────
+//
+// Each of these parsed clean and resolved to something the author did not
+// write. Same class as the unknown keys below: a line that does nothing and
+// says nothing. The policy one is the sharp one - it resolved *looser* than
+// what was asked for.
+
+/// A misspelled `deny` used to resolve to `ask`, which is the more permissive
+/// of the two: approvable by a session grant or `--yolo`. The author wrote a
+/// refusal and got a prompt.
+#[test]
+fn parse_manifest_rejects_a_misspelled_stage_tool_policy() {
+    let toml = r#"
+[agent]
+name = "typo"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.tool_permissions]
+shell = "denied"
+"#;
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(err.contains("\"denied\""), "quotes what was written: {err}");
+    assert!(err.contains("valid: allow, ask, deny"), "got: {err}");
+}
+
+#[test]
+fn parse_manifest_rejects_a_misspelled_agent_tool_policy() {
+    let toml = r#"
+[agent]
+name = "typo"
+
+[tool_permissions]
+shell = "denny"
+"#;
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(err.contains("valid: allow, ask, deny"), "got: {err}");
+}
+
+/// Case is not the mistake - `Deny` has always resolved, and still must.
+#[test]
+fn parse_manifest_accepts_a_tool_policy_in_any_case() {
+    let toml = r#"
+[agent]
+name = "cased"
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.tool_permissions]
+shell = "Deny"
+write_file = "ALLOW"
+"#;
+    let bp = parse_manifest(toml).expect("case is not a typo");
+    let stage = bp.find_stage("work").expect("stage");
+    assert_eq!(
+        stage.tool_permissions.get("shell").map(String::as_str),
+        Some("Deny")
+    );
+}
+
+/// A misspelled `fail_all` let a fan-out swallow every worker failure.
+#[test]
+fn parse_manifest_rejects_an_unknown_worker_failure_policy() {
+    let toml = r#"
+[agent]
+name = "fan"
+
+[stages.split]
+mode = "fan_out"
+worker_stage = "work"
+on_worker_failure = "failall"
+
+[stages.work]
+mode = "autonomous"
+allow_as_worker = true
+"#;
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(err.contains("valid: continue, fail_all"), "got: {err}");
+}
+
+#[test]
+fn parse_manifest_accepts_both_worker_failure_policies() {
+    for policy in ["continue", "fail_all"] {
+        let toml = format!(
+            r#"
+[agent]
+name = "fan"
+
+[stages.split]
+mode = "fan_out"
+worker_stage = "work"
+on_worker_failure = "{policy}"
+
+[stages.work]
+mode = "autonomous"
+allow_as_worker = true
+"#
+        );
+        parse_manifest(&toml).unwrap_or_else(|e| panic!("{policy} is valid: {e}"));
+    }
+}
+
+/// Its neighbour `unattended` has always rejected an unknown value; `style`
+/// turned a mistyped `confirm` into a free-text question with the options
+/// listed and nothing enforcing them.
+#[test]
+fn parse_manifest_rejects_an_unknown_interaction_style() {
+    let toml = r#"
+[agent]
+name = "ask"
+
+[stages.work]
+mode = "interactive_points"
+
+[[stages.work.interaction_points]]
+name = "approve"
+prompt = "ok?"
+style = "confirmation"
+"#;
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(
+        err.contains("valid: free_text, multiple_choice, confirm"),
+        "got: {err}"
+    );
+}
+
+/// `strategy = "per-item"` is the hyphen mistake this invites, and it left the
+/// region evicting one entry at a time with no sign the line was read.
+#[test]
+fn parse_manifest_rejects_an_unknown_eviction_strategy() {
+    let toml = r#"
+[agent]
+name = "evict"
+
+[context.regions]
+notes = { kind = "sliding_window", max_items = 20, strategy = "per-item" }
+"#;
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(err.contains("valid: per_item, bulk, compact"), "got: {err}");
+    assert!(err.contains("notes"), "names the region: {err}");
+}
+
+#[test]
+fn parse_manifest_accepts_every_eviction_strategy() {
+    for strategy in ["per_item", "bulk", "compact"] {
+        let toml = format!(
+            r#"
+[agent]
+name = "evict"
+
+[context.regions]
+notes = {{ kind = "sliding_window", max_items = 20, strategy = "{strategy}" }}
+"#
+        );
+        parse_manifest(&toml).unwrap_or_else(|e| panic!("{strategy} is valid: {e}"));
+    }
 }
 
 // ─── Keys that do not exist (#362) ───────────────────────────────────────────

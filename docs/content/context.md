@@ -59,7 +59,9 @@ history      = { kind = "compact_history", budget = "15%", source_region = "code
 | `checklist` | A task list whose entries carry state. Written through `todo_add` / `todo_done` / `todo_note`, never evicted, and rendered open-items-first. |
 | `custom` | Behavior defined by a Rhai script (see [Rhai regions](/docs/rhai-regions)). |
 
-An unrecognized `kind` is a hard parse error, not a silently ignored region.
+An unrecognized `kind` is a hard parse error, not a silently ignored region. So is an unrecognized
+`strategy`, which is the one this invites: `strategy = "per-item"` with a hyphen used to leave the
+region evicting one entry at a time, exactly as if the line had not been written.
 
 ### Per-kind keys
 

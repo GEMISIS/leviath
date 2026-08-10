@@ -597,6 +597,14 @@ fn by_any_spelling<'a, V>(map: &'a HashMap<String, V>, tool_name: &str) -> Optio
     leviath_tools::tool_name_spellings(tool_name).find_map(|name| map.get(name))
 }
 
+/// A blueprint's policy string as a [`ToolPolicy`].
+///
+/// The fallback is defensive rather than load-bearing: the manifest parser
+/// refuses a spelling that is not `allow`/`ask`/`deny`, so the only string that
+/// reaches the last arm is `ask` itself. It was load-bearing, and wrong -
+/// anything unrecognised became `ask`, so a misspelled `deny` resolved to the
+/// more permissive of the two and could then be approved by a session grant or
+/// `--yolo`.
 fn parse_policy_str(s: &str) -> ToolPolicy {
     match s.to_lowercase().as_str() {
         "allow" => ToolPolicy::Allow,

@@ -18,40 +18,36 @@ pub use providers::*;
 mod security;
 pub use security::*;
 
-/// Every top-level key `config.toml` may set.
+/// Record every dotted path in `found` that is missing from `kept`.
 ///
-/// One entry per [`Config`] field. Kept beside the struct so the two are read
-/// together, and held to the shipped example by
-/// `every_config_section_is_a_known_key`.
-const KNOWN_CONFIG_KEYS: &[&str] = &[
-    "agent_paths",
-    "agent_read_paths",
-    "agent_safe_commands",
-    "agent_tool_permissions",
-    "batch_tool_hint",
-    "default_model",
-    "default_provider",
-    "limits",
-    "mcp_servers",
-    "model_capabilities",
-    "model_providers",
-    "nudge",
-    "observability",
-    "ollama_base_url",
-    "openrouter_api_key",
-    "providers",
-    "rate_limits",
-    "request_timeout_secs",
-    "safe_commands",
-    "sandbox",
-    "security",
-    "shell_hint",
-    "taint_tracking",
-    "title",
-    "tool_permissions",
-    "tool_script_permissions",
-    "webhook",
-];
+/// `kept` is what survived a deserialize/serialize round trip, so a path that
+/// is absent from it is one nothing read. Recurses only where both sides are
+/// tables: a value serde rewrote (an enum, a duration) is still a value it
+/// understood, and only the *keys* are being judged here.
+fn collect_dropped_keys(
+    found: &toml::value::Table,
+    kept: &toml::value::Table,
+    prefix: &str,
+    out: &mut Vec<String>,
+) {
+    for (key, value) in found {
+        let path = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match kept.get(key) {
+            None => out.push(path),
+            Some(kept_value) => {
+                if let (Some(found_table), Some(kept_table)) =
+                    (value.as_table(), kept_value.as_table())
+                {
+                    collect_dropped_keys(found_table, kept_table, &path, out);
+                }
+            }
+        }
+    }
+}
 
 /// CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -452,12 +448,8 @@ impl Config {
     /// over one stale key would take the whole CLI down rather than the one
     /// thing that key was meant to affect.
     ///
-    /// The known set is spelled out below rather than derived by serializing
-    /// the default, which was the first attempt: TOML cannot represent null,
-    /// so every `Option` field still at `None` vanishes from the serialized
-    /// form and five real keys would have been reported as unknown.
-    /// `every_config_section_is_a_known_key` holds this list against the
-    /// shipped example, which sets every section.
+    /// Reported at every depth, so `[limits] max_concurrent_tool` is named as
+    /// readily as a whole unknown table (#365).
     fn warn_unknown_config_keys(content: &str) {
         let unknown = Self::unknown_config_keys(content);
         if !unknown.is_empty() {
@@ -469,9 +461,22 @@ impl Config {
             tracing::warn!(
                 %keys,
                 "config.toml has keys nothing reads; they are being ignored. \
-                 Check the spelling against `lev config schema`."
+                 `lev doctor` reports them too, if this scrolls past."
             );
         }
+    }
+
+    /// Keys in the config file at `path` that nothing reads.
+    ///
+    /// The same answer the start-up warning gives, available to anyone who
+    /// wants to *ask* rather than having to catch it scrolling past - which is
+    /// what `lev doctor` does with it. An unreadable or absent file has no
+    /// unread keys, because that is a different problem and one the caller has
+    /// already reported.
+    pub fn unread_keys_at(path: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .map(|content| Self::unknown_config_keys(&content))
+            .unwrap_or_default()
     }
 
     /// The decision behind [`Self::warn_unknown_config_keys`], as data.
@@ -485,15 +490,48 @@ impl Config {
     /// `toml::from_str::<Table>` and not `content.parse::<toml::Value>()`: the
     /// latter parses a bare TOML *value*, so a document failed at the first
     /// `=` and this returned empty every time.
+    ///
+    /// # How a key is judged unknown
+    ///
+    /// By asking serde, rather than by consulting a list somebody has to
+    /// remember to update: deserialize the file into [`Config`], serialize that
+    /// straight back to TOML, and report any path in the input that did not
+    /// survive the round trip. Serde keeps what it understands and drops what
+    /// it does not, so the round trip *is* the definition of "read".
+    ///
+    /// Three things fall out of that for free:
+    ///
+    /// - It works at any depth, without knowing the shape of anything.
+    /// - It stays true as fields come and go, with nothing to maintain.
+    /// - It respects `#[serde(flatten)]`. `[model_providers.<name>]`
+    ///   deliberately absorbs unrecognised keys and forwards them to a Rhai
+    ///   script, and those keys round-trip, so they are not reported. Where
+    ///   serde keeps the data, this stays quiet.
+    ///
+    /// An earlier attempt compared against `Config::default()` instead, which
+    /// was wrong in a way worth recording: TOML cannot represent null, so every
+    /// `Option` still at `None` vanishes from the *default's* serialized form
+    /// and five real keys read as unknown. Round-tripping the user's own config
+    /// does not have that problem, because a field they set is a field that
+    /// serializes.
     fn unknown_config_keys(content: &str) -> Vec<String> {
         let Ok(found) = toml::from_str::<toml::value::Table>(content) else {
             return Vec::new();
         };
-        found
-            .keys()
-            .filter(|k| !KNOWN_CONFIG_KEYS.contains(&k.as_str()))
-            .cloned()
-            .collect()
+        // A file that is TOML but not a config has no *unknown* keys to report
+        // - it has a type error, which whoever asked for it reports instead.
+        let Ok(config) = toml::from_str::<Self>(content) else {
+            return Vec::new();
+        };
+        // Infallible, and said with `expect` rather than a branch nothing can
+        // reach: every field of `Config` is plain data with a derived
+        // `Serialize`, and a struct always serializes to a table.
+        let kept = toml::Value::try_from(config).expect("a Config is plain data and serializes");
+        let kept = kept.as_table().expect("a struct serializes to a table");
+
+        let mut unknown = Vec::new();
+        collect_dropped_keys(&found, kept, "", &mut unknown);
+        unknown
     }
 
     /// Core of `load()`, parameterized by path so it can be exercised in
@@ -1310,24 +1348,86 @@ mod tests {
             .collect()
     }
 
-    /// A key the warning does not know is a key it reports, so a field added
-    /// to `Config` and left out of `KNOWN_CONFIG_KEYS` would tell every user
-    /// who sets it that it does nothing. The shipped example exercises every
-    /// section, which makes it the right thing to hold the list against.
+    /// An unknown key is reported wherever it sits, not only at the top level.
+    ///
+    /// The reported case (#365) was `[limits] max_concurrent_tool`, a
+    /// misspelling one level down, which the first version of this check could
+    /// not see: it compared top-level keys only, so a whole bogus table was
+    /// named and a bogus key inside a real table was not.
     #[test]
-    fn every_config_section_is_a_known_key() {
-        // Straight to `Table` rather than `Value` + a match: the match's other
-        // arm can never run, and an arm that cannot run is a coverage hole.
-        let example: toml::value::Table =
-            toml::from_str(CONFIG_EXAMPLE).expect("the example is a TOML table");
-        let unreported: Vec<&str> = example
-            .keys()
-            .filter(|k| !KNOWN_CONFIG_KEYS.contains(&k.as_str()))
-            .map(String::as_str)
-            .collect();
+    fn an_unknown_key_is_reported_at_any_depth() {
+        let content = "\
+default_provider = \"anthropic\"
+
+[cache]
+ttl = \"banana\"
+
+[limits]
+max_concurrent_tool = 3
+
+[providers]
+anthropic_api_key = \"x\"
+anthropic_cach_ttl = \"1h\"
+";
+        let unknown = Config::unknown_config_keys(content);
+        assert!(unknown.contains(&"cache".to_string()), "{unknown:?}");
         assert!(
-            unreported.is_empty(),
-            "the shipped example sets keys the warning would call unknown: {unreported:?}"
+            unknown.contains(&"limits.max_concurrent_tool".to_string()),
+            "a key one level down is named by its path: {unknown:?}"
+        );
+        assert!(
+            unknown.contains(&"providers.anthropic_cach_ttl".to_string()),
+            "{unknown:?}"
+        );
+        // And the real keys beside them are not reported.
+        assert!(
+            !unknown.iter().any(|k| k == "default_provider"),
+            "{unknown:?}"
+        );
+        assert!(
+            !unknown.iter().any(|k| k == "providers.anthropic_api_key"),
+            "{unknown:?}"
+        );
+    }
+
+    /// A file that is TOML but not a config reports no unknown keys: it has a
+    /// type error, and saying "every key here is unread" on top of that would
+    /// bury the message that actually explains it.
+    #[test]
+    fn a_file_that_is_not_a_config_reports_no_unknown_keys() {
+        // Parses as a table, fails as a `Config`: the provider is a number.
+        assert!(Config::unknown_config_keys("default_provider = 42").is_empty());
+    }
+
+    /// `unread_keys_at` answers for a path, and a path that is not there is a
+    /// question about a file rather than about its keys.
+    #[test]
+    fn unread_keys_of_a_missing_file_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Config::unread_keys_at(&dir.path().join("nope.toml")).is_empty());
+    }
+
+    #[test]
+    fn unread_keys_at_reads_the_file_it_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[cache]\nttl = \"banana\"\n").unwrap();
+        assert_eq!(Config::unread_keys_at(&path), vec!["cache".to_string()]);
+    }
+
+    /// `[model_providers.<name>]` forwards whatever it does not recognise to a
+    /// Rhai script through `#[serde(flatten)]`, so those keys *are* read and
+    /// must stay quiet. This is the case a hand-maintained key list gets wrong.
+    #[test]
+    fn keys_a_flatten_field_absorbs_are_not_reported() {
+        let content = "\
+[model_providers.groq]
+script = \"groq.rhai\"
+some_custom_thing = \"forwarded to the script\"
+";
+        assert!(
+            Config::unknown_config_keys(content).is_empty(),
+            "a key serde keeps is a key nothing should complain about"
         );
     }
 

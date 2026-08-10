@@ -216,6 +216,79 @@ fn config_check_says_none_when_nothing_is_registered() {
     );
 }
 
+/// A `[rate_limits]` entry naming no provider throttles nothing, and the
+/// unknown-key check cannot see it: the table takes arbitrary keys, so the
+/// typo deserializes perfectly.
+#[test]
+fn config_check_names_a_rate_limit_for_a_provider_that_does_not_exist() {
+    let mut config = Config::default();
+    let limit = leviath_providers::RateLimitConfig {
+        requests_per_minute: 10,
+        tokens_per_minute: 1000,
+    };
+    config
+        .rate_limits
+        .insert("anthropc".to_string(), limit.clone());
+    // The control: the correctly spelled one beside it must stay quiet, or the
+    // note would just be reporting every rate limit anyone set.
+    config.rate_limits.insert("anthropic".to_string(), limit);
+
+    let check = config_check(&config, &ProviderRegistry::new());
+    assert_eq!(check.status, CheckStatus::Ok, "not broken wiring");
+    assert!(
+        check.detail.contains("rate_limits.anthropc"),
+        "got: {}",
+        check.detail
+    );
+    assert!(
+        !check.detail.contains("rate_limits.anthropic,")
+            && !check.detail.ends_with("rate_limits.anthropic"),
+        "the real provider must not be reported: {}",
+        check.detail
+    );
+}
+
+/// Two of them read as two, not as "1 key".
+#[test]
+fn config_check_counts_more_than_one_unread_key() {
+    let mut config = Config::default();
+    for name in ["anthropc", "opennai"] {
+        config.rate_limits.insert(
+            name.to_string(),
+            leviath_providers::RateLimitConfig {
+                requests_per_minute: 10,
+                tokens_per_minute: 1000,
+            },
+        );
+    }
+    let check = config_check(&config, &ProviderRegistry::new());
+    assert!(
+        check
+            .detail
+            .contains("2 keys in config.toml are read by nothing"),
+        "got: {}",
+        check.detail
+    );
+}
+
+#[test]
+fn config_check_is_quiet_when_every_rate_limit_names_a_real_provider() {
+    let mut config = Config::default();
+    config.rate_limits.insert(
+        "openrouter".to_string(),
+        leviath_providers::RateLimitConfig {
+            requests_per_minute: 10,
+            tokens_per_minute: 1000,
+        },
+    );
+    let check = config_check(&config, &ProviderRegistry::new());
+    assert!(
+        !check.detail.contains("read by nothing"),
+        "got: {}",
+        check.detail
+    );
+}
+
 // ─── resolve_check ────────────────────────────────────────────────────────────
 
 #[test]

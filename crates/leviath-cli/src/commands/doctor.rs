@@ -210,6 +210,30 @@ pub fn format_report(checks: &[Check]) -> String {
 
 // ─── Check 1: config ──────────────────────────────────────────────────────────
 
+/// `[rate_limits.<name>]` entries naming no provider that exists.
+///
+/// The unknown-key check cannot see these: the table is a map with arbitrary
+/// keys, so `[rate_limits.anthropc]` deserializes perfectly and simply throttles
+/// nothing. The set of names that mean anything here is closed - script
+/// providers set theirs under `[model_providers.<name>] rate_limit` instead -
+/// and the wizard's catalog is already the one list of it, so this needs no
+/// second list to fall out of date.
+fn misdirected_rate_limits(config: &Config) -> Vec<String> {
+    let known: Vec<&str> = crate::commands::setup::catalog::providers()
+        .iter()
+        .map(|p| p.id)
+        .collect();
+    let mut misdirected: Vec<String> = config
+        .rate_limits
+        .keys()
+        .filter(|name| !known.contains(&name.as_str()))
+        .map(|name| format!("rate_limits.{name}"))
+        .collect();
+    // A map iterates in arbitrary order; the report should not.
+    misdirected.sort_unstable();
+    misdirected
+}
+
 /// Report what the config named and what the registry ended up holding.
 ///
 /// Only native providers can be listed - a Rhai script provider is resolved by
@@ -222,11 +246,30 @@ fn config_check(config: &Config, registry: &ProviderRegistry) -> Check {
         true => "none".to_string(),
         false => names.join(", "),
     };
+    let detail = format!(
+        "default_provider={}; registered: {} (script providers resolve by name)",
+        config.default_provider, registered
+    );
+
+    // "Which keys were ignored" was previously only answerable by catching the
+    // start-up warning as it scrolled past, and only if you were looking. A
+    // note on an OK line rather than a failure, matching how the `resolve`
+    // check reports a config that works but probably is not what was meant:
+    // the rest of the file still applies, so this is not broken wiring.
+    let mut unread = Config::unread_keys_at(&Config::config_path());
+    unread.extend(misdirected_rate_limits(config));
+    if unread.is_empty() {
+        return Check::ok("config", detail);
+    }
+    let subject = match unread.len() {
+        1 => "1 key in config.toml is",
+        n => &format!("{n} keys in config.toml are"),
+    };
     Check::ok(
         "config",
         format!(
-            "default_provider={}; registered: {} (script providers resolve by name)",
-            config.default_provider, registered
+            "{detail}  (note: {subject} read by nothing - check the spelling: {})",
+            unread.join(", ")
         ),
     )
 }
