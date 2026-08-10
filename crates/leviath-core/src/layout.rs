@@ -9,6 +9,27 @@ use crate::error::ValidationError;
 use crate::region::{RegionKind, RegionSchema};
 use serde::{Deserialize, Serialize};
 
+/// The region a stage's `system_prompt` is written into, when a blueprint
+/// declares one by this name.
+///
+/// Stage instructions have always been pinned context - that is why they read
+/// as instruction rather than history - but the region holding them was chosen
+/// by accident: whichever pinned region happened to be declared first. That
+/// region then carried the prompt's tokens in the stage ledger under its own
+/// name, could not be sized or scoped, and sat wherever it sat in the cached
+/// prefix (#366).
+///
+/// Declaring a region by this name gives the prompt a handle:
+///
+/// ```toml
+/// [context.regions]
+/// stage_instructions = { kind = "pinned", budget = "3%" }
+/// ```
+///
+/// A blueprint that declares nothing by this name keeps the old behaviour
+/// exactly, so this costs no existing agent anything.
+pub const STAGE_INSTRUCTIONS_REGION: &str = "stage_instructions";
+
 /// How a region's token ceiling is expressed before it is resolved against a
 /// concrete model context window.
 ///
