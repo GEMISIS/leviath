@@ -219,6 +219,41 @@ Scripts are stricter and have no `[read_paths]` escape: a stage hook, a custom-r
 output validator must all live inside the blueprint's own directory. A script is code the agent
 ships, and there is no such thing as loading your logic from somewhere else on purpose.
 
+## Where a stage's own instructions live
+
+A stage's `system_prompt` is pinned context - that is why it reads as instruction rather than
+history - and it goes into a region like everything else. By default that region is *whichever
+pinned region you declared first*, which costs three things: its tokens are charged to that region's
+name in the [stage ledger](/docs/cli#lev-stages-run-id), you cannot size or scope it, and it lands wherever
+that region sits in the cacheable prefix.
+
+Name a region for it and all three go away:
+
+```toml
+[context.regions]
+stage_instructions = { kind = "pinned", budget = "3%" }
+```
+
+The runtime writes the entering stage's prompt there, replacing the previous stage's. It is always
+assembled **after** every other pinned block, however you declared it, so the content in front of it
+stays byte-identical when the stage changes - and that content is what a provider's prompt cache
+matches on. Instructions sitting in front of the shared prefix rewrite its head on every transition,
+which invalidates everything behind them.
+
+Measured on a two-stage agent whose prompts are about 63 tokens each:
+
+| Region | Without the declaration | With it |
+|---|---|---|
+| `task` | 65 | 2 |
+| `stage_instructions` | not present | 63 |
+
+The 65 is the whole problem in one number: two tokens of task and sixty-three of somebody else's
+instructions, under a heading that says `task`.
+
+A blueprint that declares no such region keeps the old behaviour exactly, so this costs nothing to
+ignore. The region is never hidden by a stage that omits it from its own `[context.regions]`: it
+holds the instructions of the stage being entered, so hiding it would drop that stage's prompt.
+
 ## Eviction is deterministic
 
 When a region crosses its threshold, the runtime acts by the region's *kind*, never by pushing out

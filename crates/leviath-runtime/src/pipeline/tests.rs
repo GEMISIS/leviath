@@ -12706,3 +12706,196 @@ fn on_stage_exit_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
     assert!(status_message(&world, out_of_range).is_none());
     assert!(status_message(&world, undeclared).is_none());
 }
+
+// ─── Stage instructions get a region of their own (#366) ─────────────────────
+
+/// Build a window whose pinned regions are `names`, in that order.
+fn instructions_window(names: &[&str]) -> ContextWindow {
+    let mut window = ContextWindow::new(100_000);
+    for name in names {
+        window.add_region(leviath_core::Region::new(
+            (*name).to_string(),
+            leviath_core::RegionKind::Pinned,
+            10_000,
+        ));
+    }
+    window
+}
+
+fn setup_carrying_prompt(prompt: &str) -> StageSetup {
+    StageSetup {
+        system_prompt: Some(prompt.to_string()),
+        ..setup()
+    }
+}
+
+/// Without a declared region the prompt still lands in the first pinned one, so
+/// every blueprint written before this keeps working unchanged.
+#[test]
+fn stage_instructions_still_land_in_the_first_pinned_region_by_default() {
+    let mut window = instructions_window(&["task", "notes"]);
+    apply_stage_context(&setup_carrying_prompt("do the thing"), &mut window).expect("fits");
+
+    let task = window.get_region("task").expect("task region");
+    assert!(
+        task.content
+            .iter()
+            .any(|e| e.content.contains("do the thing")),
+        "the historical target still receives it"
+    );
+}
+
+/// Declared, it goes there instead - so its tokens stop being charged to
+/// whichever region an author happened to declare first, which is what made the
+/// per-region numbers in the stage ledger untrustworthy.
+#[test]
+fn a_declared_stage_instructions_region_receives_the_prompt() {
+    let mut window = instructions_window(&["task", "stage_instructions"]);
+    apply_stage_context(&setup_carrying_prompt("do the thing"), &mut window).expect("fits");
+
+    let instructions = window
+        .get_region("stage_instructions")
+        .expect("the declared region");
+    assert!(
+        instructions
+            .content
+            .iter()
+            .any(|e| e.content.contains("do the thing")),
+        "the prompt lands in the region named for it"
+    );
+    let task = window.get_region("task").expect("task region");
+    assert!(
+        task.content.is_empty(),
+        "and `task` is no longer charged for it: {:?}",
+        task.content
+    );
+}
+
+/// It renders last among the pinned blocks however it was declared, so the
+/// prefix in front of it is byte-identical across a stage change. That prefix is
+/// what a provider caches; a per-stage string in front of it invalidates
+/// everything behind it on every transition.
+#[test]
+fn stage_instructions_render_after_every_other_pinned_block() {
+    // Declared *first*, which is the arrangement that used to poison the prefix.
+    let mut window = instructions_window(&["stage_instructions", "task", "notes"]);
+    window
+        .add_to_region("task", "the task".to_string(), 2)
+        .expect("fits");
+    window
+        .add_to_region("notes", "some notes".to_string(), 2)
+        .expect("fits");
+
+    apply_stage_context(&setup_carrying_prompt("stage one"), &mut window).expect("fits");
+    let first = window.assemble();
+    apply_stage_context(&setup_carrying_prompt("stage two"), &mut window).expect("fits");
+    let second = window.assemble();
+
+    assert!(
+        first
+            .system_blocks
+            .last()
+            .expect("a system block")
+            .text
+            .contains("stage one"),
+        "instructions are the final system block: {:?}",
+        first.system_blocks.last()
+    );
+    assert!(
+        second
+            .system_blocks
+            .last()
+            .expect("a system block")
+            .text
+            .contains("stage two"),
+        "and still are after a transition"
+    );
+
+    // The point of the ordering: everything in front of them is unchanged.
+    let head = |c: &crate::components::AssembledContext| -> Vec<String> {
+        c.system_blocks[..c.system_blocks.len() - 1]
+            .iter()
+            .map(|b| b.text.clone())
+            .collect()
+    };
+    assert_eq!(
+        head(&first),
+        head(&second),
+        "the cacheable prefix in front of the instructions must not move"
+    );
+}
+
+/// The previous stage's instructions go and nothing else does. The shared-region
+/// fallback has to find its own entries by their opening words, which takes any
+/// author content starting the same way with it; a region of its own is emptied
+/// outright.
+#[test]
+fn a_declared_region_is_replaced_not_prefix_matched() {
+    let mut window = instructions_window(&["stage_instructions"]);
+    apply_stage_context(&setup_carrying_prompt("first"), &mut window).expect("fits");
+    apply_stage_context(&setup_carrying_prompt("second"), &mut window).expect("fits");
+
+    let region = window.get_region("stage_instructions").expect("region");
+    assert_eq!(region.content.len(), 1, "one stage's worth, not two");
+    assert!(region.content[0].content.contains("second"));
+}
+
+/// A stage with no prompt clears the previous stage's rather than leaving it
+/// standing as if it still applied.
+#[test]
+fn a_stage_without_a_prompt_clears_the_previous_one() {
+    let mut window = instructions_window(&["stage_instructions"]);
+    apply_stage_context(&setup_carrying_prompt("first"), &mut window).expect("fits");
+    apply_stage_context(&setup(), &mut window).expect("fits");
+
+    let region = window.get_region("stage_instructions").expect("region");
+    assert!(
+        region.content.is_empty(),
+        "instructions from a stage that has been left do not linger: {:?}",
+        region.content
+    );
+}
+
+/// A stage whose own `[context.regions]` does not list `stage_instructions`
+/// still shows them.
+///
+/// Omitting a region hides it, which is right for an author's data and wrong
+/// for this one: the runtime writes the entering stage's prompt into it
+/// immediately afterwards, so hiding it would drop that stage's instructions
+/// with nothing said. Found by reading the hiding rule rather than by a failing
+/// run, which is why the test exists.
+#[test]
+fn stage_instructions_survive_a_stage_layout_that_does_not_declare_them() {
+    use leviath_core::{ContextLayout, RegionDefinition};
+
+    let mut window = instructions_window(&["stage_instructions", "task"]);
+    // A stage layout naming only `task`.
+    let layout = ContextLayout::new(
+        vec![RegionDefinition::new(
+            "task".to_string(),
+            leviath_core::RegionKind::Pinned,
+            10_000,
+        )],
+        10_000,
+    );
+    let setup = StageSetup {
+        context_layout: Some(layout),
+        ..setup_carrying_prompt("still visible")
+    };
+
+    apply_stage_context(&setup, &mut window).expect("fits");
+
+    assert!(
+        !window.hidden.contains("stage_instructions"),
+        "the region the runtime fills is never hidden"
+    );
+    let assembled = window.assemble();
+    assert!(
+        assembled
+            .system_blocks
+            .iter()
+            .any(|b| b.text.contains("still visible")),
+        "the stage's own instructions reach the model: {:?}",
+        assembled.system_blocks
+    );
+}

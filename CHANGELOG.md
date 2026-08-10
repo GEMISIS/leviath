@@ -32,6 +32,19 @@ same list.
   scrolls past, and names a `[rate_limits.<provider>]` entry whose provider does
   not exist - a case the key check cannot see, since that table accepts any name
   and a misspelled provider simply throttles nothing.
+- New: a region named `stage_instructions` receives the entering stage's
+  `system_prompt`, if a blueprint declares one (#366). Stage instructions have
+  always been pinned context, but the region holding them was chosen by
+  accident - whichever pinned region was declared first - so its tokens were
+  charged to that region's name in the stage ledger, it could not be sized or
+  scoped, and it sat wherever that region sat in the cacheable prefix. Measured
+  on a two-stage agent: `task` reported 65 tokens where 63 of them were the
+  stage prompt, and 2 were the task. Declared, the same run reports `task` 2 and
+  `stage_instructions` 63. The region is also assembled after every other pinned
+  block whatever order it was declared in, so the prefix in front of it is
+  byte-identical across a transition rather than being rewritten at the head on
+  every stage change. A blueprint that declares nothing by that name behaves
+  exactly as before.
 
 - Breaking: a blueprint key the parser does not read is now refused, naming
   what is valid, in `[stages.X]`, `[stages.X.context]`,

@@ -802,6 +802,37 @@ pub(crate) fn emit_stage_transition(
     }
 }
 
+/// Which region a stage's instructions are written into.
+///
+/// A declared [`STAGE_INSTRUCTIONS_REGION`] when there is one, and it is moved
+/// to the end of the region list so it renders after every other pinned block.
+/// That ordering is the point: pinned regions carry `CacheHint::Always` and are
+/// assembled in list order, so instructions sitting anywhere but last put a
+/// per-stage string *in front of* the shared prefix - and changing stage then
+/// rewrites the head of the prefix and invalidates everything behind it. Last
+/// means the bytes in front stay identical across a transition.
+///
+/// Otherwise the historical target: the first pinned region, or `conversation`
+/// when a layout declares no pinned region at all.
+///
+/// [`STAGE_INSTRUCTIONS_REGION`]: leviath_core::layout::STAGE_INSTRUCTIONS_REGION
+fn stage_instructions_target(window: &mut ContextWindow) -> String {
+    let declared = leviath_core::layout::STAGE_INSTRUCTIONS_REGION;
+    if let Some(at) = window.regions.iter().position(|r| r.name == declared) {
+        if at + 1 < window.regions.len() {
+            let region = window.regions.remove(at);
+            window.regions.push(region);
+        }
+        return declared.to_string();
+    }
+    window
+        .regions
+        .iter()
+        .find(|r| matches!(r.kind, leviath_core::RegionKind::Pinned))
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "conversation".to_string())
+}
+
 /// Apply a stage's context setup to a window: swap to the stage's layout (if any)
 /// and (re)inject its system prompt as pinned `[Stage instructions: …]` context,
 /// clearing any previous stage's first. Returns `Err` only when the prompt
@@ -815,16 +846,18 @@ pub(crate) fn apply_stage_context(
         crate::context_setup::apply_layout(window, layout);
     }
 
-    // Inject stage instructions into the first pinned region (cacheable), or the
-    // conversation region if there is none - clearing any prior stage's first.
-    let target = window
-        .regions
-        .iter()
-        .find(|r| matches!(r.kind, leviath_core::RegionKind::Pinned))
-        .map(|r| r.name.clone())
-        .unwrap_or_else(|| "conversation".to_string());
+    let target = stage_instructions_target(window);
     if let Some(region) = window.regions.iter_mut().find(|r| r.name == target) {
-        region.remove_entries_by_prefix("[Stage instructions:");
+        if target == leviath_core::layout::STAGE_INSTRUCTIONS_REGION {
+            // The whole region is ours, so the previous stage's prompt goes by
+            // emptying it. The fallback below cannot do that - it shares a
+            // region with the author's own content - and has to identify its
+            // own entries by their prefix, which silently removes any author
+            // content that happens to start with the same words.
+            region.clear();
+        } else {
+            region.remove_entries_by_prefix("[Stage instructions:");
+        }
     }
     if let Some(sp) = &setup.system_prompt {
         let content = format!("[Stage instructions: {sp}]");

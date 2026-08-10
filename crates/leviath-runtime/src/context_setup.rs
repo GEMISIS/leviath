@@ -194,10 +194,17 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
     // hiding them would strand a message history the next stage's own turns
     // have to attach to. An answer submitted early has to survive to the end
     // for the same reason.
+    // `stage_instructions` joins them for a different reason: it holds the
+    // prompt of the stage being entered, which is written straight after this
+    // runs. Hiding it because a stage's own `[context.regions]` did not list it
+    // would silently drop that stage's instructions - the region is the
+    // runtime's to fill, not something an author has to remember to re-declare
+    // in every stage.
     let always_visible = [
         "conversation",
         "tool_results",
         crate::output_tool::FINAL_OUTPUT_REGION,
+        leviath_core::layout::STAGE_INSTRUCTIONS_REGION,
     ];
     let mut hidden = std::collections::HashSet::new();
     for existing in &window.regions {
