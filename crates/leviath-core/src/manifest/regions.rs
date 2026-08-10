@@ -170,7 +170,7 @@ pub(super) fn parse_region_layout(
                 return Err(Error::Other(format!(
                     "region '{region_name}': unknown kind \"{unknown}\" (valid kinds: \
                      pinned, sliding_window, temporary, compacting, clearable, \
-                     compact_history, hashmap, custom)"
+                     compact_history, checklist, hashmap, custom)"
                 )));
             }
         };

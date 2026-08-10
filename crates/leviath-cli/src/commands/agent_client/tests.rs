@@ -319,7 +319,7 @@ version = "1.0.0"
 description = "test"
 
 [stages.implement]
-prompt = "Do it"
+system_prompt = "Do it"
 "#,
     )
     .unwrap();

@@ -1062,7 +1062,7 @@ version = "1.0.0"
 description = "Missing"
 
 [stages.run]
-prompt = "Run"
+system_prompt = "Run"
 "#
         });
         let req = Request::builder()

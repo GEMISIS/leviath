@@ -231,8 +231,26 @@
             "max_result_tokens": { "type": "integer", "minimum": 1 },
             "overrides": {
               "type": "object",
-              "description": "Tool name to region name.",
-              "additionalProperties": { "type": "string" }
+              "description": "Tool name to a region name, or to a table carrying that tool's region, its result ceiling, or both.",
+              "additionalProperties": {
+                "oneOf": [
+                  { "type": "string" },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "minProperties": 1,
+                    "properties": {
+                      "region": { "type": "string" },
+                      "max_result_tokens": { "type": "integer", "minimum": 0 }
+                    }
+                  }
+                ]
+              }
+            },
+            "max_result_tokens_per_tool": {
+              "type": "object",
+              "description": "Tool name to that tool's result ceiling, overriding max_result_tokens for it.",
+              "additionalProperties": { "type": "integer", "minimum": 0 }
             }
           }
         },

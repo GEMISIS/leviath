@@ -849,7 +849,7 @@ mod tests {
         std::fs::write(
             bp.join("agent.leviath"),
             "[agent]\nname = \"probe\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n\
-             [stages.main]\nprompt = \"p\"\n",
+             [stages.main]\nsystem_prompt = \"p\"\n",
         )
         .unwrap();
 
@@ -1147,7 +1147,7 @@ version = "1.0.0"
 description = "A spawnable test blueprint"
 
 [stages.plan]
-prompt = "Plan the work"
+system_prompt = "Plan the work"
 "#
             ),
         )

@@ -288,6 +288,118 @@ impl Blueprint {
         // Graph validation
         self.validate_graph()?;
 
+        self.validate_region_references()?;
+
+        Ok(())
+    }
+
+    /// Every region a stage can name, anywhere in this blueprint.
+    ///
+    /// The union of the global layout, every stage's own layout, and the three
+    /// the runtime adds if nobody declared them. It is a union rather than the
+    /// per-stage set on purpose: a stage that omits a region from its
+    /// `[context.regions]` hides it, it does not destroy it, so naming a region
+    /// another stage declared is legitimate. Only a name that exists nowhere is
+    /// a typo.
+    fn known_region_names(&self) -> std::collections::HashSet<&str> {
+        let mut names: std::collections::HashSet<&str> = self
+            .context_layout
+            .regions
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        for stage in &self.stages {
+            if let Some(layout) = &stage.context_layout {
+                names.extend(layout.regions.iter().map(|r| r.name.as_str()));
+            }
+        }
+        // Added by `setup_context_window` when a blueprint does not declare
+        // them, so they are always addressable.
+        names.extend(["conversation", "tool_results", "final_output"]);
+        names
+    }
+
+    /// Refuse a region name that exists nowhere in the blueprint.
+    ///
+    /// Routing and gates are addressed by name, and a name that matches nothing
+    /// used to be accepted in silence: the routed tool result went to the
+    /// default region and the gate held nothing back, both looking exactly like
+    /// a working config (#362). A gate that silently never fires is the
+    /// expensive case - it reads as the model behaving well.
+    fn validate_region_references(&self) -> std::result::Result<(), ValidationError> {
+        let known = self.known_region_names();
+        let checklists: std::collections::HashSet<&str> = self
+            .context_layout
+            .regions
+            .iter()
+            .chain(
+                self.stages
+                    .iter()
+                    .filter_map(|s| s.context_layout.as_ref())
+                    .flat_map(|l| l.regions.iter()),
+            )
+            .filter(|r| matches!(r.kind, crate::RegionKind::Checklist))
+            .map(|r| r.name.as_str())
+            .collect();
+
+        for stage in &self.stages {
+            let bad = |message: String| ValidationError::Stage {
+                stage: stage.name.clone(),
+                message,
+            };
+
+            if let Some(routing) = &stage.tool_result_routing {
+                if !known.contains(routing.default_region.as_str()) {
+                    return Err(bad(format!(
+                        "tool_routing.default_region names region '{}', which no \
+                         stage declares",
+                        routing.default_region
+                    )));
+                }
+                for (tool, region) in &routing.tool_overrides {
+                    if !known.contains(region.as_str()) {
+                        return Err(bad(format!(
+                            "tool_routing.overrides.{tool} names region '{region}', \
+                             which no stage declares"
+                        )));
+                    }
+                }
+            }
+
+            for edge in stage.transitions.iter().flat_map(|t| t.values()) {
+                let Some(gate) = &edge.gate else { continue };
+                for (key, region) in [
+                    ("region", gate.region.as_ref()),
+                    (
+                        "require_region_updated",
+                        gate.require_region_updated.as_ref(),
+                    ),
+                    ("require_no_open_items", gate.require_no_open_items.as_ref()),
+                ] {
+                    let Some(region) = region else { continue };
+                    if !known.contains(region.as_str()) {
+                        return Err(bad(format!(
+                            "transition to '{}': gate.{key} names region \
+                             '{region}', which no stage declares",
+                            edge.target
+                        )));
+                    }
+                }
+                // A checklist gate counts open items, which only a checklist
+                // region has. Pointed at any other kind it can only ever read
+                // zero, so it would pass on the first attempt every time.
+                if let Some(region) = &gate.require_no_open_items
+                    && !checklists.contains(region.as_str())
+                {
+                    return Err(bad(format!(
+                        "transition to '{}': gate.require_no_open_items names \
+                         region '{region}', which is not a checklist region \
+                         (set kind = \"checklist\" on it)",
+                        edge.target
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 

@@ -253,6 +253,20 @@ read_file = 20000
 Both tables are keyed by tool name, and an alias matches the tool it aliases - writing `bash` covers
 the `shell` the model actually calls.
 
+An override entry can also carry both answers at once, which is usually what you mean when a tool
+needs its own region *and* its own ceiling:
+
+```toml
+[stages.analyze.tool_routing.overrides]
+read_file = { region = "codebase", max_result_tokens = 20000 }
+grep = "scratch"                     # just route it
+```
+
+Either key on its own is fine: `{ region = "codebase" }` routes without capping, and
+`{ max_result_tokens = 500 }` caps without moving the result out of `default_region`. A value that
+is neither a region name nor one of these tables is an error rather than a line that is quietly
+skipped.
+
 `read_file` also has a hard byte cap of its own, independent of any of this, and says so in the
 result when it applies. Without one, a large file went into its region whole and was either
 truncated or dropped as `[result omitted]` depending on how full the region already was - a cliff

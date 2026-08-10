@@ -108,7 +108,7 @@ version = "1.0.0"
 description = "test blueprint"
 
 [stages.plan]
-prompt = "Plan the work"
+system_prompt = "Plan the work"
 "#
             ),
         )
