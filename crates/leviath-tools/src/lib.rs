@@ -2239,10 +2239,17 @@ mod tests {
         let result = tools
             .execute("write_file", json!({"path": "../out.txt", "content": "x"}))
             .await;
-        assert!(
-            result.contains(&dir.path().display().to_string()),
-            "names the workspace root: {result}"
-        );
+        // The tempdir's own directory name rather than its full path: Windows
+        // canonicalizes a temp path (verbatim prefix, short names), so the
+        // workdir in the message is not textually the string `display()`
+        // returns here. The unique final component survives that.
+        let leaf = dir
+            .path()
+            .file_name()
+            .expect("a temp dir has a name")
+            .to_string_lossy()
+            .to_string();
+        assert!(result.contains(&leaf), "names the workspace root: {result}");
         assert!(
             result.contains("inside the workspace"),
             "says what to do instead: {result}"
