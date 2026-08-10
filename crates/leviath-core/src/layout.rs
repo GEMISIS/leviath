@@ -30,6 +30,11 @@ use serde::{Deserialize, Serialize};
 /// exactly, so this costs no existing agent anything.
 pub const STAGE_INSTRUCTIONS_REGION: &str = "stage_instructions";
 
+/// Serde default for a flag that is on unless a blueprint turns it off.
+fn default_true() -> bool {
+    true
+}
+
 /// How a region's token ceiling is expressed before it is resolved against a
 /// concrete model context window.
 ///
@@ -502,6 +507,21 @@ pub struct RegionDefinition {
     #[serde(default)]
     pub required: bool,
 
+    /// Whether an edge transform may hand this region to the summarizer.
+    ///
+    /// `transform = "compact"` reads as "summarize the transcript on the way
+    /// out" and means "summarize every region that is not pinned", which
+    /// includes the ones holding the run's results. Figures that survive a
+    /// paraphrase are no longer figures: a `results` region carrying computed
+    /// values was rewritten into prose before the stage that reports them saw
+    /// it (#369).
+    ///
+    /// Setting this false protects the region wherever it is used, rather than
+    /// at each of the N edges that might touch it. `clear` still applies - this
+    /// says "do not paraphrase my content", not "keep it forever".
+    #[serde(default = "default_true")]
+    pub summarizable: bool,
+
     /// Optional custom message shown to the agent when this region is required
     /// but empty. Falls back to a generated default when `None`.
     #[serde(default)]
@@ -531,6 +551,7 @@ impl RegionDefinition {
             description: None,
             required: false,
             required_message: None,
+            summarizable: true,
             seed: None,
         }
     }

@@ -1697,3 +1697,130 @@ fn requiring_an_output_without_the_submit_tool_is_an_error() {
     assert_eq!(missing.len(), 1, "{:?}", codes(&findings));
     assert_eq!(missing[0].severity, LintSeverity::Error);
 }
+
+// ─── compact-summarizes-deliverable (#369) ───────────────────────────────────
+
+/// The reported shape: a `required` region and a bare `compact` edge, which
+/// together mean the stage's own deliverable is paraphrased on the way out.
+#[test]
+fn a_bare_compact_over_a_required_region_is_warned_about() {
+    let toml = manifest(
+        r#"
+[stages.verify]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+[stages.verify.transitions.answer]
+transform = "compact"
+
+[stages.answer]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+"#,
+    )
+    .replace(
+        "conversation = { kind = \"sliding_window\", max_items = 50, max_tokens = 10000 }",
+        "conversation = { kind = \"sliding_window\", max_items = 50, max_tokens = 10000 }\n\
+         results = { kind = \"sliding_window\", max_items = 20, max_tokens = 8000, required = true }",
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    let found = with_code(&findings, "compact-summarizes-deliverable");
+    assert_eq!(found.len(), 1, "{:?}", codes(&findings));
+    assert!(found[0].message.contains("results"), "{}", found[0].message);
+}
+
+/// Silenced by the flag that fixes it, or the warning would be advice nobody
+/// can act on.
+#[test]
+fn a_region_declared_not_summarizable_is_not_warned_about() {
+    let toml = manifest(
+        r#"
+[stages.verify]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+[stages.verify.transitions.answer]
+transform = "compact"
+
+[stages.answer]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+"#,
+    )
+    .replace(
+        "conversation = { kind = \"sliding_window\", max_items = 50, max_tokens = 10000 }",
+        "conversation = { kind = \"sliding_window\", max_items = 50, max_tokens = 10000 }\n\
+         results = { kind = \"sliding_window\", max_items = 20, max_tokens = 8000, required = true, summarizable = false }",
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    assert!(
+        with_code(&findings, "compact-summarizes-deliverable").is_empty(),
+        "{:?}",
+        codes(&findings)
+    );
+}
+
+/// A pinned region is never handed to the summarizer in the first place, so
+/// warning about one would be noise.
+#[test]
+fn a_pinned_required_region_is_not_warned_about() {
+    let toml = manifest(
+        r#"
+[stages.verify]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+[stages.verify.transitions.answer]
+transform = "compact"
+
+[stages.answer]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+"#,
+    )
+    .replace(
+        "system = { kind = \"pinned\", max_tokens = 1000 }",
+        "system = { kind = \"pinned\", max_tokens = 1000, required = true }",
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    assert!(
+        with_code(&findings, "compact-summarizes-deliverable").is_empty(),
+        "{:?}",
+        codes(&findings)
+    );
+}
+
+/// No compact edge, nothing to say - so the check is about the pairing rather
+/// than about declaring a required region at all.
+#[test]
+fn a_required_region_with_no_compact_edge_is_not_warned_about() {
+    let toml = manifest(
+        r#"
+[stages.verify]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+[stages.verify.transitions.answer]
+transform = "direct"
+
+[stages.answer]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+"#,
+    )
+    .replace(
+        "conversation = { kind = \"sliding_window\", max_items = 50, max_tokens = 10000 }",
+        "conversation = { kind = \"sliding_window\", max_items = 50, max_tokens = 10000 }\n\
+         results = { kind = \"sliding_window\", max_items = 20, max_tokens = 8000, required = true }",
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    assert!(
+        with_code(&findings, "compact-summarizes-deliverable").is_empty(),
+        "{:?}",
+        codes(&findings)
+    );
+}

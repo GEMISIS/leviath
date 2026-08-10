@@ -242,7 +242,7 @@ pub struct PendingEdgeCompact(pub Vec<String>);
 /// Whether a region kind is "stage-specific" - eligible for an edge transform to
 /// clear or compact. The always-preserved kinds (pinned identity, compaction
 /// history, hashmap stores, persistent custom regions) are never touched.
-pub(crate) fn is_stage_specific(kind: &leviath_core::RegionKind) -> bool {
+pub fn is_stage_specific(kind: &leviath_core::RegionKind) -> bool {
     !matches!(
         kind,
         leviath_core::RegionKind::Pinned
@@ -276,10 +276,13 @@ pub(crate) fn apply_edge_transform(
             window.current_tokens = window.calculate_tokens();
             Vec::new()
         }
+        // Kind cannot tell a transcript from a table of results, so a region
+        // whose author said its content does not survive a paraphrase is left
+        // alone however the edge is spelled (#369).
         EdgeTransform::Compact { .. } => window
             .regions
             .iter()
-            .filter(|r| is_stage_specific(&r.kind) && !r.content.is_empty())
+            .filter(|r| is_stage_specific(&r.kind) && r.summarizable && !r.content.is_empty())
             .map(|r| r.name.clone())
             .collect(),
         EdgeTransform::Custom {
@@ -301,7 +304,25 @@ pub(crate) fn apply_edge_transform(
             compact
                 .iter()
                 .filter(|n| !carry.contains(n))
-                .filter(|n| window.get_region(n).is_some_and(|r| !r.content.is_empty()))
+                .filter(|n| {
+                    // The region-level flag wins over an explicit list: it is
+                    // there so a deliverable is protected wherever it is used,
+                    // rather than at each of the N edges that might touch it.
+                    // Said out loud, because refusing an explicit instruction
+                    // silently is the thing this issue is about.
+                    match window.get_region(n) {
+                        Some(r) if !r.summarizable => {
+                            tracing::warn!(
+                                region = %n,
+                                "edge asks to compact a region declared \
+                                 summarizable = false; leaving it as written"
+                            );
+                            false
+                        }
+                        Some(r) => !r.content.is_empty(),
+                        None => false,
+                    }
+                })
                 .cloned()
                 .collect()
         }
@@ -338,12 +359,33 @@ pub fn dispatch_edge_compact(
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled - don't start new work
         }
+        // Each way this can decline says which one it was. A declared
+        // transform that quietly does nothing is a transform that behaves
+        // differently on different runs of the same blueprint, with no signal
+        // either way - and the un-compacted run looks identical to a compacted
+        // one from outside (#369).
         let started = settings
             .and_then(|s| {
                 let config = &s.0;
                 let requests = build_edge_compact_requests(window, &pending.0, config)?;
-                let provider = providers.0.get(&config.provider)?;
-                let permit = stage.pools.try_acquire(&config.model)?;
+                let Some(provider) = providers.0.get(&config.provider) else {
+                    tracing::warn!(
+                        provider = %config.provider,
+                        regions = ?pending.0,
+                        "edge transform asked to compact, but its compaction provider is \
+                         not registered; carrying the regions as written"
+                    );
+                    return None;
+                };
+                let Some(permit) = stage.pools.try_acquire(&config.model) else {
+                    tracing::warn!(
+                        model = %config.model,
+                        regions = ?pending.0,
+                        "edge transform asked to compact, but the compaction pool is full; \
+                         carrying the regions as written"
+                    );
+                    return None;
+                };
                 spawn_supervised_compaction(
                     &stage,
                     entity,

@@ -371,6 +371,7 @@
         "max_tokens": { "type": "integer", "minimum": 1, "default": 5000 },
         "min_tokens": { "type": "integer", "minimum": 0 },
         "required": { "type": "boolean", "default": false },
+          "summarizable": { "type": "boolean", "default": true, "description": "Set false to keep an edge transform = \"compact\" from handing this region to the summarizer. Protects the region wherever it is used, and wins over an explicit compact list." },
         "required_message": {
           "type": "string",
           "description": "Shown when a required region is empty. `{region}` interpolates."

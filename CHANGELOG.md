@@ -61,6 +61,22 @@ same list.
   and one where it was asked twice and moved on both finished `complete` with
   nothing to tell them apart. Its counterpart `flags.gates_forced` already
   counted forced transitions.
+- New: `summarizable = false` on a region keeps an edge `transform = "compact"`
+  from handing it to the summarizer (#369). A bare `compact` reads as
+  "summarize the transcript on the way out" and means "summarize every region
+  that is not pinned", which includes the ones holding the run's results -
+  figures that survive a paraphrase are no longer figures. The flag protects a
+  region wherever it is used rather than at each of the N edges that might touch
+  it, and it wins over an explicit `compact` list, saying so when it refuses
+  one. `clear` is unaffected: this says "do not paraphrase my content", not
+  "keep it forever".
+- New: `lev validate` warns when a bare `compact` edge would summarize a region
+  declared `required` - the closest thing a blueprint has to "this is a
+  deliverable" - and names the flag that fixes it.
+- Changed: an edge compaction that does not happen says why. It was dropped
+  silently when the compaction provider was not registered or the pool had no
+  permit, so a declared transform was advisory: the same blueprint corrupted its
+  results only when a permit happened to be free, with no signal either way.
 
 - Breaking: a blueprint value that is not one of the spellings a setting
   accepts is refused, naming what is valid. Four settings took anything and

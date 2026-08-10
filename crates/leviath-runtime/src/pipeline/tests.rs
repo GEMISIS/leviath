@@ -13376,3 +13376,110 @@ fn a_region_abandoned_twice_is_listed_once() {
         vec!["plan".to_string()]
     );
 }
+
+// ─── A deliverable region survives a bare compact (#369) ─────────────────────
+
+/// A window with a transcript and a results region, both non-pinned.
+fn compact_window(results_summarizable: bool) -> ContextWindow {
+    let mut window = ContextWindow::new(100_000);
+    let mut conversation = leviath_core::Region::new(
+        "conversation".to_string(),
+        leviath_core::RegionKind::SlidingWindow {
+            max_items: 50,
+            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+        },
+        50_000,
+    );
+    conversation.summarizable = true;
+    window.add_region(conversation);
+
+    let mut results = leviath_core::Region::new(
+        "results".to_string(),
+        leviath_core::RegionKind::SlidingWindow {
+            max_items: 50,
+            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+        },
+        20_000,
+    );
+    results.summarizable = results_summarizable;
+    window.add_region(results);
+
+    window
+        .add_to_region("conversation", "chatter".to_string(), 2)
+        .expect("fits");
+    window
+        .add_to_region("results", "fee = 12.375%".to_string(), 4)
+        .expect("fits");
+    window
+}
+
+fn bare_compact() -> leviath_core::blueprint::EdgeTransform {
+    leviath_core::blueprint::EdgeTransform::Compact { prompt: None }
+}
+
+/// The bug: a bare `compact` hands every non-pinned region to the summarizer,
+/// including the one holding the run's figures. Figures that survive a
+/// paraphrase are no longer figures.
+#[test]
+fn a_bare_compact_summarizes_a_results_region_by_default() {
+    let mut window = compact_window(true);
+    let to_compact = apply_edge_transform(&mut window, &bare_compact());
+    assert!(
+        to_compact.contains(&"results".to_string()),
+        "unchanged default: {to_compact:?}"
+    );
+}
+
+/// Declaring the region not-summarizable protects it, and leaves the
+/// transcript - the thing `compact` is actually for - still summarized.
+#[test]
+fn a_region_declared_not_summarizable_is_left_alone() {
+    let mut window = compact_window(false);
+    let to_compact = apply_edge_transform(&mut window, &bare_compact());
+    assert!(
+        !to_compact.contains(&"results".to_string()),
+        "the deliverable must not be paraphrased: {to_compact:?}"
+    );
+    assert!(
+        to_compact.contains(&"conversation".to_string()),
+        "and the transcript still is: {to_compact:?}"
+    );
+}
+
+/// The region-level flag wins over an edge that names it explicitly: it exists
+/// so a deliverable is protected wherever it is used, rather than at each of
+/// the N edges that might touch it.
+#[test]
+fn a_custom_compact_list_cannot_override_the_region_flag() {
+    let _guard = leviath_testkit::tracing_guard();
+    let mut window = compact_window(false);
+    let custom = leviath_core::blueprint::EdgeTransform::Custom {
+        carry: Vec::new(),
+        compact: vec!["results".to_string(), "conversation".to_string()],
+        clear: Vec::new(),
+        compact_prompt: None,
+    };
+    let to_compact = apply_edge_transform(&mut window, &custom);
+    assert_eq!(
+        to_compact,
+        vec!["conversation".to_string()],
+        "the named-but-protected region is refused, the other still compacts"
+    );
+}
+
+/// `clear` is a different question from `compact`: the flag says "do not
+/// paraphrase my content", not "keep it forever".
+#[test]
+fn not_summarizable_does_not_protect_a_region_from_clear() {
+    let mut window = compact_window(false);
+    let cleared = apply_edge_transform(&mut window, &leviath_core::blueprint::EdgeTransform::Clear);
+    assert!(cleared.is_empty(), "clear compacts nothing");
+    assert!(
+        window
+            .get_region("results")
+            .expect("region")
+            .content
+            .is_empty(),
+        "clear still clears it"
+    );
+}

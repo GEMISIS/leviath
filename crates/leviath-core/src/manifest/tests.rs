@@ -4735,3 +4735,48 @@ read_file = "codebase"
     bp.validate()
         .expect("routing into a declared region is fine");
 }
+
+// ─── Regions an edge transform must not paraphrase (#369) ────────────────────
+
+/// `summarizable = false` parses, and the default is on.
+///
+/// A region is summarizable unless its author says the content does not survive
+/// a paraphrase, so the flag has to be readable and its absence has to mean
+/// "yes" - a default of false would quietly stop `compact` doing the thing it
+/// is for.
+#[test]
+fn parse_manifest_reads_the_summarizable_flag() {
+    let toml = r#"
+[agent]
+name = "figures"
+
+[context.regions]
+results = { kind = "sliding_window", max_items = 20, summarizable = false }
+notes = { kind = "sliding_window", max_items = 20 }
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    let region = |name: &str| {
+        bp.context_layout
+            .regions
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("{name} declared"))
+    };
+    assert!(!region("results").summarizable, "the flag is read");
+    assert!(region("notes").summarizable, "and defaults to on");
+}
+
+/// A region definition written before this field existed deserializes as
+/// summarizable, so an archived layout does not come back protected by
+/// accident - or, worse, unprotected when it was not.
+#[test]
+fn a_region_definition_without_the_field_deserializes_as_summarizable() {
+    let json = serde_json::json!({
+        "name": "notes",
+        "kind": "Temporary",
+        "max_tokens": 1000,
+    });
+    let def: crate::layout::RegionDefinition =
+        serde_json::from_value(json).expect("an older definition still loads");
+    assert!(def.summarizable);
+}

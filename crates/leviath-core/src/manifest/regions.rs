@@ -202,6 +202,13 @@ pub(super) fn parse_region_layout(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // Default on: a region is summarizable unless its author says the
+        // content does not survive a paraphrase.
+        let summarizable = region_value
+            .get("summarizable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
         let seed = parse_region_seed(region_name, region_value.get("seed"));
 
         // Percentage regions contribute their (unknown) size at resolution, so
@@ -213,6 +220,7 @@ pub(super) fn parse_region_layout(
         let mut def = RegionDefinition::new(region_name.clone(), kind, provisional_max_tokens)
             .with_budget(budget)
             .with_required(required, required_message);
+        def.summarizable = summarizable;
         if let Some(f) = compact_at_field {
             def = def.with_compact_at(f);
         }

@@ -143,6 +143,7 @@ on the first attempt, which looks exactly like a stage that finished its work.
 | `min_tokens` | unset | A floor for a percentage budget, so the region stays usable on a small model |
 | `seed` | unset | What the region starts with. See below |
 | `required` | `false` | The stage re-runs rather than moving on while this region is empty |
+| `summarizable` | `true` | Set false to keep an edge `transform = "compact"` from paraphrasing this region. See [transforms](/docs/stages#carrying-context-across-an-edge) |
 | `required_message` | generated | What the model is told when a required region is empty. Supports `{region}` |
 
 **Resolved budget** is the phrase used for the number a region actually gets, once the percentage
