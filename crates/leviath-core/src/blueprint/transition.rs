@@ -177,6 +177,26 @@ pub struct TransitionGate {
     /// entered, so "changed" means changed by *this* pass.
     #[serde(default)]
     pub require_region_updated: Option<String>,
+
+    /// Regions that must all hold content before this edge may be taken.
+    ///
+    /// Conjunctive, and that is the point. [`Self::region`] reads as though it
+    /// says this and does not: it is one of several *alternative* ways to
+    /// satisfy [`Self::require_modifications`], so
+    /// `{ require_modifications = true, region = "plan" }` is met by writing
+    /// any file anywhere while `plan` stays empty (#371). That is the right
+    /// shape for what `region` is for - a restart-durable stand-in for
+    /// per-stage counters, which do not survive a daemon restart - and the
+    /// wrong shape for "this stage does not leave without writing X". This key
+    /// is the second thing, ANDed with every other condition on the gate.
+    ///
+    /// A name the window does not hold passes with a warning rather than
+    /// blocking: `lev validate` refuses a gate naming a region no stage
+    /// declares, so reaching that at runtime means a layout moved underneath
+    /// the edge, and stranding a run over it would be worse than the missing
+    /// check. Saying nothing is what made the old behaviour hard to find.
+    #[serde(default)]
+    pub require_regions: Vec<String>,
     /// Checklist region that must have no open items before this edge is taken.
     ///
     /// The other gates ask whether a region has content, which cannot tell a

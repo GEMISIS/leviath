@@ -264,6 +264,18 @@ pub struct RunFlags {
     /// gate's re-run budget ran out.
     #[serde(default)]
     pub gates_forced: usize,
+    /// Regions declared `required` that were still empty when the stage that
+    /// owed them gave up and moved on, in the order they were abandoned.
+    ///
+    /// The mechanism re-runs the stage a bounded number of times and then
+    /// proceeds with a log line, which nothing downstream reads: a run whose
+    /// agent wrote its plan and a run where we asked twice and moved on both
+    /// finished `complete`, with the second silently missing the artifact every
+    /// later stage's prompt says to work from (#371). Names rather than a count
+    /// because knowing *which* region was abandoned is what makes it
+    /// actionable, and a run cannot abandon many.
+    #[serde(default)]
+    pub required_regions_abandoned: Vec<String>,
     /// The working directory disappeared mid-run.
     #[serde(default)]
     pub workspace_lost: bool,

@@ -8307,6 +8307,7 @@ fn gate(region: Option<&str>, message: Option<&str>) -> leviath_core::blueprint:
         tools: Vec::new(),
         max_attempts: None,
         require_region_updated: None,
+        require_regions: Vec::new(),
         require_no_open_items: None,
     }
 }
@@ -13107,5 +13108,271 @@ fn a_pointer_to_a_hidden_region_says_it_cannot_be_read_here() {
             .iter()
             .any(|e| e.content.contains("the manual's full text")),
         "the result is kept for whoever can see it"
+    );
+}
+
+// ─── A gate that can actually require a region (#371) ────────────────────────
+
+/// A gate that asks only for regions, so these tests isolate the new condition
+/// from `require_modifications`. The two together are covered separately.
+fn requiring_gate(regions: &[&str]) -> leviath_core::blueprint::TransitionGate {
+    leviath_core::blueprint::TransitionGate {
+        require_regions: regions.iter().map(|s| (*s).to_string()).collect(),
+        require_modifications: false,
+        ..gate(None, None)
+    }
+}
+
+/// A window holding `regions`, each empty unless named in `filled`.
+fn gate_window(regions: &[&str], filled: &[&str]) -> ContextWindow {
+    let mut window = ContextWindow::new(100_000);
+    for name in regions {
+        window.add_region(leviath_core::Region::new(
+            (*name).to_string(),
+            leviath_core::RegionKind::Pinned,
+            10_000,
+        ));
+    }
+    for name in filled {
+        window
+            .add_to_region(name, "written".to_string(), 2)
+            .expect("fits");
+    }
+    window
+}
+
+/// The heart of #371: `require_modifications` with `region` is satisfied by any
+/// write anywhere, so the named region can still be empty. `require_regions` is
+/// the conjunction that was missing - it holds whatever else the gate is happy
+/// about.
+#[test]
+fn require_regions_blocks_even_when_the_stage_wrote_files() {
+    let stage = writing_stage("plan", Vec::new());
+    let window = gate_window(&["plan"], &[]);
+    let progress = StageProgress {
+        // A file write, which alone satisfies `require_modifications`.
+        modifying_tool_calls: 3,
+        ..Default::default()
+    };
+
+    // The old shape: passes, with `plan` still empty.
+    let old = gate_blocks(Some(&gate(Some("plan"), None)), &stage, &progress, &window);
+    assert!(
+        matches!(old, GateDecision::Pass),
+        "the alternative-condition gate still passes on any write: {old:?}"
+    );
+
+    // The new one does not.
+    let decision = gate_blocks(Some(&requiring_gate(&["plan"])), &stage, &progress, &window);
+    let GateDecision::Block(nudge) = decision else {
+        panic!("an empty required region must hold the stage: {decision:?}");
+    };
+    assert!(
+        nudge.contains("plan"),
+        "the nudge names the region: {nudge}"
+    );
+}
+
+/// And lets the stage go once the region has content, or it would be a wall
+/// rather than a gate.
+#[test]
+fn require_regions_passes_once_the_region_is_written() {
+    let stage = writing_stage("plan", Vec::new());
+    let window = gate_window(&["plan"], &["plan"]);
+    let decision = gate_blocks(
+        Some(&requiring_gate(&["plan"])),
+        &stage,
+        &StageProgress::default(),
+        &window,
+    );
+    assert!(matches!(decision, GateDecision::Pass), "{decision:?}");
+}
+
+/// Every named region, not just the first.
+#[test]
+fn require_regions_holds_until_all_of_them_are_written() {
+    let stage = writing_stage("plan", Vec::new());
+    let gate = requiring_gate(&["plan", "risks"]);
+
+    let half = gate_window(&["plan", "risks"], &["plan"]);
+    let decision = gate_blocks(Some(&gate), &stage, &StageProgress::default(), &half);
+    let GateDecision::Block(nudge) = decision else {
+        panic!("one written region is not all of them: {decision:?}");
+    };
+    assert!(nudge.contains("risks"), "names what is missing: {nudge}");
+    assert!(
+        !nudge.contains("plan,") && !nudge.contains("plan "),
+        "and not what is already there: {nudge}"
+    );
+
+    let both = gate_window(&["plan", "risks"], &["plan", "risks"]);
+    assert!(matches!(
+        gate_blocks(Some(&gate), &stage, &StageProgress::default(), &both),
+        GateDecision::Pass
+    ));
+}
+
+/// It shares the one `max_attempts` budget, so it cannot wedge a run.
+#[test]
+fn require_regions_gives_up_with_the_shared_budget() {
+    let stage = writing_stage("plan", Vec::new());
+    let window = gate_window(&["plan"], &[]);
+    let progress = StageProgress {
+        gate_reentries: leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS,
+        ..Default::default()
+    };
+    let decision = gate_blocks(Some(&requiring_gate(&["plan"])), &stage, &progress, &window);
+    assert!(
+        matches!(decision, GateDecision::Forced),
+        "a gate that could block forever would strand the run: {decision:?}"
+    );
+}
+
+/// A region the window does not hold passes rather than stranding the run.
+/// `lev validate` refuses a gate naming a region no stage declares, so reaching
+/// this means a layout moved underneath the edge.
+#[test]
+fn require_regions_passes_when_the_window_does_not_hold_the_region() {
+    let stage = writing_stage("plan", Vec::new());
+    let window = gate_window(&["plan"], &["plan"]);
+    let decision = gate_blocks(
+        Some(&requiring_gate(&["nowhere"])),
+        &stage,
+        &StageProgress::default(),
+        &window,
+    );
+    assert!(matches!(decision, GateDecision::Pass), "{decision:?}");
+}
+
+/// The two conditions are ANDed. A stage that wrote files but not the region is
+/// held, which is the case `region` could not express; a stage that wrote the
+/// region but no files is held too, by the other half.
+#[test]
+fn require_regions_and_require_modifications_must_both_hold() {
+    let stage = writing_stage("plan", Vec::new());
+    let both = leviath_core::blueprint::TransitionGate {
+        require_regions: vec!["plan".to_string()],
+        ..gate(None, None) // require_modifications: true
+    };
+
+    let wrote_files_only = gate_blocks(
+        Some(&both),
+        &stage,
+        &StageProgress {
+            modifying_tool_calls: 2,
+            ..Default::default()
+        },
+        &gate_window(&["plan"], &[]),
+    );
+    assert!(
+        matches!(wrote_files_only, GateDecision::Block(_)),
+        "files written but the region empty: {wrote_files_only:?}"
+    );
+
+    let wrote_region_only = gate_blocks(
+        Some(&both),
+        &stage,
+        &StageProgress::default(),
+        &gate_window(&["plan"], &["plan"]),
+    );
+    assert!(
+        matches!(wrote_region_only, GateDecision::Block(_)),
+        "region written but no file modifications: {wrote_region_only:?}"
+    );
+
+    let did_both = gate_blocks(
+        Some(&both),
+        &stage,
+        &StageProgress {
+            modifying_tool_calls: 2,
+            ..Default::default()
+        },
+        &gate_window(&["plan"], &["plan"]),
+    );
+    assert!(matches!(did_both, GateDecision::Pass), "{did_both:?}");
+}
+
+/// Giving up on a required region is recorded, not just logged.
+///
+/// A log line cannot be read after the fact, so a run whose agent wrote its
+/// plan and one where we asked twice and moved on both finished `complete` and
+/// nothing downstream could tell them apart (#371).
+#[test]
+fn abandoning_a_required_region_is_recorded_in_the_run() {
+    let mut world = World::new();
+    let capped = world
+        .spawn((
+            required_bp(&["context_write"], None),
+            StageCursor { index: 0 },
+            window_with_plan(false),
+            RequiredReentries(DEFAULT_REQUIRED_REENTRY_CAP),
+            crate::persistence::RunOutcomeFlags::default(),
+            ResolveTransition,
+        ))
+        .id();
+    run_require(&mut world);
+
+    let flags = world
+        .get::<crate::persistence::RunOutcomeFlags>(capped)
+        .expect("flags");
+    assert_eq!(
+        flags.0.required_regions_abandoned,
+        vec!["plan".to_string()],
+        "the abandoned region is named in the run record"
+    );
+    // Still proceeds: this records what happened, it does not strand the run.
+    assert!(world.get::<ResolveTransition>(capped).is_some());
+}
+
+/// A stage that satisfies its required regions records nothing, or the field
+/// would be noise rather than a signal.
+#[test]
+fn meeting_a_required_region_records_nothing() {
+    let mut world = World::new();
+    let met = world
+        .spawn((
+            required_bp(&["context_write"], None),
+            StageCursor { index: 0 },
+            window_with_plan(true),
+            crate::persistence::RunOutcomeFlags::default(),
+            ResolveTransition,
+        ))
+        .id();
+    run_require(&mut world);
+    assert!(
+        world
+            .get::<crate::persistence::RunOutcomeFlags>(met)
+            .expect("flags")
+            .0
+            .required_regions_abandoned
+            .is_empty()
+    );
+}
+
+/// The same region abandoned by two stages is listed once. A run that loops
+/// should not grow the field without bound.
+#[test]
+fn a_region_abandoned_twice_is_listed_once() {
+    let mut world = World::new();
+    let capped = world
+        .spawn((
+            required_bp(&["context_write"], None),
+            StageCursor { index: 0 },
+            window_with_plan(false),
+            RequiredReentries(DEFAULT_REQUIRED_REENTRY_CAP),
+            crate::persistence::RunOutcomeFlags::default(),
+            ResolveTransition,
+        ))
+        .id();
+    run_require(&mut world);
+    run_require(&mut world);
+
+    assert_eq!(
+        world
+            .get::<crate::persistence::RunOutcomeFlags>(capped)
+            .expect("flags")
+            .0
+            .required_regions_abandoned,
+        vec!["plan".to_string()]
     );
 }

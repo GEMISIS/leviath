@@ -190,11 +190,43 @@ gate = { require_modifications = true, max_attempts = 3 }
 | Field | Default | Meaning |
 |---|---|---|
 | `require_modifications` | `false` | Require at least one successful file-modifying tool call in the stage being left |
+| `require_regions` | `[]` | Regions that must **all** hold content. ANDed with every other condition here |
 | `require_region_updated` | unset | Require that a named region **changed** during this stage, not merely that it has content. See below |
 | `require_no_open_items` | unset | Name a [checklist region](/docs/context) that must have no open items before this edge is taken |
 | `message` | generated | The nudge shown when the gate blocks |
-| `region` | unset | A region that also satisfies the gate by being non-empty |
+| `region` | unset | An **alternative** way to satisfy `require_modifications`: the gate also passes if this region is non-empty. Not a requirement - see below |
 | `tools` | `[]` | Extra tool names to count as modifying, beyond `write_file` and `edit_file` |
+
+### `region` is an alternative, `require_regions` is a requirement
+
+These two read alike and do opposite things.
+
+`region` is one of several ways to satisfy `require_modifications`, alongside "a file was modified"
+and "a modification was denied by policy". It exists because per-stage counters do not survive a
+daemon restart and a region does, so it is the durable stand-in. It is an **or**:
+
+```toml
+# Passes as soon as the stage writes any file, even with `plan` still empty.
+gate = { require_modifications = true, region = "plan" }
+```
+
+`require_regions` is the conjunction. Every region named must hold content, whatever else the gate
+is satisfied by:
+
+```toml
+# Does not leave until `plan` has been written, full stop.
+gate = { require_regions = ["plan"] }
+
+# And this one wants both: files changed AND the plan written.
+gate = { require_modifications = true, require_regions = ["plan"] }
+```
+
+Like every gate it shares the one `max_attempts` budget, so it re-runs the stage a bounded number of
+times and then lets the edge through with a warning rather than stranding the run. When that
+happens the run records it: `flags.gates_forced` in `meta.json` counts the transitions that went
+through unsatisfied, and `flags.required_regions_abandoned` names any `required = true` region a
+stage gave up on. A run that produced its artifact and one that was asked twice and moved on both
+finish `complete`, and those two fields are how you tell them apart.
 
 ### Requiring a revision, not a repetition
 

@@ -168,6 +168,7 @@ type ContextRegionQuery = (
     &'static mut ContextWindow,
     Option<&'static RequiredReentries>,
     Option<&'static StageOutcome>,
+    Option<&'static mut crate::persistence::RunOutcomeFlags>,
 );
 
 /// Required-region gate: before a normally-completed stage transitions, if it can
@@ -181,7 +182,7 @@ pub fn require_context_regions(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, bp, cursor, mut window, reentries, outcome) in agents.iter_mut() {
+    for (entity, bp, cursor, mut window, reentries, outcome, flags) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if outcome.is_some() {
             continue; // error / max-iterations transition takes precedence
@@ -201,6 +202,23 @@ pub fn require_context_regions(
                 attempts = cap,
                 "required context regions still empty after re-run attempts; proceeding"
             );
+            // Recorded as well as logged. A log line is not readable after the
+            // fact, so "the agent wrote its plan" and "we asked twice and moved
+            // on" both finished `complete` and nothing downstream could tell
+            // them apart - which is how this went unnoticed across four
+            // benchmark rounds (#371).
+            if let Some(mut flags) = flags {
+                for name in &names {
+                    if !flags
+                        .0
+                        .required_regions_abandoned
+                        .iter()
+                        .any(|seen| seen == name)
+                    {
+                        flags.0.required_regions_abandoned.push((*name).to_string());
+                    }
+                }
+            }
             continue; // proceed with the transition despite the unmet regions
         }
         inject_required_region_nudges(&mut window, &unmet);
