@@ -30,8 +30,8 @@ pub(super) async fn event_loop(state: AppState, backoff: Duration) {
     // http://169.254.169.254/…`, and since 307 preserves the method *and* the
     // body, that was a repeatable POST primitive against the internal network -
     // re-followed on every retry.
-    let client = leviath_core::checked_client(
-        leviath_core::ClientTimeouts::default(),
+    let client = leviath_net::checked_client(
+        leviath_net::ClientTimeouts::default(),
         state.limits.allow_local_network,
     );
     loop {

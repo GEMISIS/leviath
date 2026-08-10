@@ -252,6 +252,8 @@ jobs:
         # regions, kept that way by the guard-facade job below).
         package:
           - leviath-core
+          - leviath-net
+          - leviath-alloc
           - leviath-agent-client
           - leviath-runtime
           - leviath-providers

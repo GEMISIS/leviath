@@ -344,6 +344,109 @@ pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 // ── Entry points ─────────────────────────────────────────────────────────────
 
+// ── Release lists that must track the workspace ──────────────────────────────
+
+/// Path of the workflow carrying the crates.io publish order.
+const PROD_WORKFLOW: &str = ".github/workflows/prod.yml";
+
+/// Path of the workflow carrying the per-package coverage matrix.
+const CI_WORKFLOW: &str = ".github/workflows/ci.yml";
+
+/// Members that are never published, because their manifests say so.
+const UNPUBLISHED: &[&str] = &["xtask", "leviath-testkit"];
+
+/// Members the coverage gate does not run, matching
+/// [`crate::coverage::parse_workspace_packages`].
+const UNGATED: &[&str] = &["xtask", "leviath-testkit", "leviath"];
+
+/// Workspace member names, read from the root manifest's `members` list.
+///
+/// Parsed from the manifest rather than `cargo metadata` so this check costs
+/// nothing and runs the same way offline.
+fn workspace_members(manifest: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut in_members = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("members") {
+            in_members = true;
+            continue;
+        }
+        if in_members {
+            if trimmed.starts_with(']') {
+                break;
+            }
+            if let Some(path) = trimmed
+                .trim_matches(|c| c == '"' || c == ',')
+                .strip_prefix("crates/")
+            {
+                names.push(path.to_owned());
+            } else if let Some(name) = trimmed
+                .strip_suffix("\",")
+                .and_then(|s| s.strip_prefix('"'))
+            {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    names
+}
+
+/// Crate names appearing in `text`, restricted to `candidates`.
+///
+/// Deliberately a containment test rather than a parse of the workflow's YAML:
+/// the publish list is a shell `for` loop and the coverage list is a YAML
+/// matrix, and what matters about both is only whether a name is in them.
+fn names_present<'a>(text: &str, candidates: &'a [String]) -> Vec<&'a String> {
+    candidates
+        .iter()
+        .filter(|name| {
+            // Word-boundary-ish: `leviath` must not match inside `leviath-core`.
+            text.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+                .any(|word| word == name.as_str())
+        })
+        .collect()
+}
+
+/// Every member that must appear in a release list but does not.
+///
+/// These lists are written out by hand in two workflows, and nothing tied them
+/// to the workspace. Both had already drifted: `leviath-alloc` was added after
+/// the last crates.io publish and reached neither list, so the next stable
+/// release would have failed at `cargo publish -p leviath-cli` - its allocator
+/// dependency carries a version and is enabled by default, so the registry has
+/// to have it. A release is the worst place to discover a list is stale.
+fn missing_from_release_lists(manifest: &str, prod: &str, ci: &str) -> Vec<String> {
+    let members = workspace_members(manifest);
+    let mut missing = Vec::new();
+
+    let publishable: Vec<String> = members
+        .iter()
+        .filter(|m| !UNPUBLISHED.contains(&m.as_str()))
+        .cloned()
+        .collect();
+    let listed = names_present(prod, &publishable);
+    for name in &publishable {
+        if !listed.contains(&name) {
+            missing.push(format!("{name} is not in {PROD_WORKFLOW}'s publish list"));
+        }
+    }
+
+    let gated: Vec<String> = members
+        .iter()
+        .filter(|m| !UNGATED.contains(&m.as_str()))
+        .cloned()
+        .collect();
+    let listed = names_present(ci, &gated);
+    for name in &gated {
+        if !listed.contains(&name) {
+            missing.push(format!("{name} is not in {CI_WORKFLOW}'s coverage matrix"));
+        }
+    }
+
+    missing
+}
+
 /// Real entry point: reads and writes the workspace files.
 pub fn run(mode: VersionMode) -> Result<()> {
     run_with(&crate::coverage::RealRunner, mode)
@@ -381,9 +484,21 @@ pub fn run_with(runner: &dyn Runner, mode: VersionMode) -> Result<()> {
                 drift.join("; ")
             );
 
+            let prod = std::fs::read_to_string(PROD_WORKFLOW).unwrap_or_default();
+            let ci = std::fs::read_to_string(CI_WORKFLOW).unwrap_or_default();
+            let missing = missing_from_release_lists(&manifest, &prod, &ci);
+            anyhow::ensure!(
+                missing.is_empty(),
+                "a workspace member is missing from a release list: {}. \
+                 Add it, in dependency order for the publish list - a crate whose \
+                 dependency is not on crates.io cannot be published.",
+                missing.join("; ")
+            );
+
             println!(
                 "Every intra-workspace pin matches [workspace.package] version {expected}, \
-                 and both [profile.release] blocks agree."
+                 both [profile.release] blocks agree, and every member is in the \
+                 publish list and the coverage matrix."
             );
             Ok(())
         }
@@ -809,5 +924,87 @@ mod tests {
         let parts: Vec<&str> = today.split('-').collect();
         assert_eq!(parts.len(), 3);
         assert!(parts.iter().all(|p| p.bytes().all(|b| b.is_ascii_digit())));
+    }
+
+    // ── Release lists track the workspace ────────────────────────────────────────
+
+    const MEMBERS: &str = r#"
+[workspace]
+members = [
+    "crates/leviath-core",
+    "crates/leviath-net",
+    "crates/leviath-alloc",
+    "crates/leviath-testkit",
+    "xtask",
+]
+"#;
+
+    #[test]
+    fn workspace_members_reads_the_member_list() {
+        let members = workspace_members(MEMBERS);
+        assert_eq!(
+            members,
+            vec![
+                "leviath-core",
+                "leviath-net",
+                "leviath-alloc",
+                "leviath-testkit",
+                "xtask"
+            ]
+        );
+    }
+
+    /// The case this exists for: a crate added to the workspace and to neither
+    /// list. `leviath-alloc` was exactly this - added after the last publish,
+    /// depended on by `leviath-cli` with a version under a default feature, and in
+    /// neither workflow. The next stable release would have failed at
+    /// `cargo publish -p leviath-cli`.
+    #[test]
+    fn a_member_missing_from_both_lists_is_reported_twice() {
+        let missing =
+            missing_from_release_lists(MEMBERS, "for c in leviath-core; do", "- leviath-core");
+        assert!(
+            missing
+                .iter()
+                .any(|m| m.contains("leviath-net") && m.contains("publish list")),
+            "{missing:?}"
+        );
+        assert!(
+            missing
+                .iter()
+                .any(|m| m.contains("leviath-net") && m.contains("coverage matrix")),
+            "{missing:?}"
+        );
+    }
+
+    /// Members whose manifests say they are never published, and the facade with
+    /// no executable regions, are not expected in the lists - or the check would
+    /// demand entries that must not exist.
+    #[test]
+    fn the_excluded_members_are_not_demanded() {
+        let missing = missing_from_release_lists(
+            MEMBERS,
+            "for c in leviath-core leviath-net leviath-alloc; do",
+            "- leviath-core\n- leviath-net\n- leviath-alloc",
+        );
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(
+            !missing
+                .iter()
+                .any(|m| m.contains("xtask") || m.contains("testkit")),
+            "{missing:?}"
+        );
+    }
+
+    /// A name must match as a whole word: `leviath` appearing in the publish list
+    /// must not satisfy `leviath-core`, or the check would pass on a list that is
+    /// missing almost everything.
+    #[test]
+    fn a_substring_does_not_count_as_present() {
+        let missing = missing_from_release_lists(MEMBERS, "for c in leviath; do", "- leviath");
+        assert!(
+            missing.iter().any(|m| m.contains("leviath-core")),
+            "a prefix match must not satisfy a longer name: {missing:?}"
+        );
     }
 }

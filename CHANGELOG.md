@@ -13,6 +13,22 @@ same list.
 
 ## Unreleased
 
+- Changed: the outbound-request policy moved out of `leviath-core` into a new
+  `leviath-net` crate. `leviath-core` describes itself as plain serializable
+  data with no async dependencies and pulled a full HTTP client, so depending on
+  Leviath's data types cost 123 crates; it now costs 68, and `leviath-scripting`
+  and `leviath-agent-client` drop by the same amount. The `lev` binary is
+  unchanged - it needs the client either way. Anything importing
+  `leviath_core::{check_url, checked_client, client, client_builder,
+  ClientTimeouts, UrlRejection, is_restricted_addr}` should import it from
+  `leviath_net` instead.
+- Fixed: `leviath-alloc` was missing from the crates.io publish list and the
+  coverage matrix. It was added after the last publish and `leviath-cli` depends
+  on it by version under a default feature, so the next stable release would
+  have failed at `cargo publish -p leviath-cli`. `cargo xtask version --check`
+  now refuses a workspace member that is absent from either list, so a release
+  is no longer where that gets discovered.
+
 - Fixed: a stage the run never entered is recorded `skipped`, not `complete`
   (#372). The ledger marked every stage positioned before the cursor complete,
   which is only the same thing in a linear blueprint: a graph reaches its stages

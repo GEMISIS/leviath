@@ -2430,6 +2430,7 @@ dependencies = [
  "leviath-alloc",
  "leviath-core",
  "leviath-mcp",
+ "leviath-net",
  "leviath-package",
  "leviath-providers",
  "leviath-runtime",
@@ -2474,7 +2475,6 @@ dependencies = [
  "glob",
  "leviath-testkit",
  "regex",
- "reqwest",
  "serde",
  "serde_json",
  "temp-env",
@@ -2509,6 +2509,16 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "leviath-net"
+version = "0.3.2"
+dependencies = [
+ "reqwest",
+ "tokio",
  "tracing",
  "url",
 ]

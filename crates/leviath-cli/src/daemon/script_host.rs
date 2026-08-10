@@ -335,14 +335,14 @@ fn denied(func: &str) -> String {
 /// The URL came from the model, and the model picked it out of context an
 /// attacker can influence - so this is the boundary between "the agent browsing
 /// the web" and "the agent probing the user's own network on someone else's
-/// behalf". See [`leviath_core::net`] for what is refused and why.
+/// behalf". See [`leviath_net`] for what is refused and why.
 ///
 /// Lives on the host (the permission/confinement layer) rather than in
 /// [`RealScriptIo`], so a test double is subject to the same rule as the real
 /// backend and the check cannot be skipped by swapping the I/O out.
 fn check_outbound(url: &str, allow_local: bool) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("[denied] invalid URL '{url}': {e}"))?;
-    leviath_core::check_url(&parsed, allow_local).map_err(|e| format!("[denied] {e}"))
+    leviath_net::check_url(&parsed, allow_local).map_err(|e| format!("[denied] {e}"))
 }
 
 impl ScriptHost for DaemonScriptHost {
@@ -480,7 +480,7 @@ static HTTP_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
                 if attempt.previous().len() >= 5 {
                     return attempt.error("too many redirects");
                 }
-                match leviath_core::check_url(attempt.url(), local_network_allowed()) {
+                match leviath_net::check_url(attempt.url(), local_network_allowed()) {
                     Ok(()) => attempt.follow(),
                     Err(e) => attempt.error(format!("refused to follow redirect: {e}")),
                 }

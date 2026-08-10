@@ -19,7 +19,6 @@ pub mod interaction;
 pub mod layout;
 pub mod lifecycle;
 pub mod manifest;
-pub mod net;
 pub mod output;
 pub mod panic_payload;
 pub mod paths;
@@ -48,10 +47,6 @@ pub use credentials::{
 pub use error::{Error, Result, ValidationError};
 pub use layout::{BudgetSpec, ContextLayout, RegionDefinition};
 pub use lifecycle::CompactionConfig;
-pub use net::{
-    ClientTimeouts, UrlRejection, check_url, checked_client, client, client_builder,
-    is_restricted_addr,
-};
 pub use output::{
     FINAL_OUTPUT_FILE, FinalOutput, FinalOutputDescriptor, MAX_FINAL_OUTPUT_BYTES, OutputSpec,
     describe_spec, resolve_output_spec,
