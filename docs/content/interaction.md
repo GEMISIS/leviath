@@ -76,12 +76,11 @@ call until the answer comes back, then continues with it:
 
 ## When nobody answers
 
-Every prompt on this page waits on a person. Until Leviath 0.1.2 it waited forever, so a run whose
-operator had gone home sat in `WaitingInput` holding its slot until the daemon restarted.
+Every prompt on this page waits on a person, and nobody is always there. A run whose operator has
+gone home should not sit in `WaitingInput` holding its slot until the daemon restarts.
 
-`[limits] interaction_timeout_secs` puts a deadline on that wait (one hour by default; `0` waits
-indefinitely, the old behaviour). When it passes, the prompt resolves exactly as cancelling it
-would:
+`[limits] interaction_timeout_secs` puts a deadline on that wait: one hour by default, and `0`
+waits indefinitely. When it passes, the prompt resolves exactly as cancelling it would:
 
 | Prompt | What an expiry means |
 |---|---|

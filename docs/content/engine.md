@@ -16,6 +16,78 @@ Leviath keeps each agent as a row of data in one shared table. A waiting agent i
 touched this pass, which costs close to nothing, so the machine only pays for work that is actually
 in flight.
 
+## The usual shape, and this one
+
+Most agent runtimes give an agent a loop of its own. The agent is an object, it owns a task, and
+that task walks through its own steps, stopping on an `await` whenever it needs the outside world:
+
+```mermaid
+flowchart LR
+  subgraph ONE["One agent, one loop of its own"]
+    direction LR
+    S["Start"] --> I["Call the model"]
+    I --> AW1["await the reply"]
+    AW1 --> T["Run its tools"]
+    T --> AW2["await the results"]
+    AW2 --> I
+  end
+```
+
+Leviath turns that inside out. There is no agent loop and no agent object. Each agent is a row of
+data, and one fixed list of functions sweeps across every row, moving each one a single step:
+
+```mermaid
+flowchart LR
+  subgraph W["One world, one sweep for everybody"]
+    direction TB
+    R1["agent 1: ready to call the model"]
+    R2["agent 2: waiting on a reply"]
+    R3["agent 3: tools running"]
+    R4["agent 4: waiting on a person"]
+  end
+  W --> SYS["Each function handles the rows it applies to,<br/>then the sweep ends"]
+  SYS -->|"rows that moved"| W
+```
+
+The difference shows up when there are many of them. In the usual shape, each agent brings its own
+task, its own client, and its own copy of everything around it:
+
+```mermaid
+flowchart TB
+  subgraph TRAD["100 agents, the usual way"]
+    direction LR
+    P1["agent + task<br/>+ its own client"]
+    P2["agent + task<br/>+ its own client"]
+    P3["…98 more"]
+  end
+  P1 --> API["Model provider"]
+  P2 --> API
+  P3 --> API
+```
+
+In Leviath they are 100 rows in one table, sharing one set of connections, rate limits, and tool
+capacity:
+
+```mermaid
+flowchart TB
+  subgraph LEV["100 agents, in Leviath"]
+    direction LR
+    ROWS["100 rows of data"]
+    POOL["Shared inference pools"]
+    LANE["Shared tool lane"]
+    ROWS --> POOL
+    ROWS --> LANE
+  end
+  POOL --> API2["Model provider"]
+  LANE --> TOOLS["Tools"]
+```
+
+The rest of this page is how that works: [what the pieces are called](#entities-components-and-systems),
+[what one agent is made of](#an-agent-is-an-entity),
+[how it moves](#markers-are-the-state-machine), [what a sweep is](#what-a-tick-is), and
+[what happens when one agent breaks](#one-agents-failure-stays-one-agents-failure). You never have
+to configure any of it.
+
 ## Entities, components, and systems
 
 Leviath is built on [bevy_ecs](https://bevyengine.org/), a library for organising data the way game

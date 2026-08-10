@@ -16,6 +16,15 @@ So an agent can **submit a final output**: one deliberate answer, produced by a 
 every surface reports. The API returns it, `lev result` prints it, a parent agent receives it, and
 the completion webhook carries it.
 
+```mermaid
+flowchart LR
+  ST["The run's last stage"] -->|"submit_output"| ANS["One answer,<br/>in the format you named"]
+  ANS --> CHK{"Valid?"}
+  CHK -->|no| BACK["Back to the agent<br/>with what was wrong"]
+  BACK --> ST
+  CHK -->|yes| OUT["lev result · REST API<br/>parent agent · webhook"]
+```
+
 ## The smallest version
 
 Add a stage with `mode = "output"`:

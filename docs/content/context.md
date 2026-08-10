@@ -17,6 +17,26 @@ Leviath splits the window into named **regions** instead. Each one has its own s
 own rule for what to throw away first, so a big file read can only ever crowd out the region it
 landed in.
 
+```mermaid
+flowchart LR
+  subgraph FLAT["One flat list"]
+    direction TB
+    F1["task<br/>(oldest, first out)"]
+    F2["early turns"]
+    F3["a large file read"]
+    F4["recent turns"]
+  end
+  FLAT -->|"window fills"| LOST["The task falls off the end"]
+
+  subgraph REG["Named regions"]
+    direction TB
+    R1["task, pinned"]
+    R2["codebase, compacting"]
+    R3["conversation, sliding"]
+  end
+  REG -->|"window fills"| KEPT["Only the region that filled sheds;<br/>the task is untouched"]
+```
+
 ## What that looks like
 
 A typical coding agent might divide its window like this:
@@ -55,9 +75,9 @@ history      = { kind = "compact_history", budget = "15%", source_region = "code
 | `checklist` | A task list whose entries carry state. Written through `todo_add` / `todo_done` / `todo_note`, never evicted, and rendered open-items-first. |
 | `custom` | Behavior defined by a Rhai script (see [Rhai regions](/docs/rhai-regions)). |
 
-An unrecognized `kind` is a hard parse error, not a silently ignored region. So is an unrecognized
-`strategy`, which is the one this invites: `strategy = "per-item"` with a hyphen used to leave the
-region evicting one entry at a time, exactly as if the line had not been written.
+An unrecognized `kind` is a hard parse error, not a silently ignored region. So is an
+unrecognized `strategy`: `strategy = "per-item"` with a hyphen is refused, rather than leaving the
+region to evict one entry at a time as if the line had not been written.
 
 ### Per-kind keys
 

@@ -130,8 +130,8 @@ and where. The number shown is the largest each region reached while the stage w
 region is re-sent whole on every call.
 
 Leviath also warns once when a stage's per-call prompt grows past four times its first call. That
-is the shape of a region accumulating without a cap, which is the failure that costs money and the
-one nothing used to notice.
+is the shape of a region accumulating without a cap, which is the failure that costs money and
+the hardest one to spot by eye.
 
 ### `lev create <NAME>`
 

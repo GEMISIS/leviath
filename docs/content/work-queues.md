@@ -15,6 +15,11 @@ Getting that wrong is expensive in both directions. Decide a healthy run is dead
 work. Decide a dead run is healthy and you leak a slot forever. This page covers how to ask, and
 three fields that will mislead you if you read them the obvious way.
 
+> [!TIP]
+> **Building a service rather than a script? Use the [HTTP API](/docs/api), not the CLI.** Shelling
+> out to `lev` costs a process per check, gives you no way to filter server-side, and makes you
+> poll for something the daemon can push. See [Prefer the API](#prefer-the-api) below.
+
 ## Three things that are not what they look like
 
 **`updated_at` in `meta.json` is a heartbeat, not progress.** The daemon rewrites a run's metadata
@@ -81,6 +86,26 @@ A daemon restarting looks exactly like every run dying at once. A reconciler tha
 two apart will cancel a fleet of perfectly healthy agents. Leviath will not mark anything
 `abandoned` while it cannot reach the daemon, and your side should hold off too. Wait for the next
 poll.
+
+## Prefer the API
+
+The CLI recipe above is the right shape for a shell script or a CI step. For a long-lived service,
+the [HTTP API](/docs/api) is the better surface, and it answers the same questions with less work.
+
+- **`GET /api/runs` is paginated, sortable, and searchable.** Ask for the runs you care about
+  instead of listing everything and filtering client-side. Paging is keyset: follow `next_cursor`
+  until it comes back null, rather than counting pages.
+- **Poll less by asking for less.** `ids=a,b,c` fetches exactly the runs your queue is tracking,
+  and `fields=run_id,status,last_progress_at` trims each one to what you read. Ids that no longer
+  exist come back under `missing` rather than failing the whole request.
+- **`since=` beats deep paging** when you only want what changed since your last check.
+- **Or stop polling.** The `/ws` WebSocket pushes status changes as they happen, so your reconciler
+  reacts instead of sweeping. Keep the poll as a slow backstop for missed events.
+- **Completion can come to you.** A run started with a callback URL fires a signed webhook when it
+  finishes, with a stable `delivery_id` to deduplicate on. See [the API guide](/docs/api).
+
+The same `daemon_reachable` rule applies: a request that fails to reach the daemon is not evidence
+about any run.
 
 ## Two practical notes
 

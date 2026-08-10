@@ -95,7 +95,7 @@ Set `default_model` alongside your `default_provider`. Without a model to send, 
 is never consulted and Ollama wins by default. `lev doctor` says so in its `resolve` line when your
 configured provider is being passed over.
 
-A run that does start on a dead Ollama no longer dies there: an unreachable provider is treated the
+A run that starts on a dead Ollama does not die there. An unreachable provider is treated the
 same as one out of credits, so the stage moves to its next candidate. You will see the swap in the
 stage log:
 
@@ -154,9 +154,8 @@ shorter than a cold start will keep giving up on runs that were about to work.
 ## My OpenRouter agent finishes without saying anything
 
 Reasoning models on OpenRouter answer with `content: null` and put their text under `reasoning`.
-Leviath reads that field when the message carries nothing else, so a reasoning-only turn is no
-longer an empty response. If you are on an older build, an agent that loops and finishes silently
-on a `deepseek-r1`-style model is this.
+Leviath reads that field when the message carries nothing else, so a reasoning-only turn counts
+as a real answer rather than an empty response.
 
 The reasoning text is only used when the turn has no content and no tool calls of its own, so it
 never displaces real output or a tool call.
@@ -214,10 +213,8 @@ own prompt will still ask for them; that text has to change in the blueprint. Se
 
 ## Console windows keep flashing on my Windows desktop
 
-Every child process Leviath starts is asked for no console window, so this
-should not happen on 0.2 or later. Before that, each `shell` call, each MCP
-server, and each provider that shells out could pop a `cmd.exe` window on the
-desktop, which a fleet of agents turned into a steady flicker.
+Every child process Leviath starts is asked for no console window, so this should not happen at
+all. A `shell` call, an MCP server, and a provider that shells out are all covered.
 
 If you still see it, check what is spawning. `lev` itself run from a terminal
 shares that terminal and draws nothing extra. The one child that is still meant
