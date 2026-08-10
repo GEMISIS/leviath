@@ -283,6 +283,12 @@ impl DaemonScriptHost {
         workdir: &Path,
         within: fn(&Path, &Path) -> bool,
     ) -> Result<PathBuf, String> {
+        // The null device is not a place, so containment has nothing to say
+        // about it - same reasoning as the built-in tools, which share the
+        // predicate rather than each carrying their own idea of it (#373).
+        if leviath_tools::is_null_device(requested) {
+            return Ok(PathBuf::from(requested));
+        }
         let raw = if Path::new(requested).is_absolute() {
             PathBuf::from(requested)
         } else {
@@ -301,7 +307,10 @@ impl DaemonScriptHost {
         }
         if !normalized.starts_with(workdir) {
             return Err(format!(
-                "path '{requested}' would escape the working directory"
+                "path '{requested}' would escape the working directory ({}). \
+                 Use a path inside the workspace instead - a relative path \
+                 resolves against it.",
+                workdir.display()
             ));
         }
         // The lexical check above is textual only: a symlink inside the workdir
@@ -1589,6 +1598,18 @@ mod tests {
         let err = DaemonScriptHost::resolve_in("notes.txt", dir.path(), escapes)
             .expect_err("a path that resolves outside must be refused");
         assert!(err.contains("symlink"), "{err}");
+    }
+
+    /// The null device is not a place, so containment has nothing to refuse.
+    /// It is returned as written rather than joined onto the workdir, which is
+    /// what makes it a sink instead of a file called `null` in the workspace.
+    #[test]
+    fn resolve_in_admits_the_null_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved =
+            DaemonScriptHost::resolve_in("/dev/null", dir.path(), leviath_core::resolves_within)
+                .expect("the null device is not an escape");
+        assert_eq!(resolved, PathBuf::from("/dev/null"));
     }
 
     /// The converse, so the test above is not passing merely because everything

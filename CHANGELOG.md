@@ -35,6 +35,19 @@ same list.
 - Changed: when a result does land in a region the stage does not carry, the
   pointer says so instead of instructing the model to read it. The content is
   still stored, for a later stage that declares the region.
+- Fixed: the null device is no longer treated as an escape from the workspace
+  (#373). `read_file`/`write_file` and a Rhai script's file host functions
+  answered `path '/dev/null' would escape the working directory`, which is both
+  wrong - writing there writes nowhere - and unfixable from the agent's side,
+  since no path inside the workspace means "discard this". Shell *redirects* to
+  `/dev/null` were already allowed; this is the same rule applied to the paths
+  that arrive as arguments. `/dev/stdout` and `/dev/stderr` stay refused for the
+  file tools on purpose: opened by name they are the daemon's own streams, and a
+  tool writing there would land in the middle of what the CLI is drawing.
+- Changed: a refusal for a path outside the workspace names the workspace root
+  and says to use a path inside it. "Denied" on its own sends an agent looking
+  for a different way out, and the turns it spends doing that are charged to the
+  stage's iteration budget.
 
 - Breaking: a blueprint value that is not one of the spellings a setting
   accepts is refused, naming what is valid. Four settings took anything and

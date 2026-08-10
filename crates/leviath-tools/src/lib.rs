@@ -16,6 +16,7 @@ use tokio::time::{Duration, timeout};
 mod context;
 mod defs;
 mod exec;
+pub use exec::is_null_device;
 mod platform;
 pub mod validate;
 pub use context::*;
@@ -2154,6 +2155,100 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("x.txt")).unwrap(),
             "hi"
+        );
+    }
+
+    // ─── The null device is not an escape (#373) ─────────────────────────────────
+
+    /// Writing to the null device writes nowhere, so containment has nothing to
+    /// refuse. It used to answer `path '/dev/null' would escape the working
+    /// directory`, which is both wrong and unfixable from the agent's side: there
+    /// is no path inside the workspace that means "discard this".
+    #[tokio::test]
+    async fn write_file_to_the_null_device_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .execute(
+                "write_file",
+                json!({"path": "/dev/null", "content": "thrown away"}),
+            )
+            .await;
+        assert!(
+            !result.contains("escape"),
+            "the null device is not an escape: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_from_the_null_device_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .execute("read_file", json!({"path": "/dev/null"}))
+            .await;
+        assert!(
+            !result.contains("escape"),
+            "the null device is not an escape: {result}"
+        );
+    }
+
+    /// The control, so the allowance above cannot be mistaken for containment
+    /// having been switched off: a real path outside the workspace is still
+    /// refused.
+    #[tokio::test]
+    async fn a_real_outside_path_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .execute(
+                "write_file",
+                json!({"path": "/tmp/out.txt", "content": "x"}),
+            )
+            .await;
+        assert!(result.contains("escape"), "got: {result}");
+    }
+
+    /// `/dev/stdout` and `/dev/stderr` stay refused for the *file tools*, on
+    /// purpose. Opened by name from inside the daemon they are the daemon's own
+    /// streams, so a tool writing there lands in the middle of whatever the CLI is
+    /// drawing. A shell redirect to them is a different thing spelled the same way
+    /// and stays allowed, because it redirects the child's streams.
+    #[tokio::test]
+    async fn the_daemons_own_streams_are_not_null_devices() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        for path in ["/dev/stdout", "/dev/stderr"] {
+            let result = tools
+                .execute("write_file", json!({"path": path, "content": "x"}))
+                .await;
+            assert!(
+                result.contains("escape"),
+                "{path} must not be writable through a file tool: {result}"
+            );
+        }
+    }
+
+    /// A refusal names the workspace and what to do about it. An agent told only
+    /// "denied" tries a different escape; one told where to write complies, and the
+    /// turns it would have spent guessing are charged to the stage's budget.
+    #[tokio::test]
+    async fn an_escape_refusal_says_where_to_write_instead() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .execute(
+                "write_file",
+                json!({"path": "/tmp/out.txt", "content": "x"}),
+            )
+            .await;
+        assert!(
+            result.contains(&dir.path().display().to_string()),
+            "names the workspace root: {result}"
+        );
+        assert!(
+            result.contains("inside the workspace"),
+            "says what to do instead: {result}"
         );
     }
 }

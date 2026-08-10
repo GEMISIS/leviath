@@ -186,6 +186,9 @@ impl BuiltinTools {
         workdir: &Path,
         within: fn(&Path, &Path) -> bool,
     ) -> anyhow::Result<PathBuf> {
+        if is_null_device(requested) {
+            return Ok(PathBuf::from(requested));
+        }
         let raw = if Path::new(requested).is_absolute() {
             PathBuf::from(requested)
         } else {
@@ -206,7 +209,17 @@ impl BuiltinTools {
         }
 
         if !normalized.starts_with(workdir) {
-            anyhow::bail!("path '{}' would escape the working directory", requested);
+            // Names the workspace and what to do instead. "Denied" on its own
+            // sends an agent looking for a different way out, and it spends
+            // iterations - which the stage's budget is charged for - finding
+            // that there isn't one (#373).
+            anyhow::bail!(
+                "path '{}' would escape the working directory ({}). Use a path \
+                 inside the workspace instead - a relative path resolves \
+                 against it.",
+                requested,
+                workdir.display()
+            );
         }
 
         if !within(&normalized, workdir) {
@@ -652,6 +665,28 @@ impl BuiltinTools {
 /// shell output already overruns any region budget an agent has; keeping more
 /// of it helps nobody downstream.
 pub(crate) const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+
+/// Is `path` the platform's discard device?
+///
+/// The null device is not a location in the filesystem, so a workspace check has
+/// nothing to say about it: writing there writes nowhere, and reading there
+/// reads nothing. Refusing it produced `path '/dev/null' would escape the
+/// working directory`, which is both wrong and, worse, unactionable - an agent
+/// told that spends turns guessing at a path it cannot fix (#373).
+///
+/// Deliberately *only* the null device, not `/dev/stdout` or `/dev/stderr`.
+/// Those are the daemon's own streams once a tool opens them by name, and a
+/// tool writing into them would land in the middle of whatever the CLI is
+/// drawing. A shell *redirect* to them stays allowed, because that redirects
+/// the child's streams rather than opening the daemon's - a different thing
+/// that happens to be spelled the same way.
+pub fn is_null_device(path: &str) -> bool {
+    // `NUL` is the Windows spelling, matched on every platform for the same
+    // reason the redirect classifier does: a command should not depend on who
+    // ran it. On Unix the name resolves to an ordinary file in the workdir, and
+    // treating it as a sink writes nothing rather than creating litter.
+    path == "/dev/null" || path.eq_ignore_ascii_case("nul")
+}
 
 /// Most of a file `read_file` returns.
 ///
