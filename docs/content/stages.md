@@ -212,8 +212,9 @@ gate = { require_region_updated = "plan",
 The region's content is hashed when the stage is entered and compared when it tries to leave, so
 "changed" means changed by *this* pass. It shares the same `max_attempts` budget as every other
 gate: a gate that could hold a stage forever would strand the run, so after the budget the edge is
-taken with a warning. A gate naming a region the window does not hold passes rather than blocking,
-since no amount of work could satisfy it.
+taken with a warning. A gate naming a region no stage declares is refused by `lev validate`: at
+runtime it passes rather than blocking, since no amount of work could satisfy it, so a typo there
+would read as a gate that is simply never reached.
 | `max_attempts` | `3` | How many times the stage re-runs before the gate gives up and lets the transition through with a warning |
 
 Per-stage tool counters reset when a stage is entered, and they are not restored when a run resumes
