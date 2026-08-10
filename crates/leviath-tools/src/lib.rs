@@ -2201,32 +2201,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tools = make_tools(dir.path());
         let result = tools
-            .execute(
-                "write_file",
-                json!({"path": "/tmp/out.txt", "content": "x"}),
-            )
+            .execute("write_file", json!({"path": "../out.txt", "content": "x"}))
             .await;
         assert!(result.contains("escape"), "got: {result}");
     }
 
-    /// `/dev/stdout` and `/dev/stderr` stay refused for the *file tools*, on
-    /// purpose. Opened by name from inside the daemon they are the daemon's own
-    /// streams, so a tool writing there lands in the middle of whatever the CLI is
-    /// drawing. A shell redirect to them is a different thing spelled the same way
-    /// and stays allowed, because it redirects the child's streams.
-    #[tokio::test]
-    async fn the_daemons_own_streams_are_not_null_devices() {
-        let dir = tempfile::tempdir().unwrap();
-        let tools = make_tools(dir.path());
-        for path in ["/dev/stdout", "/dev/stderr"] {
-            let result = tools
-                .execute("write_file", json!({"path": path, "content": "x"}))
-                .await;
-            assert!(
-                result.contains("escape"),
-                "{path} must not be writable through a file tool: {result}"
-            );
-        }
+    /// `/dev/stdout` and `/dev/stderr` are not sinks, on purpose. Opened by
+    /// name from inside the daemon they are its own streams, so a tool writing
+    /// there lands in the middle of whatever the CLI is drawing. A shell
+    /// redirect to them is a different thing spelled the same way and stays
+    /// allowed.
+    ///
+    /// Asserted against the predicate rather than through a tool call: on
+    /// Windows a `/dev/...` path is relative, so a call would be judged against
+    /// the workdir and the test would be measuring the platform's path rules
+    /// rather than this one.
+    #[test]
+    fn the_daemons_own_streams_are_not_null_devices() {
+        assert!(is_null_device("/dev/null"), "the sink is a sink");
+        assert!(is_null_device("NUL"), "and so is the Windows spelling");
+        assert!(is_null_device("nul"), "case does not decide it");
+        assert!(!is_null_device("/dev/stdout"));
+        assert!(!is_null_device("/dev/stderr"));
+        assert!(
+            !is_null_device("notes.md"),
+            "an ordinary path is not a sink"
+        );
     }
 
     /// A refusal names the workspace and what to do about it. An agent told only
@@ -2237,10 +2237,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tools = make_tools(dir.path());
         let result = tools
-            .execute(
-                "write_file",
-                json!({"path": "/tmp/out.txt", "content": "x"}),
-            )
+            .execute("write_file", json!({"path": "../out.txt", "content": "x"}))
             .await;
         assert!(
             result.contains(&dir.path().display().to_string()),
