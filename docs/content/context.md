@@ -128,8 +128,9 @@ gate = { require_no_open_items = "todos",
 ```
 
 The nudge names the items that are still open. It shares the same `max_attempts` budget as every
-other gate, so it cannot wedge a run, and a gate naming a region that does not exist passes rather
-than stranding one.
+other gate, so it cannot wedge a run. A gate naming a region no stage declares, or a region that is
+not a `checklist`, is refused by `lev validate`: at runtime it could only ever count zero and pass
+on the first attempt, which looks exactly like a stage that finished its work.
 
 ### Keys every region accepts
 
