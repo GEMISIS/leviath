@@ -291,6 +291,11 @@ read_file = 20000
 Both tables are keyed by tool name, and an alias matches the tool it aliases - writing `bash` covers
 the `shell` the model actually calls.
 
+A stage may only route into a region it can see. Routing a result into a region the stage left out
+of its own `[context.regions]` writes it where that stage cannot read it back, so `lev validate`
+refuses the blueprint and says which region to add. The four the runtime always carries -
+`conversation`, `tool_results`, `final_output` and `stage_instructions` - are always valid targets.
+
 An override entry can also carry both answers at once, which is usually what you mean when a tool
 needs its own region *and* its own ceiling:
 

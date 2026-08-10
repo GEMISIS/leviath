@@ -4114,7 +4114,11 @@ fn validate_rejects_a_checklist_gate_on_a_non_checklist_region() {
 /// it rather than destroying it, so this is legitimate and must not be
 /// mistaken for a typo.
 #[test]
-fn validate_allows_a_region_declared_by_another_stage() {
+fn validate_allows_a_gate_on_a_region_declared_by_another_stage() {
+    // A gate is evaluated by the runtime against the region's contents, not by
+    // the model reading it, so a region this stage does not render is still a
+    // sound thing to gate on. Routing is the opposite case and is checked
+    // per-stage; see the #370 tests.
     let toml = r#"
 [agent]
 name = "keys"
@@ -4124,8 +4128,9 @@ entry_stage = "work"
 mode = "autonomous"
 system_prompt = "go"
 
-[stages.work.tool_routing.overrides]
-read_file = "notes"
+[stages.work.transitions.other]
+condition = "always"
+gate = { require_region_updated = "notes" }
 
 [stages.other]
 mode = "autonomous"
@@ -4136,7 +4141,7 @@ notes = { kind = "pinned", max_tokens = 1000 }
 "#;
     let bp = parse_manifest(toml).expect("parses");
     bp.validate()
-        .expect("a cross-stage region reference is fine");
+        .expect("a cross-stage region reference is fine for a gate");
 }
 
 #[test]
@@ -4540,4 +4545,156 @@ on_unavailable = "explode"
         err.contains("unknown on_unavailable 'explode'"),
         "got: {err}"
     );
+}
+
+// ─── Routing into a region the stage cannot see (#370) ───────────────────────
+
+/// The reported shape: a stage scopes its context and routes a tool into a
+/// region it left out. The result is written where the stage cannot read it,
+/// and the pointer left in `conversation` tells the model to go read it.
+#[test]
+fn validate_rejects_routing_into_a_region_the_stage_omits() {
+    let toml = r#"
+[agent]
+name = "scoped"
+entry_stage = "verify"
+
+[context.regions]
+data_preview = { kind = "pinned", max_tokens = 8000 }
+plan = { kind = "pinned", max_tokens = 2000 }
+
+[stages.verify]
+mode = "autonomous"
+system_prompt = "check the rules against the manual"
+
+[stages.verify.context.regions]
+plan = { kind = "pinned", max_tokens = 2000 }
+
+[stages.verify.tool_routing.overrides]
+read_file = "data_preview"
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    let err = bp.validate().unwrap_err().to_string();
+    assert!(err.contains("data_preview"), "names the region: {err}");
+    assert!(
+        err.contains("could not read them back"),
+        "says what is wrong: {err}"
+    );
+    assert!(
+        err.contains("[stages.verify.context.regions]"),
+        "says how to fix it: {err}"
+    );
+}
+
+/// `scratch` in the report: declared globally, named as a routing target, and
+/// in no stage's layout at all - unreachable by construction for the whole life
+/// of the blueprint.
+#[test]
+fn validate_rejects_a_default_region_no_stage_renders() {
+    let toml = r#"
+[agent]
+name = "scoped"
+entry_stage = "plan"
+
+[context.regions]
+scratch = { kind = "temporary", max_tokens = 4000 }
+notes = { kind = "pinned", max_tokens = 2000 }
+
+[stages.plan]
+mode = "autonomous"
+system_prompt = "go"
+
+[stages.plan.context.regions]
+notes = { kind = "pinned", max_tokens = 2000 }
+
+[stages.plan.tool_routing]
+default_region = "scratch"
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    let err = bp.validate().unwrap_err().to_string();
+    assert!(err.contains("scratch"), "{err}");
+}
+
+/// A stage that declares no layout of its own sees the blueprint's, so routing
+/// into any global region is fine. Without this the check would reject the
+/// ordinary un-scoped blueprint, which is most of them.
+#[test]
+fn validate_allows_routing_into_a_global_region_from_an_unscoped_stage() {
+    let toml = r#"
+[agent]
+name = "plain"
+entry_stage = "work"
+
+[context.regions]
+codebase = { kind = "compacting", max_tokens = 8000 }
+
+[stages.work]
+mode = "autonomous"
+system_prompt = "go"
+
+[stages.work.tool_routing.overrides]
+read_file = "codebase"
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    bp.validate()
+        .expect("an unscoped stage sees the global layout");
+}
+
+/// The regions the runtime carries visible whatever a stage declares are always
+/// legitimate routing targets, or a scoped stage could not route anywhere.
+#[test]
+fn validate_allows_routing_into_the_always_visible_regions() {
+    for target in ["conversation", "tool_results", "final_output"] {
+        let toml = format!(
+            r#"
+[agent]
+name = "scoped"
+entry_stage = "work"
+
+[context.regions]
+notes = {{ kind = "pinned", max_tokens = 2000 }}
+
+[stages.work]
+mode = "autonomous"
+system_prompt = "go"
+
+[stages.work.context.regions]
+notes = {{ kind = "pinned", max_tokens = 2000 }}
+
+[stages.work.tool_routing]
+default_region = "{target}"
+"#
+        );
+        let bp = parse_manifest(&toml).expect("parses");
+        bp.validate()
+            .unwrap_or_else(|e| panic!("{target} is always visible: {e}"));
+    }
+}
+
+/// A stage that scopes its context and routes into a region it *did* declare is
+/// the case this must not touch.
+#[test]
+fn validate_allows_routing_into_a_region_the_stage_declares() {
+    let toml = r#"
+[agent]
+name = "scoped"
+entry_stage = "work"
+
+[context.regions]
+codebase = { kind = "compacting", max_tokens = 8000 }
+notes = { kind = "pinned", max_tokens = 2000 }
+
+[stages.work]
+mode = "autonomous"
+system_prompt = "go"
+
+[stages.work.context.regions]
+codebase = { kind = "compacting", max_tokens = 8000 }
+
+[stages.work.tool_routing.overrides]
+read_file = "codebase"
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    bp.validate()
+        .expect("routing into a declared region is fine");
 }
