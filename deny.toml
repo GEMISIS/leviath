@@ -31,6 +31,19 @@ ignore = [
     #   { id = "RUSTSEC-0000-0000", reason = "why this is acceptable here" },
     # Every entry needs a reason. An ignore with no justification is a silent
     # acceptance of risk, which is what this file exists to prevent.
+    # smartstring is unmaintained: the repository was archived on 2026-05-03.
+    #
+    # Accepted 2026-08-10, because nothing on our side can remove it. It is a
+    # hard, non-optional dependency of rhai, no rhai feature turns it off, and
+    # 1.25.1 is the latest release. rhai cannot swap it without a breaking
+    # change of its own, because SmartString appears in rhai's public API; the
+    # maintainer is weighing `ecow` in rhaiscript/rhai#816.
+    #
+    # Watch that issue rather than this advisory. It also covers a soundness
+    # concern in smartstring whose fix sits in an unmerged PR against the now
+    # archived repo, and that is the part that would actually matter to us.
+    # Revisit when rhai ships a release without smartstring.
+    { id = "RUSTSEC-2026-0249", reason = "unmaintained; transitive via rhai, no upgrade path, tracked in rhaiscript/rhai#816" },
 ]
 
 [licenses]
