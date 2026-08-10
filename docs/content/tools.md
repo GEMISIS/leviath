@@ -23,7 +23,7 @@ Read and modify files relative to the agent's working directory.
 
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
-| `read_file` | Read one file's complete contents. | `path` |
+| `read_file` | Read one file, up to 256 KiB, with a note when the content is truncated. | `path` |
 | `read_files` | Read several files in one call, separated by path headers. | `paths` (array) |
 | `write_file` | Write content to a file, creating parent directories as needed. | `path`, `content` |
 | `edit_file` | Replace an exact string that occurs exactly once in a file. | `path`, `old_str`, `new_str` |
