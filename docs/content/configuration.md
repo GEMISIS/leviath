@@ -471,6 +471,27 @@ max_output_tokens    = 4096
 `lev models show <model>` prints the values a run will actually use, with any correction already
 applied.
 
+### Where a window comes from
+
+Three sources, narrowest first:
+
+1. A `[model_capabilities]` entry, if you wrote one. Your number is the last word, which is how you
+   correct an API that is itself wrong.
+2. What the provider's own API reports, read once when the daemon starts. OpenRouter fronts far more
+   models than any compiled table can name, so its `/models` endpoint is the only current answer for
+   most of them.
+3. The table compiled into this build, and for an OpenRouter model it does not name, a conservative
+   128,000 tokens.
+
+The reason this order matters is that region budgets are percentages of the window. A `budget = "30%"`
+region on a model that really holds 1M tokens is 314,572 tokens if the window is known and 38,400 if
+it fell back, with no error either way - the agent just evicts working material early and looks like
+a worse model.
+
+A provider that cannot be reached at start-up costs nothing but the fallback: Leviath warns, keeps
+the compiled table, and starts. It warns once per model when a run does land on the fallback, naming
+the line that fixes it.
+
 > [!NOTE]
 > Region budgets written as percentages resolve against `max_context_tokens`, so a wrong window is
 > not cosmetic: a `budget = "30%"` region on a model assumed to be 128k gets 38 400 tokens instead
