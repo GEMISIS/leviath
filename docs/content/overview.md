@@ -90,8 +90,8 @@ script. See [Outputs](/docs/outputs).
 [daemon](/docs/daemon) that holds every agent in one process, and returns immediately.
 
 That is what makes hundreds of concurrent agents affordable: a waiting agent is a row of data
-nothing touched this pass, not an idle process. The [ECS engine](/docs/engine) page explains the
-design, and you never have to think about it to use Leviath.
+nothing touched this pass, not an idle process. [The agent engine](/docs/engine) explains how, and
+you never have to think about it to use Leviath.
 
 ## Nothing lives only in memory
 
