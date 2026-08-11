@@ -164,6 +164,7 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/agents/{id}/result` · `/context` | The run's answer and log tail · current context window |
 | `GET /api/agents/{id}/logs?stage=&stream=&tail=` | A run's logs. `stage` takes an index or `all`, defaulting to the current stage; `stream` is `output` (the assistant's text) or `logs` (tool calls, token counts, errors); `tail` is a byte budget |
 | `GET /api/agents/{id}/context/history` | How the context window changed over the run, paginated |
+| `GET /api/agents/{id}/stages` | The per-stage ledger: what each stage cost, which regions it carried, and whether it ran at all. See [below](#where-a-runs-cost-went) |
 | `GET /api/agents/{id}/files` | List a run's files, or read one with `?path=`. `offset` pages a large one. See [below](#a-runs-files) |
 | `GET /api/agents/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + token roll-ups |
 | `POST /api/agents/{id}/pause` · `/resume` | Pause a run · resume it |
@@ -239,6 +240,58 @@ One honest limit: the deep sources match the raw JSON on disk, so a query contai
 a backslash or a newline may not match text that does contain it.
 
 ## A run's files
+
+## Where a run's cost went
+
+`GET /api/agents/{id}/stages` returns one record per declared stage, in blueprint
+order:
+
+```json
+{
+  "run_id": "analyst-1786409275-d17e8f82",
+  "stages": [
+    { "name": "plan",           "status": "complete", "entered": true,
+      "prompt_tokens": 8420, "completion_tokens": 610,
+      "cached_tokens": 6100, "cache_write_tokens": 240,
+      "region_tokens": { "task": 24, "data_preview": 4004 },
+      "runaway_warned": false },
+    { "name": "error_recovery", "status": "skipped",  "entered": false },
+    { "name": "answer",         "status": "complete", "entered": true }
+  ]
+}
+```
+
+Three things here are not derivable from any other route.
+
+**`entered` says whether the run was ever in that stage.** The alternative is to
+fetch `context/history` and diff consecutive snapshots to see which stages
+produced entries, which is expensive - every point carries a whole context
+window - and wrong in the case that matters: a stage that ran and wrote nothing
+to any region leaves no trace to find. `status: "skipped"` is the same fact
+stated from the other side, and means the run finished without reaching this
+stage, as distinct from `"pending"` on a run that is still going.
+
+**The per-stage cost split.** The run-level totals are on the run record; which
+stage spent them, and the cache read/write split within a stage, are only here.
+A stage showing no cache reads cannot be told apart from one paying to write a
+prefix nothing reuses without `cache_write_tokens`.
+
+**`region_tokens` is what decides whether a region is earning its place** - the
+largest each region reached while that stage was active. This is the number to
+look at before trimming a layout.
+
+`runaway_warned` is set when a stage's per-call prompt passed four times its
+first call, which is the shape of a region accumulating without a cap.
+
+The list is bounded by the blueprint's stage count, so it is not paginated. A run
+that has not reached its first stage boundary returns an empty list rather than a
+404 - the run exists, it just has nothing to report yet.
+
+> [!NOTE]
+> `entered` is `false` for every stage of a run recorded before Leviath tracked
+> it, because the field simply is not in those files. Read it together with
+> `status`: a stage recorded `complete` with tokens against its name ran,
+> whatever `entered` says on an old run.
 
 `GET /api/agents/{id}/files` answers two different questions, and neither substitutes for the other.
 

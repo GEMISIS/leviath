@@ -100,6 +100,7 @@ fn api_router() -> Router<AppState> {
         .route("/api/agents/{id}/files", get(agents::agent_file))
         .route("/api/agents/{id}/logs", get(agents::agent_logs))
         .route("/api/agents/{id}/result", get(agents::agent_result))
+        .route("/api/agents/{id}/stages", get(agents::agent_stages))
         .route("/api/agents/{id}/tree-status", get(tree::agent_tree_status))
         .route("/api/agents/{id}/pause", post(agents::pause_agent))
         .route("/api/agents/{id}/resume", post(agents::resume_agent))
