@@ -8,9 +8,9 @@ order: 1
 
 # Getting Started
 
-Leviath runs LLM agents. What it adds over asking a model directly is **structure**: context that
-stays coherent across hundreds of tool calls, a different model for each phase of a task, and
-hundreds of agents running at once in one process.
+Leviath runs LLM agents. What it adds over asking a model directly is **structure**. That means
+context that stays coherent across hundreds of tool calls, a different model for each phase of a
+task, and hundreds of agents running at once in one process.
 
 You'll go from nothing to a running agent in four steps:
 

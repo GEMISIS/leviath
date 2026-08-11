@@ -81,7 +81,7 @@ returning.
 | `fallback_model(provider, model)` | Where a run moves when its provider fails mid-run, so a single-model blueprint survives an outage. |
 | `prompt_hints(hints)` | Turn on the batch-tool and shell hints, which are off by default on the embed path. |
 | `tool_service(arc)` | Replace the built-in tool service with your own (see below). |
-| `state_dir(dir)` | Persist runs on disk in the daemon's layout (`dir/runs/<run_id>/`). Without it the world is fully in memory and never touches disk. |
+| `state_dir(dir)` | Persist runs on disk in the daemon's layout (`dir/runs/<run_id>/`). Without it the world stays in memory. |
 | `inference_pool(config)` | Per-model inference concurrency limits. |
 | `tool_concurrency(n)` | How many tool batches may execute at once (default 4). |
 | `runtime(handle)` | Run on a specific Tokio runtime instead of the ambient one. |

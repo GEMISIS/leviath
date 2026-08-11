@@ -76,7 +76,7 @@ layer and names the first one that breaks.
 ## `has no usable provider`, but I do have a key
 
 The message names what it tried: `stage 'parallel_fix' has no usable provider (tried: anthropic)`.
-That stage's `models` list simply never mentions the provider you configured. A blueprint only
+That stage's `models` list never mentions the provider you configured. A blueprint only
 starts on a provider it lists. The [bundled agents](/docs/agent-catalog) list all five providers,
 so with them any key qualifies; a blueprint you downloaded or wrote may list fewer.
 
@@ -226,8 +226,8 @@ console on purpose, and that is not this bug.
 Run `lev ps` and read the line under the table. If there isn't one, the daemon thinks it is
 getting somewhere and the problem is in a particular run rather than the daemon as a whole.
 
-A `lanes:` line means the tool lane is full with batches queued behind it. On its own that is just
-a busy factory. What matters is the second half:
+A `lanes:` line means the tool lane is full with batches queued behind it. On its own that is a
+normal sign of a busy daemon. What matters is the second half:
 
 ```
 lanes: tools 8/8 busy, 3 parked, 12 queued  ·  no progress for 14 cycles (7m)
@@ -270,7 +270,7 @@ is off by default because it fails runs. A run it fails logs at `error` level an
 carries the reason, which begins `[wedged]` in the stage log. Nothing else in Leviath produces that
 line, so it means the engine lost track of a run. Please report it.
 
-It never fires on a run that is merely slow. An agent waiting on the model, on a tool, on its
+A slow run never trips it. An agent waiting on the model, on a tool, on its
 sub-agents, or on a person is holding the marker that says so and is exempt however long it takes.
 
 ## An agent seems stuck in a loop
@@ -306,7 +306,7 @@ passed to `--token`.
 ## An admin action returns `405` or `404`
 
 Config-write and MCP add/remove live behind `--allow-admin`. Without that flag the mutating route is
-not mounted, and you get whichever error fits the path: **405** for `PUT /api/config` and
-`POST /api/mcp/servers`, because those paths still answer `GET`, and **404** for
-`DELETE /api/mcp/servers/{name}`, because nothing is mounted there at all. The read routes keep
+not mounted, and you get whichever error fits the path. `PUT /api/config` and
+`POST /api/mcp/servers` return **405**, because those paths still answer `GET`.
+`DELETE /api/mcp/servers/{name}` returns **404**, because nothing is mounted there at all. The read routes keep
 working either way. Restart with `lev serve … --allow-admin`.

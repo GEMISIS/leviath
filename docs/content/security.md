@@ -61,9 +61,10 @@ kind = "none"             # run discovery on the host…
 >
 > Inside the boundary: the `shell` tool, a blueprint's seed commands, and a Rhai script tool's
 > `shell()` calls. Outside it: file tools, which stay on the host and rely on workdir
-> [path confinement](#reading-outside-the-workdir) instead, and `web_fetch`, `web_search`, and a
-> script's HTTP functions, which use the host network, so `network = false` fences the sandboxed
-> commands and not those tools. [MCP servers](/docs/mcp) are host processes shared across agents,
+> [path confinement](#reading-outside-the-workdir) instead. Also outside are `web_fetch`,
+> `web_search`, and a script's HTTP functions, which use the host network, so `network = false`
+> fences the sandboxed commands and not those tools.
+> [MCP servers](/docs/mcp) are host processes shared across agents,
 > so they sit outside too.
 >
 > Covering every side effect, and letting a single run opt into a sandbox, is
@@ -89,7 +90,7 @@ engine on `PATH`, the agent **fails to spawn** with a clear error. That is
 host instead.
 
 > [!IMPORTANT]
-> An *installed* agent can never weaken the sandbox you configured: it may pick a stricter kind,
+> An *installed* agent can never weaken the sandbox you configured. It may pick a stricter kind,
 > never a looser one, and its own `engine` choice is always discarded, because the engine binary
 > runs on the host at spawn, before any prompt. With no `[sandbox]` of your own, a blueprint may
 > still opt in with its own image and mounts, so read a downloaded agent's sandbox block rather
@@ -152,7 +153,7 @@ Four other commands surface the same thing, so this is hard to miss:
 | `lev list` | The same granted-over-declared counts under each agent |
 | `lev add` | The status of what you just installed |
 | `lev run` | Warns in the daemon log when an agent declares reads and your config grants none |
-| `lev ps` | A `READS` column, granted over declared. `0/2` is a run that is up and will have every read outside its workdir refused |
+| `lev ps` | A `READS` column, granted over declared. `0/2` means every read outside the workdir will be refused |
 
 Those checks compare patterns, not paths on disk, so treat them as the first answer rather than the
 last: an individual read is still matched against the real, symlink-resolved path at run time.
@@ -197,7 +198,7 @@ can, which matters, because otherwise an agent could relabel its own data.
 
 Every tool that could send bytes off the machine has a **clearance**, the highest sensitivity it is
 trusted with. Before such a tool runs, Leviath compares the two. If the data is more sensitive than
-the tool's clearance, the call does not simply proceed.
+the tool's clearance, your policy decides what happens next.
 
 ```mermaid
 flowchart TD

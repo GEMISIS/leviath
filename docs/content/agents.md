@@ -124,9 +124,9 @@ temperature = 0.2
 max_tokens  = 8000
 ```
 
-Model selection is per stage, and only per stage. There are two ways to get this wrong quietly (a
-top-level `[model]` block, which parses and is read by nothing, and a stage naming no model, which
-silently takes the host default), and `lev validate` reports both. See
+Model selection is per stage, and only per stage. Two mistakes here are quiet ones. A top-level
+`[model]` block parses and is read by nothing, and a stage naming no model takes the host default
+without saying so. `lev validate` reports both. See
 [every stage should name its own model](/docs/stages#every-stage-should-name-its-own-model).
 
 ### Which tools a stage gets
@@ -161,7 +161,7 @@ max_tokens = 2000          # bare max_tokens alone = fixed absolute budget
 
 Percentages are **ceilings, not allocations**. They may sum past 100%, because regions rarely all
 fill at once. With a percentage, `max_tokens` caps and `min_tokens` floors the resolved value;
-without one, `max_tokens` is simply the fixed budget. Compacting regions also take
+without one, `max_tokens` is the fixed budget. Compacting regions also take
 `threshold_tokens`, the fill level that triggers compaction.
 
 A stage can override the whole layout for just itself with `[stages.<name>.context.regions]`. The
@@ -335,8 +335,8 @@ lev test .                        # run the blueprint's tests/ cases (real API c
 lev test . --dry-run              # parse and report them without calling a provider
 ```
 
-Beyond the graph, `lev validate` reports the fields whose absence quietly changes what a run does: a
-stage with no model block, a tool name that matches nothing, an autonomous stage offering a tool
-that waits for a person. Errors exit non-zero, warnings do not, notes never can. The
+Beyond the graph, `lev validate` reports the fields whose absence quietly changes what a run does.
+That covers a stage with no model block, a tool name that matches nothing, and an autonomous stage
+offering a tool that waits for a person. Errors exit non-zero, warnings do not, notes never can. The
 [CLI reference](/docs/cli#lev-validate-path) lists every check. The daemon logs the same findings
 when a run spawns, so a blueprint nobody validated still says what is wrong with it.

@@ -18,8 +18,8 @@ table over and over. An agent with nothing to do is a row those functions skippe
 close to nothing.
 
 That arrangement has a name: an **Entity Component System**, usually shortened to **ECS**. Game
-engines use it to move thousands of objects per frame, and Leviath borrows the storage and
-iteration rather than the reason: games want cache locality in a tight frame budget, while an agent
+engines use it to move thousands of objects per frame. Leviath borrows the storage and iteration
+rather than the reason. Games want cache locality in a tight frame budget, while an agent
 runtime wants a way to hold state for something that is mostly waiting. If you have written a
 reactor with a state machine per connection, this will feel familiar. The ECS supplies the table
 and the sweep so Leviath does not hand-roll them.
@@ -28,7 +28,7 @@ The three words are the three pieces, and this page explains each one as it goes
 
 | Word | Means here |
 |---|---|
-| **Entity** | One agent. Really just a row number, with no code attached to it. |
+| **Entity** | One agent. A row number, with no code attached to it. |
 | **Component** | One piece of an agent's data, such as its context window or which stage it is on. |
 | **System** | One function that runs across every agent in a given state and moves it along. |
 
@@ -60,8 +60,8 @@ Leviath turns that inside out. The loop belongs to the engine, not to any agent,
 pipeline: a fixed sequence of phases that runs start to finish, over and over. Each phase is one
 function, and it acts on whichever agents happen to be sitting at that phase right now.
 
-Here is the spine of it. The real pipeline has about forty-five functions; these five are the ones
-that move an ordinary turn, and the rest handle summarizing context, spotting a stuck agent,
+Here is the spine of it. The real pipeline has about forty-five functions, and these five are the
+ones that move an ordinary turn. The rest handle summarizing context, spotting a stuck agent,
 iteration caps, checkpoints, fan-out, telemetry, and writing to disk.
 
 ```mermaid
@@ -90,8 +90,8 @@ An agent's position in the pipeline is itself a piece of its data, which is what
 find its agents by looking rather than by being told.
 
 The difference shows up when there are many of them. Give each agent its own task and the runtime
-has 100 things it must schedule, each holding a turn's worth of stack, and any budget you want to
-apply across all of them has to be coordinated between them:
+has 100 things it must schedule, each holding a turn's worth of stack. Any budget you want to
+apply across all of them then has to be coordinated between them:
 
 ```mermaid
 flowchart TB
@@ -151,7 +151,7 @@ From here the page gets specific:
 Leviath gets this from [bevy_ecs](https://bevy.org/), a library built for game engines and
 used here unchanged. Precisely:
 
-- An **entity** is just an id. No data, no methods. Think of it as a row number.
+- An **entity** is an id and nothing else. No data, no methods. Think of it as a row number.
 - A **component** is a plain struct attached to an entity. `AgentState` is a component,
   `ContextWindow` is a component. An entity is nothing more than the components it carries.
 - A **system** is an ordinary function that runs over every entity carrying some particular set of
@@ -159,7 +159,7 @@ used here unchanged. Precisely:
 
 So there is no agent object that knows how to run itself. There is agent-shaped **data**, and the
 pipeline of functions above running across all of it. Nothing sits on an `await`, because nothing
-owns a call stack. A blocked agent is just a row that this pass skipped.
+owns a call stack. A blocked agent is a row that this pass skipped.
 
 That trade is aimed at running many agents at once:
 
@@ -233,7 +233,7 @@ components, and each system asks for the marker it acts on.
 | `AwaitingTitle` | The title call is in flight. Titling runs alongside the first turn | the title-collect system |
 
 Moving an agent forward means removing one marker and adding another. `dispatch_inference` asks for
-entities `With<ReadyToInfer>`, so an agent without that marker is simply not in the results. The
+entities `With<ReadyToInfer>`, so an agent without that marker is not in the results at all. The
 same trick makes control operations nearly free: pausing a run sets `AgentStatus::Paused`, and
 every dispatch system already ignores agents that are not `Active`.
 
@@ -262,7 +262,7 @@ flowchart TD
 3. **`process_response`** reads the reply. Tool calls go down the tool path; plain text goes toward
    a transition.
 4. **`dispatch_tools`** checks each requested call before it runs. A tool the stage never
-   advertised in `available_tools` is refused rather than hidden, [permissions](/docs/tools) decide
+   advertised in `available_tools` is refused rather than hidden. [Permissions](/docs/tools) decide
    whether the call needs you, and [taint tracking](/docs/security#taint-tracking-experimental)
    blocks a call that would carry sensitive data somewhere it should not go. Calls that only edit
    the agent's own context apply here; the rest go to the tool lane.
@@ -271,11 +271,11 @@ flowchart TD
    `ReadyToInfer`.
 6. **`resolve_transition`** picks what happens at the end of a stage. A stage's outgoing edges are
    its [transitions](/docs/stages), including ones that fire on an error or when the agent is
-   detected going in circles. There are six answers: `Terminal` (done), `TerminalError` (failed,
-   with no `error` edge to catch it), `Next` (take this edge), `Choose` (ask the model which edge),
-   `Resume` (the agent looked stuck, but the stage has no edge for that, so carry on), and
-   `DeadEnd` (every edge out is exhausted, which routes to the `error` edge or fails the run rather
-   than reporting a completion that did not happen).
+   detected going in circles. There are six answers. Four are ordinary: `Terminal` (done),
+   `TerminalError` (failed, with no `error` edge to catch it), `Next` (take this edge), and
+   `Choose` (ask the model which edge). `Resume` means the agent looked stuck but the stage has no
+   edge for that, so it carries on. `DeadEnd` means every edge out is exhausted, which routes to the
+   `error` edge or fails the run rather than reporting a completion that did not happen.
 
 Those are six of the roughly forty-five. See [Multi-stage workflows](/docs/stages) for what the
 transition conditions mean and [Structured context](/docs/context) for what the regions do.
@@ -286,13 +286,13 @@ A **tick** is one pass of that whole system list over every agent in the world. 
 one after another in a fixed order, so no two ever overlap, and no system ever awaits. A dispatch
 system starts async work and swaps in an `Awaiting*` marker; a collect system on a later tick
 picks the result up. That one rule is what keeps a pass short no matter how many agents are
-waiting, and it gives you backpressure for free: a full pool just means an agent stays
+waiting. It also gives you backpressure for free: a full pool means an agent stays
 `ReadyToInfer` until a later tick finds it a slot.
 
 At the end of a tick, Leviath counts how many agents carry each of the twelve markers. Those
 counts are the world's **fingerprint**. The loop does not do its work on a clock. It ticks for as
-long as the fingerprint keeps changing, and when a whole tick changes nothing it sleeps (one slow
-30-second timer stays armed as a safety net, re-driving anything a lost wakeup would strand):
+long as the fingerprint keeps changing, and when a whole tick changes nothing it sleeps. One slow
+30-second timer stays armed as a safety net, re-driving anything a lost wakeup would strand:
 
 ```rust
 loop {

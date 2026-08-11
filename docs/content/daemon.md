@@ -166,7 +166,7 @@ wedge_timeout_secs = 300
 
 It is `0`, meaning off, by default, because it fails runs and that should be your choice.
 
-It never fires on a run that is merely slow. An agent waiting on the model, on a tool, on its
+A slow run never trips it. An agent waiting on the model, on a tool, on its
 sub-agents, or on a person is exempt however long it takes. If it does fire, the run's error says
 so and the daemon logs it at `error` level. That is a bug in Leviath, and worth reporting.
 

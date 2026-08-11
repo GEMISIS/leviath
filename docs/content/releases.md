@@ -28,8 +28,8 @@ the commit carrying the bump is the one that gets built.
 
 Alpha picks it up as soon as the merge lands, and re-checks every night in case
 it missed one. Beta and stable stay on their weekly cadence, but each one asks
-the same question before it does anything: is the version at the build I would
-publish different from the version at the build I last published? When the
+the same question first. Is the version at the build I would publish different
+from the version at the build I last published? When the
 answer is no, the run finishes in seconds having touched nothing. A quiet
 Monday means there was nothing new to promote, not that something failed.
 
@@ -43,9 +43,9 @@ cuts an immutable versioned release. Release titles follow the same scheme:
 `Leviath v0.1.2-Alpha`, `Leviath v0.1.2-Beta`, and `Leviath v0.1.2` for the immutable stable
 release, while the rolling `latest` is titled with its channel.
 
-Maintainers can re-cut a channel without a bump - to recover from an
-infrastructure failure, say - by running the workflow by hand with its `force`
-input. That is the only path that can land on a version already released, and
+Maintainers can re-cut a channel without a bump by running the workflow by hand
+with its `force` input, which is how they recover from an infrastructure
+failure. That is the only path that can land on a version already released, and
 the versioned tag gets a date suffix (`v0.1.2+20260802`) when it does, so an
 immutable tag is never moved.
 
@@ -91,8 +91,8 @@ macOS on both and Windows on x64.
 
 Reach for the musl ones when you are dropping `lev` into an image you did not build. The glibc
 binaries link against the release runner's C library and so need `GLIBC_2.38` or newer, which is
-Ubuntu 24.04 and up; anything older fails at exec with a `version not found` message before it runs
-a line of Leviath. The musl archives are statically linked and need nothing from the image at all.
+Ubuntu 24.04 and up. Anything older fails at exec with a `version not found` message, before it
+runs a line of Leviath. The musl archives are statically linked and need nothing from the image.
 
 ```bash
 # The rolling tag for the channel you want: latest (stable), beta, or alpha.
