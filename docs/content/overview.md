@@ -117,7 +117,9 @@ webhooks can deliver a finished run to you. See
 
 ## Where to go next
 
-- [Agent blueprints](/docs/agents) is the natural next page, since everything else configures one.
+- [Build your first agent](/docs/first-agent) is the natural next page: it writes one from
+  scratch, and the ideas below make more sense once you have.
+- [Agent blueprints](/docs/agents) is the field-by-field reference for what you wrote.
 - [Multi-stage workflows](/docs/stages) and [Structured context](/docs/context) are the two ideas
   that do the most work.
 - [Glossary](/docs/glossary) defines every term these docs use in a particular way.

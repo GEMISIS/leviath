@@ -3,7 +3,7 @@ title: Multi-stage workflows
 description: Split an agent into stages so each phase of a task gets its own model, tools, and context.
 group: Concepts
 group_order: 2
-order: 6
+order: 7
 ---
 
 # Multi-stage workflows

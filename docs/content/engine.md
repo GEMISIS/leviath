@@ -3,7 +3,7 @@ title: The agent engine
 description: How one process runs many agents at once: each is a row of data in an Entity Component System, so a waiting agent costs almost nothing.
 group: Concepts
 group_order: 2
-order: 3
+order: 4
 ---
 
 # The agent engine
