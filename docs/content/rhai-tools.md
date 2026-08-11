@@ -111,7 +111,7 @@ schema   = { type = "string", enum = ["json", "yaml"], description = "output for
 ## Inspecting the inventory
 
 `lev tools` lists the global inventory without starting the daemon. Compiled tools are marked,
-files that failed to compile are shown with their reason (they are simply not advertised), and a tool
+files that failed to compile are shown with their reason (they are not advertised at all), and a tool
 whose `@requires` capability the platform cannot satisfy is flagged unavailable:
 
 ```bash

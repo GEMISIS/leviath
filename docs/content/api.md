@@ -28,13 +28,13 @@ a test, so a client generator or an agent can consume the contract directly.
   (`ps`).
 - **CORS is closed by default.** Pass `--cors <origin>` (e.g. `https://leviath.dev`) or `--cors "*"`
   to allow a browser to call it cross-origin.
-- **Binds to `127.0.0.1`** by default. `--host 0.0.0.0` exposes it on your network - and without
-  `--tls-cert`, puts the bearer token on the wire in cleartext for anyone on that network to read.
+- **Binds to `127.0.0.1`** by default. `--host 0.0.0.0` exposes it on your network. Without
+  `--tls-cert`, that puts the bearer token on the wire in cleartext for anyone on that network to read.
   If the address is publicly routable, that is the open internet. See
   [reaching a Leviath on another machine](#reaching-a-leviath-on-another-machine).
 - **`--tls-cert` / `--tls-key`** serve HTTPS instead of HTTP. Off by default, bring your own
   certificate; Leviath never generates one.
-- **`GET /` needs no token.** It returns a fixed "Leviath is running." page and nothing else - no
+- **`GET /` needs no token.** It returns a fixed "Leviath is running." page and nothing else: no
   version, no run counts, no endpoint list. It exists so a certificate can be accepted in a browser
   tab; see the section below.
 - **`--allow-admin`** mounts the mutating admin routes. `GET /api/config` and
@@ -60,7 +60,7 @@ The short version: **`http://` only works on loopback.** Everything else needs H
 
 A browser treats `http://localhost` and `http://127.0.0.1` as potentially trustworthy, which is the
 only reason the default setup works from a page served over HTTPS. Every other address is blocked,
-and **a LAN address is blocked exactly like a public one** - `http://192.168.1.50:3000` fails just as
+and **a LAN address is blocked exactly like a public one**. `http://192.168.1.50:3000` fails just as
 `http://203.0.113.10:8080` does:
 
 ```
@@ -133,7 +133,7 @@ ssh -N -L 3000:127.0.0.1:3000 you@that-machine
 ```
 
 Then point The Lair at `http://127.0.0.1:3000`. Leave Leviath on its default `127.0.0.1` bind for
-this - `--host 0.0.0.0` is not wanted and only widens the exposure.
+this. `--host 0.0.0.0` is not wanted and only widens the exposure.
 
 ## Auth flow
 
@@ -159,10 +159,10 @@ Base path `/api`; all JSON unless noted.
 | Method · Path | Purpose |
 |---|---|
 | `GET /api/runs` | List runs: paginated, sortable, searchable. See [below](#listing-and-searching-runs) |
-| `GET /api/agents` · `POST /api/agents` | List runs *(deprecated, use `/api/runs`)* · spawn an agent. Reads the persisted records, so unlike `lev ps` it keeps finished runs |
+| `GET /api/agents` · `POST /api/agents` | List runs *(deprecated, use `/api/runs`)* · spawn an agent. Reads the persisted records, so finished runs stay listed |
 | `GET /api/agents/{id}` · `DELETE …` | Get one · cancel |
 | `GET /api/agents/{id}/result` · `/context` | The run's answer and log tail · current context window |
-| `GET /api/agents/{id}/logs?stage=&stream=&tail=` | A run's logs. `stage` takes an index or `all`, defaulting to the current stage; `stream` is `output` (the assistant's text) or `logs` (tool calls, token counts, errors); `tail` is a byte budget |
+| `GET /api/agents/{id}/logs?stage=&stream=&tail=` | A run's logs. `stage`, `stream` and `tail` pick which stage, which stream, and how much |
 | `GET /api/agents/{id}/context/history` | How the context window changed over the run, paginated |
 | `GET /api/agents/{id}/stages` | The per-stage ledger: what each stage cost, which regions it carried, and whether it ran at all. See [below](#where-a-runs-cost-went) |
 | `GET /api/agents/{id}/files` | List a run's files, or read one with `?path=`. `offset` pages a large one. See [below](#a-runs-files) |
@@ -177,6 +177,10 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/doctor` | The checks `lev doctor` runs, as data. A failing check is `ok: false` inside a 200, never an HTTP error |
 | `GET /api/fs/dirs?path=&hidden=` | One directory level of subdirectory names, for a folder picker. Absolute paths only, fenced by `--workdir-root`; `hidden=true` includes dot-prefixed names |
 | `GET /ws` · `GET /ws/agents/{id}` | Live event stream (all agents / one run) |
+
+On `/logs`, `stage` takes a stage index or `all`, and defaults to the current stage. `stream` is
+either `output`, the assistant's own text, or `logs`, which carries tool calls, token counts and
+errors. `tail` is a byte budget for how much of the end you get back.
 
 > [!NOTE]
 > A run object carries both `updated_at` and `last_progress_at`. The first advances on a 30-second
@@ -229,8 +233,8 @@ operators or phrase quoting, and case folding is ASCII-only.
 
 The last three read from disk, which is why they are opt-in. Surface them as a "search inside
 runs" toggle rather than making every keystroke pay for them. They also stop after a bounded number
-of runs, newest first; when that happens the response says `scan_truncated: true` and sets `total`
-to null, because a count taken from a partial scan would be rendered as fact.
+of runs, newest first. When that happens the response says `scan_truncated: true` and sets `total`
+to null, because a count taken from a partial scan would be read as fact.
 
 Matching items carry `highlights` saying *why* they matched: the field, a snippet, and the stage
 where there is one, which you can pass straight to `/logs?stage=`. This is the part that cannot be
@@ -263,9 +267,9 @@ Three things here are not derivable from any other route.
 
 **`entered` says whether the run was ever in that stage.** The alternative is to
 fetch `context/history` and diff consecutive snapshots to see which stages
-produced entries, which is expensive - every point carries a whole context
-window - and wrong in the case that matters: a stage that ran and wrote nothing
-to any region leaves no trace to find. `status: "skipped"` is the same fact
+produced entries. That is expensive, because every point carries a whole context
+window. It is also wrong in the case that matters: a stage that ran and wrote
+nothing to any region leaves no trace to find. `status: "skipped"` is the same fact
 stated from the other side, and means the run finished without reaching this
 stage, as distinct from `"pending"` on a run that is still going.
 
@@ -274,8 +278,8 @@ stage spent them, and the cache read/write split within a stage, are only here.
 A stage showing no cache reads cannot be told apart from one paying to write a
 prefix nothing reuses without `cache_write_tokens`.
 
-**`region_tokens` is what decides whether a region is earning its place** - the
-largest each region reached while that stage was active. This is the number to
+**`region_tokens` is what decides whether a region is earning its place.** It is
+the largest each region reached while that stage was active. This is the number to
 look at before trimming a layout.
 
 `runaway_warned` is set when a stage's per-call prompt passed four times its
@@ -283,11 +287,11 @@ first call, which is the shape of a region accumulating without a cap.
 
 The list is bounded by the blueprint's stage count, so it is not paginated. A run
 that has not reached its first stage boundary returns an empty list rather than a
-404 - the run exists, it just has nothing to report yet.
+404. The run exists and has nothing to report yet.
 
 > [!NOTE]
 > `entered` is `false` for every stage of a run recorded before Leviath tracked
-> it, because the field simply is not in those files. Read it together with
+> it, because the field is not in those files at all. Read it together with
 > `status`: a stage recorded `complete` with tokens against its name ran,
 > whatever `entered` says on an old run.
 

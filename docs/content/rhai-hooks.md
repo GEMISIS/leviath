@@ -1,6 +1,6 @@
 ---
 title: Rhai stage hooks
-description: Run your own Rhai at seven points in an agent's lifecycle - seed a stage, gate a call, reshape an answer.
+description: Run your own Rhai at seven points in an agent's lifecycle to seed a stage, gate a call, or reshape an answer.
 group: Reference
 group_order: 3
 order: 12
@@ -76,7 +76,7 @@ The same four answers everywhere, so there is no vocabulary to learn per hook:
 | `#{ action: "retry" }` | do it again |
 
 Hooks are a **return-value contract**. Rhai passes arguments by value, so mutating `ctx` does
-nothing - the script has to return its decision.
+nothing. The script has to return its decision.
 
 Not every hook can honour `retry`, and one that cannot says so rather than treating it as allow.
 Today none of them do: it is reserved for re-inference, which needs an attempt bound first or a hook
@@ -85,13 +85,13 @@ that always retries would wedge the run.
 ## What hooks cannot do
 
 **`on_tool_call` runs before the gate, not after.** Whatever it leaves is what your tool policy, the
-taint gate, and the approval prompt then check. So a hook can *narrow* what runs - veto a call,
-rewrite arguments to something tamer - and cannot widen anything, because nothing it produces skips
+taint gate, and the approval prompt then check. So a hook can *narrow* what runs. It can veto a call
+or rewrite arguments to something tamer. It cannot widen anything, because nothing it produces skips
 those checks. It also has no access to the gate itself: it cannot mark its own calls approved.
 
-**`after_inference` cannot rewrite tool calls.** It is shown their names - enough to notice "it wants
-to run shell" - and can replace the response text only. Editing the calls there would be a way around
-checks you configured; that is `on_tool_call`'s job, where the gate can see it.
+**`after_inference` cannot rewrite tool calls.** It is shown their names, which is enough to notice
+"it wants to run shell". It can replace the response text only. Editing the calls there would be a
+way around checks you configured; that is `on_tool_call`'s job, where the gate can see it.
 
 **A failed hook is not an allowed hook.** A script that throws, or returns something malformed, fails
 the run. Treating a broken gate as permission is how a gate quietly stops gating.

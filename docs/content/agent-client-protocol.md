@@ -65,11 +65,11 @@ Flags (run `lev agent-client --help` for the authoritative list):
 
 | Flag | Purpose |
 |---|---|
-| `--agent <name-or-path>` | Blueprint to serve: an installed [agent](/docs/agents) name, or a path to one. When omitted, the session's working directory is searched for an `agent.leviath`. |
+| `--agent <name-or-path>` | Blueprint to serve: an installed [agent](/docs/agents) name, or a path to one. Omitted, the session's working directory is searched. |
 | `--yolo` | Approve every tool call without prompting. Recommended when the host does not implement `session/request_permission` (e.g. Gas City). |
 | `--allow <tool>` | Allow a tool outright. Repeatable. |
 | `--max-depth <n>` | Override the blueprint's max sub-agent tree depth. |
-| `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions, which run a shell command at spawn, before the first inference, and so before any approval prompt. |
+| `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions, which run at spawn before any approval prompt. |
 | `--output-format <label>` | Ask for the [final output](/docs/outputs) in this shape. Any label works. |
 | `--output-instructions <text>` | Extra guidance about that shape. |
 

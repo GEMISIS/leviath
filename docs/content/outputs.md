@@ -184,10 +184,10 @@ good default behaviour and directly at odds with `--output-instructions "reply w
 integer"`.
 
 Once the three levels above have combined, the winning spec is stated to the model as the one that
-governs how the answer is presented, and the stage prompt yields to it wherever the two disagree. So
-a caller who passes `--output-format` or `--output-instructions` does not have to know what the
-blueprint's prompt says, and a blueprint author does not have to strip presentation guidance out of
-a prompt to leave room for callers who may never pass anything.
+governs how the answer is presented. The stage prompt yields to it wherever the two disagree. So a
+caller who passes `--output-format` or `--output-instructions` does not have to know what the
+blueprint's prompt says. A blueprint author, in turn, does not have to strip presentation guidance
+out of a prompt to leave room for callers who may never pass anything.
 
 The claim is scoped to presentation: length, structure, what to lead with. It does not tell the
 model to disregard what the stage prompt asked it to *do*.

@@ -69,7 +69,7 @@ history      = { kind = "compact_history", budget = "15%", source_region = "code
 | `pinned` | Never evicted (architecture, the task). |
 | `sliding_window` | Keeps the most recent entries; the conversation lives here. |
 | `compacting` | Summarizes instead of evicting: file reads and tool results. |
-| `compact_history` | Carries summaries from earlier stages forward, so a later stage knows what happened without holding the raw content. Names the region it summarizes with `source_region`. |
+| `compact_history` | Carries summaries from earlier stages forward, so a later stage skips the raw content. `source_region` names what it summarizes. |
 | `clearable` | Wiped in one shot when space is needed (scratch). |
 | `hashmap` | Keyed entries (alias `hash_map`); a write to a key replaces it. |
 | `checklist` | A task list whose entries carry state. Written through `todo_add` / `todo_done` / `todo_note`, never evicted, and rendered open-items-first. |
@@ -131,11 +131,11 @@ model believes it wrote:
 | `todo_done(region, id)` | Ticks it off |
 | `todo_note(region, id, note)` | Records a note **without** closing it |
 
-It renders as one stable block with open items first, because the value of it being in the system
-section is that it stays in front of the model every turn as instruction rather than history.
+It renders as one stable block with open items first. Sitting in the system section is what keeps it
+in front of the model every turn, as instruction rather than history.
 
-An id is never reused, so a `todo_done` cannot land on a different item than the one it names, and
-an id that matches nothing is an error the model can read rather than a silent no-op.
+An id is never reused, so a `todo_done` cannot land on a different item than the one it names. An id
+that matches nothing is an error the model can read rather than a silent no-op.
 
 The gate is the part that makes any of this enforceable:
 
@@ -147,8 +147,8 @@ gate = { require_no_open_items = "todos",
 
 The nudge names the items that are still open. It shares the same `max_attempts` budget as every
 other gate, so it cannot wedge a run. A gate naming a region no stage declares, or a region that is
-not a `checklist`, is refused by `lev validate`: at runtime it could only ever count zero and pass
-on the first attempt, which looks exactly like a stage that finished its work.
+not a `checklist`, is refused by `lev validate`. At runtime such a gate could only ever count zero
+and pass on the first attempt, which looks exactly like a stage that finished its work.
 
 ### Keys every region accepts
 
@@ -206,8 +206,8 @@ working.
 
 A `seed` that matches none of the forms above is ignored and the region starts empty. `lev validate`
 reports that as `region-seed-not-understood`, which is worth reading before wondering why a region
-came out blank: the table keys are exactly the ones in the left column, so `{ caller_input = "..." }`
-is a typo for `{ caller = "..." }` and seeds nothing. And a blueprint that seeds no region from the
+came out blank. The table keys are exactly the ones in the left column, so `{ caller_input = "..." }`
+is a typo for `{ caller = "..." }` and seeds nothing. A blueprint that seeds no region from the
 task refuses a task outright rather than running without it.
 
 > [!WARNING]
@@ -238,10 +238,10 @@ ships, and there is no such thing as loading your logic from somewhere else on p
 
 ## Where a stage's own instructions live
 
-A stage's `system_prompt` is pinned context - that is why it reads as instruction rather than
-history - and it goes into a region like everything else. By default that region is *whichever
-pinned region you declared first*, which costs three things: its tokens are charged to that region's
-name in the [stage ledger](/docs/cli#lev-stages-run-id), you cannot size or scope it, and it lands wherever
+A stage's `system_prompt` is pinned context, which is why it reads as instruction rather than
+history. It goes into a region like everything else. By default that region is *whichever pinned
+region you declared first*. That costs three things: its tokens are charged to that region's name in
+the [stage ledger](/docs/cli#lev-stages-run-id), you cannot size or scope it, and it lands wherever
 that region sits in the cacheable prefix.
 
 Name a region for it and all three go away:
@@ -253,7 +253,7 @@ stage_instructions = { kind = "pinned", budget = "3%" }
 
 The runtime writes the entering stage's prompt there, replacing the previous stage's. It is always
 assembled **after** every other pinned block, however you declared it, so the content in front of it
-stays byte-identical when the stage changes - and that content is what a provider's prompt cache
+stays byte-identical when the stage changes. That content is what a provider's prompt cache
 matches on. Instructions sitting in front of the shared prefix rewrite its head on every transition,
 which invalidates everything behind them.
 
@@ -305,13 +305,13 @@ read_file = "codebase"
 read_file = 20000
 ```
 
-Both tables are keyed by tool name, and an alias matches the tool it aliases - writing `bash` covers
+Both tables are keyed by tool name, and an alias matches the tool it aliases. Writing `bash` covers
 the `shell` the model actually calls.
 
 A stage may only route into a region it can see. Routing a result into a region the stage left out
 of its own `[context.regions]` writes it where that stage cannot read it back, so `lev validate`
-refuses the blueprint and says which region to add. The four the runtime always carries -
-`conversation`, `tool_results`, `final_output` and `stage_instructions` - are always valid targets.
+refuses the blueprint and says which region to add. The four the runtime always carries are always
+valid targets: `conversation`, `tool_results`, `final_output` and `stage_instructions`.
 
 An override entry can also carry both answers at once, which is usually what you mean when a tool
 needs its own region *and* its own ceiling:
@@ -329,8 +329,8 @@ skipped.
 
 `read_file` also has a hard byte cap of its own, independent of any of this, and says so in the
 result when it applies. Without one, a large file went into its region whole and was either
-truncated or dropped as `[result omitted]` depending on how full the region already was - a cliff
-rather than a limit.
+truncated or dropped as `[result omitted]` depending on how full the region already was. That is a
+cliff rather than a limit.
 
 ## Budgets travel across models
 

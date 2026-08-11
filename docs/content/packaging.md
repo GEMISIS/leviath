@@ -94,9 +94,9 @@ project directory.
 
 > [!IMPORTANT]
 > An installed blueprint can only ever **tighten** its sandbox, never loosen it. The permission
-> floor your own config sets always wins, and for a tool you have not configured a blueprint may
-> go no higher than Leviath's own default - except `web_search` and `web_fetch`, which read-only
-> research agents pre-approve. Installing an agent does not let it grant itself more than you
+> floor your own config sets always wins. For a tool you have not configured, a blueprint may go no
+> higher than Leviath's own default. The exceptions are `web_search` and `web_fetch`, which
+> read-only research agents pre-approve. Installing an agent does not let it grant itself more than you
 > allow. See [Security](/docs/security) for how the sandbox and permission floor work.
 
 See the [CLI reference](/docs/cli) for every command and flag.

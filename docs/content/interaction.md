@@ -87,7 +87,10 @@ waits indefinitely. When it passes, the prompt resolves exactly as cancelling it
 | Tool approval | Denied. A timeout is never read as consent. |
 | Taint gate | Denied. |
 | `ask_user_*` | The model is told no answer came, and carries on. |
-| Interaction point | Proceeds with no user text, as a cancelled checkpoint does - unless it declared `unattended = "ask"`, in which case the run **stops with an error** rather than approving a checkpoint nobody made. |
+| Interaction point | Proceeds with no user text, as a cancelled checkpoint does. See below. |
+
+An interaction point that declared `unattended = "ask"` behaves differently on a timeout: the run
+**stops with an error**, rather than approving a checkpoint nobody made.
 
 The deadline is read once when the daemon starts, so changing it needs a daemon restart.
 
@@ -152,11 +155,11 @@ approve `git push`. A line the parser cannot read as a list of commands (a backt
 
 Nothing is written to disk. Every grant dies with the run that made it.
 
-The taint gate in [security](/docs/security) uses the same prompt shape with its own wording: an
-outbound tool that would carry sensitive data above its clearance is blocked and surfaced as a
-tool-approval, where **Allow for this session** raises the tool's clearance for the rest of the
-run and **Deny** blocks it. It offers no per-stage option, because a clearance is not keyed on what a call
-runs.
+The taint gate in [security](/docs/security) uses the same prompt shape with its own wording. An
+outbound tool that would carry sensitive data above its clearance is blocked, then surfaced as a
+tool-approval. There, **Allow for this session** raises the tool's clearance for the rest of the
+run, and **Deny** blocks it. It offers no per-stage option, because a clearance is not keyed on
+what a call runs.
 
 ## Interaction points
 
@@ -212,8 +215,8 @@ loop keeps regenerating from scratch and your edits are lost each time.
 
 `unattended` decides what the point does in a `--yolo` run. The default, `auto_approve`, resolves it
 as approved without opening a prompt: nobody is watching, and a checkpoint that waited would park
-the run. Set it to `ask` for a gate whose whole purpose is a human decision - a plan signed off
-before any code is written - and the prompt opens even under `--yolo`. The shipped
+the run. Set it to `ask` for a gate whose whole purpose is a human decision, such as a plan signed
+off before any code is written. The prompt then opens even under `--yolo`. The shipped
 `software-engineer` agent does exactly that for its plan approval. Give a run like that an
 [`interaction_timeout_secs`](/docs/configuration#limits), so an unanswered gate releases on its own
 terms instead of waiting for ever.

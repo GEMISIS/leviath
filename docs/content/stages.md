@@ -81,8 +81,8 @@ quietly does nothing, so a typo fails at `lev validate` instead of at 2am.
 ### The escape that is not also a shortcut
 
 `condition = "dead_end"` fires in one situation: the stage finished, and every normal edge's target
-has spent its `max_revisits`. Without it the run errors out and everything it established - a
-profiled dataset, a plan, two rounds of critique - is discarded.
+has spent its `max_revisits`. Without it the run errors out, and everything it established is
+discarded: a profiled dataset, a plan, two rounds of critique.
 
 ```toml
 [stages.plan.transitions.review]
@@ -93,8 +93,8 @@ hint = "Plan is ready for review"
 condition = "dead_end"
 ```
 
-The reason this is its own condition, rather than "add an ordinary edge to the output stage": an
-ordinary edge is offered to the model at the end of **every** visit, so it becomes a shortcut past
+Why is this its own condition, rather than "add an ordinary edge to the output stage"? An ordinary
+edge is offered to the model at the end of **every** visit, so it becomes a shortcut past
 the rest of the pipeline. Measured on four agents, that shortcut was taken in 10 of 24 runs of one
 and 21 of 36 of another, computing nothing on the way. A `dead_end` edge is invisible to the model's
 choice and reachable only when the alternative is dying.
@@ -105,14 +105,14 @@ somewhere else.
 
 > [!NOTE]
 > `condition = "max_iterations"` does **not** cover this. It fires when a stage burns its iteration
-> budget, which is a different event - on the stranding path it is never consulted. `lev validate`
+> budget, which is a different event. On the stranding path it is never consulted. `lev validate`
 > reflects that: a `max_iterations` edge does not silence `dead-end-possible`.
 
 ### Stage keys that shape routing
 
 | Key | Default | Effect |
 |---|---|---|
-| `max_revisits` | unlimited | How many times this stage may be re-entered, not counting the first visit. An edge pointing at a stage that is out of budget is dropped from the choices |
+| `max_revisits` | unlimited | How many times this stage may be re-entered, not counting the first visit. See below |
 | `transition_prompt` | built-in | Replaces the prompt used to ask the model which edge to take |
 | `allow_complete` | `false` | Offers the model an explicit `DONE` answer that ends the run, rather than forcing it down the one available edge |
 | `requires_children` | `false` | Holds the stage until every sub-agent it spawned has finished |
@@ -120,7 +120,10 @@ somewhere else.
 | `accepts_messages` | `true` | Whether `lev msg` reaches this stage. See [Human-in-the-loop](/docs/interaction) |
 | `allow_blocking_tools` | `false` | Marks an autonomous stage as deliberately offering the tools that wait on a person |
 
-Two of those need a sentence more.
+Three of those need a sentence more.
+
+`max_revisits` is also read when the runtime builds the list of edges to offer. An edge pointing at
+a stage that is out of budget is dropped from the choices.
 
 `allow_as_worker` is off by default so that you can only fan out into a stage that was designed for
 it, rather than into any stage that happens to look suitable.
@@ -154,8 +157,8 @@ transform = "compact"        # direct | clear | compact | summarize | custom
 - `direct` is the default and carries everything as-is.
 - `clear` drops stage-specific regions and keeps pinned ones.
 - `compact`, and its alias `summarize`, sends the stage's content through a summarization pass
-  before the next stage starts. **It summarizes every region that is not pinned**, not just the
-  transcript - including the ones holding your results. A region whose content does not survive a
+  before the next stage starts. **It summarizes every region that is not pinned**, not only the
+  transcript. That includes the ones holding your results. A region whose content does not survive a
   rewrite should say so:
 
   ```toml
@@ -198,10 +201,10 @@ gate = { require_modifications = true, max_attempts = 3 }
 |---|---|---|
 | `require_modifications` | `false` | Require at least one successful file-modifying tool call in the stage being left |
 | `require_regions` | `[]` | Regions that must **all** hold content. ANDed with every other condition here |
-| `require_region_updated` | unset | Require that a named region **changed** during this stage, not merely that it has content. See below |
+| `require_region_updated` | unset | Require that a named region **changed** during this stage, rather than only holding content. See below |
 | `require_no_open_items` | unset | Name a [checklist region](/docs/context) that must have no open items before this edge is taken |
 | `message` | generated | The nudge shown when the gate blocks |
-| `region` | unset | An **alternative** way to satisfy `require_modifications`: the gate also passes if this region is non-empty. Not a requirement - see below |
+| `region` | unset | An **alternative** way to satisfy `require_modifications`: the gate also passes if this region is non-empty. See below |
 | `tools` | `[]` | Extra tool names to count as modifying, beyond `write_file` and `edit_file` |
 
 ### `region` is an alternative, `require_regions` is a requirement
@@ -251,9 +254,9 @@ gate = { require_region_updated = "plan",
 The region's content is hashed when the stage is entered and compared when it tries to leave, so
 "changed" means changed by *this* pass. It shares the same `max_attempts` budget as every other
 gate: a gate that could hold a stage forever would strand the run, so after the budget the edge is
-taken with a warning. A gate naming a region no stage declares is refused by `lev validate`: at
-runtime it passes rather than blocking, since no amount of work could satisfy it, so a typo there
-would read as a gate that is simply never reached.
+taken with a warning. A gate naming a region no stage declares is refused by `lev validate`. At runtime such a gate
+would pass rather than block, since no amount of work could satisfy it. A typo there would read as
+a gate that is never reached.
 | `max_attempts` | `3` | How many times the stage re-runs before the gate gives up and lets the transition through with a warning |
 
 Per-stage tool counters reset when a stage is entered, and they are not restored when a run resumes

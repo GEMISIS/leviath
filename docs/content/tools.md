@@ -37,7 +37,7 @@ Read and modify files relative to the agent's working directory.
 
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
-| `shell` | Run a shell command in the working directory using the system shell. Has a 60-second timeout, and keeps at most 1 MB of each of stdout and stderr. | `command` |
+| `shell` | Run a shell command in the working directory, using the system shell. It has a 60-second timeout. | `command` |
 
 `bash` is an accepted alias for `shell`: a stage's `available_tools` may name either, and both
 resolve to the same tool advertised to the model.
@@ -83,8 +83,9 @@ question.
 Discarded writes cost nothing. `2>/dev/null`, `> /dev/null 2>&1`, `&> /dev/null` and `> NUL` write
 nowhere anyone can read back, so they are neither clamped nor confined.
 
-A target the parser cannot name - `> $OUT`, or bash's `/dev/tcp/host/port` - has no path to check,
-so it is ungrantable instead: it prompts every time and no approval makes it reusable.
+Some targets the parser cannot name at all, such as `> $OUT` or bash's `/dev/tcp/host/port`. Those
+have no path to check, so they are ungrantable: they prompt every time, and no approval makes them
+reusable.
 
 ### How much output comes back
 
@@ -151,7 +152,7 @@ Present work to the user for approval or direct editing.
 ### These tools need someone there
 
 Every tool in the two tables above does the same thing: it opens a prompt and waits. That is fine
-when you are watching the run. When nobody is, the wait has no end - the agent sits in
+when you are watching the run. When nobody is, the wait has no end. The agent sits in
 `WaitingInput`, holding a concurrency slot, until the daemon restarts.
 
 So an unattended run does not get them. A run launched with `--yolo` (and every sub-agent and
@@ -201,8 +202,12 @@ network at all.
 
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
-| `web_search` | Search the web and return a JSON list of `{title, url, snippet}`. Uses Brave Search when `BRAVE_API_KEY` is readable, otherwise a keyless Wikipedia search that works with no configuration. | `query`, `count` (optional, default 5) |
-| `web_fetch` | Fetch a URL and return its readable text. HTML is stripped to prose; large pages are truncated, and a blocked or oversized request returns a diagnostic rather than failing the run. | `url` |
+| `web_search` | Search the web and return a JSON list of `{title, url, snippet}`. See below | `query`, `count` (optional, default 5) |
+| `web_fetch` | Fetch a URL and return its readable text, with HTML stripped to prose. See below | `url` |
+
+`web_search` uses Brave Search when `BRAVE_API_KEY` is readable. Otherwise it falls back to a
+keyless Wikipedia search that needs no configuration. `web_fetch` truncates large pages, and a
+blocked or oversized request comes back as a diagnostic rather than failing the run.
 
 Both ship with `researcher`, `deep-researcher`, `wide-researcher`, `daily-briefer`, and
 `writing-assistant`. To give another agent web access, copy them into that agent's `tools/`
@@ -280,9 +285,9 @@ Two rules constrain that:
 
 - A blueprint may only **tighten** what your config set. A downloaded agent cannot grant itself
   `shell = "allow"` over your `ask`. For a tool you have not configured there is nothing of yours
-  to clamp against, so a blueprint may raise it no higher than the built-in default - except
-  `web_search` and `web_fetch`, which research agents pre-approve and which can neither write nor
-  execute. To trust one agent with more, name the tool in
+  to clamp against, so a blueprint may raise it no higher than the built-in default. The exceptions
+  are `web_search` and `web_fetch`, which research agents pre-approve and which can neither write
+  nor execute. To trust one agent with more, name the tool in
   `[agent_tool_permissions.<agent>]` in your own [config](/docs/configuration#tool-permissions),
   or set `[security] allow_blueprint_permissions` for every agent.
 - A launch flag (`--allow`, `--yolo`) can turn an `ask` into an `allow`, but it can **never** lift

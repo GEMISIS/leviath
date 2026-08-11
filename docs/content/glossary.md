@@ -107,7 +107,7 @@ call finishes.
 **Tool lane**: the shared cap on how many agents' tool batches may run at once across the whole
 daemon. See [the tool lane](/docs/engine#the-tool-lane).
 
-**Backpressure**: what happens when a pool is full. New work simply is not started yet. Nothing
+**Backpressure**: what happens when a pool is full. New work is not started yet. Nothing
 fails and nothing queues up at the provider.
 
 **Park**: to stop and wait, without holding anything up. It means two related things. A run parks

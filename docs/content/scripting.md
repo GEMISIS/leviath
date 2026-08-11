@@ -28,7 +28,7 @@ can copy and change. [rhai.rs](https://rhai.rs) has the language reference if yo
 |---|---|---|
 | [**Model providers**](/docs/rhai-providers) | `~/.leviath/providers/<name>.rhai` | How to map a request onto some HTTP API, and the response back |
 | [**Context regions**](/docs/rhai-regions) | beside the agent, referenced by `script =` | How one region renders, accepts writes, and sheds content under pressure |
-| [**Stage hooks**](/docs/rhai-hooks) | beside the agent, referenced by `[stages.<name>.hooks]` | What happens at seven points in an agent's lifecycle - entering a stage, either side of an inference, before a tool call, and at the end |
+| [**Stage hooks**](/docs/rhai-hooks) | beside the agent, referenced by `[stages.<name>.hooks]` | What happens at seven points in an agent's lifecycle, from entering a stage through to the end |
 | [**Global tools**](/docs/rhai-tools) | `~/.leviath/tools/*.rhai`, or an agent's own `tools/` | A new tool, its schema, and what it does |
 | [**Output validators**](/docs/rhai-validators) | beside the agent, referenced by the stage's `[output]` block | Whether a submitted final output is accepted, and what the model is told when it is not |
 | [**Policy rules**](/docs/rhai-tools#policy-rules) | `rules/*.rhai` in your OS config dir, see [configuration](/docs/configuration#policytoml) | Whether a given tool call is allowed to fire |
@@ -50,7 +50,7 @@ by point:
 - Region hooks and policy rules get **nothing**. They are pure data transforms over the `ctx` they
   are handed.
 
-Names are matched exactly, and the match is enforced: a script missing the function its surface
+Names are matched exactly, and the match is enforced. A script missing the function its surface
 needs, or defining it with the wrong arity, fails at spawn with a compile error rather than
 silently never firing. `lev validate` and `lev tools` catch it before a run does.
 

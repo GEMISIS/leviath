@@ -111,7 +111,7 @@ real work is slower than that, mostly because it is waiting on models:
 | Setting | Default | Why you might raise it |
 |---|---|---|
 | `handshake_timeout` | `30s` | Only covers the handshake, so the default is usually fine. Raise it if the daemon has to cold-start first |
-| `nudge_busy_timeout` | `60s` | How long Gas City waits for the agent to go idle before sending another prompt. A multi-stage run is busy for much longer than a minute |
+| `nudge_busy_timeout` | `60s` | How long Gas City waits for the agent to go idle before prompting again. A multi-stage run needs longer |
 | `output_buffer_lines` | `1000` | How much output is kept for `Peek`. A long run produces more than this |
 
 ## Checking it works

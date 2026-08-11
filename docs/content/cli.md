@@ -36,17 +36,23 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 |---|---|
 | `-t`, `--task <TEXT\|FILE>` | The task prompt, or the path of a file holding it. Left off, your editor opens |
 | `-m`, `--model <MODEL>` | Model override, as `provider/model` or a bare model name |
-| `--workdir <DIR>` | Working directory for the run. Defaults to where you ran the command. File tools are confined to it, and relative `[read_paths]` entries resolve against it |
+| `--workdir <DIR>` | Working directory for the run, defaulting to where you ran the command. See below |
 | `--yolo` | Run unattended. See below |
 | `--allow <TOOL>` | Allow one tool outright. Repeatable |
 | `--max-depth <N>` | Override the blueprint's maximum sub-agent tree depth |
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions for this run |
 | `--count <N>` | Start this many runs of the same agent and task, each under its own run id, from one invocation |
-| `--json` | Print the spawned run as JSON rather than a sentence, for a caller that parses the run id back out. With `--count` above 1 it is an array, one object per run |
+| `--json` | Print the spawned run as JSON rather than a sentence. See below |
 | `--output-format <LABEL>` | Ask for the final output in this shape. See [Final outputs](/docs/outputs) |
 | `--output-instructions <TEXT>` | Extra guidance about that shape |
 | `--output-schema <JSON\|@FILE>` | A JSON Schema the final output must satisfy |
 | `--<region> <TEXT\|@FILE>` | Seed a named context region. See below |
+
+**`--workdir`** decides more than where commands run. File tools are confined to it, and relative
+`[read_paths]` entries resolve against it.
+
+**`--json`** is for a caller that parses the run id back out. With `--count` above 1 it prints an
+array, one object per run.
 
 **`--yolo`** waives approvals, not checkpoints. It approves every tool call, and it takes away the
 tools that wait on a person (`ask_user_*`, `present_for_review`, `edit_document`) so the run does
@@ -72,7 +78,7 @@ lev run reviewer --task "Review the auth module" --standards @./team-standards.m
 A region only accepts a seed if the blueprint declares it as caller input: a string
 `seed = "<key>"` in its `[context.regions]` entry, or being named `task`, which asks for the `task`
 key implicitly. A table seed (`seed = { glob = ... }`, `{ command = ... }`, and so on) fills the
-region from somewhere else and takes no caller input, and a `--<name>` naming any other region is
+region from somewhere else and takes no caller input. A `--<name>` naming any other region is
 dropped.
 
 > [!NOTE]
@@ -96,10 +102,11 @@ your PATH.
 Stdin has to be a terminal for any of this. In a script, a pipeline, or CI, pass `-t` and Leviath
 says so rather than blocking.
 
-`-t` reads a file when the value names one that exists. It is an error when the value looks like a path but no such
-file is there, so a mistyped filename fails instead of quietly becoming the prompt. "Looks like a
-path" means no spaces, plus a `/`, a `\`, or a leading `~`. Region flags work the other way round and want an
-explicit `@` before a path, because a region seed is usually a file while a task is usually a
+`-t` reads a file when the value names one that exists. A value that looks like a path with no
+file behind it is an error, so a mistyped filename fails instead of quietly becoming the prompt.
+"Looks like a path" means no spaces, plus a `/`, a `\`, or a leading `~`. Region flags work the
+other way round and want an explicit `@` before a path, because a region seed is usually a file
+while a task is usually a
 sentence.
 
 ### `lev stages <RUN-ID>`
@@ -150,27 +157,75 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 
 | Level | Code | What it means |
 |---|---|---|
-| error | `unknown-tool` | A name in `available_tools` matches no built-in, sub-agent tool, or `tools/*.rhai`. The stage silently advertises one tool fewer, so the model is told it does not exist. MCP names (`server__tool`) are skipped, since they resolve only once that server is installed. |
-| error | `unparseable-safe-command` | A `[safe_commands] shell` entry that is not a bare command prefix, so no call can ever match it. Write a program, optionally with the subcommand that narrows it: `rg`, `cargo test`. |
-| error | `output-missing-submit-tool` | A stage sets `require_output` but never grants `submit_output`, so it is required to produce an answer it has no way to submit. Use `mode = "output"`, which grants the tool. |
+| error | `unknown-tool` | A name in `available_tools` matches nothing. See below |
+| error | `unparseable-safe-command` | A `[safe_commands] shell` entry no call can ever match. See below |
+| error | `output-missing-submit-tool` | A stage must produce an output and has no way to submit one. See below |
 | error | `orphan-stage-permission` | A `[stages.X.tool_permissions]` key names a tool the stage never granted. It reads as a grant and is not one. |
 | warning | `stage-missing-model` | No `[stages.X.model]` block, so the stage runs on whatever your `default_provider` is. |
 | warning | `stage-missing-mode` | No `mode`, so the stage runs as `autonomous`. |
 | warning | `stage-missing-max-iterations` | Unbounded unless `[limits] default_max_iterations` is set. Fan-out stages are exempt. |
 | warning | `agent-model-block-ignored` | A top-level `[model]` block. Nothing reads it; model selection is per stage. |
-| warning | `region-seed-not-understood` | A region's `seed` is not one of the recognized forms, so it is ignored and the region starts empty. Usually a typo in the table key: it is `{ caller = "task" }`, not `{ caller_input = "task" }`. |
-| warning | `blocking-tool-in-autonomous-stage` | An autonomous stage grants `ask_user_*`, `present_for_review` or `edit_document`. With nobody attached the run parks there until it is killed. Set `allow_blocking_tools = true` on the stage to say you meant it. |
-| warning | `implicit-shell-policy` | A shell grant with no policy behind it. The default is `ask`, and an unattended run waits on that prompt rather than being denied. |
-| warning | `unknown-model` | A model this build has not heard of, checked only against providers with a closed catalog. Ollama, OpenRouter and script providers are never checked. |
+| warning | `region-seed-not-understood` | A region's `seed` is not a recognized form, so the region starts empty. See below |
+| warning | `blocking-tool-in-autonomous-stage` | An autonomous stage grants a tool that waits for a person. See below |
+| warning | `implicit-shell-policy` | A shell grant with no policy behind it. See below |
+| warning | `unknown-model` | A model this build has not heard of. See below |
 | warning | `no-reachable-provider` | Nothing in the stage's models list is configured here, so it falls through to your default model. |
-| warning | `compact-summarizes-deliverable` | A `required` region would be handed to the summarizer by a `transform = "compact"` edge, so a later stage reads a paraphrase of it. Set `summarizable = false` on the region. |
+| warning | `compact-summarizes-deliverable` | A `compact` edge would hand a `required` region to the summarizer. See below |
 | warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `[read_paths]` shape. |
-| warning | `dead-end-possible` | Every normal edge's target has a `max_revisits` budget, so the run errors once they are spent. Add a `condition = "dead_end"` edge to a stage without one. A `max_iterations` edge does not count: it fires on the iteration cap, never on this path. |
-| warning | `read-paths-not-granted` | The blueprint declares `[read_paths]` your `config.toml` does not grant. Declaring is not granting, so those reads are refused; the fix line carries the stanza to add. |
+| warning | `dead-end-possible` | Every route out of a stage can run out of budget. See below |
+| warning | `read-paths-not-granted` | The blueprint declares `[read_paths]` your `config.toml` does not grant. See below |
 | warning | `read-paths-grant-invalid` | A `read_paths` grant in your own config will not compile. It is a hard spawn error, named here first. |
-| note | `holds-under-yolo` | A checkpoint that still stops an unattended run for a person: an interaction point declaring `unattended = "ask"`, or a blocking tool a stage keeps in `required_tools`. Deliberate where it appears; noted because `--yolo` reads as "run without me". |
-| note | `safe-commands-declared` | The blueprint declares `[safe_commands]`. Declaring is not granting: it applies only where the user opts in, per agent via `[agent_safe_commands.<name>] allow_blueprint` or globally via `[security] allow_blueprint_safe_commands`. |
-| note | `command-seed`, `read-paths-declared` | What the blueprint will do that you should know about before running it. `read-paths-declared` carries the granted/declared counts and each entry's status. |
+| note | `holds-under-yolo` | A checkpoint that still stops an unattended run for a person. See below |
+| note | `safe-commands-declared` | The blueprint declares `[safe_commands]`. Declaring is not granting. See below |
+| note | `command-seed`, `read-paths-declared` | Things worth knowing before you run the blueprint. See below |
+
+Thirteen of those findings need more than a phrase.
+
+**`unknown-tool`** means the name matches no built-in, no sub-agent tool, and no `tools/*.rhai`
+file. The stage then advertises one tool fewer, so the model is told a tool it was meant to have
+does not exist. MCP names (`server__tool`) are skipped, since they resolve only once that server is
+installed.
+
+**`unparseable-safe-command`** fires on an entry that is not a bare command prefix, so no call can
+ever match it. Write a program, optionally with the subcommand that narrows it: `rg`, `cargo test`.
+
+**`output-missing-submit-tool`** means a stage sets `require_output` but never grants
+`submit_output`. Use `mode = "output"`, which grants the tool.
+
+**`region-seed-not-understood`** is usually a typo in a table key. It is `{ caller = "task" }`, not
+`{ caller_input = "task" }`. An unrecognized seed is ignored, and the region starts empty.
+
+**`blocking-tool-in-autonomous-stage`** fires when an autonomous stage grants `ask_user_*`,
+`present_for_review` or `edit_document`. With nobody attached, the run parks there until it is
+killed. Set `allow_blocking_tools = true` on the stage to say you meant it.
+
+**`implicit-shell-policy`** matters because the default is `ask`. An unattended run waits on that
+prompt rather than being denied.
+
+**`unknown-model`** is checked only against providers with a closed catalog. Ollama, OpenRouter and
+script providers are never checked.
+
+**`compact-summarizes-deliverable`** means a later stage reads a paraphrase of a region you marked
+`required`. Set `summarizable = false` on the region.
+
+**`dead-end-possible`** fires when every normal edge's target has a `max_revisits` budget, so the
+run errors once they are spent. Add a `condition = "dead_end"` edge to a stage without one. A
+`max_iterations` edge does not count, because it fires on the iteration cap rather than on this
+path.
+
+**`read-paths-not-granted`** is the declaring-is-not-granting case. Those reads are refused at
+runtime, and the fix line carries the stanza that would grant them.
+
+**`holds-under-yolo`** names an interaction point declaring `unattended = "ask"`, or a blocking tool
+a stage keeps in `required_tools`. Both are deliberate wherever they appear. It is a note because
+`--yolo` reads as "run without me".
+
+**`safe-commands-declared`** applies only where you opt in. That is per agent via
+`[agent_safe_commands.<name>] allow_blueprint`, or globally via
+`[security] allow_blueprint_safe_commands`.
+
+**`command-seed`** and **`read-paths-declared`** say what the blueprint will do before you run it.
+`read-paths-declared` carries the granted and declared counts, plus each entry's status.
 
 | Flag | Purpose |
 |---|---|
@@ -183,7 +238,7 @@ validated still says what is wrong with it. Nothing there refuses a spawn.
 `[read_paths]` entries are checked against your own `config.toml`, entry by entry, because
 declaring one is not the same as being allowed to read it. Anything your config does not grant is
 named as such, with the stanza that would grant it. The daemon's own lint has no user config to
-consult, so there it stays the plain "these need granting" note - see
+consult, so there it stays the plain "these need granting" note. See
 [reading outside the workdir](/docs/security#reading-outside-the-workdir).
 
 ### `lev test [PATH]`
@@ -215,13 +270,14 @@ max_tokens = 500
 | `name` | Case name. `--filter` matches on it |
 | `input` | Seeded as the task, exactly as `lev run "..."` would |
 | `expect_contains` | Case-insensitive substring the response must contain |
-| `expect_tool_call` | A tool the model must call. Only tools the stage lists in `available_tools` are offered, so a case cannot assert on a tool the stage does not have |
+| `expect_tool_call` | A tool the model must call. It has to be one the stage lists in `available_tools` |
 | `max_tokens` | Caps this case's output. Narrows the ceiling the window and model already impose; it cannot raise it |
 
 **What a case actually runs.** One inference, not a run. `lev test` builds a fresh context
 window from the blueprint's layout, seeds `input` as the task, and assembles the request exactly
-as a live run's *first* turn would - iteration 0, region hooks active, the first stage's model and
-tools. It then calls the provider once and checks the assertions. Nothing executes: a tool call is
+as a live run's *first* turn would. That means iteration 0, region hooks active, and the first
+stage's model and tools. It then calls the provider once and checks the assertions. Nothing
+executes: a tool call is
 asserted on, never performed, so a case can expect `write_file` without a file appearing.
 
 A `tests/*.rhai` file is run instead as a script through the scripting engine, and fails the run if
@@ -231,7 +287,7 @@ it returns `false`.
 
 | Command | Flags |
 |---|---|
-| `lev models list` | `-p/--provider <NAME>`, `-r/--remote` (fetch live from the provider APIs, slower but complete), `-a/--all` (include providers this install has no credential for) |
+| `lev models list` | `-p/--provider <NAME>`, `-r/--remote` (live from the provider APIs, slower), `-a/--all` (include providers with no credential here) |
 | `lev models show <MODEL>` | `-p/--provider <NAME>` (required for a remote lookup), `-r/--remote` |
 
 ### `lev agent-client`
@@ -252,16 +308,21 @@ Serve an agent over the [Agent Client Protocol](/docs/agent-client-protocol) as 
 
 | Command | Flags | Purpose |
 |---|---|---|
-| `lev list` | `--json`, `-f`, `--filter <all\|agents\|blueprints>` | List installed and bundled blueprints. `--filter` narrows to installed agents or to bundled blueprints; an unrecognized value is an error, not a silent ignore. An agent declaring [`[read_paths]`](/docs/security#reading-outside-the-workdir) also shows how many of its entries your config grants |
+| `lev list` | `--json`, `-f`, `--filter <all\|agents\|blueprints>` | List installed and bundled blueprints. See below |
 | `lev add <PACKAGE>` | | Install a blueprint directory or `.leviath-bundle`. Prints what the package grants itself before installing |
 | `lev remove <NAME>` | | Uninstall a blueprint |
 | `lev pack [PATH]` | `-o`, `--output <FILE>` (default `{name}-{version}.leviath-bundle`) | Bundle a blueprint for [sharing](/docs/packaging) |
+
+`lev list --filter` narrows the listing to installed agents or to bundled blueprints. An
+unrecognized value is an error rather than a silent ignore. An agent declaring
+[`[read_paths]`](/docs/security#reading-outside-the-workdir) also shows how many of its entries your
+config grants.
 
 ## Watching and steering
 
 | Command | Flags | Purpose |
 |---|---|---|
-| `lev ps` | `--json`, `--all` | List runs in the daemon with their status. `--all` adds runs on disk the daemon is not hosting, finished ones included. See [below](#reading-lev-ps) |
+| `lev ps` | `--json`, `--all` | List runs in the daemon with their status. `--all` also reads the runs dir. See [below](#reading-lev-ps) |
 | `lev dash` | | Full-screen TUI [dashboard](/docs/dashboard) |
 | `lev msg <AGENT_ID> <CONTENT>` | | Deliver a message into a running agent's context |
 | `lev pause <RUN_ID>` | | Pause a run. It finishes its in-flight step, then holds |
@@ -352,7 +413,7 @@ you are driving Leviath from a scheduler.
 | `active` | Running a turn, or waiting on the model or a tool |
 | `idle` | Spawned, not yet started |
 | `paused` | Paused with `lev pause` |
-| `waiting` | Blocked - the reason follows the colon |
+| `waiting` | Blocked. The reason follows the colon |
 | `complete` | Finished |
 | `cancelled` | Cancelled with `lev cancel` |
 | `error` | Ended with the error shown |
@@ -362,8 +423,8 @@ need to do anything. These are stopped until a person acts:
 
 | Reason | What to do |
 |---|---|
-| `tool approval` | A tool call needs approving - `lev respond` |
-| `user prompt` | The agent asked a question (`ask_user_*`) - answer it |
+| `tool approval` | A tool call needs approving with `lev respond` |
+| `user prompt` | The agent asked a question (`ask_user_*`). Answer it |
 | `taint gate` | A call needs clearance for the data it touches |
 | `checkpoint` | A blueprint stage-boundary review |
 
@@ -472,8 +533,8 @@ Start the [REST and WebSocket API](/docs/api).
 | `--tls-key <PATH>` | unset | PEM private key for `--tls-cert` |
 
 > [!TIP]
-> A browser cannot call an `http://` Leviath that is not on loopback, whatever `--cors` says - not
-> even on a LAN. That is what the TLS flags are for. See
+> A browser cannot call an `http://` Leviath that is not on loopback, whatever `--cors` says. That
+> holds on a LAN too. That is what the TLS flags are for. See
 > [reaching a Leviath on another machine](/docs/api#reaching-a-leviath-on-another-machine).
 
 > [!WARNING]
@@ -515,11 +576,13 @@ the run. Nothing is left in `lev ps` or on disk.
 
 | Flag | Purpose |
 |---|---|
-| `-m`, `--model <MODEL>` | Test a specific model. Takes the same forms as `lev run --model`: `provider/model` picks both, a bare model id pairs with your `default_provider` |
+| `-m`, `--model <MODEL>` | Test a specific model. Takes the same forms as `lev run --model` |
 | `--no-daemon` | Stop after the third check. Contacts no daemon, starts none, and creates no run |
 | `--json` | Print the checks as `{"checks": [...], "passed": bool}` |
 
-`--model provider/model` is the way to reach a [Rhai script provider](/docs/rhai-providers), which
+`--model` takes `provider/model` to pick both, and a bare model id pairs with your
+`default_provider`. `--model provider/model` is the way to reach a
+[Rhai script provider](/docs/rhai-providers), which
 is resolved by name and so cannot be listed. Use it to try a model string before wiring it into a
 blueprint.
 

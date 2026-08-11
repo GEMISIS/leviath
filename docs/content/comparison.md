@@ -86,9 +86,10 @@ and script shell calls, while file tools rely on path confinement and network to
 host. Widening it to cover every side effect is
 [in progress](https://github.com/GEMISIS/leviath/issues/326).
 
-**Reach for Leviath** when the hard part is inside a single unit of work: the task has distinct
-phases that want different models and different tools, you care about exactly what is in the context
-window at each phase, or you want many agents running at once without paying for a process each.
+**Reach for Leviath** when the hard part is inside a single unit of work. That is the case when a
+task has distinct phases wanting different models and different tools. It is also the case when you
+care about exactly what is in the context window at each phase, or want many agents running at once
+without paying for a process each.
 Every run journals to disk as it goes, so a daemon you kill mid-run picks the work back up on its
 next start.
 
@@ -109,7 +110,7 @@ agent design. Here is Leviath against it, factor by factor.
 | 8 | Own your control flow | ✓ | Graph transitions on error, iteration cap, stuck, and model choice |
 | 9 | Compact errors into context | ✓ | Tool, inference, and iteration-cap errors all land in context |
 | 10 | Small, focused agents | ✓ | Per-stage models, tools, and prompts, plus bounded fan-out |
-| 11 | Trigger from anywhere | ✓ | Start a run from the CLI, REST, or ACP. WebSocket pushes updates and webhooks report completion. Scheduling is your cron or CI, not ours |
+| 11 | Trigger from anywhere | ✓ | Start a run from the CLI, REST, or ACP. WebSocket updates, webhooks on completion. Scheduling is your cron or CI |
 | 12 | Stateless reducer | ✓ | Durable state lives on disk; the process is disposable. Runs resume on restart, and interrupted tool batches replay exactly-once |
 
 ## How we measure
