@@ -265,6 +265,26 @@ max_repeat_calls    = 3      # default; identical tool call, back to back
 max_readonly_streak = 10     # default; read-only calls with no modification in between
 ```
 
+## Who does the summarizing
+
+A [`compacting` region](/docs/context) summarizes rather than evicting, and something has to write
+that summary. By default it is Sonnet on Anthropic, whatever the stage itself runs on, because a
+summary is cheap work that does not need the stage's model:
+
+```toml
+[compaction]
+provider           = "anthropic"          # default
+model              = "claude-sonnet-4-6"  # default
+max_summary_tokens = 2000                 # default
+temperature        = 0.2                  # default
+system_prompt      = "..."                # optional; replaces the built-in summarizer prompt
+```
+
+Point it at a provider you have configured if you do not use Anthropic. A run whose compaction
+provider is not registered loses compaction rather than failing, so an unset `[compaction]` on an
+OpenAI-only machine quietly stops summarizing. `lev doctor` reports which providers are
+registered.
+
 ## Discovering tools mid-run
 
 By default a stage advertises a fixed tool set resolved at spawn, and a tool that appears later is

@@ -95,12 +95,19 @@ Ubuntu 24.04 and up; anything older fails at exec with a `version not found` mes
 a line of Leviath. The musl archives are statically linked and need nothing from the image at all.
 
 ```bash
+# The rolling tag for the channel you want: latest (stable), beta, or alpha.
+CHANNEL=latest
+
 # glibc: fine on a modern host, fails on an older container image
-curl -fsSLO https://github.com/GEMISIS/leviath/releases/download/alpha/leviath-linux-x64.tar.gz
+curl -fsSLO "https://github.com/GEMISIS/leviath/releases/download/$CHANNEL/leviath-linux-x64.tar.gz"
 
 # musl: runs anywhere
-curl -fsSLO https://github.com/GEMISIS/leviath/releases/download/alpha/leviath-linux-x64-musl.tar.gz
+curl -fsSLO "https://github.com/GEMISIS/leviath/releases/download/$CHANNEL/leviath-linux-x64-musl.tar.gz"
 ```
+
+The musl archives were added after the current stable release, so they are on `alpha` and `beta`
+today and reach `latest` with the next stable promotion. `gh release view <channel>` lists what a
+channel actually carries.
 
 They are the same binary otherwise. The glibc builds stay the default because they use the
 platform's own resolver and NSS configuration, which is what you want on a machine you control.

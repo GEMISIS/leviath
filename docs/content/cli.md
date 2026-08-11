@@ -17,7 +17,7 @@ symptom, and `lev doctor` checks the usual causes for you.
 `-v` / `--verbose` is global and works on every subcommand.
 
 Scripting against the CLI? `--json` is on `run`, `ps`, `doctor`, `validate`, `list`, `models list`,
-`context`, `result`, `respond`, `tools`, `approvals safe`, and `mcp list`. Everything else prints
+`context`, `result`, `respond`, `stages`, `tools`, `approvals safe`, and `mcp list`. Everything else prints
 for a person. Warnings go to stderr, so stdout parses on its own. A service that would rather
 speak HTTP should use [`lev serve`](/docs/api) instead.
 
@@ -152,6 +152,7 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 |---|---|---|
 | error | `unknown-tool` | A name in `available_tools` matches no built-in, sub-agent tool, or `tools/*.rhai`. The stage silently advertises one tool fewer, so the model is told it does not exist. MCP names (`server__tool`) are skipped, since they resolve only once that server is installed. |
 | error | `unparseable-safe-command` | A `[safe_commands] shell` entry that is not a bare command prefix, so no call can ever match it. Write a program, optionally with the subcommand that narrows it: `rg`, `cargo test`. |
+| error | `output-missing-submit-tool` | A stage sets `require_output` but never grants `submit_output`, so it is required to produce an answer it has no way to submit. Use `mode = "output"`, which grants the tool. |
 | error | `orphan-stage-permission` | A `[stages.X.tool_permissions]` key names a tool the stage never granted. It reads as a grant and is not one. |
 | warning | `stage-missing-model` | No `[stages.X.model]` block, so the stage runs on whatever your `default_provider` is. |
 | warning | `stage-missing-mode` | No `mode`, so the stage runs as `autonomous`. |
@@ -162,6 +163,7 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 | warning | `implicit-shell-policy` | A shell grant with no policy behind it. The default is `ask`, and an unattended run waits on that prompt rather than being denied. |
 | warning | `unknown-model` | A model this build has not heard of, checked only against providers with a closed catalog. Ollama, OpenRouter and script providers are never checked. |
 | warning | `no-reachable-provider` | Nothing in the stage's models list is configured here, so it falls through to your default model. |
+| warning | `compact-summarizes-deliverable` | A `required` region would be handed to the summarizer by a `transform = "compact"` edge, so a later stage reads a paraphrase of it. Set `summarizable = false` on the region. |
 | warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `[read_paths]` shape. |
 | warning | `dead-end-possible` | Every normal edge's target has a `max_revisits` budget, so the run errors once they are spent. Add a `condition = "dead_end"` edge to a stage without one. A `max_iterations` edge does not count: it fires on the iteration cap, never on this path. |
 | warning | `read-paths-not-granted` | The blueprint declares `[read_paths]` your `config.toml` does not grant. Declaring is not granting, so those reads are refused; the fix line carries the stanza to add. |
@@ -250,7 +252,7 @@ Serve an agent over the [Agent Client Protocol](/docs/agent-client-protocol) as 
 
 | Command | Flags | Purpose |
 |---|---|---|
-| `lev list` | `--json` | List installed and bundled blueprints. An agent declaring [`[read_paths]`](/docs/security#reading-outside-the-workdir) also shows how many of its entries your config grants |
+| `lev list` | `--json`, `-f`, `--filter <all\|agents\|blueprints>` | List installed and bundled blueprints. `--filter` narrows to installed agents or to bundled blueprints; an unrecognized value is an error, not a silent ignore. An agent declaring [`[read_paths]`](/docs/security#reading-outside-the-workdir) also shows how many of its entries your config grants |
 | `lev add <PACKAGE>` | | Install a blueprint directory or `.leviath-bundle`. Prints what the package grants itself before installing |
 | `lev remove <NAME>` | | Uninstall a blueprint |
 | `lev pack [PATH]` | `-o`, `--output <FILE>` (default `{name}-{version}.leviath-bundle`) | Bundle a blueprint for [sharing](/docs/packaging) |

@@ -61,11 +61,11 @@ The short version: **`http://` only works on loopback.** Everything else needs H
 A browser treats `http://localhost` and `http://127.0.0.1` as potentially trustworthy, which is the
 only reason the default setup works from a page served over HTTPS. Every other address is blocked,
 and **a LAN address is blocked exactly like a public one** - `http://192.168.1.50:3000` fails just as
-`http://34.132.206.6:8080` does:
+`http://203.0.113.10:8080` does:
 
 ```
 Mixed Content: The page at 'https://leviath.dev/lair' was loaded over HTTPS, but requested an
-insecure resource 'http://34.132.206.6:8080/api/config'. This request has been blocked.
+insecure resource 'http://203.0.113.10:8080/api/config'. This request has been blocked.
 ```
 
 Two things that are *not* the problem, because they are what people reach for first:
@@ -239,8 +239,6 @@ done in the browser, because The Lair never holds a run's transcript.
 One honest limit: the deep sources match the raw JSON on disk, so a query containing a quote,
 a backslash or a newline may not match text that does contain it.
 
-## A run's files
-
 ## Where a run's cost went
 
 `GET /api/agents/{id}/stages` returns one record per declared stage, in blueprint
@@ -292,6 +290,8 @@ that has not reached its first stage boundary returns an empty list rather than 
 > it, because the field simply is not in those files. Read it together with
 > `status`: a stage recorded `complete` with tokens against its name ran,
 > whatever `entered` says on an old run.
+
+## A run's files
 
 `GET /api/agents/{id}/files` answers two different questions, and neither substitutes for the other.
 

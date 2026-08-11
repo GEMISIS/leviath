@@ -492,6 +492,73 @@ mod tests {
     }
 
     #[test]
+    fn the_blueprint_schema_accepts_every_region_kind_the_parser_names() {
+        // The bundled agents between them use only some of the kinds, so the
+        // positive test above cannot notice one the schema forgot. `checklist`
+        // shipped that way: the parser took it, the published schema's closed
+        // enum refused it, and every blueprint using the feature failed to
+        // validate against the file we tell people to validate against.
+        //
+        // The parser's own error message enumerates the valid kinds, so read
+        // the list back from it rather than restating it here and drifting the
+        // same way twice.
+        let err = leviath_core::manifest::parse_manifest(
+            "[agent]\nname = \"a\"\n\n[context.regions]\nx = { kind = \"not-a-kind\" }\n",
+        )
+        .expect_err("an unknown region kind is a load error")
+        .to_string();
+        let listed = err
+            .split("valid kinds:")
+            .nth(1)
+            .expect("the error names the valid kinds")
+            .trim()
+            .trim_end_matches(')')
+            .split(',')
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .collect::<Vec<_>>();
+        assert!(
+            listed.len() > 5,
+            "the error should list every kind: {listed:?}"
+        );
+
+        let schema: serde_json::Value =
+            serde_json::from_str(BLUEPRINT_SCHEMA).expect("the schema is valid JSON");
+        let validator = jsonschema::validator_for(&schema).expect("the schema compiles");
+        for kind in listed {
+            let manifest = format!(
+                "[agent]\nname = \"a\"\n\n[context.regions]\nx = {{ kind = \"{kind}\" }}\n"
+            );
+            let parsed: toml::Value = toml::from_str(&manifest).expect("valid TOML");
+            assert_eq!(
+                schema_problems(&validator, &toml_to_json(&parsed)),
+                Vec::<String>::new(),
+                "the schema rejects region kind \"{kind}\", which the parser accepts"
+            );
+        }
+    }
+
+    #[test]
+    fn the_blueprint_schema_accepts_stage_hooks() {
+        // Same blind spot as the region kinds: no bundled agent declares hooks,
+        // so nothing noticed that the stage object is `additionalProperties:
+        // false` without a `hooks` property. Every blueprint following the Rhai
+        // hooks page was rejected by the published schema.
+        let schema: serde_json::Value =
+            serde_json::from_str(BLUEPRINT_SCHEMA).expect("the schema is valid JSON");
+        let validator = jsonschema::validator_for(&schema).expect("the schema compiles");
+        let manifest = "[agent]\nname = \"a\"\n\n[stages.main.hooks]\n\
+                        on_stage_enter = \"hooks/enter.rhai\"\n\
+                        on_error = \"hooks/error.rhai\"\n";
+        let parsed: toml::Value = toml::from_str(manifest).expect("valid TOML");
+        assert_eq!(
+            schema_problems(&validator, &toml_to_json(&parsed)),
+            Vec::<String>::new(),
+            "the schema rejects [stages.<name>.hooks], which the parser accepts"
+        );
+    }
+
+    #[test]
     fn the_blueprint_schema_rejects_what_the_parser_rejects() {
         // A schema that accepts everything would pass the test above over any
         // input at all. These are the mistakes it exists to catch before a run
