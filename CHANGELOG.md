@@ -13,6 +13,13 @@ same list.
 
 ## Unreleased
 
+- New: `GET /api/agents/{id}/stages` serves a run's per-stage ledger - what each
+  stage cost, the cache read/write split, `region_tokens`, and whether the stage
+  was entered at all (#388). It was the one thing the runtime records per run
+  that no route exposed, so a client over HTTP had to reconstruct it by diffing
+  `context/history` snapshots: expensive, and blind to a stage that ran and
+  wrote nothing to any region. Advertised as the `runs.stages` capability.
+
 ## 0.3.3 - 2026-08-11
 
 - Changed: the outbound-request policy moved out of `leviath-core` into a new

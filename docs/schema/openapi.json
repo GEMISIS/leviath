@@ -1085,6 +1085,42 @@
           }
         }
       }
+    },
+    "/api/agents/{id}/stages": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "The run's per-stage ledger",
+        "description": "What each stage cost and which regions it carried. Not derivable from the other routes: a stage that ran and wrote nothing to any region leaves no trace in context/history, so `entered` is the only way to tell it from a stage that was never reached.",
+        "responses": {
+          "200": {
+            "description": "Stage records in blueprint order. Empty for a run that has not reached its first stage boundary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunStagesResp"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No run with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1353,6 +1389,113 @@
         "properties": {
           "error": {
             "type": "string"
+          }
+        }
+      },
+      "RunStagesResp": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "stages"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "stages": {
+            "type": "array",
+            "description": "One record per declared stage, in blueprint order.",
+            "items": {
+              "$ref": "#/components/schemas/StageRecord"
+            }
+          }
+        }
+      },
+      "StageRecord": {
+        "type": "object",
+        "required": [
+          "name",
+          "index",
+          "status",
+          "entered",
+          "prompt_tokens",
+          "completion_tokens"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The stage's key under [stages]."
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Position in the blueprint's stage list. Not a progress measure: stages loop and revisit."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "active",
+              "waiting_input",
+              "complete",
+              "error",
+              "skipped"
+            ],
+            "description": "`skipped` means the run finished without ever entering this stage, which is distinct from `pending` (not yet, on a live run)."
+          },
+          "entered": {
+            "type": "boolean",
+            "description": "Whether the run has ever been in this stage. Position cannot answer this - a graph reaches its stages in whatever order its edges describe. False for every stage of a run recorded before Leviath tracked this, because the field is not in those files; read it together with `status`."
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cached_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cache_write_tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Without this a stage showing no cache reads cannot be told apart from one paying to write a prefix nothing reuses."
+          },
+          "region_tokens": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "The largest each region reached while this stage was active, by region name. The number that decides whether a region is earning its place."
+          },
+          "first_call_prompt_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "runaway_warned": {
+            "type": "boolean",
+            "description": "The stage's per-call prompt passed four times its first call - the shape of a region accumulating without a cap."
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Unix seconds; null until the stage is entered."
+          },
+          "ended_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Unix seconds; null until the stage is left."
           }
         }
       }

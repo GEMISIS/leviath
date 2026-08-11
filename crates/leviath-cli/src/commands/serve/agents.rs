@@ -720,6 +720,34 @@ pub(super) async fn agent_result(
     }))
 }
 
+/// `GET /api/agents/{id}/stages`: the run's per-stage ledger.
+///
+/// Read-only, and read through the same `stages.json` reader `lev stages`
+/// uses, so the CLI and the API cannot disagree about a run.
+///
+/// A missing or unreadable index is an empty list rather than a 404: the run
+/// exists - `read_meta` would have failed otherwise - and a run that has not
+/// reached its first stage boundary legitimately has no records yet. Reporting
+/// that as "no such run" would send a client back to re-ask a question that has
+/// already been answered.
+pub(super) async fn agent_stages(
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<RunStagesResp>, (StatusCode, Json<ErrorResponse>)> {
+    let meta = runstate::read_meta(&id).map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Agent run '{}' not found", id),
+            }),
+        )
+    })?;
+
+    Ok(Json(RunStagesResp {
+        stages: runstate::read_stages_index(&id),
+        run_id: meta.run_id,
+    }))
+}
+
 /// `DELETE /api/agents/{id}`: cancel a run in the shared-world daemon. The
 /// daemon cancels the agent (cascading to its sub-agents in the one world) and
 /// persists the terminal status.
@@ -3344,6 +3372,153 @@ system_prompt = "Plan the work"
             assert!(v["next_offset"].is_null(), "nothing more to fetch");
 
             let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    // ─── GET /api/agents/{id}/stages (#388) ──────────────────────────────────
+
+    /// Build a ledger with one stage that ran, one the run stepped over, and
+    /// one still ahead of it.
+    fn ledger_fixture() -> Vec<leviath_core::run_meta::StageRecord> {
+        use leviath_core::run_meta::{StageRecord, StageRunStatus};
+        let mut plan = StageRecord::new("plan".to_string(), 0);
+        plan.status = StageRunStatus::Complete;
+        plan.entered = true;
+        plan.prompt_tokens = 900;
+        plan.completion_tokens = 120;
+        plan.cached_tokens = 400;
+        plan.cache_write_tokens = 60;
+        plan.region_tokens.insert("task".to_string(), 24);
+        plan.region_tokens.insert("data_preview".to_string(), 4004);
+        plan.runaway_warned = true;
+
+        let mut recovery = StageRecord::new("error_recovery".to_string(), 1);
+        recovery.status = StageRunStatus::Skipped;
+
+        let answer = StageRecord::new("answer".to_string(), 2);
+        vec![plan, recovery, answer]
+    }
+
+    /// The route the issue asks for: the per-stage ledger, served as recorded.
+    #[tokio::test]
+    async fn agent_stages_serves_the_per_stage_ledger() {
+        crate::runstate::with_isolated_runs_dir_async("agent_stages_serves", |_d| async move {
+            let run_id = unique_run_id("stages-ledger");
+            create_run(&make_run(&run_id)).unwrap();
+            runstate::write_stages_index(&run_id, &ledger_fixture()).unwrap();
+
+            let app = Router::new()
+                .route("/api/agents/{id}/stages", get(agent_stages))
+                .with_state(test_state());
+            let req = Request::builder()
+                .uri(format!("/api/agents/{}/stages", run_id))
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["run_id"], run_id);
+
+            let stages = body["stages"].as_array().expect("an array of stages");
+            assert_eq!(stages.len(), 3);
+
+            // The costs no other route can answer.
+            assert_eq!(stages[0]["name"], "plan");
+            assert_eq!(stages[0]["prompt_tokens"], 900);
+            assert_eq!(stages[0]["cache_write_tokens"], 60);
+            assert_eq!(stages[0]["region_tokens"]["data_preview"], 4004);
+            assert_eq!(stages[0]["runaway_warned"], true);
+
+            // The distinction that cannot be reconstructed from context/history:
+            // a stage the run stepped over, versus one still ahead of it.
+            assert_eq!(stages[1]["entered"], false);
+            assert_eq!(stages[2]["entered"], false);
+        })
+        .await;
+    }
+
+    /// The wire spelling is snake_case, and pinned here because the issue is
+    /// right that this has drifted before: `RunMeta` serializes snake_case
+    /// while the result and tree routes render a PascalCase `Display`, and that
+    /// asymmetry has already cost one filter bug.
+    #[tokio::test]
+    async fn agent_stages_spells_status_in_snake_case() {
+        crate::runstate::with_isolated_runs_dir_async("agent_stages_spelling", |_d| async move {
+            let run_id = unique_run_id("stages-spelling");
+            create_run(&make_run(&run_id)).unwrap();
+            runstate::write_stages_index(&run_id, &ledger_fixture()).unwrap();
+
+            let app = Router::new()
+                .route("/api/agents/{id}/stages", get(agent_stages))
+                .with_state(test_state());
+            let req = Request::builder()
+                .uri(format!("/api/agents/{}/stages", run_id))
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+            assert_eq!(body["stages"][0]["status"], "complete");
+            assert_eq!(
+                body["stages"][1]["status"], "skipped",
+                "the status #372 added has to reach the wire under the name the \
+                 schema advertises"
+            );
+            assert_eq!(body["stages"][2]["status"], "pending");
+        })
+        .await;
+    }
+
+    /// A run that has not reached its first stage boundary has no records yet.
+    /// That is an empty list, not a 404 - the run exists, and answering "no
+    /// such run" would send a client back to re-ask a settled question.
+    #[tokio::test]
+    async fn agent_stages_of_a_run_with_no_index_is_empty() {
+        crate::runstate::with_isolated_runs_dir_async("agent_stages_empty", |_d| async move {
+            let run_id = unique_run_id("stages-empty");
+            create_run(&make_run(&run_id)).unwrap();
+
+            let app = Router::new()
+                .route("/api/agents/{id}/stages", get(agent_stages))
+                .with_state(test_state());
+            let req = Request::builder()
+                .uri(format!("/api/agents/{}/stages", run_id))
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(body["stages"].as_array().expect("an array").is_empty());
+        })
+        .await;
+    }
+
+    /// A run that does not exist is still a 404, or the empty-list answer above
+    /// would swallow a typo'd id.
+    #[tokio::test]
+    async fn agent_stages_of_an_unknown_run_is_not_found() {
+        crate::runstate::with_isolated_runs_dir_async("agent_stages_unknown", |_d| async move {
+            let app = Router::new()
+                .route("/api/agents/{id}/stages", get(agent_stages))
+                .with_state(test_state());
+            let req = Request::builder()
+                .uri("/api/agents/no-such-run/stages")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         })
         .await;
     }

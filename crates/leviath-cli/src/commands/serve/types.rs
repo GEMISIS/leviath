@@ -763,6 +763,28 @@ pub(super) enum FileOrListing {
     Listing(Box<RunFileListing>),
 }
 
+/// Response of `GET /api/agents/{id}/stages`: the run's per-stage ledger.
+///
+/// The one thing the runtime records per run that no route served. Everything
+/// here is already on disk in `stages.json` and already read by `lev stages`;
+/// a client over HTTP had to reconstruct the interesting part by diffing
+/// `context/history` snapshots, which is expensive and cannot see a stage that
+/// ran and wrote nothing (#388).
+///
+/// Not paginated. The list is bounded by the blueprint's stage count - a dozen
+/// at the top end - so a cursor would be ceremony over a short array. The
+/// records themselves are open-ended in width because `region_tokens` has one
+/// entry per region, which is the reason this is its own route rather than a
+/// field on the run listing.
+#[derive(Debug, Serialize)]
+pub(super) struct RunStagesResp {
+    /// The run these stages belong to, echoed so a response is self-describing
+    /// when it has been passed around.
+    pub(super) run_id: String,
+    /// Per-stage records in blueprint order, exactly as recorded.
+    pub(super) stages: Vec<leviath_core::run_meta::StageRecord>,
+}
+
 /// Response of `GET /api/agents/{id}/files` with no file named.
 #[derive(Debug, Serialize)]
 pub(super) struct RunFileListing {
@@ -988,6 +1010,7 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "runs.since",
     "runs.files.listing",
     "runs.files.workdir",
+    "runs.stages",
     "logs.stage",
     "logs.stream",
     "context.history.page",
