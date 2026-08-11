@@ -3,7 +3,7 @@ title: Agent blueprints
 description: The agent.leviath blueprint format: the TOML defining an agent's stages, models, tools, and context layout.
 group: Concepts
 group_order: 2
-order: 4
+order: 5
 ---
 
 # Agent blueprints (`agent.leviath`)
@@ -11,6 +11,9 @@ order: 4
 An agent is a directory with an `agent.leviath` file, a TOML **blueprint** describing a
 multi-stage [workflow graph](/docs/stages). The [agent catalog](/docs/agent-catalog) has ten
 complete ones worth stealing from.
+
+New to this? [Build your first agent](/docs/first-agent) walks through writing one stage by
+stage; this page is the reference for every field it uses.
 
 Start from a scaffold rather than a blank file:
 

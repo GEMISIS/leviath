@@ -198,12 +198,15 @@ cd my-agent
 lev run . --task "Your task here"
 ```
 
-This writes an `agent.leviath` config you can customize: the stages, the model for each phase,
-and the context regions. See [Agents](/docs/agents) to go deeper.
+This writes an `agent.leviath` file you can customize: the stages, the model for each phase, and
+the context regions. [Build your first agent](/docs/first-agent) walks through writing one from
+scratch, a stage at a time, and is the natural next thing to read.
 
 ## Where to go next
 
 - The [Agent catalog](/docs/agent-catalog) tours the ten pre-built agents and what each is for.
+- [Build your first agent](/docs/first-agent) writes one from an empty directory, explaining each
+  piece as it goes.
 - [Overview](/docs/overview) explains what Leviath is doing underneath: stages, context regions,
   and the shared world your agents run in.
 - [Agent blueprints](/docs/agents) covers what goes in an `agent.leviath` file, for building your

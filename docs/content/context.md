@@ -3,7 +3,7 @@ title: Structured context
 description: How structured context regions keep an agent coherent across hundreds of tool calls, where a flat message list drifts.
 group: Concepts
 group_order: 2
-order: 5
+order: 6
 ---
 
 # Structured context memory
