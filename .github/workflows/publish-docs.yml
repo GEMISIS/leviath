@@ -89,7 +89,14 @@ jobs:
       # Docs published before this step existed simply have no index, and the site falls
       # back to the title filter it had, so a channel is never broken by being behind.
       - name: Build the docs search index
-        run: node site/node_modules/.bin/tsx site/tools/build-docs-index.ts docs-out
+        run: |
+          node site/node_modules/.bin/tsx site/tools/build-docs-index.ts docs-out
+          # The site falls back to a title-only filter when the index is absent,
+          # and says nothing about it, so a channel can publish without search
+          # and look fine. Fail here instead, the way the schemas below do.
+          test -s docs-out/pagefind/pagefind.js || {
+            echo "no search index at docs-out/pagefind/pagefind.js"; exit 1;
+          }
 
       # The machine-readable half: JSON Schemas for agent.leviath and
       # config.toml, the OpenAPI spec for `lev serve`, and the commented example
