@@ -65,8 +65,31 @@ jobs:
           npm ci
           npm run build --workspace @leviath-dev/docs-ssg
 
+      # DOCS_RENDERER_REV goes into a <meta> on every page. This bundle is built from
+      # leviath.dev's default branch at whatever it is right now, and only when a
+      # channel publishes, so a renderer fix over there can sit unpublished for days
+      # with nothing on the page to say which version rendered it. This makes that
+      # answerable with view-source instead of a guess.
+      - name: Record which renderer is being used
+        id: renderer
+        working-directory: site
+        run: echo "rev=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Render docs
+        env:
+          DOCS_RENDERER_REV: ${{ steps.renderer.outputs.rev }}
         run: node site/packages/docs-ssg/dist/cli.mjs docs/content docs-out "${{ inputs.channel }}"
+
+      # Full-text search. Pagefind indexes the rendered HTML and shards the index, so a
+      # reader fetches only the fragments their query needs rather than one blob of it up
+      # front. It runs after the render and before the sync, and the step also deletes
+      # Pagefind's own search widget, which this site does not use: ~400 KB a channel
+      # that would otherwise be published and never requested.
+      #
+      # Docs published before this step existed simply have no index, and the site falls
+      # back to the title filter it had, so a channel is never broken by being behind.
+      - name: Build the docs search index
+        run: node site/node_modules/.bin/tsx site/tools/build-docs-index.ts docs-out
 
       # The machine-readable half: JSON Schemas for agent.leviath and
       # config.toml, and the OpenAPI spec for `lev serve`. llms.txt links these

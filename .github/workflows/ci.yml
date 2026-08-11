@@ -222,6 +222,25 @@ jobs:
       - name: Check docs/content links and frontmatter
         run: cargo xtask docs
 
+      # leviath.dev reads CHANGELOG.md to name the version beside its install command and
+      # to render that release's notes, and it fails its own deploy rather than publish a
+      # version it cannot verify. Without this that failure lands on the website, after
+      # merging, for somebody who was not editing the website. The checker is the same
+      # parser the site uses, so there is one definition of the format rather than two.
+      - name: Checkout leviath.dev (changelog contract)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: GEMISIS/leviath.dev
+          token: ${{ secrets.DOCS_SSG_TOKEN }}
+          path: site
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      # No npm ci: the checker and its parser import nothing but node:fs, so tsx on its
+      # own is the whole dependency.
+      - name: Check the changelog the site publishes from
+        run: npx --yes tsx site/tools/check-changelog.ts CHANGELOG.md
+
   # Coverage runs on all three OSes and enforces a hard 100% on regions, lines,
   # and functions. Each (os × package) runner GATES one package with llvm-cov's
   # own thresholds: `cargo xtask coverage --package <pkg>` runs `cargo llvm-cov
