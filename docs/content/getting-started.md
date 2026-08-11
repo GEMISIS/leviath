@@ -70,11 +70,14 @@ scoop install leviath
 <summary>Switch to the beta or alpha channel</summary>
 
 `stable` is the default and is what you want unless you have a reason to be ahead of it. To ride a
-faster channel, set `LEVIATH_CHANNEL` for the installer:
+faster channel, pass it to the installer:
 
 ```bash
-LEVIATH_CHANNEL=beta curl -fsSL https://leviath.dev/install.sh | sh
+curl -fsSL https://leviath.dev/install.sh | sh -s -- --channel beta
 ```
+
+The installer prints which channel it is about to install, so you can see you got the one you
+asked for.
 
 Homebrew and Scoop name the channels as separate packages instead: install `leviath-beta` or
 `leviath-alpha` in place of `leviath`. See [Releases and channels](/docs/releases) for what each
