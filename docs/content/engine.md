@@ -18,8 +18,13 @@ table over and over. An agent with nothing to do is a row those functions skippe
 close to nothing.
 
 That arrangement has a name: an **Entity Component System**, usually shortened to **ECS**. Game
-engines use it to move thousands of objects every frame, for the same reason it suits agents. The
-three words are the three pieces, and this page explains each one as it goes:
+engines use it to move thousands of objects per frame, and Leviath borrows the storage and
+iteration rather than the reason: games want cache locality in a tight frame budget, while an agent
+runtime wants a way to hold state for something that is mostly waiting. If you have written a
+reactor with a state machine per connection, this will feel familiar. The ECS supplies the table
+and the sweep so Leviath does not hand-roll them.
+
+The three words are the three pieces, and this page explains each one as it goes:
 
 | Word | Means here |
 |---|---|
@@ -27,8 +32,12 @@ three words are the three pieces, and this page explains each one as it goes:
 | **Component** | One piece of an agent's data, such as its context window or which stage it is on. |
 | **System** | One function that runs across every agent in a given state and moves it along. |
 
-You never configure any of this. It is here because "hundreds of agents in one process" is a claim
-worth being able to check.
+Two words from elsewhere in the docs turn up throughout. A **stage** is one phase of the agent's
+own workflow, with its own prompt, model, and tools, described in
+[Multi-stage workflows](/docs/stages). The **world** is the single table this page keeps talking
+about: one per daemon, holding every agent on the machine.
+
+You never configure any of this.
 
 ## The usual shape, and this one
 
@@ -51,6 +60,10 @@ Leviath turns that inside out. The loop belongs to the engine, not to any agent,
 pipeline: a fixed sequence of phases that runs start to finish, over and over. Each phase is one
 function, and it acts on whichever agents happen to be sitting at that phase right now.
 
+Here is the spine of it. The real pipeline has about forty-five functions; these five are the ones
+that move an ordinary turn, and the rest handle summarizing context, spotting a stuck agent,
+iteration caps, checkpoints, fan-out, telemetry, and writing to disk.
+
 ```mermaid
 flowchart LR
   P1["Phase 1<br/>Ask the model<br/>· agent 1 · agent 7"]
@@ -63,23 +76,29 @@ flowchart LR
 ```
 
 Read one pass of that left to right. Agents 1 and 7 have a request ready, so the first phase sends
-both. Agent 2's reply has landed, so the second phase takes it, while agent 6 is still waiting on
-the provider and is skipped at no cost. Agent 4's turn asked for tools, so the third phase starts
-them. Agent 3's tools have come back. Agent 5 finished its stage and needs an edge chosen.
+both and moves on. Agent 2's reply has come back, so the second phase takes it. Agent 6 is in that
+same phase but its reply has not arrived, so the function looks at it, finds nothing to do, and
+leaves it there. Agent 4's turn asked for tools, so the third phase starts them. Agent 3's tools
+have finished. Agent 5 reached the end of its stage and needs its next one chosen.
 
-Nobody was blocked and nothing was waited on. An agent's position in the pipeline **is** a piece of
-its data, so the phase that acts on it finds it by looking, and an agent waiting on the outside
-world is simply not in any phase's list this pass.
+Two things to take from that. **Nothing blocked**: sending a request and collecting its reply are
+different phases, so an agent that asks the model in one pass is collected in some *later* pass,
+whenever the answer actually arrives. And **an agent with nothing to do costs a glance**. Agent 6
+was looked at and skipped; no thread was parked on it, and no work was queued behind it.
 
-The difference shows up when there are many of them. In the usual shape, each agent brings its own
-task, its own client, and its own copy of everything around it:
+An agent's position in the pipeline is itself a piece of its data, which is what lets each phase
+find its agents by looking rather than by being told.
+
+The difference shows up when there are many of them. Give each agent its own task and the runtime
+has 100 things it must schedule, each holding a turn's worth of stack, and any budget you want to
+apply across all of them has to be coordinated between them:
 
 ```mermaid
 flowchart TB
-  subgraph TRAD["100 agents, the usual way"]
+  subgraph TRAD["100 agents, one task each"]
     direction LR
-    T1["agent + task<br/>+ its own client"]
-    T2["agent + task<br/>+ its own client"]
+    T1["agent + its own task"]
+    T2["agent + its own task"]
     T3["…98 more"]
   end
   T1 --> API["Model provider"]
@@ -87,8 +106,8 @@ flowchart TB
   T3 --> API
 ```
 
-In Leviath they are 100 rows in one table, sharing one set of connections, rate limits, and tool
-capacity:
+In Leviath they are 100 rows in one table, and the budgets live in one place because there is only
+one place to put them:
 
 ```mermaid
 flowchart TB
@@ -104,7 +123,25 @@ flowchart TB
   LANE --> TOOLS["Tools"]
 ```
 
-The rest of this page fills that in: [what the three words mean precisely](#entities-components-and-systems),
+### The cost that is left
+
+Being straight about what this does and does not buy. It removes the per-agent task and the
+per-agent scheduling, which is the part that scales badly. It does **not** make an agent free,
+because the expensive thing an idle agent holds is its context window, and that stays in memory
+while the run is live. A hundred idle agents with large windows cost real memory, whatever the
+concurrency model.
+
+Two cases reclaim it. A **paused** run is written to disk and dropped from the world entirely, then
+rebuilt when you resume it. A **fan-out worker** whose result has been merged and persisted has its
+window, blueprint, and stage tables removed while its record stays. Everything else keeps its
+window until the run ends.
+
+Every system also runs on one thread, in a fixed order, so a pass is serial in the number of agents
+that have something to do. Idle agents cost a glance each, and a pass where nothing changed puts
+the loop to sleep entirely, which is the [fixed point](#what-a-tick-is) below.
+
+From here the page gets specific:
+[what the three words mean precisely](#entities-components-and-systems),
 [what one agent is made of](#an-agent-is-an-entity), [how it moves between phases](#markers-are-the-state-machine),
 [what one pass costs](#what-a-tick-is), and
 [what happens when one agent breaks](#one-agents-failure-stays-one-agents-failure).
@@ -224,30 +261,33 @@ flowchart TD
 2. **`collect_inference`** picks up whatever came back and moves the agent to `ProcessResponse`.
 3. **`process_response`** reads the reply. Tool calls go down the tool path; plain text goes toward
    a transition.
-4. **`dispatch_tools`** enforces the stage's `available_tools` (a tool the stage never advertised is
-   refused, not merely hidden), runs the taint and permission checks, applies `context_*` tools
-   immediately, and sends everything else to the tool lane.
+4. **`dispatch_tools`** checks each requested call before it runs. A tool the stage never
+   advertised in `available_tools` is refused rather than hidden, [permissions](/docs/tools) decide
+   whether the call needs you, and [taint tracking](/docs/security#taint-tracking-experimental)
+   blocks a call that would carry sensitive data somewhere it should not go. Calls that only edit
+   the agent's own context apply here; the rest go to the tool lane.
 5. **`collect_tools`** merges the results back into the order the model asked for them, files each
-   into a context region per the stage's tool routing, and returns the agent to `ReadyToInfer`.
-6. **`resolve_transition`** ends the stage with one of six answers: `Terminal` (done),
-   `TerminalError` (failed with no `error` edge to catch it), `Next` (take this edge), `Choose`
-   (ask the model which edge), `Resume` (a `stuck` interrupt fired with no `stuck` edge, so keep
-   going), or `DeadEnd` (every outgoing edge is exhausted, which routes down the `error` edge or
-   fails the run rather than faking a completion).
+   into the [context region](/docs/context) the stage routes it to, and returns the agent to
+   `ReadyToInfer`.
+6. **`resolve_transition`** picks what happens at the end of a stage. A stage's outgoing edges are
+   its [transitions](/docs/stages), including ones that fire on an error or when the agent is
+   detected going in circles. There are six answers: `Terminal` (done), `TerminalError` (failed,
+   with no `error` edge to catch it), `Next` (take this edge), `Choose` (ask the model which edge),
+   `Resume` (the agent looked stuck, but the stage has no edge for that, so carry on), and
+   `DeadEnd` (every edge out is exhausted, which routes to the `error` edge or fails the run rather
+   than reporting a completion that did not happen).
 
-Those are six of roughly forty-five systems. The rest handle compaction, stuck detection,
-iteration caps, interaction points, fan-out, telemetry, and persistence, all in a fixed order every
-pass. See [Multi-stage workflows](/docs/stages) for the transition conditions and
-[Structured context](/docs/context) for the regions.
+Those are six of the roughly forty-five. See [Multi-stage workflows](/docs/stages) for what the
+transition conditions mean and [Structured context](/docs/context) for what the regions do.
 
 ## What a tick is
 
 A **tick** is one pass of that whole system list over every agent in the world. The systems run
 one after another in a fixed order, so no two ever overlap, and no system ever awaits. A dispatch
 system starts async work and swaps in an `Awaiting*` marker; a collect system on a later tick
-picks the result up. That one rule is what makes "hundreds of agents in one process" true, and it
-gives you backpressure for free: a full pool just means an agent stays `ReadyToInfer` until a later
-tick finds it a slot.
+picks the result up. That one rule is what keeps a pass short no matter how many agents are
+waiting, and it gives you backpressure for free: a full pool just means an agent stays
+`ReadyToInfer` until a later tick finds it a slot.
 
 At the end of a tick, Leviath counts how many agents carry each of the twelve markers. Those
 counts are the world's **fingerprint**. The loop does not do its work on a clock. It ticks for as
@@ -327,5 +367,5 @@ is the guarantee separate processes would give you and this design does not.
 
 > [!NOTE]
 > The engine is not something you usually configure. You describe *what* an agent does in its
-> [blueprint](/docs/agents), and the engine works out how to run it. This page exists so that
-> "hundreds of agents in one process" is not a black box.
+> [blueprint](/docs/agents), and the engine works out how to run it. This page exists so the
+> design is inspectable rather than something you have to take on trust.
