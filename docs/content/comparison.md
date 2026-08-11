@@ -61,9 +61,11 @@ description comes from that project's own documentation.
 We would rather you pick the right tool than pick ours, so here is where Leviath is the wrong
 answer and what to reach for instead.
 
-**Use a coding agent like Claude Code or Codex** when you want to sit down and work with something
-polished and interactive. They are better at that than Leviath is, and it is not close. Leviath can
-even run *on top of* Claude Code as a transport, so this is not either/or.
+**Use a coding agent like Claude Code or Codex** when you want the familiar thing: a chat in your
+terminal or editor, aimed squarely at writing code, that you steer turn by turn. That interactive
+loop is what they are built around, and it is the experience most people want most days. Leviath
+asks you to describe the work up front instead, which pays off on a task with distinct phases and
+gets in the way of a quick edit.
 
 **Use CrewAI or LangGraph** when your orchestration already lives in Python or TypeScript and you
 want the workflow expressed in code, with your own types and your own tests around it. A Leviath
@@ -71,18 +73,11 @@ agent is a TOML blueprint plus optional Rhai script tools, so if you want agent 
 language against an SDK, that model is not here. Other languages drive Leviath through the
 [REST API](/docs/api) instead.
 
-**Use [Gas City](/docs/gas-city) (an orchestration-builder SDK from the
-[Gas Town Hall](https://gastownhall.ai/) project) or [OpenHands](https://docs.all-hands.dev/)**
-when the hard problem is coordinating work across issues, repos, and people. That is a different problem from what happens
-inside one agent, and Leviath does not try to solve it. Run Leviath underneath one of them if you
-want both.
-
 **Use a hosted platform** if you want somebody else operating it. You run the Leviath daemon
 yourself. [`lev serve`](/docs/api) and [The Lair](https://leviath.dev/lair) reach it from anywhere,
 but there is no hosted service and no multi-machine scheduling.
 
-You also need a model provider either way: an API key, a local Ollama, or the Claude Code transport
-with its terms-of-service caveat.
+You also need a model provider either way: an API key or a local Ollama.
 
 One current limit worth knowing before you choose. Every agent has its own state, workdir fence,
 tool policy, and panic boundary, so one agent's crash stays its own. The opt-in

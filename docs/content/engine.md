@@ -1,20 +1,34 @@
 ---
-title: ECS engine
-description: The ECS engine that keeps each agent as a row of data, so an agent that is waiting costs almost nothing.
+title: The agent engine
+description: How one process runs many agents at once: each is a row of data in an Entity Component System, so a waiting agent costs almost nothing.
 group: Concepts
 group_order: 2
 order: 3
 ---
 
-# The ECS agent engine
+# The agent engine
 
 Most of the agents you run are waiting. Waiting on a model to reply, on a tool to finish, on a
 person to answer a question. If every waiting agent costs you an operating system process, then a
 hundred agents cost a hundred processes whether or not any of them are doing anything.
 
-Leviath keeps each agent as a row of data in one shared table. A waiting agent is a row nothing
-touched this pass, which costs close to nothing, so the machine only pays for work that is actually
-in flight.
+So Leviath does not give an agent a process, a thread, or even a task of its own. It keeps each
+agent as a **row of data** in one shared table, and runs a fixed list of functions across the whole
+table over and over. An agent with nothing to do is a row those functions skipped, which costs
+close to nothing.
+
+That arrangement has a name: an **Entity Component System**, usually shortened to **ECS**. Game
+engines use it to move thousands of objects every frame, for the same reason it suits agents. The
+three words are the three pieces, and this page explains each one as it goes:
+
+| Word | Means here |
+|---|---|
+| **Entity** | One agent. Really just a row number, with no code attached to it. |
+| **Component** | One piece of an agent's data, such as its context window or which stage it is on. |
+| **System** | One function that runs across every agent in a given state and moves it along. |
+
+You never configure any of this. It is here because "hundreds of agents in one process" is a claim
+worth being able to check.
 
 ## The usual shape, and this one
 
@@ -33,21 +47,29 @@ flowchart LR
   end
 ```
 
-Leviath turns that inside out. There is no agent loop and no agent object. Each agent is a row of
-data, and one fixed list of functions sweeps across every row, moving each one a single step:
+Leviath turns that inside out. The loop belongs to the engine, not to any agent, and it is a
+pipeline: a fixed sequence of phases that runs start to finish, over and over. Each phase is one
+function, and it acts on whichever agents happen to be sitting at that phase right now.
 
 ```mermaid
 flowchart LR
-  subgraph W["One world, one sweep for everybody"]
-    direction TB
-    R1["agent 1: ready to call the model"]
-    R2["agent 2: waiting on a reply"]
-    R3["agent 3: tools running"]
-    R4["agent 4: waiting on a person"]
-  end
-  W --> SYS["Each function handles the rows it applies to,<br/>then the sweep ends"]
-  SYS -->|"rows that moved"| W
+  P1["Phase 1<br/>Ask the model<br/>· agent 1 · agent 7"]
+  P2["Phase 2<br/>Take replies that arrived<br/>· agent 2 · agent 6 still waiting"]
+  P3["Phase 3<br/>Start tool calls<br/>· agent 4"]
+  P4["Phase 4<br/>Take finished tool results<br/>· agent 3"]
+  P5["Phase 5<br/>Choose the next stage<br/>· agent 5"]
+  P1 --> P2 --> P3 --> P4 --> P5
+  P5 -.->|"run it again"| P1
 ```
+
+Read one pass of that left to right. Agents 1 and 7 have a request ready, so the first phase sends
+both. Agent 2's reply has landed, so the second phase takes it, while agent 6 is still waiting on
+the provider and is skipped at no cost. Agent 4's turn asked for tools, so the third phase starts
+them. Agent 3's tools have come back. Agent 5 finished its stage and needs an edge chosen.
+
+Nobody was blocked and nothing was waited on. An agent's position in the pipeline **is** a piece of
+its data, so the phase that acts on it finds it by looking, and an agent waiting on the outside
+world is simply not in any phase's list this pass.
 
 The difference shows up when there are many of them. In the usual shape, each agent brings its own
 task, its own client, and its own copy of everything around it:
@@ -56,13 +78,13 @@ task, its own client, and its own copy of everything around it:
 flowchart TB
   subgraph TRAD["100 agents, the usual way"]
     direction LR
-    P1["agent + task<br/>+ its own client"]
-    P2["agent + task<br/>+ its own client"]
-    P3["…98 more"]
+    T1["agent + task<br/>+ its own client"]
+    T2["agent + task<br/>+ its own client"]
+    T3["…98 more"]
   end
-  P1 --> API["Model provider"]
-  P2 --> API
-  P3 --> API
+  T1 --> API["Model provider"]
+  T2 --> API
+  T3 --> API
 ```
 
 In Leviath they are 100 rows in one table, sharing one set of connections, rate limits, and tool
@@ -82,17 +104,15 @@ flowchart TB
   LANE --> TOOLS["Tools"]
 ```
 
-The rest of this page is how that works: [what the pieces are called](#entities-components-and-systems),
-[what one agent is made of](#an-agent-is-an-entity),
-[how it moves](#markers-are-the-state-machine), [what a sweep is](#what-a-tick-is), and
-[what happens when one agent breaks](#one-agents-failure-stays-one-agents-failure). You never have
-to configure any of it.
+The rest of this page fills that in: [what the three words mean precisely](#entities-components-and-systems),
+[what one agent is made of](#an-agent-is-an-entity), [how it moves between phases](#markers-are-the-state-machine),
+[what one pass costs](#what-a-tick-is), and
+[what happens when one agent breaks](#one-agents-failure-stays-one-agents-failure).
 
 ## Entities, components, and systems
 
-Leviath is built on [bevy_ecs](https://bevyengine.org/), a library for organising data the way game
-engines do: an Entity Component System. An ECS turns an agent inside out. Instead of one object
-with its own methods and its own task, parked on an `await`, there are three separate things:
+Leviath gets this from [bevy_ecs](https://bevyengine.org/), a library built for game engines and
+used here unchanged. Precisely:
 
 - An **entity** is just an id. No data, no methods. Think of it as a row number.
 - A **component** is a plain struct attached to an entity. `AgentState` is a component,
@@ -100,8 +120,8 @@ with its own methods and its own task, parked on an `await`, there are three sep
 - A **system** is an ordinary function that runs over every entity carrying some particular set of
   components. It asks for what it needs and changes it in place.
 
-So there is no agent object that knows how to run itself. There is agent-shaped **data**, and a
-fixed list of functions that sweep across all of it. Nothing sits on an `await`, because nothing
+So there is no agent object that knows how to run itself. There is agent-shaped **data**, and the
+pipeline of functions above running across all of it. Nothing sits on an `await`, because nothing
 owns a call stack. A blocked agent is just a row that this pass skipped.
 
 That trade is aimed at running many agents at once:
