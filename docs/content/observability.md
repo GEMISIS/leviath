@@ -117,3 +117,11 @@ block above and run an agent. The run shows up as a trace named `agent.run` unde
 The daemon owns the exporter. It starts with the daemon and flushes on shutdown, so short-lived CLI
 commands do not each pay the setup cost. See [the daemon](/docs/daemon) for where this sits in its
 lifecycle.
+
+## Where one run's cost went
+
+The metrics above answer "is the fleet healthy". For "what did this one run spend, and on which
+stage", read its stage ledger instead: [`lev stages <run-id>`](/docs/cli#lev-stages-run-id) at a terminal,
+or [`GET /api/agents/{id}/stages`](/docs/api#where-a-runs-cost-went) over HTTP. Both carry the
+per-stage token split, the cache read and write halves, and the largest each context region reached
+while that stage was active, which is the number to look at before trimming a layout.

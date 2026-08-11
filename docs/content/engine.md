@@ -148,7 +148,7 @@ From here the page gets specific:
 
 ## Entities, components, and systems
 
-Leviath gets this from [bevy_ecs](https://bevyengine.org/), a library built for game engines and
+Leviath gets this from [bevy_ecs](https://bevy.org/), a library built for game engines and
 used here unchanged. Precisely:
 
 - An **entity** is just an id. No data, no methods. Think of it as a row number.

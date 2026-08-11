@@ -218,6 +218,7 @@
         "shell_hint": { "type": "boolean" },
         "model": { "$ref": "#/$defs/modelConfig" },
         "nudge": { "$ref": "#/$defs/nudge" },
+        "hooks": { "$ref": "#/$defs/stageHooks" },
         "sandbox": { "$ref": "#/$defs/sandbox" },
         "security": { "type": "object" },
         "tool_permissions": { "$ref": "#/$defs/toolPermissions" },
@@ -360,6 +361,7 @@
             "clearable",
             "hashmap",
             "hash_map",
+            "checklist",
             "custom"
           ]
         },
@@ -576,6 +578,21 @@
           "type": "string",
           "description": "`{stage}` and `{regions}` interpolate."
         }
+      }
+    },
+
+    "stageHooks": {
+      "type": "object",
+      "description": "Rhai scripts run at points in this stage's lifecycle. Each value is a script path relative to the agent directory.",
+      "additionalProperties": false,
+      "properties": {
+        "on_stage_enter": { "type": "string" },
+        "on_stage_exit": { "type": "string" },
+        "before_inference": { "type": "string" },
+        "after_inference": { "type": "string" },
+        "on_tool_call": { "type": "string" },
+        "on_completion": { "type": "string" },
+        "on_error": { "type": "string" }
       }
     }
   }
