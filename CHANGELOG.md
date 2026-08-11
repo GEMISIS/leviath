@@ -13,6 +13,8 @@ same list.
 
 ## Unreleased
 
+## 0.3.3 - 2026-08-11
+
 - Changed: the outbound-request policy moved out of `leviath-core` into a new
   `leviath-net` crate. `leviath-core` describes itself as plain serializable
   data with no async dependencies and pulled a full HTTP client, so depending on
