@@ -98,8 +98,11 @@ Leviath is also a library: add the [`leviath`](https://crates.io/crates/leviath)
 One provider is all you need: an API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), [Google AI](https://aistudio.google.com/), or [OpenRouter](https://openrouter.ai/). No key at all? Run a local [Ollama](https://ollama.com), or opt into the [Claude Code transport](https://leviath.dev/docs/providers#claude-code-transport) to run on your Claude subscription (read its terms-of-service note first).
 
 ```bash
-lev setup                                            # interactive wizard
-lev setup --non-interactive --anthropic-key sk-ant-...  # scriptable
+lev setup      # interactive wizard
+
+# scriptable. --install-agents is what puts the bundled blueprints on disk,
+# so leaving it off means `lev run coder` has nothing to run.
+lev setup --non-interactive --anthropic-key sk-ant-... --install-agents
 ```
 
 ### 3. Run an agent
@@ -143,33 +146,79 @@ workflow graph is in the [agent catalog →](https://leviath.dev/docs/agent-cata
 
 ## Features
 
-### Structured context memory
-
-The context window is split into named regions, and you decide what each one drops first. Architecture stays pinned, tool results go first, conversation compacts into summaries. A file dump can only crowd out the region it landed in.
-
-Budgets are percentages of the model's window, so the same blueprint keeps its shape when you switch models. When the eight built-in region kinds do not fit, a [`custom` region](https://leviath.dev/docs/rhai-regions) hands one region to a Rhai script you write. [Learn more →](https://leviath.dev/docs/context)
-
-### Multi-stage workflows
-
-Each stage gets its own model, tools, and context layout. Run them linearly or as a [directed graph](https://leviath.dev/docs/stages#graph) with conditional transitions, error recovery, and LLM-driven routing, then check the graph with `lev validate`. A `stuck` edge escapes a stage that is making no progress, and stuckness is measured by the runtime (iteration counts, repeated edits to one file), not self-reported by the model. [Learn more →](https://leviath.dev/docs/stages)
-
-### Human-in-the-loop
-
-The core primitive is **mid-run message injection**: `lev msg` (or the API) drops a message straight into a running agent's context, and the model sees it on its next inference call, so you redirect or add constraints without restarting. Stages can opt out with `accepts_messages = false`; a message then waits in the inbox until a stage that accepts it. Force checkpoints with `interaction_points` (approve, request revisions, or edit the agent's output directly), or grant `ask_user_*` tools so the agent asks on its own judgment. [Learn more →](https://leviath.dev/docs/interaction)
-
-### Security: sandboxed execution and taint tracking
-
-By default an agent's shell commands run on your machine with nothing extra to install. When you want isolation, opt in per agent or per stage: hardened **containers** (Docker/Podman, capabilities dropped, warm per agent) or lighter **Linux namespaces**, mixable within one workflow, and an installed agent can tighten its sandbox but never turn one off. Experimental **taint tracking** labels every context region's sensitivity and gates exfiltration-capable tool calls before they fire, with allowlists and scripted policy rules on top. [Learn more →](https://leviath.dev/docs/security)
-
-### ECS agent engine
-
-Agents run as entities in a [bevy_ecs](https://bevyengine.org/) world. Thousands can share one process with game-engine-style scheduling (ten agents each fanning out to ten sub-agents is still one process), instead of that many OS processes fighting for resources.
-
-And no, thousands of agents won't stampede your provider: a shared per-model inference pool caps how many requests are in flight to each model across the whole world, and an agent waiting for a slot just sits as data until one frees. Optional per-provider rate limits (requests and tokens per minute) are enforced on top, before every call. [Learn more →](https://leviath.dev/docs/engine)
-
-### Sub-agents and fan-out
-
-Agents spawn children with different blueprints. A **fan-out** stage splits a task into work items, runs one sub-agent worker per item concurrently, and merges the results back into the parent, all in the same process. Any sub-agent, at any depth, can ask the user questions directly. [Learn more →](https://leviath.dev/docs/sub-agents)
+<table>
+<tr>
+<td width="50%" valign="top">
+<b>Structured context memory</b>
+<br><br>
+The window is split into named regions, and you decide what each one drops
+first. Architecture stays pinned, tool results go first, conversation compacts
+into summaries, so a file dump can only crowd out the region it landed in.
+Budgets are percentages of the window, so a blueprint keeps its shape when you
+switch models.
+<br><br>
+<a href="https://leviath.dev/docs/context">Context docs →</a>
+</td>
+<td width="50%" valign="top">
+<b>Multi-stage workflows</b>
+<br><br>
+Each stage gets its own model, tools, and context layout. Run them linearly or
+as a directed graph with conditional transitions, error recovery, and
+LLM-driven routing. A <code>stuck</code> edge escapes a stage that is making no
+progress, and stuckness is measured by the runtime rather than self-reported by
+the model.
+<br><br>
+<a href="https://leviath.dev/docs/stages">Stage docs →</a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<b>Human-in-the-loop</b>
+<br><br>
+<code>lev msg</code> drops a message straight into a running agent's context,
+and the model sees it on its next inference call, so you redirect without
+restarting. <code>interaction_points</code> force a checkpoint to approve,
+revise, or edit the output directly, and <code>ask_user_*</code> tools let the
+agent ask on its own judgment.
+<br><br>
+<a href="https://leviath.dev/docs/interaction">Interaction docs →</a>
+</td>
+<td width="50%" valign="top">
+<b>Sandboxed execution and taint tracking</b>
+<br><br>
+Shell commands run on your machine by default, with nothing extra to install.
+Opt into hardened containers or lighter Linux namespaces per agent or per
+stage, or across the whole world in one config block, and an installed agent
+can tighten its sandbox but never turn one off. Taint tracking (experimental)
+gates exfiltration-capable tool calls before they fire.
+<br><br>
+<a href="https://leviath.dev/docs/security">Security docs →</a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<b>ECS agent engine</b>
+<br><br>
+Agents are entities in a <a href="https://bevyengine.org/">bevy_ecs</a> world,
+so thousands share one process with game-engine-style scheduling instead of
+that many OS processes. They won't stampede your provider either: a shared
+per-model inference pool caps in-flight requests across the world, and an agent
+waiting for a slot just sits as data.
+<br><br>
+<a href="https://leviath.dev/docs/engine">Engine docs →</a>
+</td>
+<td width="50%" valign="top">
+<b>Sub-agents and fan-out</b>
+<br><br>
+Agents spawn children with different blueprints. A fan-out stage splits a task
+into work items, runs one worker per item concurrently, and merges the results
+back into the parent, all in the same process. Any sub-agent, at any depth, can
+ask you questions directly.
+<br><br>
+<a href="https://leviath.dev/docs/sub-agents">Sub-agent docs →</a>
+</td>
+</tr>
+</table>
 
 ## Dashboard
 
@@ -225,7 +274,7 @@ and why you might not want Leviath at all, is on the docs site:
 - **It's not a replacement for Claude Code, Codex, or your favorite coding agent.** Those are polished interactive products at a different layer, and Leviath can even run on top of Claude Code as a transport.
 - **Agents are config, not code.** A Leviath agent is a TOML blueprint plus optional Rhai script tools. If you want to write agent logic in Python or TypeScript against an SDK, other languages drive Leviath through the REST API instead.
 - **Agents execute on one machine.** The daemon hosts every agent in a single process on a single box. You can reach it from anywhere over the REST and WebSocket API, and it can call out through signed webhooks, but there is no hosted service and no scheduling work across several machines.
-- **Isolation is at the data layer, not the process layer.** Every agent has its own state, working directory, tool policy and read-path grants, and a panic fails that agent alone rather than the daemon. What is opt-in is the [OS sandbox](https://leviath.dev/docs/security) that confines shell commands, seed commands and script `shell()` calls. If you need each agent in its own kernel-enforced box by default, that is a different design.
+- **Isolation is at the data layer by default.** Every agent has its own state, working directory, tool policy and read-path grants, and a panic fails that agent alone rather than the daemon. The [OS sandbox](https://leviath.dev/docs/security) is opt-in: one `[sandbox]` block turns it on for the whole world and each agent gets its own container or namespace, which a blueprint may tighten per stage but never loosen. Two limits are worth knowing. There is no way to sandbox a single `lev run` on demand, and the boundary covers what an agent *executes* (shell, seed commands, script `shell()`) rather than file tools, `web_fetch`, or MCP servers, which stay on the host behind workdir confinement. [Widening it](https://github.com/GEMISIS/leviath/issues/326) is the intended end state.
 - **You need a model provider**: an API key, a local Ollama, or the Claude Code transport (with its terms-of-service caveat).
 
 ## CLI
