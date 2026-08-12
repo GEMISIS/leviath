@@ -265,7 +265,7 @@ orchestrators that decide which work happens. Several of those are worth running
 rather than instead of it.
 
 The full breakdown, including what each design buys and costs, when to reach for something else,
-where Leviath falls short of [12-Factor Agents](https://github.com/humanlayer/12-factor-agents),
+a factor-by-factor score against [12-Factor Agents](https://github.com/humanlayer/12-factor-agents),
 and why you might not want Leviath at all, is on the docs site:
 [Where Leviath sits →](https://leviath.dev/docs/comparison)
 
