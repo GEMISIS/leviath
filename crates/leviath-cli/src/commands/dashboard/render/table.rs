@@ -106,7 +106,7 @@ impl Dashboard {
             .collect();
 
         let empty_state_msg: Option<String> = if self.agents.is_empty() {
-            Some("  No agents running. Use `lev run <agent>` to start one.".to_string())
+            Some("  No agents running. Press `n` to start one.".to_string())
         } else if self.display_indices.is_empty() {
             Some(format!("  No agents match \"{}\".", self.list_search_query))
         } else {
@@ -489,6 +489,11 @@ impl Dashboard {
                 Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
             ),
             Span::raw(" detail  "),
+            Span::styled(
+                "[n]",
+                Style::default().fg(C_SUCCESS).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" new run  "),
             Span::styled(
                 "[Tab]",
                 Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),

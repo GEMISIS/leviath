@@ -1,5 +1,6 @@
 //! `lev dash` - Interactive terminal UI for managing concurrent agents.
 
+mod construct;
 mod context_tree;
 mod graph;
 mod graph_layout;
@@ -7,6 +8,7 @@ mod helpers;
 mod history;
 mod input;
 mod mcp;
+mod new_run;
 mod render;
 mod selection;
 mod state;
@@ -174,6 +176,9 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
         // Surface any completed MCP login/test as a toast.
         dashboard.drain_mcp_outcomes();
 
+        // …and any run the new-run screen asked for.
+        dashboard.drain_spawn_outcomes();
+
         // Report what the daemon did with this tick's commands.
         dashboard.drain_daemon_outcomes();
 
@@ -223,6 +228,7 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
         crate::runstate::dashboard_log_path(),
         yank_fn,
         mcp_ctx,
+        new_run::production_new_run_context(),
     );
 
     // Forward the dashboard's control commands to the daemon, and report each
@@ -231,7 +237,11 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
     let daemon_outcome_tx = dashboard
         .take_daemon_outcome_tx()
         .expect("a fresh dashboard has its daemon outcome sender");
-    tokio::spawn(daemon_background_loop(control, cmd_rx, daemon_outcome_tx));
+    tokio::spawn(daemon_background_loop(
+        control.clone(),
+        cmd_rx,
+        daemon_outcome_tx,
+    ));
 
     // Run MCP logins/tests off the UI loop. A freshly-built dashboard always
     // has its background channel ends.
@@ -244,7 +254,18 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
         mcp_outcome_tx,
     ));
 
-    dashboard.add_log("Dashboard started. Use `lev run <agent>` to start an agent.".to_string());
+    // Resolve-and-spawn for the new-run screen, off the UI loop for the same
+    // reason. A freshly-built dashboard always has these ends too.
+    let (spawn_cmd_rx, spawn_outcome_tx) = dashboard
+        .take_spawn_bg_ends()
+        .expect("a fresh dashboard has its spawn background channel ends");
+    tokio::spawn(new_run::spawn_background_loop(
+        control,
+        spawn_cmd_rx,
+        spawn_outcome_tx,
+    ));
+
+    dashboard.add_log("Dashboard started. Press `n` to start an agent.".to_string());
 
     dashboard
 }
