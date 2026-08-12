@@ -158,14 +158,11 @@ fn load_blueprint(
     // reads as a broken agent rather than a stale file. Say which it is.
     let path = Path::new(&args.blueprint_path);
     let stale = || {
-        crate::bundled::stale_install_hint(
+        crate::bundled::stale_install_suffix(
             path,
-            dirs::home_dir()
-                .map(|h| crate::commands::setup::real_agents_dir(Some(&h)))
-                .as_deref(),
+            crate::bundled::real_agents_dir_opt().as_deref(),
+            ". ",
         )
-        .map(|hint| format!(". {hint}"))
-        .unwrap_or_default()
     };
     let mut blueprint = leviath_core::manifest::parse_manifest(&content)
         .map_err(|e| format!("parse manifest: {e}{}", stale()))?;

@@ -210,6 +210,32 @@ pub fn stale_install_hint(manifest_path: &Path, agents_dir: Option<&Path>) -> Op
     ))
 }
 
+/// [`stale_install_hint`] as a suffix ready to append to an error message, or
+/// an empty string when there is nothing to say.
+///
+/// Here rather than at each call site because both callers want the same
+/// "hint or nothing" shape and differ only in how they separate it from the
+/// error: `lev validate` prints a paragraph, the daemon writes one line.
+pub fn stale_install_suffix(
+    manifest_path: &Path,
+    agents_dir: Option<&Path>,
+    separator: &str,
+) -> String {
+    match stale_install_hint(manifest_path, agents_dir) {
+        Some(hint) => format!("{separator}{hint}"),
+        None => String::new(),
+    }
+}
+
+/// The agents directory of the real environment, for a caller that has no test
+/// seam of its own.
+///
+/// `None` when the home directory cannot be resolved, which
+/// [`stale_install_hint`] reads as "nowhere to check" and stays quiet about.
+pub fn real_agents_dir_opt() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| crate::commands::setup::real_agents_dir(Some(&h)))
+}
+
 /// Write one bundled blueprint into `<agents_dir>/<name>/`, replacing whatever
 /// is there.
 ///
@@ -1071,6 +1097,32 @@ write_file = "allow"
     /// Narrow in the same way as the note: it speaks only for the installed
     /// copy, so a blueprint of the user's own is never blamed on a bundled one
     /// that shares its name, and neither is a path with no agents dir to check.
+    /// The suffix form is what both call sites actually use, and the thing that
+    /// must not decorate an error with a blank paragraph when there is no hint.
+    #[test]
+    fn the_suffix_carries_the_hint_or_nothing_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = &BUNDLED_AGENTS[0];
+        install_bundled(agent, dir.path()).unwrap();
+        let manifest = dir.path().join(agent.name).join("agent.leviath");
+
+        // Nothing to say: an empty string, not a separator with nothing after it.
+        assert_eq!(
+            stale_install_suffix(&manifest, Some(dir.path()), "\n\n"),
+            ""
+        );
+
+        std::fs::write(&manifest, "[agent]\nname = \"x\"\n").unwrap();
+        let suffix = stale_install_suffix(&manifest, Some(dir.path()), "\n\n");
+        assert!(suffix.starts_with("\n\n"), "{suffix:?}");
+        assert!(suffix.contains(agent.name), "{suffix:?}");
+        // The daemon writes one line rather than a paragraph, same hint.
+        assert!(
+            stale_install_suffix(&manifest, Some(dir.path()), ". ").starts_with(". "),
+            "the separator is the caller's choice"
+        );
+    }
+
     #[test]
     fn the_hint_stays_quiet_outside_the_installed_copy() {
         let dir = tempfile::tempdir().unwrap();
