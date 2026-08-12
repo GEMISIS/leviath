@@ -46,8 +46,12 @@ panel and answer. `lev respond` does the same from the shell.
 
 ## Keys
 
-The dashboard has two screens, and most keys only work on one of them. Press `?` on either for the
-same list in the app.
+Most keys work on one screen only. Press `?` for the list that applies to where you are, or `F1`
+where `?` would be typed as text: on the new-run screen every printable character goes into the
+filter or the task.
+
+Besides the main list and the detail view below, there is a screen for starting a run (`n`), one for
+MCP servers (`m`), and a stage explorer for branching agents (`g`, from the detail view).
 
 ### Main list
 
@@ -56,6 +60,7 @@ same list in the app.
 | `↑` / `↓` (or `k` / `j`) | Select a run |
 | `Home` / `End` (or `g` / `G`) | Jump to the first / last run |
 | `Enter` | Open detail view |
+| `n` | Start a run: pick an agent, write the task, press Enter |
 | `Tab` | Focus the log panel. Arrows scroll it, `End` resumes tailing, `Esc` comes back |
 | `/` | Filter runs by name or status |
 | `s` | Cycle the sort: start time (default), recent activity, or status groups |
@@ -68,6 +73,27 @@ same list in the app.
 
 By default runs are listed newest first and keep their row for their whole life, so nothing jumps
 around when a run finishes. The sort indicator sits in the table's top-right corner.
+
+### Starting a run (`n`)
+
+Agents on the left, the task on the right. Once it starts, the dashboard opens that run's page, and
+`Esc` from there goes back to the list rather than back into the form.
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Choose an agent. Any letter filters the list; `Backspace` shortens the filter |
+| `Tab` / `Enter` | Move from the agent list to the task |
+| `Enter` (in the task) | Start the run |
+| `Alt+Enter` | Newline, rather than starting the run |
+| `@` | Reference a file from the working directory, with completion |
+| `Ctrl-Y` | Run unattended, so the agent approves its own tool calls |
+| `F1` | Help. `?` types a question mark here |
+| `Esc` | Clear the filter, then close the screen |
+
+`Ctrl-Y` warns the first time you use it in a sitting, and the warning is worth reading: an
+unattended run approves its own file edits and shell commands, but it does **not** skip a checkpoint
+the blueprint asks a person for. Those still stop, and one nobody answers ends the run when the
+interaction timeout expires. The setting is off again every time the screen opens.
 
 ### Detail view
 

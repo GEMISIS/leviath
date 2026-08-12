@@ -374,13 +374,17 @@ See [Human-in-the-loop](/docs/interaction) for what raises these.
 ### Reading `lev ps`
 
 ```
-RUN                             STATUS                  STAGE         ITER   TOOLS  AGE
-solo-1785568852-9fa61fd279dd    waiting: tool approval  work          1      1      41s
-busy-1785568852-384bad04c9ac    active                  work          13824  13824  0s
-waiter-1785568852-7895a2209850  waiting: children(1)    delegate 1/2  2      1      41s
+RUN                             TITLE                  STATUS                  STAGE         ITER   TOOLS  AGE
+solo-1785568852-9fa61fd279dd    Retry backoff audit    waiting: tool approval  work          1      1      41s
+busy-1785568852-384bad04c9ac    Index the changelog    active                  work          13824  13824  0s
+waiter-1785568852-7895a2209850  Split the log sweep    waiting: children(1)    delegate 1/2  2      1      41s
 
 1 run needs an answer: lev respond
 ```
+
+`TITLE` is the [generated one-line title](/docs/configuration#title), and the column appears only
+when at least one listed run has one - a run whose titling was turned off or did not finish leaves
+the cell empty rather than widening every row for nothing.
 
 `AGE` is how long since the run last moved: a new iteration, a new stage, or a change of
 status. It is deliberately not `meta.json`'s `updated_at`, which also advances on a
@@ -594,7 +598,9 @@ per run, each capped at 64 output tokens; `--no-daemon` bills one.
 The interactive [provider](/docs/providers) wizard. Every credential and agent choice it asks for
 has a flag, so headless setup is scriptable. The wizard's Limits screen edits the
 [`[limits]`](/docs/configuration#limits) keys, which have no flags: script those by writing
-`config.toml` directly.
+`config.toml` directly. That screen is opt-in - every limit already has a working default, so it
+only appears once you turn on **Show advanced tuning** on the Defaults screen. Skipping it changes
+nothing about what gets written.
 
 | Flag | Purpose |
 |---|---|
@@ -630,6 +636,8 @@ Inside the wizard, the keys work the same way on every screen:
 | `↑` `↓` (or `k` `j`) | Move between rows |
 | `←` `→` (or `h` `l`) | Cycle a choice or the reasoning effort |
 | Space or Enter | Select the focused row; Enter also opens editors for typed values |
+| Enter on a default | Opens a searchable list of providers or models, with what the choice decides |
+| PgUp / PgDn, Home / End | Scroll a long screen; the selection moves with the view |
 | Enter on `[ Continue ]` | Move to the next screen (the button is the last row) |
 | Tab / Shift-Tab | Next / previous screen |
 | Esc | Previous screen, or cancel an edit or dialog |
@@ -637,7 +645,7 @@ Inside the wizard, the keys work the same way on every screen:
 | `o` | Open the provider's signup page |
 | Ctrl-R | Show or hide credentials |
 | Ctrl-S | Write the config and finish, from anywhere |
-| `?` | Help overlay |
+| `?` or F1 | Help overlay. It scrolls, so a long list is not cut off |
 | `q` / Ctrl-C | Quit without writing. If you changed anything, it asks first |
 
 Nothing is written until you confirm on the Review screen. Leaving the provider screen with
@@ -706,11 +714,11 @@ not something to start because somebody typed `lev update`.
 ```bash
 $ lev update --check
 
-lev 0.3.4, installed with Homebrew (formula leviath-beta, beta channel)
+lev 0.3.5, installed with Homebrew (formula leviath-beta, beta channel)
 
   binary   brew upgrade leviath-beta
   agents   1 of 7 would change
-             coder - update 0.0.1 → 0.0.2
+             data-analyst - update 0.0.1 → 0.0.2
   config   nothing to migrate
 ```
 
