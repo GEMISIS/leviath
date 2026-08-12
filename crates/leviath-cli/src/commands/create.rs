@@ -11,8 +11,9 @@ pub struct CreateArgs {
     #[arg(value_name = "NAME")]
     pub name: String,
 
-    /// Starting template (software-engineer, coder, researcher)
-    #[arg(short, long, default_value = "software-engineer")]
+    /// Starting template: `coder` for the multi-stage shape, anything else for a
+    /// single-stage starting point
+    #[arg(short, long, default_value = "default")]
     pub template: String,
 }
 
@@ -250,7 +251,7 @@ mod tests {
 
     #[test]
     fn default_template_is_valid_toml() {
-        let manifest = create_manifest("test-agent", "software-engineer");
+        let manifest = create_manifest("test-agent", "default");
         let parsed: toml::Value = toml::from_str(&manifest).unwrap();
         let agent = parsed.get("agent").expect("should have [agent] section");
         assert_eq!(agent.get("name").unwrap().as_str().unwrap(), "test-agent");
@@ -266,7 +267,7 @@ mod tests {
         // start of an (invalid) 8-digit-hex unicode escape, breaking every
         // template. Confirmed this exact failure on real Windows CI.
         let name = r"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpmAlPt3\default-template-agent";
-        for template in ["software-engineer", "coder", "researcher"] {
+        for template in ["default", "coder", "researcher"] {
             let manifest = create_manifest(name, template);
             let parsed: toml::Value =
                 toml::from_str(&manifest).expect("template produced invalid TOML");
@@ -278,7 +279,7 @@ mod tests {
     #[test]
     fn name_with_embedded_quote_produces_valid_toml() {
         let name = r#"my"agent"#;
-        let manifest = create_manifest(name, "software-engineer");
+        let manifest = create_manifest(name, "default");
         let parsed: toml::Value = toml::from_str(&manifest).unwrap();
         let agent = parsed.get("agent").unwrap();
         assert_eq!(agent.get("name").unwrap().as_str().unwrap(), name);
@@ -308,7 +309,7 @@ mod tests {
     fn templates_use_percentage_budgets_and_parse_via_manifest() {
         // Every generated template ships percentage budgets and must parse under
         // the real manifest parser (which validates `budget`/`compact_at`).
-        for template in ["software-engineer", "coder", "researcher", "other"] {
+        for template in ["default", "coder", "researcher", "other"] {
             let manifest = create_manifest("pct-agent", template);
             assert!(
                 manifest.contains("budget = \""),
@@ -326,7 +327,7 @@ mod tests {
     #[test]
     fn every_template_satisfies_context_layout_invariants() {
         use leviath_core::RegionKind;
-        for template in ["software-engineer", "coder", "researcher", "other"] {
+        for template in ["default", "coder", "researcher", "other"] {
             let manifest = create_manifest("inv-agent", template);
             let bp = leviath_core::manifest::parse_manifest(&manifest).unwrap();
             let regions = &bp.context_layout.regions;
@@ -425,7 +426,7 @@ mod tests {
 
     #[test]
     fn all_templates_have_context_regions() {
-        for template in &["software-engineer", "coder", "researcher"] {
+        for template in &["default", "coder", "researcher"] {
             let manifest = create_manifest("test", template);
             let parsed: toml::Value = toml::from_str(&manifest).unwrap();
             assert_has_context(template, &parsed);
@@ -469,7 +470,7 @@ mod tests {
         let blueprint_path = dir.path().join("default-template-agent");
         let args = CreateArgs {
             name: blueprint_path.to_str().unwrap().to_string(),
-            template: "software-engineer".to_string(),
+            template: "default".to_string(),
         };
 
         with_tracing(|| execute(args)).await.unwrap();

@@ -1,14 +1,14 @@
 //! The agent blueprints shipped inside the `lev` binary, and the planner that
 //! decides what to do with them.
 //!
-//! Embedding is what makes the ten blueprints under the workspace's `agents/`
+//! Embedding is what makes the blueprints under the workspace's `agents/`
 //! directory reachable outside a git checkout: `lev add` takes a local path,
 //! and an `agents/` directory next to the executable is a layout no real
 //! install has, so without the bundle a user who downloads a release binary
 //! gets a working runtime and zero agents to run on it.
 //!
-//! `build.rs` embeds every file of every blueprint via `include_str!` (23
-//! files, ~170 KB of text) and generates the [`BUNDLED_AGENTS`] table included
+//! `build.rs` embeds every file of every blueprint via `include_str!` and
+//! generates the [`BUNDLED_AGENTS`] table included
 //! below. `lev setup` offers to install them; `lev list` reports them.
 
 include!(concat!(env!("OUT_DIR"), "/bundled_agents.rs"));
@@ -174,6 +174,68 @@ pub fn stale_install_note(
     ))
 }
 
+/// Why an installed bundled blueprint would not load, when the reason is that
+/// it is old rather than that it is wrong.
+///
+/// The twin of [`stale_install_note`], for the path where there is no
+/// [`leviath_core::Blueprint`] to hand because parsing or validation is what
+/// failed. That is exactly when the user most needs to hear it: a graph rule
+/// added after their install turns their copy into "invalid blueprint", which
+/// reads as a bug in the agent rather than as an out-of-date file, and the
+/// version note they would have got on the success path never fires.
+///
+/// Narrow in the same way: the manifest must *be* the installed copy at
+/// `agents_dir/<name>/`, so a blueprint of the user's own is never blamed on a
+/// bundled one that shares its name.
+pub fn stale_install_hint(manifest_path: &Path, agents_dir: Option<&Path>) -> Option<String> {
+    let agents_dir = agents_dir?;
+    let bundled = BUNDLED_AGENTS
+        .iter()
+        .find(|a| manifest_path.starts_with(agents_dir.join(a.name)))?;
+    // Content, not the version field. A blueprint's `version` is authored by
+    // hand and routinely does not move when the file does, so an install can be
+    // months behind while claiming the same number: the two coder blueprints
+    // that started failing here were both `0.0.2`. Comparing bytes is the only
+    // answer that is always right.
+    if matches_bundled(bundled, agents_dir) {
+        // Byte-identical to what this build ships, so age is not the story and
+        // saying otherwise would send the user to reinstall the same file.
+        return None;
+    }
+    Some(format!(
+        "this is the installed copy of the bundled '{}' agent, and it differs from the one this \
+         build ships, so it is most likely out of date rather than broken. Run `lev setup` to \
+         reinstall it, or `lev add <path>` if you meant to keep your own edits.",
+        bundled.name
+    ))
+}
+
+/// [`stale_install_hint`] as a suffix ready to append to an error message, or
+/// an empty string when there is nothing to say.
+///
+/// Here rather than at each call site because both callers want the same
+/// "hint or nothing" shape and differ only in how they separate it from the
+/// error: `lev validate` prints a paragraph, the daemon writes one line.
+pub fn stale_install_suffix(
+    manifest_path: &Path,
+    agents_dir: Option<&Path>,
+    separator: &str,
+) -> String {
+    match stale_install_hint(manifest_path, agents_dir) {
+        Some(hint) => format!("{separator}{hint}"),
+        None => String::new(),
+    }
+}
+
+/// The agents directory of the real environment, for a caller that has no test
+/// seam of its own.
+///
+/// `None` when the home directory cannot be resolved, which
+/// [`stale_install_hint`] reads as "nowhere to check" and stays quiet about.
+pub fn real_agents_dir_opt() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| crate::commands::setup::real_agents_dir(Some(&h)))
+}
+
 /// Write one bundled blueprint into `<agents_dir>/<name>/`, replacing whatever
 /// is there.
 ///
@@ -323,7 +385,7 @@ mod tests {
     /// onward - and it is appended even to a stage's custom `transition_prompt`,
     /// so a blueprint can offer an exit its own prompt never mentions. A run
     /// that takes it finishes with no answer, looking exactly like success.
-    /// That happened to `writing-assistant` while this was being written.
+    /// That happened to a shipped blueprint while this was being written.
     ///
     /// Asserted over whatever is bundled rather than a hard-coded list, so a
     /// new agent is held to it the day it lands.
@@ -534,6 +596,49 @@ mod tests {
                 schema_problems(&validator, &toml_to_json(&parsed)),
                 Vec::<String>::new(),
                 "the schema rejects region kind \"{kind}\", which the parser accepts"
+            );
+        }
+    }
+
+    #[test]
+    fn the_blueprint_schema_accepts_every_transition_condition_the_parser_names() {
+        // The third instance of the same drift: `dead_end` parsed, the
+        // `dead-end-possible` lint told people to write it, and the published
+        // schema's closed enum rejected it. Same trick as the region kinds, for
+        // the same reason: read the list out of the parser's error rather than
+        // restating it here.
+        let err = leviath_core::manifest::parse_manifest(
+            "[agent]\nname = \"a\"\n\n[stages.main.transitions.other]\ncondition = \"whenever\"\n",
+        )
+        .expect_err("an unknown condition is a load error")
+        .to_string();
+        let listed = err
+            .split("(valid:")
+            .nth(1)
+            .expect("the error names the valid conditions")
+            .trim()
+            .trim_end_matches(')')
+            .split(',')
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .collect::<Vec<_>>();
+        assert!(
+            listed.len() > 3,
+            "the error should list every condition: {listed:?}"
+        );
+
+        let schema: serde_json::Value =
+            serde_json::from_str(BLUEPRINT_SCHEMA).expect("the schema is valid JSON");
+        let validator = jsonschema::validator_for(&schema).expect("the schema compiles");
+        for condition in listed {
+            let manifest = format!(
+                "[agent]\nname = \"a\"\n\n[stages.main.transitions.other]\ncondition = \"{condition}\"\n"
+            );
+            let parsed: toml::Value = toml::from_str(&manifest).expect("valid TOML");
+            assert_eq!(
+                schema_problems(&validator, &toml_to_json(&parsed)),
+                Vec::<String>::new(),
+                "the schema rejects condition \"{condition}\", which the parser accepts"
             );
         }
     }
@@ -960,6 +1065,88 @@ write_file = "allow"
             .expect("the bundled agent is in the plan")
             .1
             .clone()
+    }
+
+    // ─── stale_install_hint ─────────────────────────────────────────────────
+
+    /// The report that prompted this: a user on alpha whose installed `coder`
+    /// stopped loading, with an error about graph shape and nothing saying the
+    /// file was simply old. A blueprint that predates a graph rule fails in a
+    /// way that reads as a broken agent rather than an out-of-date one.
+    #[test]
+    fn an_installed_agent_that_will_not_load_is_named_as_out_of_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = &BUNDLED_AGENTS[0];
+        install_bundled(agent, dir.path()).unwrap();
+        let manifest = dir.path().join(agent.name).join("agent.leviath");
+
+        // Byte-identical to what this build ships: age is not the story, and
+        // sending the user to reinstall the same file would waste their time.
+        assert_eq!(stale_install_hint(&manifest, Some(dir.path())), None);
+
+        // Any difference is enough. The version field is deliberately not
+        // consulted, because it routinely does not move when the file does:
+        // both coder blueprints in the report were `0.0.2`.
+        std::fs::write(&manifest, "[agent]\nname = \"x\"\nversion = \"0.0.2\"\n").unwrap();
+        let hint =
+            stale_install_hint(&manifest, Some(dir.path())).expect("a changed copy is named");
+        assert!(hint.contains(agent.name), "{hint}");
+        assert!(hint.contains("lev setup"), "{hint}");
+    }
+
+    /// Narrow in the same way as the note: it speaks only for the installed
+    /// copy, so a blueprint of the user's own is never blamed on a bundled one
+    /// that shares its name, and neither is a path with no agents dir to check.
+    /// The suffix form is what both call sites actually use, and the thing that
+    /// must not decorate an error with a blank paragraph when there is no hint.
+    #[test]
+    fn the_suffix_carries_the_hint_or_nothing_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = &BUNDLED_AGENTS[0];
+        install_bundled(agent, dir.path()).unwrap();
+        let manifest = dir.path().join(agent.name).join("agent.leviath");
+
+        // Nothing to say: an empty string, not a separator with nothing after it.
+        assert_eq!(
+            stale_install_suffix(&manifest, Some(dir.path()), "\n\n"),
+            ""
+        );
+
+        std::fs::write(&manifest, "[agent]\nname = \"x\"\n").unwrap();
+        let suffix = stale_install_suffix(&manifest, Some(dir.path()), "\n\n");
+        assert!(suffix.starts_with("\n\n"), "{suffix:?}");
+        assert!(suffix.contains(agent.name), "{suffix:?}");
+        // The daemon writes one line rather than a paragraph, same hint.
+        assert!(
+            stale_install_suffix(&manifest, Some(dir.path()), ". ").starts_with(". "),
+            "the separator is the caller's choice"
+        );
+    }
+
+    #[test]
+    fn the_hint_stays_quiet_outside_the_installed_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = &BUNDLED_AGENTS[0];
+        install_bundled(agent, dir.path()).unwrap();
+
+        let elsewhere = dir.path().join("elsewhere").join(agent.name);
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let mine = elsewhere.join("agent.leviath");
+        std::fs::write(&mine, "[agent]\nname = \"mine\"\n").unwrap();
+        assert_eq!(stale_install_hint(&mine, Some(dir.path())), None);
+
+        // A name no bundled agent has, inside the agents dir.
+        let other = dir.path().join("not-a-bundled-agent");
+        std::fs::create_dir_all(&other).unwrap();
+        let manifest = other.join("agent.leviath");
+        std::fs::write(&manifest, "[agent]\nname = \"other\"\n").unwrap();
+        assert_eq!(stale_install_hint(&manifest, Some(dir.path())), None);
+
+        // And with nowhere to look, it says nothing rather than guessing.
+        assert_eq!(
+            stale_install_hint(&dir.path().join(agent.name).join("agent.leviath"), None),
+            None
+        );
     }
 
     // ─── stale_install_note ─────────────────────────────────────────────────

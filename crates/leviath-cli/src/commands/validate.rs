@@ -134,20 +134,27 @@ struct CheckedManifest {
     agent_dir: PathBuf,
 }
 
-fn check_manifest(path: &std::path::Path) -> Result<CheckedManifest, ManifestCheckError> {
-    // Resolve manifest path
-    let manifest_path = if path.is_file() {
+/// The manifest a validate target names: the file itself, or the `agent.leviath`
+/// inside a directory.
+///
+/// Pure, and shared by [`check_manifest`] and the stale-install suffix, so both
+/// resolve a target the same way. Says nothing about whether the file exists.
+fn manifest_path_for(path: &std::path::Path) -> std::path::PathBuf {
+    if path.is_file() {
         path.to_path_buf()
     } else {
-        let p = path.join("agent.leviath");
-        if !p.exists() {
-            return Err(ManifestCheckError::Io(anyhow::anyhow!(
-                "No agent.leviath found at {}",
-                path.display()
-            )));
-        }
-        p
-    };
+        path.join("agent.leviath")
+    }
+}
+
+fn check_manifest(path: &std::path::Path) -> Result<CheckedManifest, ManifestCheckError> {
+    let manifest_path = manifest_path_for(path);
+    if !manifest_path.exists() {
+        return Err(ManifestCheckError::Io(anyhow::anyhow!(
+            "No agent.leviath found at {}",
+            path.display()
+        )));
+    }
 
     let content = std::fs::read_to_string(&manifest_path).map_err(|e| {
         ManifestCheckError::Io(anyhow::anyhow!(
@@ -393,10 +400,22 @@ fn print_script_tool_report(path: &std::path::Path) {
 /// Run `lev validate`: check a blueprint and print what is wrong with it.
 pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
     let config = crate::config::Config::load().ok();
+    // Appended to a load failure, and only when the file is an installed copy
+    // of a bundled agent this build ships a different version of. Then the
+    // answer is "reinstall it", not "debug your graph".
+    let stale = || {
+        crate::bundled::stale_install_suffix(
+            &manifest_path_for(std::path::Path::new(&args.path)),
+            crate::bundled::real_agents_dir_opt().as_deref(),
+            "\n\n",
+        )
+    };
     match execute_reporting_outcome(&args, config.as_ref())? {
         ValidateOutcome::Success => Ok(()),
-        ValidateOutcome::ParseError(e) => anyhow::bail!("✗ Parse error: {}", e),
-        ValidateOutcome::ValidationError(e) => anyhow::bail!("✗ Validation failed: {}", e),
+        ValidateOutcome::ParseError(e) => anyhow::bail!("✗ Parse error: {}{}", e, stale()),
+        ValidateOutcome::ValidationError(e) => {
+            anyhow::bail!("✗ Validation failed: {}{}", e, stale())
+        }
         ValidateOutcome::LintFailed { errors, warnings } => {
             anyhow::bail!(lint_failure_message(errors, warnings, args.deny_warnings))
         }

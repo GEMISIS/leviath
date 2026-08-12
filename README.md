@@ -31,7 +31,7 @@ Give a model one flat list of messages and a single big file read pushes your sy
 
 Use it for:
 
-- **Agents beyond coding**: research, log analysis, daily briefings, and writing all ship [out of the box](#pre-built-agents)
+- **Agents beyond coding**: research, code review, log analysis, and data gathering all ship [out of the box](#pre-built-agents)
 - **Long tasks that stay coherent**: [context regions](#features) instead of a flat transcript
 - **Agents you drive from anything that speaks HTTP**: a [REST + WebSocket API](#api-server) with webhooks, backed by an always-on daemon
 - **Headless agents inside any [Agent Client Protocol](#agent-client-protocol) host**
@@ -149,15 +149,15 @@ This writes an `agent.leviath` config you can customize: models per stage, conte
 
 ## Pre-built Agents
 
-Ten agents ship out of the box, each a multi-stage directed graph with structured context regions, per-stage model fallback, and error recovery. In the graphs below, diamonds are LLM-routed or human-in-the-loop decisions, and dotted edges fire automatically on a runtime condition (like the `stuck` detector) rather than by the agent's choice.
+Seven agents ship out of the box, each a multi-stage directed graph with structured context regions, per-stage model fallback, and error recovery. Five of them fan out, covering several things at once instead of one after another. In the graphs below, diamonds are LLM-routed or human-in-the-loop decisions, and dotted edges fire automatically on a runtime condition (like the `stuck` detector) rather than by the agent's choice.
 
 <table>
 <tr><th align="left">Agent</th><th align="left">Workflow</th></tr>
 <tr>
-<td valign="middle" width="30%"><b>software-engineer</b><br>Full coding workflow: codebase discovery, human-approved planning, an optional prototype spike, stuck detection</td>
+<td valign="middle" width="30%"><b>coder</b><br>Full coding workflow: codebase discovery, planning you sign off on, an optional prototype spike, stuck detection, and a review loop</td>
 <td><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/software-engineer-dark.svg">
-  <img src="docs/assets/agents/software-engineer.svg" alt="software-engineer workflow graph">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/coder-dark.svg">
+  <img src="docs/assets/agents/coder.svg" alt="coder workflow graph">
 </picture></td>
 </tr>
 <tr>
@@ -177,19 +177,12 @@ Ten agents ship out of the box, each a multi-stage directed graph with structure
 </table>
 
 <details>
-<summary><b>The other seven</b>: coder, reviewer, data-analyst, researcher, log-analyzer, daily-briefer, writing-assistant</summary>
+<summary><b>The other four</b>: reviewer, data-analyst, researcher, log-analyzer</summary>
 
 <br/>
 
 <table>
 <tr><th align="left">Agent</th><th align="left">Workflow</th></tr>
-<tr>
-<td valign="middle" width="30%"><b>coder</b><br>Focused implementation with discovery, an optional prototype spike, stuck detection, and a review loop</td>
-<td><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/coder-dark.svg">
-  <img src="docs/assets/agents/coder.svg" alt="coder workflow graph">
-</picture></td>
-</tr>
 <tr>
 <td valign="middle" width="30%"><b>reviewer</b><br>Code review and audit, grounded in a discovery pass; read-only</td>
 <td><picture>
@@ -216,20 +209,6 @@ Ten agents ship out of the box, each a multi-stage directed graph with structure
 <td><picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/log-analyzer-dark.svg">
   <img src="docs/assets/agents/log-analyzer.svg" alt="log-analyzer workflow graph">
-</picture></td>
-</tr>
-<tr>
-<td valign="middle" width="30%"><b>daily-briefer</b><br>Morning summaries from local and web sources</td>
-<td><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/daily-briefer-dark.svg">
-  <img src="docs/assets/agents/daily-briefer.svg" alt="daily-briefer workflow graph">
-</picture></td>
-</tr>
-<tr>
-<td valign="middle" width="30%"><b>writing-assistant</b><br>Research-backed writing with an interactive outline checkpoint and a draft⇄edit loop</td>
-<td><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/writing-assistant-dark.svg">
-  <img src="docs/assets/agents/writing-assistant.svg" alt="writing-assistant workflow graph">
 </picture></td>
 </tr>
 </table>

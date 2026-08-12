@@ -1,10 +1,11 @@
 flowchart LR
-    scope(scope)
+    scope{{scope}}
     split(split)
     gather_worker(gather worker)
     build(build)
     present(present)
     scope --> split
+    scope --> build
     split ==>|×4 workers| gather_worker
     gather_worker ==>|merge| build
     build --> present

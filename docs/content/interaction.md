@@ -118,7 +118,7 @@ defaults = true                # ship the read-only verb list, on unless you say
 tools = ["read_files"]
 shell = ["cargo test", "rg"]   # `cargo test` never covers `cargo publish`
 
-[agent_safe_commands.software-engineer]
+[agent_safe_commands.coder]
 shell = ["./gradlew"]
 allow_blueprint = true         # honour this agent's own [safe_commands] block
 ```
@@ -216,8 +216,9 @@ loop keeps regenerating from scratch and your edits are lost each time.
 `unattended` decides what the point does in a `--yolo` run. The default, `auto_approve`, resolves it
 as approved without opening a prompt: nobody is watching, and a checkpoint that waited would park
 the run. Set it to `ask` for a gate whose whole purpose is a human decision, such as a plan signed
-off before any code is written. The prompt then opens even under `--yolo`. The shipped
-`software-engineer` agent does exactly that for its plan approval. Give a run like that an
+off before any code is written. The prompt then opens even under `--yolo`. The bundled `coder`
+leaves its plan checkpoint on the default, so an unattended run proceeds; set `ask` on your own
+blueprint when the decision genuinely cannot be made without you. Give a run like that an
 [`interaction_timeout_secs`](/docs/configuration#limits), so an unanswered gate releases on its own
 terms instead of waiting for ever.
 

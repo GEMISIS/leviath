@@ -61,7 +61,7 @@ not stop for somebody who is not there.
 Two things still hold it. A stage keeps whatever it lists in
 [`required_tools`](/docs/tools#these-tools-need-someone-there), and an
 [interaction point](/docs/interaction#interaction-points) declaring `unattended = "ask"` opens its
-prompt however the run was launched. The shipped `software-engineer` does exactly that for its plan
+prompt however the run was launched. A blueprint can ask for that on its plan
 approval, because everything after that gate writes code. `lev run --yolo` prints what will hold
 before the run starts, and `lev validate` reports it as `holds-under-yolo`.
 
@@ -146,7 +146,7 @@ Scaffold a new [blueprint](/docs/agents) directory.
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `-t`, `--template <NAME>` | `software-engineer` | Starting template: `software-engineer`, `coder`, or `researcher` |
+| `-t`, `--template <NAME>` | `default` | Starting template. `coder` scaffolds the multi-stage shape; anything else gives a single-stage starting point |
 
 ### `lev validate [PATH]`
 

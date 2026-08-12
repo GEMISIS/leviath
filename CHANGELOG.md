@@ -13,6 +13,37 @@ same list.
 
 ## Unreleased
 
+- Changed: the bundled set is seven agents, not ten (#395). `software-engineer`
+  merged into `coder`, which keeps the plan checkpoint and the discovery pass
+  that grounds it; `writing-assistant` and `daily-briefer` are gone. **If you
+  used any of the three, `lev setup` will not reinstall them: copy the blueprint
+  out of an older release first, or keep the copy already in
+  `~/.leviath/agents/` and it will keep running.** Two deliberate behaviour
+  choices in the merge, both so `coder` stays usable unattended: its plan
+  checkpoint resolves as approved under `--yolo` rather than parking the run,
+  and its blocking tools are no longer in `required_tools`. Both are one line to
+  reverse in your own copy.
+- New: five of the seven agents fan out, covering several things at once instead
+  of one after another (#395). `deep-researcher` and `wide-researcher` split
+  into sub-questions and threads and run each as a full `researcher` sub-agent,
+  so a thread gets its own clean context window rather than a share of the
+  parent's; `reviewer` splits over files and hunk groups, `log-analyzer` over log
+  files. Each keeps a direct edge for the narrow case, so one log file or a
+  two-file diff does not pay for a fan-out it does not need.
+- Fixed: an installed agent that will not load now says whether it is simply out
+  of date (#395). A blueprint installed before a graph rule existed fails that
+  rule, and the run reported `invalid blueprint` with nothing to suggest the
+  file was old rather than wrong, which is what an alpha user hit on `coder`.
+  Both `lev validate` and the spawn path now name it as the installed copy of a
+  bundled agent and point at `lev setup`. The check compares the bytes on disk
+  with the bundled ones rather than the `version` field, which routinely does
+  not move when a blueprint does.
+- Fixed: `condition = "dead_end"` is in the published blueprint schema (#395).
+  The parser accepted it and the `dead-end-possible` lint recommended writing
+  it, while the schema Leviath publishes rejected it, so a blueprint following
+  that advice failed to validate against the file it is told to validate
+  against.
+
 - New: `GET /api/agents/{id}/stages` serves a run's per-stage ledger - what each
   stage cost, the cache read/write split, `region_tokens`, and whether the stage
   was entered at all (#388). It was the one thing the runtime records per run

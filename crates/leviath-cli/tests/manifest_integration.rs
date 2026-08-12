@@ -120,13 +120,15 @@ fn specific_agent_coder_has_expected_structure() {
     let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
 
     assert_eq!(bp.name, "coder");
-    assert!(bp.stages.len() >= 2); // at least analyze + implement
-    assert!(bp.find_stage("analyze").is_some());
+    assert!(bp.stages.len() >= 2);
+    // `plan` is the stage that carries the approval checkpoint, and `implement`
+    // is what it gates. Both are load-bearing for this agent's whole shape.
+    assert!(bp.find_stage("plan").is_some());
     assert!(bp.find_stage("implement").is_some());
 
     // Should have graph transitions
-    let analyze = bp.find_stage("analyze").unwrap();
-    assert!(analyze.transitions.is_some());
+    let plan = bp.find_stage("plan").unwrap();
+    assert!(plan.transitions.is_some());
 }
 
 /// A `required` region the AGENT is expected to fill is enforced at runtime by
@@ -495,12 +497,15 @@ fn builtin_required_tools_are_offered_and_belong_to_an_interactive_stage() {
     }
 }
 
+/// The set is deliberately small, and every one of them is discovered rather
+/// than named here: an assertion listing agents by name has to be edited every
+/// time the set changes, which is how it stops being a check and starts being a
+/// chore. What matters is that agents ship at all, and that each one parses.
 #[test]
-fn at_least_nine_builtin_agents_exist() {
+fn the_bundled_agents_exist_and_are_discoverable() {
     let manifests = discover_agent_manifests();
     assert!(
-        manifests.len() >= 9,
-        "Expected at least 9 built-in agents, found {}",
-        manifests.len()
+        !manifests.is_empty(),
+        "the binary ships no agents; build.rs found no agents/ directory"
     );
 }

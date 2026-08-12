@@ -1,6 +1,6 @@
 [agent]
 name = "deep-researcher"
-version = "0.0.2"
+version = "0.1.0"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 entry_stage = "gather"
 
@@ -47,8 +47,12 @@ web_fetch  = "sources"
 read_file  = "sources"
 list_dir   = "sources"
 
+[stages.gather.transitions.investigate]
+hint = "The topic breaks into sub-questions worth researching separately"
+transform = "direct"
+
 [stages.gather.transitions.analyze]
-hint = "Enough primary sources gathered for meaningful analysis"
+hint = "Enough primary sources gathered, and the topic is one question rather than several"
 transform = "direct"
 
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
@@ -61,6 +65,59 @@ transform = "compact"
 [stages.gather.transitions.error_recovery]
 condition = "error"
 transform = "direct"
+
+# ─── Stage 2: Investigate (fan out) ──────────────────────────────────────────
+# A thorough investigation is usually several questions wearing one coat. This
+# runs them at the same time, each as a full `researcher` run with its own clean
+# context, instead of walking them one after another through this agent's.
+#
+# `researcher` is a separate installed blueprint. `lev setup` installs the
+# bundled set together, so it is there in the normal case; installing this agent
+# on its own leaves the workers with nothing to run, and
+# `on_worker_failure = "continue"` means the run reports that rather than dying.
+[stages.investigate]
+mode = "fan_out"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Research each sub-question of the topic in parallel"
+available_tools = []
+max_iterations = 4
+# investigate to error_recovery and back is a cycle, so it needs a ceiling.
+max_revisits = 1
+worker_agent = "researcher"
+merge_stage = "analyze"
+max_workers = 4
+# Where the workers' findings land, and the budget their shares divide.
+results_region = "sub_findings"
+# A ceiling on sub-questions, not just on concurrency. Past this each worker's
+# share of the region is too small to carry a usable answer.
+max_items = 8
+on_worker_failure = "continue"
+split_prompt = """
+Split the topic in `query` into sub-questions that can be researched
+independently, one work item each, using what `sources` has already turned up to
+decide where the real questions are.
+
+Output ONLY a JSON array, starting with '[' and ending with ']'. No prose, no
+markdown fences. Each item:
+
+[{"id": "<short-slug>", "context": {"question": "<the sub-question>", "why": "<what this settles for the wider topic>"}}]
+
+Every item MUST carry enough to work from alone: a worker is a separate agent
+and does not share this run's context, so the work item is all it gets. Name the
+question precisely enough that two workers cannot answer the same one.
+
+Prefer a handful of substantial questions over many thin ones. One question is
+fine for a narrow topic.
+"""
+
+[stages.investigate.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# Un-exhaustible escape (lint: dead-end-possible).
+[stages.investigate.transitions.synthesize]
+hint = "Analysis is out of revisits - synthesize from what came back"
+transform = "compact"
 
 # ─── Stage 2: Analyze ─────────────────────────────────────────────────────────
 # Three open edges: more breadth (gather), chase a specific citation
@@ -241,6 +298,9 @@ format         = { kind = "pinned", budget = "1%", max_tokens = 500, seed = { li
 sources        = { kind = "temporary",      budget = "30%", max_tokens = 50000 }
 claims         = { kind = "sliding_window", max_items = 40, budget = "8%", max_tokens = 9000 }
 contradictions = { kind = "clearable",      budget = "3%", max_tokens = 3000 }
+# What the parallel researcher workers hand back, one entry each. Pinned: the
+# analysis stage reads it directly and it is the point of the fan-out.
+sub_findings   = { kind = "pinned", budget = "20%", max_tokens = 30000 }
 analysis         = { kind = "compacting",      budget = "30%", compact_at = "80%", threshold_tokens = 30000, max_tokens = 40000 }
 analysis_history = { kind = "compact_history", source_region = "analysis", budget = "3%", max_tokens = 15000 }
 

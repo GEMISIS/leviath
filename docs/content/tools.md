@@ -209,8 +209,8 @@ network at all.
 keyless Wikipedia search that needs no configuration. `web_fetch` truncates large pages, and a
 blocked or oversized request comes back as a diagnostic rather than failing the run.
 
-Both ship with `researcher`, `deep-researcher`, `wide-researcher`, `daily-briefer`, and
-`writing-assistant`. To give another agent web access, copy them into that agent's `tools/`
+Both ship with `data-analyst`, `researcher`, `deep-researcher`, and `wide-researcher`. To give
+another agent web access, copy them into that agent's `tools/`
 directory, or drop them in `~/.leviath/tools/` to offer them to every agent.
 
 > [!IMPORTANT]

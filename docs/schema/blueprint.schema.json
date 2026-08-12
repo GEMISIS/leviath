@@ -448,7 +448,7 @@
         },
         "condition": {
           "description": "An unrecognised value is a hard parse error.",
-          "enum": ["always", "llm_choice", "error", "max_iterations", "stuck"]
+          "enum": ["always", "llm_choice", "error", "max_iterations", "stuck", "dead_end"]
         },
         "transform": {
           "description": "What happens to context on this edge. `custom` reads transform_config. Anything else is a hard parse error rather than a silent downgrade to `direct`.",
