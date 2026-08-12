@@ -296,18 +296,25 @@ fn replace_pin(line: &str, new: &str) -> String {
     format!("{before}version = \"{new}\"{tail}")
 }
 
-/// Roll `## Unreleased` under a dated heading and open a fresh empty one.
+/// Rename `## Unreleased` to a dated heading for this version.
 ///
 /// The entries themselves are left untouched: what was accumulating under
 /// `## Unreleased` is exactly what this version ships.
+///
+/// No fresh `## Unreleased` is opened behind it. leviath.dev reads this file to
+/// build its release notes and rejects a section with no entries, so a bump
+/// that left an empty heading failed the docs check on its own release PR - and
+/// the failure landed on whoever cut the release, for a heading they did not
+/// write. The next person to write an entry adds the heading back, which the
+/// error below asks for by name.
 pub fn roll_changelog(changelog: &str, version: &str, date: &str) -> Result<String> {
     anyhow::ensure!(
         changelog.contains("\n## Unreleased\n"),
-        "no `## Unreleased` heading in {CHANGELOG} - add one before bumping"
+        "no `## Unreleased` heading in {CHANGELOG} - add one, with the entries this version ships, before bumping"
     );
     Ok(changelog.replacen(
         "\n## Unreleased\n",
-        &format!("\n## Unreleased\n\n## {version} - {date}\n"),
+        &format!("\n## {version} - {date}\n"),
         1,
     ))
 }
@@ -870,14 +877,18 @@ mod tests {
     // ── Changelog ─────────────────────────────────────────────────────────────
 
     #[test]
-    fn roll_changelog_inserts_a_dated_heading_below_a_fresh_unreleased() {
+    fn roll_changelog_dates_the_unreleased_heading_and_leaves_no_empty_one() {
         let rolled = roll_changelog(
             "# Changelog\n\n## Unreleased\n\n- did a thing\n\n## 0.1.1 - 2026-07-31\n",
             "0.1.2",
             "2026-08-02",
         )
         .unwrap();
-        assert!(rolled.contains("## Unreleased\n\n## 0.1.2 - 2026-08-02\n\n- did a thing"));
+        assert!(rolled.contains("## 0.1.2 - 2026-08-02\n\n- did a thing"));
+        assert!(
+            !rolled.contains("## Unreleased"),
+            "an empty Unreleased fails the site's changelog check: {rolled}"
+        );
         assert!(rolled.contains("## 0.1.1 - 2026-07-31"), "history is kept");
     }
 

@@ -11,8 +11,6 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
-## Unreleased
-
 ## 0.3.4 - 2026-08-12
 
 - Changed: the bundled set is seven agents, not ten (#395). `software-engineer`
