@@ -393,10 +393,31 @@ fn print_script_tool_report(path: &std::path::Path) {
 /// Run `lev validate`: check a blueprint and print what is wrong with it.
 pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
     let config = crate::config::Config::load().ok();
+    // Appended to a load failure, and only when the file is an installed copy
+    // of a bundled agent this build ships a different version of. Then the
+    // answer is "reinstall it", not "debug your graph".
+    let stale = || {
+        let path = std::path::Path::new(&args.path);
+        let manifest = if path.is_file() {
+            path.to_path_buf()
+        } else {
+            path.join("agent.leviath")
+        };
+        crate::bundled::stale_install_hint(
+            &manifest,
+            dirs::home_dir()
+                .map(|h| crate::commands::setup::real_agents_dir(Some(&h)))
+                .as_deref(),
+        )
+        .map(|hint| format!("\n\n{hint}"))
+        .unwrap_or_default()
+    };
     match execute_reporting_outcome(&args, config.as_ref())? {
         ValidateOutcome::Success => Ok(()),
-        ValidateOutcome::ParseError(e) => anyhow::bail!("✗ Parse error: {}", e),
-        ValidateOutcome::ValidationError(e) => anyhow::bail!("✗ Validation failed: {}", e),
+        ValidateOutcome::ParseError(e) => anyhow::bail!("✗ Parse error: {}{}", e, stale()),
+        ValidateOutcome::ValidationError(e) => {
+            anyhow::bail!("✗ Validation failed: {}{}", e, stale())
+        }
         ValidateOutcome::LintFailed { errors, warnings } => {
             anyhow::bail!(lint_failure_message(errors, warnings, args.deny_warnings))
         }

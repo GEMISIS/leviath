@@ -1,26 +1,23 @@
 [agent]
 name = "coder"
-version = "0.0.2"
-description = "Multi-stage coding agent - discover, analyze, optionally prototype, implement, and review, with stuck detection and graph-based error recovery"
+version = "0.1.0"
+description = "Coding agent: discover the repo, plan with your sign-off, optionally spike, implement, and review, with stuck detection and graph-based recovery"
 entry_stage = "discover"
 
-# Model selection is an ordered fallback list per stage: the first provider
-# configured at runtime wins. Anthropic first, then OpenAI, then a local Ollama
-# model as a last resort. `allow_user_default` (on by default) still lets the
-# user's configured default model catch anything unlisted.
-
-# Global tool permissions: write/exec require approval unless overridden.
+# Global tool permissions for this agent: write tools require approval by default.
+# Use `lev run default --yolo` to skip all approvals, or `--allow bash` for selective override.
 [tool_permissions]
-read_file  = "allow"
-list_dir   = "allow"
+read_file = "allow"
+list_dir  = "allow"
 write_file = "ask"
 edit_file  = "ask"
 bash       = "ask"
 
-# ─── Stage 1: Discover ────────────────────────────────────────────────────────
-# Orient before acting: map the codebase and synthesize the verification
-# workflow the later stages must follow. Cheap model, hard iteration cap, and a
-# single non-error edge so the runtime auto-follows it without a routing call.
+# ─── Stage 1: Discover ───────────────────────────────────────────────────────
+# Orient before planning: map the codebase and synthesize the verification
+# workflow the later stages must follow. Runs before the human sees anything, so
+# the plan they approve is grounded in what this repo actually is. Cheap model,
+# hard iteration cap, and a single non-error edge (auto-followed, no routing call).
 [stages.discover]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -29,13 +26,13 @@ available_tools = ["read_file", "list_dir", "bash", "context_write"]
 max_iterations = 8
 max_revisits = 2
 system_prompt = """
-Before any code is written, answer two questions about THIS repository:
-what is it, and how do I verify my work in it? Do not plan or edit here.
+Before any planning, answer two questions about THIS repository: what is it, and
+how do I verify work in it? Do not plan or edit here.
 
 Start from what you already have - do not rediscover it:
 - `repo_files` holds the tracked file list (empty if this isn't a git repo).
-- `conventions` and `architecture` are pre-loaded with the project's style/lint
-  rules and design docs.
+- `architecture` is pre-loaded with design docs, `constraints` with any
+  caller-supplied limits.
 - If `.leviath/discovery.md`, `CLAUDE.md`, `AGENTS.md` or
   `.github/copilot-instructions.md` exist, read them and treat them as
   authoritative - they were written for exactly this purpose.
@@ -44,6 +41,14 @@ Then fill the gaps with list_dir/read_file, and use bash ONLY to interrogate the
 build/test tooling read-only (e.g. `pytest --collect-only -q`, `cargo test
 --list`, `npm run`). Do not modify anything. You have few iterations - spend
 them on the area the task touches, not a full tour.
+
+This stage does not build the deliverable. If you find yourself creating the
+thing the task asked for, stop - that is `implement`'s job, and doing it here
+means the plan gets written against work you have already done rather than
+against the repository. If a scratch file is genuinely unavoidable to answer a
+question about the tooling, delete it before you finish, and say in `discovery`
+what you created and that you removed it. A file left behind reads to every
+later stage as pre-existing code.
 
 Write `discovery` (context_write) covering:
 - language, build system, and how to build
@@ -55,12 +60,11 @@ Write `discovery` (context_write) covering:
 Then classify the project into exactly one tier and write `workflow`
 (context_write) with the tier, the concrete commands, and the completion bar:
 
-- TIER 1 - no tests, no CI, nothing to verify against. The implement stage must
-  BUILD its own verification: name the smoke test or assertion it should write,
-  and how to run it. Say plainly that there is no baseline to compare against.
+- TIER 1 - no tests, no CI, nothing to verify against. The plan must include
+  BUILDING verification: name the smoke test or assertion to write, and how to
+  run it. Say plainly that there is no baseline to compare against.
 - TIER 2 - some tests exist but coverage is patchy. Name the tests that already
-  cover the area being changed, and the gap the implement stage should fill with
-  a new test.
+  cover the area being changed, and the gap a new test should fill.
 - TIER 3 - rich test suite. Name the exact subset to run for this task (a full
   suite run per edit is too slow) and the full-suite command for the final pass.
 
@@ -82,7 +86,7 @@ read_file = "codebase"
 list_dir  = "codebase"
 bash      = "scratch"
 
-[stages.discover.transitions.analyze]
+[stages.discover.transitions.plan]
 hint = "Codebase mapped and verification workflow synthesized"
 transform = "direct"
 
@@ -90,88 +94,174 @@ transform = "direct"
 condition = "error"
 transform = "direct"
 
-# ─── Stage 2: Analyze ─────────────────────────────────────────────────────────
-[stages.analyze]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
-description = "Understand requirements and plan the implementation"
-available_tools = ["read_file", "list_dir"]
-max_iterations = 15
-# The prototype back-edge makes analyze re-enterable, so it needs a revisit cap.
-max_revisits = 2
-# Two Always edges out of analyze put it in the LLM-choice lane, so this prompt
-# is what decides whether a task detours through `prototype`. Most tasks should
-# not - the spike is for when the APPROACH is genuinely unknown.
-transition_prompt = """
-Plan ready. Choose where to go next:
-- Respond with `prototype` when the APPROACH is uncertain - you are not sure the
-  API/library/algorithm behaves the way the plan assumes, or you could not pin
-  down where the behavior you need to change actually lives. A ten-line spike
-  settles that far more cheaply than discovering it forty edits into `implement`.
-- Respond with `implement` when the plan is a straightforward application of a
-  pattern that already exists in this codebase, or `discovery` already told you
-  where the change belongs.
+[stages.discover.transitions.summary]
+condition = "dead_end"
+# Taken only when every other way out is revisit-exhausted, so it is never a
+# route the model can pick early. Without it the run errors as dead-ended and
+# the work done so far is lost; with it the run still hands back an answer.
 
-Prototyping is not free - only take it when you expect to learn something that
-would change what you write.
+# ─── Stage 2: Plan ───────────────────────────────────────────────────────────
+# Read-only exploration culminating in a structured plan.
+# The user is shown the plan and must approve, request revisions, or add detail.
+
+[stages.plan]
+mode = "interactive_points"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Explore the codebase and produce a step-by-step implementation plan"
+available_tools = ["read_file", "list_dir", "ask_user_text", "ask_user_choice", "edit_document"]
+# Attended, planning is where this agent most wants its user, and all three of
+# these are available above. They are deliberately NOT in required_tools: an
+# unattended run drops them with the rest of the blocking tools, so `--yolo`
+# plans and proceeds instead of parking on a question nobody is there to
+# answer. Put them back if you would rather an unattended run stop and wait.
+required_tools = []
+max_iterations = 20
+max_revisits = 6
+# "Abort" is handled deterministically by the engine (see abort_options on the
+# plan_approval interaction point), so allow_complete is not required here - and
+# leaving it on let a model end the whole run from `plan`.
+#
+# That is not hypothetical: a model that had created a file during `discover`
+# (which has `bash`) read it back here, concluded "already created and verified
+# in the previous step - no further action is needed", and completed. The user's
+# correction to the plan was applied to the document and then ignored, because
+# the model had already decided there was nothing to do. `implement` never ran.
+#
+# Planning is not a place a run should be able to end. Every edge out of here
+# goes to `prototype`, `implement` or back to `discover`; the abort path is the
+# engine's, not the model's.
+allow_complete = false
+transition_prompt = """
+You've shown the plan to the user and asked them to approve it, request
+revisions, or edit it directly.
+
+- If they approved the plan, transition to 'implement' - UNLESS the plan rests
+  on an assumption you have not verified (you are unsure an API/library behaves
+  as assumed, or `discovery` did not pin down where the behavior you must change
+  lives). In that case transition to 'prototype' to settle it with a small spike
+  first. The user approved the goal, not your guesses about the codebase; a
+  spike that corrects the plan serves them better than forty edits in the wrong
+  file. Only detour when you expect to learn something that would change what
+  you write.
+- If they asked for revisions or edited the plan, transition back to 'plan',
+  incorporate their feedback (see the "directive"/"detail" messages in
+  context), and produce an updated plan before asking again.
 """
 system_prompt = """
-You are analyzing a coding task to produce a concise implementation plan.
+You are the planning stage of a code assistant.
 
-Start by categorizing the task - it drives everything downstream:
-- NEW FEATURE: what to build, where it slots in, which existing patterns to follow.
-- BUGFIX: reproduce first, isolate the root cause, then scope the minimal fix.
-- REFACTOR: preserve behavior; identify the seam and what must stay invariant.
-
-Then:
+Your job:
 1. Read `discovery` and `workflow` first - the discover stage already mapped this
-   codebase and chose how the work will be verified. Do NOT re-explore what they
-   already answer; build on them.
-2. Check `conventions` and `architecture` - pre-loaded style/lint rules and design
-   docs. Follow them; don't rediscover them.
-3. Estimate scope: which files to create/modify, and roughly how large the change is.
-   Name them - do not create them. This stage has no tool that writes or edits a
-   file, and calling one is refused; `implement` makes the change you describe.
-4. Identify dependencies - modules, libraries, config, or tests this touches.
-   Use list_dir/read_file ONLY to fill real gaps left by `discovery`. For a fresh
-   task with no existing code, skip exploration entirely.
+   codebase and chose how the work will be verified. `architecture` holds design
+   docs and `constraints` any caller-supplied limits (tech stack, timeline,
+   budget). Explore with list_dir/read_file only to fill real gaps left by those.
+2. Think through the implementation approach, respecting the constraints.
+3. Produce a concise, numbered plan:
+   - Files to create or modify
+   - What each change does
+   - Key decisions and trade-offs
+   - How the change will be verified, using `workflow`'s VERIFY command. If
+     `workflow` is TIER 1, the plan must include writing that verification.
 
-Output a short bullet-list plan: which files to create/modify, what each does, key
-decisions, and the dependencies you found. If `workflow` is TIER 1, the plan must
-include writing the verification the implement stage will run. Be brief - the
-implement stage does the actual coding and reads this plan from the conversation.
+If the task is genuinely ambiguous (e.g. missing requirements, or a real
+fork in approach you can't resolve yourself), use ask_user_text or
+ask_user_choice to ask BEFORE producing the plan - don't guess on things
+only the user can answer. Don't ask about things you can reasonably decide
+yourself.
+
+This stage does not touch the codebase. You have no tool here that writes or
+edits a file, and calling one is refused - planning that starts writing is how a
+run ends up with code nobody approved. Describe the change; `implement` makes it.
+If a claim in the plan needs proving before it is worth writing down, that is what
+`prototype` is for.
+
+Be specific - the implement stage will execute exactly what you write here.
+End with:
+
+## Plan
+<numbered list of steps>
+
+## Files
+<list of files to create/modify>
 """
 
-# Only passive reads route to the persistent `codebase` region; everything else
-# stays in conversation.
-[stages.analyze.tool_routing]
+[stages.plan.tool_permissions]
+read_file = "allow"
+list_dir  = "allow"
+ask_user_text   = "allow"
+ask_user_choice = "allow"
+edit_document   = "allow"
+
+# Only passive reads feed the persistent codebase region; everything else stays
+# in conversation.
+[stages.plan.tool_routing]
 default_region = "conversation"
-[stages.analyze.tool_routing.overrides]
+[stages.plan.tool_routing.overrides]
 read_file = "codebase"
 list_dir  = "codebase"
 
-[stages.analyze.transitions.implement]
-hint = "The fix location and approach are clear - begin implementation"
-transform = "direct"
+[stages.plan.transitions.implement]
+hint = "Plan approved and the approach is verified - proceed to implementation"
 
-[stages.analyze.transitions.prototype]
-hint = "The approach is uncertain - spike it before committing to a full implementation"
-transform = "direct"
+[stages.plan.transitions.prototype]
+hint = "Plan approved but rests on an unverified assumption - spike it first"
 
-[stages.analyze.transitions.error_recovery]
+[stages.plan.transitions.plan]
+hint = "User asked for revisions or more detail - keep planning"
+
+[stages.plan.transitions.error_recovery]
 condition = "error"
 transform = "direct"
 
-# ─── Stage 2b: Prototype (elective) ───────────────────────────────────────────
-# NOT a mandatory hop - `analyze` only routes here when it judges the approach
-# uncertain. The point is to buy information cheaply: prove or kill the riskiest
-# assumption, write down what was ruled out, and REPLACE the plan with one that
-# rests on something that actually ran. `implement` then executes evidence
-# rather than a guess.
+[stages.plan.transitions.summary]
+condition = "dead_end"
+# Taken only when every other way out is revisit-exhausted, so it is never a
+# route the model can pick early. Without it the run errors as dead-ended and
+# the work done so far is lost; with it the run still hands back an answer.
+
+[[stages.plan.interaction_points]]
+name     = "plan_approval"
+prompt   = "Review the plan above. What would you like to do?"
+required = true
+# Attended, this is the checkpoint that matters: everything after it writes
+# code, so a person sees the plan first. Unattended, it resolves as approved
+# rather than stranding the run, because `--yolo` means nobody is there to
+# answer and this agent is also the one CI reaches for. Set
+# `unattended = "ask"` here if you would rather an unattended run stop and wait.
+style    = "multiple_choice"
+options  = ["Approve - proceed to implementation", "Revise - I'll describe changes", "Add detail - expand a section", "Abort - cancel this run"]
+
+# The pinned region that holds the authoritative plan. Each time this point is
+# presented, the current plan - the model's output, or the user's direct edit -
+# REPLACES this region, so revisions build on the current version (the user's
+# edits included) instead of regenerating the plan from the task.
+document_region = "plan"
+
+# "Abort" ends the run immediately (engine-level, deterministic) - no further
+# inference, no transition.
+abort_options = ["Abort - cancel this run"]
+
+# "Add detail" opens the current plan in an editable field (engine-level,
+# deterministic) so the user modifies it directly - no dependence on the model
+# choosing to call an edit tool. The edited text becomes the authoritative plan.
+edit_options = ["Add detail - expand a section"]
+
+# Directives keyed by option label. Selecting one keeps the run in the plan
+# stage and injects the directive into the agent's context so it drives the
+# next step via a tool call (deterministic routing, agent-driven capture).
+[stages.plan.interaction_points.directives]
+"Revise - I'll describe changes" = "The user wants to revise the plan. Call the ask_user_text tool to ask exactly what they want changed. Then start from the CURRENT plan (in the 'plan' section of your context - it already includes any edits the user made directly) and apply ONLY the requested change, preserving every other detail verbatim (wording, file names, and exact strings the user chose). Do not revert earlier user edits or 'correct' them back to defaults. End with the '## Plan' and '## Files' sections so it can be re-approved."
+
+# ─── Stage 2b: Prototype (elective) ──────────────────────────────────────────
+# NOT a mandatory hop - `plan` only routes here when the approved plan rests on
+# an assumption the agent has not actually verified. It buys information
+# cheaply: prove or kill the riskiest assumption, record what was ruled out, and
+# correct the plan so `implement` executes evidence instead of a guess. The
+# user's approved GOAL is never renegotiated here, only the technical route.
 [stages.prototype]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "devstral:24b" }] }
-description = "Spike the riskiest assumption in the plan before committing to it"
+description = "Spike the riskiest assumption in the approved plan before executing it"
 available_tools = ["read_file", "list_dir", "write_file", "edit_file", "bash", "context_write", "context_append"]
 max_iterations = 15
 max_revisits = 2
@@ -179,14 +269,15 @@ transition_prompt = """
 Spike complete. Based on what you actually observed:
 - Respond with `implement` if a hypothesis held up - you now know where the
   change belongs and what it should do.
-- Respond with `analyze` if every hypothesis failed. The plan rests on a wrong
-  premise, so it needs rewriting rather than executing; what you ruled out is in
-  `prototypes` and will inform the new plan.
+- Respond with `plan` if every hypothesis failed. The approved plan rests on a
+  wrong premise, so the user needs to see and approve a corrected one rather
+  than have you execute a plan you know is wrong.
 """
 system_prompt = """
-You are spiking, not implementing. Pick the ONE assumption in the plan that
-would cost the most to discover was wrong, and settle it with the smallest thing
-that actually runs.
+You are spiking, not implementing. The plan in `plan` was approved by the user,
+but it assumes things about this codebase you have not verified. Pick the ONE
+assumption that would cost the most to discover was wrong, and settle it with
+the smallest thing that actually runs.
 
 1. State the assumption in a sentence.
 2. Prove or disprove it: a throwaway script, a failing test that reproduces the
@@ -198,11 +289,11 @@ that actually runs.
    the file paths you confirmed. Record what you RULED OUT as carefully as what
    worked - a dead end you don't write down gets retried.
 4. Before you leave, write the corrected approach to the `plan` region
-   (context_write, key "plan") so `implement` executes what you learned.
+   (context_write, key "plan"). Preserve the user's intent and any wording they
+   chose; correct only the technical route. That plan is what runs next.
 
-Keep this to a handful of iterations. You are buying information, not shipping
-code - do not start the real implementation here, and throw away scaffolding you
-created purely to test a hypothesis.
+Keep this to a handful of iterations, and throw away scaffolding you created
+purely to test a hypothesis. You are buying information, not shipping code.
 """
 
 [stages.prototype.tool_routing]
@@ -218,8 +309,8 @@ edit_file  = "implementation"
 hint = "A hypothesis held up - implement it properly"
 transform = "compact"
 
-[stages.prototype.transitions.analyze]
-hint = "Every hypothesis failed - the plan's premise is wrong, re-plan"
+[stages.prototype.transitions.plan]
+hint = "Every hypothesis failed - the plan's premise is wrong, re-plan with the user"
 transform = "compact"
 
 [stages.prototype.transitions.reassess]
@@ -233,75 +324,83 @@ transform = "direct"
 condition = "error"
 transform = "direct"
 
-# ─── Stage 3: Implement ───────────────────────────────────────────────────────
+[stages.prototype.transitions.summary]
+condition = "dead_end"
+# Taken only when every other way out is revisit-exhausted, so it is never a
+# route the model can pick early. Without it the run errors as dead-ended and
+# the work done so far is lost; with it the run still hands back an answer.
+
+# ─── Stage 3: Implement ──────────────────────────────────────────────────────
+# Executes the approved plan. Write/edit/bash require tool-approval unless
+# the user passes --yolo or stage-level overrides.
+
 [stages.implement]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }] }
-description = "Write code according to the plan, verifying continuously"
-available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "context_write", "ask_user_confirm"]
+description = "Write code according to the approved plan"
+available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "ask_user_text", "ask_user_confirm", "context_append"]
 max_iterations = 50
-max_revisits = 3
-# ask_user_confirm suspends the run until a person answers, which is deliberate
-# here: this stage checks in before doing something it cannot undo. Declared so
-# `lev validate` reports it as a choice rather than an oversight.
+max_revisits = 5
+# The ask_user_* tools suspend the run until a person answers, which is
+# deliberate here: this stage asks rather than guessing when the approved plan
+# turns out to be underspecified. Declared so `lev validate` reports it as a
+# choice rather than an oversight.
 allow_blocking_tools = true
 system_prompt = """
-You are implementing the plan from the `plan` region. Write working,
-production-quality code that matches the project's `conventions`.
+You are the implementation stage. The plan in the `plan` region has been approved.
+Execute it step by step:
+- Use write_file to create new files and edit_file to modify existing ones. Do
+  NOT edit files through bash - no `sed -i`, no `tee`, no `>`/`>>` redirection,
+  no here-docs. Only write_file/edit_file are recorded in the `implementation`
+  region the reviewer reads, and this stage will not hand off until at least one
+  of them has landed.
+- Use bash to run tests or verify the build after writing - output goes to
+  `test_results`.
 
 Follow the workflow the discover stage synthesized in `workflow`. It ends with
 three literal lines - BASELINE, VERIFY and DONE WHEN. Execute them:
 
-1. BASELINE, before your FIRST edit. Run the BASELINE command with bash and
-   context_write the result to `baseline`: which tests pass and which already
-   fail. You cannot tell a regression from a pre-existing failure without this.
-   (TIER 1 / no runnable suite: write "no baseline - nothing to run yet" and
-   build the verification the plan calls for as your first change.)
-2. Implement incrementally - one coherent file/change at a time, not one giant
-   dump. Use write_file to create files and edit_file to modify existing ones.
-   Do NOT edit files through bash - no `sed -i`, no `tee`, no `>`/`>>`
-   redirection, no here-docs. Bash is for running tests and builds and for
-   read-only exploration. Only write_file/edit_file are recorded in the
-   `implementation` region the reviewer reads, and this stage will not hand off
-   to review until at least one of them has landed.
-   Handle errors explicitly (validate inputs, propagate/return errors, no silent
-   swallowing) - match the error-handling style already in this codebase.
-   Write or update tests alongside the code when the task warrants it.
-3. VERIFY after each logical change, not just at the end. Run the VERIFY command
-   with bash; output is routed to `test_results`.
-4. Compare every VERIFY against `baseline`. If a test that passed in `baseline`
+1. BASELINE, before your FIRST edit. Run the BASELINE command and context_write
+   the result to `baseline`: which tests pass and which already fail. You cannot
+   tell a regression from a pre-existing failure without this. (TIER 1 / no
+   runnable suite: write "no baseline - nothing to run yet" and build the
+   verification the plan calls for as your first change.)
+2. VERIFY after each logical change, not just at the end.
+3. Compare every VERIFY against `baseline`. If a test that passed in `baseline`
    now fails, you broke it: say so explicitly - "I broke <test> with my change to
-   <file>, investigating" - and fix it before writing anything else. Never move
-   on from a regression.
-5. Before finishing, run the full-suite command from `workflow` once.
+   <file>, investigating" - and fix it before writing anything else.
+4. Before finishing, run the full-suite command from `workflow` once.
 
 You are NOT done because most tests pass. You are done when DONE WHEN is met:
 the target tests pass AND nothing that passed in `baseline` fails now. If tests
-are still failing, say how many and keep going - do not stop early and do not
-report success you haven't observed.
+are still failing, say how many and keep going - do not stop early.
 
-If a test keeps failing, check the `errors` region - it keeps the recent failures
-so you can spot a repeating pattern instead of chasing the same wall.
+As you work, keep two running logs so the review stage (and any restart) has
+the full picture without re-scanning:
+- `decisions` (context_append): each non-obvious design/architectural choice and
+  the WHY behind it - invaluable when review questions a call.
+- `changelog` (context_append): one line per file created/modified, so review
+  knows exactly what to check.
 
-Do NOT spend iterations re-reading the codebase unless you need something
-specific; `discovery` already has the map.
+If you hit a genuine ambiguity the plan didn't resolve (e.g. conflicting
+requirements, or a destructive/hard-to-reverse action you're unsure about),
+use ask_user_text or ask_user_confirm to check before proceeding - don't
+silently guess on something the user would want a say in.
 
-If you hit a destructive or hard-to-reverse action you're unsure about, use
-ask_user_confirm before proceeding. Otherwise work autonomously.
-
-Finish with a short summary of what changed, the final test counts, and an
-explicit statement that nothing regressed against `baseline`.
+Work methodically through each plan step. After all steps, give a concise summary
+of what was created/modified, the final test counts, and an explicit statement
+that nothing regressed against `baseline`.
 """
 
 # Large read output persists in `codebase`; test output persists in `test_results`
 # (the review stage reads it). Routed results leave a short pointer in conversation
-# (paired with their tool_use) and the full output as text in the region, so the
-# model still sees each action landed.
+# (paired with their tool_use) with the full output as text in the region.
 #
-# write_file/edit_file confirmations persist in `implementation`, which makes it
-# the run's changelog: it is what the review stage is told to read, it survives
-# `conversation` eviction, and - being persisted context - it also satisfies the
-# transition gate below after a daemon restart, when per-stage counters are gone.
+# write_file/edit_file confirmations persist in `implementation`, alongside the
+# hand-written `changelog`: it is a mechanical record of every file touched, it
+# survives `conversation` eviction, and - being persisted context - it satisfies
+# the transition gates below after a daemon restart, when per-stage counters are
+# gone.
 [stages.implement.tool_routing]
 default_region = "conversation"
 [stages.implement.tool_routing.overrides]
@@ -311,19 +410,26 @@ bash       = "test_results"
 write_file = "implementation"
 edit_file  = "implementation"
 
-# The gate refuses this edge until the stage has actually written something, so an
-# agent that explored the codebase through bash and changed nothing gets sent back
-# instead of handing an untouched workspace to review (issue #107).
+# Both non-error edges are gated: an agent that explored through bash and changed
+# nothing is sent back for another pass rather than handing an untouched workspace
+# to review - or slipping out sideways via the `plan` edge, which can itself end
+# the run (issue #107).
 [stages.implement.transitions.review]
 hint = "Implementation complete, ready for review"
 transform = "compact"
 gate = { require_modifications = true, region = "implementation" }
 
-# Runtime escape hatch (issue #106). This is the fix for the observed failure
-# mode: ~100 iterations spent editing the wrong file, a working fix broken and
-# never recovered, with no exception ever raised for `error_recovery` to catch.
-# `stuck_after_same_file_edits` is the trigger that actually catches it; the
-# other two are backstops. Bounded by reassess's max_revisits.
+# Going back to planning with nothing written is sometimes the right call, so this
+# edge only asks once before letting a genuinely stuck agent through.
+[stages.implement.transitions.plan]
+hint = "Need to fundamentally rethink the approach"
+transform = "compact"
+gate = { require_modifications = true, region = "implementation", max_attempts = 1 }
+
+# Runtime escape hatch (issue #106). Distinct from the voluntary `plan` edge
+# above: that one requires the agent to NOTICE it is lost, which is exactly what
+# fails when it is stuck. This one fires on measured behavior instead, and is
+# ungated - a stuck agent is not helped by being told to write more.
 [stages.implement.transitions.reassess]
 condition = "stuck"
 stuck_after_iterations = 20
@@ -332,10 +438,10 @@ stuck_after_same_file_edits = 5
 hint = "No forward progress - step back and reassess"
 transform = "custom"
 # `custom`, not `compact`: a plain compact edge would summarize EVERY
-# stage-specific region including `test_results`, which is the raw evidence
-# reassess most needs. Compact only the conversation and leave the rest intact.
+# stage-specific region including `test_results`, the raw evidence reassess most
+# needs. Compact only the conversation and leave the rest intact.
 [stages.implement.transitions.reassess.transform_config]
-carry = ["discovery", "workflow", "architecture", "conventions", "task", "plan", "codebase", "implementation", "prototypes", "errors", "test_results", "stuck_report", "error_report"]
+carry = ["discovery", "workflow", "task", "constraints", "architecture", "plan", "codebase", "implementation", "prototypes", "changelog", "decisions", "errors", "test_results", "stuck_report", "error_report"]
 compact = ["conversation"]
 clear = ["scratch"]
 compact_prompt = "Summarize what was attempted in this stage: which files were edited and how often, which tests were run and their outcome, and the last point at which anything demonstrably worked."
@@ -344,45 +450,57 @@ compact_prompt = "Summarize what was attempted in this stage: which files were e
 condition = "error"
 transform = "direct"
 
-# ─── Stage 4: Review ──────────────────────────────────────────────────────────
-# Interactive: the user sees the review before it decides. allow_complete lets
-# the reviewer end the run (DONE) when the code is clean instead of being forced
-# back into another implementation pass by a lone outgoing edge.
+[stages.implement.transitions.summary]
+condition = "dead_end"
+# Taken only when every other way out is revisit-exhausted, so it is never a
+# route the model can pick early. Without it the run errors as dead-ended and
+# the work done so far is lost; with it the run still hands back an answer.
+
+# ─── Stage 4: Review ─────────────────────────────────────────────────────────
+# Autonomous review. Transitions back to implement if issues found, ends the
+# run (allow_complete + "DONE") when the code is clean, or routes to
+# error_recovery if the review itself errors out.
+
 [stages.review]
-mode = "interactive"
+mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }] }
-description = "Review the code before finalizing"
+description = "Review the implementation and evaluate code quality"
 available_tools = ["read_file", "list_dir", "bash"]
-max_iterations = 10
+max_iterations = 20
 max_revisits = 3
+# Lets the run end here (via "DONE") when the review approves the work,
+# instead of being forced down the only declared edge back to implement.
 transition_prompt = """
 Review complete. Based on your findings:
-- If there are issues that must be fixed, respond with: implement
+- If there are issues that need fixing, respond with: implement
 - If the code is clean and correct, respond with: DONE
 
-Minor style nits don't warrant another implementation pass.
+Minor style issues don't warrant another implementation pass.
 """
 system_prompt = """
-You are reviewing the implementation. Verify it against the ORIGINAL task in the
-`task` region - not just against the plan (the plan can be wrong).
+You are the review stage. The implementation is complete.
 
-You review here; you do not repair. This stage has no write or edit tool and
-calling one is refused - report what you find and route back to `implement`,
-which is where changes are made and re-reviewed.
+Use the `changelog` region to see exactly which files changed (the
+`implementation` region holds the mechanical record of every write the framework
+saw, if the changelog looks incomplete), and `decisions` to understand why choices
+were made before you question them. Read those files and provide a quality review:
+You review here; you do not repair. There is no write or edit tool in this
+stage and calling one is refused - a reviewer who fixes what they find is the
+same person marking their own work. Report the problem and route back to
+`implement`, which is where changes are made and re-reviewed.
 
-1. Read the files that were created or modified (they are tracked in the
-   `implementation` region; read_file for anything you need to confirm).
-2. Re-run the tests with bash - use the commands in `workflow`, which the
-   implement stage was told to follow. Output goes to `test_results`. Don't
-   approve on unverified claims that "tests pass".
-3. Diff what you just ran against `baseline`: anything that passed there and
-   fails now is a regression the implement stage was required to fix, and is
-   grounds for NEEDS CHANGES on its own.
-4. Hold the work to `workflow`'s DONE WHEN line, not to your own impression of
-   "close enough". If the implement stage skipped its own stated workflow (no
-   baseline captured, verification never run), say so.
-5. Check: correctness vs. the task, edge cases, error handling, security, and
-   code quality/conventions.
+- Correctness: does it match the plan AND the original task in `task`?
+- Edge cases: what inputs or conditions could cause failures?
+- Code quality: clarity, naming, error handling, conventions.
+- Security: any obvious vulnerabilities?
+
+Re-run the tests with bash - use the commands in `workflow`, which the implement
+stage was told to follow (output → `test_results`). Don't approve on an
+unverified claim that tests pass. Then diff what you ran against `baseline`:
+anything that passed there and fails now is a regression, and is grounds for
+NEEDS CHANGES on its own. Hold the work to `workflow`'s DONE WHEN line, and say
+so if the implement stage skipped its own stated workflow (no baseline captured,
+verification never run).
 
 If `error_report` says the implement stage hit its iteration cap, it was cut off
 before declaring the work done - assume the implementation is incomplete and
@@ -390,7 +508,7 @@ verify every DONE WHEN criterion rather than sampling.
 
 End with one of:
   APPROVED - no significant issues
-  NEEDS CHANGES - <numbered list of specific required fixes>
+  NEEDS CHANGES - <list specific required changes>
 """
 
 [stages.review.tool_permissions]
@@ -406,31 +524,29 @@ read_file = "codebase"
 list_dir  = "codebase"
 bash      = "test_results"
 
-# Custom transform: carry the plan/architecture/task/codebase forward, compact the
-# review conversation into a fix list, and clear scratch + test_results before
-# re-implementing so stale failures don't confuse the next pass.
 [stages.review.transitions.summary]
 hint = "The work is done and reviewed"
 
 [stages.review.transitions.implement]
 hint = "Issues found - needs another implementation pass"
 transform = "custom"
+
 [stages.review.transitions.implement.transform_config]
-carry = ["architecture", "conventions", "task", "plan", "codebase", "discovery", "workflow", "baseline"]
+carry = ["task", "constraints", "architecture", "plan", "codebase", "changelog", "decisions", "discovery", "workflow", "baseline"]
 compact = ["conversation"]
 clear = ["scratch", "test_results"]
-compact_prompt = "Summarize the review findings as a numbered list of required fixes."
+compact_prompt = "Summarize review findings as a numbered list of required fixes."
 
 [stages.review.transitions.error_recovery]
 condition = "error"
 transform = "direct"
 
-# ─── Stage 4b: Reassess ───────────────────────────────────────────────────────
+# ─── Stage 4b: Reassess ──────────────────────────────────────────────────────
 # Reached ONLY via a `stuck` edge (issue #106) - invisible during normal flow,
-# exactly like error_recovery. Deliberately has NO write tools: the whole point
-# is to stop editing and start thinking. It reads the runtime's `stuck_report`
-# (which threshold tripped and why), finds the wrong assumption, and REPLACES
-# the plan before handing back to implement.
+# exactly like error_recovery. Deliberately has NO write tools: the point is to
+# stop editing and start thinking. It reads the runtime's `stuck_report` (which
+# threshold tripped and why), finds the wrong assumption, and corrects the plan
+# before handing back to implement.
 [stages.reassess]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }] }
@@ -444,12 +560,13 @@ pulled out of implementation because you stopped making progress. The
 `stuck_report` region says which threshold tripped and why.
 
 Work through this in order:
-1. Re-read the ORIGINAL task in `task`. State in one sentence what "done" means.
-   Not what the plan says - what the task says. Check it against the DONE WHEN
-   line in `workflow`.
+1. Re-read the ORIGINAL task in `task` and the user's `constraints`. State in
+   one sentence what "done" means. Not what the plan says - what the task says.
+   Check it against the DONE WHEN line in `workflow`.
 2. Separate what you have VERIFIED (a command you ran and an output you saw)
-   from what you ASSUMED. `test_results`, `errors` and `implementation` are your
-   evidence. Be honest: the bug is almost always in the assumed column.
+   from what you ASSUMED. `test_results`, `changelog`, `decisions` and
+   `implementation` are your evidence. The bug is almost always in the assumed
+   column.
 3. Find the wrong assumption. The most common one by far is that you have been
    editing the wrong file. Use list_dir/read_file and bash (grep) to confirm
    WHERE the behavior under test actually lives before changing anything else.
@@ -458,9 +575,10 @@ Work through this in order:
    git status) to see everything this run has changed. A working fix you broke
    is worth more than a fresh idea.
 
-Then REPLACE the `plan` region (context_write, key "plan") with a corrected
+Then rewrite the `plan` region (context_write, key "plan") with a corrected
 numbered plan whose FIRST step is the smallest change you can verify with one
-command, and which names explicitly what NOT to touch again. Append one line to
+command, and which names explicitly what NOT to touch again. Preserve the user's
+approved intent - correct the route, not the destination. Append one line to
 `errors` naming the dead end so it is not retried.
 """
 
@@ -481,7 +599,7 @@ bash      = "test_results"
 hint = "Corrected plan in hand - retry implementation"
 transform = "custom"
 [stages.reassess.transitions.implement.transform_config]
-carry = ["discovery", "workflow", "architecture", "conventions", "task", "plan", "codebase", "implementation", "prototypes", "errors", "stuck_report", "error_report"]
+carry = ["discovery", "workflow", "task", "constraints", "architecture", "plan", "codebase", "implementation", "prototypes", "changelog", "decisions", "errors", "stuck_report", "error_report"]
 compact = ["conversation"]
 clear = ["scratch", "test_results"]
 compact_prompt = "Summarize the reassessment as three things: the wrong assumption, the corrected approach, and what must be reverted first."
@@ -490,8 +608,15 @@ compact_prompt = "Summarize the reassessment as three things: the wrong assumpti
 condition = "error"
 transform = "direct"
 
-# ─── Stage 5: Error recovery ──────────────────────────────────────────────────
-# Only reachable via error edges - invisible during normal flow.
+[stages.reassess.transitions.summary]
+condition = "dead_end"
+# Taken only when every other way out is revisit-exhausted, so it is never a
+# route the model can pick early. Without it the run errors as dead-ended and
+# the work done so far is lost; with it the run still hands back an answer.
+
+# ─── Stage 5: Error Recovery ────────────────────────────────────────────────
+# Only reachable via error condition edges - invisible during normal flow.
+
 [stages.error_recovery]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -500,31 +625,37 @@ available_tools = ["read_file", "bash", "context_append"]
 max_iterations = 10
 max_revisits = 2
 system_prompt = """
-An error occurred. The `error_report` region holds the error text the runtime
-captured - read it first, diagnose the root cause, and note a fix or workaround.
-Append a one-line summary of the failure to the `errors` region (context_append)
-so repeated failures become visible as a pattern, then transition back to
-implement to retry. If you see the SAME error recurring in `errors`, change
-approach rather than repeating the fix.
+An error occurred during implementation. Your job:
+1. Read the error text the runtime captured in the `error_report` region.
+2. Diagnose the root cause.
+3. Suggest a fix or workaround.
+
+Append a one-line summary of the failure to the `errors` region
+(context_append) so repeated failures become visible as a pattern. If you see
+the SAME error recurring there, change approach rather than repeating the fix.
+
+Once you've identified the issue, transition back to implement to retry.
 """
 
-# Route tool chatter to scratch (clearable), not `errors`: `errors` is a
-# sliding_window and only `conversation` may hold routed ToolResult blocks
-# (a second sliding_window desyncs the result from its tool_use → API 400).
-# The agent still records failures to `errors` explicitly via context_append.
-[stages.error_recovery.tool_routing]
-default_region = "conversation"
-[stages.error_recovery.tool_routing.overrides]
-read_file = "codebase"
-
 [stages.error_recovery.transitions.implement]
-hint = "Error diagnosed - retry implementation"
+hint = "Error diagnosed and resolved, retry implementation"
 transform = "compact"
 
-# ─── Compaction ───────────────────────────────────────────────────────────────
+[stages.error_recovery.transitions.summary]
+condition = "dead_end"
+# Taken only when every other way out is revisit-exhausted, so it is never a
+# route the model can pick early. Without it the run errors as dead-ended and
+# the work done so far is lost; with it the run still hands back an answer.
+
+# ─── Compaction ──────────────────────────────────────────────────────────────
+
 [compaction]
 provider = "anthropic"
-model = "claude-sonnet-5"
+model    = "claude-sonnet-5"
+
+# ─── Context layout ──────────────────────────────────────────────────────────
+# Budgets are a percentage of the model's context window (issue #100) with an
+# absolute `max_tokens`/`threshold_tokens` guard-rail. Percentages are ceilings.
 
 # ─── Final output ────────────────────────────────────────────────────────────
 # Terminal. `mode = "output"` grants `submit_output`, requires the call, and
@@ -538,35 +669,26 @@ max_iterations = 8
 system_prompt = """
 Say what you changed, for whoever asked for it.
 
-List the files you touched and what each change does - one line each. Then
-anything they need to know: a decision you made, a test you could not run, a
-loose end you left.
+Lead with one sentence on what the change does. Then the files you touched and
+what each one does now, one line each. Then anything they need to know before
+merging: a decision you made, a test you could not run, a loose end you left.
 
 Do not paste the code back. They can read the diff; what they cannot read is
-why.
+why you did it this way.
 """
 
 [stages.summary.transitions]
 
-# ─── Context layout ───────────────────────────────────────────────────────────
-# Budgets are given as a percentage of the model's context window (issue #100),
-# with an absolute `max_tokens`/`threshold_tokens` guard-rail so the layout is
-# sensible on any model. Percentages are ceilings, not reservations - they may
-# sum past 100% since regions rarely fill at once.
 [context.regions]
 # ── Inputs (pinned, stable, cacheable) ──
-task         = { kind = "pinned", budget = "2%", max_tokens = 4000, required = true, required_message = "Describe the coding task via --task (or the API/ACP task field)." }
-# Deterministic repo scan, run once at spawn - the discover stage starts from
-# facts instead of burning iterations on `ls`. `git ls-files` behaves identically
-# on POSIX and Windows shells; outside a git repo it fails and this is simply
-# left empty (non-fatal), and oversized output is trimmed to the budget.
-# Refuse it with `--no-seed-commands` or `[security] allow_seed_commands = false`.
-repo_files   = { kind = "pinned", budget = "3%", max_tokens = 4000, seed = { command = "git ls-files" } }
+task         = { kind = "pinned", budget = "2%", max_tokens = 4000, required = true, required_message = "Describe the task via --task (or the API/ACP task field)." }
+# Optional caller limits: --constraints "must stay on Node 18, no new deps".
+constraints  = { kind = "pinned", budget = "1%", max_tokens = 2000, seed = "constraints" }
+# Pre-loaded on startup: architecture / design docs (missing files skipped).
 # Pre-loaded on startup: coding style, lint rules, contribution guide (missing files skipped).
 conventions  = { kind = "pinned", budget = "2%", max_tokens = 3000, seed = { files = ["CONVENTIONS.md", "CONTRIBUTING.md", "STYLEGUIDE.md", "STYLE.md", ".editorconfig", "rustfmt.toml", ".rustfmt.toml", ".prettierrc", ".eslintrc.json", "ruff.toml", "pyproject.toml"] } }
-# Pre-loaded on startup: architecture / design docs (missing files skipped).
 architecture = { kind = "pinned", budget = "3%", max_tokens = 6000, seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "docs/architecture.md", "README.md"] } }
-plan         = { kind = "pinned", budget = "3%", max_tokens = 4000 }
+plan         = { kind = "pinned", budget = "5%", max_tokens = 6000 }
 # Verified findings from a `prototype` spike: the assumption, the verdict, and
 # the command that settled it - including what was RULED OUT. Pinned so neither
 # implement nor reassess redoes the spike.
@@ -578,6 +700,12 @@ stuck_report = { kind = "pinned", budget = "1%", max_tokens = 2000 }
 # inference call's error text, or a note that a stage hit its iteration cap.
 # Pinned so it survives the edge transform into `error_recovery` or `review`.
 error_report = { kind = "pinned", budget = "1%", max_tokens = 2000 }
+# Deterministic repo scan, run once at spawn - the discover stage starts from
+# facts instead of burning iterations on `ls`. `git ls-files` behaves identically
+# on POSIX and Windows shells; outside a git repo it fails and this is simply
+# left empty (non-fatal), and oversized output is trimmed to the budget.
+# Refuse it with `--no-seed-commands` or `[security] allow_seed_commands = false`.
+repo_files   = { kind = "pinned", budget = "3%", max_tokens = 4000, seed = { command = "git ls-files" } }
 
 # ── Discovery (issue #108): written by the discover stage, read by every later
 # stage. Pinned, so no edge transform can clear or compact them. `required` puts
@@ -590,18 +718,23 @@ workflow     = { kind = "pinned", budget = "2%", max_tokens = 3000, required = t
 # a regression is indistinguishable from a pre-existing failure.
 baseline     = { kind = "pinned", budget = "3%", max_tokens = 4000 }
 
-# ── Knowledge (non-volatile, survives message eviction; compacts to *_history) ──
+# ── Knowledge (non-volatile; compacts to *_history) ──
 codebase         = { kind = "compacting",      budget = "25%", compact_at = "80%", threshold_tokens = 25000, max_tokens = 40000 }
 codebase_history = { kind = "compact_history", source_region = "codebase",      budget = "2%", max_tokens = 8000 }
 implementation   = { kind = "compacting",      budget = "35%", compact_at = "80%", threshold_tokens = 32000, max_tokens = 40000 }
 impl_history     = { kind = "compact_history", source_region = "implementation", budget = "2%", max_tokens = 8000 }
 
-# ── Feedback loops ──
-# test_results is clearable so stale failures are wiped between retry passes.
+# ── Working records (sliding windows) + test feedback ──
+# decisions: WHY choices were made. changelog: which files changed.
+decisions    = { kind = "sliding_window", max_items = 10, budget = "3%", max_tokens = 4000 }
+changelog    = { kind = "sliding_window", max_items = 20, budget = "2%", max_tokens = 3000 }
 test_results = { kind = "clearable",      budget = "4%", max_tokens = 5000 }
-# errors is a small sliding window so a repeating failure is visible as a pattern.
+# A small sliding window so a repeating failure is visible as a pattern rather
+# than a one-off. Written explicitly via context_append by error_recovery and
+# reassess - never by tool routing (only `conversation` may hold routed tool
+# results; a second sliding_window desyncs them from their tool_use → API 400).
 errors       = { kind = "sliding_window", max_items = 5, budget = "2%", max_tokens = 3000 }
 
-# ── Conversation (bulk eviction for prompt caching) + working memory ──
+# ── Conversation (bulk eviction for caching) + working memory ──
 conversation = { kind = "sliding_window", max_items = 40, budget = "20%", max_tokens = 30000, strategy = "bulk", overflow = 20 }
 scratch      = { kind = "clearable",      budget = "8%", max_tokens = 10000 }

@@ -11,6 +11,7 @@
 //! straight from the host's control loop.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use bevy_ecs::entity::Entity;
@@ -151,11 +152,26 @@ fn load_blueprint(
 ) -> Result<(String, leviath_core::Blueprint), String> {
     let content = std::fs::read_to_string(&args.blueprint_path)
         .map_err(|e| format!("read manifest '{}': {e}", args.blueprint_path))?;
+    // A blueprint that will not load is usually the user's own mistake, but for
+    // an installed bundled agent it is usually just an old copy: a graph rule
+    // added since they installed turns "valid" into "invalid blueprint", which
+    // reads as a broken agent rather than a stale file. Say which it is.
+    let path = Path::new(&args.blueprint_path);
+    let stale = || {
+        crate::bundled::stale_install_hint(
+            path,
+            dirs::home_dir()
+                .map(|h| crate::commands::setup::real_agents_dir(Some(&h)))
+                .as_deref(),
+        )
+        .map(|hint| format!(". {hint}"))
+        .unwrap_or_default()
+    };
     let mut blueprint = leviath_core::manifest::parse_manifest(&content)
-        .map_err(|e| format!("parse manifest: {e}"))?;
+        .map_err(|e| format!("parse manifest: {e}{}", stale()))?;
     blueprint
         .validate()
-        .map_err(|e| format!("invalid blueprint: {e}"))?;
+        .map_err(|e| format!("invalid blueprint: {e}{}", stale()))?;
     // What `lev validate` would have said, in the daemon log. Nothing here
     // refuses a spawn: these are authoring mistakes whose cost is a run that
     // behaves oddly hours later, and the whole point is that they are invisible

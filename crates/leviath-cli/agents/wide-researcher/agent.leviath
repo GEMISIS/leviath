@@ -1,7 +1,7 @@
 [agent]
 name = "wide-researcher"
-version = "0.0.2"
-description = "Broad multi-topic survey - cast a wide net, compare approaches, dive on the interesting threads, and produce a landscape overview"
+version = "0.1.0"
+description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 entry_stage = "survey"
 
 [tool_permissions]
@@ -42,8 +42,14 @@ web_fetch  = "landscape"
 read_file  = "landscape"
 list_dir   = "landscape"
 
+[stages.survey.transitions.investigate]
+hint = "Landscape mapped - the threads worth covering are identified"
+transform = "direct"
+
+# Still available when the survey found one thread rather than several: no point
+# spinning up a fan-out to cover a single topic.
 [stages.survey.transitions.compare]
-hint = "Landscape mapped - ready to compare approaches"
+hint = "The area turned out to be narrow - one thread, no need to split it"
 transform = "direct"
 
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
@@ -56,6 +62,60 @@ transform = "compact"
 [stages.survey.transitions.error_recovery]
 condition = "error"
 transform = "direct"
+
+# ─── Stage 2: Investigate (fan out) ──────────────────────────────────────────
+# The survey found the threads; this covers them at the same time instead of one
+# after another. Each worker is a full `researcher` run rather than a stage of
+# this blueprint, so a thread gets that agent's own gather/analyze loop and its
+# own clean context window.
+#
+# `researcher` is a separate installed blueprint. `lev setup` installs the
+# bundled set together, so it is there in the normal case; installing this agent
+# on its own leaves the workers with nothing to run, and
+# `on_worker_failure = "continue"` means the run reports that rather than dying.
+[stages.investigate]
+mode = "fan_out"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Research each thread of the landscape in parallel"
+available_tools = []
+max_iterations = 4
+# investigate to error_recovery and back is a cycle, so it needs a ceiling.
+max_revisits = 1
+worker_agent = "researcher"
+merge_stage = "compare"
+max_workers = 4
+# Where the workers' findings land, and the budget their shares divide.
+results_region = "thread_findings"
+# A ceiling on threads, not just on concurrency. Past this each worker's share
+# of the region is too small to carry a usable answer.
+max_items = 8
+on_worker_failure = "continue"
+split_prompt = """
+Split the landscape in `landscape` into threads that can be researched
+independently, one work item each. A thread is an approach, a project, a school
+of thought, a question the survey raised - whatever divides the area without two
+workers covering the same ground.
+
+Output ONLY a JSON array, starting with '[' and ending with ']'. No prose, no
+markdown fences. Each item:
+
+[{"id": "<short-slug>", "context": {"thread": "<what to research>", "why": "<what the survey wants to know about it>"}}]
+
+Every item MUST carry enough to work from alone: a worker is a separate agent
+and does not share this run's context, so the work item is all it gets.
+
+Prefer a handful of substantial threads over many thin ones. One thread is fine
+for a narrow area.
+"""
+
+[stages.investigate.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# Un-exhaustible escape (lint: dead-end-possible).
+[stages.investigate.transitions.summarize]
+hint = "Comparison is out of revisits - write the overview from what came back"
+transform = "compact"
 
 # ─── Stage 2: Compare ─────────────────────────────────────────────────────────
 # Three edges: more breadth (survey), dive on a thread (deep_dive), or write it up.
@@ -221,6 +281,9 @@ format             = { kind = "pinned", budget = "1%", max_tokens = 500, seed = 
 
 landscape          = { kind = "temporary",      budget = "30%", max_tokens = 50000 }
 deep_dives         = { kind = "sliding_window", max_items = 15, budget = "8%", max_tokens = 9000 }
+# What the parallel researcher workers hand back, one entry each. Pinned: it is
+# the whole point of the fan-out, and compare reads it directly.
+thread_findings    = { kind = "pinned", budget = "20%", max_tokens = 30000 }
 comparisons        = { kind = "compacting",      budget = "25%", compact_at = "80%", threshold_tokens = 25000, max_tokens = 35000 }
 comparison_history = { kind = "compact_history", source_region = "comparisons", budget = "3%", max_tokens = 10000 }
 
