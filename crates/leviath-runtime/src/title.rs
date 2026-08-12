@@ -625,5 +625,4 @@ mod tests {
         assert_eq!(request.messages.len(), 1);
         assert_eq!(request.messages[0].role, "user");
     }
-
 }
