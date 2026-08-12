@@ -2789,10 +2789,9 @@ fn coder_plan_stage_branches_on_choice() {
 /// helped by being told to write more.
 #[test]
 fn shipped_coding_agents_gate_every_non_error_implement_edge() {
-    for manifest_content in [
-        include_str!("../../../leviath-cli/agents/coder/agent.leviath"),
-        include_str!("../../../leviath-cli/agents/coder/agent.leviath"),
-    ] {
+    for manifest_content in [include_str!(
+        "../../../leviath-cli/agents/coder/agent.leviath"
+    )] {
         let bp = parse_manifest(manifest_content).unwrap();
         bp.validate().unwrap();
         let implement = bp.find_stage("implement").unwrap();
@@ -2804,12 +2803,16 @@ fn shipped_coding_agents_gate_every_non_error_implement_edge() {
         );
         let transitions = implement.transitions.as_ref().unwrap();
         for (target, edge) in transitions {
-            // Recovery must stay reachable from a failed stage, and a stuck
-            // escape must stay reachable from a looping one.
+            // Recovery must stay reachable from a failed stage, a stuck escape
+            // from a looping one, and a dead-end escape from a stage whose
+            // every other way out is revisit-exhausted. None of the three is a
+            // route the model picks, so a gate on one could only block the
+            // escape it exists to provide.
             if matches!(
                 edge.condition,
                 crate::blueprint::TransitionCondition::Error
                     | crate::blueprint::TransitionCondition::Stuck
+                    | crate::blueprint::TransitionCondition::DeadEnd
             ) {
                 continue;
             }

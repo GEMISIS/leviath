@@ -143,7 +143,7 @@ pub struct Config {
     /// Per-agent additions to [`Self::safe_commands`], keyed by agent name.
     ///
     /// ```toml
-    /// [agent_safe_commands.software-engineer]
+    /// [agent_safe_commands.coder]
     /// shell = ["./gradlew", "ninja"]
     /// allow_blueprint = true
     /// ```

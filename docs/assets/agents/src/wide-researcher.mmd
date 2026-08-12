@@ -1,14 +1,22 @@
-flowchart LR
-    survey(survey)
+flowchart TD
+    survey{{survey}}
+    investigate(investigate)
     compare{{compare}}
-    deep_dive(deep dive)
+    deep_dive{{deep dive}}
     summarize(summarize)
     summary(summary)
+    investigate_workers[["researcher (sub-agent)"]]
+    survey --> investigate
     survey --> compare
+    survey --> summarize
+    investigate ==>|×4 workers| investigate_workers
+    investigate_workers ==>|merge| compare
+    investigate --> summarize
     compare --> survey
     compare --> deep_dive
     compare --> summarize
     deep_dive --> compare
+    deep_dive --> summarize
     summarize --> summary
     classDef entry stroke-width:3px
     class survey entry

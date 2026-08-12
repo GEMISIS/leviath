@@ -45,14 +45,25 @@ def blueprint_to_mermaid(path: Path) -> str:
     # (from, to, label, style) with style in {solid, condition, fanout}
     edges: list[tuple[str, str, str, str]] = []
     decisions: set[str] = set()
+    # Nodes that are not stages of this blueprint: a fan-out worker that is a
+    # separate installed agent. Keyed by node id, valued by its label.
+    external: dict[str, str] = {}
 
     for name, stage in stages.items():
         if stage.get("interaction_points"):
             decisions.add(name)
         if stage.get("mode") == "fan_out":
-            worker = stage["worker_stage"]
             merge = stage["merge_stage"]
             per = f"×{stage['max_workers']} workers" if "max_workers" in stage else "workers"
+            # A worker is either a stage of this blueprint (`worker_stage`) or a
+            # separate installed agent (`worker_agent`). The first is a real node
+            # in this graph; the second is not, so it gets a labelled node of its
+            # own rather than being drawn as a stage that does not exist here.
+            worker = stage.get("worker_stage")
+            if worker is None:
+                agent = stage.get("worker_agent") or stage.get("worker_query", "workers")
+                worker = f"{name}_workers"
+                external[worker] = f"{agent} (sub-agent)"
             edges.append((name, worker, per, "fanout"))
             edges.append((worker, merge, "merge", "fanout"))
 
@@ -79,6 +90,10 @@ def blueprint_to_mermaid(path: Path) -> str:
             lines.append(f"    {name}{{{{{label}}}}}")
         else:
             lines.append(f"    {name}({label})")
+    # Drawn with a different shape, because it is another agent rather than a
+    # stage of this one.
+    for node, label in external.items():
+        lines.append(f'    {node}[["{label}"]]')
     for frm, to, label, style in edges:
         if style == "condition":
             lines.append(f"    {frm} -. {label} .-> {to}")

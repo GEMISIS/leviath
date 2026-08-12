@@ -590,7 +590,7 @@ pub fn session_approval_keys(tool_name: &str, arguments: &serde_json::Value) -> 
 /// may write an alias (`bash`). Matching only the name as called meant every
 /// `bash` entry was dead: `[tool_permissions] bash = "allow"` granted nothing
 /// and `lev run --allow bash` did nothing, because neither key was ever asked
-/// for. The shipped `software-engineer` writes `bash = "ask"`, which only
+/// for. The shipped `coder` writes `bash = "ask"`, which only
 /// behaved as intended because the built-in default for an unlisted tool is
 /// also `ask`.
 fn by_any_spelling<'a, V>(map: &'a HashMap<String, V>, tool_name: &str) -> Option<&'a V> {
@@ -2012,7 +2012,7 @@ mod policy_tests {
     /// canonical `shell`, while a manifest, a config, or a `--allow` flag may
     /// have written `bash`. Every one of those entries used to be dead:
     /// `lev run --allow bash` did nothing at all, and `bash = "ask"` in the
-    /// shipped `software-engineer` only behaved as intended because the default
+    /// shipped `coder` only behaved as intended because the default
     /// for an unlisted tool is also `ask`.
     #[test]
     fn a_permission_written_as_an_alias_reaches_the_tool() {

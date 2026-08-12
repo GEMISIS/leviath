@@ -1,14 +1,22 @@
-flowchart LR
-    gather(gather)
+flowchart TD
+    gather{{gather}}
+    investigate(investigate)
     analyze{{analyze}}
-    follow_citations(follow citations)
+    follow_citations{{follow citations}}
     synthesize(synthesize)
     summary(summary)
+    investigate_workers[["researcher (sub-agent)"]]
+    gather --> investigate
     gather --> analyze
+    gather --> synthesize
+    investigate ==>|×4 workers| investigate_workers
+    investigate_workers ==>|merge| analyze
+    investigate --> synthesize
     analyze --> gather
     analyze --> follow_citations
     analyze --> synthesize
     follow_citations --> analyze
+    follow_citations --> synthesize
     synthesize --> summary
     classDef entry stroke-width:3px
     class gather entry

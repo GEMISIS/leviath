@@ -1,7 +1,7 @@
 [agent]
 name = "log-analyzer"
-version = "0.0.3"
-description = "Analyzes log files - identifies anomalies, trends, and error patterns via a scripted analyze⇄script loop, maintaining a severity-ranked findings index"
+version = "0.1.0"
+description = "Analyzes log files - sweeps many files or time windows in parallel, then identifies anomalies, trends, and error patterns via a scripted analyze⇄script loop, maintaining a severity-ranked findings index"
 entry_stage = "ingest"
 
 [tool_permissions]
@@ -28,7 +28,9 @@ Use bash to sample rather than reading whole huge files - the first N lines, a
 line count, a file type probe. Reach for whatever your shell actually provides
 (`head`/`wc`/`file` on Unix, `Get-Content -TotalCount` and `Measure-Object` on
 Windows). Write a short format/structure summary to `findings` (context_write) so
-the analyze stage starts oriented. Raw sampled content lands in `logs`.
+the analyze stage starts oriented, and name every log file you found in it with
+its size and the time range it covers - that inventory is what the next stage
+divides the sweep over. Raw sampled content lands in `logs`.
 """
 
 [stages.ingest.tool_routing]
@@ -37,8 +39,8 @@ default_region = "conversation"
 read_file = "logs"
 bash      = "logs"
 
-[stages.ingest.transitions.analyze]
-hint = "Log format identified, ready to analyze"
+[stages.ingest.transitions.split_logs]
+hint = "Log format identified, ready to sweep the files"
 transform = "direct"
 
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
@@ -52,7 +54,102 @@ transform = "compact"
 condition = "error"
 transform = "direct"
 
-# ─── Stage 2: Analyze ─────────────────────────────────────────────────────────
+# ─── Stage 2: Split logs ──────────────────────────────────────────────────────
+# One worker per log file or time window, so a hundred rotated files get swept at
+# once instead of one after another - and each worker reads its own slice into a
+# context nothing else is competing for. The workers hand back findings; the
+# analyze stage takes them from there and digs into what they turned up.
+[stages.split_logs]
+mode = "fan_out"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Split the logs into files or time windows, one sweeper each"
+available_tools = []
+max_iterations = 4
+# split_logs ↔ error_recovery is a cycle, so it needs a ceiling. One retry is
+# enough to route around a transient failure; a second means the logs cannot be
+# divided usefully and the run should analyze what it has rather than keep
+# splitting.
+max_revisits = 1
+worker_stage = "scan_worker"
+merge_stage = "analyze"
+max_workers = 4
+# A file that will not parse is a gap in the sweep, not a reason to throw the
+# other workers' findings away. The failure is named in the results and the
+# analyze stage decides what to do about it.
+on_worker_failure = "continue"
+# Where the workers' findings land, and the budget their shares divide. A region
+# of its own rather than the conversation, which is carrying the message history
+# alongside them.
+results_region = "worker_findings"
+# A ceiling on slices, not just on concurrency. Eight is enough breadth for any
+# log set - a rotation with more files than that wants time windows, not one
+# worker each - and past it every worker's share of the region is too small to
+# carry the counts that make a finding evidence.
+max_items = 8
+split_prompt = """
+Split the sweep into slices that can be read independently, one work item each.
+A slice is one log file, one service's files, or one time window of a single
+large file - whatever divides the data without two workers counting the same
+lines. Use the file inventory `findings` holds.
+
+Output ONLY a JSON array, starting with '[' and ending with ']'. No prose, no
+markdown fences. Each item:
+
+[{"id": "<short-slug>", "context": {"slice": "<the file path(s), and the time window if the file is split by time>", "format": "<the log format and its fields, verbatim from findings>", "looking_for": "<what this run is trying to find, from the task>"}}]
+
+Every item MUST carry the format and what the run is looking for: workers do not
+share this agent's context, so the work item is all they get. A worker that does
+not know the field layout can only grep for the word "error".
+
+One log file is ONE item. Split a single file by time only when it is too large
+to sweep in one pass, and give each window an explicit start and end.
+"""
+
+[stages.split_logs.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Worker: sweep one slice ─────────────────────────────────────────────────
+# Entered as a sub-agent, one per slice. It hands back findings, which the
+# analyze stage reads. `require_output` is what makes that a guarantee rather
+# than a hope. bash is the point of the worker: counting a million lines is a
+# shell job, and its whole output stays in the worker's own context rather than
+# this one's.
+[stages.scan_worker]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Sweep one log file or time window for errors, anomalies, and trends"
+available_tools = ["read_file", "bash", "submit_output"]
+allow_as_worker = true
+require_output = true
+max_iterations = 20
+system_prompt = """
+Sweep ONE slice of the logs. Your work item names the file (and time window),
+the format its lines are in, and what this run is looking for - it is all the
+context you get, so work from it.
+
+Count rather than skim. Aggregate with whatever your shell runs (awk/grep/sed or
+python via bash on Unix, PowerShell or python on Windows): error counts by type,
+rates per interval, status-code and latency distributions, the first and last
+occurrence of anything unusual. Read the surrounding lines of a spike before
+calling it one.
+
+Submit what you found with submit_output. Every finding carries its evidence -
+counts and timestamps from your own commands, never an impression. An hour you
+could not parse is itself a finding; say which lines defeated you.
+
+A quiet slice is a result: say so, with the volume you swept, rather than
+inflating routine noise into a finding. Only your submitted findings reach the
+merge - anything else you write is lost.
+"""
+
+[stages.scan_worker.output]
+format = "markdown"
+instructions = "One finding per line, as `<severity> | <finding> | <evidence: counts/timestamps>` with severity in {critical, warning, info}, most severe first. Start with a `info | swept <slice> | <line count>, <time range>` line so the merge knows what was covered."
+
+[stages.scan_worker.transitions]
+
+# ─── Stage 3: Analyze ─────────────────────────────────────────────────────────
 [stages.analyze]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.6:27b" }] }
@@ -66,7 +163,13 @@ Decide what happens next:
 - If you have enough findings to produce a report, respond with: report
 """
 system_prompt = """
-Analyze the log data for:
+The sweepers' findings are in the `worker_findings` region, one block per slice.
+Start there: fold each finding into `findings`, merge the ones that are the same
+error seen in two files, and treat a worker reported as FAILED as a slice nobody
+swept - say so, or sweep it here. What no single worker could see is yours: the
+same failure crossing files, and the order events happened in across them.
+
+Then analyze the log data for:
 1. Error patterns - recurring errors, error spikes, cascading failures
 2. Anomalies - unusual request rates, latency outliers, unexpected status codes
 3. Trends - gradual degradation, growing queue depths, memory creep
@@ -101,7 +204,7 @@ transform = "compact"
 condition = "error"
 transform = "direct"
 
-# ─── Stage 3: Script ──────────────────────────────────────────────────────────
+# ─── Stage 4: Script ──────────────────────────────────────────────────────────
 [stages.script]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -151,7 +254,7 @@ transform = "compact"
 condition = "error"
 transform = "direct"
 
-# ─── Stage 4: Report (terminal) ───────────────────────────────────────────────
+# ─── Stage 5: Report ──────────────────────────────────────────────────────────
 [stages.report]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.6:27b" }] }
@@ -178,7 +281,7 @@ severity counts must match `severity_index`.
 [stages.report.transitions.summary]
 hint = "The report is written"
 
-# ─── Stage 5: Error recovery ──────────────────────────────────────────────────
+# ─── Stage 6: Error recovery ──────────────────────────────────────────────────
 [stages.error_recovery]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -235,6 +338,11 @@ guess.
 task            = { kind = "pinned", budget = "2%", max_tokens = 3000, required = true, seed = "task", required_message = "Name the log file(s)/dir and what to look for via --task." }
 severity_index  = { kind = "pinned", budget = "2%", max_tokens = 2000 }
 findings        = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+# The sweepers' submitted findings, on the way into the analyze stage. Its budget
+# is what each worker's share is divided from, so it matches the findings region
+# it feeds. Clearable: once analyze has folded the findings in, the raw worker
+# report is safe to drop.
+worker_findings = { kind = "clearable", budget = "12%", max_tokens = 15000 }
 
 logs            = { kind = "temporary",       budget = "30%", max_tokens = 50000 }
 scripts         = { kind = "compacting",      budget = "20%", compact_at = "80%", threshold_tokens = 20000, max_tokens = 30000 }

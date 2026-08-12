@@ -2,7 +2,7 @@
 //!
 //! `--yolo` means "run without me", so a run that stops anyway looks like a
 //! hang. It is not: a blueprint can declare that a particular checkpoint needs a
-//! person however the run was launched, and the flagship `software-engineer`
+//! person however the run was launched, and the flagship `coder`
 //! does exactly that for its plan approval, because everything after that gate
 //! writes code.
 //!

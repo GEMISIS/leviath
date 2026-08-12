@@ -1355,7 +1355,7 @@ mod tests {
         assert!(!entries.iter().any(|e| e.content.contains("interrupted")));
     }
 
-    /// A temp agent dir holding the `software-engineer` manifest, whose stage 0
+    /// A temp agent dir holding the interactive planning manifest, whose stage 0
     /// (`plan`) is an `interactive_points` stage with a `plan_approval` point.
     fn interactive_agent_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

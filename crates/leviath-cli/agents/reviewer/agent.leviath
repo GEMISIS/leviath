@@ -1,7 +1,7 @@
 [agent]
 name = "reviewer"
-version = "0.0.2"
-description = "Code review agent - discover, scan, deep review, and report with error recovery and multi-provider fallback"
+version = "0.1.0"
+description = "Code review agent - discover, scan, review the areas in parallel, then deep review and report, with error recovery and multi-provider fallback"
 entry_stage = "discover"
 
 # Read-only agent: it inspects a diff/codebase and reports. No write access.
@@ -83,22 +83,118 @@ default_region = "conversation"
 read_file = "findings"
 list_dir  = "findings"
 
-[stages.scan.transitions.deep_review]
-hint = "First pass complete - scrutinize the flagged areas"
+[stages.scan.transitions.split_review]
+hint = "First pass complete - hand the flagged areas out for review"
 transform = "direct"
 
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
 # target has spent its max_revisits budget, the run can still move forward
 # to the deliverable instead of dead-ending.
 [stages.scan.transitions.report]
-hint = "Deep review is out of revisits - report the scan findings"
+hint = "The review stages are out of revisits - report the scan findings"
 transform = "compact"
 
 [stages.scan.transitions.error_handler]
 condition = "error"
 transform = "direct"
 
-# ─── Stage 3: Deep review ─────────────────────────────────────────────────────
+# ─── Stage 3: Split review ────────────────────────────────────────────────────
+# One worker per area of the change, so forty files get read at once instead of
+# one after another - and each area is read by a reviewer whose context holds
+# nothing but that area. The workers hand back findings; the deep review merges
+# them and does the work that needs the whole picture.
+[stages.split_review]
+mode = "fan_out"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Split the change into areas, one reviewer each"
+available_tools = []
+max_iterations = 4
+# split_review ↔ error_handler is a cycle, so it needs a ceiling. One retry is
+# enough to route around a transient failure; a second means the change cannot
+# be split usefully and the run should review what it has rather than keep
+# splitting.
+max_revisits = 1
+worker_stage = "review_worker"
+merge_stage = "deep_review"
+max_workers = 4
+# An area nobody could review is a gap in the report, not a reason to throw the
+# other nine away. The failed worker is named in the results, and the deep review
+# is told to cover its area itself.
+on_worker_failure = "continue"
+# Where the workers' findings land, and the budget their shares divide. A region
+# of its own rather than the conversation, which is carrying the message history
+# alongside them.
+results_region = "worker_findings"
+# A ceiling on areas, not just on concurrency. Ten areas is enough breadth for
+# any one change, and past that each worker's share of the region is too small
+# to carry a usable finding list.
+max_items = 10
+split_prompt = """
+Split this review into areas that can be scrutinized independently, one work
+item each. An area is a file, a module, a subsystem, or one coherent group of
+hunks - whatever divides the change without two workers reviewing the same
+lines. Start from the areas `findings` already flags.
+
+Output ONLY a JSON array, starting with '[' and ending with ']'. No prose, no
+markdown fences. Each item:
+
+[{"id": "<short-slug>", "context": {"area": "<the files or hunks to review>", "code": "<the diff hunks for this area, verbatim>", "focus": "<what to look hardest at here>", "conventions": "<what this project calls correct, verbatim from discovery>"}}]
+
+Every item MUST carry its code and the conventions: workers do not share this
+agent's context, so the work item is all they get. A worker that does not know
+what this project holds itself to can only offer generic advice.
+
+A small change is ONE item, not one per hunk. Split when there is genuinely more
+ground than a single reviewer can hold at once.
+"""
+
+[stages.split_review.transitions.error_handler]
+condition = "error"
+transform = "direct"
+
+# ─── Worker: review one area ─────────────────────────────────────────────────
+# Entered as a sub-agent, one per area. It hands back findings, which the deep
+# review merges. `require_output` is what makes that a guarantee rather than a
+# hope. Same models as the deep review: this IS the deep review, on one area.
+# No bash here - a worker's hypothesis checks would raise four approval prompts
+# at once, so verification stays in the merge, where `workflow`'s VERIFY line is.
+[stages.review_worker]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }] }
+description = "Review one area of the change in depth"
+available_tools = ["read_file", "list_dir", "submit_output"]
+allow_as_worker = true
+require_output = true
+max_iterations = 20
+system_prompt = """
+Review ONE area. Your work item holds the code, the focus, and the conventions
+every worker is holding to - it is all the context you get, so work from it.
+
+Run the same framework the deep review does, on your area only:
+  1. Correctness - does it do what it intends? Trace the logic.
+  2. Security - injection, authz, secret handling, unsafe input.
+  3. Performance - hot-path allocations, N+1 queries, needless work.
+  4. Maintainability - clarity, naming, duplication, conventions.
+  5. Test coverage - are the risky paths actually tested?
+
+Read the surrounding code with read_file before judging a hunk. A diff read on
+its own is how a reviewer reports a bug the caller already prevents.
+
+Submit your findings with submit_output. Recommend fixes; never apply one - no
+stage in this agent has a tool that writes, and calling one is refused.
+
+A clean area is a result, not a failure: say so in one line rather than padding
+the list. Only your submitted findings reach the merge - anything else you write
+is lost.
+"""
+
+[stages.review_worker.output]
+format = "markdown"
+instructions = "One finding per line, most severe first, as `severity | file:line | what is wrong | the failure scenario | the fix`, with severity in {critical, warning, info}. A clean area is the single line `none | <area> | no findings`."
+
+[stages.review_worker.transitions]
+
+# ─── Stage 4: Deep review ─────────────────────────────────────────────────────
 [stages.deep_review]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }] }
@@ -107,7 +203,14 @@ available_tools = ["read_file", "list_dir", "bash", "context_write", "context_ap
 max_iterations = 25
 max_revisits = 2
 system_prompt = """
-Scrutinize the flagged areas in depth. Work the review through a fixed framework so
+The area reviewers' findings are in the `worker_findings` region, one block per
+area. Start there: fold each finding into `findings` (context_append), drop the
+duplicates and anything that reads as generic advice, and check the ones that
+would block a merge yourself. A worker reported as FAILED covered nothing - its
+area is still unreviewed, so review it here.
+
+Then scrutinize what no single area could show: the interactions between them,
+and anything the workers left. Work the review through a fixed framework so
 nothing is skipped:
   1. Correctness - does it do what the task/diff intends? Trace the logic.
   2. Security - injection, authz, secret handling, unsafe input.
@@ -146,7 +249,7 @@ transform = "compact"
 condition = "error"
 transform = "direct"
 
-# ─── Stage 4: Report (terminal) ───────────────────────────────────────────────
+# ─── Stage 5: Report ──────────────────────────────────────────────────────────
 [stages.report]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -173,7 +276,7 @@ went unreviewed.
 [stages.report.transitions.summary]
 hint = "The review is written"
 
-# ─── Stage 5: Error handler ───────────────────────────────────────────────────
+# ─── Stage 6: Error handler ───────────────────────────────────────────────────
 [stages.error_handler]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -246,6 +349,12 @@ repo_files      = { kind = "pinned", budget = "3%",  max_tokens = 4000, seed = {
 # stage is re-run with a nudge until it actually fills them.
 discovery       = { kind = "pinned", budget = "4%",  max_tokens = 5000, required = true, required_message = "Populate `discovery` (context_write) with this project's build system, test runner, layout and conventions before leaving the discover stage." }
 workflow        = { kind = "pinned", budget = "2%",  max_tokens = 2000, required = true, required_message = "Populate `workflow` (context_write) with the literal VERIFY / DONE WHEN lines before leaving the discover stage." }
+
+# The area workers' submitted findings, on the way into the deep review. Its
+# budget is what each worker's share is divided from, so it gets a slice the size
+# of the findings region it feeds. Clearable: once the deep review has folded the
+# findings in, the raw worker report is safe to drop.
+worker_findings = { kind = "clearable", budget = "20%", max_tokens = 25000 }
 
 # Accumulated review findings and the running severity tally.
 findings        = { kind = "temporary", budget = "20%", max_tokens = 25000 }
