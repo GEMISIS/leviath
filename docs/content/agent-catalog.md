@@ -21,16 +21,17 @@ bundled agent lists all five providers, and a stage falls back to the one you co
 
 This page is also a set of worked examples. Each section shows the agent's real stages and how
 they route, so you can copy the patterns into your own blueprint (`lev create my-agent` scaffolds
-one, then read [Agents](/docs/agents)). The diagrams show the main path; error-recovery edges and
-the final summary stage that writes the run's [output](/docs/outputs) are left out to keep them
-readable.
+one, then read [Agents](/docs/agents)). The diagrams are simplified: they show each agent's main
+path, and most draw the edge into its error-recovery stage, but a real graph has more edges than
+these. `lev validate <agent>` prints every one of them.
 
 > [!TIP]
 > Pick by the shape of the work: a codebase change (the coding agents), a question to answer from
 > sources (the research agents), or a recurring chore like triaging logs. Not sure? Run `coder`.
 >
-> `data-analyst`, `deep-researcher`, and `wide-researcher` [fan out](/docs/sub-agents), covering
-> several things at once instead of one after another.
+> `coder` aside, every agent that has more than one thing to cover
+> [fans out](/docs/sub-agents): `data-analyst`, `deep-researcher`, `log-analyzer`, `reviewer`,
+> and `wide-researcher` all work on several at once instead of one after another.
 
 ## coder
 
@@ -107,7 +108,7 @@ the numbers say. Reach for it when you want a dataset you can open, not a paragr
 ```mermaid
 flowchart TD
     scope --> split
-    scope -->|small enough| build
+    scope -->|no further splitting is useful| build
     split -->|fan out| gather_worker
     gather_worker --> build
     build --> present
@@ -221,7 +222,7 @@ loop, keeping a severity-ranked findings index. Reach for it to triage a noisy l
 ```mermaid
 flowchart LR
     ingest --> split_logs
-    split_logs -->|"fan out: one worker per file"| analyze
+    split_logs -->|"fan out: one worker per file or window"| analyze
     analyze --> script
     script -->|refine| script
     script --> analyze
@@ -234,8 +235,13 @@ flowchart LR
 lev run log-analyzer --task "Find the error patterns in /var/log/app.log"
 ```
 
-`analyze` (on Opus) hands off to `script` to write and run parsing or aggregation code, which can
-refine itself before returning results. Findings persist in a [context region](/docs/context)
+`split_logs` is a [fan-out](/docs/sub-agents) stage: one sweeper per log file, per service, or per
+time window of a single large file, all reading at once. `analyze` merges what they found, and a
+slice whose worker failed comes back as unswept rather than silently missing. One log file is one
+work item, so a single file does not pay for a fan-out.
+
+`analyze` (on Opus) then hands off to `script` to write and run parsing or aggregation code, which
+can refine itself before returning results. Findings persist in a [context region](/docs/context)
 across passes so the report ranks them by severity.
 
 ## Running one

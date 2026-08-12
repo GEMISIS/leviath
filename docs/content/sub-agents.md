@@ -15,9 +15,10 @@ full of items one through eight.
 A **sub-agent** is a child agent started by another one. Give each item its own sub-agent and they
 run at the same time, each with a clean context, and the parent gets the results back.
 
-This is how the bundled `data-analyst` agent gathers a broad subject at once, one worker per slice
-of it, and how a wide research sweep covers many sub-topics in parallel. See the
-[agent catalog](/docs/agent-catalog) for both.
+Five bundled agents work this way: `data-analyst` gathers one slice of a subject per worker,
+`reviewer` takes a file or hunk group each, `log-analyzer` a log file or time window, and
+`deep-researcher` and `wide-researcher` hand each sub-question to a whole `researcher` run. See the
+[agent catalog](/docs/agent-catalog) for all five.
 
 Sub-agents cost very little here. They are more entities in the same [world](/docs/engine), so there
 are no extra processes to start and nothing has to be serialized between a parent and its children.
@@ -63,6 +64,29 @@ Those keys sit directly on the stage next to `mode = "fan_out"`, not in a sub-ta
 
 Set exactly one of `worker_agent`, `worker_stage`, or `worker_query`. `lev validate` checks that,
 and checks that a named `worker_stage` exists and has opted in with `allow_as_worker`.
+
+### A worker that is a whole other agent
+
+`worker_stage` keeps the work inside this blueprint. `worker_agent` hands each item to a separate
+installed agent instead, which is worth doing when one already does the job:
+
+```toml
+[stages.investigate]
+mode = "fan_out"
+worker_agent = "researcher"    # every item is a full researcher run
+merge_stage = "analyze"
+max_workers = 4
+```
+
+That is what the bundled `deep-researcher` and `wide-researcher` do. The difference is not only who
+does the work: a `worker_agent` worker is a run of its own, so it brings its own stages, its own
+tools, and its own clean context window, rather than a share of the parent's.
+
+The cost is a dependency. The named blueprint has to be installed, and `lev validate` cannot check
+that for you the way it checks a `worker_stage`, because what is installed is a property of the
+machine rather than of the blueprint. A missing one fails per item, so with the default
+`on_worker_failure = "continue"` the run reports it rather than dying. `lev setup` installs the
+bundled agents together, so this only bites when an agent has been installed on its own.
 
 ## What a worker hands back
 
