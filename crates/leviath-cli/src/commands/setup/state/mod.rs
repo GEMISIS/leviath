@@ -276,12 +276,32 @@ impl Wizard {
         }
     }
 
+    /// The credential screen's action rows, after the credential itself.
+    ///
+    /// They exist as rows rather than as shortcut keys alone because that is
+    /// how they become discoverable: a row can be seen, moved onto, and
+    /// clicked, and `o` and `v` still work for anyone who knows them.
+    pub fn detail_actions(&self) -> Vec<DetailAction> {
+        let Some(index) = self.detail_row() else {
+            return Vec::new();
+        };
+        let mut actions = Vec::new();
+        if self.providers[index].provider.signup_url.is_some() {
+            actions.push(DetailAction::OpenSignup);
+        }
+        actions.push(DetailAction::Verify);
+        actions
+    }
+
     /// How many selectable rows the current step has.
     pub fn row_count(&self) -> usize {
         match self.step {
             Step::Welcome | Step::Review => 0,
             Step::Providers => self.providers.len(),
-            Step::ProviderDetail => usize::from(self.detail_row().is_some()),
+            Step::ProviderDetail => match self.detail_row() {
+                Some(_) => 1 + self.detail_actions().len(),
+                None => 0,
+            },
             Step::Defaults => self.defaults.len(),
             Step::Limits => self.limits.len(),
             Step::Agents => self.agents.len(),

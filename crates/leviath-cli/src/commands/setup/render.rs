@@ -55,20 +55,8 @@ pub fn draw(frame: &mut Frame, wizard: &Wizard) {
         return;
     }
 
-    // The breadcrumb is the first thing to go on a short window. It says where
-    // you are, which the body's own title also says, so spending three of
-    // twelve rows on it costs more than it tells you.
-    let header = if area.height >= 14 { 3 } else { 0 };
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(header),
-            Constraint::Min(3),
-            Constraint::Length(3),
-        ])
-        .split(area);
-
-    if header > 0 {
+    let chunks = body_layout(area);
+    if chunks[0].height > 0 {
         draw_header(frame, chunks[0], wizard);
     }
     draw_body(frame, chunks[1], wizard);
@@ -120,21 +108,7 @@ fn help_sections() -> [HelpSection; 3] {
 
 /// The step's Continue/action button, rendered as the last cursor row.
 fn continue_line(wizard: &Wizard) -> Line<'static> {
-    let focused = wizard.on_continue();
-    let style = if focused {
-        Style::default()
-            .fg(C_ACCENT)
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-    } else {
-        Style::default().fg(C_MUTED)
-    };
-    Line::from(vec![
-        Span::styled(
-            if focused { "› " } else { "  " },
-            Style::default().fg(C_ACCENT),
-        ),
-        Span::styled(format!("[ {} ]", wizard.continue_label()), style),
-    ])
+    button_line(&wizard.continue_label(), wizard.on_continue())
 }
 
 /// The step breadcrumb.
@@ -227,7 +201,71 @@ fn draw_body(frame: &mut Frame, area: Rect, wizard: &Wizard) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let screen = match wizard.step {
+    draw_screen(
+        frame,
+        inner,
+        area,
+        &build_screen(wizard).wrapped(inner.width as usize),
+        wizard,
+    );
+}
+
+/// Which selectable row, if any, sits under a point in the window.
+///
+/// This rebuilds the layout the last frame used rather than remembering it.
+/// A stored layout would make drawing a state change, and the wizard's one
+/// rule is that a render never moves anything; rebuilding costs a screenful of
+/// lines on a click, which is not a cost worth trading that rule for.
+pub fn row_at(area: Rect, wizard: &Wizard, column: u16, row: u16) -> Option<usize> {
+    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+        return None;
+    }
+    let chunks = body_layout(area);
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(chunks[1]);
+    if column < inner.x
+        || column >= inner.x + inner.width
+        || row < inner.y
+        || row >= inner.y + inner.height
+    {
+        return None;
+    }
+
+    let screen = build_screen(wizard).wrapped(inner.width as usize);
+    let offset = first_visible(&screen, wizard, inner.height as usize);
+    let line = offset + (row - inner.y) as usize;
+    // The row that owns this line is the last one starting at or before it,
+    // and only if the line is still inside the screen's content.
+    if line >= screen.lines.len() {
+        return None;
+    }
+    screen
+        .rows
+        .iter()
+        .rposition(|start| *start <= line)
+        .filter(|_| screen.rows.first().is_some_and(|first| *first <= line))
+}
+
+/// The header/body/footer split, shared by drawing and hit-testing so a click
+/// can never land on a layout the frame did not use.
+fn body_layout(area: Rect) -> std::rc::Rc<[Rect]> {
+    // The breadcrumb is the first thing to go on a short window. It says where
+    // you are, which the body's own title also says, so spending three of
+    // twelve rows on it costs more than it tells you.
+    let header = if area.height >= 14 { 3 } else { 0 };
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header),
+            Constraint::Min(3),
+            Constraint::Length(3),
+        ])
+        .split(area)
+}
+
+/// The current step's content, before wrapping.
+fn build_screen(wizard: &Wizard) -> Screen {
+    match wizard.step {
         Step::Welcome => build_welcome(wizard),
         Step::Providers => build_providers(wizard),
         Step::ProviderDetail => build_provider_detail(wizard),
@@ -235,8 +273,7 @@ fn draw_body(frame: &mut Frame, area: Rect, wizard: &Wizard) {
         Step::Agents => build_agents(wizard),
         Step::Mcp => build_mcp(wizard),
         Step::Review => build_review(wizard),
-    };
-    draw_screen(frame, inner, area, &screen.wrapped(inner.width as usize), wizard);
+    }
 }
 
 /// Total width of a styled line, counted the way [`wrap_line`] counts.
@@ -280,7 +317,11 @@ fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
         .spans
         .first()
         .map_or(0, |s| s.content.chars().take_while(|c| *c == ' ').count());
-    let indent_len = if indent_len * 2 >= width { 0 } else { indent_len };
+    let indent_len = if indent_len * 2 >= width {
+        0
+    } else {
+        indent_len
+    };
 
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut current: Vec<Span<'static>> = Vec::new();
@@ -341,7 +382,11 @@ fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
     }
     // The break stands in for the space it happened at, so no row ends in one.
     for line in &mut out {
-        while line.spans.len() > 1 && line.spans.last().is_some_and(|s| s.content.trim().is_empty())
+        while line.spans.len() > 1
+            && line
+                .spans
+                .last()
+                .is_some_and(|s| s.content.trim().is_empty())
         {
             line.spans.pop();
         }
@@ -561,7 +606,7 @@ fn build_provider_detail(wizard: &Wizard) -> Screen {
                 )));
             }
             lines.push(Line::from(Span::styled(
-                "Enter to edit.  Ctrl-R shows it.  o opens the signup page.  v re-checks.",
+                "Enter or click to edit.  Ctrl-R shows what you typed.",
                 Style::default().fg(C_DIM),
             )));
         }
@@ -596,12 +641,38 @@ fn build_provider_detail(wizard: &Wizard) -> Screen {
 
     lines.push(Line::from(""));
     lines.push(status_line(wizard, index));
+    lines.push(Line::from(""));
 
-    Screen {
+    let mut screen = Screen {
         lines,
         rows: vec![credential_row],
+    };
+    for (offset, action) in wizard.detail_actions().iter().enumerate() {
+        // Row 0 is the credential itself, so the actions start after it.
+        let focused = wizard.cursor == offset + 1;
+        screen.row();
+        screen.push(button_line(&action.label(row.provider.display), focused));
     }
-    .finish(wizard)
+    screen.finish(wizard)
+}
+
+/// A clickable action, drawn the same way the Continue button is so that what
+/// can be pressed looks like one thing.
+fn button_line(label: &str, focused: bool) -> Line<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(C_ACCENT)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default().fg(C_MUTED)
+    };
+    Line::from(vec![
+        Span::styled(
+            if focused { "› " } else { "  " },
+            Style::default().fg(C_ACCENT),
+        ),
+        Span::styled(format!("[ {label} ]"), style),
+    ])
 }
 
 /// What to print in place of a credential when it is not being edited.
@@ -1019,7 +1090,11 @@ mod tests {
         assert_eq!(
             wrapped
                 .iter()
-                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .map(|l| l
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>())
                 .collect::<Vec<_>>(),
             ["name", "value"]
         );

@@ -13,10 +13,11 @@
 //! toggles a provider, opens an editor, cycles a choice - and only advances
 //! the screen when the cursor is visibly on the step's Continue button.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 
 use super::catalog::Credential;
-use super::state::{ConfirmPurpose, Edit, EditTarget, FieldValue, Step, Wizard};
+use super::state::{ConfirmPurpose, DetailAction, Edit, EditTarget, FieldValue, Step, Wizard};
 use crate::tui::keymap;
 use crate::tui::widgets::confirm::ConfirmOutcome;
 use crate::tui::widgets::help::dismisses_help;
@@ -71,6 +72,32 @@ impl Wizard {
             return Action::Continue;
         }
         self.handle_nav_key(key)
+    }
+
+    /// Handle one mouse event against the window it was clicked in.
+    ///
+    /// A click acts on what it lands on rather than only selecting it, which
+    /// is the point: the wizard leaned on `o` and `v` and a footer nobody
+    /// read, and a row you can press is the version of that a first-time user
+    /// finds on their own. Clicks are ignored while a dialog, an edit or the
+    /// help overlay is up, because a click cannot mean anything there and
+    /// dismissing them by accident would lose typed input.
+    pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) -> Action {
+        if self.confirm.is_some() || self.edit.is_some() || self.show_help {
+            return Action::Continue;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.scroll_by(1),
+            MouseEventKind::ScrollUp => self.scroll_by(-1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(row) = super::render::row_at(area, self, mouse.column, mouse.row) {
+                    self.cursor = row;
+                    return self.activate();
+                }
+            }
+            _ => {}
+        }
+        Action::Continue
     }
 
     /// Keys while a confirmation dialog is open. Its Yes routes by purpose;
@@ -190,13 +217,18 @@ impl Wizard {
         }
         match self.step {
             Step::Providers | Step::Agents | Step::Mcp => self.toggle(),
-            Step::ProviderDetail => {
-                // The credential row opens its editor; the Claude Code row has
-                // nothing to type, so Enter cycles its effort instead.
-                if !self.open_credential_editor() {
-                    self.adjust(1);
+            Step::ProviderDetail => match self.detail_actions().get(self.cursor.wrapping_sub(1)) {
+                // Row 0 is the credential: it opens its editor, and the Claude
+                // Code row has nothing to type, so Enter cycles its effort.
+                // `wrapping_sub` turns that row into an index no action has.
+                None => {
+                    if !self.open_credential_editor() {
+                        self.adjust(1);
+                    }
                 }
-            }
+                Some(DetailAction::OpenSignup) => self.open_signup_page(),
+                Some(DetailAction::Verify) => self.verify_current(),
+            },
             Step::Defaults | Step::Limits => self.activate_field(),
             // Rowless steps put the cursor on their button, so these arms are
             // reachable only with a hand-forced cursor; acting on nothing is

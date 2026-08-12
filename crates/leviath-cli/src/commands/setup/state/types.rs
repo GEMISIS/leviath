@@ -123,6 +123,30 @@ pub struct McpRow {
     pub name: String,
 }
 
+/// A thing the credential screen can do, offered as its own row.
+///
+/// These were shortcut keys and nothing else, which meant they existed only
+/// for people who had read the footer. As rows they can be seen, moved onto
+/// with the arrows, and clicked; `o` and `v` still work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailAction {
+    /// Open the provider's signup or key page in a browser.
+    OpenSignup,
+    /// Check the credential against the provider.
+    Verify,
+}
+
+impl DetailAction {
+    /// The button's text, which names the provider so the row says what it
+    /// will do rather than what it is called.
+    pub fn label(self, provider: &str) -> String {
+        match self {
+            Self::OpenSignup => format!("Open the {provider} key page"),
+            Self::Verify => "Check this credential".to_string(),
+        }
+    }
+}
+
 /// A single editable setting on the Defaults / Limits screens.
 #[derive(Debug, Clone)]
 pub struct Field {

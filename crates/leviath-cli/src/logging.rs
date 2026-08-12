@@ -202,7 +202,9 @@ mod tests {
         // Released is the resting state, so a write goes straight out.
         release_from_tui();
         assert!(!TUI_HOLDS_TERMINAL.load(Ordering::Relaxed));
-        TerminalAwareWriter.write_all(b"").expect("stderr accepts a write");
+        TerminalAwareWriter
+            .write_all(b"")
+            .expect("stderr accepts a write");
         TerminalAwareWriter.flush().expect("stderr accepts a flush");
 
         hold_for_tui();
@@ -211,7 +213,9 @@ mod tests {
             .expect("a held write is buffered, never refused");
         // A flush while held must not reach the terminal either, or the point
         // of buffering is lost on the very next `tracing` call.
-        TerminalAwareWriter.flush().expect("a held flush is a no-op");
+        TerminalAwareWriter
+            .flush()
+            .expect("a held flush is a no-op");
         assert_eq!(
             PARKED.lock().expect("uncontended").as_slice(),
             b"parked line\n"

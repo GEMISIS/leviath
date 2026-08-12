@@ -1,5 +1,5 @@
 use super::*;
-use crate::commands::setup::state::{ConfirmPurpose, Edit, EditTarget, FieldValue};
+use crate::commands::setup::state::{ConfirmPurpose, DetailAction, Edit, EditTarget, FieldValue};
 
 fn press(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::empty())
@@ -1081,4 +1081,152 @@ fn without_claude_code_review_saves_immediately() {
 
     let action = w.handle_key(press(KeyCode::Enter));
     assert_eq!(action, Action::Save, "no claude-code means no gate");
+}
+
+// ─── the mouse ──────────────────────────────────────────────────────────
+
+/// The window the click tests aim at.
+const AREA: Rect = Rect::new(0, 0, 90, 40);
+
+fn click(column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::empty(),
+    }
+}
+
+fn wheel(down: bool) -> MouseEvent {
+    MouseEvent {
+        kind: if down {
+            MouseEventKind::ScrollDown
+        } else {
+            MouseEventKind::ScrollUp
+        },
+        column: 4,
+        row: 6,
+        modifiers: KeyModifiers::empty(),
+    }
+}
+
+/// Where a given row is drawn, so the assertions below say which row they
+/// clicked rather than encoding a line layout that will move.
+fn point_of_row(w: &Wizard, row: usize) -> (u16, u16) {
+    for y in 0..AREA.height {
+        if crate::commands::setup::render::row_at(AREA, w, 4, y) == Some(row) {
+            return (4, y);
+        }
+    }
+    panic!("row {row} is not on screen");
+}
+
+#[test]
+fn clicking_a_provider_selects_and_toggles_it() {
+    let (_dir, mut w) = wizard();
+    w.enter(Step::Providers);
+    let (x, y) = point_of_row(&w, 1);
+
+    w.handle_mouse(click(x, y), AREA);
+
+    assert_eq!(w.cursor, 1, "the click moves the selection to what it hit");
+    assert!(w.providers[1].selected, "and acts on it, as Enter would");
+}
+
+#[test]
+fn clicking_the_button_advances_the_step() {
+    let (_dir, mut w) = wizard();
+    w.enter(Step::Agents);
+    let button = w.nav_rows() - 1;
+    let (x, y) = point_of_row(&w, button);
+
+    w.handle_mouse(click(x, y), AREA);
+
+    assert_ne!(w.step, Step::Agents, "the button is a button when clicked");
+}
+
+/// The two actions that used to be shortcut keys and nothing else.
+#[test]
+fn the_credential_screen_offers_its_actions_as_clickable_rows() {
+    let (_dir, mut w) = wizard();
+    w.providers[0].selected = true;
+    w.enter(Step::ProviderDetail);
+    assert_eq!(
+        w.detail_actions(),
+        vec![DetailAction::OpenSignup, DetailAction::Verify],
+        "a provider with a key page offers both"
+    );
+
+    let (x, y) = point_of_row(&w, 1);
+    w.handle_mouse(click(x, y), AREA);
+    assert!(
+        w.message
+            .as_deref()
+            .is_some_and(|m| m.starts_with("Opened")),
+        "clicking the signup row opens the page: {:?}",
+        w.message
+    );
+
+    let (x, y) = point_of_row(&w, 2);
+    w.handle_mouse(click(x, y), AREA);
+    assert_eq!(w.message.as_deref(), Some("Checking…"));
+}
+
+/// A provider with nowhere to sign up offers only the check, and the rows stay
+/// contiguous rather than leaving a gap where a button would have been.
+#[test]
+fn a_provider_without_a_key_page_offers_only_the_check() {
+    let (_dir, mut w) = wizard();
+    let index = w
+        .providers
+        .iter()
+        .position(|r| r.provider.signup_url.is_none())
+        .expect("the catalog has one");
+    w.providers[index].selected = true;
+    w.enter(Step::ProviderDetail);
+
+    assert_eq!(w.detail_actions(), vec![DetailAction::Verify]);
+    assert_eq!(w.row_count(), 2, "the credential row plus the one action");
+}
+
+#[test]
+fn a_click_outside_the_body_does_nothing() {
+    let (_dir, mut w) = wizard();
+    w.enter(Step::Providers);
+    let before = w.providers[0].selected;
+
+    // The footer, which is not a row and must not be treated as the nearest one.
+    w.handle_mouse(click(4, AREA.height - 1), AREA);
+
+    assert_eq!(w.cursor, 0);
+    assert_eq!(w.providers[0].selected, before);
+}
+
+#[test]
+fn the_wheel_moves_the_selection_so_the_view_follows_it() {
+    let (_dir, mut w) = wizard();
+    w.enter(Step::Providers);
+
+    w.handle_mouse(wheel(true), AREA);
+    assert_eq!(w.cursor, 1);
+    w.handle_mouse(wheel(false), AREA);
+    assert_eq!(w.cursor, 0);
+}
+
+/// A click cannot mean anything while a dialog or an edit is up, and taking it
+/// as a dismissal would throw away a half-typed credential.
+#[test]
+fn clicks_are_ignored_while_a_dialog_or_an_edit_is_open() {
+    let (_dir, mut w) = wizard();
+    w.enter(Step::Providers);
+    w.edit = Some(credential_edit("half-typed", true));
+    w.handle_mouse(click(4, 4), AREA);
+    assert!(w.edit.is_some(), "the edit survives a stray click");
+    assert!(!w.providers[0].selected);
+
+    w.edit = None;
+    w.open_quit_confirm();
+    w.handle_mouse(click(4, 4), AREA);
+    assert!(w.confirm.is_some());
+    assert!(!w.providers[0].selected);
 }
