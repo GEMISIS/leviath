@@ -1567,3 +1567,20 @@ fn choosing_a_provider_in_the_chooser_repicks_the_concurrency_default() {
         crate::commands::setup::catalog::OLLAMA_MAX_CONCURRENT_INFERENCES.to_string()
     );
 }
+
+/// Both TUIs answer the same key for help, so one habit works in both.
+#[test]
+fn f1_opens_the_wizard_help_too() {
+    let (_dir, mut w) = wizard();
+    w.handle_key(press(KeyCode::F(1)));
+    assert!(w.show_help);
+
+    // And the overlay scrolls rather than swallowing the key.
+    w.handle_key(press(KeyCode::PageDown));
+    assert!(w.show_help, "scrolling is not dismissing");
+    assert!(w.help_scroll.get() > 0);
+
+    w.handle_key(press(KeyCode::Esc));
+    assert!(!w.show_help);
+    assert_eq!(w.help_scroll.get(), 0, "closing resets it");
+}

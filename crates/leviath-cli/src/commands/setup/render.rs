@@ -68,7 +68,7 @@ pub fn draw(frame: &mut Frame, wizard: &Wizard) {
     } else if let Some(picker) = &wizard.picker {
         draw_picker(frame, frame.area(), picker);
     } else if wizard.show_help {
-        draw_help(frame, frame.area(), &help_sections());
+        draw_help(frame, frame.area(), &help_sections(), &wizard.help_scroll);
     }
 }
 

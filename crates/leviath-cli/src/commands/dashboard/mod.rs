@@ -178,6 +178,8 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
 
         // …and any run the new-run screen asked for.
         dashboard.drain_spawn_outcomes();
+        // A run started here opens its own page, once the daemon reports it.
+        dashboard.open_pending_run();
 
         // Report what the daemon did with this tick's commands.
         dashboard.drain_daemon_outcomes();

@@ -19,11 +19,18 @@ use tokio::sync::mpsc;
 
 use super::state::Dashboard;
 use super::types::{
-    NewRunAgent, NewRunContext, NewRunPane, SpawnCommand, SpawnOutcome, ToastLevel,
+    ConfirmAction, NewRunAgent, NewRunContext, NewRunPane, SpawnCommand, SpawnOutcome, ToastLevel,
 };
 use crate::commands::list::{ListFilter, build_list_report};
 use crate::config::Config;
 use crate::daemon::client::{LaunchRequest, never_interactive, resolve_spawn_args};
+use crate::tui::widgets::confirm::Confirm;
+
+/// How many ticks the dashboard waits for a just-started run to appear before
+/// giving up on opening its page. At the 250ms tick the loop runs on, this is
+/// about fifteen seconds.
+pub(super) const OPEN_RUN_TICKS: u32 = 60;
+use ratatui::text::Line;
 
 /// How many workdir files the `@` completion will offer.
 ///
@@ -45,6 +52,10 @@ impl Dashboard {
         self.new_run_filter.clear();
         self.new_run_selected = 0;
         self.new_run_task = ratatui_textarea::TextArea::default();
+        // Unattended is off every time the screen opens. It is a consequential
+        // setting, and one that survived out of sight is one somebody can
+        // leave on and forget.
+        self.new_run_yolo = false;
         self.close_file_ref();
         self.refresh_new_run_agents();
         self.new_run_files = collect_workdir_files(&self.new_run_ctx.workdir, FILE_CANDIDATE_CAP);
@@ -140,8 +151,13 @@ impl Dashboard {
             agent_path: agent.path.clone(),
             task,
             workdir: self.new_run_ctx.workdir.display().to_string(),
+            yolo: self.new_run_yolo,
         });
-        self.toast(format!("Starting '{}'…", agent.name), ToastLevel::Info);
+        let how = match self.new_run_yolo {
+            true => " unattended",
+            false => "",
+        };
+        self.toast(format!("Starting '{}'{how}…", agent.name), ToastLevel::Info);
         self.add_log(format!("run requested: {}", agent.name));
         self.close_new_run_screen();
     }
@@ -155,6 +171,45 @@ impl Dashboard {
             };
             self.add_log(outcome.message.clone());
             self.toast(outcome.message, level);
+            // Starting a run is a request to watch it, so the dashboard goes
+            // to its page. Not here though: the daemon has only just been told,
+            // and the run reaches the list on a later sync.
+            if let Some(run_id) = outcome.run_id {
+                self.pending_open_run = Some((run_id, OPEN_RUN_TICKS));
+            }
+        }
+    }
+
+    /// Open the page of a run started from this screen, once it exists.
+    ///
+    /// Bounded rather than open-ended: a run that never appears is a run the
+    /// daemon dropped, and a dashboard that jumps to a page minutes later,
+    /// after the user has moved on, is worse than one that quietly gives up.
+    /// The toast already said the run started.
+    pub(super) fn open_pending_run(&mut self) {
+        let Some((run_id, ticks)) = self.pending_open_run.take() else {
+            return;
+        };
+        // Only from the list. Somewhere else means the user went there
+        // themselves, and yanking them out of it is not what they asked for.
+        if self.detail_view || self.mcp_screen || self.new_run_screen {
+            return;
+        }
+        match self
+            .display_indices
+            .iter()
+            .position(|i| self.agents.get(*i).is_some_and(|agent| agent.id == run_id))
+        {
+            Some(row) => {
+                self.selected = row;
+                self.table_state.select(Some(row));
+                self.open_detail_view();
+            }
+            None => {
+                if let Some(left) = ticks.checked_sub(1) {
+                    self.pending_open_run = Some((run_id, left));
+                }
+            }
         }
     }
 
@@ -199,6 +254,35 @@ impl Dashboard {
         self.new_run_file_selected = 0;
     }
 
+    /// Ctrl-Y: turn unattended runs on or off for this screen.
+    ///
+    /// A chord rather than a letter because both panes here consume printable
+    /// characters - one filters the agent list, the other is the task itself -
+    /// so there is no letter left that could mean anything but text.
+    ///
+    /// Turning it *on* asks first, once per sitting. Turning it off never asks:
+    /// nothing needs confirming about deciding to be asked more.
+    pub(super) fn toggle_new_run_yolo(&mut self) {
+        if self.new_run_yolo {
+            self.new_run_yolo = false;
+            self.toast("Unattended off: you will be asked", ToastLevel::Info);
+            return;
+        }
+        if self.yolo_warning_silenced {
+            self.new_run_yolo = true;
+            self.toast("Unattended on", ToastLevel::Warning);
+            return;
+        }
+        self.pending_confirm = Some((ConfirmAction::EnableYolo, yolo_warning()));
+    }
+
+    /// Apply the answer to that warning.
+    pub(super) fn accept_yolo_warning(&mut self, silence: bool) {
+        self.new_run_yolo = true;
+        self.yolo_warning_silenced = silence;
+        self.toast("Unattended on", ToastLevel::Warning);
+    }
+
     // ── Keys ─────────────────────────────────────────────────────────────────
 
     /// Keys while the new-run screen is open. The `@` popup takes them first -
@@ -207,6 +291,21 @@ impl Dashboard {
     pub(super) fn handle_new_run_key(&mut self, key: crossterm::event::KeyEvent) {
         if self.new_run_file_ref {
             self.handle_file_ref_key(key);
+            return;
+        }
+        // Ahead of both panes: these belong to the screen, not to whichever
+        // half of it currently has the cursor. F1 rather than `?`, which is a
+        // question mark in both a filter box and a task.
+        if key.code == crossterm::event::KeyCode::F(1) {
+            self.show_help = true;
+            return;
+        }
+        if key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL)
+            && key.code == crossterm::event::KeyCode::Char('y')
+        {
+            self.toggle_new_run_yolo();
             return;
         }
         match self.new_run_focus {
@@ -306,6 +405,36 @@ impl Dashboard {
     }
 }
 
+/// The warning shown before the first unattended run of a sitting.
+///
+/// It says what `--yolo` does *and* what it does not: a run that still stops
+/// for a person reads as a hang to somebody who was told it would not stop, and
+/// that misunderstanding is worse than the setting itself.
+fn yolo_warning() -> Confirm {
+    Confirm::new(
+        "Run unattended?",
+        vec![
+            Line::from(
+                "Runs started from this screen will approve their own tool calls: \
+                 editing files, running shell commands, fetching URLs, whatever \
+                 the agent's permissions allow, without stopping to ask you.",
+            ),
+            Line::from(""),
+            Line::from(
+                "It does not skip checkpoints a blueprint asks a person for. \
+                 Those still stop, and one nobody answers ends the run when the \
+                 interaction timeout expires.",
+            ),
+            Line::from(""),
+            Line::from("Ctrl-Y turns it off again."),
+        ],
+        "Run unattended",
+        "Keep asking me",
+    )
+    .danger()
+    .with_remember("Don't ask again while this dashboard is open")
+}
+
 /// Workdir-relative paths of the files under `root`, sorted, at most `cap`.
 ///
 /// There is no `.gitignore` reader in the dependency tree and adding one to
@@ -368,7 +497,7 @@ async fn run_spawn(control: &ControlClient, cmd: SpawnCommand) -> SpawnOutcome {
         stdin_is_terminal: &never_interactive,
         model: None,
         workdir: &cmd.workdir,
-        yolo: false,
+        yolo: cmd.yolo,
         allow: Vec::new(),
         max_depth: None,
         // Region seeds are a `lev run` command line; this screen writes a task.
@@ -381,6 +510,7 @@ async fn run_spawn(control: &ControlClient, cmd: SpawnCommand) -> SpawnOutcome {
             return SpawnOutcome {
                 message: format!("Could not start '{}': {e}", cmd.agent_path),
                 ok: false,
+                run_id: None,
             };
         }
     };
@@ -388,18 +518,22 @@ async fn run_spawn(control: &ControlClient, cmd: SpawnCommand) -> SpawnOutcome {
         Ok(ControlResponse::Spawned { run_id }) => SpawnOutcome {
             message: format!("Started {run_id}"),
             ok: true,
+            run_id: Some(run_id),
         },
         Ok(ControlResponse::Error { message }) => SpawnOutcome {
             message: format!("The daemon refused the run: {message}"),
             ok: false,
+            run_id: None,
         },
         Ok(other) => SpawnOutcome {
             message: format!("Unexpected daemon response to spawn: {other:?}"),
             ok: false,
+            run_id: None,
         },
         Err(e) => SpawnOutcome {
             message: format!("Could not reach the daemon: {e}"),
             ok: false,
+            run_id: None,
         },
     }
 }
@@ -947,10 +1081,12 @@ mod tests {
         dash.inject_spawn_outcome_for_test(SpawnOutcome {
             message: "Started run-1".to_string(),
             ok: true,
+            run_id: Some("run-1".to_string()),
         });
         dash.inject_spawn_outcome_for_test(SpawnOutcome {
             message: "boom".to_string(),
             ok: false,
+            run_id: None,
         });
         dash.drain_spawn_outcomes();
         assert_eq!(
@@ -1008,6 +1144,7 @@ mod tests {
                 agent_path: dir.path().join("alpha").display().to_string(),
                 task: "ship it".to_string(),
                 workdir: dir.path().display().to_string(),
+                yolo: false,
             })
             .unwrap();
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
@@ -1057,6 +1194,7 @@ mod tests {
                 agent_path: dir.path().join("nope").display().to_string(),
                 task: "ship it".to_string(),
                 workdir: dir.path().display().to_string(),
+                yolo: false,
             },
         )
         .await;
@@ -1081,6 +1219,7 @@ mod tests {
                 agent_path: dir.path().join("nope").display().to_string(),
                 task: "t".to_string(),
                 workdir: dir.path().display().to_string(),
+                yolo: false,
             })
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), handle)
@@ -1094,5 +1233,108 @@ mod tests {
         let ctx = production_new_run_context();
         assert!(ctx.config_path.ends_with("config.toml"));
         assert!(ctx.agents_dir.ends_with("agents"));
+    }
+
+    // ─── unattended runs ─────────────────────────────────────────────────────
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    /// The first Ctrl-Y of a sitting warns rather than arming anything, and the
+    /// warning has to be accepted before the setting changes.
+    #[test]
+    fn the_first_unattended_toggle_asks_before_it_arms() {
+        let mut dash = make_test_dashboard();
+        dash.new_run_screen = true;
+        assert!(!dash.new_run_yolo, "off until somebody says otherwise");
+
+        dash.handle_key(ctrl(KeyCode::Char('y')));
+        assert!(dash.pending_confirm.is_some(), "it asks first");
+        assert!(!dash.new_run_yolo, "and arms nothing until answered");
+
+        // Declining leaves it off.
+        dash.handle_key(key(KeyCode::Esc));
+        assert!(dash.pending_confirm.is_none());
+        assert!(!dash.new_run_yolo);
+
+        // Accepting turns it on.
+        dash.handle_key(ctrl(KeyCode::Char('y')));
+        dash.handle_key(key(KeyCode::Char('y')));
+        assert!(dash.new_run_yolo);
+
+        // Turning it back off never asks: nothing needs confirming about
+        // choosing to be asked more.
+        dash.handle_key(ctrl(KeyCode::Char('y')));
+        assert!(dash.pending_confirm.is_none());
+        assert!(!dash.new_run_yolo);
+    }
+
+    /// The box silences the warning for the rest of the sitting, and only for the
+    /// warning: the setting itself still has to be turned on each time.
+    #[test]
+    fn dont_ask_again_lasts_the_session_but_does_not_arm_anything() {
+        let mut dash = make_test_dashboard();
+        dash.new_run_screen = true;
+
+        dash.handle_key(ctrl(KeyCode::Char('y')));
+        // Space ticks the box, then Enter on the focused button would decline, so
+        // answer explicitly.
+        dash.handle_key(key(KeyCode::Char(' ')));
+        dash.handle_key(key(KeyCode::Char('y')));
+        assert!(dash.new_run_yolo);
+        assert!(dash.yolo_warning_silenced);
+
+        // Off, then on again: no second warning.
+        dash.handle_key(ctrl(KeyCode::Char('y')));
+        dash.handle_key(ctrl(KeyCode::Char('y')));
+        assert!(dash.pending_confirm.is_none(), "it was told not to ask");
+        assert!(dash.new_run_yolo);
+
+        // Re-opening the screen still resets the setting, silence or not: this is
+        // the half that stops somebody leaving it armed and forgetting.
+        dash.open_new_run_screen();
+        assert!(!dash.new_run_yolo);
+        assert!(dash.yolo_warning_silenced, "but the silence holds");
+    }
+
+    /// A fresh dashboard has forgotten the silence entirely, which is what makes
+    /// it a session and not a preference.
+    #[test]
+    fn a_new_dashboard_asks_again() {
+        let mut dash = make_test_dashboard();
+        dash.new_run_screen = true;
+        dash.handle_key(ctrl(KeyCode::Char('y')));
+        dash.handle_key(key(KeyCode::Char(' ')));
+        dash.handle_key(key(KeyCode::Char('y')));
+        assert!(dash.yolo_warning_silenced);
+
+        let fresh = make_test_dashboard();
+        assert!(
+            !fresh.yolo_warning_silenced,
+            "closing the dashboard is what expires it"
+        );
+        assert!(!fresh.new_run_yolo);
+    }
+
+    /// The setting reaches the spawn rather than only the screen.
+    #[test]
+    fn the_setting_travels_with_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents/alpha"), "alpha", "first");
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+        dash.new_run_focus = NewRunPane::Task;
+        dash.new_run_task.insert_str("do the thing");
+        dash.new_run_yolo = true;
+
+        dash.submit_new_run();
+
+        let cmd = dash
+            .spawn_cmd_rx_for_test()
+            .try_recv()
+            .expect("a run was sent");
+        assert!(cmd.yolo, "the run carries what the screen was set to");
+        assert_eq!(cmd.task, "do the thing");
     }
 }

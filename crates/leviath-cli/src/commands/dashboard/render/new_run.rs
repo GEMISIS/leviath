@@ -129,12 +129,25 @@ impl Dashboard {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(focus_style(focused))
-                .title(Span::styled(
-                    format!(" Task for {agent} "),
-                    Style::default()
-                        .fg(focus_colour(focused))
-                        .add_modifier(Modifier::BOLD),
-                )),
+                .title(Line::from(vec![
+                    Span::styled(
+                        format!(" Task for {agent} "),
+                        Style::default()
+                            .fg(focus_colour(focused))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    // On the title rather than the help bar: this is the pane
+                    // you are looking at when you press Enter, and a setting
+                    // this consequential should not be one line further away
+                    // than the thing it changes.
+                    match self.new_run_yolo {
+                        true => Span::styled(
+                            "[ unattended ] ",
+                            Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
+                        ),
+                        false => Span::styled("", Style::default()),
+                    },
+                ])),
         );
         self.new_run_task.set_style(Style::default().fg(C_WHITE));
         self.new_run_task
@@ -193,10 +206,10 @@ impl Dashboard {
         let hint = match (self.new_run_file_ref, self.new_run_focus) {
             (true, _) => " ↑↓ choose · Enter/Tab insert · Esc dismiss ",
             (false, NewRunPane::Agents) => {
-                " ↑↓ select · type to filter · Tab/Enter write task · Esc back "
+                " ↑↓ select · type to filter · Tab write task · ^Y unattended · F1 help · Esc back "
             }
             (false, NewRunPane::Task) => {
-                " Enter start · Alt+↵ newline · @ file · Tab agents · Esc back "
+                " Enter start · Alt+↵ newline · @ file · ^Y unattended · F1 help · Esc back "
             }
         };
         frame.render_widget(
@@ -369,5 +382,21 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(out.contains("files"), "{out}");
+    }
+
+    /// The setting is on the pane you are looking at when you press Enter,
+    /// and only when it is on.
+    #[test]
+    fn the_task_pane_says_when_a_run_will_be_unattended() {
+        let mut dash = screen();
+
+        // The help bar names the chord either way, so the assertion is on the
+        // marker the title carries only while it is armed.
+        let quiet = rendered(&mut dash);
+        assert!(!quiet.contains("[ unattended ]"), "{quiet}");
+
+        dash.new_run_yolo = true;
+        let loud = rendered(&mut dash);
+        assert!(loud.contains("[ unattended ]"), "{loud}");
     }
 }

@@ -22,10 +22,10 @@ impl Dashboard {
             return;
         }
 
-        // Help overlay: closed deliberately (Esc/q/?/Enter), never by a key
-        // that would also act underneath.
+        // Help overlay: scrolls, and closes deliberately (Esc/q/?/Enter),
+        // never by a key that would also act underneath.
         if self.show_help {
-            if crate::tui::widgets::help::dismisses_help(&key) {
+            if crate::tui::widgets::help::handle_help_key(&key, &self.help_scroll) {
                 self.show_help = false;
             }
             return;
@@ -134,6 +134,10 @@ impl Dashboard {
                 ConfirmAction::Kill { run_id } => self.perform_kill(&run_id),
                 ConfirmAction::Delete { run_id } => self.perform_delete(&run_id),
                 ConfirmAction::McpRemove { name } => self.mcp_remove_named(&name),
+                // The box is read off the dialog rather than carried in the
+                // outcome: whether to ask again is a note about future
+                // questions, not a third answer to this one.
+                ConfirmAction::EnableYolo => self.accept_yolo_warning(dialog.remembered()),
             },
         }
     }
@@ -154,7 +158,7 @@ impl Dashboard {
                 self.main_focus = MainPane::RunList;
             }
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
             _ => {}
         }
     }
@@ -366,7 +370,7 @@ impl Dashboard {
                     }
                 }
             }
-            KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
             _ => {}
         }
     }
@@ -559,7 +563,7 @@ impl Dashboard {
                 self.detail_scroll = 0;
                 self.review_scroll = 0;
             }
-            KeyCode::Char('?') => {
+            KeyCode::Char('?') | KeyCode::F(1) => {
                 self.show_help = true;
             }
             // Search: `/` enters search mode; `n`/`N` step through matches
@@ -738,13 +742,7 @@ impl Dashboard {
             }
             KeyCode::Enter => {
                 if !self.display_indices.is_empty() {
-                    self.detail_view = true;
-                    self.detail_scroll = 0;
-                    // Default to the currently active stage when opening detail view
-                    self.selected_stage = self.selected_agent().map(|a| a.stage_index).unwrap_or(0);
-                    // Fresh run, fresh exploration state.
-                    self.context_tree = ContextTreeState::default();
-                    self.stage_explorer = None;
+                    self.open_detail_view();
                 }
             }
             KeyCode::Char('/') => {
@@ -764,7 +762,7 @@ impl Dashboard {
             KeyCode::Char('r') => {
                 self.handle_resume();
             }
-            KeyCode::Char('?') => {
+            KeyCode::Char('?') | KeyCode::F(1) => {
                 self.show_help = true;
             }
             KeyCode::Char('m') => {
@@ -812,7 +810,7 @@ impl Dashboard {
                 self.mcp_screen = false;
             }
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
             KeyCode::Up | KeyCode::Char('k') => {
                 self.mcp_selected = self.mcp_selected.saturating_sub(1);
             }
@@ -3757,5 +3755,103 @@ mod tests {
         dash.handle_key(key(KeyCode::Esc));
         dash.handle_key(key(KeyCode::Esc));
         assert!(!dash.new_run_screen);
+    }
+
+    // ─── where you end up after starting a run ───────────────────────────────
+
+    /// The whole path: list → new run → the run's own page → back to the list.
+    ///
+    /// The last step is the one worth pinning. The new-run screen closes at submit
+    /// rather than staying behind the detail view, so Esc from the run lands on
+    /// the list and not back in a form that has already been filled in.
+    #[test]
+    fn starting_a_run_opens_its_page_and_esc_returns_to_the_list() {
+        let mut dash = make_test_dashboard();
+        dash.handle_key(key(KeyCode::Char('n')));
+        assert!(dash.new_run_screen, "n opens the screen");
+
+        // The run is dispatched; the daemon has not reported it yet.
+        dash.close_new_run_screen();
+        dash.inject_spawn_outcome_for_test(SpawnOutcome {
+            message: "Started run-7".to_string(),
+            ok: true,
+            run_id: Some("run-7".to_string()),
+        });
+        dash.drain_spawn_outcomes();
+        dash.open_pending_run();
+        assert!(
+            !dash.detail_view,
+            "nothing to open until the run reaches the list"
+        );
+
+        // It arrives on a later sync.
+        dash.agents
+            .push(make_test_agent("run-7", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.open_pending_run();
+        assert!(dash.detail_view, "the run's page opens by itself");
+        assert_eq!(
+            dash.selected_agent().map(|a| a.id.as_str()),
+            Some("run-7"),
+            "and it is the run that was started, not whatever was selected"
+        );
+
+        // Back goes to the list, not to the screen the run was started from.
+        dash.handle_key(key(KeyCode::Esc));
+        assert!(!dash.detail_view);
+        assert!(!dash.new_run_screen, "the form is not on the back stack");
+    }
+
+    /// A run that never appears is given up on rather than opening a page minutes
+    /// later, under whatever the user has moved on to.
+    #[test]
+    fn a_run_that_never_arrives_is_dropped() {
+        let mut dash = make_test_dashboard();
+        dash.inject_spawn_outcome_for_test(SpawnOutcome {
+            message: "Started ghost".to_string(),
+            ok: true,
+            run_id: Some("ghost".to_string()),
+        });
+        dash.drain_spawn_outcomes();
+        for _ in 0..crate::commands::dashboard::new_run::OPEN_RUN_TICKS + 1 {
+            dash.open_pending_run();
+        }
+        assert!(dash.pending_open_run.is_none(), "it stopped waiting");
+        assert!(!dash.detail_view);
+    }
+
+    /// Somewhere else means the user went there themselves.
+    #[test]
+    fn a_pending_run_does_not_yank_you_out_of_another_screen() {
+        let mut dash = make_test_dashboard();
+        dash.inject_spawn_outcome_for_test(SpawnOutcome {
+            message: "Started run-7".to_string(),
+            ok: true,
+            run_id: Some("run-7".to_string()),
+        });
+        dash.drain_spawn_outcomes();
+        dash.agents
+            .push(make_test_agent("run-7", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+
+        dash.mcp_screen = true;
+        dash.open_pending_run();
+        assert!(!dash.detail_view, "it waits rather than interrupting");
+        assert!(dash.mcp_screen);
+    }
+
+    /// A spawn that failed has no page to open.
+    #[test]
+    fn a_refused_run_opens_nothing() {
+        let mut dash = make_test_dashboard();
+        dash.inject_spawn_outcome_for_test(SpawnOutcome {
+            message: "The daemon refused the run: nope".to_string(),
+            ok: false,
+            run_id: None,
+        });
+        dash.drain_spawn_outcomes();
+        assert!(dash.pending_open_run.is_none());
+        dash.open_pending_run();
+        assert!(!dash.detail_view);
     }
 }

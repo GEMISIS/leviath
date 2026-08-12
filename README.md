@@ -308,8 +308,8 @@ and why you might not want Leviath at all, is on the docs site:
 
 - **It's not a replacement for Claude Code, Codex, or your favorite coding agent.** Those are polished interactive products at a different layer, and Leviath can even run on top of Claude Code as a transport.
 - **Agents are config, not code.** A Leviath agent is a TOML blueprint plus optional Rhai script tools. If you want to write agent logic in Python or TypeScript against an SDK, other languages drive Leviath through the REST API instead.
-- **It runs on one machine.** The daemon hosts every agent in a single process on a single box. There is no hosted service and no multi-machine orchestration.
-- **Agents share a process.** That is what makes them cheap, and it means you don't get the isolation a process-per-agent design gives you for free. [Sandboxing](https://leviath.dev/docs/security) is opt-in.
+- **Agents execute on one machine.** The daemon hosts every agent in a single process on a single box. You can reach it from anywhere over the REST and WebSocket API, and it can call out through signed webhooks, but there is no hosted service and no scheduling work across several machines.
+- **Isolation is at the data layer, not the process layer.** Every agent has its own state, working directory, tool policy and read-path grants, and a panic fails that agent alone rather than the daemon. What is opt-in is the [OS sandbox](https://leviath.dev/docs/security) that confines shell commands, seed commands and script `shell()` calls. If you need each agent in its own kernel-enforced box by default, that is a different design.
 - **You need a model provider**: an API key, a local Ollama, or the Claude Code transport (with its terms-of-service caveat).
 
 ## CLI

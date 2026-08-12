@@ -47,6 +47,16 @@ impl Dashboard {
             self.draw_new_run_screen(frame, frame.area());
             self.apply_selection_overlay(frame);
             self.draw_toasts(frame);
+            // This screen types text, so `?` is a question mark here and F1 is
+            // the way in. Without drawing the overlay it would have no way out
+            // of being pressed and nothing happening.
+            if self.show_help {
+                self.draw_help_overlay(frame);
+            }
+            // The unattended warning opens over this screen.
+            if let Some((_, dialog)) = &self.pending_confirm {
+                dialog.draw(frame, frame.area());
+            }
             return;
         }
         if self.detail_view {
@@ -994,5 +1004,41 @@ mod tests {
             .unwrap();
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("CANCEL"), "{buf}");
+    }
+
+    /// The new-run screen draws its own help and its own dialog. It used to
+    /// return before both, so F1 there did nothing visible and the unattended
+    /// warning would have opened behind the screen that raised it.
+    #[test]
+    fn the_new_run_screen_draws_its_overlays() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = crate::commands::dashboard::test_support::make_test_dashboard();
+        dash.new_run_ctx = crate::commands::dashboard::types::NewRunContext {
+            agents_dir: dir.path().join("agents"),
+            config_path: dir.path().join("config.toml"),
+            workdir: dir.path().join("work"),
+        };
+        std::fs::create_dir_all(dir.path().join("work")).unwrap();
+        dash.open_new_run_screen();
+
+        dash.show_help = true;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        assert!(
+            crate::commands::dashboard::test_support::rendered_buffer(&terminal)
+                .contains("New run: agents")
+        );
+
+        dash.show_help = false;
+        dash.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('y'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        assert!(
+            crate::commands::dashboard::test_support::rendered_buffer(&terminal)
+                .contains("Run unattended?")
+        );
     }
 }

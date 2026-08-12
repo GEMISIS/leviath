@@ -98,6 +98,9 @@ pub struct Wizard {
     /// rather than that Leviath is configurable. Turned on from the Defaults
     /// screen, it slots the `Limits` step back into the flow.
     pub show_advanced: bool,
+    /// How far the help overlay is scrolled. See the dashboard's field for
+    /// why it is a `Cell`.
+    pub help_scroll: std::cell::Cell<usize>,
     /// The open chooser for a Defaults value, if one is open.
     pub picker: Option<Picker>,
 }
@@ -213,6 +216,7 @@ impl Wizard {
             ticks: 0,
             scroll: 0,
             show_advanced: false,
+            help_scroll: std::cell::Cell::new(0),
             picker: None,
         };
         wizard.rebuild_defaults();
