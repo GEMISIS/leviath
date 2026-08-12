@@ -19,10 +19,10 @@ runtime. So this page is about layers, not scores, and several of the tools belo
 
 ```mermaid
 flowchart TD
-  ORCH["Orchestrators<br/>Gas City / OpenHands"]
+  ORCH["Orchestrators<br/>Gas Town / Gas City"]
   ORCH --> AGENTS["Agent layer"]
   subgraph AGENTS["Agent layer: pick one"]
-    CC["Coding agents<br/>Claude Code, Codex"]
+    CC["Coding agents<br/>Claude Code, Codex, OpenHands"]
     FW["Frameworks<br/>CrewAI, LangGraph"]
     LEV["Runtimes<br/>Leviath"]
   end
