@@ -668,6 +668,71 @@ Transport is inferred from whether you pass `--url` or `--command`.
 `lev auth migrate` moves keys into the OS store by default; `--to-file` moves them back out. Set
 `[security] credential_store` in the [config](/docs/configuration#security) first.
 
+### `lev update`
+
+Update Leviath, then offer to bring everything else up to date with it: the binary, the bundled
+blueprints, and the config file, in that order.
+
+The binary is updated with the installer that put it there, and which one that was is read off the
+filesystem rather than guessed from the version string. The version cannot answer: every
+[channel](/docs/releases) ships the same number, because the `-alpha` and `-beta` suffixes live in
+the tap manifests and not in the binary. Where the file sits does answer.
+
+| Found at | What it runs |
+|---|---|
+| A Homebrew Cellar path, or a Homebrew-only prefix | `brew upgrade <formula>` |
+| `scoop/apps/<package>` or a scoop shim | `scoop update <package>` |
+| `~/.cargo/bin` | Nothing. It says to run `cargo install leviath-cli` |
+| `/usr/local/bin`, `/usr/bin`, `~/.local/bin`, `%LOCALAPPDATA%\Leviath\bin` | `curl -fsSL https://leviath.dev/install.sh \| sh -s -- --channel <CHANNEL>` |
+| Anywhere else | Nothing. It names the path and leaves the choice to you |
+
+A Cellar or `apps` path carries the package name, and the package name carries the channel, so a
+beta install updates to beta without being told. The install script records nothing at all, so its
+channel is genuinely unknowable: that arm defaults to `stable` and `--channel` is how you say
+otherwise.
+
+A `cargo install` is described rather than run, because updating it is a full compile and that is
+not something to start because somebody typed `lev update`.
+
+| Flag | Purpose |
+|---|---|
+| `--check` | Print the plan and change nothing |
+| `--json` | Print the plan as JSON and change nothing |
+| `--channel <stable\|beta\|alpha>` | The channel to re-install. Only the install-script method reads it |
+| `--dry-run` | Walk the whole flow, prompts and all, printing each action instead of doing it |
+| `--yes` | Answer yes to the binary upgrade and the config write. It does **not** install blueprints |
+| `--install-agents` | Install the bundled blueprints without asking |
+
+```bash
+$ lev update --check
+
+lev 0.3.4, installed with Homebrew (formula leviath-beta, beta channel)
+
+  binary   brew upgrade leviath-beta
+  agents   1 of 7 would change
+             coder - update 0.0.1 → 0.0.2
+  config   nothing to migrate
+```
+
+All three steps run every time, whatever the binary step did. That is the point of the command:
+`brew upgrade` and `scoop update` hand you a new binary and say nothing about the blueprints in
+`~/.leviath/agents` or the config beside them, so anyone who has ever updated that way is running
+blueprints from whenever they last ran `lev setup`. A binary that needs no update is not evidence
+that anything else is current.
+
+The blueprint step is the same offer `lev setup` makes, and nothing is written to your agents
+directory without a yes. The whole list is printed first, then one confirmation covers it;
+`--install-agents` is how a script says yes. `--yes` alone is deliberately not enough, because
+updating a binary and replacing the blueprints in your agents directory are different requests.
+
+A copy at the bundled version whose files differ from the bundled ones reads as edited locally. It
+is named as edited, asked about on its own, and no flag covers it: installing removes the
+destination directory first and would take your edits, and any file you added, with it.
+
+The config step applies any migration this build knows how to make, printing every change before it
+asks to write anything. Today there are none: no released `config.toml` has to change to work with
+this version, so the step exists to explain a future one rather than to do work now.
+
 ### `lev tools`
 
 | Flag | Purpose |

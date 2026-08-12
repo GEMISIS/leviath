@@ -11,6 +11,32 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+- Added: `lev update`, which updates Leviath with the installer that put it
+  there and then offers to bring the bundled blueprints and the config along
+  with it. The install method is read off the filesystem, not guessed from the
+  version string: a Homebrew Cellar path carries the formula name and the
+  formula carries the channel, so a beta install runs `brew upgrade
+  leviath-beta` without being told, and Scoop works the same way. The install
+  script keeps no record of the channel it used, so that arm defaults to
+  `stable` and `--channel` is how you say otherwise. A `cargo install` is
+  described rather than run, because updating it is a full compile.
+
+  The blueprints and the config are checked every time, whatever the binary
+  step did. `brew upgrade` on its own leaves both behind, so anyone who has
+  ever updated that way is running blueprints from whenever they last ran
+  `lev setup`, and a binary that needs no update is not a reason to stop
+  looking.
+
+  Nothing is written to your agents directory without a yes: the list is
+  printed first and one confirmation covers it, with `--install-agents` for
+  scripts. `--yes` alone does not install blueprints, because updating a binary
+  and replacing your agents directory are different requests. A copy you edited
+  is named as edited and asked about on its own, and no flag covers it.
+  `--check` and `--json` report and change nothing; `--dry-run` walks the whole
+  flow and performs none of it.
+
 ## 0.3.4 - 2026-08-12
 
 - Changed: the bundled set is seven agents, not ten (#395). `software-engineer`

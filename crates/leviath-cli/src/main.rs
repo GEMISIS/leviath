@@ -217,6 +217,89 @@ impl RiskyExecutors for RealExecutors {
         };
         commands::mcp::execute_with(args, &env).await
     }
+
+    async fn update(&self, args: commands::update::UpdateArgs) -> anyhow::Result<()> {
+        real_update(args)
+    }
+}
+
+/// Real `lev update`: the four things the command needs from the machine, wired
+/// into the tested core.
+///
+/// Resolving the executable is the load-bearing one. A Homebrew `bin/lev` is a
+/// symlink into the Cellar, and the Cellar path is the only place the formula
+/// name - and so the channel - is written down, so the link has to be followed
+/// before detection can read anything off it.
+fn real_update(args: commands::update::UpdateArgs) -> anyhow::Result<()> {
+    let home = dirs::home_dir();
+    let exe = std::env::current_exe()?;
+    // A path that cannot be canonicalized is used as it came: worse detection,
+    // never a failed command.
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+
+    let env = commands::update::UpdateEnv {
+        exe,
+        agents_dir: commands::setup::real_agents_dir(home.as_deref()),
+        home,
+        brew_prefix: brew_prefix(),
+        config_path: leviath_cli::config::Config::config_path(),
+        runner: std::sync::Arc::new(run_upgrade),
+        confirm: std::sync::Arc::new(ask_yes_no),
+        migrations: commands::update::MIGRATIONS,
+    };
+    commands::update::execute_with(&args, &env, env!("CARGO_PKG_VERSION"))
+}
+
+/// What `brew --prefix` says, when there is a `brew` to ask. Any failure is a
+/// `None`: it only ever adds evidence, and a machine without Homebrew is the
+/// ordinary case rather than an error.
+fn brew_prefix() -> Option<std::path::PathBuf> {
+    let output = leviath_sys::child_command("brew")
+        .arg("--prefix")
+        .output()
+        .ok()?;
+    let prefix = String::from_utf8(output.stdout).ok()?;
+    let prefix = prefix.trim();
+    match prefix.is_empty() {
+        true => None,
+        false => Some(std::path::PathBuf::from(prefix)),
+    }
+}
+
+/// Run the upgrade command, letting it draw on the terminal it inherits - a
+/// package manager's progress output is most of what makes the wait bearable.
+fn run_upgrade(argv: &[String]) -> anyhow::Result<()> {
+    let (program, rest) = argv
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("no upgrade command to run"))?;
+    let status = leviath_sys::child_command(program)
+        .args(rest)
+        .status()
+        .map_err(|e| anyhow::anyhow!("could not run `{program}`: {e}"))?;
+    match status.success() {
+        true => Ok(()),
+        false => anyhow::bail!("`{}` exited with {status}", argv.join(" ")),
+    }
+}
+
+/// Ask a yes/no question on the real terminal.
+///
+/// Without a terminal the answer is no, never a hang: `lev update` in CI is
+/// `--yes` plus whatever that flag deliberately does not cover, and a prompt
+/// waiting forever on a closed stdin would be the worst of both.
+fn ask_yes_no(question: &str) -> bool {
+    use std::io::{IsTerminal, Write};
+    if !io::stdin().is_terminal() {
+        println!("  {question} [no terminal to ask on, so: no]");
+        return false;
+    }
+    print!("  {question} [y/N] ");
+    let _ = io::stdout().flush();
+    let mut answer = String::new();
+    match io::stdin().read_line(&mut answer) {
+        Ok(_) => matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
+        Err(_) => false,
+    }
 }
 
 /// Real `lev run`: ensure the daemon is running (auto-start it detached if not),
