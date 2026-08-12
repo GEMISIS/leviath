@@ -305,11 +305,26 @@ pub async fn run_wizard_loop<B: ratatui::backend::Backend>(
             // Send/Sync guarantee, so convert by message rather than by `?`.
             .map_err(|e| anyhow::anyhow!("terminal draw failed: {e}"))?;
 
-        if let Some(Event::Key(key)) = events.poll_event(tick_rate)?
-            && key.kind == KeyEventKind::Press
-            && wizard.handle_key(key) == input::Action::Save
-        {
-            wizard.finished = true;
+        match events.poll_event(tick_rate)? {
+            Some(Event::Key(key))
+                if key.kind == KeyEventKind::Press
+                    && wizard.handle_key(key) == input::Action::Save =>
+            {
+                wizard.finished = true;
+            }
+            // The window the mouse was clicked in is the one just drawn, and
+            // asking the terminal for its size is what lets the hit test
+            // rebuild that layout without the renderer storing it.
+            Some(Event::Mouse(mouse)) => {
+                let area = terminal
+                    .size()
+                    .map(|size| ratatui::layout::Rect::new(0, 0, size.width, size.height))
+                    .unwrap_or_default();
+                if wizard.handle_mouse(mouse, area) == input::Action::Save {
+                    wizard.finished = true;
+                }
+            }
+            _ => {}
         }
 
         if wizard.finished {
