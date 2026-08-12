@@ -98,6 +98,8 @@ pub struct Wizard {
     /// rather than that Leviath is configurable. Turned on from the Defaults
     /// screen, it slots [`Step::Limits`] back into the flow.
     pub show_advanced: bool,
+    /// The open chooser for a Defaults value, if one is open.
+    pub picker: Option<Picker>,
 }
 
 /// The environment variables the wizard reports as already-supplying a
@@ -211,6 +213,7 @@ impl Wizard {
             ticks: 0,
             scroll: 0,
             show_advanced: false,
+            picker: None,
         };
         wizard.rebuild_defaults();
         wizard
@@ -570,6 +573,45 @@ impl Wizard {
         }
     }
 
+    /// What choosing one of these values actually decides.
+    ///
+    /// Written against `leviath_runtime::pipeline::resolve`, which is the code
+    /// that reads them. The line about a blueprint winning is the one worth
+    /// having: a user who sets a default and then watches an agent run on
+    /// something else has been told, by every other tool, that a default is a
+    /// default.
+    fn precedence_explanation(provider: bool) -> Vec<&'static str> {
+        if provider {
+            vec![
+                "Where your runs go by default. A stage that lists this provider among",
+                "its models is served by it first, ahead of the blueprint's own order.",
+                "",
+                "This field does nothing on its own. Until you also set a default model",
+                "below, the only thing it can do is reorder a list that already names",
+                "this provider, so on a machine keyed for one provider that no blueprint",
+                "mentions, every stage still goes somewhere else.",
+                "",
+                "It never overrides a blueprint that pins its provider: a stage with",
+                "allow_user_default = false ignores this, and so does a provider you",
+                "have not given a credential.",
+            ]
+        } else {
+            vec![
+                "The model your default provider is asked for. The two travel together:",
+                "this name is never sent to a different provider, so an OpenAI model is",
+                "never asked of Anthropic.",
+                "",
+                "Setting it is what makes the default provider above take effect. The",
+                "pair is offered to every stage that allows a user default, and moves to",
+                "the front of the models that stage lists.",
+                "",
+                "Leaving it unset does not mean your provider picks a model. It means",
+                "each blueprint uses the models it names, and a stage that names none",
+                "falls back to a model built into Leviath, whoever you configured.",
+            ]
+        }
+    }
+
     /// Every model id any provider reported, deduplicated, for the picker.
     pub fn discovered_models(&self) -> Vec<String> {
         let mut models: Vec<String> = self
@@ -603,11 +645,11 @@ impl Wizard {
         };
         let index = providers.iter().position(|p| *p == chosen).unwrap_or(0);
 
-        let mut models = vec!["(provider default)".to_string()];
+        let mut models = vec![Self::NO_DEFAULT_MODEL.to_string()];
         models.extend(self.discovered_models());
         let current_model = self
             .current_default_model()
-            .unwrap_or_else(|| "(provider default)".to_string());
+            .unwrap_or_else(|| Self::NO_DEFAULT_MODEL.to_string());
         if !models.contains(&current_model) {
             models.push(current_model.clone());
         }
@@ -620,7 +662,8 @@ impl Wizard {
         self.defaults = vec![
             Field {
                 label: "Default provider",
-                help: "Used by any blueprint that allows a user default.",
+                help: "Preferred by any stage that allows a user default. Takes effect once a \
+                       default model is set below.",
                 value: FieldValue::Choice {
                     options: providers,
                     index,
@@ -628,7 +671,8 @@ impl Wizard {
             },
             Field {
                 label: "Default model",
-                help: "Filled in from the models your providers reported.",
+                help: "Offered to every stage that allows a user default, paired with the \
+                       provider above. Listed from what your providers reported.",
                 value: FieldValue::Choice {
                     options: models,
                     index: model_index,
@@ -656,6 +700,97 @@ impl Wizard {
 
     /// Where the advanced-tuning toggle sits on the Defaults screen.
     pub const ADVANCED_FIELD: usize = 3;
+
+    /// The model field's "no default" option.
+    ///
+    /// It read "(provider default)", which is a thing that does not exist: no
+    /// provider default model is consulted anywhere at run time. A stage that
+    /// names no model of its own falls back to a model built into Leviath, not
+    /// to anything your provider chose, so the old label promised a mechanism
+    /// and delivered the opposite of what it said.
+    pub const NO_DEFAULT_MODEL: &'static str = "(each blueprint decides)";
+
+    /// Open the chooser for the Defaults field the cursor is on.
+    ///
+    /// The options come from the caller because it has already matched on the
+    /// field's kind: re-reading them here would add a shape this cannot be in.
+    pub(super) fn open_picker(&mut self, options: Vec<String>, index: usize) {
+        let field = self.cursor;
+        let title = match field {
+            0 => "Default provider",
+            _ => "Default model",
+        };
+        let options = options
+            .into_iter()
+            .map(|value| {
+                let detail = if field == 0 {
+                    self.provider_detail(&value)
+                } else {
+                    self.model_detail(&value)
+                };
+                PickerOption { value, detail }
+            })
+            .collect();
+        self.picker = Some(Picker {
+            field,
+            title,
+            explain: Self::precedence_explanation(field == 0),
+            query: crate::tui::widgets::line_edit::LineEdit::new(String::new(), false),
+            options,
+            // Opening on the current value rather than at the top: the list is
+            // long, and "where am I now" is the first thing you look for.
+            cursor: index,
+        });
+    }
+
+    /// What a provider id is, for the chooser's second column.
+    fn provider_detail(&self, id: &str) -> String {
+        match self.providers.iter().find(|r| r.provider.id == id) {
+            Some(row) => row.provider.display.to_string(),
+            // A provider that is configured but not in the catalog: it came
+            // from the config file, so it is still a legitimate choice.
+            None => "from your config".to_string(),
+        }
+    }
+
+    /// Which providers reported a model, so the row says where it came from.
+    fn model_detail(&self, model: &str) -> String {
+        let reported: Vec<&str> = self
+            .providers
+            .iter()
+            .filter(|r| r.selected && r.outcome.models().iter().any(|m| m == model))
+            .map(|r| r.provider.display)
+            .collect();
+        if reported.is_empty() {
+            return "not reported by a provider you selected".to_string();
+        }
+        format!("reported by {}", reported.join(", "))
+    }
+
+    /// Take the chooser's answer, writing it back into the field it came from.
+    pub(super) fn commit_picker(&mut self) {
+        let Some(picker) = self.picker.take() else {
+            return;
+        };
+        let Some(chosen) = picker.selected() else {
+            // An empty filter has nothing to choose; closing without a change
+            // is the only honest outcome.
+            return;
+        };
+        let value = picker.options[chosen].value.clone();
+        if let Some(field) = self.defaults.get_mut(picker.field)
+            && let FieldValue::Choice { options, index } = &mut field.value
+            && let Some(position) = options.iter().position(|option| *option == value)
+        {
+            *index = position;
+            self.dirty = true;
+        }
+        // The concurrency default follows the provider, so an Ollama-first
+        // setup does not inherit a number meant for hosted APIs.
+        if picker.field == 0 {
+            self.apply_provider_concurrency_default();
+        }
+    }
 
     /// The default provider as it currently stands in the form, or the base
     /// config's value before the form exists.
@@ -851,7 +986,7 @@ impl Wizard {
         config.default_provider = self.current_default_provider();
         config.default_model = self
             .current_default_model()
-            .filter(|m| m != "(provider default)");
+            .filter(|m| m != Self::NO_DEFAULT_MODEL);
         config.request_timeout_secs = self.current_request_timeout();
 
         apply_limits_fields(&mut config, &self.limits);
@@ -1545,7 +1680,7 @@ pub(super) mod tests {
         wizard.enter(Step::Defaults);
         assert_eq!(
             wizard.defaults[1].value.options(),
-            ["(provider default)".to_string()],
+            [Wizard::NO_DEFAULT_MODEL.to_string()],
             "nothing has been reported yet"
         );
 
@@ -1664,7 +1799,7 @@ pub(super) mod tests {
         wizard.enter(Step::Defaults);
 
         let options = wizard.defaults[1].value.options();
-        assert!(options.contains(&"(provider default)".to_string()));
+        assert!(options.contains(&Wizard::NO_DEFAULT_MODEL.to_string()));
         assert!(options.contains(&"claude-opus-5".to_string()));
         assert_eq!(
             wizard.defaults[1].value.display(),
@@ -2172,7 +2307,7 @@ pub(super) mod tests {
         wizard.providers[0].selected = true;
         wizard.enter(Step::Defaults);
 
-        // Index 0 of the model picker is always "(provider default)".
+        // Index 0 of the model field is always the "no default" option.
         assert!(wizard.build_config().default_model.is_none());
     }
 

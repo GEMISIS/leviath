@@ -271,7 +271,7 @@ fn enter_on_a_toggle_flips_it_and_stays() {
 }
 
 #[test]
-fn enter_on_a_choice_cycles_it_and_stays() {
+fn the_arrows_still_cycle_a_choice_in_place() {
     let (_dir, mut w) = wizard();
     w.providers[0].selected = true;
     let ollama = w
@@ -283,9 +283,10 @@ fn enter_on_a_choice_cycles_it_and_stays() {
     w.enter(Step::Defaults);
     w.cursor = 0; // the provider choice
 
-    w.handle_key(press(KeyCode::Enter));
+    w.handle_key(press(KeyCode::Right));
 
     assert_eq!(w.step, Step::Defaults);
+    assert!(w.picker.is_none(), "an arrow is not a chooser");
     assert_eq!(w.defaults[0].value.display(), "ollama");
 }
 
@@ -1229,4 +1230,204 @@ fn clicks_are_ignored_while_a_dialog_or_an_edit_is_open() {
     w.handle_mouse(click(4, 4), AREA);
     assert!(w.confirm.is_some());
     assert!(!w.providers[0].selected);
+}
+
+// ─── the chooser ────────────────────────────────────────────────────────
+
+/// A wizard on the Defaults screen with a model list worth searching.
+fn wizard_with_models() -> (tempfile::TempDir, Wizard) {
+    let (dir, mut w) = wizard();
+    w.providers[0].selected = true;
+    w.providers[0].outcome = crate::commands::setup::verify::Outcome::Reachable {
+        models: vec![
+            "claude-opus-4".to_string(),
+            "claude-sonnet-4-6".to_string(),
+            "claude-haiku-4-5".to_string(),
+        ],
+    };
+    w.enter(Step::Defaults);
+    w.cursor = 1; // the model choice
+    (dir, w)
+}
+
+fn type_str(w: &mut Wizard, text: &str) {
+    for c in text.chars() {
+        w.handle_key(press(KeyCode::Char(c)));
+    }
+}
+
+#[test]
+fn enter_on_a_default_opens_a_chooser_that_says_what_it_decides() {
+    let (_dir, mut w) = wizard_with_models();
+
+    w.handle_key(press(KeyCode::Enter));
+
+    let picker = w.picker.as_ref().expect("the chooser is open");
+    assert_eq!(picker.title, "Default model");
+    assert!(
+        !picker.explain.is_empty(),
+        "the chooser exists to explain the value, not only to list it"
+    );
+    assert!(
+        picker.options.iter().any(|o| o.value == "claude-opus-4"),
+        "every discovered model is offered"
+    );
+    // Where a model came from is on the row, so a name nobody recognises is
+    // still attributable.
+    let opus = picker
+        .options
+        .iter()
+        .find(|o| o.value == "claude-opus-4")
+        .expect("listed");
+    assert!(opus.detail.contains("Anthropic"), "{}", opus.detail);
+}
+
+#[test]
+fn typing_filters_the_chooser_and_enter_takes_the_match() {
+    let (_dir, mut w) = wizard_with_models();
+    w.handle_key(press(KeyCode::Enter));
+
+    type_str(&mut w, "haiku");
+    let picker = w.picker.as_ref().expect("still open");
+    assert_eq!(picker.matches().len(), 1, "one model matches 'haiku'");
+
+    w.handle_key(press(KeyCode::Enter));
+
+    assert!(w.picker.is_none(), "choosing closes it");
+    assert_eq!(w.defaults[1].value.display(), "claude-haiku-4-5");
+    assert!(w.dirty, "a chosen default is an unsaved change");
+}
+
+/// Every term has to land somewhere on the row, in any order, so a search
+/// reads the way somebody would say the model out loud.
+#[test]
+fn the_search_matches_terms_in_any_order_and_across_the_detail() {
+    let (_dir, mut w) = wizard_with_models();
+    w.handle_key(press(KeyCode::Enter));
+
+    type_str(&mut w, "4-6 claude");
+    assert_eq!(
+        w.picker.as_ref().expect("open").matches().len(),
+        1,
+        "terms are matched independently of their order"
+    );
+
+    for _ in 0.."4-6 claude".len() {
+        w.handle_key(press(KeyCode::Backspace));
+    }
+    // The provider name is part of the row, so it is part of the search.
+    type_str(&mut w, "anthropic");
+    assert_eq!(w.picker.as_ref().expect("open").matches().len(), 3);
+}
+
+#[test]
+fn escape_closes_the_chooser_and_keeps_the_value() {
+    let (_dir, mut w) = wizard_with_models();
+    let before = w.defaults[1].value.display();
+    w.handle_key(press(KeyCode::Enter));
+
+    w.handle_key(press(KeyCode::Down));
+    w.handle_key(press(KeyCode::Esc));
+
+    assert!(w.picker.is_none());
+    assert_eq!(w.defaults[1].value.display(), before);
+    assert!(!w.dirty, "looking is not changing");
+}
+
+/// A filter that matches nothing must not leave the cursor pointing past the
+/// end of the list, and Enter on it must not choose whatever was there before.
+#[test]
+fn a_filter_that_matches_nothing_chooses_nothing() {
+    let (_dir, mut w) = wizard_with_models();
+    let before = w.defaults[1].value.display();
+    w.handle_key(press(KeyCode::Enter));
+
+    type_str(&mut w, "zzzz");
+    assert!(w.picker.as_ref().expect("open").selected().is_none());
+
+    w.handle_key(press(KeyCode::Enter));
+    assert!(w.picker.is_none(), "Enter still closes it");
+    assert_eq!(w.defaults[1].value.display(), before);
+}
+
+/// The chooser is modal, so a letter is a letter. `q` here means the user is
+/// looking for Qwen.
+#[test]
+fn letters_search_rather_than_acting_while_the_chooser_is_open() {
+    let (_dir, mut w) = wizard_with_models();
+    w.handle_key(press(KeyCode::Enter));
+
+    w.handle_key(press(KeyCode::Char('q')));
+
+    assert!(!w.should_quit, "q must not quit out of a search box");
+    assert_eq!(w.picker.as_ref().expect("open").query.value(), "q");
+}
+
+#[test]
+fn the_provider_chooser_lists_providers_with_their_names() {
+    let (_dir, mut w) = wizard();
+    w.providers[0].selected = true;
+    w.enter(Step::Defaults);
+    w.cursor = 0;
+
+    w.handle_key(press(KeyCode::Enter));
+
+    let picker = w.picker.as_ref().expect("open");
+    assert_eq!(picker.title, "Default provider");
+    assert!(picker.options.iter().any(|o| o.value == "anthropic"));
+    assert!(
+        picker.options.iter().all(|o| !o.detail.is_empty()),
+        "an id alone does not say which service it is"
+    );
+}
+
+/// Moving stops at the ends. Wrapping from the top of eighty models to the
+/// bottom looks like the list jumped rather than moved.
+#[test]
+fn the_chooser_cursor_clamps_at_both_ends() {
+    let (_dir, mut w) = wizard_with_models();
+    w.handle_key(press(KeyCode::Enter));
+    let total = w.picker.as_ref().expect("open").matches().len();
+
+    w.handle_key(press(KeyCode::Home));
+    assert_eq!(w.picker.as_ref().expect("open").cursor, 0);
+    w.handle_key(press(KeyCode::Up));
+    assert_eq!(w.picker.as_ref().expect("open").cursor, 0);
+
+    w.handle_key(press(KeyCode::End));
+    assert_eq!(w.picker.as_ref().expect("open").cursor, total - 1);
+    w.handle_key(press(KeyCode::PageDown));
+    assert_eq!(w.picker.as_ref().expect("open").cursor, total - 1);
+    w.handle_key(press(KeyCode::PageUp));
+    assert_eq!(w.picker.as_ref().expect("open").cursor, 0);
+}
+
+#[test]
+fn clicking_a_row_in_the_chooser_takes_it_and_the_wheel_moves_within_it() {
+    let (_dir, mut w) = wizard_with_models();
+    w.handle_key(press(KeyCode::Enter));
+
+    w.handle_mouse(wheel(true), AREA);
+    let moved = w.picker.as_ref().expect("open").cursor;
+    assert_eq!(moved, 1, "the wheel moves inside the chooser, not behind it");
+
+    // A click outside the list keeps the chooser open rather than discarding a
+    // half-typed search.
+    w.handle_mouse(click(4, 0), AREA);
+    assert!(w.picker.is_some());
+
+    let row = (0..AREA.height)
+        .find(|y| {
+            crate::commands::setup::render::picker_row_at(
+                AREA,
+                w.picker.as_ref().expect("open"),
+                *y,
+            ) == Some(2)
+        })
+        .expect("the third match is on screen");
+    w.handle_mouse(click(6, row), AREA);
+
+    assert!(w.picker.is_none(), "a click on a row chooses it");
+    // Row 0 is the "no default" option and the models sort after it.
+    assert_eq!(w.defaults[1].value.display(), "claude-opus-4");
 }

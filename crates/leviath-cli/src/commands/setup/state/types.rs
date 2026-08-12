@@ -123,6 +123,73 @@ pub struct McpRow {
     pub name: String,
 }
 
+/// A full-screen chooser for one of the Defaults screen's list values.
+///
+/// The arrows cycle those fields in place, which is fine for three providers
+/// and hopeless for eighty models: you read the list one value at a time
+/// through a single line, and the only way back is round again. The picker
+/// shows the list, filters it as you type, and says what the value decides -
+/// which the field could not, in the one line it had.
+pub struct Picker {
+    /// Which Defaults field this is choosing for.
+    pub field: usize,
+    /// Its heading, taken from the field it opened from.
+    pub title: &'static str,
+    /// What the value actually decides, and what it does not.
+    pub explain: Vec<&'static str>,
+    /// The search box.
+    pub query: crate::tui::widgets::line_edit::LineEdit,
+    /// Every option, in the field's own order.
+    pub options: Vec<PickerOption>,
+    /// Cursor into the *filtered* list, not into `options`.
+    pub cursor: usize,
+}
+
+/// One row of a [`Picker`].
+pub struct PickerOption {
+    /// The value that would be written.
+    pub value: String,
+    /// Where it came from, or what it is, in a few words.
+    pub detail: String,
+}
+
+impl Picker {
+    /// The options matching the query, as indices into `options`.
+    ///
+    /// Every whitespace-separated term has to appear somewhere in the row, so
+    /// "claude sonnet" finds the model whichever order the id puts them in,
+    /// and a term can match the provider that reported it as easily as the
+    /// name itself.
+    pub fn matches(&self) -> Vec<usize> {
+        let query = self.query.value().to_lowercase();
+        let terms: Vec<&str> = query.split_whitespace().collect();
+        self.options
+            .iter()
+            .enumerate()
+            .filter(|(_, option)| {
+                let haystack = format!("{} {}", option.value, option.detail).to_lowercase();
+                terms.iter().all(|term| haystack.contains(term))
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Which option the cursor is on, if the filter left anything.
+    pub fn selected(&self) -> Option<usize> {
+        self.matches().get(self.cursor).copied()
+    }
+
+    /// Move within the filtered list, clamped to it.
+    ///
+    /// Clamping rather than wrapping: at eighty models, wrapping from the top
+    /// to the bottom looks like the list jumped rather than moved.
+    pub fn move_cursor(&mut self, delta: isize) {
+        let count = self.matches().len();
+        let next = self.cursor as isize + delta;
+        self.cursor = next.clamp(0, count.saturating_sub(1) as isize) as usize;
+    }
+}
+
 /// A thing the credential screen can do, offered as its own row.
 ///
 /// These were shortcut keys and nothing else, which meant they existed only
