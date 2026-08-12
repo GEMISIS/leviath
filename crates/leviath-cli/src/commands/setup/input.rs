@@ -17,7 +17,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 
 use super::catalog::Credential;
-use super::state::{ConfirmPurpose, DetailAction, Edit, EditTarget, FieldValue, Step, Wizard};
+use super::state::{
+    ConfirmPurpose, DetailAction, Edit, EditTarget, FieldValue, Picker, Step, Wizard,
+};
 use crate::tui::keymap;
 use crate::tui::widgets::confirm::ConfirmOutcome;
 use crate::tui::widgets::help::dismisses_help;
@@ -61,8 +63,8 @@ impl Wizard {
         if self.confirm.is_some() {
             return self.handle_confirm_key(key);
         }
-        if self.picker.is_some() {
-            self.handle_picker_key(key);
+        if let Some(picker) = self.picker.take() {
+            self.handle_picker_key(key, picker);
             return Action::Continue;
         }
         if let Some(edit) = self.edit.take() {
@@ -90,8 +92,8 @@ impl Wizard {
         if self.confirm.is_some() || self.edit.is_some() || self.show_help {
             return Action::Continue;
         }
-        if self.picker.is_some() {
-            self.handle_picker_mouse(mouse, area);
+        if let Some(picker) = self.picker.take() {
+            self.handle_picker_mouse(mouse, area, picker);
             return Action::Continue;
         }
         match mouse.kind {
@@ -143,18 +145,14 @@ impl Wizard {
     /// A click outside the list is ignored rather than closing the chooser.
     /// Closing on a stray click would discard a search somebody was halfway
     /// through typing, and Esc is right there.
-    fn handle_picker_mouse(&mut self, mouse: MouseEvent, area: Rect) {
-        let Some(mut picker) = self.picker.take() else {
-            return;
-        };
+    fn handle_picker_mouse(&mut self, mouse: MouseEvent, area: Rect, mut picker: Picker) {
         match mouse.kind {
             MouseEventKind::ScrollDown => picker.move_cursor(1),
             MouseEventKind::ScrollUp => picker.move_cursor(-1),
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(row) = super::render::picker_row_at(area, &picker, mouse.row) {
                     picker.cursor = row;
-                    self.picker = Some(picker);
-                    self.commit_picker();
+                    self.commit_picker(picker);
                     return;
                 }
             }
@@ -168,10 +166,7 @@ impl Wizard {
     /// Everything that is not navigation goes to the search box, so letters
     /// type rather than acting: `q` in a chooser means the user is looking for
     /// Qwen, and quitting setup instead would be indefensible.
-    fn handle_picker_key(&mut self, key: KeyEvent) {
-        let Some(mut picker) = self.picker.take() else {
-            return;
-        };
+    fn handle_picker_key(&mut self, key: KeyEvent, mut picker: Picker) {
         match key.code {
             KeyCode::Up => picker.move_cursor(-1),
             KeyCode::Down => picker.move_cursor(1),
@@ -182,8 +177,7 @@ impl Wizard {
             _ => {
                 match picker.query.handle_key(&key) {
                     EditOutcome::Commit => {
-                        self.picker = Some(picker);
-                        self.commit_picker();
+                        self.commit_picker(picker);
                         return;
                     }
                     // Esc closes without choosing, leaving the field as it was.
@@ -312,28 +306,26 @@ impl Wizard {
     fn activate_field(&mut self) {
         // The choice is cloned out before acting, because opening the chooser
         // needs `&mut self` while the field it came from is still borrowed.
-        let choice = match self.fields().get(self.cursor).map(|f| &f.value) {
-            Some(FieldValue::Bool(_)) => {
+        let Some(field) = self.fields().get(self.cursor) else {
+            // Reachable only with a hand-forced cursor past the fields.
+            return;
+        };
+        let label = field.label;
+        let choice = match &field.value {
+            FieldValue::Bool(_) => {
                 self.toggle();
                 return;
             }
-            Some(FieldValue::Number(_)) => {
+            FieldValue::Number(_) => {
                 self.open_field_editor();
                 return;
             }
-            Some(FieldValue::Choice { options, index }) => (options.clone(), *index),
-            // Reachable only with a hand-forced cursor past the fields.
-            None => return,
+            FieldValue::Choice { options, index } => (options.clone(), *index),
         };
-        // The two Defaults choices are a provider list and a model list, which
-        // is what the chooser exists for. The tuning screen's choices are
-        // two-or-three-value switches, where a full-screen list would be
-        // ceremony around something the arrows already do well.
-        if self.step == Step::Defaults {
-            self.open_picker(choice.0, choice.1);
-        } else {
-            self.adjust(1);
-        }
+        // Unconditionally, because the only list-valued fields in the wizard
+        // are the Defaults screen's provider and model. The tuning screen is
+        // numbers and switches, which the arrows already handle well.
+        self.open_picker(label, choice.0, choice.1);
     }
 
     /// Open the credential editor for the provider on screen. Returns false

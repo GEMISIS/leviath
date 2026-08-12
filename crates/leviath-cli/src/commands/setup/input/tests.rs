@@ -1415,7 +1415,10 @@ fn clicking_a_row_in_the_chooser_takes_it_and_the_wheel_moves_within_it() {
 
     w.handle_mouse(wheel(true), AREA);
     let moved = w.picker.as_ref().expect("open").cursor;
-    assert_eq!(moved, 1, "the wheel moves inside the chooser, not behind it");
+    assert_eq!(
+        moved, 1,
+        "the wheel moves inside the chooser, not behind it"
+    );
 
     // A click outside the list keeps the chooser open rather than discarding a
     // half-typed search.
@@ -1436,4 +1439,121 @@ fn clicking_a_row_in_the_chooser_takes_it_and_the_wheel_moves_within_it() {
     assert!(w.picker.is_none(), "a click on a row chooses it");
     // Row 0 is the "no default" option and the models sort after it.
     assert_eq!(w.defaults[1].value.display(), "claude-opus-4");
+}
+
+/// Page keys and Home/End are bound, not only reachable through the methods
+/// the render tests call directly.
+#[test]
+fn the_page_and_edge_keys_move_the_selection() {
+    let (_dir, mut w) = wizard();
+    w.show_advanced = true;
+    w.enter(Step::Limits);
+
+    w.handle_key(press(KeyCode::PageDown));
+    assert_eq!(w.cursor, Wizard::PAGE as usize);
+    w.handle_key(press(KeyCode::PageUp));
+    assert_eq!(w.cursor, 0);
+    w.handle_key(press(KeyCode::End));
+    assert_eq!(w.cursor, w.nav_rows() - 1);
+    w.handle_key(press(KeyCode::Home));
+    assert_eq!(w.cursor, 0);
+}
+
+/// Everything the terminal reports that is not a wheel or a left click is
+/// ignored, on the screen and inside the chooser alike. Mouse movement in
+/// particular arrives constantly once capture is on.
+#[test]
+fn mouse_events_that_are_not_a_click_or_a_wheel_are_ignored() {
+    let (_dir, mut w) = wizard();
+    w.enter(Step::Providers);
+    let moved = MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: 4,
+        row: 4,
+        modifiers: KeyModifiers::empty(),
+    };
+
+    w.handle_mouse(moved, AREA);
+    assert_eq!(w.cursor, 0);
+    assert!(!w.providers[0].selected, "hovering is not clicking");
+
+    w.enter(Step::Defaults);
+    w.open_picker("Default provider", w.defaults[0].value.options().to_vec(), 0);
+    w.handle_mouse(moved, AREA);
+    assert!(w.picker.is_some(), "and it does not close the chooser");
+    w.handle_mouse(wheel(false), AREA);
+    assert_eq!(
+        w.picker.as_ref().expect("open").cursor,
+        0,
+        "the wheel up stops at the top"
+    );
+}
+
+/// A value the catalog has never heard of still reads as a choice: it is in
+/// the config, so it is legitimate, and the row says where it came from.
+#[test]
+fn a_configured_provider_outside_the_catalog_still_describes_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = crate::config::Config::default();
+    config.default_provider = "in-house".to_string();
+    config.default_model = Some("ghost-model".to_string());
+    let mut w = Wizard::new(
+        config,
+        &|_| None,
+        Vec::new(),
+        Vec::new(),
+        dir.path(),
+        std::sync::Arc::new(|_| true),
+    );
+    w.enter(Step::Defaults);
+
+    w.open_picker("Default provider", w.defaults[0].value.options().to_vec(), 0);
+    let picker = w.picker.take().expect("open");
+    assert_eq!(picker.options[0].value, "in-house");
+    assert_eq!(picker.options[0].detail, "from your config");
+
+    w.cursor = 1;
+    w.open_picker("Default model", w.defaults[1].value.options().to_vec(), 0);
+    let picker = w.picker.as_ref().expect("open");
+    let ghost = picker
+        .options
+        .iter()
+        .find(|o| o.value == "ghost-model")
+        .expect("the configured model is offered even unreported");
+    assert_eq!(ghost.detail, "not reported by a provider you selected");
+}
+
+/// Choosing a provider re-picks the concurrency default, the same way an arrow
+/// press does, so a local-first setup does not keep a hosted-API number.
+#[test]
+fn choosing_a_provider_in_the_chooser_repicks_the_concurrency_default() {
+    let (_dir, mut w) = wizard();
+    let ollama = w
+        .providers
+        .iter()
+        .position(|r| r.provider.id == "ollama")
+        .expect("ollama is offered");
+    w.providers[0].selected = true;
+    w.providers[ollama].selected = true;
+    w.enter(Step::Defaults);
+    w.cursor = 0;
+    w.handle_key(press(KeyCode::Enter));
+
+    // Move onto ollama and take it.
+    while w
+        .picker
+        .as_ref()
+        .and_then(|p| p.selected())
+        .map(|i| w.picker.as_ref().expect("open").options[i].value.clone())
+        != Some("ollama".to_string())
+    {
+        w.handle_key(press(KeyCode::Down));
+    }
+    w.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(w.defaults[0].value.display(), "ollama");
+    assert_eq!(
+        w.limits[0].value.display(),
+        crate::commands::setup::catalog::OLLAMA_MAX_CONCURRENT_INFERENCES.to_string()
+    );
 }

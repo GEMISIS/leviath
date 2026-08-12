@@ -137,8 +137,9 @@ pub struct Picker {
     pub title: &'static str,
     /// What the value actually decides, and what it does not.
     pub explain: Vec<&'static str>,
-    /// The search box.
-    pub query: crate::tui::widgets::line_edit::LineEdit,
+    /// The search box. Crate-visible like the widget it holds, which is not
+    /// part of any public surface.
+    pub(crate) query: crate::tui::widgets::line_edit::LineEdit,
     /// Every option, in the field's own order.
     pub options: Vec<PickerOption>,
     /// Cursor into the *filtered* list, not into `options`.
@@ -254,6 +255,17 @@ impl FieldValue {
                 Some(chosen) => chosen.clone(),
                 None => "(none)".to_string(),
             },
+        }
+    }
+
+    /// Move a choice to `index`.
+    ///
+    /// A no-op for the other kinds, which have no list to move within. Total
+    /// rather than fallible because the caller that has a chosen index already
+    /// knows which field it came from.
+    pub fn set_index(&mut self, next: usize) {
+        if let Self::Choice { index, .. } = self {
+            *index = next;
         }
     }
 
