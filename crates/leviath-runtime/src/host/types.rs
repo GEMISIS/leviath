@@ -106,6 +106,13 @@ pub struct SpawnArgs {
 pub struct RunListEntry {
     /// The run id (`lev ps`'s first column, and what `lev kill` takes).
     pub run_id: String,
+    /// The generated one-line title, once there is one.
+    ///
+    /// Absent from this listing until now, which meant `lev ps` could only ever
+    /// print a run id and an agent name while the dashboard - reading the same
+    /// runs off disk - had a title for them.
+    #[serde(default)]
+    pub title: Option<String>,
     /// The agent's live status.
     pub status: AgentStatus,
     /// Why the status is [`AgentStatus::Waiting`]; `None` for every other

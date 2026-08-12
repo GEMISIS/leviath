@@ -104,6 +104,7 @@ impl WorldHost {
             .is_some();
         RunListEntry {
             run_id: run_id.to_string(),
+            title: metadata.and_then(|m| m.title.clone()),
             status: state.status.clone(),
             wait_reason: self.wait_reason(crate::world::AgentId::in_world(world, entity)),
             stage: state.current_stage.clone(),

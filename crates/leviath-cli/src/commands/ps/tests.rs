@@ -17,6 +17,7 @@ fn healthy_daemon() -> DaemonHealth {
 fn entry(run_id: &str, status: AgentStatus) -> RunListEntry {
     RunListEntry {
         run_id: run_id.to_string(),
+        title: None,
         status,
         wait_reason: None,
         stage: "implement".to_string(),
@@ -790,4 +791,46 @@ fn offline_runs_report_whether_an_answer_is_waiting() {
     };
     assert!(by_id("run-answered"));
     assert!(!by_id("run-silent"));
+}
+
+/// A listing of runs that have no title reads exactly as it did before the
+/// column existed.
+#[test]
+fn the_title_column_is_absent_when_no_run_has_one() {
+    let out = format_runs(
+        &[entry("a", AgentStatus::Active)],
+        &[],
+        &healthy_daemon(),
+        0,
+    );
+    assert!(!out.contains("TITLE"), "{out}");
+}
+
+/// And when a run has one, `lev ps` says it. It could not before: the listing
+/// the daemon returns carried no title at all, so the one surface that reads
+/// runs over the control socket was the one surface that never showed the
+/// title the dashboard had been displaying from disk all along.
+#[test]
+fn the_title_column_shows_a_generated_title() {
+    let mut titled = entry("a", AgentStatus::Active);
+    titled.title = Some("Tidy the kitchen sink".to_string());
+    // A run beside it with no title yet keeps an empty cell rather than
+    // borrowing its neighbour's.
+    let untitled = entry("b", AgentStatus::Active);
+
+    let out = format_runs(&[titled, untitled], &[], &healthy_daemon(), 0);
+    let lines: Vec<&str> = out.lines().collect();
+    // TITLE is not the last column, so the rest of the row follows it; the
+    // assertion is on what the column starts with.
+    let col = lines[0].find("TITLE").expect("header has a TITLE column");
+    assert!(
+        from_column(lines[1], col).starts_with("Tidy the kitchen sink"),
+        "{out}"
+    );
+    assert!(
+        from_column(lines[2], col)
+            .trim_start()
+            .starts_with("active"),
+        "an untitled run leaves the cell empty rather than borrowing one: {out}"
+    );
 }
