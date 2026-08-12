@@ -54,6 +54,7 @@ transform = "direct"
 # to the deliverable instead of dead-ending.
 [stages.scope.transitions.build]
 hint = "No further splitting is useful - build from what is already gathered"
+condition = "dead_end"
 transform = "compact"
 
 [stages.scope.transitions.error_recovery]
@@ -231,6 +232,7 @@ back so the dataset can be finished from what is reachable.
 # to the deliverable instead of dead-ending.
 [stages.error_recovery.transitions.present]
 hint = "Recovery is not converging - present the analysis built so far"
+condition = "dead_end"
 transform = "compact"
 
 [stages.error_recovery.transitions.split]

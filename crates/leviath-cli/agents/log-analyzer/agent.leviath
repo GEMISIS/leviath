@@ -48,6 +48,7 @@ transform = "direct"
 # to the deliverable instead of dead-ending.
 [stages.ingest.transitions.report]
 hint = "Analysis is out of revisits - report what ingestion established"
+condition = "dead_end"
 transform = "compact"
 
 [stages.ingest.transitions.error_recovery]
@@ -248,6 +249,7 @@ transform = "compact"
 # to the deliverable instead of dead-ending.
 [stages.script.transitions.report]
 hint = "Analysis is out of revisits - report the findings so far"
+condition = "dead_end"
 transform = "compact"
 
 [stages.script.transitions.error_recovery]

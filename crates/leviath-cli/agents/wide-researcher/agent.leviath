@@ -57,6 +57,7 @@ transform = "direct"
 # to the deliverable instead of dead-ending.
 [stages.survey.transitions.summarize]
 hint = "Comparison is out of revisits - write the overview from the survey"
+condition = "dead_end"
 transform = "compact"
 
 [stages.survey.transitions.error_recovery]
@@ -194,6 +195,7 @@ transform = "compact"
 # to the deliverable instead of dead-ending.
 [stages.deep_dive.transitions.summarize]
 hint = "Comparison is out of revisits - write the overview with this depth"
+condition = "dead_end"
 transform = "compact"
 
 [stages.deep_dive.transitions.error_recovery]
