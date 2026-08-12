@@ -872,6 +872,12 @@ fn load_dotenv_filtered(path: &str) {
         .collect();
     let _ = dotenvy::from_read(doc.as_bytes());
 
+    // The common case is that a `.env` sets nothing sensitive, and warning then
+    // printed "Ignoring  from .env" with an empty list where a name belonged.
+    if skipped.is_empty() {
+        return;
+    }
+
     // Joined before the macro rather than inside it: `tracing` does not
     // evaluate field expressions when no subscriber is interested, so an
     // argument built in place reads as an unexecuted region even on the run
@@ -1225,6 +1231,41 @@ mod dotenv_tests {
     fn a_missing_dot_env_is_not_an_error() {
         let dir = make_fake_config_dir("dotenv-missing");
         load_dotenv_filtered(&dir.join("absent.env").to_string_lossy());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `.env` that sets nothing sensitive is the ordinary case, and it used
+    /// to warn anyway: the message named the skipped variables, so with none
+    /// skipped users read "Ignoring  from .env" with a hole where a name
+    /// belonged. Under `-v` that landed in the middle of the setup wizard.
+    #[test]
+    fn an_ordinary_dot_env_warns_about_nothing() {
+        let dir = make_fake_config_dir("dotenv-nothing-skipped");
+        std::fs::write(dir.join(".env"), "LEV_DOTENV_ORDINARY=fine\n").unwrap();
+
+        {
+            let _cwd = isolate_cwd_for_test();
+            std::env::set_current_dir(&dir).unwrap();
+            temp_env::with_vars(
+                [
+                    (
+                        "LEVIATH_CONFIG_PATH",
+                        Some(dir.join("config.toml").into_os_string()),
+                    ),
+                    ("LEVIATH_SKIP_DOTENV", None),
+                    ("LEV_DOTENV_ORDINARY", None),
+                ],
+                || {
+                    Config::load().expect("a missing config file is not an error");
+                    // The allowed variable still lands, so the early return
+                    // skips the warning and nothing else.
+                    assert_eq!(
+                        std::env::var("LEV_DOTENV_ORDINARY").ok().as_deref(),
+                        Some("fine")
+                    );
+                },
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
