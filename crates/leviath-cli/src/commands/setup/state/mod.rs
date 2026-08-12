@@ -698,6 +698,9 @@ impl Wizard {
         self.apply_provider_concurrency_default();
     }
 
+    /// Where the provider choice sits on the Defaults screen.
+    pub const PROVIDER_FIELD: usize = 0;
+
     /// Where the advanced-tuning toggle sits on the Defaults screen.
     pub const ADVANCED_FIELD: usize = 3;
 
@@ -714,16 +717,17 @@ impl Wizard {
     ///
     /// The options come from the caller because it has already matched on the
     /// field's kind: re-reading them here would add a shape this cannot be in.
-    pub(super) fn open_picker(&mut self, options: Vec<String>, index: usize) {
+    pub(super) fn open_picker(
+        &mut self,
+        title: &'static str,
+        options: Vec<String>,
+        index: usize,
+    ) {
         let field = self.cursor;
-        let title = match field {
-            0 => "Default provider",
-            _ => "Default model",
-        };
         let options = options
             .into_iter()
             .map(|value| {
-                let detail = if field == 0 {
+                let detail = if field == Self::PROVIDER_FIELD {
                     self.provider_detail(&value)
                 } else {
                     self.model_detail(&value)
@@ -734,7 +738,7 @@ impl Wizard {
         self.picker = Some(Picker {
             field,
             title,
-            explain: Self::precedence_explanation(field == 0),
+            explain: Self::precedence_explanation(field == Self::PROVIDER_FIELD),
             query: crate::tui::widgets::line_edit::LineEdit::new(String::new(), false),
             options,
             // Opening on the current value rather than at the top: the list is
@@ -773,26 +777,21 @@ impl Wizard {
     }
 
     /// Take the chooser's answer, writing it back into the field it came from.
-    pub(super) fn commit_picker(&mut self) {
-        let Some(picker) = self.picker.take() else {
-            return;
-        };
+    pub(super) fn commit_picker(&mut self, picker: Picker) {
         let Some(chosen) = picker.selected() else {
             // An empty filter has nothing to choose; closing without a change
             // is the only honest outcome.
             return;
         };
-        let value = picker.options[chosen].value.clone();
-        if let Some(field) = self.defaults.get_mut(picker.field)
-            && let FieldValue::Choice { options, index } = &mut field.value
-            && let Some(position) = options.iter().position(|option| *option == value)
-        {
-            *index = position;
-            self.dirty = true;
-        }
+        // The chooser's options were built from this field's, one for one and
+        // in order, so the match index *is* the field's index. Indexing rather
+        // than looking up: the field is where it was when the chooser opened,
+        // and nothing rebuilds the form while one is on screen.
+        self.defaults[picker.field].value.set_index(chosen);
+        self.dirty = true;
         // The concurrency default follows the provider, so an Ollama-first
         // setup does not inherit a number meant for hosted APIs.
-        if picker.field == 0 {
+        if picker.field == Self::PROVIDER_FIELD {
             self.apply_provider_concurrency_default();
         }
     }
@@ -1849,6 +1848,23 @@ pub(super) mod tests {
             .display(),
             "(none)"
         );
+    }
+
+    /// Moving a choice is total: the chooser hands back an index and the
+    /// field it came from takes it, while a kind with no list ignores it
+    /// rather than making every caller check first.
+    #[test]
+    fn setting_an_index_moves_a_choice_and_leaves_other_kinds_alone() {
+        let mut choice = FieldValue::Choice {
+            options: vec!["a".into(), "b".into()],
+            index: 0,
+        };
+        choice.set_index(1);
+        assert_eq!(choice.display(), "b");
+
+        let mut number = FieldValue::Number(Some(7));
+        number.set_index(1);
+        assert_eq!(number.display(), "7");
     }
 
     #[test]

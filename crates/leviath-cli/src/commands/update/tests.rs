@@ -1129,7 +1129,7 @@ fn a_config_that_cannot_be_written_is_an_error() {
             binary: binary_step(&InstallMethod::Cargo),
             agents: Vec::new(),
             migrations: SAMPLE.iter().take(1).collect(),
-            config: ConfigState::Loaded(Box::new(Config::default())),
+            config: ConfigState::Loaded(Box::default()),
         };
         let err = migrate_config(&args, &env, &plan).expect_err("the write failed");
         assert!(!err.to_string().is_empty());

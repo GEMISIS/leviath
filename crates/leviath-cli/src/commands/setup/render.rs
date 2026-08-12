@@ -113,9 +113,6 @@ pub fn picker_row_at(area: Rect, picker: &Picker, row: u16) -> Option<usize> {
 fn draw_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
     let popup = centered(80, 88, area);
     let inner = popup_frame(frame, popup, picker.title, C_BORDER_FOCUS);
-    if inner.height < 4 {
-        return;
-    }
     let chunks = picker_layout(inner, picker);
 
     let mut lines: Vec<Line<'static>> = picker
@@ -432,6 +429,20 @@ fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
         indent_len
     };
 
+    /// Close a row, dropping the whitespace it would otherwise end in: the
+    /// break stands in for the space it happened at.
+    ///
+    /// Indexing rather than `last_mut`, because a row is only ever closed with
+    /// something on it - `has_word` is what decides to close one.
+    fn close_row(spans: &mut Vec<Span<'static>>) -> Line<'static> {
+        while spans.len() > 1 && spans[spans.len() - 1].content.trim().is_empty() {
+            spans.pop();
+        }
+        let last = spans.len() - 1;
+        spans[last].content = spans[last].content.trim_end().to_string().into();
+        Line::from(std::mem::take(spans))
+    }
+
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut current: Vec<Span<'static>> = Vec::new();
     let mut used = 0usize;
@@ -454,7 +465,7 @@ fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
                     break;
                 }
                 if has_word {
-                    out.push(Line::from(std::mem::take(&mut current)));
+                    out.push(close_row(&mut current));
                     used = indent_len;
                     has_word = false;
                     if indent_len > 0 {
@@ -477,7 +488,7 @@ fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
                     .expect("infallible: the run is longer than the room left");
                 let (head, tail) = piece.split_at(cut);
                 current.push(Span::styled(head.to_string(), span.style));
-                out.push(Line::from(std::mem::take(&mut current)));
+                out.push(close_row(&mut current));
                 used = indent_len;
                 if indent_len > 0 {
                     current.push(Span::raw(" ".repeat(indent_len)));
@@ -486,22 +497,9 @@ fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
             }
         }
     }
+    // Empty when the text ended exactly at a break.
     if !current.is_empty() {
-        out.push(Line::from(current));
-    }
-    // The break stands in for the space it happened at, so no row ends in one.
-    for line in &mut out {
-        while line.spans.len() > 1
-            && line
-                .spans
-                .last()
-                .is_some_and(|s| s.content.trim().is_empty())
-        {
-            line.spans.pop();
-        }
-        if let Some(last) = line.spans.last_mut() {
-            last.content = last.content.trim_end().to_string().into();
-        }
+        out.push(close_row(&mut current));
     }
     out
 }
@@ -1175,6 +1173,33 @@ mod tests {
         );
         // A degenerate zero width still terminates.
         assert_eq!(wrapped_text(&Line::from("ab"), 0), ["a", "b"]);
+        // Padding that fits is kept, and dropped from the end of a row it
+        // would otherwise trail off.
+        assert_eq!(wrapped_text(&Line::from("ab  cdef"), 4), ["ab", "cdef"]);
+        // Whitespace that lands at the start of a continuation is dropped
+        // too: the break already stood in for it. Across a span boundary that
+        // is a whole run arriving with a row already broken under it.
+        assert_eq!(wrapped_text(&Line::from("aaaa  bbbb"), 4), ["aaaa", "bbbb"]);
+        assert_eq!(
+            wrapped_text(
+                &Line::from(vec![Span::raw("aaaa "), Span::raw(" bbbb")]),
+                4
+            ),
+            ["aaaa", "bbbb"]
+        );
+        // Text ending exactly at a break leaves nothing to close.
+        assert_eq!(wrapped_text(&Line::from("aaaa "), 4), ["aaaa"]);
+        assert_eq!(wrapped_text(&Line::from("aaaa bb"), 4), ["aaaa", "bb"]);
+    }
+
+    /// An indented line whose word cannot fit even after the indent breaks the
+    /// word and keeps indenting what follows.
+    #[test]
+    fn wrap_line_hard_breaks_under_an_indent_it_can_afford() {
+        assert_eq!(
+            wrapped_text(&Line::from("  abcdefghijklmno"), 10),
+            ["  abcdefgh", "  ijklmno"]
+        );
     }
 
     /// An indented help line keeps its indent on every row it folds onto, so a
@@ -1336,7 +1361,7 @@ mod tests {
         };
         w.enter(Step::Defaults);
         w.cursor = 1;
-        w.open_picker(w.defaults[1].value.options().to_vec(), 0);
+        w.open_picker("Default model", w.defaults[1].value.options().to_vec(), 0);
 
         let screen = rendered(&w);
         assert!(screen.contains("Default model"), "{screen}");
@@ -1348,9 +1373,8 @@ mod tests {
         assert!(screen.contains("Search"), "{screen}");
 
         // Nothing matching is a state worth naming.
-        if let Some(picker) = w.picker.as_mut() {
-            picker.query = crate::tui::widgets::line_edit::LineEdit::new("zzz", false);
-        }
+        w.picker.as_mut().expect("open").query =
+            crate::tui::widgets::line_edit::LineEdit::new("zzz", false);
         assert!(rendered(&w).contains("Nothing matches that."));
     }
 
@@ -1360,10 +1384,41 @@ mod tests {
     fn the_chooser_survives_a_short_window() {
         let (_dir, mut w) = wizard();
         w.enter(Step::Defaults);
-        w.open_picker(w.defaults[0].value.options().to_vec(), 0);
+        w.open_picker("Default provider", w.defaults[0].value.options().to_vec(), 0);
 
         let screen = rendered_at(&w, 70, 14);
         assert!(screen.contains("anthropic"), "{screen}");
+    }
+
+    /// A window too short to hold the chooser's frame has nothing in it to
+    /// click, and neither does the space outside its list.
+    #[test]
+    fn a_window_too_short_for_the_chooser_declines_to_draw_it() {
+        let (_dir, mut w) = wizard();
+        w.enter(Step::Defaults);
+        w.open_picker("Default provider", w.defaults[0].value.options().to_vec(), 0);
+        let picker = w.picker.as_ref().expect("open");
+
+        // `draw` refuses to draw anything under its own floor, so this size
+        // only reaches the hit test - which a real 5-row terminal can.
+        assert_eq!(picker_row_at(Rect::new(0, 0, 60, 5), picker, 3), None);
+        // A click outside the list is not a row either.
+        assert_eq!(picker_row_at(Rect::new(0, 0, 90, 40), picker, 1), None);
+    }
+
+    /// Hit-testing agrees with drawing about what is on screen: nothing below
+    /// the last line is a row, and a window under the floor has no rows at all.
+    #[test]
+    fn a_click_below_the_content_is_not_the_nearest_row() {
+        let (_dir, mut w) = wizard();
+        w.enter(Step::Welcome);
+        let area = Rect::new(0, 0, 90, 40);
+
+        // Welcome is a handful of lines in a forty-row window, so most of the
+        // pane is empty space under them.
+        assert_eq!(row_at(area, &w, 4, 34), None);
+        // And below the floor there is no layout to resolve against.
+        assert_eq!(row_at(Rect::new(0, 0, 10, 4), &w, 2, 2), None);
     }
 
     fn wizard() -> (tempfile::TempDir, Wizard) {

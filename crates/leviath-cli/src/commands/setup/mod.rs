@@ -299,8 +299,15 @@ pub async fn run_wizard_loop<B: ratatui::backend::Backend>(
     loop {
         wizard.ticks += 1;
         wizard.drain_verifications();
+        // The area is taken from the frame that was actually drawn, so a click
+        // resolves against the layout the user was looking at rather than
+        // against a size asked for separately afterwards.
+        let mut area = ratatui::layout::Rect::default();
         terminal
-            .draw(|frame| render::draw(frame, wizard))
+            .draw(|frame| {
+                area = frame.area();
+                render::draw(frame, wizard);
+            })
             // ratatui 0.30 made the backend error an associated type with no
             // Send/Sync guarantee, so convert by message rather than by `?`.
             .map_err(|e| anyhow::anyhow!("terminal draw failed: {e}"))?;
@@ -312,14 +319,7 @@ pub async fn run_wizard_loop<B: ratatui::backend::Backend>(
             {
                 wizard.finished = true;
             }
-            // The window the mouse was clicked in is the one just drawn, and
-            // asking the terminal for its size is what lets the hit test
-            // rebuild that layout without the renderer storing it.
             Some(Event::Mouse(mouse)) => {
-                let area = terminal
-                    .size()
-                    .map(|size| ratatui::layout::Rect::new(0, 0, size.width, size.height))
-                    .unwrap_or_default();
                 if wizard.handle_mouse(mouse, area) == input::Action::Save {
                     wizard.finished = true;
                 }
@@ -823,6 +823,88 @@ mod tests {
         .unwrap();
 
         assert!(plan.is_none(), "only the real press quit");
+    }
+
+    /// A click reaches the wizard through the loop, against the size the
+    /// terminal reports, and can finish the run the same way a key can.
+    #[tokio::test]
+    async fn a_click_is_routed_with_the_window_it_was_made_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = build_wizard(&env_in(dir.path()));
+        wizard.enter(state::Step::Providers);
+        let mut terminal = test_terminal();
+        let size = terminal.size().expect("the test backend has a size");
+        let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+        // The row the click has to land on is asked for, not assumed, so the
+        // test does not encode a layout.
+        let row = (0..area.height)
+            .find(|y| render::row_at(area, &wizard, 4, *y) == Some(1))
+            .expect("the second provider is on screen");
+
+        let mut events = TestEventSource::new(vec![
+            crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(
+                    crossterm::event::MouseButton::Left,
+                ),
+                column: 4,
+                row,
+                modifiers: KeyModifiers::empty(),
+            }),
+            key_with(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        ]);
+
+        let plan = run_wizard_loop(
+            &mut wizard,
+            &mut terminal,
+            &mut events,
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap()
+        .expect("ctrl-s finished it");
+
+        assert!(
+            wizard.providers[1].selected,
+            "the click selected what it landed on"
+        );
+        assert!(!plan.agents.is_empty());
+    }
+
+    /// The last button finishes the run, whether it is pressed or clicked.
+    #[tokio::test]
+    async fn clicking_apply_and_finish_ends_the_wizard() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = build_wizard(&env_in(dir.path()));
+        wizard.enter(state::Step::Review);
+        let mut terminal = test_terminal();
+        let size = terminal.size().expect("the test backend has a size");
+        let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+        let button = wizard.nav_rows() - 1;
+        let row = (0..area.height)
+            .find(|y| render::row_at(area, &wizard, 4, *y) == Some(button))
+            .expect("the button is on screen");
+
+        let mut events = TestEventSource::new(vec![crossterm::event::Event::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(
+                    crossterm::event::MouseButton::Left,
+                ),
+                column: 4,
+                row,
+                modifiers: KeyModifiers::empty(),
+            },
+        )]);
+
+        let plan = run_wizard_loop(
+            &mut wizard,
+            &mut terminal,
+            &mut events,
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+
+        assert!(plan.is_some(), "the click applied the plan");
     }
 
     #[tokio::test]

@@ -27,7 +27,7 @@
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -56,12 +56,14 @@ struct TerminalAwareWriter;
 impl Write for TerminalAwareWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         if TUI_HOLDS_TERMINAL.load(Ordering::Relaxed) {
-            // A poisoned lock means another thread panicked mid-write. Dropping
-            // the line beats propagating a panic out of a logging call, which
-            // would turn a stray debug line into a crash.
-            if let Ok(mut parked) = PARKED.lock() {
-                parked.extend_from_slice(buf);
-            }
+            // A poisoned lock means a thread panicked while parking a line. The
+            // buffer is still a valid buffer, so it is taken back rather than
+            // handled: a logging call is the worst place to raise a second
+            // panic, and there is nothing here that a poisoned flag protects.
+            PARKED
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend_from_slice(buf);
             return Ok(buf.len());
         }
         std::io::stderr().write(buf)
@@ -73,6 +75,16 @@ impl Write for TerminalAwareWriter {
         }
         std::io::stderr().flush()
     }
+}
+
+/// The fmt layer's writer factory.
+///
+/// A named function rather than a closure at the call site, so the one region
+/// this indirection costs is something a test can execute. A closure inside
+/// [`init`] only ever runs when this process owns the global subscriber, which
+/// under a parallel test runner is whichever test won the slot.
+fn writer() -> TerminalAwareWriter {
+    TerminalAwareWriter
 }
 
 /// Park log output for as long as a TUI owns the terminal.
@@ -88,10 +100,10 @@ pub fn hold_for_tui() {
 /// Safe to call when nothing was held: there is simply nothing parked.
 pub fn release_from_tui() {
     TUI_HOLDS_TERMINAL.store(false, Ordering::Relaxed);
-    let parked = match PARKED.lock() {
-        Ok(mut parked) if !parked.is_empty() => std::mem::take(&mut *parked),
-        _ => return,
-    };
+    let parked = std::mem::take(&mut *PARKED.lock().unwrap_or_else(PoisonError::into_inner));
+    if parked.is_empty() {
+        return;
+    }
     let _ = std::io::stderr().write_all(&parked);
     let _ = std::io::stderr().flush();
 }
@@ -109,7 +121,7 @@ pub fn init(verbose: bool) {
     let (otel_layer, handle) = reload::Layer::new(None as OtelSlot);
     let subscriber = tracing_subscriber::registry().with(otel_layer).with(
         tracing_subscriber::fmt::layer()
-            .with_writer(|| TerminalAwareWriter)
+            .with_writer(writer)
             .with_filter(EnvFilter::new(level)),
     );
     let _ = subscriber.try_init();
@@ -202,20 +214,16 @@ mod tests {
         // Released is the resting state, so a write goes straight out.
         release_from_tui();
         assert!(!TUI_HOLDS_TERMINAL.load(Ordering::Relaxed));
-        TerminalAwareWriter
-            .write_all(b"")
-            .expect("stderr accepts a write");
-        TerminalAwareWriter.flush().expect("stderr accepts a flush");
+        writer().write_all(b"").expect("stderr accepts a write");
+        writer().flush().expect("stderr accepts a flush");
 
         hold_for_tui();
-        TerminalAwareWriter
+        writer()
             .write_all(b"parked line\n")
             .expect("a held write is buffered, never refused");
         // A flush while held must not reach the terminal either, or the point
         // of buffering is lost on the very next `tracing` call.
-        TerminalAwareWriter
-            .flush()
-            .expect("a held flush is a no-op");
+        writer().flush().expect("a held flush is a no-op");
         assert_eq!(
             PARKED.lock().expect("uncontended").as_slice(),
             b"parked line\n"
