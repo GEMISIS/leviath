@@ -5,13 +5,22 @@
 //! optional help overlay on top. Every function takes `&Wizard` and produces
 //! widgets - no state changes here, so a render can never be the reason
 //! something moved.
+//!
+//! Every step builds a [`Screen`]: flat lines, plus the line each selectable
+//! row starts on. That shape is what makes the wizard survive a small window.
+//! The screens used to be `List`s of pre-sized items and assumed the terminal
+//! was tall enough, so the tuning screen's thirteen fields simply stopped at
+//! whatever row ran out of pane, with nothing on screen to say more existed.
+//! Wrapping happens here too, in [`wrap_line`], for the same reason: the
+//! number of rows a screen occupies is only knowable once its text is wrapped,
+//! and without that number there is nothing to scroll against.
 
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 
 use super::catalog::{self, Credential};
@@ -20,18 +29,48 @@ use crate::tui::theme::*;
 use crate::tui::widgets::footer::{Hint, draw_hint_bar, hint};
 use crate::tui::widgets::help::{HelpSection, draw_help};
 
+/// The smallest window the wizard will try to draw in. Below this there is no
+/// honest layout left, and half a bordered pane reads as a broken program
+/// rather than a small one.
+const MIN_WIDTH: u16 = 24;
+const MIN_HEIGHT: u16 = 6;
+
 /// Draw one frame.
 pub fn draw(frame: &mut Frame, wizard: &Wizard) {
+    let area = frame.area();
+    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "Window too small",
+                    Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    format!("Need {MIN_WIDTH}x{MIN_HEIGHT}"),
+                    Style::default().fg(C_MUTED),
+                )),
+            ]),
+            area,
+        );
+        return;
+    }
+
+    // The breadcrumb is the first thing to go on a short window. It says where
+    // you are, which the body's own title also says, so spending three of
+    // twelve rows on it costs more than it tells you.
+    let header = if area.height >= 14 { 3 } else { 0 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Min(5),
+            Constraint::Length(header),
+            Constraint::Min(3),
             Constraint::Length(3),
         ])
-        .split(frame.area());
+        .split(area);
 
-    draw_header(frame, chunks[0], wizard);
+    if header > 0 {
+        draw_header(frame, chunks[0], wizard);
+    }
     draw_body(frame, chunks[1], wizard);
     draw_footer(frame, chunks[2], wizard);
 
@@ -49,6 +88,8 @@ fn help_sections() -> [HelpSection; 3] {
             title: "Navigate",
             entries: vec![
                 ("↑ ↓ / k j", "move"),
+                ("pgup / pgdn", "scroll a page"),
+                ("home / end", "first row / the button"),
                 ("← → / h l", "change a choice"),
                 ("space", "select / toggle"),
                 ("enter", "act on the focused row; Continue moves on"),
@@ -127,6 +168,56 @@ fn draw_header(frame: &mut Frame, area: Rect, wizard: &Wizard) {
     );
 }
 
+/// One step's content: flat lines, plus where each selectable row begins.
+///
+/// The row index is what lets scrolling follow the selection. A `List` tracks
+/// that itself, but its items cannot wrap, and a wizard row is a label and a
+/// help line that both have to fold on a narrow window.
+#[derive(Default)]
+struct Screen {
+    lines: Vec<Line<'static>>,
+    /// First line of each selectable row, in cursor order. The last entry is
+    /// always the Continue button, matching [`Wizard::nav_rows`].
+    rows: Vec<usize>,
+}
+
+impl Screen {
+    /// Mark the next line as the start of the next selectable row.
+    fn row(&mut self) {
+        self.rows.push(self.lines.len());
+    }
+
+    fn push(&mut self, line: Line<'static>) {
+        self.lines.push(line);
+    }
+
+    fn blank(&mut self) {
+        self.lines.push(Line::from(""));
+    }
+
+    /// Close the screen with its Continue button, which every step has.
+    fn finish(mut self, wizard: &Wizard) -> Self {
+        self.blank();
+        self.row();
+        self.push(continue_line(wizard));
+        self
+    }
+
+    /// Re-flow to `width`, keeping the row markers pointing at the same rows.
+    fn wrapped(self, width: usize) -> Self {
+        let mut out = Screen::default();
+        let mut rows = self.rows.iter().peekable();
+        for (index, line) in self.lines.iter().enumerate() {
+            while rows.peek().is_some_and(|start| **start == index) {
+                rows.next();
+                out.row();
+            }
+            out.lines.extend(wrap_line(line, width));
+        }
+        out
+    }
+}
+
 /// The step's own content.
 fn draw_body(frame: &mut Frame, area: Rect, wizard: &Wizard) {
     let block = Block::default()
@@ -136,18 +227,189 @@ fn draw_body(frame: &mut Frame, area: Rect, wizard: &Wizard) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    match wizard.step {
-        Step::Welcome => draw_welcome(frame, inner, wizard),
-        Step::Providers => draw_providers(frame, inner, wizard),
-        Step::ProviderDetail => draw_provider_detail(frame, inner, wizard),
-        Step::Defaults | Step::Limits => draw_fields(frame, inner, wizard),
-        Step::Agents => draw_agents(frame, inner, wizard),
-        Step::Mcp => draw_mcp(frame, inner, wizard),
-        Step::Review => draw_review(frame, inner, wizard),
+    let screen = match wizard.step {
+        Step::Welcome => build_welcome(wizard),
+        Step::Providers => build_providers(wizard),
+        Step::ProviderDetail => build_provider_detail(wizard),
+        Step::Defaults | Step::Limits => build_fields(wizard),
+        Step::Agents => build_agents(wizard),
+        Step::Mcp => build_mcp(wizard),
+        Step::Review => build_review(wizard),
+    };
+    draw_screen(frame, inner, area, &screen.wrapped(inner.width as usize), wizard);
+}
+
+/// Total width of a styled line, counted the way [`wrap_line`] counts.
+fn line_width(line: &Line<'_>) -> usize {
+    line.spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+/// Split into alternating runs of whitespace and non-whitespace, so wrapping
+/// can keep column padding that fits and drop it at a break.
+fn runs(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let blank = rest.starts_with(char::is_whitespace);
+        let end = rest
+            .char_indices()
+            .find(|(_, c)| c.is_whitespace() != blank)
+            .map_or(rest.len(), |(i, _)| i);
+        let (head, tail) = rest.split_at(end);
+        out.push(head);
+        rest = tail;
+    }
+    out
+}
+
+/// Word-wrap a styled line to `width`, keeping every span's style and
+/// indenting continuations to the line's own leading spaces.
+///
+/// `Paragraph`'s `Wrap` would fold the text, but only inside the widget: the
+/// caller never learns how many rows came out, and the wizard needs that
+/// number to scroll. Wrapping up front means the row count and the scroll
+/// offset are the same units.
+fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    if line_width(line) <= width {
+        return vec![line.clone()];
+    }
+    // A hanging indent keeps a wrapped help line reading as one item, but only
+    // when it leaves most of the width for text.
+    let indent_len = line
+        .spans
+        .first()
+        .map_or(0, |s| s.content.chars().take_while(|c| *c == ' ').count());
+    let indent_len = if indent_len * 2 >= width { 0 } else { indent_len };
+
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    let mut has_word = false;
+
+    for span in &line.spans {
+        for run in runs(&span.content) {
+            let blank = run.starts_with(char::is_whitespace);
+            // Whitespace that a break already stood in for.
+            if blank && !has_word && !out.is_empty() {
+                continue;
+            }
+            let mut piece = run;
+            loop {
+                let len = piece.chars().count();
+                if used + len <= width {
+                    current.push(Span::styled(piece.to_string(), span.style));
+                    used += len;
+                    has_word |= !blank;
+                    break;
+                }
+                if has_word {
+                    out.push(Line::from(std::mem::take(&mut current)));
+                    used = indent_len;
+                    has_word = false;
+                    if indent_len > 0 {
+                        current.push(Span::raw(" ".repeat(indent_len)));
+                    }
+                    // The break stands in for the space that did not fit.
+                    if blank {
+                        break;
+                    }
+                    continue;
+                }
+                // A single word wider than the pane, on a line with nothing
+                // else on it: hard-break it at a char boundary. `used` is the
+                // indent here, which is strictly under `width`, so there is
+                // always at least one character of room.
+                let cut = piece
+                    .char_indices()
+                    .nth(width - used)
+                    .map(|(i, _)| i)
+                    .expect("infallible: the run is longer than the room left");
+                let (head, tail) = piece.split_at(cut);
+                current.push(Span::styled(head.to_string(), span.style));
+                out.push(Line::from(std::mem::take(&mut current)));
+                used = indent_len;
+                if indent_len > 0 {
+                    current.push(Span::raw(" ".repeat(indent_len)));
+                }
+                piece = tail;
+            }
+        }
+    }
+    if !current.is_empty() {
+        out.push(Line::from(current));
+    }
+    // The break stands in for the space it happened at, so no row ends in one.
+    for line in &mut out {
+        while line.spans.len() > 1 && line.spans.last().is_some_and(|s| s.content.trim().is_empty())
+        {
+            line.spans.pop();
+        }
+        if let Some(last) = line.spans.last_mut() {
+            last.content = last.content.trim_end().to_string().into();
+        }
+    }
+    out
+}
+
+/// The first line to show, given where the user last scrolled and where the
+/// cursor is.
+///
+/// The cursor wins. `wizard.scroll` is what the wheel and the page keys move,
+/// but a selection the user cannot see is worse than a lost scroll position,
+/// so an off-screen cursor pulls the viewport back to it.
+fn first_visible(screen: &Screen, wizard: &Wizard, height: usize) -> usize {
+    let total = screen.lines.len();
+    let max = total.saturating_sub(height);
+    let mut offset = wizard.scroll.min(max);
+    let Some(&start) = screen.rows.get(wizard.cursor) else {
+        return offset;
+    };
+    // The row runs to the start of the next one, so a two-line field scrolls
+    // into view whole rather than showing its label with the help cut off.
+    let end = screen
+        .rows
+        .get(wizard.cursor + 1)
+        .copied()
+        .unwrap_or(total)
+        .max(start + 1);
+    if start < offset {
+        offset = start;
+    } else if end > offset + height {
+        offset = end.saturating_sub(height).min(start);
+    }
+    offset
+}
+
+/// Render a built screen into `inner`, with a scrollbar on `outer`'s border
+/// when there is more than fits.
+fn draw_screen(frame: &mut Frame, inner: Rect, outer: Rect, screen: &Screen, wizard: &Wizard) {
+    // At least one row: the floor in `draw` leaves the body three rows and its
+    // border takes two.
+    let height = inner.height as usize;
+    let offset = first_visible(screen, wizard, height);
+    frame.render_widget(
+        Paragraph::new(screen.lines.clone()).scroll((offset.min(u16::MAX as usize) as u16, 0)),
+        inner,
+    );
+
+    let total = screen.lines.len();
+    if total > height {
+        let mut state = ScrollbarState::new(total - height).position(offset);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓")),
+            outer.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut state,
+        );
     }
 }
 
-fn draw_welcome(frame: &mut Frame, area: Rect, wizard: &Wizard) {
+fn build_welcome(wizard: &Wizard) -> Screen {
     let configured: Vec<&str> = wizard
         .providers
         .iter()
@@ -197,110 +459,51 @@ fn draw_welcome(frame: &mut Frame, area: Rect, wizard: &Wizard) {
         "Nothing is written until the last screen.",
         Style::default().fg(C_DIM),
     )));
-    lines.push(Line::from(""));
-    lines.push(continue_line(wizard));
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    Screen {
+        lines,
+        rows: Vec::new(),
+    }
+    .finish(wizard)
 }
 
-/// Greedy word-wrap for plain text rendered inside `List` items, which
-/// (unlike `Paragraph`) cannot wrap. Words longer than `width` break at a
-/// character boundary rather than overflowing.
-fn wrap_plain(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        let mut word = word;
-        loop {
-            let need = if current.is_empty() {
-                word.chars().count()
-            } else {
-                current.chars().count() + 1 + word.chars().count()
-            };
-            if need <= width {
-                if !current.is_empty() {
-                    current.push(' ');
-                }
-                current.push_str(word);
-                break;
-            }
-            if current.is_empty() {
-                // A single word wider than the pane: hard-break it after
-                // `width` characters (a char boundary by construction).
-                // This branch is only reachable when the word has more than
-                // `width` chars (a shorter word takes the fits-branch above),
-                // so the boundary at char `width` always exists.
-                let cut = word
-                    .char_indices()
-                    .nth(width)
-                    .map(|(i, _)| i)
-                    .expect("infallible: the word is longer than width chars");
-                let (head, tail) = word.split_at(cut);
-                lines.push(head.to_string());
-                // The cut is strictly inside the word, so the tail is never
-                // empty; the loop re-tests it against the width.
-                word = tail;
-            } else {
-                lines.push(std::mem::take(&mut current));
-            }
+fn build_providers(wizard: &Wizard) -> Screen {
+    let mut screen = Screen::default();
+    for (index, row) in wizard.providers.iter().enumerate() {
+        let mark = if row.selected {
+            GLYPH_COMPLETE
+        } else {
+            GLYPH_PENDING
+        };
+        let mut spans = vec![
+            Span::styled(
+                format!("{mark} "),
+                Style::default().fg(if row.selected { C_SUCCESS } else { C_DIM }),
+            ),
+            Span::styled(row.provider.display, name_style(index == wizard.cursor)),
+        ];
+        if let Some(var) = row.from_env {
+            spans.push(Span::styled(
+                format!("  (${var})"),
+                Style::default().fg(C_WARN),
+            ));
+        } else if !row.value.is_empty() {
+            spans.push(Span::styled("  (set)", Style::default().fg(C_MUTED)));
         }
+        screen.row();
+        screen.push(Line::from(spans));
+        screen.push(Line::from(Span::styled(
+            format!("    {}", row.provider.blurb),
+            Style::default().fg(C_DIM),
+        )));
     }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    lines
+    screen.finish(wizard)
 }
 
-fn draw_providers(frame: &mut Frame, area: Rect, wizard: &Wizard) {
-    let mut items: Vec<ListItem> = wizard
-        .providers
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let mark = if row.selected {
-                GLYPH_COMPLETE
-            } else {
-                GLYPH_PENDING
-            };
-            let mut spans = vec![
-                Span::styled(
-                    format!("{mark} "),
-                    Style::default().fg(if row.selected { C_SUCCESS } else { C_DIM }),
-                ),
-                Span::styled(row.provider.display, name_style(index == wizard.cursor)),
-            ];
-            if let Some(var) = row.from_env {
-                spans.push(Span::styled(
-                    format!("  (${var})"),
-                    Style::default().fg(C_WARN),
-                ));
-            } else if !row.value.is_empty() {
-                spans.push(Span::styled("  (set)", Style::default().fg(C_MUTED)));
-            }
-            let mut item_lines = vec![Line::from(spans)];
-            // Word-wrap the blurb to the pane: `List` does not wrap, so a
-            // long description on a narrow window would otherwise clip
-            // mid-sentence with nothing to say more text exists.
-            for chunk in wrap_plain(row.provider.blurb, area.width.saturating_sub(6) as usize) {
-                item_lines.push(Line::from(Span::styled(
-                    format!("    {chunk}"),
-                    Style::default().fg(C_DIM),
-                )));
-            }
-            ListItem::new(item_lines)
-        })
-        .collect();
-    items.push(ListItem::new(vec![Line::from(""), continue_line(wizard)]));
-
-    frame.render_widget(List::new(items), area);
-}
-
-fn draw_provider_detail(frame: &mut Frame, area: Rect, wizard: &Wizard) {
+fn build_provider_detail(wizard: &Wizard) -> Screen {
     let Some(index) = wizard.detail_row() else {
         // Forced onto an empty credential screen (tests do): only the button.
-        frame.render_widget(Paragraph::new(vec![continue_line(wizard)]), area);
-        return;
+        return Screen::default().finish(wizard);
     };
     // `detail_row` yields an index into `providers`, so this is a read rather
     // than a lookup that could miss.
@@ -329,6 +532,7 @@ fn draw_provider_detail(frame: &mut Frame, area: Rect, wizard: &Wizard) {
     // The credential (or effort) row is the screen's one cursor row; the
     // marker shows whether it or the Continue button holds focus.
     let row_marker = if wizard.on_continue() { "  " } else { "› " };
+    let credential_row = lines.len();
     match row.provider.credential {
         Credential::ApiKey | Credential::BaseUrl => {
             let label = if row.provider.credential == Credential::ApiKey {
@@ -392,10 +596,12 @@ fn draw_provider_detail(frame: &mut Frame, area: Rect, wizard: &Wizard) {
 
     lines.push(Line::from(""));
     lines.push(status_line(wizard, index));
-    lines.push(Line::from(""));
-    lines.push(continue_line(wizard));
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    Screen {
+        lines,
+        rows: vec![credential_row],
+    }
+    .finish(wizard)
 }
 
 /// What to print in place of a credential when it is not being edited.
@@ -439,161 +645,142 @@ fn status_line(wizard: &Wizard, index: usize) -> Line<'static> {
     }
 }
 
-fn draw_fields(frame: &mut Frame, area: Rect, wizard: &Wizard) {
-    let mut items: Vec<ListItem> = wizard
-        .fields()
-        .iter()
-        .enumerate()
-        .map(|(index, field)| {
-            let selected = index == wizard.cursor;
-            let hint = match &field.value {
-                FieldValue::Bool(_) => "enter/space",
-                FieldValue::Choice { .. } => "enter/← →",
-                _ => "enter",
-            };
-            let mut spans = vec![
-                Span::styled(
-                    if selected { "› " } else { "  " },
-                    Style::default().fg(C_ACCENT),
-                ),
-                Span::styled(format!("{:<28}", field.label), name_style(selected)),
-            ];
-            match &wizard.edit {
-                Some(edit) if edit.target == super::state::EditTarget::Field(index) => {
-                    spans.extend(edit.line.display_spans(wizard.reveal).spans);
-                }
-                _ => spans.push(Span::styled(
-                    field.value.display(),
-                    Style::default().fg(C_ACCENT),
-                )),
+fn build_fields(wizard: &Wizard) -> Screen {
+    let mut screen = Screen::default();
+    for (index, field) in wizard.fields().iter().enumerate() {
+        let selected = index == wizard.cursor;
+        let hint = match &field.value {
+            FieldValue::Bool(_) => "enter/space",
+            FieldValue::Choice { .. } => "enter/← →",
+            _ => "enter",
+        };
+        let mut spans = vec![
+            Span::styled(
+                if selected { "› " } else { "  " },
+                Style::default().fg(C_ACCENT),
+            ),
+            Span::styled(format!("{:<28}", field.label), name_style(selected)),
+        ];
+        match &wizard.edit {
+            Some(edit) if edit.target == super::state::EditTarget::Field(index) => {
+                spans.extend(edit.line.display_spans(wizard.reveal).spans);
             }
-            spans.push(Span::styled(
-                format!("   [{hint}]"),
+            _ => spans.push(Span::styled(
+                field.value.display(),
+                Style::default().fg(C_ACCENT),
+            )),
+        }
+        spans.push(Span::styled(
+            format!("   [{hint}]"),
+            Style::default().fg(C_DIM),
+        ));
+        screen.row();
+        screen.push(Line::from(spans));
+        screen.push(Line::from(Span::styled(
+            format!("    {}", field.help),
+            Style::default().fg(C_DIM),
+        )));
+    }
+    screen.finish(wizard)
+}
+
+fn build_agents(wizard: &Wizard) -> Screen {
+    let mut screen = Screen::default();
+    for (index, row) in wizard.agents.iter().enumerate() {
+        let mark = if row.selected {
+            GLYPH_COMPLETE
+        } else {
+            GLYPH_PENDING
+        };
+        let action = row.action.label(row.agent.version);
+        // Dim for "nothing to do", and for a locally edited install too:
+        // it is offered, not urged, because reinstalling destroys the edit.
+        let action_style = if row.action.preselect() {
+            Style::default().fg(C_ACCENT)
+        } else {
+            Style::default().fg(C_DIM)
+        };
+        screen.row();
+        screen.push(Line::from(vec![
+            Span::styled(
+                format!("{mark} "),
+                Style::default().fg(if row.selected { C_SUCCESS } else { C_DIM }),
+            ),
+            Span::styled(
+                format!("{:<22}", row.agent.name),
+                name_style(index == wizard.cursor),
+            ),
+            Span::styled(action, action_style),
+        ]));
+    }
+    screen.finish(wizard)
+}
+
+fn build_mcp(wizard: &Wizard) -> Screen {
+    let mut screen = Screen::default();
+    for (index, row) in wizard.mcp.iter().enumerate() {
+        let mark = if row.selected {
+            GLYPH_COMPLETE
+        } else {
+            GLYPH_PENDING
+        };
+        let mut detail = vec![Span::styled(
+            format!("    from {}", row.source),
+            Style::default().fg(C_DIM),
+        )];
+        if !row.candidate.scope.is_empty() {
+            detail.push(Span::styled(
+                format!(" · {}", row.candidate.scope),
                 Style::default().fg(C_DIM),
             ));
-            ListItem::new(vec![
-                Line::from(spans),
-                Line::from(Span::styled(
-                    format!("    {}", field.help),
-                    Style::default().fg(C_DIM),
-                )),
-            ])
-        })
-        .collect();
-    items.push(ListItem::new(vec![Line::from(""), continue_line(wizard)]));
-
-    frame.render_widget(List::new(items), area);
-}
-
-fn draw_agents(frame: &mut Frame, area: Rect, wizard: &Wizard) {
-    let mut items: Vec<ListItem> = wizard
-        .agents
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let mark = if row.selected {
-                GLYPH_COMPLETE
-            } else {
-                GLYPH_PENDING
-            };
-            let action = row.action.label(row.agent.version);
-            // Dim for "nothing to do", and for a locally edited install too:
-            // it is offered, not urged, because reinstalling destroys the edit.
-            let action_style = if row.action.preselect() {
-                Style::default().fg(C_ACCENT)
-            } else {
-                Style::default().fg(C_DIM)
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{mark} "),
-                    Style::default().fg(if row.selected { C_SUCCESS } else { C_DIM }),
+        }
+        if row.collides {
+            detail.push(Span::styled(
+                format!(" · already configured; would be added as {}", row.name),
+                Style::default().fg(C_WARN),
+            ));
+        }
+        if !row.candidate.inline_secrets.is_empty() {
+            detail.push(Span::styled(
+                format!(
+                    " · carries a literal secret in {}",
+                    row.candidate.inline_secrets.join(", ")
                 ),
-                Span::styled(
-                    format!("{:<22}", row.agent.name),
-                    name_style(index == wizard.cursor),
-                ),
-                Span::styled(action, action_style),
-            ]))
-        })
-        .collect();
-    items.push(ListItem::new(vec![Line::from(""), continue_line(wizard)]));
-
-    frame.render_widget(List::new(items), area);
-}
-
-fn draw_mcp(frame: &mut Frame, area: Rect, wizard: &Wizard) {
-    let mut items: Vec<ListItem> = wizard
-        .mcp
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let mark = if row.selected {
-                GLYPH_COMPLETE
-            } else {
-                GLYPH_PENDING
-            };
-            let mut detail = vec![Span::styled(
-                format!("    from {}", row.source),
-                Style::default().fg(C_DIM),
-            )];
-            if !row.candidate.scope.is_empty() {
-                detail.push(Span::styled(
-                    format!(" · {}", row.candidate.scope),
-                    Style::default().fg(C_DIM),
-                ));
-            }
-            if row.collides {
-                detail.push(Span::styled(
-                    format!(" · already configured; would be added as {}", row.name),
-                    Style::default().fg(C_WARN),
-                ));
-            }
-            if !row.candidate.inline_secrets.is_empty() {
-                detail.push(Span::styled(
-                    format!(
-                        " · carries a literal secret in {}",
-                        row.candidate.inline_secrets.join(", ")
-                    ),
-                    Style::default().fg(C_WARN),
-                ));
-            }
-            let endpoint = row
-                .candidate
-                .config
-                .url
-                .clone()
-                .or_else(|| row.candidate.config.command.clone())
-                .unwrap_or_default();
-            ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled(
-                        format!("{mark} "),
-                        Style::default().fg(if row.selected { C_SUCCESS } else { C_DIM }),
-                    ),
-                    Span::styled(
-                        format!("{:<22}", row.candidate.config.name),
-                        name_style(index == wizard.cursor),
-                    ),
-                    Span::styled(endpoint, Style::default().fg(C_MUTED)),
-                ]),
-                Line::from(detail),
-            ])
-        })
-        .collect();
+                Style::default().fg(C_WARN),
+            ));
+        }
+        let endpoint = row
+            .candidate
+            .config
+            .url
+            .clone()
+            .or_else(|| row.candidate.config.command.clone())
+            .unwrap_or_default();
+        screen.row();
+        screen.push(Line::from(vec![
+            Span::styled(
+                format!("{mark} "),
+                Style::default().fg(if row.selected { C_SUCCESS } else { C_DIM }),
+            ),
+            Span::styled(
+                format!("{:<22}", row.candidate.config.name),
+                name_style(index == wizard.cursor),
+            ),
+            Span::styled(endpoint, Style::default().fg(C_MUTED)),
+        ]));
+        screen.push(Line::from(detail));
+    }
 
     for error in &wizard.mcp_scan_errors {
-        items.push(ListItem::new(Line::from(Span::styled(
+        screen.push(Line::from(Span::styled(
             format!("{GLYPH_ERROR} {error}"),
             Style::default().fg(C_WARN),
-        ))));
+        )));
     }
-    items.push(ListItem::new(vec![Line::from(""), continue_line(wizard)]));
-
-    frame.render_widget(List::new(items), area);
+    screen.finish(wizard)
 }
 
-fn draw_review(frame: &mut Frame, area: Rect, wizard: &Wizard) {
+fn build_review(wizard: &Wizard) -> Screen {
     let mut lines = vec![Line::from(Span::styled(
         "About to write:",
         Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
@@ -662,10 +849,11 @@ fn draw_review(frame: &mut Frame, area: Rect, wizard: &Wizard) {
         }
     }
 
-    lines.push(Line::from(""));
-    lines.push(continue_line(wizard));
-
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    Screen {
+        lines,
+        rows: Vec::new(),
+    }
+    .finish(wizard)
 }
 
 /// The footer's key hints for the wizard's current mode.
@@ -773,22 +961,176 @@ mod tests {
         );
     }
 
+    /// The text of one wrapped line, span styles collapsed away.
+    fn wrapped_text(line: &Line<'static>, width: usize) -> Vec<String> {
+        wrap_line(line, width)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
     #[test]
-    fn wrap_plain_wraps_at_word_boundaries_and_hard_breaks_long_words() {
-        assert_eq!(
-            wrap_plain("alpha beta gamma", 11),
-            vec!["alpha beta", "gamma"]
-        );
+    fn wrap_line_breaks_at_words_and_hard_breaks_one_that_never_fits() {
+        let plain = Line::from("alpha beta gamma");
+        assert_eq!(wrapped_text(&plain, 11), ["alpha beta", "gamma"]);
+        // Nothing to do when it already fits, and the line comes back whole.
+        assert_eq!(wrapped_text(&plain, 40), ["alpha beta gamma"]);
         // One word wider than the pane hard-breaks by characters.
-        assert_eq!(wrap_plain("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(
+            wrapped_text(&Line::from("abcdefghij"), 4),
+            ["abcd", "efgh", "ij"]
+        );
         // Multibyte characters break on char boundaries, never mid-character.
         assert_eq!(
-            wrap_plain("\u{65e5}\u{672c}\u{8a9e}\u{3067}\u{3059}", 2),
-            vec!["\u{65e5}\u{672c}", "\u{8a9e}\u{3067}", "\u{3059}"]
+            wrapped_text(&Line::from("\u{65e5}\u{672c}\u{8a9e}\u{3067}\u{3059}"), 2),
+            ["\u{65e5}\u{672c}", "\u{8a9e}\u{3067}", "\u{3059}"]
         );
-        assert!(wrap_plain("", 10).is_empty());
-        // A degenerate zero width still terminates and yields one char per line.
-        assert_eq!(wrap_plain("ab", 0), vec!["a", "b"]);
+        // A degenerate zero width still terminates.
+        assert_eq!(wrapped_text(&Line::from("ab"), 0), ["a", "b"]);
+    }
+
+    /// An indented help line keeps its indent on every row it folds onto, so a
+    /// wrapped help string still reads as belonging to the field above it.
+    #[test]
+    fn wrap_line_hangs_continuations_under_the_indent() {
+        let indented = Line::from("    alpha beta gamma delta");
+        assert_eq!(
+            wrapped_text(&indented, 14),
+            ["    alpha beta", "    gamma", "    delta"]
+        );
+        // Unless the indent would leave no useful width, in which case the text
+        // is worth more than the alignment and continuations start at column 0.
+        assert_eq!(
+            wrapped_text(&indented, 8),
+            ["    alph", "a beta", "gamma", "delta"]
+        );
+    }
+
+    /// Styles survive the fold, and column padding that no longer fits is
+    /// dropped at the break rather than pushed onto the next row.
+    #[test]
+    fn wrap_line_keeps_styles_and_drops_padding_at_a_break() {
+        let line = Line::from(vec![
+            Span::styled("name", Style::default().fg(C_WHITE)),
+            Span::styled("        ", Style::default()),
+            Span::styled("value", Style::default().fg(C_ACCENT)),
+        ]);
+        let wrapped = wrap_line(&line, 8);
+        assert_eq!(
+            wrapped
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .collect::<Vec<_>>(),
+            ["name", "value"]
+        );
+        assert_eq!(wrapped[1].spans[0].style.fg, Some(C_ACCENT));
+    }
+
+    /// Draw into a window of a given size and return what it says.
+    fn rendered_at(wizard: &Wizard, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackendHarness::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, wizard)).unwrap();
+        terminal.backend().text()
+    }
+
+    /// The tuning screen has thirteen two-line fields, which is more than most
+    /// windows are tall. It used to render as a `List` that simply stopped at
+    /// the bottom of the pane, so the last fields and the Continue button were
+    /// unreachable with no sign they existed.
+    #[test]
+    fn a_short_window_can_still_reach_the_last_field_and_the_button() {
+        let (_dir, mut w) = wizard();
+        w.show_advanced = true;
+        w.enter(Step::Limits);
+
+        let top = rendered_at(&w, 90, 20);
+        assert!(top.contains("Max concurrent inferences"), "{top}");
+        assert!(
+            !top.contains("Max bytes one run may write"),
+            "the far end of the form is not on the first screenful:\n{top}"
+        );
+        // The scrollbar is what says there is more, since nothing else can.
+        assert!(top.contains('\u{2193}'), "no scrollbar drawn:\n{top}");
+
+        w.scroll_end();
+        let bottom = rendered_at(&w, 90, 20);
+        assert!(bottom.contains("Max bytes one run may write"), "{bottom}");
+        assert!(
+            bottom.contains("Continue:"),
+            "the button has to be reachable:\n{bottom}"
+        );
+    }
+
+    /// Paging moves the selection as well as the view, so the two can never
+    /// end up looking at different parts of the form.
+    #[test]
+    fn paging_moves_the_selection_and_the_view_together() {
+        let (_dir, mut w) = wizard();
+        w.show_advanced = true;
+        w.enter(Step::Limits);
+
+        w.scroll_by(Wizard::PAGE);
+        assert_eq!(w.cursor, Wizard::PAGE as usize);
+        let screen = rendered_at(&w, 90, 20);
+        assert!(
+            screen.contains("Finished run retention"),
+            "the newly selected row has to be on screen:\n{screen}"
+        );
+
+        // Moving the selection back up pulls the view with it, even though the
+        // scroll offset was left pointing at the far end of the form.
+        w.scroll_end();
+        w.move_cursor(-100);
+        let back = rendered_at(&w, 90, 20);
+        assert!(back.contains("Max concurrent inferences"), "{back}");
+
+        w.scroll_home();
+        assert_eq!(w.cursor, 0);
+        assert!(rendered_at(&w, 90, 20).contains("Max concurrent inferences"));
+    }
+
+    /// A cursor past the end of the rows draws the top of the screen rather
+    /// than panicking. Nothing in the wizard puts it there, but tests do, and
+    /// a render is never the right place to discover an inconsistency.
+    #[test]
+    fn a_cursor_past_the_last_row_still_draws() {
+        let (_dir, mut w) = wizard();
+        w.enter(Step::Providers);
+        w.cursor = 999;
+        let screen = rendered_at(&w, 90, 20);
+        assert!(screen.contains("Providers"), "{screen}");
+    }
+
+    /// Review has nothing to select, so there the offset moves on its own
+    /// rather than being pinned to a cursor that cannot move.
+    #[test]
+    fn a_screen_with_no_rows_scrolls_by_offset() {
+        let (_dir, mut w) = wizard();
+        w.enter(Step::Review);
+        assert_eq!(w.row_count(), 0);
+
+        w.scroll_by(Wizard::PAGE);
+        assert_eq!(w.scroll, Wizard::PAGE as usize);
+        w.scroll_by(-Wizard::PAGE * 4);
+        assert_eq!(w.scroll, 0, "scrolling up past the top stops at the top");
+    }
+
+    /// Below a floor there is no layout left worth drawing, and half a
+    /// bordered pane reads as a crash rather than a small window.
+    #[test]
+    fn a_window_under_the_floor_says_so_instead_of_drawing_wreckage() {
+        let (_dir, w) = wizard();
+        let tiny = rendered_at(&w, 20, 5);
+        assert!(tiny.contains("Window too small"), "{tiny}");
+
+        // Just above the floor it draws, and drops the breadcrumb to spend the
+        // rows on content instead.
+        let small = rendered_at(&w, 60, 12);
+        assert!(small.contains("Get started"), "{small}");
+        assert!(
+            !small.contains("\u{203a} Providers"),
+            "the breadcrumb is what gives way first:\n{small}"
+        );
     }
 
     fn wizard() -> (tempfile::TempDir, Wizard) {

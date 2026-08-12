@@ -692,14 +692,24 @@ fn tab_and_shift_tab_walk_the_steps() {
     assert_eq!(w.step, Step::Welcome);
 }
 
+/// Back from Agents skips the tuning screen, because it is off by default.
+/// Turning it on puts it back in the path, in both directions.
 #[test]
-fn escape_goes_back_a_step() {
+fn escape_goes_back_a_step_and_the_advanced_toggle_decides_which() {
     let (_dir, mut w) = wizard();
     w.enter(Step::Agents);
 
     w.handle_key(press(KeyCode::Esc));
+    assert_eq!(w.step, Step::Defaults);
 
+    w.cursor = Wizard::ADVANCED_FIELD;
+    w.handle_key(press(KeyCode::Char(' ')));
+    assert!(w.show_advanced, "space on the toggle turns tuning on");
+
+    w.handle_key(press(KeyCode::Tab));
     assert_eq!(w.step, Step::Limits);
+    w.handle_key(press(KeyCode::Esc));
+    assert_eq!(w.step, Step::Defaults);
 }
 
 #[test]

@@ -130,6 +130,10 @@ impl Wizard {
             KeyCode::Char('s') if ctrl => return self.try_save(),
             KeyCode::Char('o') => self.open_signup_page(),
             KeyCode::Char('v') => self.verify_current(),
+            KeyCode::PageUp => self.scroll_by(-Wizard::PAGE),
+            KeyCode::PageDown => self.scroll_by(Wizard::PAGE),
+            KeyCode::Home => self.scroll_home(),
+            KeyCode::End => self.scroll_end(),
             _ => match keymap::resolve(&key) {
                 Some(keymap::Action::Up) => self.move_cursor(-1),
                 Some(keymap::Action::Down) => self.move_cursor(1),
@@ -293,6 +297,13 @@ impl Wizard {
                 }
                 if changed {
                     self.dirty = true;
+                    // One of those booleans decides whether the tuning screen
+                    // is on the path at all. The field was built from the flag,
+                    // so flipping one flips the other, and the Continue
+                    // button's label changes with it.
+                    if self.step == Step::Defaults && cursor == Wizard::ADVANCED_FIELD {
+                        self.show_advanced = !self.show_advanced;
+                    }
                 }
             }
             Step::Welcome | Step::ProviderDetail | Step::Review => {}
