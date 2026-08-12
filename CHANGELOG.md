@@ -11,7 +11,7 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
-## Unreleased
+## 0.3.5 - 2026-08-12
 
 - Fixed: the fan-out agents no longer skip their own fan-out. A
   `wide-researcher` run finished "complete" having run only its first stage:
