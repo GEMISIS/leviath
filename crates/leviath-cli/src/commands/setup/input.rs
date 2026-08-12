@@ -22,7 +22,7 @@ use super::state::{
 };
 use crate::tui::keymap;
 use crate::tui::widgets::confirm::ConfirmOutcome;
-use crate::tui::widgets::help::dismisses_help;
+use crate::tui::widgets::help::handle_help_key;
 use crate::tui::widgets::line_edit::{EditOutcome, LineEdit};
 
 /// What the loop should do after a key press.
@@ -72,7 +72,7 @@ impl Wizard {
             return Action::Continue;
         }
         if self.show_help {
-            if dismisses_help(&key) {
+            if handle_help_key(&key, &self.help_scroll) {
                 self.show_help = false;
             }
             return Action::Continue;
@@ -224,6 +224,9 @@ impl Wizard {
             KeyCode::PageDown => self.scroll_by(Wizard::PAGE),
             KeyCode::Home => self.scroll_home(),
             KeyCode::End => self.scroll_end(),
+            // `?` reaches the keymap below; F1 has no keymap action and is
+            // the key that works on the screens where `?` is text.
+            KeyCode::F(1) => self.show_help = true,
             _ => match keymap::resolve(&key) {
                 Some(keymap::Action::Up) => self.move_cursor(-1),
                 Some(keymap::Action::Down) => self.move_cursor(1),

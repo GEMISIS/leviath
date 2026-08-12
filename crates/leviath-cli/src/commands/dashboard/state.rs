@@ -162,6 +162,29 @@ pub(crate) struct Dashboard {
     pub(super) new_run_file_query: String,
     /// Highlighted row of the completion popup.
     pub(super) new_run_file_selected: usize,
+    /// A run started from the new-run screen whose page to open once the
+    /// daemon reports it, with the ticks left to wait for that.
+    pub(super) pending_open_run: Option<(String, u32)>,
+    /// How far the help overlay is scrolled.
+    ///
+    /// A `Cell` so drawing can clamp it: only the frame knows how tall the
+    /// overlay came out, and an offset left past the end makes every press
+    /// back up do nothing visible.
+    pub(super) help_scroll: std::cell::Cell<usize>,
+    /// Whether runs started from this screen run unattended.
+    ///
+    /// Off every time the screen opens is deliberate: the state carries real
+    /// consequences, and a toggle that survives out of sight is one a user can
+    /// leave on and forget.
+    pub(super) new_run_yolo: bool,
+    /// Whether the unattended warning has been silenced for this session.
+    ///
+    /// In memory only, and by design. "Do not ask again" is a statement about
+    /// the sitting you are in, not a permanent preference, so closing the
+    /// dashboard is what expires it. Persisting it to the config would turn one
+    /// tick of a box into a machine-wide change nothing on screen mentions
+    /// again.
+    pub(super) yolo_warning_silenced: bool,
     /// Paths the screen reads its agents and file candidates from.
     pub(super) new_run_ctx: NewRunContext,
     /// Sends resolve-and-spawn work to the background lane.
@@ -326,6 +349,27 @@ impl Dashboard {
             self.selected = self.selected.min(self.display_indices.len() - 1);
             self.table_state.select(Some(self.selected));
         }
+    }
+
+    /// Open the selected run's page.
+    ///
+    /// One function so Enter and a just-started run land in the same state: a
+    /// second copy of this drifted the moment either grew a field, and "the
+    /// page I opened by hand behaves differently from the one that opened
+    /// itself" is a bug nobody would think to look for.
+    ///
+    /// It deliberately does not remember where it was opened from. The new-run
+    /// screen closes when the run is submitted, so Esc from here goes back to
+    /// the list - which is where a person who has just started a run wants to
+    /// be, not back in a form they have already filled in.
+    pub(super) fn open_detail_view(&mut self) {
+        self.detail_view = true;
+        self.detail_scroll = 0;
+        // Default to the stage the run is actually on.
+        self.selected_stage = self.selected_agent().map(|a| a.stage_index).unwrap_or(0);
+        // Fresh run, fresh exploration state.
+        self.context_tree = ContextTreeState::default();
+        self.stage_explorer = None;
     }
 
     pub(super) fn selected_agent(&self) -> Option<&DashboardAgent> {

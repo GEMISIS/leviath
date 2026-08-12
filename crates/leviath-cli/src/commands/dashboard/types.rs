@@ -132,6 +132,8 @@ pub(super) enum ConfirmAction {
     Delete { run_id: String },
     /// Remove an MCP server from the config.
     McpRemove { name: String },
+    /// Turn on unattended runs for the new-run screen.
+    EnableYolo,
 }
 
 /// Display status for agents in the dashboard.
@@ -403,6 +405,8 @@ pub(super) struct SpawnCommand {
     pub(super) task: String,
     /// The working directory the run gets.
     pub(super) workdir: String,
+    /// Whether the run approves its own tool calls.
+    pub(super) yolo: bool,
 }
 
 /// The result of a [`SpawnCommand`], drained each tick and shown as a toast.
@@ -412,6 +416,8 @@ pub(super) struct SpawnOutcome {
     pub(super) message: String,
     /// Whether the run actually started (drives the toast colour).
     pub(super) ok: bool,
+    /// The id the daemon gave it, so the dashboard can open its page.
+    pub(super) run_id: Option<String>,
 }
 
 /// Toast notification shown as an overlay.

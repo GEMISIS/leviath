@@ -117,7 +117,9 @@ impl Dashboard {
 
     fn draw_mcp_help_bar(&self, frame: &mut Frame, area: Rect) {
         let hint = Paragraph::new(Line::from(Span::styled(
-            " ↑↓ select · a add · d delete · l login · t test · r refresh · q back ",
+            // `q` quits the whole dashboard here, as it does on the run list.
+            // This line used to say "q back", which is what Esc does.
+            " ↑↓ select · a add · d delete · l login · t test · r refresh · esc back · q quit ",
             Style::default().fg(C_DIM),
         )));
         frame.render_widget(hint, area);
