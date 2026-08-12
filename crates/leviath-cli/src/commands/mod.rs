@@ -57,4 +57,5 @@ pub mod setup;
 pub mod stages;
 pub mod test;
 pub mod tools;
+pub mod update;
 pub mod validate;

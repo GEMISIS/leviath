@@ -115,6 +115,10 @@ pub enum Commands {
 
     /// Inspect and move the secrets Leviath holds
     Auth(commands::auth::AuthArgs),
+
+    /// Update Leviath, then everything that shipped with it
+    #[command(long_about = commands::update::UPDATE_LONG_ABOUT)]
+    Update(commands::update::UpdateArgs),
 }
 
 /// The subset of commands whose real execution performs I/O that a unit test
@@ -212,6 +216,13 @@ pub trait RiskyExecutors {
         &self,
         args: commands::auth::AuthArgs,
     ) -> impl std::future::Future<Output = anyhow::Result<()>>;
+
+    /// `lev update` - resolves the real executable, shells out to a package
+    /// manager, blocks on stdin for each confirmation, and rewrites the config.
+    fn update(
+        &self,
+        args: commands::update::UpdateArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
 }
 
 /// Inject argv-prescanned dynamic `--<region>` seed flags into a parsed
@@ -260,6 +271,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Result(args) => commands::result::execute(args).await,
         Commands::Mcp(args) => ex.mcp(args).await,
         Commands::Auth(args) => ex.auth(args).await,
+        Commands::Update(args) => ex.update(args).await,
     }
 }
 
@@ -320,6 +332,10 @@ mod tests {
         }
 
         async fn mcp(&self, _args: commands::mcp::McpArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn update(&self, _args: commands::update::UpdateArgs) -> anyhow::Result<()> {
             Ok(())
         }
     }
@@ -460,6 +476,16 @@ mod tests {
     async fn dispatch_auth_variant_is_routed_through_the_executor() {
         let args = commands::auth::AuthArgs::status_for_test();
         let result = dispatch(Commands::Auth(args), &MockRisky).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_update_variant_is_routed_through_the_executor() {
+        // Routed, not called directly: the real `lev update` shells out to a
+        // package manager and blocks on stdin, so a unit test must never reach
+        // it. Its own tests drive the command core against injected seams.
+        let args = commands::update::UpdateArgs::default();
+        let result = dispatch(Commands::Update(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 
