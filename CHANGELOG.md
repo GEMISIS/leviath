@@ -13,6 +13,18 @@ same list.
 
 ## Unreleased
 
+- Fixed: the fan-out agents no longer skip their own fan-out. A
+  `wide-researcher` run finished "complete" having run only its first stage:
+  the escape edge every stage carries for the out-of-revisits case was a plain
+  transition, so it sat on the menu every turn and the model took it on the
+  first one. Ten such edges across six agents are now `condition = "dead_end"`,
+  which the engine consults only when nothing else can be followed. **If you
+  have these blueprints installed, `lev setup` (or `lev update`) reinstalls
+  them; an edited copy is left alone and keeps the old behaviour.**
+- Fixed: a title from a reasoning model is the title rather than the reasoning.
+  Those models answer after thinking out loud, so the first line is prose about
+  the task, and that is what got stored and displayed.
+
 - Fixed: runs get their generated titles. Every run showed its raw task text
   instead, which is what the dashboard falls back to when there is no title.
   The titling call put its instruction in a message with `role: "system"`,
