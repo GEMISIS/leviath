@@ -20,14 +20,15 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 
 use super::catalog::{self, Credential};
-use super::state::{FieldValue, Step, Wizard};
+use super::state::{FieldValue, Picker, Step, Wizard};
 use crate::tui::theme::*;
 use crate::tui::widgets::footer::{Hint, draw_hint_bar, hint};
 use crate::tui::widgets::help::{HelpSection, draw_help};
+use crate::tui::widgets::popup::{centered, popup_frame};
 
 /// The smallest window the wizard will try to draw in. Below this there is no
 /// honest layout left, and half a bordered pane reads as a broken program
@@ -64,9 +65,116 @@ pub fn draw(frame: &mut Frame, wizard: &Wizard) {
 
     if let Some(pending) = &wizard.confirm {
         pending.dialog.draw(frame, frame.area());
+    } else if let Some(picker) = &wizard.picker {
+        draw_picker(frame, frame.area(), picker);
     } else if wizard.show_help {
         draw_help(frame, frame.area(), &help_sections());
     }
+}
+
+/// The chooser's split: prose, search box, then the list with the rest.
+fn picker_layout(inner: Rect, picker: &Picker) -> std::rc::Rc<[Rect]> {
+    let explain = (picker.explain.len() as u16 + 2).min(inner.height.saturating_sub(4));
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(explain),
+            Constraint::Length(2),
+            Constraint::Min(1),
+        ])
+        .split(inner)
+}
+
+/// Which option a click in the chooser landed on, as an index into the
+/// filtered list. Shares [`picker_layout`] with the drawing, so a click cannot
+/// resolve against rows that were not on screen.
+pub fn picker_row_at(area: Rect, picker: &Picker, row: u16) -> Option<usize> {
+    let popup = centered(80, 88, area);
+    // What `popup_frame` leaves after its border.
+    let inner = Block::default().borders(Borders::ALL).inner(popup);
+    if inner.height < 4 {
+        return None;
+    }
+    let list = picker_layout(inner, picker)[2];
+    if row < list.y || row >= list.y + list.height {
+        return None;
+    }
+    let height = list.height as usize;
+    let offset = picker.cursor.saturating_sub(height.saturating_sub(1));
+    let position = offset + (row - list.y) as usize;
+    (position < picker.matches().len()).then_some(position)
+}
+
+/// Draw the chooser over everything else.
+///
+/// It takes most of the window rather than a small popup: the whole complaint
+/// it answers is that a long list read through one line is unreadable, and the
+/// prose above it is the other half of the answer.
+fn draw_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
+    let popup = centered(80, 88, area);
+    let inner = popup_frame(frame, popup, picker.title, C_BORDER_FOCUS);
+    if inner.height < 4 {
+        return;
+    }
+    let chunks = picker_layout(inner, picker);
+
+    let mut lines: Vec<Line<'static>> = picker
+        .explain
+        .iter()
+        .map(|text| Line::from(Span::styled(*text, Style::default().fg(C_MUTED))))
+        .collect();
+    lines.push(Line::from(""));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), chunks[0]);
+
+    let mut search = vec![Span::styled("Search  ", Style::default().fg(C_DIM))];
+    search.extend(picker.query.display_spans(true).spans);
+    frame.render_widget(
+        Paragraph::new(vec![Line::from(search), Line::from("")]),
+        chunks[1],
+    );
+
+    let matches = picker.matches();
+    if matches.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Nothing matches that.",
+                Style::default().fg(C_WARN),
+            ))),
+            chunks[2],
+        );
+        return;
+    }
+
+    let height = chunks[2].height as usize;
+    // Keep the cursor in view without a stored offset: the list is rebuilt
+    // every frame anyway, so the window into it is arithmetic, not state.
+    let offset = picker.cursor.saturating_sub(height.saturating_sub(1));
+    let rows: Vec<Line<'static>> = matches
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(height)
+        .map(|(position, option)| {
+            let option = &picker.options[*option];
+            let selected = position == picker.cursor;
+            Line::from(vec![
+                Span::styled(
+                    if selected { "› " } else { "  " },
+                    Style::default().fg(C_ACCENT),
+                ),
+                Span::styled(
+                    format!("{:<38}", option.value),
+                    if selected {
+                        Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(C_WHITE)
+                    },
+                ),
+                Span::styled(option.detail.clone(), Style::default().fg(C_DIM)),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), chunks[2]);
 }
 
 /// The help overlay's content, matching the bindings in `input.rs`.
@@ -81,6 +189,7 @@ fn help_sections() -> [HelpSection; 3] {
                 ("← → / h l", "change a choice"),
                 ("space", "select / toggle"),
                 ("enter", "act on the focused row; Continue moves on"),
+                ("enter", "on a default, opens a searchable list"),
                 ("tab", "next screen"),
                 ("shift-tab / esc", "previous screen"),
             ],
@@ -936,6 +1045,14 @@ fn footer_hints(wizard: &Wizard) -> Vec<Hint> {
             hint("esc", "cancel"),
         ];
     }
+    if wizard.picker.is_some() {
+        return vec![
+            hint("type", "search"),
+            hint("↑↓", "move"),
+            hint("enter/click", "choose"),
+            hint("esc", "keep what it was"),
+        ];
+    }
     if wizard.edit.is_some() {
         return vec![
             hint("enter", "save"),
@@ -1206,6 +1323,47 @@ mod tests {
             !small.contains("\u{203a} Providers"),
             "the breadcrumb is what gives way first:\n{small}"
         );
+    }
+
+    /// The chooser draws its prose, its search box and its rows, and a filter
+    /// that matches nothing says so rather than showing an empty pane.
+    #[test]
+    fn the_chooser_draws_the_explanation_the_field_had_no_room_for() {
+        let (_dir, mut w) = wizard();
+        w.providers[0].selected = true;
+        w.providers[0].outcome = crate::commands::setup::verify::Outcome::Reachable {
+            models: vec!["claude-opus-4".to_string()],
+        };
+        w.enter(Step::Defaults);
+        w.cursor = 1;
+        w.open_picker(w.defaults[1].value.options().to_vec(), 0);
+
+        let screen = rendered(&w);
+        assert!(screen.contains("Default model"), "{screen}");
+        assert!(
+            screen.contains("never sent to a different provider"),
+            "the precedence prose is the point of the screen:\n{screen}"
+        );
+        assert!(screen.contains("claude-opus-4"), "{screen}");
+        assert!(screen.contains("Search"), "{screen}");
+
+        // Nothing matching is a state worth naming.
+        if let Some(picker) = w.picker.as_mut() {
+            picker.query = crate::tui::widgets::line_edit::LineEdit::new("zzz", false);
+        }
+        assert!(rendered(&w).contains("Nothing matches that."));
+    }
+
+    /// The chooser fills most of the window, so a short one still gets a list
+    /// rather than only a heading.
+    #[test]
+    fn the_chooser_survives_a_short_window() {
+        let (_dir, mut w) = wizard();
+        w.enter(Step::Defaults);
+        w.open_picker(w.defaults[0].value.options().to_vec(), 0);
+
+        let screen = rendered_at(&w, 70, 14);
+        assert!(screen.contains("anthropic"), "{screen}");
     }
 
     fn wizard() -> (tempfile::TempDir, Wizard) {

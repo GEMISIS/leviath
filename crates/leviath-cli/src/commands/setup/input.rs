@@ -61,6 +61,10 @@ impl Wizard {
         if self.confirm.is_some() {
             return self.handle_confirm_key(key);
         }
+        if self.picker.is_some() {
+            self.handle_picker_key(key);
+            return Action::Continue;
+        }
         if let Some(edit) = self.edit.take() {
             self.handle_edit_key(key, edit);
             return Action::Continue;
@@ -84,6 +88,10 @@ impl Wizard {
     /// dismissing them by accident would lose typed input.
     pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) -> Action {
         if self.confirm.is_some() || self.edit.is_some() || self.show_help {
+            return Action::Continue;
+        }
+        if self.picker.is_some() {
+            self.handle_picker_mouse(mouse, area);
             return Action::Continue;
         }
         match mouse.kind {
@@ -127,6 +135,67 @@ impl Wizard {
                 }
             },
         }
+    }
+
+    /// The mouse while the chooser is open: the wheel moves within the list, a
+    /// click on a row takes it.
+    ///
+    /// A click outside the list is ignored rather than closing the chooser.
+    /// Closing on a stray click would discard a search somebody was halfway
+    /// through typing, and Esc is right there.
+    fn handle_picker_mouse(&mut self, mouse: MouseEvent, area: Rect) {
+        let Some(mut picker) = self.picker.take() else {
+            return;
+        };
+        match mouse.kind {
+            MouseEventKind::ScrollDown => picker.move_cursor(1),
+            MouseEventKind::ScrollUp => picker.move_cursor(-1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(row) = super::render::picker_row_at(area, &picker, mouse.row) {
+                    picker.cursor = row;
+                    self.picker = Some(picker);
+                    self.commit_picker();
+                    return;
+                }
+            }
+            _ => {}
+        }
+        self.picker = Some(picker);
+    }
+
+    /// Keys while the chooser is open.
+    ///
+    /// Everything that is not navigation goes to the search box, so letters
+    /// type rather than acting: `q` in a chooser means the user is looking for
+    /// Qwen, and quitting setup instead would be indefensible.
+    fn handle_picker_key(&mut self, key: KeyEvent) {
+        let Some(mut picker) = self.picker.take() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Up => picker.move_cursor(-1),
+            KeyCode::Down => picker.move_cursor(1),
+            KeyCode::PageUp => picker.move_cursor(-Wizard::PAGE),
+            KeyCode::PageDown => picker.move_cursor(Wizard::PAGE),
+            KeyCode::Home => picker.cursor = 0,
+            KeyCode::End => picker.move_cursor(isize::MAX),
+            _ => {
+                match picker.query.handle_key(&key) {
+                    EditOutcome::Commit => {
+                        self.picker = Some(picker);
+                        self.commit_picker();
+                        return;
+                    }
+                    // Esc closes without choosing, leaving the field as it was.
+                    EditOutcome::Cancel => return,
+                    EditOutcome::Pending => {}
+                }
+                // The filter just changed under the cursor, so a selection
+                // that has been filtered away must not linger off the end.
+                picker.move_cursor(0);
+            }
+        }
+        self.picker = Some(picker);
     }
 
     /// Keys while a text field is open.
@@ -241,14 +310,29 @@ impl Wizard {
     /// Enter on a Defaults/Limits row always acts on that row's kind: toggle
     /// a bool, cycle a choice, open the editor for a number.
     fn activate_field(&mut self) {
-        match self.fields().get(self.cursor).map(|f| &f.value) {
-            Some(FieldValue::Bool(_)) => self.toggle(),
-            Some(FieldValue::Choice { .. }) => self.adjust(1),
+        // The choice is cloned out before acting, because opening the chooser
+        // needs `&mut self` while the field it came from is still borrowed.
+        let choice = match self.fields().get(self.cursor).map(|f| &f.value) {
+            Some(FieldValue::Bool(_)) => {
+                self.toggle();
+                return;
+            }
             Some(FieldValue::Number(_)) => {
                 self.open_field_editor();
+                return;
             }
+            Some(FieldValue::Choice { options, index }) => (options.clone(), *index),
             // Reachable only with a hand-forced cursor past the fields.
-            None => {}
+            None => return,
+        };
+        // The two Defaults choices are a provider list and a model list, which
+        // is what the chooser exists for. The tuning screen's choices are
+        // two-or-three-value switches, where a full-screen list would be
+        // ceremony around something the arrows already do well.
+        if self.step == Step::Defaults {
+            self.open_picker(choice.0, choice.1);
+        } else {
+            self.adjust(1);
         }
     }
 
