@@ -1,14 +1,14 @@
 //! The agent blueprints shipped inside the `lev` binary, and the planner that
 //! decides what to do with them.
 //!
-//! Embedding is what makes the ten blueprints under the workspace's `agents/`
+//! Embedding is what makes the blueprints under the workspace's `agents/`
 //! directory reachable outside a git checkout: `lev add` takes a local path,
 //! and an `agents/` directory next to the executable is a layout no real
 //! install has, so without the bundle a user who downloads a release binary
 //! gets a working runtime and zero agents to run on it.
 //!
-//! `build.rs` embeds every file of every blueprint via `include_str!` (23
-//! files, ~170 KB of text) and generates the [`BUNDLED_AGENTS`] table included
+//! `build.rs` embeds every file of every blueprint via `include_str!` and
+//! generates the [`BUNDLED_AGENTS`] table included
 //! below. `lev setup` offers to install them; `lev list` reports them.
 
 include!(concat!(env!("OUT_DIR"), "/bundled_agents.rs"));
@@ -359,7 +359,7 @@ mod tests {
     /// onward - and it is appended even to a stage's custom `transition_prompt`,
     /// so a blueprint can offer an exit its own prompt never mentions. A run
     /// that takes it finishes with no answer, looking exactly like success.
-    /// That happened to `writing-assistant` while this was being written.
+    /// That happened to a shipped blueprint while this was being written.
     ///
     /// Asserted over whatever is bundled rather than a hard-coded list, so a
     /// new agent is held to it the day it lands.

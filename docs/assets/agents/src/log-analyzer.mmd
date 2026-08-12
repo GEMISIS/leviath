@@ -1,14 +1,20 @@
-flowchart LR
-    ingest(ingest)
+flowchart TD
+    ingest{{ingest}}
+    split_logs(split logs)
+    scan_worker(scan worker)
     analyze{{analyze}}
     script{{script}}
     report(report)
     summary(summary)
-    ingest --> analyze
+    ingest --> split_logs
+    ingest --> report
+    split_logs ==>|×4 workers| scan_worker
+    scan_worker ==>|merge| analyze
     analyze --> script
     analyze --> report
     script --> script
     script --> analyze
+    script --> report
     report --> summary
     classDef entry stroke-width:3px
     class ingest entry

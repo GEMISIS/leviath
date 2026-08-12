@@ -1,21 +1,28 @@
 flowchart TD
     discover(discover)
-    analyze{{analyze}}
+    plan{{plan}}
     prototype{{prototype}}
-    implement(implement)
+    implement{{implement}}
     review{{review}}
     reassess(reassess)
     summary(summary)
-    discover --> analyze
-    analyze --> implement
-    analyze --> prototype
+    discover --> plan
+    discover -. dead_end .-> summary
+    plan --> implement
+    plan --> prototype
+    plan --> plan
+    plan -. dead_end .-> summary
     prototype --> implement
-    prototype --> analyze
+    prototype --> plan
     prototype -. stuck .-> reassess
+    prototype -. dead_end .-> summary
     implement --> review
+    implement --> plan
     implement -. stuck .-> reassess
+    implement -. dead_end .-> summary
     review --> summary
     review --> implement
     reassess --> implement
+    reassess -. dead_end .-> summary
     classDef entry stroke-width:3px
     class discover entry

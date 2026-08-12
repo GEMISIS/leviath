@@ -1,6 +1,6 @@
 ---
 title: Agent catalog
-description: The ten pre-built agents Leviath ships, what each is for, how to install them, and the lev run command for each.
+description: The seven pre-built agents Leviath ships, what each is for, how to install them, and the lev run command for each.
 group: Get started
 group_order: 1
 order: 2
@@ -8,7 +8,7 @@ order: 2
 
 # Agent catalog
 
-Leviath ships with ten pre-built agents. `lev setup` installs them into `~/.leviath/agents/`
+Leviath ships with seven pre-built agents. `lev setup` installs them into `~/.leviath/agents/`
 (scripting it? pass `--install-agents`), one directory per agent, each holding an `agent.leviath`
 [blueprint](/docs/agents). Run any of them by name:
 
@@ -27,13 +27,15 @@ readable.
 
 > [!TIP]
 > Pick by the shape of the work: a codebase change (the coding agents), a question to answer from
-> sources (the research agents), or a recurring chore like logs, briefings, or drafts. Not sure?
-> Run `coder`.
+> sources (the research agents), or a recurring chore like triaging logs. Not sure? Run `coder`.
+>
+> `data-analyst`, `deep-researcher`, and `wide-researcher` [fan out](/docs/sub-agents), covering
+> several things at once instead of one after another.
 
-## software-engineer
+## coder
 
-Plan-then-implement with a human sign-off before any code is written. Reach for it when you want
-to approve the approach first.
+Discover the repo, plan with your sign-off, optionally spike an uncertain approach, implement, and
+review. The coding agent: reach for it for any change to a codebase.
 
 ```mermaid
 flowchart TD
@@ -54,44 +56,21 @@ flowchart TD
 ```
 
 ```bash
-lev run software-engineer --task "Add rate limiting to the public API"
+lev run coder --task "Add rate limiting to the public API"
 ```
 
-The `plan` stage runs in `interactive_points` mode, so it pauses for your approval before the flow
-continues. That is the [human-in-the-loop](/docs/interaction) pattern, and the plan gate holds
-**even under `--yolo`**, deliberately, because everything after it writes code. For a fully
-unattended run, use `coder`. `discover` and `plan` run on Sonnet; `implement`, `review`, and
-`reassess` step up to Opus.
+`discover` answers what the repository is and how to verify work in it before anything is planned,
+so the plan is grounded in the project rather than in guesswork.
 
-## coder
+The `plan` stage runs in `interactive_points` mode, so it stops for your approval before any code
+is written. That is the [human-in-the-loop](/docs/interaction) pattern. Unattended, the checkpoint
+resolves as approved rather than stranding the run, so `--yolo` in CI still works. Set
+`unattended = "ask"` on the interaction point if you would rather an unattended run wait.
 
-The same discover, prototype, implement, review shape without the plan gate. Reach for it when
-you just want the change made. The `review` stage still runs interactive, so you see the review
-before the run decides it is done.
-
-```mermaid
-flowchart TD
-    discover --> analyze
-    analyze --> implement
-    analyze --> prototype
-    prototype --> implement
-    prototype -->|re-plan| analyze
-    prototype -->|stuck| reassess
-    implement --> review
-    review -->|issues| implement
-    implement -->|stuck| reassess
-    reassess --> implement
-    implement -->|error| error_recovery
-    error_recovery --> implement
-```
-
-```bash
-lev run coder --task "Fix the flaky retry logic in the uploader"
-```
-
-`analyze` chooses between a direct `implement` and a `prototype` spike when the approach is
-uncertain. `reassess` is reached only on a `stuck` edge. Cheap model early, Opus for the
-implement and review passes, so it is a [multi-model](/docs/stages) blueprint.
+`plan` also chooses between going straight to `implement` and spiking first with `prototype` when
+the approach is uncertain, and `reassess` is reached only on a `stuck` edge. `discover` and `plan`
+run on Sonnet; `implement`, `review`, and `reassess` step up to Opus, so it is a
+[multi-model](/docs/stages) blueprint.
 
 ## reviewer
 
@@ -101,7 +80,8 @@ ending in a ranked report. Reach for it to vet a diff or PR.
 ```mermaid
 flowchart LR
     discover --> scan
-    scan --> deep_review
+    scan --> split_review
+    split_review -->|"fan out: one worker per area"| deep_review
     deep_review --> report
     deep_review -->|error| error_handler
     error_handler --> deep_review
@@ -111,8 +91,13 @@ flowchart LR
 lev run reviewer --task "Review the changes on the feature/auth branch"
 ```
 
-The two-pass split is deliberate: `scan` runs on Sonnet to flag areas, then `deep_review`
+The two-pass split is deliberate: `scan` runs on Sonnet to flag areas, then the review itself
 escalates to Opus to scrutinize only what was flagged, which keeps the expensive model focused.
+
+`split_review` is a [fan-out](/docs/sub-agents) stage: one worker per file, module, or group of
+hunks, all reviewing at once. `deep_review` merges their findings, re-checks the blocking ones,
+covers any area whose worker failed, and then looks for what no single area could show. A small
+change is one work item, so a two-file diff does not pay for a fan-out it does not need.
 
 ## data-analyst
 
@@ -175,7 +160,9 @@ then write an overview with recommendations. Reach for it to map a whole space.
 
 ```mermaid
 flowchart TD
-    survey --> compare
+    survey --> investigate
+    survey -->|narrow area| compare
+    investigate -->|"fan out: one researcher per thread"| compare
     compare -->|gaps| survey
     compare --> deep_dive
     deep_dive --> compare
@@ -188,8 +175,13 @@ flowchart TD
 lev run wide-researcher --task "Survey approaches to vector database indexing"
 ```
 
-`compare` is the hub: it can widen coverage (back to `survey`), pull one thread for a focused
-`deep_dive`, or finish. The breadth here comes from the survey-then-compare loop, not fan-out.
+`investigate` is a [fan-out](/docs/sub-agents) stage, and its workers are full `researcher` runs
+rather than stages of this blueprint. Every thread the survey found is researched at the same time,
+each with its own clean context window, and their findings merge into `compare`. A survey that
+turns up one thread skips it and goes straight to `compare`.
+
+`compare` is then the hub: widen coverage (back to `survey`), pull one thread for a focused
+`deep_dive`, or finish.
 
 ## deep-researcher
 
@@ -198,7 +190,9 @@ structured, cited report. Reach for it when rigor and sources matter.
 
 ```mermaid
 flowchart TD
-    gather --> analyze
+    gather --> investigate
+    gather -->|single question| analyze
+    investigate -->|"fan out: one researcher per sub-question"| analyze
     analyze -->|gaps| gather
     analyze --> follow_citations
     follow_citations --> analyze
@@ -211,6 +205,10 @@ flowchart TD
 lev run deep-researcher --task "Investigate the evidence for X causing Y"
 ```
 
+A thorough investigation is usually several questions wearing one coat. `investigate` is a
+[fan-out](/docs/sub-agents) stage that splits them out and runs each as its own `researcher` sub-agent
+in parallel, merging what comes back into `analyze`. A topic that really is one question skips it.
+
 `follow_citations` is a dedicated targeted-read stage: `analyze` flags a specific cited source, the
 stage pulls and reads it, then hands control back. Evidence accumulates in
 [context regions](/docs/context) across the loop before `synthesize` writes the report on Opus.
@@ -222,7 +220,8 @@ loop, keeping a severity-ranked findings index. Reach for it to triage a noisy l
 
 ```mermaid
 flowchart LR
-    ingest --> analyze
+    ingest --> split_logs
+    split_logs -->|"fan out: one worker per file"| analyze
     analyze --> script
     script -->|refine| script
     script --> analyze
@@ -238,54 +237,6 @@ lev run log-analyzer --task "Find the error patterns in /var/log/app.log"
 `analyze` (on Opus) hands off to `script` to write and run parsing or aggregation code, which can
 refine itself before returning results. Findings persist in a [context region](/docs/context)
 across passes so the report ranks them by severity.
-
-## daily-briefer
-
-A morning digest: gathers from local and web sources, ranks items into a priorities index, and
-delivers a concise briefing. Reach for it for a recurring standup-style summary.
-
-```mermaid
-flowchart LR
-    collect --> prioritize
-    prioritize -->|source empty| collect
-    prioritize --> brief
-    prioritize -->|error| error_recovery
-    error_recovery --> prioritize
-```
-
-```bash
-lev run daily-briefer --task "Brief me on overnight activity across my repos and inbox"
-```
-
-`prioritize` (on Opus) can send the flow back to `collect` when a critical source came back empty,
-so the briefing is not built on a gap. The ranked items live in a [context region](/docs/context).
-
-## writing-assistant
-
-Research-backed writing from topic to polished draft, with an interactive outline checkpoint and a
-draft, edit, proofread loop. Reach for it to produce a sourced piece.
-
-```mermaid
-flowchart TD
-    research --> outline
-    outline -->|revise| outline
-    outline --> draft
-    outline -->|more material| research
-    draft --> edit
-    edit -->|structural| draft
-    edit --> proofread
-    proofread -->|substantive| edit
-    draft -->|error| error_recovery
-    error_recovery --> draft
-```
-
-```bash
-lev run writing-assistant --task "Write a 1500-word explainer on consistent hashing"
-```
-
-`outline` runs in `interactive_points` mode, so it stops for your approval before drafting starts,
-the [human-in-the-loop](/docs/interaction) checkpoint. From there `edit` and `proofread` can each
-kick the piece back a stage when they hit a structural or substantive problem.
 
 ## Running one
 

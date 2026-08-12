@@ -341,7 +341,7 @@ defaults = true                 # ship the read-only verb list
 tools    = ["read_files"]
 shell    = ["cargo test", "rg"]
 
-[agent_safe_commands.software-engineer]
+[agent_safe_commands.coder]
 shell           = ["./gradlew", "env:GRADLE_OPTS"]
 allow_blueprint = true          # honour this agent's own [safe_commands]
 ```

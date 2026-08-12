@@ -98,7 +98,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
 #[cfg(test)]
 pub(crate) fn inline_interactive_manifest() -> String {
     r#"[agent]
-name = "software-engineer"
+name = "planning-agent"
 version = "0.0.0"
 description = "Inline test blueprint (interactive plan); self-contained."
 entry_stage = "plan"

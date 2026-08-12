@@ -41,7 +41,7 @@ pub struct RunArgs {
     ///
     /// One exception, and it is the one that looks like a hang: an interaction
     /// point declaring `unattended = "ask"` still holds for a person. The
-    /// bundled software-engineer's plan approval does, deliberately, because
+    /// bundled coder's plan approval can, deliberately, because
     /// everything after it writes code. Such a run parks in `Waiting` until
     /// `[limits] interaction_timeout_secs` (default 3600) releases it. Lower
     /// that to bound the wait.

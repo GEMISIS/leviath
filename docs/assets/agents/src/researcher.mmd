@@ -1,9 +1,10 @@
 flowchart LR
-    gather(gather)
+    gather{{gather}}
     analyze{{analyze}}
     summarize(summarize)
     summary(summary)
     gather --> analyze
+    gather --> summarize
     analyze --> gather
     analyze --> summarize
     summarize --> summary

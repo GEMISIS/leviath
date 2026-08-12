@@ -9,7 +9,7 @@ order: 5
 # Agent blueprints (`agent.leviath`)
 
 An agent is a directory with an `agent.leviath` file, a TOML **blueprint** describing a
-multi-stage [workflow graph](/docs/stages). The [agent catalog](/docs/agent-catalog) has ten
+multi-stage [workflow graph](/docs/stages). The [agent catalog](/docs/agent-catalog) has seven
 complete ones worth stealing from.
 
 New to this? [Build your first agent](/docs/first-agent) walks through writing one stage by
@@ -218,7 +218,7 @@ read-only, and every access is checked against the symlink-resolved real path. R
 
 ## How the coding agents verify their work
 
-The bundled coding agents (`software-engineer`, `coder`) decide what "done" means before they
+The bundled `coder` agent decides what "done" means before it
 start, rather than judging it at the end. Their entry stage is `discover`: before planning anything, the agent classifies the
 project's testing story and writes a `workflow` region ending in three literal lines that later
 stages execute verbatim:
@@ -310,7 +310,7 @@ child starts with the parent's findings under its own region names.
 ```toml
 [[transforms]]
 from_blueprint = "researcher"
-to_blueprint   = "writing-assistant"
+to_blueprint   = "reviewer"
 
 [[transforms.mappings]]
 from_region = "findings"

@@ -327,7 +327,7 @@ mod tests {
     fn create_args() -> commands::create::CreateArgs {
         commands::create::CreateArgs {
             name: "unused".to_string(),
-            template: "software-engineer".to_string(),
+            template: "default".to_string(),
         }
     }
 
