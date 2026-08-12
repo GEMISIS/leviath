@@ -13,6 +13,30 @@ same list.
 
 ## Unreleased
 
+- Fixed: runs get their generated titles. Every run showed its raw task text
+  instead, which is what the dashboard falls back to when there is no title.
+  The titling call put its instruction in a message with `role: "system"`,
+  which every OpenAI-shaped provider accepts and Anthropic's Messages API
+  rejects with a 400, and Anthropic is the default for every blueprint Leviath
+  ships. The failure was invisible: a failed title is deliberately not worth
+  interrupting a run for, the reason went to a debug log, and the daemon's
+  output goes to /dev/null. `lev ps` also grows a TITLE column, because the
+  listing the daemon returns had no title field at all - the dashboard and the
+  HTTP API read titles from disk and always could, once there were any.
+- Changed: the dashboard's help lists every key. Six modes had no entry at all
+  (the new-run screen, the stage explorer, the log panel, confirm dialogs, the
+  MCP add form, and both search modes), `n` was undocumented, and several
+  entries described keys that do something else. The overlay scrolls now,
+  which it had to: it was a fixed paragraph, so on a short terminal the detail
+  view's help already stopped part way down with nothing to say there was
+  more. F1 opens it as well as `?`, for the screens where `?` is text.
+- Added: unattended runs from the dashboard, with Ctrl-Y on the new-run
+  screen. The first use in a sitting warns, and says both what `--yolo` does
+  and what it does not - it never skips checkpoints a blueprint asks a person
+  for. "Don't ask again" holds until the dashboard closes and is never written
+  to the config, and the setting itself resets every time the screen opens.
+- Changed: starting a run from the dashboard opens that run's page rather than
+  returning to the list, and Esc from it goes back to the list.
 - Added: you can start a run from the dashboard. `n` on the main list opens a
   screen with the installed agents on one side (type to filter) and a task
   editor on the other, where `@` completes a path from the working directory
