@@ -238,7 +238,8 @@ A tool existing in the catalog does not mean an agent can call it. Two independe
 stage control access:
 
 - **`available_tools`**: the allowlist of tool names advertised to the model in that stage. A tool
-  not listed here is invisible to the LLM. Names may use aliases (e.g. `bash` for `shell`).
+  not listed here is invisible to the LLM, and a call to one it guessed is refused before it runs,
+  with the refusal returned as that call's result. Names may use aliases (e.g. `bash` for `shell`).
 - **`tool_permissions`**: a per-tool map whose values are `allow`, `ask`, or `deny`. `allow` runs
   the call outright, `ask` requires user approval first, and `deny` blocks it. Stage-level entries
   are narrower than agent-level `[tool_permissions]` and wider than launch-time flags. Any other

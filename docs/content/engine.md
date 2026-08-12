@@ -262,7 +262,8 @@ flowchart TD
 3. **`process_response`** reads the reply. Tool calls go down the tool path; plain text goes toward
    a transition.
 4. **`dispatch_tools`** checks each requested call before it runs. A tool the stage never
-   advertised in `available_tools` is refused rather than hidden. [Permissions](/docs/tools) decide
+   advertised in `available_tools` was never sent to the model, and is refused here too if it
+   guesses the name. [Permissions](/docs/tools) decide
    whether the call needs you, and [taint tracking](/docs/security#taint-tracking-experimental)
    blocks a call that would carry sensitive data somewhere it should not go. Calls that only edit
    the agent's own context apply here; the rest go to the tool lane.

@@ -118,8 +118,11 @@ configured wins, so this stage runs on Anthropic if you have a key for it and Op
 Adding your own provider to the front is how you take an agent somewhere else.
 
 `available_tools` is the entire set this stage may call. Sorting text needs no file access and no
-shell, so it gets neither. A tool left out here is refused if the model asks for it, rather than
-quietly hidden, which is what keeps a stage's blast radius equal to its list.
+shell, so it gets neither. A tool left out here is not sent to the model at all: it never sees the
+name or the schema, so it cannot be tempted by one. If it guesses a name anyway, the call is
+refused before anything runs, and the refusal goes back as that call's result so the model can
+correct itself. Both halves matter, and together they keep a stage's blast radius equal to its
+list.
 
 `max_iterations` bounds the loop. A stage that never decides it is finished stops here rather than
 spending your budget.
