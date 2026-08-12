@@ -1,6 +1,6 @@
 [agent]
 name = "researcher"
-version = "0.0.2"
+version = "0.0.3"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 entry_stage = "gather"
 
