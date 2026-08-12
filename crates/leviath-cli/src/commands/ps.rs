@@ -404,7 +404,15 @@ pub fn format_runs(
     // nearly never: an extra column of dashes on every ordinary listing would
     // cost every reader something to buy the rare reader nothing.
     let show_reads = runs.iter().chain(finished).any(|e| e.read_paths.is_some());
-    let mut headers = vec!["RUN", "STATUS", "STAGE", "ITER", "TOOLS", "AGE"];
+    // Same rule as READS: a column nobody can fill costs every reader width and
+    // buys them nothing. A title exists once the run has been titled, which is
+    // shortly after it starts and never for a run whose provider refused.
+    let show_title = runs.iter().chain(finished).any(|e| e.title.is_some());
+    let mut headers = vec!["RUN"];
+    if show_title {
+        headers.push("TITLE");
+    }
+    headers.extend(["STATUS", "STAGE", "ITER", "TOOLS", "AGE"]);
     if show_reads {
         headers.push("READS");
     }
@@ -412,14 +420,17 @@ pub fn format_runs(
         .iter()
         .chain(finished)
         .map(|e| {
-            let mut cells = vec![
-                e.run_id.clone(),
+            let mut cells = vec![e.run_id.clone()];
+            if show_title {
+                cells.push(e.title.clone().unwrap_or_default());
+            }
+            cells.extend([
                 status_cell(e),
                 stage_cell(e),
                 e.iteration.to_string(),
                 e.tool_calls.to_string(),
                 age_cell(e, now),
-            ];
+            ]);
             if show_reads {
                 cells.push(reads_cell(e));
             }

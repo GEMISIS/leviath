@@ -2605,6 +2605,7 @@ async fn a_run_is_listed_once_however_often_it_is_recorded() {
     let mut host = host_with(vec![]);
     let entry = |status| RunListEntry {
         run_id: "worker-1".to_string(),
+        title: None,
         status,
         wait_reason: None,
         stage: "work".to_string(),
@@ -2635,6 +2636,7 @@ async fn the_listing_of_finished_runs_is_capped() {
         host.record_finished(
             RunListEntry {
                 run_id: format!("worker-{i}"),
+                title: None,
                 status: AgentStatus::Complete,
                 wait_reason: None,
                 stage: "work".to_string(),

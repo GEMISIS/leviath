@@ -1034,6 +1034,7 @@ mod tests {
     fn listing_entry() -> RunListEntry {
         RunListEntry {
             run_id: "run-a".to_string(),
+            title: None,
             status: AgentStatus::Active,
             wait_reason: None,
             stage: "plan".to_string(),

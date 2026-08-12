@@ -3199,4 +3199,40 @@ mod tests {
         );
         assert!(unlimited.rate_limiter.is_none());
     }
+
+    /// Message roles are passed through untouched, including ones this API
+    /// rejects. That is the contract callers have to build against: Anthropic
+    /// accepts only `user` and `assistant` in `messages`, and nothing here
+    /// rescues a `system` role by lifting it into the top-level field.
+    ///
+    /// Worth pinning because a caller did exactly that. Run titling put its
+    /// instruction in a `role: "system"` message, which every OpenAI-shaped
+    /// provider accepts and this one 400s, so no run on the default provider
+    /// was ever titled - and the failure was swallowed as a best-effort miss.
+    #[test]
+    fn build_request_body_passes_message_roles_through_untouched() {
+        let provider = AnthropicProvider::new(reqwest::Client::new(), "k".to_string());
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![crate::Message {
+                role: "system".to_string(),
+                content: "be brief".to_string().into(),
+                cache_breakpoint: false,
+            }],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 16,
+            temperature: 0.0,
+            tools: Vec::new(),
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let body = provider.build_request_body(&request);
+
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert!(
+            body.get("system").is_none(),
+            "a system *message* is not promoted to the system field: {body}"
+        );
+    }
 }

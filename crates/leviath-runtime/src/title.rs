@@ -81,21 +81,25 @@ fn resolve_title_model(
 /// Build the one-shot titling request over the task prompt.
 fn title_request(task: &str, model: &str) -> InferenceRequest {
     InferenceRequest {
-        system: vec![],
-        messages: vec![
-            leviath_providers::Message {
-                role: "system".to_string(),
-                content: TITLE_SYSTEM_PROMPT.to_string().into(),
-                cache_breakpoint: false,
-            },
-            leviath_providers::Message {
-                role: "user".to_string(),
-                content: leviath_core::truncate_at_boundary(task, TITLE_TASK_BUDGET)
-                    .to_string()
-                    .into(),
-                cache_breakpoint: false,
-            },
-        ],
+        // A system *block*, not a message with `role: "system"`. That is the
+        // portable shape: each provider maps blocks to whatever its API wants,
+        // and Anthropic's Messages API - the default for every shipped
+        // blueprint - rejects a `system` role inside `messages` outright with a
+        // 400. Titling therefore failed for essentially every user, silently,
+        // because a failed title is by design not worth interrupting a run for
+        // and the reason only reached a debug log in a daemon whose output goes
+        // nowhere.
+        system: vec![leviath_providers::SystemBlock {
+            text: TITLE_SYSTEM_PROMPT.to_string(),
+            cache_hint: leviath_core::CacheHint::Never,
+        }],
+        messages: vec![leviath_providers::Message {
+            role: "user".to_string(),
+            content: leviath_core::truncate_at_boundary(task, TITLE_TASK_BUDGET)
+                .to_string()
+                .into(),
+            cache_breakpoint: false,
+        }],
         model: model.to_string(),
         max_tokens: TITLE_MAX_TOKENS,
         temperature: 0.2,
@@ -559,12 +563,15 @@ mod tests {
         let req = title_request(&long_task, "gpt-5-mini");
         assert_eq!(req.model, "gpt-5-mini");
         assert_eq!(req.max_tokens, TITLE_MAX_TOKENS);
-        assert_eq!(req.messages.len(), 2);
+        // One message, the task. This used to assert two, pinning the shape
+        // that Anthropic rejects - the test agreed with the code and both were
+        // wrong, which is how titling shipped broken for the default provider.
+        assert_eq!(req.messages.len(), 1);
         let expected: leviath_providers::MessageContent =
             leviath_core::truncate_at_boundary(&long_task, TITLE_TASK_BUDGET)
                 .to_string()
                 .into();
-        assert_eq!(req.messages[1].content, expected);
+        assert_eq!(req.messages[0].content, expected);
     }
 
     #[tokio::test]
@@ -595,4 +602,28 @@ mod tests {
         let long = "word ".repeat(40);
         assert!(sanitize_title(&long).len() <= TITLE_MAX_LEN);
     }
+
+    /// The one that mattered: the instruction goes in a system *block*, not a
+    /// message with `role: "system"`.
+    ///
+    /// Anthropic's Messages API accepts only `user` and `assistant` roles in
+    /// `messages` and rejects anything else with a 400, and it is the default
+    /// provider for every blueprint Leviath ships. So the old shape meant no
+    /// run ever got a title, and nothing said so: a failed title is
+    /// deliberately not worth interrupting a run for, and the reason reached
+    /// only a debug log in a daemon whose output goes to /dev/null.
+    #[test]
+    fn the_title_request_carries_its_instruction_as_a_system_block() {
+        let request = title_request("tidy the kitchen", "claude-sonnet-4-6");
+
+        assert_eq!(request.system.len(), 1);
+        assert!(request.system[0].text.contains("short title"));
+        assert!(
+            request.messages.iter().all(|m| m.role != "system"),
+            "no provider is obliged to accept a system role in messages"
+        );
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.messages[0].role, "user");
+    }
+
 }
