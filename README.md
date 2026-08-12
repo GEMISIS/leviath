@@ -311,19 +311,19 @@ Every platform-specific system call lives in one crate, `leviath-sys`, behind a 
 
 ```mermaid
 graph TD
-    CLI["leviath-cli<br/><i>the lev binary: args, TUI, daemon, serve</i>"]
-    LIB["leviath<br/><i>library facade for embedding the runtime</i>"]
-    RT["leviath-runtime<br/><i>ECS engine (bevy_ecs) + stage-run orchestration</i>"]
-    TOOLS["leviath-tools<br/><i>built-in tool implementations</i>"]
-    PROV["leviath-providers<br/><i>Anthropic · OpenAI · Google<br/>OpenRouter · Ollama · Claude Code</i>"]
-    CORE["leviath-core<br/><i>regions, layouts, blueprints, manifest, run metadata</i>"]
-    MCP["leviath-mcp<br/><i>MCP tool servers (stdio + HTTP/SSE)</i>"]
-    ACP["leviath-agent-client<br/><i>Agent Client Protocol wire types (JSON-RPC/stdio)</i>"]
-    PKG["leviath-package<br/><i>agent bundling and install</i>"]
-    SCRIPT["leviath-scripting<br/><i>Rhai sandbox</i>"]
-    TELEM["leviath-telemetry<br/><i>OpenTelemetry export</i>"]
-    NET["leviath-net<br/><i>outbound request policy + shared HTTP client</i>"]
-    SYS["leviath-sys<br/><i>all OS-specific syscalls (perms, signals, TTY)</i>"]
+    CLI["leviath-cli"]
+    LIB["leviath"]
+    RT["leviath-runtime"]
+    TOOLS["leviath-tools"]
+    PROV["leviath-providers"]
+    CORE["leviath-core"]
+    MCP["leviath-mcp"]
+    ACP["leviath-agent-client"]
+    PKG["leviath-package"]
+    SCRIPT["leviath-scripting"]
+    TELEM["leviath-telemetry"]
+    NET["leviath-net"]
+    SYS["leviath-sys"]
 
     CLI --> RT
     CLI --> MCP
@@ -350,7 +350,23 @@ graph TD
     TELEM --> CORE
 ```
 
-Two leaves round it out: `leviath-alloc`, one audited mimalloc option call for the binary, and `leviath-testkit`, shared test support.
+| Crate | What it holds |
+|---|---|
+| `leviath-cli` | The `lev` binary: args, TUI, daemon, serve |
+| `leviath` | Library facade for embedding the runtime |
+| `leviath-runtime` | ECS engine (bevy_ecs) and stage-run orchestration |
+| `leviath-core` | Regions, layouts, blueprints, manifest, run metadata |
+| `leviath-tools` | Built-in tool implementations |
+| `leviath-providers` | Anthropic, OpenAI, Google, OpenRouter, Ollama, Claude Code |
+| `leviath-mcp` | MCP tool servers over stdio and HTTP/SSE |
+| `leviath-agent-client` | Agent Client Protocol wire types (JSON-RPC over stdio) |
+| `leviath-package` | Agent bundling and install |
+| `leviath-scripting` | Rhai sandbox |
+| `leviath-telemetry` | OpenTelemetry export |
+| `leviath-net` | Outbound request policy and the shared HTTP client |
+| `leviath-sys` | Every OS-specific syscall (permissions, signals, TTY) |
+| `leviath-alloc` | One audited mimalloc option call for the binary |
+| `leviath-testkit` | Shared test support |
 
 </details>
 
