@@ -4,6 +4,9 @@
 
 **A structured runtime for AI agents**
 
+Give a model one flat list of messages and a single big file read pushes your system prompt
+out of the window. Leviath gives it structure instead.
+
 **Coherent.** Structured context regions mean an agent still knows what it read 50 tool calls ago.<br>
 **Right-sized.** Each phase of a task gets its own model, tools, and context layout, so you aren't paying frontier prices for file reads.<br>
 **Light.** Hundreds of agents in one [bevy_ecs](https://bevyengine.org/) process, from a single binary. No Node, Python, or Docker.
@@ -12,30 +15,19 @@
 [![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-coverage-lines.json)](https://github.com/GEMISIS/leviath/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/GEMISIS/leviath/blob/main/LICENSE)
 [![Docs](https://img.shields.io/badge/docs-leviath.dev-8b5cf6)](https://leviath.dev)
-
 [![stable](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-channel-stable.json)](https://github.com/GEMISIS/leviath/releases/latest)
 [![beta](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-channel-beta.json)](https://github.com/GEMISIS/leviath/releases/tag/beta)
 [![alpha](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-channel-alpha.json)](https://github.com/GEMISIS/leviath/releases/tag/alpha)
 
-**[Quick Start](#quick-start) · [Agents](#pre-built-agents) · [Features](#features) · [Dashboard](#dashboard) · [API](#api-server) · [Agent Client Protocol](#agent-client-protocol) · [Comparison](#how-it-compares) · [Why not Leviath](#why-you-might-not-want-leviath) · [Contributing](#contributing)**
+**[Quick Start](#quick-start) · [Agents](#agents) · [Features](#features) · [Dashboard](#dashboard) · [API](#api-server) · [Comparison](#how-it-compares) · [Why not Leviath](#why-you-might-not-want-leviath) · [Contributing](#contributing)**
 
 </div>
 
 ---
 
-Give a model one flat list of messages and a single big file read pushes your system prompt out of the window. Leviath gives it **structure** instead: context that stays coherent across hundreds of tool calls, the right model for each phase of a task, and hundreds of agents running at once on one machine.
-
 <p align="center">
   <img src="docs/assets/hero-final.gif" alt="Leviath's terminal dashboard running several agents concurrently" width="900">
 </p>
-
-Use it for:
-
-- **Agents beyond coding**: research, code review, log analysis, and data gathering all ship [out of the box](#pre-built-agents)
-- **Long tasks that stay coherent**: [context regions](#features) instead of a flat transcript
-- **Agents you drive from anything that speaks HTTP**: a [REST + WebSocket API](#api-server) with webhooks, backed by an always-on daemon
-- **Headless agents inside any [Agent Client Protocol](#agent-client-protocol) host**
-- **Tinkering**: an ECS world, workflow graphs, Rhai script tools, and a [full TUI](#dashboard)
 
 ## At a glance
 
@@ -67,10 +59,10 @@ curl -fsSL https://leviath.dev/install.sh | sh
 powershell -ExecutionPolicy Bypass -c "irm https://leviath.dev/install.ps1 | iex"
 ```
 
-The script picks the right installer for your platform and takes the stable
-channel by default. For beta or alpha, pass the channel as an argument:
-`curl -fsSL https://leviath.dev/install.sh | sh -s -- --channel beta`. Both
-install prebuilt binaries, so no Rust toolchain is needed.
+Both install prebuilt binaries, so no Rust toolchain is needed. Stable is the default; for beta or
+alpha, pass the channel as an argument:
+`curl -fsSL https://leviath.dev/install.sh | sh -s -- --channel beta`.
+[Release channels →](https://leviath.dev/docs/releases)
 
 <details>
 <summary><b>Package managers</b>: Homebrew and Scoop, if you would rather manage it that way</summary>
@@ -103,29 +95,12 @@ Leviath is also a library: add the [`leviath`](https://crates.io/crates/leviath)
 
 ### 2. Configure a provider
 
-One provider is all you need: an API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), [Google AI](https://aistudio.google.com/), or [OpenRouter](https://openrouter.ai/). No key at all? Run a local [Ollama](https://ollama.com), or use the Claude Code transport below.
+One provider is all you need: an API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), [Google AI](https://aistudio.google.com/), or [OpenRouter](https://openrouter.ai/). No key at all? Run a local [Ollama](https://ollama.com), or opt into the [Claude Code transport](https://leviath.dev/docs/providers#claude-code-transport) to run on your Claude subscription (read its terms-of-service note first).
 
 ```bash
 lev setup                                            # interactive wizard
 lev setup --non-interactive --anthropic-key sk-ant-...  # scriptable
 ```
-
-<details>
-<summary><b>Claude Code transport (opt-in, no API key)</b>: run Leviath on your Claude subscription. Read the terms note.</summary>
-
-<br/>
-
-If you have [Claude Code](https://claude.com/claude-code) installed and signed in, enable it in `lev setup` to run Leviath on your Claude subscription with no API key. Leviath's structured regions work normally. It drives the CLI as a plain inference relay, keeping the context window, the tool loop, and the iteration count on Leviath's side.
-
-> **⚠️ Terms of service:** Anthropic's terms [state](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) that third-party developers may not offer claude.ai login or subscription rate limits for their products without prior approval. Using this transport routes inference through your Claude subscription via the CLI's OAuth session. **By enabling it, you accept responsibility for compliance with Anthropic's terms.** For unambiguous compliance, use a direct Anthropic API key instead.
-
-A few caveats, all measured:
-
-- The CLI adds ~130 tokens of its own context to **every** call, including **your account email address** and the current date. No flag disables this without also disabling subscription auth.
-- No prompt caching, and each call spawns a subprocess (~200 ms). Anthropic models only.
-- For full control over what reaches the model, use a direct provider key.
-
-</details>
 
 ### 3. Run an agent
 
@@ -148,73 +123,23 @@ lev run . --task "Your task here"
 
 This writes an `agent.leviath` config you can customize: models per stage, context regions and their budgets, tools, and the workflow graph. [Agent configuration →](https://leviath.dev/docs/agents)
 
-## Pre-built Agents
+## Agents
 
-Seven agents ship out of the box, each a multi-stage directed graph with structured context regions, per-stage model fallback, and error recovery. Five of them fan out, covering several things at once instead of one after another. In the graphs below, diamonds are LLM-routed or human-in-the-loop decisions, and dotted edges fire automatically on a runtime condition (like the `stuck` detector) rather than by the agent's choice.
+Seven agents ship out of the box, covering coding, review, research, data gathering, and log
+analysis. Each is a multi-stage directed graph with structured context regions, per-stage model
+fallback, and error recovery, and five of them fan out to cover several things at once instead of
+one after another. `coder` is the largest:
 
-<table>
-<tr><th align="left">Agent</th><th align="left">Workflow</th></tr>
-<tr>
-<td valign="middle" width="30%"><b>coder</b><br>Full coding workflow: codebase discovery, planning you sign off on, an optional prototype spike, stuck detection, and a review loop</td>
-<td><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/coder-dark.svg">
-  <img src="docs/assets/agents/coder.svg" alt="coder workflow graph">
-</picture></td>
-</tr>
-<tr>
-<td valign="middle" width="30%"><b>wide-researcher</b><br>Broad multi-topic landscape survey: compares approaches, dives on interesting threads</td>
-<td><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/wide-researcher-dark.svg">
-  <img src="docs/assets/agents/wide-researcher.svg" alt="wide-researcher workflow graph">
-</picture></td>
-</tr>
-<tr>
-<td valign="middle" width="30%"><b>deep-researcher</b><br>Thorough single-topic investigation: follows citation chains, cross-checks claims, writes a cited report</td>
-<td><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/deep-researcher-dark.svg">
-  <img src="docs/assets/agents/deep-researcher.svg" alt="deep-researcher workflow graph">
-</picture></td>
-</tr>
-</table>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/coder-dark.svg">
+    <img src="docs/assets/agents/coder.svg" alt="The coder agent's workflow graph" width="560">
+  </picture>
+</p>
 
-<details>
-<summary><b>The other four</b>: reviewer, data-analyst, researcher, log-analyzer</summary>
-
-<br/>
-
-<table>
-<tr><th align="left">Agent</th><th align="left">Workflow</th></tr>
-<tr>
-<td valign="middle" width="30%"><b>reviewer</b><br>Code review and audit, grounded in a discovery pass; read-only</td>
-<td><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/reviewer-dark.svg">
-  <img src="docs/assets/agents/reviewer.svg" alt="reviewer workflow graph">
-</picture></td>
-</tr>
-<tr>
-<td valign="middle" width="30%"><b>data-analyst</b><br>Gathers data on a subject in parallel, builds one clean CSV, and says what the numbers show</td>
-<td><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/data-analyst-dark.svg">
-  <img src="docs/assets/agents/data-analyst.svg" alt="data-analyst workflow graph">
-</picture></td>
-</tr>
-<tr>
-<td valign="middle" width="30%"><b>researcher</b><br>General-purpose research with a gather↔analyze refinement loop</td>
-<td><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/researcher-dark.svg">
-  <img src="docs/assets/agents/researcher.svg" alt="researcher workflow graph">
-</picture></td>
-</tr>
-<tr>
-<td valign="middle" width="30%"><b>log-analyzer</b><br>Log analysis with scripted aggregation, severity-ranked findings</td>
-<td><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/log-analyzer-dark.svg">
-  <img src="docs/assets/agents/log-analyzer.svg" alt="log-analyzer workflow graph">
-</picture></td>
-</tr>
-</table>
-
-</details>
+Diamonds are LLM-routed or human-in-the-loop decisions, and dotted edges fire automatically on a
+runtime condition (like the `stuck` detector) rather than by the agent's choice. Every agent's
+workflow graph is in the [agent catalog →](https://leviath.dev/docs/agent-catalog)
 
 ## Features
 
@@ -228,6 +153,14 @@ Budgets are percentages of the model's window, so the same blueprint keeps its s
 
 Each stage gets its own model, tools, and context layout. Run them linearly or as a [directed graph](https://leviath.dev/docs/stages#graph) with conditional transitions, error recovery, and LLM-driven routing, then check the graph with `lev validate`. A `stuck` edge escapes a stage that is making no progress, and stuckness is measured by the runtime (iteration counts, repeated edits to one file), not self-reported by the model. [Learn more →](https://leviath.dev/docs/stages)
 
+### Human-in-the-loop
+
+The core primitive is **mid-run message injection**: `lev msg` (or the API) drops a message straight into a running agent's context, and the model sees it on its next inference call, so you redirect or add constraints without restarting. Stages can opt out with `accepts_messages = false`; a message then waits in the inbox until a stage that accepts it. Force checkpoints with `interaction_points` (approve, request revisions, or edit the agent's output directly), or grant `ask_user_*` tools so the agent asks on its own judgment. [Learn more →](https://leviath.dev/docs/interaction)
+
+### Security: sandboxed execution and taint tracking
+
+By default an agent's shell commands run on your machine with nothing extra to install. When you want isolation, opt in per agent or per stage: hardened **containers** (Docker/Podman, capabilities dropped, warm per agent) or lighter **Linux namespaces**, mixable within one workflow, and an installed agent can tighten its sandbox but never turn one off. Experimental **taint tracking** labels every context region's sensitivity and gates exfiltration-capable tool calls before they fire, with allowlists and scripted policy rules on top. [Learn more →](https://leviath.dev/docs/security)
+
 ### ECS agent engine
 
 Agents run as entities in a [bevy_ecs](https://bevyengine.org/) world. Hundreds can share one process with game-engine-style scheduling (ten agents each fanning out to ten sub-agents is still one process), instead of that many OS processes fighting for resources.
@@ -237,14 +170,6 @@ And no, hundreds of agents won't stampede your provider: a shared per-model infe
 ### Sub-agents and fan-out
 
 Agents spawn children with different blueprints. A **fan-out** stage splits a task into work items, runs one sub-agent worker per item concurrently, and merges the results back into the parent, all in the same process. Any sub-agent, at any depth, can ask the user questions directly. [Learn more →](https://leviath.dev/docs/sub-agents)
-
-### Human-in-the-loop
-
-The core primitive is **mid-run message injection**: `lev msg` (or the API) drops a message straight into a running agent's context, and the model sees it on its next inference call, so you redirect or add constraints without restarting. Stages can opt out with `accepts_messages = false`; a message then waits in the inbox until a stage that accepts it. Force checkpoints with `interaction_points` (approve, request revisions, or edit the agent's output directly), or grant `ask_user_*` tools so the agent asks on its own judgment. [Learn more →](https://leviath.dev/docs/interaction)
-
-### Security: sandboxed execution and taint tracking
-
-By default an agent's shell commands run on your machine with nothing extra to install. When you want isolation, opt in per agent or per stage: hardened **containers** (Docker/Podman, capabilities dropped, warm per agent) or lighter **Linux namespaces**, mixable within one workflow - and an installed agent can tighten its sandbox but never turn one off. Experimental **taint tracking** labels every context region's sensitivity and gates exfiltration-capable tool calls before they fire, with allowlists and scripted policy rules on top. [Learn more →](https://leviath.dev/docs/security)
 
 ## Dashboard
 
@@ -256,7 +181,7 @@ By default an agent's shell commands run on your machine with nothing extra to i
 
 ## API Server
 
-`lev serve` exposes a REST + WebSocket API, so anything that speaks HTTP can integrate with it. No SDK required. It covers agent lifecycle, human-in-the-loop interaction, per-agent streaming, and signed webhook callbacks on completion, and it ships a browser console at `/app` for driving agents from a web page. Because the API can spawn tool-executing agents, it refuses to start without a token and binds to `127.0.0.1` by default.
+`lev serve` exposes a REST + WebSocket API, so anything that speaks HTTP can integrate with it. No SDK required. It covers agent lifecycle, human-in-the-loop interaction, per-agent streaming, and signed webhook callbacks on completion. [The Lair](https://leviath.dev/lair) is a browser console that drives it, so you get a web UI without writing one. Because the API can spawn tool-executing agents, it refuses to start without a token and binds to `127.0.0.1` by default.
 
 ```bash
 export LEVIATH_API_TOKEN="$(openssl rand -hex 16)"
@@ -283,19 +208,10 @@ Production deployments can export structured traces, metrics, and logs over Open
 
 > "ACP" is claimed by two unrelated protocols; Leviath implements the Agent **Client** Protocol (JSON-RPC/stdio), not BeeAI's Agent Communication Protocol.
 
-## How we measure
-
-Leviath is a runtime that orchestrates agents, not a coding agent itself, so we don't publish head-to-head numbers against tools like Claude Code or Codex. They sit at a different layer of the stack. What we measure, on the same tasks with the same models:
-
-- **Structured vs flat context**: the same Leviath runtime with regions enabled vs disabled, scored on held-out test pass rate, total billed tokens (including cache reads and writes), and cost.
-- **Resource footprint**: absolute memory of one daemon running many concurrent agents.
-
-Methodology and raw data will be published alongside the benchmark results.
-
 ## How it compares
 
-Leviath is a runtime that agents run *on*. Claude Code is a polished coding agent you work with,
-CrewAI and LangGraph are frameworks you build agents *in*, and Gas Town, Gas City and OpenHands are
+Leviath is a runtime that agents run *on*. Claude Code, Codex, and OpenHands are agents you work
+with, CrewAI and LangGraph are frameworks you build agents *in*, and Gas Town and Gas City are
 orchestrators that decide which work happens. Several of those are worth running alongside Leviath
 rather than instead of it.
 
@@ -322,19 +238,9 @@ Leviath also connects to [Model Context Protocol](https://modelcontextprotocol.i
 
 Anthropic, OpenAI, Google (Gemini), OpenRouter, local [Ollama](https://ollama.com) with no key, and the Claude Code subscription transport, with per-stage model fallback, optional client-side rate limits enforced before each call, and custom OpenAI-compatible providers as [Rhai scripts](https://leviath.dev/docs/rhai-providers). [Provider docs →](https://leviath.dev/docs/providers)
 
-## Releases
-
-| Channel | Cadence | Tag | Stability |
-|---------|---------|-----|-----------|
-| **Alpha** | Nightly | `alpha` | Bleeding edge |
-| **Beta** | Weekly (Monday) | `beta` | Tested |
-| **Stable** | Weekly (Thursday, approval-gated) | `latest` | Production |
-
-Channel tags roll with every publish; each stable deploy also cuts an immutable versioned release (`vX.Y.Z`, date-suffixed when the same version ships twice). One binary is built on alpha and promoted unchanged through beta and stable, checksum-verified at every hop, and each channel's docs are rendered from the exact commit its binaries came from. [Release docs →](https://leviath.dev/docs/releases) · [distribution repo](https://github.com/GEMISIS/leviath-dist)
-
 ## Security
 
-Leviath runs LLM-driven tools on your machine, so [SECURITY.md](SECURITY.md) states plainly what it defends against (a malicious agent package, prompt injection reaching an agent's tools, a hostile MCP server, another local user) and what it does not, including that the model can do anything you granted it. It also covers vulnerability reporting, where every secret lives, hardening a `lev serve` deployment, and verifying a release's signed build provenance.
+Leviath runs LLM-driven tools on your machine. [SECURITY.md](SECURITY.md) states plainly what it defends against and what it does not, and covers vulnerability reporting, hardening a `lev serve` deployment, and verifying a release's signed build provenance.
 
 ## Contributing
 
@@ -345,7 +251,7 @@ cargo build
 cargo test --workspace
 ```
 
-The pre-commit hook installs itself on first build, with no setup step, and enforces formatting, clippy, doc lints, and the full test suite. The workspace is gated at a hard **100% coverage on lines, regions, and functions**, with no opt-outs and coverage-suppression markers banned by lint; CI enforces it on Linux, macOS, and Windows. The only exclusion is the thin `lev` binary entrypoint, guarded by a CI check. Details on the hook, `ast-grep`, and the coverage tooling: [CONTRIBUTING.md](CONTRIBUTING.md).
+The workspace is gated at a hard **100% coverage on lines, regions, and functions**, with no opt-outs and coverage-suppression markers banned by lint; CI enforces it on Linux, macOS, and Windows. The only exclusion is the thin `lev` binary entrypoint, guarded by a CI check. [CONTRIBUTING.md](CONTRIBUTING.md) covers the rest.
 
 <details>
 <summary><b>Crate map</b></summary>
@@ -356,30 +262,46 @@ Every platform-specific system call lives in one crate, `leviath-sys`, behind a 
 
 ```mermaid
 graph TD
-    CLI["leviath-cli<br/><i>CLI binary (lev): args, TUI, serve, run adapters</i>"]
-    RT["leviath-runtime<br/><i>ECS engine (bevy_ecs) + stage-run orchestration seams</i>"]
-    CORE["leviath-core<br/><i>Regions, layouts, blueprints, manifest, run metadata</i>"]
-    ACP["leviath-agent-client<br/><i>Agent Client Protocol wire types (JSON-RPC/stdio)</i>"]
+    CLI["leviath-cli<br/><i>the lev binary: args, TUI, daemon, serve</i>"]
+    LIB["leviath<br/><i>library facade for embedding the runtime</i>"]
+    RT["leviath-runtime<br/><i>ECS engine (bevy_ecs) + stage-run orchestration</i>"]
+    TOOLS["leviath-tools<br/><i>built-in tool implementations</i>"]
     PROV["leviath-providers<br/><i>Anthropic · OpenAI · Google<br/>OpenRouter · Ollama · Claude Code</i>"]
-    MCP["leviath-mcp<br/><i>MCP tool integration (stdio + HTTP/SSE)</i>"]
+    CORE["leviath-core<br/><i>regions, layouts, blueprints, manifest, run metadata</i>"]
+    MCP["leviath-mcp<br/><i>MCP tool servers (stdio + HTTP/SSE)</i>"]
+    ACP["leviath-agent-client<br/><i>Agent Client Protocol wire types (JSON-RPC/stdio)</i>"]
+    PKG["leviath-package<br/><i>agent bundling and install</i>"]
     SCRIPT["leviath-scripting<br/><i>Rhai sandbox</i>"]
-    PKG["leviath-package<br/><i>Agent bundling & install</i>"]
-    TOOLS["leviath-tools<br/><i>Built-in tool implementations</i>"]
-    SYS["leviath-sys<br/><i>All OS-specific syscalls (perms, signals, TTY)</i>"]
+    TELEM["leviath-telemetry<br/><i>OpenTelemetry export</i>"]
+    NET["leviath-net<br/><i>outbound request policy + shared HTTP client</i>"]
+    SYS["leviath-sys<br/><i>all OS-specific syscalls (perms, signals, TTY)</i>"]
 
     CLI --> RT
+    CLI --> MCP
     CLI --> ACP
-    ACP --> CORE
-    CLI --> SCRIPT
     CLI --> PKG
-    CLI --> TOOLS
-    CLI --> SYS
-    RT --> CORE
+    CLI --> NET
+    LIB --> RT
+    LIB --> MCP
+    LIB --> ACP
+    LIB --> PKG
+    LIB --> TELEM
+    RT --> TOOLS
     RT --> PROV
-    RT --> MCP
+    RT --> SCRIPT
+    TOOLS --> CORE
+    TOOLS --> SYS
+    PROV --> CORE
     PROV --> SYS
-    PKG --> SYS
+    MCP --> CORE
+    MCP --> SYS
+    ACP --> CORE
+    PKG --> CORE
+    SCRIPT --> CORE
+    TELEM --> CORE
 ```
+
+Two leaves round it out: `leviath-alloc`, one audited mimalloc option call for the binary, and `leviath-testkit`, shared test support.
 
 </details>
 
