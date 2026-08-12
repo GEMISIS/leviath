@@ -1478,7 +1478,11 @@ fn mouse_events_that_are_not_a_click_or_a_wheel_are_ignored() {
     assert!(!w.providers[0].selected, "hovering is not clicking");
 
     w.enter(Step::Defaults);
-    w.open_picker("Default provider", w.defaults[0].value.options().to_vec(), 0);
+    w.open_picker(
+        "Default provider",
+        w.defaults[0].value.options().to_vec(),
+        0,
+    );
     w.handle_mouse(moved, AREA);
     assert!(w.picker.is_some(), "and it does not close the chooser");
     w.handle_mouse(wheel(false), AREA);
@@ -1494,9 +1498,11 @@ fn mouse_events_that_are_not_a_click_or_a_wheel_are_ignored() {
 #[test]
 fn a_configured_provider_outside_the_catalog_still_describes_itself() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = crate::config::Config::default();
-    config.default_provider = "in-house".to_string();
-    config.default_model = Some("ghost-model".to_string());
+    let config = crate::config::Config {
+        default_provider: "in-house".to_string(),
+        default_model: Some("ghost-model".to_string()),
+        ..Default::default()
+    };
     let mut w = Wizard::new(
         config,
         &|_| None,
@@ -1507,7 +1513,11 @@ fn a_configured_provider_outside_the_catalog_still_describes_itself() {
     );
     w.enter(Step::Defaults);
 
-    w.open_picker("Default provider", w.defaults[0].value.options().to_vec(), 0);
+    w.open_picker(
+        "Default provider",
+        w.defaults[0].value.options().to_vec(),
+        0,
+    );
     let picker = w.picker.take().expect("open");
     assert_eq!(picker.options[0].value, "in-house");
     assert_eq!(picker.options[0].detail, "from your config");

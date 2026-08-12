@@ -319,10 +319,10 @@ pub async fn run_wizard_loop<B: ratatui::backend::Backend>(
             {
                 wizard.finished = true;
             }
-            Some(Event::Mouse(mouse)) => {
-                if wizard.handle_mouse(mouse, area) == input::Action::Save {
-                    wizard.finished = true;
-                }
+            Some(Event::Mouse(mouse))
+                if wizard.handle_mouse(mouse, area) == input::Action::Save =>
+            {
+                wizard.finished = true;
             }
             _ => {}
         }
@@ -843,9 +843,7 @@ mod tests {
 
         let mut events = TestEventSource::new(vec![
             crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
-                kind: crossterm::event::MouseEventKind::Down(
-                    crossterm::event::MouseButton::Left,
-                ),
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
                 column: 4,
                 row,
                 modifiers: KeyModifiers::empty(),
@@ -886,9 +884,7 @@ mod tests {
 
         let mut events = TestEventSource::new(vec![crossterm::event::Event::Mouse(
             crossterm::event::MouseEvent {
-                kind: crossterm::event::MouseEventKind::Down(
-                    crossterm::event::MouseButton::Left,
-                ),
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
                 column: 4,
                 row,
                 modifiers: KeyModifiers::empty(),

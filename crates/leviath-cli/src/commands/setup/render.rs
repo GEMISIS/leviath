@@ -6,12 +6,12 @@
 //! widgets - no state changes here, so a render can never be the reason
 //! something moved.
 //!
-//! Every step builds a [`Screen`]: flat lines, plus the line each selectable
+//! Every step builds a `Screen`: flat lines, plus the line each selectable
 //! row starts on. That shape is what makes the wizard survive a small window.
 //! The screens used to be `List`s of pre-sized items and assumed the terminal
 //! was tall enough, so the tuning screen's thirteen fields simply stopped at
 //! whatever row ran out of pane, with nothing on screen to say more existed.
-//! Wrapping happens here too, in [`wrap_line`], for the same reason: the
+//! Wrapping happens here too, in `wrap_line`, for the same reason: the
 //! number of rows a screen occupies is only knowable once its text is wrapped,
 //! and without that number there is nothing to scroll against.
 
@@ -86,7 +86,7 @@ fn picker_layout(inner: Rect, picker: &Picker) -> std::rc::Rc<[Rect]> {
 }
 
 /// Which option a click in the chooser landed on, as an index into the
-/// filtered list. Shares [`picker_layout`] with the drawing, so a click cannot
+/// filtered list. Shares `picker_layout` with the drawing, so a click cannot
 /// resolve against rows that were not on screen.
 pub fn picker_row_at(area: Rect, picker: &Picker, row: u16) -> Option<usize> {
     let popup = centered(80, 88, area);
@@ -1181,10 +1181,7 @@ mod tests {
         // is a whole run arriving with a row already broken under it.
         assert_eq!(wrapped_text(&Line::from("aaaa  bbbb"), 4), ["aaaa", "bbbb"]);
         assert_eq!(
-            wrapped_text(
-                &Line::from(vec![Span::raw("aaaa "), Span::raw(" bbbb")]),
-                4
-            ),
+            wrapped_text(&Line::from(vec![Span::raw("aaaa "), Span::raw(" bbbb")]), 4),
             ["aaaa", "bbbb"]
         );
         // Text ending exactly at a break leaves nothing to close.
@@ -1384,7 +1381,11 @@ mod tests {
     fn the_chooser_survives_a_short_window() {
         let (_dir, mut w) = wizard();
         w.enter(Step::Defaults);
-        w.open_picker("Default provider", w.defaults[0].value.options().to_vec(), 0);
+        w.open_picker(
+            "Default provider",
+            w.defaults[0].value.options().to_vec(),
+            0,
+        );
 
         let screen = rendered_at(&w, 70, 14);
         assert!(screen.contains("anthropic"), "{screen}");
@@ -1396,7 +1397,11 @@ mod tests {
     fn a_window_too_short_for_the_chooser_declines_to_draw_it() {
         let (_dir, mut w) = wizard();
         w.enter(Step::Defaults);
-        w.open_picker("Default provider", w.defaults[0].value.options().to_vec(), 0);
+        w.open_picker(
+            "Default provider",
+            w.defaults[0].value.options().to_vec(),
+            0,
+        );
         let picker = w.picker.as_ref().expect("open");
 
         // `draw` refuses to draw anything under its own floor, so this size
