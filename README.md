@@ -68,7 +68,8 @@ powershell -ExecutionPolicy Bypass -c "irm https://leviath.dev/install.ps1 | iex
 ```
 
 The script picks the right installer for your platform and takes the stable
-channel by default; set `LEVIATH_CHANNEL` to `beta` or `alpha` to switch. Both
+channel by default. For beta or alpha, pass the channel as an argument:
+`curl -fsSL https://leviath.dev/install.sh | sh -s -- --channel beta`. Both
 install prebuilt binaries, so no Rust toolchain is needed.
 
 <details>

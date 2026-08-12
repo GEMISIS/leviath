@@ -1318,6 +1318,12 @@ fn the_search_matches_terms_in_any_order_and_across_the_detail() {
     // The provider name is part of the row, so it is part of the search.
     type_str(&mut w, "anthropic");
     assert_eq!(w.picker.as_ref().expect("open").matches().len(), 3);
+
+    // The "no default" row is the absence of a model, so it does not claim a
+    // provider failed to report it.
+    let none = &w.picker.as_ref().expect("open").options[0];
+    assert_eq!(none.value, Wizard::NO_DEFAULT_MODEL);
+    assert!(none.detail.starts_with("no default"), "{}", none.detail);
 }
 
 #[test]
