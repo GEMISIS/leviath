@@ -88,7 +88,7 @@ pub struct Wizard {
     pub ticks: u64,
     /// First visible row of the current step, so a screen taller than the
     /// terminal can still be reached. Head-anchored, unlike the log panel's
-    /// tail-anchored [`crate::tui::widgets::scroll::ScrollState`]: a wizard
+    /// tail-anchored `ScrollState` the log panel uses: a wizard
     /// screen is read from the top, and the cursor decides what must be shown.
     pub scroll: usize,
     /// Whether the tuning screen is on the path.
@@ -96,7 +96,7 @@ pub struct Wizard {
     /// Off by default. Every one of those limits has a working default, so
     /// walking a first-time user through them taught them that setup is long
     /// rather than that Leviath is configurable. Turned on from the Defaults
-    /// screen, it slots [`Step::Limits`] back into the flow.
+    /// screen, it slots the `Limits` step back into the flow.
     pub show_advanced: bool,
     /// The open chooser for a Defaults value, if one is open.
     pub picker: Option<Picker>,
@@ -717,12 +717,7 @@ impl Wizard {
     ///
     /// The options come from the caller because it has already matched on the
     /// field's kind: re-reading them here would add a shape this cannot be in.
-    pub(super) fn open_picker(
-        &mut self,
-        title: &'static str,
-        options: Vec<String>,
-        index: usize,
-    ) {
+    pub(super) fn open_picker(&mut self, title: &'static str, options: Vec<String>, index: usize) {
         let field = self.cursor;
         let options = options
             .into_iter()
