@@ -13,6 +13,8 @@ same list.
 
 ## Unreleased
 
+## 0.3.4 - 2026-08-12
+
 - Changed: the bundled set is seven agents, not ten (#395). `software-engineer`
   merged into `coder`, which keeps the plan checkpoint and the discovery pass
   that grounds it; `writing-assistant` and `daily-briefer` are gone. **If you
@@ -38,6 +40,18 @@ same list.
   bundled agent and point at `lev setup`. The check compares the bytes on disk
   with the bundled ones rather than the `version` field, which routinely does
   not move when a blueprint does.
+- Fixed: the published blueprint schema accepts `checklist` regions and
+  `[stages.<name>.hooks]` (#393). Both parse, both are documented, and both were
+  rejected by the schema Leviath publishes and points people at, so a blueprint
+  using either failed to validate against the file it is told to validate
+  against. The test that should have caught it only checked the bundled
+  blueprints, none of which use either feature; it now reads the valid values
+  out of the parser's own error message, so a new one cannot ship schema-less.
+- Fixed: `config.example.toml` is published alongside the schemas (#393).
+  Configuration links it, the publish step copied only `*.json`, and the check
+  meant to catch a missing artifact listed only what the glob already caught, so
+  the link had 404'd for its whole life. The docs publish also now fails when a
+  channel has no search index rather than quietly serving title-only search.
 - Fixed: `condition = "dead_end"` is in the published blueprint schema (#395).
   The parser accepted it and the `dead-end-possible` lint recommended writing
   it, while the schema Leviath publishes rejected it, so a blueprint following
