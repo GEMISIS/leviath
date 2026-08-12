@@ -66,11 +66,11 @@ brew install leviath-alpha
 curl -fsSL https://leviath.dev/install.sh | sh -s -- --channel beta   # or alpha, stable
 ```
 
-`LEVIATH_CHANNEL` works too, but it has to go *after* the pipe — `| LEVIATH_CHANNEL=beta sh` —
-because the two sides of a pipe are separate processes and an assignment written before `curl`
-belongs to curl. Written the other way round the installer never sees it and quietly installs
-`stable`, which is why `--channel` exists and why the installer says out loud which channel it is
-installing.
+`LEVIATH_CHANNEL` works too, but it has to go *after* the pipe, as
+`| LEVIATH_CHANNEL=beta sh`. The two sides of a pipe are separate processes, so an assignment
+written before `curl` belongs to curl. Written the other way round the installer never sees it and
+quietly installs `stable`, which is why `--channel` exists and why the installer now says out loud
+which channel it is installing.
 
 **Scoop** mirrors the Homebrew layout:
 
