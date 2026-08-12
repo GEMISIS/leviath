@@ -13,6 +13,44 @@ same list.
 
 ## Unreleased
 
+- Added: you can start a run from the dashboard. `n` on the main list opens a
+  screen with the installed agents on one side (type to filter) and a task
+  editor on the other, where `@` completes a path from the working directory
+  the way a coding agent does. Until now the dashboard could watch, pause and
+  cancel runs but not begin one, so the answer to "start another" was always
+  another terminal.
+- Fixed: `lev -v setup` no longer fills the wizard with debug text. The tracing
+  layer writes to stderr, the wizard owns the alternate screen on stdout, and
+  both are the same terminal, so a provider check under `-v` drew hyper and
+  rustls lines straight into the frame. Raw mode staircased them and ratatui's
+  cell diffing never painted over them, so the screen stayed broken until exit.
+  Log lines are now buffered while a TUI holds the terminal and flushed to the
+  scrollback when it lets go, including on the panic path. Also fixed next to
+  it: the `.env` filter warned even when it had filtered nothing, printing
+  `Ignoring  from .env` with a hole where a name belonged.
+- Changed: every `lev setup` screen scrolls, so the wizard works at any window
+  size. The tuning screen is thirteen two-line fields, and a twenty-row
+  terminal showed twelve of them with nothing on screen to say the rest
+  existed, the Continue button included. Page keys move the selection and the
+  view follows it; below 24x6 the wizard says the window is too small rather
+  than drawing half a frame.
+- Changed: the tuning screen is now opt-in, from a toggle on Defaults. Every
+  one of those limits already has a working default, so walking a first-time
+  user through concurrency and retry ceilings taught them that setup is long
+  rather than that Leviath is configurable. Skipping it changes nothing about
+  what gets written.
+- Changed: `lev setup` takes the mouse. The credential screen's actions (open
+  the provider's key page, check the credential) are rows you can click or
+  reach with the arrows, rather than `o` and `v` in a footer; clicking a
+  provider selects it, and the wheel scrolls.
+- Changed: the default provider and model are chosen from a searchable list
+  that explains what the choice decides. The list is long and the field showed
+  one line of it. More importantly, the field never said that a stage listing
+  its own models keeps them, or that `default_provider` does nothing at all
+  until `default_model` is also set. The model list's first option read
+  `(provider default)`, which is not a thing: no provider default model is
+  consulted at run time, and a stage naming no model falls back to one built
+  into Leviath. It now reads `(each blueprint decides)`.
 - Added: `lev update`, which updates Leviath with the installer that put it
   there and then offers to bring the bundled blueprints and the config along
   with it. The install method is read off the filesystem, not guessed from the
