@@ -216,10 +216,10 @@ read-only, and every access is checked against the symlink-resolved real path. R
 `lev validate` to see which of them the config on this machine actually grants. See
 [Security](/docs/security) for the grant stanzas and the full matching rules.
 
-## How the coding agents verify their work
+## How the coding agent verifies its work
 
-The bundled `coder` agent decides what "done" means before it
-start, rather than judging it at the end. Their entry stage is `discover`: before planning anything, the agent classifies the
+The bundled `coder` agent decides what "done" means before it starts, rather than judging it at
+the end. Its entry stage is `discover`: before planning anything, the agent classifies the
 project's testing story and writes a `workflow` region ending in three literal lines that later
 stages execute verbatim:
 

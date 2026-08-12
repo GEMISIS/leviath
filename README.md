@@ -31,7 +31,7 @@ Give a model one flat list of messages and a single big file read pushes your sy
 
 Use it for:
 
-- **Agents beyond coding**: research, log analysis, daily briefings, and writing all ship [out of the box](#pre-built-agents)
+- **Agents beyond coding**: research, code review, log analysis, and data gathering all ship [out of the box](#pre-built-agents)
 - **Long tasks that stay coherent**: [context regions](#features) instead of a flat transcript
 - **Agents you drive from anything that speaks HTTP**: a [REST + WebSocket API](#api-server) with webhooks, backed by an always-on daemon
 - **Headless agents inside any [Agent Client Protocol](#agent-client-protocol) host**
