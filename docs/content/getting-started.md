@@ -10,7 +10,7 @@ order: 1
 
 Leviath runs LLM agents. What it adds over asking a model directly is **structure**. That means
 context that stays coherent across hundreds of tool calls, a different model for each phase of a
-task, and hundreds of agents running at once in one process.
+task, and thousands of agents running at once in one process.
 
 You'll go from nothing to a running agent in four steps:
 
