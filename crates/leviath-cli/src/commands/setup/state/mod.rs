@@ -755,6 +755,11 @@ impl Wizard {
 
     /// Which providers reported a model, so the row says where it came from.
     fn model_detail(&self, model: &str) -> String {
+        // The first row is the absence of a model, not a model, so the
+        // question "who reported it" does not apply to it.
+        if model == Self::NO_DEFAULT_MODEL {
+            return "no default; every blueprint uses the models it names".to_string();
+        }
         let reported: Vec<&str> = self
             .providers
             .iter()
