@@ -712,7 +712,7 @@ async fn real_setup(args: commands::setup::SetupArgs) -> anyhow::Result<()> {
     }
     let mut setup = CrosstermSetup {
         viewport: Viewport::Fullscreen,
-        mouse_capture: false,
+        mouse_capture: true,
         enabled: false,
     };
     let mut events = CrosstermEventSource::open();
@@ -724,9 +724,9 @@ async fn real_setup(args: commands::setup::SetupArgs) -> anyhow::Result<()> {
 /// binary because it can only be exercised against a real terminal.
 ///
 /// `mouse_capture` is per-surface: the dashboard wants wheel events and its
-/// own click-drag selection, while the setup wizard handles no mouse events
-/// at all - capturing there would only steal the terminal's native
-/// drag-to-select (copying an error or a signup URL) for nothing.
+/// own click-drag selection, and the setup wizard wants clicks on its rows and
+/// buttons. It stays off for the workdir prompt, which is one question with
+/// two answers and nothing to aim at.
 struct CrosstermSetup {
     viewport: Viewport,
     mouse_capture: bool,
@@ -759,6 +759,12 @@ fn install_terminal_restore_panic_hook() {
         std::panic::set_hook(Box::new(move |info| {
             if TERMINAL_HELD.load(std::sync::atomic::Ordering::SeqCst) {
                 restore_terminal();
+                // The screen is back, so parked lines can be shown, and the
+                // panic message that follows is not competing with the frame.
+                // Clearing the flag also stops a loop still running on another
+                // thread from re-parking output nobody will ever flush.
+                TERMINAL_HELD.store(false, std::sync::atomic::Ordering::SeqCst);
+                leviath_cli::logging::release_from_tui();
             }
             previous(info);
         }));
@@ -786,6 +792,10 @@ impl TerminalSetup for CrosstermSetup {
         }
         self.enabled = true;
         TERMINAL_HELD.store(true, std::sync::atomic::Ordering::SeqCst);
+        // stderr is this same terminal, so a log line from here on would land
+        // inside the frame - and in raw mode, without a carriage return,
+        // staircase across it. Park them until the screen is ours again.
+        leviath_cli::logging::hold_for_tui();
         Ok(())
     }
 
@@ -806,6 +816,9 @@ impl TerminalSetup for CrosstermSetup {
         }
         self.enabled = false;
         TERMINAL_HELD.store(false, std::sync::atomic::Ordering::SeqCst);
+        // Flushes whatever was logged while the screen was held, so `-v`
+        // diagnostics are waiting in the scrollback rather than lost.
+        leviath_cli::logging::release_from_tui();
         // Mouse release runs before leaving the alternate screen, and
         // unconditionally (even when capture was never enabled - it's a
         // no-op then): a terminal left in mouse-reporting mode emits escape
