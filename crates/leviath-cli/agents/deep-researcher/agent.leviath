@@ -60,6 +60,7 @@ transform = "direct"
 # to the deliverable instead of dead-ending.
 [stages.gather.transitions.synthesize]
 hint = "Analysis is out of revisits - synthesize from the material in hand"
+condition = "dead_end"
 transform = "compact"
 
 [stages.gather.transitions.error_recovery]
@@ -206,6 +207,7 @@ transform = "compact"
 # to the deliverable instead of dead-ending.
 [stages.follow_citations.transitions.synthesize]
 hint = "Analysis is out of revisits - synthesize from the material in hand"
+condition = "dead_end"
 transform = "compact"
 
 [stages.follow_citations.transitions.error_recovery]

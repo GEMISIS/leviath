@@ -53,6 +53,7 @@ transform = "direct"
 # to the deliverable instead of dead-ending.
 [stages.gather.transitions.summarize]
 hint = "Analysis is out of revisits - summarize from the material in hand"
+condition = "dead_end"
 transform = "compact"
 
 [stages.gather.transitions.error_recovery]

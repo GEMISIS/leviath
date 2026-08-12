@@ -509,3 +509,77 @@ fn the_bundled_agents_exist_and_are_discoverable() {
         "the binary ships no agents; build.rs found no agents/ directory"
     );
 }
+
+/// A stage that can start a fan-out must not also offer the model a way
+/// straight to the deliverable.
+///
+/// This is what a real `wide-researcher` run did: `survey` listed
+/// `investigate` (the fan-out), `compare`, and `summarize`, and the model
+/// picked `summarize` on its first transition. The run finished "complete"
+/// having skipped the fan-out and the two stages after it, with no sub-agents
+/// and nothing to say anything had been skipped.
+///
+/// The escape to the deliverable is meant for one case - every looping target
+/// out of revisits - and `condition = "dead_end"` is how you say that. The
+/// engine consults such an edge only when nothing else can be followed, so it
+/// is not on the menu. A plain edge to the same stage is offered every single
+/// turn, which is the shape the lint's own fix text warns against.
+#[test]
+fn a_stage_that_can_fan_out_offers_no_shortcut_past_it() {
+    use leviath_core::blueprint::{StageMode, TransitionCondition};
+
+    let manifests = discover_agent_manifests();
+    let mut checked = 0;
+
+    for (name, path) in &manifests {
+        let content = std::fs::read_to_string(path).unwrap();
+        let blueprint = leviath_core::manifest::parse_manifest(&content).unwrap();
+
+        let is_fan_out = |target: &str| {
+            blueprint
+                .stages
+                .iter()
+                .any(|s| s.name == target && matches!(s.mode, StageMode::FanOut { .. }))
+        };
+        let is_output = |target: &str| {
+            blueprint
+                .stages
+                .iter()
+                .any(|s| s.name == target && matches!(s.mode, StageMode::Output))
+        };
+
+        for stage in &blueprint.stages {
+            let Some(edges) = &stage.transitions else {
+                continue;
+            };
+            if !edges.values().any(|e| is_fan_out(&e.target)) {
+                continue;
+            }
+            checked += 1;
+            let shortcuts: Vec<&str> = edges
+                .values()
+                .filter(|e| {
+                    is_output(&e.target)
+                        && matches!(
+                            e.condition,
+                            TransitionCondition::Always | TransitionCondition::LlmChoice
+                        )
+                })
+                .map(|e| e.target.as_str())
+                .collect();
+            assert!(
+                shortcuts.is_empty(),
+                "{name}: stage '{}' can fan out, but also offers the model a \
+                 plain edge straight to {shortcuts:?}. Gate it with \
+                 condition = \"dead_end\" so it is taken only when nothing \
+                 else can be.",
+                stage.name
+            );
+        }
+    }
+
+    assert!(
+        checked > 0,
+        "no bundled agent has a stage that can fan out, so this proves nothing"
+    );
+}

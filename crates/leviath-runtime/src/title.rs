@@ -113,15 +113,49 @@ fn title_request(task: &str, model: &str) -> InferenceRequest {
 /// non-empty line, unquoted, capped at [`TITLE_MAX_LEN`]. Empty means "no
 /// title" and the metadata stays untouched.
 fn sanitize_title(raw: &str) -> String {
-    let first = raw
+    // Reasoning models answer the instruction *after* thinking about it out
+    // loud, so the first line is prose about the task rather than a title. A
+    // real one read "We need to generate a short title for the task. The task:
+    // …", which is what the dashboard then displayed.
+    //
+    // The rule that separates them without guessing at content: a title fits
+    // the display cap, and reasoning does not. So the first line short enough
+    // to *be* a title wins, and a reply with no such line falls back to the
+    // first line truncated - which is exactly what this did before.
+    let stripped = strip_reasoning(raw);
+    let lines: Vec<&str> = stripped
         .lines()
         .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("");
-    let unquoted = first.trim_matches(['"', '\'', '`']).trim();
-    leviath_core::truncate_at_boundary(unquoted, TITLE_MAX_LEN)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let unquote = |l: &str| l.trim_matches(['"', '\'', '`']).trim().to_string();
+    let chosen = lines
+        .iter()
+        .map(|l| unquote(l))
+        .find(|l| l.chars().count() <= TITLE_MAX_LEN)
+        .unwrap_or_else(|| lines.first().map(|l| unquote(l)).unwrap_or_default());
+    leviath_core::truncate_at_boundary(&chosen, TITLE_MAX_LEN)
         .trim_end()
         .to_string()
+}
+
+/// Drop a `<think>…</think>` block, which several models emit around their
+/// reasoning. An unclosed tag drops the rest, which is the safe reading: what
+/// follows an opening tag is reasoning until something says otherwise.
+fn strip_reasoning(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    // `split_once` rather than `find` plus a slice: the crate forbids string
+    // indexing, and this needs no indices anyway.
+    while let Some((before, after)) = rest.split_once("<think>") {
+        out.push_str(before);
+        match after.split_once("</think>") {
+            Some((_, tail)) => rest = tail,
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// What `dispatch_title` selects.
@@ -624,5 +658,38 @@ mod tests {
         );
         assert_eq!(request.messages.len(), 1);
         assert_eq!(request.messages[0].role, "user");
+    }
+
+    /// A reasoning model answers after thinking out loud, and the thinking is
+    /// not a title. This is the reply shape that actually reached a dashboard:
+    /// the first line was prose about the task, and it got displayed.
+    #[test]
+    fn sanitize_skips_reasoning_and_takes_the_line_that_is_a_title() {
+        let reply = "We need to generate a short title for the task. The task: \
+                     \"Research leviath.dev and report what the docs cover\" - so \
+                     something short and descriptive.\n\nLeviath Docs Coverage";
+        assert_eq!(sanitize_title(reply), "Leviath Docs Coverage");
+
+        // The same, wrapped in the tags several models use.
+        let tagged = "<think>The user wants a title. Keep it under eight words \
+                      and avoid punctuation at the end.</think>\nRetry Backoff \
+                      Refactor";
+        assert_eq!(sanitize_title(tagged), "Retry Backoff Refactor");
+
+        // An unclosed tag drops what follows: it is all reasoning until
+        // something says otherwise, and no title beats a wrong one.
+        assert_eq!(sanitize_title("<think>thinking with no end"), "");
+    }
+
+    /// A compliant reply is untouched, including one long enough to need
+    /// cutting - there is no shorter line to prefer, so it is still cut.
+    #[test]
+    fn sanitize_leaves_an_ordinary_reply_alone() {
+        assert_eq!(
+            sanitize_title("Tidy the kitchen sink"),
+            "Tidy the kitchen sink"
+        );
+        let long = "x".repeat(TITLE_MAX_LEN * 2);
+        assert_eq!(sanitize_title(&long).chars().count(), TITLE_MAX_LEN);
     }
 }

@@ -92,6 +92,7 @@ transform = "direct"
 # to the deliverable instead of dead-ending.
 [stages.scan.transitions.report]
 hint = "The review stages are out of revisits - report the scan findings"
+condition = "dead_end"
 transform = "compact"
 
 [stages.scan.transitions.error_handler]
