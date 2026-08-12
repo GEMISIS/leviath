@@ -2740,7 +2740,7 @@ mode = "autonomous"
     assert_eq!(edge.transform, EdgeTransform::Compact { prompt: None });
 }
 
-// ─── Regression: shipped software-engineer agent must branch on plan_approval ──
+// ─── Regression: the shipped coding agent must branch on plan_approval ──
 //
 // The "plan" stage's plan_approval interaction point lets the user pick
 // Approve / Revise / Add detail / Abort. If "plan" only has a single
@@ -2750,9 +2750,8 @@ mode = "autonomous"
 // regressing by requiring at least two outgoing edges (forcing the
 // LLM-consultation path in resolve_transition / prompt_llm_transition).
 #[test]
-fn software_engineer_plan_stage_branches_on_choice() {
-    let manifest_content =
-        include_str!("../../../leviath-cli/agents/software-engineer/agent.leviath");
+fn coder_plan_stage_branches_on_choice() {
+    let manifest_content = include_str!("../../../leviath-cli/agents/coder/agent.leviath");
     let bp = parse_manifest(manifest_content).unwrap();
     let plan = bp.find_stage("plan").unwrap();
 
@@ -2792,7 +2791,7 @@ fn software_engineer_plan_stage_branches_on_choice() {
 fn shipped_coding_agents_gate_every_non_error_implement_edge() {
     for manifest_content in [
         include_str!("../../../leviath-cli/agents/coder/agent.leviath"),
-        include_str!("../../../leviath-cli/agents/software-engineer/agent.leviath"),
+        include_str!("../../../leviath-cli/agents/coder/agent.leviath"),
     ] {
         let bp = parse_manifest(manifest_content).unwrap();
         bp.validate().unwrap();
@@ -2846,9 +2845,8 @@ fn shipped_coding_agents_gate_every_non_error_implement_edge() {
 }
 
 #[test]
-fn software_engineer_plan_routes_errors_and_cannot_end_the_run() {
-    let manifest_content =
-        include_str!("../../../leviath-cli/agents/software-engineer/agent.leviath");
+fn coder_plan_routes_errors_and_cannot_end_the_run() {
+    let manifest_content = include_str!("../../../leviath-cli/agents/coder/agent.leviath");
     let bp = parse_manifest(manifest_content).unwrap();
     let plan = bp.find_stage("plan").unwrap();
     let transitions = plan.transitions.as_ref().unwrap();
@@ -2878,9 +2876,8 @@ fn software_engineer_plan_routes_errors_and_cannot_end_the_run() {
 }
 
 #[test]
-fn software_engineer_plan_approval_option_routing() {
-    let manifest_content =
-        include_str!("../../../leviath-cli/agents/software-engineer/agent.leviath");
+fn coder_plan_approval_option_routing() {
+    let manifest_content = include_str!("../../../leviath-cli/agents/coder/agent.leviath");
     let bp = parse_manifest(manifest_content).unwrap();
     let plan = bp.find_stage("plan").unwrap();
     let points = unwrap_interactive_points(&plan.mode);
@@ -2916,9 +2913,8 @@ fn software_engineer_plan_approval_option_routing() {
 }
 
 #[test]
-fn software_engineer_review_stage_can_finish_and_routes_errors() {
-    let manifest_content =
-        include_str!("../../../leviath-cli/agents/software-engineer/agent.leviath");
+fn coder_review_stage_can_finish_and_routes_errors() {
+    let manifest_content = include_str!("../../../leviath-cli/agents/coder/agent.leviath");
     let bp = parse_manifest(manifest_content).unwrap();
     let review = bp.find_stage("review").unwrap();
 
@@ -2949,22 +2945,20 @@ fn software_engineer_review_stage_can_finish_and_routes_errors() {
 }
 
 #[test]
-fn software_engineer_blueprint_passes_full_validation() {
-    let manifest_content =
-        include_str!("../../../leviath-cli/agents/software-engineer/agent.leviath");
+fn coder_blueprint_passes_full_validation() {
+    let manifest_content = include_str!("../../../leviath-cli/agents/coder/agent.leviath");
     let bp = parse_manifest(manifest_content).unwrap();
     bp.validate()
-        .expect("shipped software-engineer blueprint must pass Blueprint::validate()");
+        .expect("the shipped coder blueprint must pass Blueprint::validate()");
 }
 
 #[test]
-fn software_engineer_plan_and_implement_can_ask_the_user_dynamically() {
+fn coder_plan_and_implement_can_ask_the_user_dynamically() {
     // Beyond the static plan_approval checkpoint, plan/implement should
     // be able to decide for themselves, mid-reasoning, that they need
     // human input - via the ask_user_* tools, not just the forced
     // interaction_points.
-    let manifest_content =
-        include_str!("../../../leviath-cli/agents/software-engineer/agent.leviath");
+    let manifest_content = include_str!("../../../leviath-cli/agents/coder/agent.leviath");
     let bp = parse_manifest(manifest_content).unwrap();
 
     let plan = bp.find_stage("plan").unwrap();
