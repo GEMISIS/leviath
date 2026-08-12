@@ -10,7 +10,7 @@ order: 4
 
 Most of the agents you run are waiting. Waiting on a model to reply, on a tool to finish, on a
 person to answer a question. If every waiting agent costs you an operating system process, then a
-hundred agents cost a hundred processes whether or not any of them are doing anything.
+thousand agents cost a thousand processes whether or not any of them are doing anything.
 
 So Leviath does not give an agent a process, a thread, or even a task of its own. It keeps each
 agent as a **row of data** in one shared table, and runs a fixed list of functions across the whole
@@ -169,7 +169,7 @@ That trade is aimed at running many agents at once:
   processes, nothing serialized between a parent and its children.
 - **Rate limits, retries, and provider clients are shared** instead of duplicated per process.
 - **One place holds all the state**, so the [dashboard](/docs/dashboard) and [API](/docs/api) read
-  every agent without talking to hundreds of separate processes.
+  every agent without talking to thousands of separate processes.
 
 The cost is the process boundary. Agents keep their own state, workdir, and tool policy, and
 [a panic in one stays in one](#one-agents-failure-stays-one-agents-failure). But they share the

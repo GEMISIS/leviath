@@ -12,7 +12,7 @@ If an agent runs inside your terminal, then closing the terminal kills it, and a
 leaving a window open for hours. Leviath does not work that way. `lev run` hands the agent to a
 background service called the **daemon**, which owns every run on the machine.
 
-So your runs keep going after you close the terminal, and hundreds of agents share one process
+So your runs keep going after you close the terminal, and thousands of agents share one process
 instead of taking a process each. Building Leviath into your own Rust program instead? You can skip
 the daemon entirely. See [Embedding](/docs/embedding).
 
