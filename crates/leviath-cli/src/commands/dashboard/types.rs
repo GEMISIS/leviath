@@ -357,6 +357,63 @@ pub(super) struct McpContext {
     pub(super) clock: fn() -> u64,
 }
 
+/// Which pane of the new-run screen holds keyboard focus (Tab toggles).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NewRunPane {
+    Agents,
+    Task,
+}
+
+/// One runnable agent offered by the new-run screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NewRunAgent {
+    pub(super) name: String,
+    /// Where it came from: `installed`, `configured`, `local`, or `bundled`.
+    pub(super) source: String,
+    pub(super) description: String,
+    /// What gets handed to `lev run`'s resolver: the manifest's directory for a
+    /// discovered agent, the bare name for a bundled one (which resolves only
+    /// once `lev setup` has installed it - and says so if it has not).
+    pub(super) path: String,
+}
+
+/// Where the new-run screen reads its agent catalog and its `@` file
+/// candidates from, so the whole screen is testable against a temp tree
+/// instead of the user's real home directory and working directory.
+#[derive(Clone)]
+pub(super) struct NewRunContext {
+    /// `~/.leviath/agents`, scanned for installed agents.
+    pub(super) agents_dir: std::path::PathBuf,
+    /// The config whose `agent_paths` add more places to look.
+    pub(super) config_path: std::path::PathBuf,
+    /// The directory the run's tools are confined to, and the root the `@`
+    /// completion offers files from.
+    pub(super) workdir: std::path::PathBuf,
+}
+
+/// A run the new-run screen asked for, dispatched to the async spawn lane.
+///
+/// Resolving a blueprint reads and parses files and the spawn itself is a
+/// socket round trip, so neither happens on the draw loop.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct SpawnCommand {
+    /// The agent path or name to resolve.
+    pub(super) agent_path: String,
+    /// The task text as typed.
+    pub(super) task: String,
+    /// The working directory the run gets.
+    pub(super) workdir: String,
+}
+
+/// The result of a [`SpawnCommand`], drained each tick and shown as a toast.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct SpawnOutcome {
+    /// Human-readable result to toast.
+    pub(super) message: String,
+    /// Whether the run actually started (drives the toast colour).
+    pub(super) ok: bool,
+}
+
 /// Toast notification shown as an overlay.
 #[derive(Debug, Clone)]
 pub(super) struct Toast {

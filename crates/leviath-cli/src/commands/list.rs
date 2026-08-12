@@ -51,10 +51,10 @@ pub struct ListArgs {
 
 /// Info parsed from an agent manifest for display.
 #[derive(serde::Serialize)]
-struct AgentInfo {
-    name: String,
+pub(crate) struct AgentInfo {
+    pub(crate) name: String,
     version: String,
-    description: String,
+    pub(crate) description: String,
     /// The agent's `[read_paths]` grant status under the active config, when it
     /// declares any. Shown because a declaration nothing grants is inert, and
     /// the listing is where someone looks before running an agent they just
@@ -65,28 +65,28 @@ struct AgentInfo {
 /// One agent in `lev list --json`, with the source the prose report puts in a
 /// heading and the path `lev run` would resolve.
 #[derive(serde::Serialize)]
-struct ListedAgent {
+pub(crate) struct ListedAgent {
     #[serde(flatten)]
-    info: AgentInfo,
+    pub(crate) info: AgentInfo,
     /// `installed`, `configured`, or `local`.
-    source: &'static str,
-    path: String,
+    pub(crate) source: &'static str,
+    pub(crate) path: String,
 }
 
 /// What `lev list --json` prints.
 #[derive(serde::Serialize)]
-struct ListReport {
+pub(crate) struct ListReport {
     /// Every agent that can be run by name or path right now.
-    agents: Vec<ListedAgent>,
+    pub(crate) agents: Vec<ListedAgent>,
     /// The catalog embedded in this binary, which `lev setup` installs from.
     /// Not runnable until installed, which is why it is a separate key.
-    bundled: Vec<BundledEntry>,
+    pub(crate) bundled: Vec<BundledEntry>,
 }
 
 #[derive(serde::Serialize)]
-struct BundledEntry {
-    name: String,
-    version: String,
+pub(crate) struct BundledEntry {
+    pub(crate) name: String,
+    pub(crate) version: String,
 }
 
 fn read_agent_info(manifest_path: &Path, config: &Config, cwd: &Path) -> Option<AgentInfo> {
@@ -205,8 +205,9 @@ fn json_agent_listing(
 }
 
 /// The report [`json_agent_listing`] prints. Split out so its contents are
-/// assertable without capturing stdout.
-fn build_list_report(
+/// assertable without capturing stdout, and shared with the dashboard's
+/// new-run picker so the two offer exactly the same agents.
+pub(crate) fn build_list_report(
     agents_dir: &Path,
     cwd: &Path,
     config: &Config,

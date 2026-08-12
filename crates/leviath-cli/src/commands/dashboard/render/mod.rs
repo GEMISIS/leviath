@@ -7,6 +7,7 @@ mod graph_view;
 mod header;
 mod input;
 mod mcp;
+mod new_run;
 mod overlays;
 mod stages;
 mod table;
@@ -40,6 +41,12 @@ impl Dashboard {
             if let Some((_, dialog)) = &self.pending_confirm {
                 dialog.draw(frame, frame.area());
             }
+            return;
+        }
+        if self.new_run_screen {
+            self.draw_new_run_screen(frame, frame.area());
+            self.apply_selection_overlay(frame);
+            self.draw_toasts(frame);
             return;
         }
         if self.detail_view {

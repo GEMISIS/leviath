@@ -43,6 +43,13 @@ impl Dashboard {
             return;
         }
 
+        // So is the new-run screen. It has to be: a task is typed here, so
+        // every letter belongs to the editor rather than to a list command.
+        if self.new_run_screen {
+            self.handle_new_run_key(key);
+            return;
+        }
+
         // ── Detail view ─────────────────────────────────────────────────────
         if self.detail_view {
             if self.input_mode {
@@ -766,6 +773,7 @@ impl Dashboard {
                 self.mcp_selected = 0;
                 self.refresh_mcp_rows();
             }
+            KeyCode::Char('n') => self.open_new_run_screen(),
             _ => {}
         }
     }
@@ -3711,5 +3719,43 @@ mod tests {
         dash.mcp_screen = true;
         dash.handle_key(key(KeyCode::Char('z')));
         assert!(dash.mcp_screen, "an unbound key does nothing");
+    }
+
+    // ─── the new-run screen ───────────────────────────────────────────────
+
+    /// A dashboard whose new-run screen reads from an empty temp tree, so `n`
+    /// never scans the real agents directory or working directory.
+    fn new_run_dash(dir: &std::path::Path) -> Dashboard {
+        let mut dash = make_test_dashboard();
+        dash.new_run_ctx = NewRunContext {
+            agents_dir: dir.join("agents"),
+            config_path: dir.join("config.toml"),
+            workdir: dir.join("work"),
+        };
+        dash
+    }
+
+    #[test]
+    fn n_opens_the_new_run_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = new_run_dash(dir.path());
+        dash.handle_key(key(KeyCode::Char('n')));
+        assert!(dash.new_run_screen);
+    }
+
+    #[test]
+    fn the_new_run_screen_owns_the_keys_while_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = new_run_dash(dir.path());
+        dash.handle_key(key(KeyCode::Char('n')));
+        // `q` would quit from the main list; here it is filter text, because a
+        // task is typed on this screen.
+        dash.handle_key(key(KeyCode::Char('q')));
+        assert!(!dash.should_quit);
+        assert_eq!(dash.new_run_filter, "q");
+
+        dash.handle_key(key(KeyCode::Esc));
+        dash.handle_key(key(KeyCode::Esc));
+        assert!(!dash.new_run_screen);
     }
 }
