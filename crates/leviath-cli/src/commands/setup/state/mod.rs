@@ -86,6 +86,18 @@ pub struct Wizard {
     pub reply_rx: mpsc::UnboundedReceiver<VerifyReply>,
     /// Tick counter, for the spinner.
     pub ticks: u64,
+    /// First visible row of the current step, so a screen taller than the
+    /// terminal can still be reached. Head-anchored, unlike the log panel's
+    /// tail-anchored [`crate::tui::widgets::scroll::ScrollState`]: a wizard
+    /// screen is read from the top, and the cursor decides what must be shown.
+    pub scroll: usize,
+    /// Whether the tuning screen is on the path.
+    ///
+    /// Off by default. Every one of those limits has a working default, so
+    /// walking a first-time user through them taught them that setup is long
+    /// rather than that Leviath is configurable. Turned on from the Defaults
+    /// screen, it slots [`Step::Limits`] back into the flow.
+    pub show_advanced: bool,
 }
 
 /// The environment variables the wizard reports as already-supplying a
@@ -197,6 +209,8 @@ impl Wizard {
             reply_tx,
             reply_rx,
             ticks: 0,
+            scroll: 0,
+            show_advanced: false,
         };
         wizard.rebuild_defaults();
         wizard
@@ -335,6 +349,40 @@ impl Wizard {
         self.cursor = next.clamp(0, count as isize - 1) as usize;
     }
 
+    /// How many rows a page key moves. Smaller than most windows on purpose:
+    /// a page that overshoots the pane is indistinguishable from a jump.
+    pub const PAGE: isize = 8;
+
+    /// Scroll by whole rows.
+    ///
+    /// Where there is something to select, this moves the selection and lets
+    /// the renderer follow it, so the view and the cursor can never disagree
+    /// about what the user is looking at. Welcome and Review have no rows, so
+    /// there the offset moves on its own.
+    pub fn scroll_by(&mut self, rows: isize) {
+        if self.row_count() > 0 {
+            self.move_cursor(rows);
+            return;
+        }
+        self.scroll = self.scroll.saturating_add_signed(rows);
+    }
+
+    /// Jump to the top of the current step.
+    pub fn scroll_home(&mut self) {
+        self.cursor = 0;
+        self.scroll = 0;
+    }
+
+    /// Jump to the end of the current step, which is always its button.
+    ///
+    /// The offset is set past any possible content and clamped when drawn,
+    /// because the number of lines a step occupies depends on the window it is
+    /// drawn into and is not known here.
+    pub fn scroll_end(&mut self) {
+        self.cursor = self.nav_rows().saturating_sub(1);
+        self.scroll = usize::MAX;
+    }
+
     /// Advance to the next step, skipping ones with nothing to show. Skipping
     /// the credential screen is announced rather than silent: it looks exactly
     /// like a bug when a screen the breadcrumb promises never appears.
@@ -377,6 +425,11 @@ impl Wizard {
         match step {
             Step::Mcp => self.mcp.is_empty() && self.mcp_scan_errors.is_empty(),
             Step::ProviderDetail => self.detail_row().is_none(),
+            // Not empty so much as not asked for. Routing it through the same
+            // predicate keeps `next_step`, `prev_step` and the Continue
+            // button's own label agreeing about what comes next, which they
+            // would not if the skip were special-cased at one call site.
+            Step::Limits => !self.show_advanced,
             _ => false,
         }
     }
@@ -385,6 +438,7 @@ impl Wizard {
     pub fn enter(&mut self, step: Step) {
         self.step = step;
         self.cursor = 0;
+        self.scroll = 0;
         self.edit = None;
         if step == Step::Defaults {
             // The model picker is populated by verification, which may have
@@ -565,6 +619,12 @@ impl Wizard {
                 help: "How long to wait on one inference. Unset uses the provider default.",
                 value: FieldValue::Number(timeout),
             },
+            Field {
+                label: "Show advanced tuning",
+                help: "Adds a screen of concurrency, retry and context limits. Every one of \
+                       them already has a default that works.",
+                value: FieldValue::Bool(self.show_advanced),
+            },
         ];
         // Re-pick the concurrency default now that the provider choice is
         // settled. Doing this only on an arrow press missed the commonest
@@ -573,6 +633,9 @@ impl Wizard {
         // stayed at the hosted-API default of 8.
         self.apply_provider_concurrency_default();
     }
+
+    /// Where the advanced-tuning toggle sits on the Defaults screen.
+    pub const ADVANCED_FIELD: usize = 3;
 
     /// The default provider as it currently stands in the form, or the base
     /// config's value before the form exists.
