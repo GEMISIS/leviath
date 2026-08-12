@@ -20,6 +20,10 @@ List agents running in the shared-world daemon.
 Columns: RUN, STATUS, STAGE (with position when the blueprint has several),
 ITER (iterations in the current stage), TOOLS (tool calls so far), and AGE.
 
+TITLE sits after RUN when at least one listed run has a generated title, on the
+same terms as READS below: a column nobody can fill costs every reader width and
+buys them nothing.
+
 READS appears only when some listed run's blueprint declares [read_paths], and
 reads granted/declared. A blueprint declaring paths outside its workdir is not
 the same as being allowed to read them: your config.toml has to grant them too,

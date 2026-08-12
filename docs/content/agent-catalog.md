@@ -108,7 +108,7 @@ the numbers say. Reach for it when you want a dataset you can open, not a paragr
 ```mermaid
 flowchart TD
     scope --> split
-    scope -->|no further splitting is useful| build
+    scope -.->|only if splitting is exhausted| build
     split -->|fan out| gather_worker
     gather_worker --> build
     build --> present
