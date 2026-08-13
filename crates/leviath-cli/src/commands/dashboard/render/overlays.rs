@@ -100,8 +100,12 @@ fn run_list_sections() -> Vec<HelpSection> {
             ("p / r", "pause / resume the selected run"),
             ("x", "kill the run (asks first)"),
             ("d", "delete the run and its files (asks first)"),
+            (
+                "space",
+                "mark/unmark the run (marked runs are killed/deleted together)",
+            ),
             ("m", "manage MCP servers"),
-            ("esc", "clear the filter"),
+            ("esc", "clear the filter, then the marks"),
             ("q", "quit"),
         ],
     }]

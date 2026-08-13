@@ -111,6 +111,7 @@ impl Dashboard {
             should_quit: false,
             pending_confirm: None,
             sort_mode: SortMode::StartedAt,
+            marked: std::collections::HashSet::new(),
             main_focus: MainPane::RunList,
             log_scroll: crate::tui::widgets::scroll::ScrollState::default(),
             pane_rects: Vec::new(),

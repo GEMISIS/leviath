@@ -131,8 +131,21 @@ impl Dashboard {
             ConfirmOutcome::Pending => self.pending_confirm = Some((action, dialog)),
             ConfirmOutcome::No => self.add_log("Cancelled".to_string()),
             ConfirmOutcome::Yes => match action {
-                ConfirmAction::Kill { run_id } => self.perform_kill(&run_id),
-                ConfirmAction::Delete { run_id } => self.perform_delete(&run_id),
+                ConfirmAction::Kill { run_ids } => {
+                    for run_id in &run_ids {
+                        // Un-mark first: a killed row stays in the list, and a
+                        // mark that survived the kill would silently pull the
+                        // run into the next group action.
+                        self.marked.remove(run_id);
+                        self.perform_kill(run_id);
+                    }
+                }
+                ConfirmAction::Delete { run_ids } => {
+                    for run_id in &run_ids {
+                        self.marked.remove(run_id);
+                        self.perform_delete(run_id);
+                    }
+                }
                 ConfirmAction::McpRemove { name } => self.mcp_remove_named(&name),
                 // The box is read off the dialog rather than carried in the
                 // outcome: whether to ask again is a note about future
@@ -701,13 +714,30 @@ impl Dashboard {
 
     fn handle_main_list_key(&mut self, key_code: KeyCode) {
         match key_code {
-            // Esc dismisses (the filter); it does not quit - `q` quits, the
-            // same as every other Leviath TUI.
+            // Esc dismisses: the filter first, then the marks. It does not
+            // quit - `q` quits, the same as every other Leviath TUI.
             KeyCode::Esc => {
                 if !self.list_search_query.is_empty() {
                     self.list_search_query.clear();
                     self.selected = 0;
                     self.update_display_indices();
+                } else if !self.marked.is_empty() {
+                    self.marked.clear();
+                }
+            }
+            // Space marks or unmarks the selected run for a group kill or
+            // delete, then moves down one row so repeated presses sweep the
+            // list.
+            KeyCode::Char(' ') => {
+                if let Some(agent) = self.selected_agent() {
+                    let id = agent.id.clone();
+                    if !self.marked.remove(&id) {
+                        self.marked.insert(id);
+                    }
+                    if self.selected < self.display_indices.len() - 1 {
+                        self.selected += 1;
+                        self.table_state.select(Some(self.selected));
+                    }
                 }
             }
             KeyCode::Char('q') => self.should_quit = true,
@@ -3853,5 +3883,212 @@ mod tests {
         assert!(dash.pending_open_run.is_none());
         dash.open_pending_run();
         assert!(!dash.detail_view);
+    }
+
+    // ── Marking runs with Space for group kill / delete ──────────────────
+
+    #[test]
+    fn space_marks_the_selected_run_and_advances() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-2", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let first_id = dash.selected_agent().unwrap().id.clone();
+        dash.handle_key(key(KeyCode::Char(' ')));
+        assert!(dash.marked.contains(&first_id));
+        assert_eq!(dash.selected, 1, "space moves down like the Down key");
+    }
+
+    #[test]
+    fn space_on_a_marked_run_unmarks_it() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-2", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char(' ')));
+        dash.handle_key(key(KeyCode::Up));
+        dash.handle_key(key(KeyCode::Char(' ')));
+        assert!(dash.marked.is_empty(), "the second press toggles it off");
+    }
+
+    #[test]
+    fn space_on_the_last_row_keeps_the_selection() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(dash.marked.len(), 1);
+        assert_eq!(dash.selected, 0, "nothing below to advance to");
+    }
+
+    #[test]
+    fn space_with_no_runs_is_a_noop() {
+        let mut dash = make_test_dashboard();
+        dash.handle_key(key(KeyCode::Char(' ')));
+        assert!(dash.marked.is_empty());
+    }
+
+    #[test]
+    fn esc_clears_marks_when_no_filter_is_set() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(dash.marked.len(), 1);
+        dash.handle_key(key(KeyCode::Esc));
+        assert!(dash.marked.is_empty());
+        assert!(!dash.should_quit);
+    }
+
+    #[test]
+    fn esc_clears_the_filter_before_the_marks() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char(' ')));
+        dash.list_search_query = "test".to_string();
+        dash.handle_key(key(KeyCode::Esc));
+        assert!(dash.list_search_query.is_empty());
+        assert_eq!(dash.marked.len(), 1, "the first Esc only drops the filter");
+        dash.handle_key(key(KeyCode::Esc));
+        assert!(dash.marked.is_empty());
+    }
+
+    #[test]
+    fn marked_delete_confirm_carries_all_ids_and_removes_them() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Complete));
+        dash.agents
+            .push(make_test_agent("run-2", AgentDisplayStatus::Complete));
+        dash.agents
+            .push(make_test_agent("run-3", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+        dash.marked.insert("run-1".to_string());
+        dash.marked.insert("run-2".to_string());
+        dash.handle_key(key(KeyCode::Char('d')));
+
+        let (action, dialog) = dash.pending_confirm.clone().expect("d opens the dialog");
+        assert_eq!(
+            action,
+            ConfirmAction::Delete {
+                run_ids: vec!["run-1".to_string(), "run-2".to_string()],
+            }
+        );
+        assert!(
+            format!("{:?}", dialog.body).contains("Delete 2 runs"),
+            "the body states the count: {:?}",
+            dialog.body
+        );
+
+        dash.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(dash.agents.len(), 1, "both marked runs are gone");
+        assert_eq!(dash.agents[0].id, "run-3");
+        assert!(dash.marked.is_empty(), "acted-on ids leave the mark set");
+    }
+
+    #[test]
+    fn marked_delete_of_one_run_uses_the_singular_noun() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+        dash.marked.insert("run-1".to_string());
+        dash.handle_key(key(KeyCode::Char('d')));
+        let (_, dialog) = dash.pending_confirm.clone().expect("d opens the dialog");
+        assert!(
+            format!("{:?}", dialog.body).contains("Delete 1 run and its"),
+            "{:?}",
+            dialog.body
+        );
+    }
+
+    #[test]
+    fn marked_kill_skips_finished_runs_and_unmarks_only_the_killed() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-2", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+        dash.marked.insert("run-1".to_string());
+        dash.marked.insert("run-2".to_string());
+        dash.handle_key(key(KeyCode::Char('x')));
+
+        let (action, dialog) = dash.pending_confirm.clone().expect("x opens the dialog");
+        assert_eq!(
+            action,
+            ConfirmAction::Kill {
+                run_ids: vec!["run-1".to_string()],
+            },
+            "the finished run is not on the kill list"
+        );
+        assert!(
+            format!("{:?}", dialog.body).contains("Cancel 1 run?"),
+            "{:?}",
+            dialog.body
+        );
+
+        dash.handle_key(key(KeyCode::Char('y')));
+        assert_cancelled(&dash.agents[0].status);
+        assert_eq!(
+            cmd_rx.try_recv().unwrap(),
+            DaemonCommand::Cancel {
+                run_id: "run-1".to_string()
+            }
+        );
+        assert!(cmd_rx.try_recv().is_err(), "run-2 was never cancelled");
+        assert!(!dash.marked.contains("run-1"), "the killed run is unmarked");
+        assert!(
+            dash.marked.contains("run-2"),
+            "the skipped run stays marked"
+        );
+    }
+
+    #[test]
+    fn marked_kill_of_several_runs_cancels_each() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-2", AgentDisplayStatus::Waiting));
+        dash.update_display_indices();
+        dash.marked.insert("run-1".to_string());
+        dash.marked.insert("run-2".to_string());
+        dash.handle_key(key(KeyCode::Char('x')));
+
+        let (_, dialog) = dash.pending_confirm.clone().expect("x opens the dialog");
+        assert!(
+            format!("{:?}", dialog.body).contains("Cancel 2 runs?"),
+            "{:?}",
+            dialog.body
+        );
+
+        dash.handle_key(key(KeyCode::Char('y')));
+        assert_cancelled(&dash.agents[0].status);
+        assert_cancelled(&dash.agents[1].status);
+        assert!(cmd_rx.try_recv().is_ok());
+        assert!(cmd_rx.try_recv().is_ok());
+        assert!(dash.marked.is_empty());
+    }
+
+    #[test]
+    fn marked_kill_with_only_finished_runs_opens_no_dialog() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+        dash.marked.insert("run-1".to_string());
+        dash.handle_key(key(KeyCode::Char('x')));
+        assert!(dash.pending_confirm.is_none());
     }
 }
