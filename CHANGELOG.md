@@ -11,6 +11,34 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## 0.3.8 - 2026-08-13
+
+- Fixed: a fan-out split whose answer is not a JSON array no longer ends the
+  run. The split asked the model for one exact shape and parsed the reply
+  once, so a stage that answered in prose, or a reasoning model that answered
+  with nothing at all, killed a run that had already done real work. The model
+  is now handed back its own answer with a correction and asked again, twice,
+  the way every other stage treats a reply it cannot use. When the corrections
+  are spent the run does fail, and the message now quotes what came back
+  rather than only naming the rule it broke.
+- Changed: `deep-researcher` and `wide-researcher` require the stages that do
+  their research. Both blueprints offered a way straight past their own
+  investigation, so which stages ran came down to which model was driving:
+  the same topic produced a full parallel investigation on one model and a
+  report from the first stage's sources on another. `deep-researcher` now goes
+  from `gather` to `investigate`, and `wide-researcher` runs `survey` to
+  `investigate` to `compare` to `deep_dive`. A topic that turns out to be one
+  question is a fan-out of one worker, which is far cheaper than skipping the
+  investigation.
+- Changed: `wide-researcher` decides whether it needs more material after
+  `deep_dive` rather than after `compare`, since that is the first stage to
+  have read a thread properly rather than surveyed it. From there it can pick
+  another thread, go back for more breadth, or write the overview.
+- Fixed: the fan-out stages of both researchers can no longer skip their own
+  workers. Each had an escape edge to its write-up stage that its own comment
+  described as a last resort, but neither was conditioned on being one, so it
+  sat on the model's menu as an ordinary choice.
+
 ## 0.3.7 - 2026-08-13
 
 - Fixed: a run whose provider account runs out of credits now pauses instead
