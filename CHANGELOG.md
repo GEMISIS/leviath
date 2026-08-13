@@ -11,6 +11,62 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## 0.3.7 - 2026-08-13
+
+- Fixed: a run whose provider account runs out of credits now pauses instead
+  of failing. The failure was terminal, so the one problem a top-up fixes was
+  also the only one a run could never come back from; the run now waits with
+  its retry staged, the stage log says why, and `lev resume` re-dispatches it.
+  Resuming also resets the provider circuit breakers, so the retry probes
+  immediately rather than sitting out a cooldown that predates the top-up.
+- Added: `lev validate` reports which inputs an agent accepts: each `--<flag>`,
+  the region it seeds when the names differ, whether it is required, and an
+  explicit note when `--task` is not among them. The JSON report carries the
+  same facts as `blueprint.accepts_task` and `blueprint.inputs`, so a harness
+  can check before spawning what `lev run` would refuse at spawn.
+- Fixed: a run that is paged back in keeps its per-stage token ledger. Nothing
+  rebuilt the ledger on restore, so every stage of a restored run was back at
+  zero and the next persist tick wrote those zeros over the real `stages.json`.
+  The run-level totals survived, so the run looked healthy while its per-stage
+  history was silently gone, and `lev stages` and the stages API served the
+  zeroed records. This hit an on-demand page-in as well as a daemon restart.
+- Fixed: a provider capacity refusal no longer kills a run in seven seconds.
+  Four attempts on a one-second base covers a network blip, not an overload
+  that lasts minutes, so a run that had already spent real money died
+  mid-stage on an HTTP 529. A 429 or 529 now backs off on its own longer
+  schedule and honours the provider's `Retry-After` when it sends one, bounded
+  by a cumulative ceiling so a run can never wait forever. An ordinary server
+  error keeps the old fast schedule.
+- Added: `[limits] inference_retry_attempts` and `inference_retry_base_ms` set
+  the inference retry schedule. Both default to what Leviath already used, so
+  nothing changes until you set them; raising the attempt count is the lever
+  for riding out a longer outage.
+- Changed: a structured agent's volatile context regions are cached in two
+  pieces rather than one. A provider that spends a cache breakpoint per run of
+  same-hint blocks gave the whole volatile tier a single entry, so mutating any
+  region in it re-billed every region behind it as a cache write. The blocks
+  ahead of the most recent change are now hinted separately, which puts them in
+  an entry of their own. Nothing about what the model reads changes: block order
+  and text are untouched, and the request stays within the four cache
+  breakpoints Anthropic allows.
+- Changed: for anyone using the crates as libraries,
+  `ProviderError::RateLimitExceeded` now carries the provider's `Retry-After`
+  value and so is a struct variant. Code that matches on that variant needs
+  updating; its displayed message is unchanged.
+- Fixed: the dashboard's Output pane shows a run's final output. A stage that
+  submits its result through `submit_output` writes the `final_output` record
+  rather than a stage output log, so the pane said "No output yet" for exactly
+  the stage that produced the answer.
+- Added: the dashboard can act on several runs at once. `space` marks or
+  unmarks the selected run, marked rows carry a check with a count in the pane
+  title, and `x`/`d` kill or delete every marked run behind one confirm
+  dialog. Nothing changes visually until the first mark.
+- Changed: labels say Agent Runs when they mean runs and Agent Blueprints
+  when they mean blueprints. The dashboard's run list is titled Agent Runs
+  with a Blueprint column, the new-run picker is titled Agent Blueprints,
+  `lev ps` answers "no agent runs active", and `lev list` offers to install
+  agent blueprints.
+
 ## 0.3.6 - 2026-08-13
 
 - Fixed: adding an MCP server that authenticates with a header no longer chases
