@@ -452,6 +452,41 @@ pub(super) struct BlueprintInfo {
     pub(super) description: String,
     pub(super) path: String,
     pub(super) stages: Vec<String>,
+    /// The manifest text, carried but never listed.
+    ///
+    /// Discovery has already read and parsed this file to fill in everything
+    /// above, so the detail route hands back the text it read rather than
+    /// opening the file a second time. That is not only cheaper: a second read
+    /// could fail on a file the first read succeeded on, and the only honest
+    /// answer to that would be an error arm no test can reach.
+    ///
+    /// Skipped when serializing, so `GET /api/blueprints` stays a catalog.
+    /// [`BlueprintDetail`] is what puts it on the wire.
+    #[serde(skip)]
+    pub(super) manifest: String,
+}
+
+/// One blueprint, with the manifest text behind it.
+///
+/// The detail route only. A listing that carried one of these per blueprint
+/// would send every manifest on the machine to answer "what agents are there",
+/// which is why this is a separate shape rather than an extra field on
+/// [`BlueprintInfo`].
+///
+/// Flattened, so the detail route's JSON is what it always was plus
+/// `manifest`, and a client reading only the old fields is unaffected.
+#[derive(Debug, Serialize)]
+pub(super) struct BlueprintDetail {
+    #[serde(flatten)]
+    pub(super) info: BlueprintInfo,
+    /// The manifest exactly as it is on disk.
+    ///
+    /// Without this a console has no way to read what it is editing: naming
+    /// the file in `path` is not the same as being able to open it, since the
+    /// browser cannot, and the fallbacks it is left with (a draft in local
+    /// storage, or a copy bundled at build time) are both disconnected from
+    /// the file the daemon actually runs.
+    pub(super) manifest: String,
 }
 
 /// Query for `GET /api/blueprints`.
@@ -482,6 +517,15 @@ pub(super) struct UpdateBlueprintReq {
 #[derive(Deserialize)]
 pub(super) struct ValidateBlueprintReq {
     pub(super) manifest: String,
+    /// The blueprint this manifest is an edit of, when it is one.
+    ///
+    /// The lint resolves an agent's own `tools/*.rhai` relative to a
+    /// directory, so validating an existing agent without saying which one
+    /// reports every tool it defines as unknown. A manifest genuinely typed
+    /// from nothing has no directory to name, and omitting this keeps the
+    /// old behaviour for that case.
+    #[serde(default)]
+    pub(super) name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1016,6 +1060,8 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "context.history.page",
     "blueprints.envelope",
     "blueprints.query",
+    "blueprints.manifest",
+    "blueprints.validate.name",
 ];
 
 /// The server's numeric limits.
