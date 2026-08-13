@@ -233,6 +233,7 @@ pub(super) async fn login(
         .login(
             &url,
             &server.headers,
+            &config.security.allow_env_vars,
             admin.opener.clone(),
             (admin.clock)(),
             reuse.as_deref(),
@@ -301,7 +302,7 @@ pub(super) async fn test_server(
         Ok(header) => header,
         Err(e) => return err(StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
     };
-    let result = connect_and_list(server, auth_header).await;
+    let result = connect_and_list(server, auth_header, &config.security.allow_env_vars).await;
     match result {
         Ok(tools) => Json(serde_json::json!({ "server": name, "tools": tools })).into_response(),
         Err(e) => err(StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
@@ -317,8 +318,13 @@ pub(super) async fn test_server(
 async fn connect_and_list(
     server: &MCPServerConfig,
     auth_header: Option<(String, String)>,
+    allow_env: &[String],
 ) -> anyhow::Result<Vec<String>> {
-    let mut client = MCPClient::from_config_with_auth(server, auth_header, &[]).await?;
+    // The allowlist has to come from the config, not be an empty slice: an
+    // empty one refuses every `${VAR}` header, so testing a server whose token
+    // comes from the environment failed here while the same server worked for
+    // an agent.
+    let mut client = MCPClient::from_config_with_auth(server, auth_header, allow_env).await?;
     let listed = async {
         client.connect().await?;
         client.list_tools().await

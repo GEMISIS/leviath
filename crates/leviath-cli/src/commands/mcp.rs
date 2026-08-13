@@ -52,7 +52,12 @@ struct AddArgs {
     #[arg(long)]
     command: Option<String>,
     /// Argument to pass to the command (repeatable)
-    #[arg(long = "arg")]
+    ///
+    /// `allow_hyphen_values` because the arguments being passed through belong
+    /// to the *server's* command line, not to `lev`. Nearly every published MCP
+    /// server is launched as `npx -y <package>`, and without this the `-y` is
+    /// read as an unknown flag of ours and the whole command is rejected.
+    #[arg(long = "arg", allow_hyphen_values = true)]
     args: Vec<String>,
     /// Environment variable for the command, as KEY=VALUE (repeatable)
     #[arg(long = "env")]
@@ -215,6 +220,7 @@ async fn login(name: &str, env: &McpEnv) -> anyhow::Result<()> {
         .login(
             &url,
             &server.headers,
+            &env.allow_env_vars,
             env.opener.clone(),
             env.now,
             reuse.as_deref(),

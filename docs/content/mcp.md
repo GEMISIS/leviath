@@ -41,11 +41,17 @@ lev mcp remove <name>
 `Name: value` form an HTTP header is usually written in, so `Authorization: Bearer ...` is rejected
 with `--header must be KEY=VALUE`.
 
+`--arg` passes its value through to the server's own command line, so an argument of its own that
+starts with `-` is fine: `--arg -y` is the `-y` that `npx` wants, not a flag of ours.
+
 There are two ways an HTTP server authenticates you, and Leviath picks between them by asking the
 server rather than by guessing. If a `--header` you configured is enough, as it is for a server that
 takes an API token of its own, `add` reports that no login is needed and stores nothing. If the
 server answers with a `401` instead, the OAuth flow runs and the tokens land in the credential
 store. `lev mcp login` on an already-satisfied server says so rather than failing.
+
+That question is asked with the headers as they will actually be sent, `${VAR}` references
+expanded, so a credential that comes from the environment is recognised as the credential it is.
 
 > [!NOTE]
 > GitHub's MCP server accepts either. A personal access token in an `Authorization` header needs no

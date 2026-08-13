@@ -245,20 +245,27 @@ pub(super) async fn mcp_background_loop(
 }
 
 /// Load the configured server by name, or an error outcome.
-fn find_server(ctx: &McpContext, name: &str) -> Result<MCPServerConfig, McpOutcome> {
+/// The server entry plus the `${VAR}` allowlist that goes with it.
+///
+/// Both come out of the same config read. Returning only the server is what
+/// left the callers passing an empty allowlist, which refuses every `${VAR}`
+/// header and made a server that works for an agent fail here.
+fn find_server(ctx: &McpContext, name: &str) -> Result<(MCPServerConfig, Vec<String>), McpOutcome> {
     let config = Config::load_from_path_public(&ctx.config_path)
         .map_err(|e| fail(format!("Could not read config: {e}")))?;
+    let allow_env = config.security.allow_env_vars.clone();
     config
         .mcp_servers
         .into_iter()
         .find(|s| s.name == name)
+        .map(|server| (server, allow_env))
         .ok_or_else(|| fail(format!("No MCP server named '{name}'")))
 }
 
 /// Run the OAuth browser login for `name`.
 async fn run_login(ctx: &McpContext, name: &str) -> McpOutcome {
-    let server = match find_server(ctx, name) {
-        Ok(server) => server,
+    let (server, allow_env) = match find_server(ctx, name) {
+        Ok(found) => found,
         Err(outcome) => return outcome,
     };
     let url = match server.resolve() {
@@ -271,6 +278,7 @@ async fn run_login(ctx: &McpContext, name: &str) -> McpOutcome {
         .login(
             &url,
             &server.headers,
+            &allow_env,
             ctx.opener.clone(),
             (ctx.clock)(),
             reuse.as_deref(),
@@ -293,8 +301,8 @@ async fn run_login(ctx: &McpContext, name: &str) -> McpOutcome {
 
 /// Connect to `name` and report its tool count.
 async fn run_test(ctx: &McpContext, name: &str) -> McpOutcome {
-    let server = match find_server(ctx, name) {
-        Ok(server) => server,
+    let (server, allow_env) = match find_server(ctx, name) {
+        Ok(found) => found,
         Err(outcome) => return outcome,
     };
     let auth_header = match OAuthClient::new()
@@ -304,7 +312,7 @@ async fn run_test(ctx: &McpContext, name: &str) -> McpOutcome {
         Ok(header) => header,
         Err(e) => return fail(format!("Auth failed for '{name}': {e}")),
     };
-    match connect_and_count(&server, auth_header).await {
+    match connect_and_count(&server, auth_header, &allow_env).await {
         Ok(count) => ok(format!("'{name}' connected · {count} tool(s)")),
         Err(e) => fail(format!("'{name}' failed: {e}")),
     }
@@ -314,8 +322,9 @@ async fn run_test(ctx: &McpContext, name: &str) -> McpOutcome {
 async fn connect_and_count(
     server: &MCPServerConfig,
     auth_header: Option<(String, String)>,
+    allow_env: &[String],
 ) -> anyhow::Result<usize> {
-    let mut client = MCPClient::from_config_with_auth(server, auth_header, &[]).await?;
+    let mut client = MCPClient::from_config_with_auth(server, auth_header, allow_env).await?;
     client.connect().await?;
     let tools = client.list_tools().await?;
     let _ = client.shutdown().await;
