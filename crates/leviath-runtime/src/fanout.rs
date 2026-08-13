@@ -30,6 +30,62 @@ use crate::pipeline::{AgentBlueprint, ProcessResponse, ResolveTransition, StageC
 /// Depth cap for fan-out workers when the parent's blueprint doesn't set one.
 const DEFAULT_FANOUT_DEPTH: usize = 3;
 
+/// How many times a malformed split is sent back to the model before the run
+/// fails.
+///
+/// A split asks for one exact shape, and a model that answers with prose or an
+/// apology has not failed at the work, only at the format. Failing the run on
+/// the first such answer throws away everything the parent has done, which is
+/// what a deep-researcher run reported: one non-conforming response ended it.
+/// Two corrections is enough to clear a formatting slip without letting a model
+/// that cannot produce the shape loop for ever.
+const MAX_SPLIT_RETRIES: usize = 2;
+
+/// How many corrective attempts a parent's split has already had.
+///
+/// Absent until the first malformed split, so a split that parses first time
+/// costs nothing.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SplitAttempts(pub usize);
+
+/// What the model is told after a split that could not be parsed.
+///
+/// It names the failure and restates the shape rather than repeating the
+/// original instruction, because the original instruction is what just did not
+/// work.
+fn split_correction(reason: &str) -> String {
+    format!(
+        "Your previous response could not be used: {reason}. Reply with the JSON \
+         array of work items and nothing else - no prose before or after it, no \
+         markdown fences, no explanation. It must start with `[` and end with `]`."
+    )
+}
+
+/// The first `MAX_SPLIT_SNIPPET` characters of what the model actually said,
+/// for the failure message.
+///
+/// The old message named the rule that was broken but never what came back, so
+/// an operator reading `split output is not a JSON array` could not tell a
+/// refusal from an empty response from prose. Bounded because a split response
+/// can be long, and truncated on a character boundary because model output is
+/// arbitrary UTF-8.
+fn response_snippet(response: &str) -> String {
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return "the response was empty".to_string();
+    }
+    // Taken as characters rather than bytes: a byte ceiling can land inside a
+    // character, and model output is arbitrary UTF-8.
+    let kept: String = trimmed.chars().take(MAX_SPLIT_SNIPPET).collect();
+    match kept.len() < trimmed.len() {
+        true => format!("the response began: {kept}…"),
+        false => format!("the response was: {kept}"),
+    }
+}
+
+/// How much of a failed split response the error message carries, in characters.
+const MAX_SPLIT_SNIPPET: usize = 200;
+
 /// One unit of work produced by a fan-out split.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 pub struct WorkItem {
@@ -241,13 +297,69 @@ pub fn fan_out_split(world: &mut World) {
                 set_status(world, parent, AgentStatus::Waiting);
             }
             Err(message) => {
-                set_status(
-                    world,
-                    parent,
-                    AgentStatus::Error {
-                        message: format!("fan_out split failed: {message}"),
-                    },
-                );
+                // A split that did not parse is a formatting miss, not a dead
+                // run: send the model its own answer plus a correction and ask
+                // again, the way every other stage handles a response it cannot
+                // use. Only once the corrections are spent does the run fail.
+                let attempts = world.get::<SplitAttempts>(parent).map_or(0, |a| a.0);
+                // Correcting needs somewhere to put the correction, so an agent
+                // with no context window falls through to the failure below
+                // rather than looping without ever being told anything.
+                let corrected = match attempts < MAX_SPLIT_RETRIES {
+                    false => false,
+                    true => {
+                        let mut entity = world.entity_mut(parent);
+                        match entity.get_mut::<ContextWindow>() {
+                            None => false,
+                            Some(mut window) => {
+                                // The model sees what it said before the
+                                // correction, so "reply with only the array"
+                                // has something to correct.
+                                let tokens = leviath_core::estimate_tokens(&response);
+                                let _ = window.add_typed_entry(
+                                    "conversation",
+                                    leviath_core::EntryKind::AssistantTurn {
+                                        tool_calls: Vec::new(),
+                                    },
+                                    response.clone(),
+                                    tokens,
+                                );
+                                crate::pipeline::inject_system_nudge(
+                                    &mut window,
+                                    &split_correction(&message),
+                                );
+                                true
+                            }
+                        }
+                    }
+                };
+                if corrected {
+                    tracing::warn!(
+                        attempt = attempts + 1,
+                        max = MAX_SPLIT_RETRIES,
+                        error = %message,
+                        "fan_out split did not parse; asking the model again"
+                    );
+                    world
+                        .entity_mut(parent)
+                        .insert(SplitAttempts(attempts + 1))
+                        .insert(crate::pipeline::ReadyToInfer);
+                } else {
+                    // Name what came back as well as the rule it broke: the
+                    // rule alone cannot tell a refusal from an empty response
+                    // from prose.
+                    set_status(
+                        world,
+                        parent,
+                        AgentStatus::Error {
+                            message: format!(
+                                "fan_out split failed after {attempts} correction(s): \
+                                 {message} ({})",
+                                response_snippet(&response)
+                            ),
+                        },
+                    );
+                }
             }
         }
     }
@@ -1006,15 +1118,181 @@ mod tests {
 
     #[test]
     fn split_errors_on_non_array_output() {
+        // The corrections have to be spent before the run dies, so this drives
+        // the split until they are. Failing on the first answer is the bug the
+        // retry exists to fix.
         let mut world = World::new();
         let e = spawn_parent(
             &mut world,
             fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
             "definitely not a json array",
         );
-        fan_out_split(&mut world);
+        for _ in 0..=MAX_SPLIT_RETRIES {
+            fan_out_split(&mut world);
+            redrive_split(&mut world, e, "definitely not a json array");
+        }
         assert!(world.get::<FanOutWaiting>(e).is_none());
         assert_errored(&world, e);
+    }
+
+    /// Put the parent back where a fresh inference would leave it, so the split
+    /// can be driven a second and third time without a real provider.
+    fn redrive_split(world: &mut World, e: Entity, response: &str) {
+        world
+            .entity_mut(e)
+            .remove::<crate::pipeline::ReadyToInfer>()
+            .insert(InferenceResult {
+                response: response.to_string(),
+                tool_calls: vec![],
+                tokens_used: 0,
+                timestamp: 0,
+            })
+            .insert(ProcessResponse);
+    }
+
+    fn conversation_text(world: &World, e: Entity) -> String {
+        world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .iter()
+            .map(|entry| entry.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The fix for the deep-researcher report: a split that comes back as prose
+    /// is a formatting miss, and the run gets to correct it instead of dying.
+    #[test]
+    fn a_split_that_is_not_an_array_is_corrected_rather_than_fatal() {
+        let mut world = World::new();
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            "Sure! I will research these topics for you.",
+        );
+
+        fan_out_split(&mut world);
+
+        assert_eq!(status_of(&world, e), AgentStatus::Active, "still running");
+        assert_eq!(world.get::<SplitAttempts>(e), Some(&SplitAttempts(1)));
+        assert!(
+            world.get::<crate::pipeline::ReadyToInfer>(e).is_some(),
+            "the parent is queued for another attempt"
+        );
+        assert!(world.get::<FanOutWaiting>(e).is_none());
+        let convo = conversation_text(&world, e);
+        assert!(
+            convo.contains("Sure! I will research"),
+            "the model sees its own answer: {convo}"
+        );
+        assert!(
+            convo.contains("[System]") && convo.contains("start with `[`"),
+            "and the correction: {convo}"
+        );
+    }
+
+    /// A correction that works is the whole point: the second answer parses and
+    /// the run carries on into its fan-out.
+    #[test]
+    fn a_corrected_split_proceeds_to_the_fan_out() {
+        let mut world = World::new();
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            "no array here",
+        );
+        fan_out_split(&mut world);
+        redrive_split(&mut world, e, r#"[{"id":"a","context":{}}]"#);
+
+        fan_out_split(&mut world);
+
+        assert!(world.get::<FanOutWaiting>(e).is_some(), "the split took");
+        assert_eq!(status_of(&world, e), AgentStatus::Waiting);
+    }
+
+    /// Once the corrections are spent the run does fail, and the message names
+    /// what came back rather than only the rule it broke.
+    #[test]
+    fn the_failure_message_quotes_what_the_model_actually_said() {
+        let mut world = World::new();
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            "I cannot help with that request.",
+        );
+        for _ in 0..=MAX_SPLIT_RETRIES {
+            fan_out_split(&mut world);
+            redrive_split(&mut world, e, "I cannot help with that request.");
+        }
+        // Read through Debug rather than a pattern: the arm a passing run does
+        // not take reads to llvm-cov as an uncovered region.
+        let status = format!("{:?}", status_of(&world, e));
+        assert!(status.contains("Error"), "{status}");
+        assert!(status.contains("I cannot help with that"), "{status}");
+        assert!(status.contains("correction(s)"), "{status}");
+    }
+
+    /// No context window means nowhere to put a correction, so the run fails on
+    /// the first malformed split rather than looping while being told nothing.
+    #[test]
+    fn a_split_with_nowhere_to_put_a_correction_fails_at_once() {
+        let mut world = World::new();
+        let e = world
+            .spawn((
+                AgentBlueprint(fanout_blueprint(cfg(
+                    None,
+                    2,
+                    WorkerFailurePolicy::Continue,
+                ))),
+                StageCursor { index: 0 },
+                parent_state(),
+                StageProgress::default(),
+                StageInferences(vec![stage_inf(), stage_inf()]),
+                StageSetups(vec![setup(), setup()]),
+                VisitCounts::default(),
+                InferenceResult {
+                    response: "not an array".to_string(),
+                    tool_calls: vec![],
+                    tokens_used: 0,
+                    timestamp: 0,
+                },
+                ProcessResponse,
+            ))
+            .id();
+
+        fan_out_split(&mut world);
+
+        assert_errored(&world, e);
+        assert!(world.get::<SplitAttempts>(e).is_none());
+    }
+
+    #[test]
+    fn the_snippet_reports_an_empty_response_as_empty() {
+        assert_eq!(response_snippet("   \n "), "the response was empty");
+    }
+
+    #[test]
+    fn the_snippet_quotes_a_short_response_whole() {
+        assert_eq!(response_snippet("  nope  "), "the response was: nope");
+    }
+
+    #[test]
+    fn the_snippet_truncates_a_long_response_on_a_character_boundary() {
+        // Three bytes per character on purpose: cutting model output at a byte
+        // offset is how a panic gets shipped, so the ceiling counts characters
+        // and this proves no character was split.
+        let long = "€".repeat(MAX_SPLIT_SNIPPET + 10);
+        let snippet = response_snippet(&long);
+        assert!(snippet.starts_with("the response began: "), "{snippet}");
+        assert!(snippet.ends_with('…'), "{snippet}");
+        let kept = snippet
+            .trim_start_matches("the response began: ")
+            .trim_end_matches('…');
+        assert_eq!(kept.chars().count(), MAX_SPLIT_SNIPPET);
+        assert!(kept.chars().all(|c| c == '€'), "no character was split");
     }
 
     #[test]
