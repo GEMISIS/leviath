@@ -105,7 +105,7 @@ impl Dashboard {
         let agent = match self.selected_agent() {
             Some(a) => a.clone(),
             None => {
-                let msg = ratatui::widgets::Paragraph::new("No run selected.").block(
+                let msg = ratatui::widgets::Paragraph::new("No agent run selected.").block(
                     ratatui::widgets::Block::default()
                         .borders(ratatui::widgets::Borders::ALL)
                         .title(" Detail "),
@@ -667,7 +667,7 @@ mod tests {
         dash.show_help = true;
         terminal.draw(|f| dash.draw(f)).unwrap();
         let buf = rendered_buffer(&terminal);
-        assert!(buf.contains("Run list"), "{buf}");
+        assert!(buf.contains("Agent run list"), "{buf}");
     }
 
     #[test]
@@ -1027,7 +1027,7 @@ mod tests {
         terminal.draw(|f| dash.draw(f)).unwrap();
         assert!(
             crate::commands::dashboard::test_support::rendered_buffer(&terminal)
-                .contains("New run: agents")
+                .contains("New run: agent blueprints")
         );
 
         dash.show_help = false;

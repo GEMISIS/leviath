@@ -24,7 +24,7 @@ impl Dashboard {
                 Style::default().add_modifier(Modifier::BOLD),
             )),
             Cell::from(Span::styled(
-                "Agent",
+                "Blueprint",
                 Style::default().add_modifier(Modifier::BOLD),
             )),
             Cell::from(Span::styled(
@@ -121,24 +121,27 @@ impl Dashboard {
             .collect();
 
         let empty_state_msg: Option<String> = if self.agents.is_empty() {
-            Some("  No runs yet. Press `n` to start one.".to_string())
+            Some("  No agent runs yet. Press `n` to start one.".to_string())
         } else if self.display_indices.is_empty() {
-            Some(format!("  No runs match \"{}\".", self.list_search_query))
+            Some(format!(
+                "  No agent runs match \"{}\".",
+                self.list_search_query
+            ))
         } else {
             None
         };
 
         let mut list_title = if !self.list_search_query.is_empty() {
             format!(
-                " Runs  /{}/  {}/{} ",
+                " Agent Runs  /{}/  {}/{} ",
                 self.list_search_query,
                 self.display_indices.len(),
                 self.agents.len()
             )
         } else if self.list_search_mode {
-            format!(" Runs  /{}▌ ", self.list_search_query)
+            format!(" Agent Runs  /{}▌ ", self.list_search_query)
         } else {
-            " Runs ".to_string()
+            " Agent Runs ".to_string()
         };
         if any_marked {
             list_title = format!("{} {} marked ", list_title.trim_end(), self.marked.len());

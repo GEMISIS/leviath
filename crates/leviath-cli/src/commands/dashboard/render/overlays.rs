@@ -88,7 +88,7 @@ impl Dashboard {
 /// The run list: the screen `lev dash` opens on.
 fn run_list_sections() -> Vec<HelpSection> {
     vec![HelpSection {
-        title: "Run list",
+        title: "Agent run list",
         entries: vec![
             ("↑ ↓ / k j", "select a run"),
             ("home / end (g / G)", "first / last run"),
@@ -140,8 +140,8 @@ fn detail_sections() -> Vec<HelpSection> {
                 ("home / end (b / e)", "top / bottom"),
                 ("/", "search; n / N step through matches"),
                 ("y", "copy this pane to the clipboard"),
-                ("i", "respond, or send a message to a running agent"),
-                ("g", "stage explorer (branching agents only)"),
+                ("i", "respond, or send a message to a running agent run"),
+                ("g", "stage explorer (branching agent runs only)"),
                 (", / .", "older / newer context point; opens Context"),
                 ("x", "kill the run (asks first)"),
                 ("p / r", "pause / resume"),
@@ -193,7 +193,7 @@ fn detail_sections() -> Vec<HelpSection> {
 fn new_run_sections() -> Vec<HelpSection> {
     vec![
         HelpSection {
-            title: "New run: agents",
+            title: "New run: agent blueprints",
             entries: vec![
                 ("↑ ↓", "select an agent"),
                 ("any letter", "filter the list"),
@@ -410,7 +410,7 @@ mod tests {
             })
             .unwrap();
         let buf = rendered_buffer(&terminal);
-        assert!(buf.contains("Run list"), "{buf}");
+        assert!(buf.contains("Agent run list"), "{buf}");
     }
 
     #[test]
@@ -424,7 +424,7 @@ mod tests {
             })
             .unwrap();
         let buf = rendered_buffer(&terminal);
-        assert!(buf.contains("Run list"), "{buf}");
+        assert!(buf.contains("Agent run list"), "{buf}");
     }
 
     #[test]
@@ -473,7 +473,7 @@ mod tests {
             .unwrap();
 
         let rendered = rendered_buffer(&terminal);
-        assert!(rendered.contains("Run list"));
+        assert!(rendered.contains("Agent run list"));
         assert!(rendered.contains("cycle sort"));
         assert!(rendered.contains("kill the run (asks first)"));
         assert!(!rendered.contains("Detail view"));
@@ -499,7 +499,7 @@ mod tests {
         // their own: `?` is unbound once you are typing, so the only place to
         // read them is before you press `i`.
         assert!(rendered.contains("Writing a response"));
-        assert!(!rendered.contains("Run list"));
+        assert!(!rendered.contains("Agent run list"));
         assert!(!rendered.contains("cycle sort"));
     }
 
@@ -551,7 +551,7 @@ mod tests {
         terminal.draw(|f| dash.draw_help_overlay(f)).unwrap();
 
         let rendered = rendered_buffer(&terminal);
-        assert!(rendered.contains("New run: agents"), "{rendered}");
+        assert!(rendered.contains("New run: agent blueprints"), "{rendered}");
         assert!(rendered.contains("New run: task"));
         assert!(rendered.contains("reference a file"));
         assert!(rendered.contains("New run: unattended"));

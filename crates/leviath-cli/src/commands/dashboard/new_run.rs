@@ -136,7 +136,7 @@ impl Dashboard {
     /// row shows up in the list the user is returned to.
     pub(super) fn submit_new_run(&mut self) {
         let Some(agent) = self.new_run_selected_agent().cloned() else {
-            self.toast("Pick an agent first", ToastLevel::Error);
+            self.toast("Pick an agent blueprint first", ToastLevel::Error);
             return;
         };
         let task = self.new_run_task.lines().join("\n").trim().to_string();
@@ -415,7 +415,7 @@ fn yolo_warning() -> Confirm {
         "Run unattended?",
         vec![
             Line::from(
-                "Runs started from this screen will approve their own tool calls: \
+                "Agent runs started from this screen will approve their own tool calls: \
                  editing files, running shell commands, fetching URLs, whatever \
                  the agent's permissions allow, without stopping to ask you.",
             ),

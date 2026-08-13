@@ -657,7 +657,7 @@ impl Dashboard {
                         };
                         Self::push_toast(
                             &mut self.toasts,
-                            format!("Run '{}' failed{}", name, preview),
+                            format!("Agent run '{}' failed{}", name, preview),
                             ToastLevel::Error,
                             50,
                         );
@@ -667,7 +667,7 @@ impl Dashboard {
                     ) {
                         Self::push_toast(
                             &mut self.toasts,
-                            format!("Run '{}' completed", name),
+                            format!("Agent run '{}' completed", name),
                             ToastLevel::Info,
                             35,
                         );
@@ -742,7 +742,7 @@ impl Dashboard {
                                     .unwrap_or(truncate(&agent.blueprint_name, 20));
                                 Self::push_toast(
                                     &mut self.toasts,
-                                    format!("Run '{}' needs input", name),
+                                    format!("Agent run '{}' needs input", name),
                                     ToastLevel::Warning,
                                     35,
                                 );
@@ -766,7 +766,7 @@ impl Dashboard {
                         let name = run.title.clone().unwrap_or(truncate(&run.agent_name, 20));
                         Self::push_toast(
                             &mut self.toasts,
-                            format!("Run '{}' needs input", name),
+                            format!("Agent run '{}' needs input", name),
                             ToastLevel::Warning,
                             35,
                         );
@@ -778,7 +778,7 @@ impl Dashboard {
                         let name = run.title.clone().unwrap_or(truncate(&run.agent_name, 20));
                         Self::push_toast(
                             &mut self.toasts,
-                            format!("Run '{}' completed", name),
+                            format!("Agent run '{}' completed", name),
                             ToastLevel::Info,
                             35,
                         );
@@ -2345,7 +2345,7 @@ mod tests {
         let mut meta = runstate::RunMeta::new(
             run_id.to_string(),
             // Use the (unique-per-test) run_id as the agent name too, so toast
-            // messages ("Run '<name>' ...") can be unambiguously matched even
+            // messages ("Agent run '<name>' ...") can be unambiguously matched even
             // when tests run concurrently against the shared real runs dir.
             run_id.to_string(),
             "/nonexistent/agent/path".to_string(),
