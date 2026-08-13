@@ -129,6 +129,24 @@ impl ProviderCircuits {
         self.0.remove(provider);
     }
 
+    /// The reason of the last recorded failure for `provider`, open or not.
+    ///
+    /// The stall watchdog asks this to tell "out of credits" apart from the
+    /// other ways a provider leaves service: the former pauses the run for a
+    /// resume instead of failing it (issue #413).
+    pub fn last_reason(&self, provider: &str) -> Option<UnavailableReason> {
+        self.0.get(provider).map(|c| c.reason)
+    }
+
+    /// Forget every recorded failure, so the next dispatch is a real probe.
+    ///
+    /// Called on an explicit resume: the operator is saying conditions have
+    /// changed (most often a top-up after credits ran out), and holding the
+    /// retry until a cooldown lapses would make the resume look ignored.
+    pub fn reset(&mut self) {
+        self.0.clear();
+    }
+
     /// Whether `provider` should be skipped right now.
     ///
     /// False once the cooldown has elapsed, which is what makes the next
@@ -270,6 +288,33 @@ mod tests {
         // And the count restarts, so one later failure does not re-open it.
         assert!(!fail(&mut circuits, 10));
         assert!(!circuits.is_open("openrouter", 10, &policy()));
+    }
+
+    #[test]
+    fn last_reason_reports_the_most_recent_failure_or_nothing() {
+        let mut circuits = ProviderCircuits::default();
+        assert_eq!(circuits.last_reason("p"), None);
+        circuits.record_failure("p", UnavailableReason::CreditsExhausted, 0, &policy());
+        assert_eq!(
+            circuits.last_reason("p"),
+            Some(UnavailableReason::CreditsExhausted),
+            "one failure is enough for the reason, open or not"
+        );
+    }
+
+    #[test]
+    fn reset_forgets_every_circuit() {
+        // What an explicit resume relies on: after a reset the next dispatch
+        // is a real probe rather than a wait for the cooldown (issue #413).
+        let mut circuits = ProviderCircuits::default();
+        let mut now = 0;
+        while !fail(&mut circuits, now) {
+            now += 1;
+        }
+        assert!(circuits.is_open("openrouter", now, &policy()));
+        circuits.reset();
+        assert!(!circuits.is_open("openrouter", now, &policy()));
+        assert_eq!(circuits.last_reason("openrouter"), None);
     }
 
     #[test]

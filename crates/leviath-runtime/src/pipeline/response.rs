@@ -226,6 +226,30 @@ pub fn collect_inference(
                         .insert(ReadyToInfer);
                     continue;
                 }
+                // Running out of credits with no candidate left is an account
+                // state, not a defect in the run: the operator tops up and
+                // resumes. Failing here would make the run permanently
+                // unresumable, so it pauses instead, still pointed at the same
+                // inference, and a `lev resume` re-dispatches it (issue #413).
+                if err.unavailable_reason()
+                    == Some(leviath_providers::UnavailableReason::CreditsExhausted)
+                {
+                    let message = format!(
+                        "out of credits ({err}); pausing this run - top up the \
+                         account, then `lev resume` it"
+                    );
+                    tracing::warn!(error = %err, "out of credits; pausing the run for a resume");
+                    if let Some(mut buffer) = buffer {
+                        buffer.logs.push((idx, format!("[paused] {message}")));
+                    }
+                    state.status = AgentStatus::Paused;
+                    commands
+                        .entity(outcome.entity)
+                        .remove::<AwaitingInference>()
+                        .remove::<InFlightWork>()
+                        .insert(ReadyToInfer);
+                    continue;
+                }
                 if let Some(mut buffer) = buffer {
                     buffer.logs.push((idx, format!("[error] {err}")));
                 }
