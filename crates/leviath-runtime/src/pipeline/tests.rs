@@ -1644,6 +1644,87 @@ fn a_restored_ledger_reaches_the_persist_tick_instead_of_the_seeded_zeros() {
 /// Not writing the same quarter-megabyte file on every heartbeat is still worth
 /// doing; it now happens in the lane, past the coalescing, where whether a job
 /// was written is a fact rather than an assumption.
+/// The reason a run is parked reaches `meta.json` through the real system, not
+/// just through the mapper.
+///
+/// Worth going through the whole system rather than calling the mapper: the
+/// markers live on the entity and the persist query is the only place that can
+/// see them, so a query that forgot to select one would leave the field empty
+/// with every unit test still passing.
+#[test]
+fn dispatch_persistence_records_why_a_run_is_parked() {
+    use leviath_core::run_meta::WaitingOn;
+
+    // A parent held by its own fan-out: waiting, and needing nobody.
+    let (mut world, mut rx) = world_with_persistence();
+    let mut state = agent_state();
+    state.status = AgentStatus::Waiting;
+    let e = world
+        .spawn((
+            run_metadata(),
+            state,
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            crate::pipeline::WaitingForChildren,
+        ))
+        .id();
+
+    run_dispatch_persistence(&mut world);
+    let job = snapshot_job(rx.try_recv().expect("job sent"));
+    assert_eq!(
+        job.meta.status,
+        leviath_core::run_meta::RunStatus::WaitingInput
+    );
+    assert_eq!(
+        job.meta.waiting_on,
+        Some(WaitingOn::Children),
+        "a run held for its sub-agents says so"
+    );
+
+    // The same run once it is moving again reports no reason at all.
+    world
+        .get_mut::<AgentState>(e)
+        .expect("state present")
+        .status = AgentStatus::Active;
+    world
+        .get_mut::<PersistWatermark>(e)
+        .expect("watermark present")
+        .backdate(0);
+    run_dispatch_persistence(&mut world);
+    let moving = snapshot_job(rx.try_recv().expect("job sent"));
+    assert_eq!(moving.meta.waiting_on, None);
+}
+
+/// Tool approvals are a person's to give, so a run holding them says so.
+///
+/// The count is what decides it rather than the marker's presence: a prompt
+/// record with nothing outstanding is not something to interrupt anybody for.
+#[test]
+fn dispatch_persistence_reports_outstanding_tool_approvals() {
+    use leviath_core::run_meta::WaitingOn;
+
+    for (outstanding, expected) in [(2usize, Some(WaitingOn::Approval)), (0, None)] {
+        let (mut world, mut rx) = world_with_persistence();
+        let mut state = agent_state();
+        state.status = AgentStatus::Waiting;
+        world.spawn((
+            run_metadata(),
+            state,
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            crate::gate_prompt::AwaitingGatePrompt(outstanding),
+        ));
+
+        run_dispatch_persistence(&mut world);
+        let job = snapshot_job(rx.try_recv().expect("job sent"));
+        assert_eq!(job.meta.waiting_on, expected, "{outstanding} outstanding");
+    }
+}
+
 #[test]
 fn dispatch_persistence_always_carries_the_answer_for_the_lane_to_judge() {
     let (mut world, mut rx) = world_with_persistence();
