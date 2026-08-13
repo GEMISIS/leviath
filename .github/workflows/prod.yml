@@ -366,25 +366,40 @@ jobs:
     if: needs.check-beta.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch to leviath.dev
+      - name: Ask leviath.dev to redeploy
         env:
           # Same token and the same reason as the tap bump below: GITHUB_TOKEN is
-          # scoped to this repo, so reaching another one needs the PAT. It only
-          # needs leviath.dev added to its repository access (Contents: read and
-          # write, which is what a dispatch requires) - no new secret.
+          # scoped to this repo, so reaching another one needs the PAT. It needs
+          # leviath.dev added to its repository access with `Actions: read and
+          # write` - see the note below for why Actions and not Contents.
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           VERSION: ${{ needs.check-beta.outputs.version }}
         run: |
           set -euo pipefail
-          # The site reports the stable channel: the version beside its install
-          # command and the release notes behind it are both generated from this
-          # release and this repo's CHANGELOG.md. It refreshed on a daily timer,
-          # which has no relationship to when a promotion lands - 0.3.7 shipped at
-          # 18:34 and the day's refresh had run at 07:53, so the site advertised
-          # 0.2.0 for eleven hours over a command that installed 0.3.7.
-          jq -nc --arg version "$VERSION"             '{event_type:"release-stable",
-              client_payload:{channel:"stable", version:$version}}'             | gh api repos/GEMISIS/leviath.dev/dispatches --input -
-          echo "Asked leviath.dev to refresh for $VERSION."
+
+          # What this does and does not refresh. The site takes the version it
+          # prints from leviath-dist's Homebrew formula, not from this release,
+          # because every install route it offers resolves there and taking the
+          # number from here is what let it advertise 0.3.7 while `brew upgrade`
+          # was still a no-op on 0.2.0. So this cannot move the version: the tap
+          # has not bumped yet by definition. It refreshes the release notes,
+          # and it is a second chance if the tap's own dispatch never arrives.
+          #
+          # `workflow run` rather than a repository dispatch, because a
+          # fine-grained PAT carries one permission set across every repository
+          # selected for it. A repository dispatch needs Contents: write, which
+          # would also hand this token write access to this repository's
+          # contents; starting a workflow needs Actions: write, which is enough
+          # to run the deploy and not enough to push anything.
+          if ! err=$(gh workflow run deploy.yml --repo GEMISIS/leviath.dev 2>&1); then
+            # A warning, not a failure. The release itself is fine and the site
+            # keeps a daily refresh, so this costs freshness rather than
+            # correctness - failing the promotion over it would be a lie about
+            # what went wrong.
+            echo "::warning::Could not start the leviath.dev deploy; it will refresh on its daily run instead. Give RELEASE_TOKEN access to GEMISIS/leviath.dev with 'Actions: read and write'. GitHub said: ${err}"
+            exit 0
+          fi
+          echo "Asked leviath.dev to redeploy after $VERSION."
 
   bump-tap:
     name: Bump tap manifests (stable)
