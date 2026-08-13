@@ -154,6 +154,35 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  # Optional features, with every one of them off. Every other job here builds
+  # with `--all-features`, so the configuration an embedder actually gets was
+  # the one configuration nothing compiled. It had already rotted: a doc
+  # comment in ungated code linked into the feature-gated `control_socket`
+  # module, so `cargo doc -p leviath-runtime` failed for anyone who ran it
+  # outside the workspace.
+  #
+  # `-p <crate>` rather than `--workspace` is the whole point. A workspace
+  # build unifies features, and `leviath-cli` turns `control-socket` on, which
+  # is exactly how the off path stayed invisible.
+  default-features:
+    name: Build with default features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - name: Check the runtime without its optional features
+        run: cargo check -p leviath-runtime --all-targets
+      - name: Check the facade without its optional features
+        run: cargo check -p leviath
+      # The rot this job exists to catch was in the docs, not the build, so
+      # checking only compilation would not have caught it.
+      - name: Document the runtime without its optional features
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p leviath-runtime --no-deps
+
   # Supply chain. Leviath ships a binary that executes model-chosen tool calls on
   # a user's machine, so its ~370 transitive crates are part of the attack
   # surface. This job is what makes that graph reviewable:
