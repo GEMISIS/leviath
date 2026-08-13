@@ -47,12 +47,14 @@ web_fetch  = "sources"
 read_file  = "sources"
 list_dir   = "sources"
 
+# The only way forward. Investigating is what makes this a deep researcher, so
+# it is not a choice: an edge straight to `analyze` used to sit here for topics
+# that "turned out to be one question", and a model that took it produced a
+# report from the gather stage's sources alone while another model on the same
+# topic ran the full fan-out. A single sub-question is a fan-out of one, which
+# costs one worker; skipping the stage costs the whole investigation.
 [stages.gather.transitions.investigate]
-hint = "The topic breaks into sub-questions worth researching separately"
-transform = "direct"
-
-[stages.gather.transitions.analyze]
-hint = "Enough primary sources gathered, and the topic is one question rather than several"
+hint = "Primary sources gathered - break the topic into sub-questions and research them"
 transform = "direct"
 
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
@@ -115,9 +117,12 @@ fine for a narrow topic.
 condition = "error"
 transform = "direct"
 
-# Un-exhaustible escape (lint: dead-end-possible).
+# Un-exhaustible escape (lint: dead-end-possible). Conditioned, like every
+# other escape here: an unconditioned edge is on the model's menu, so this one
+# let a fan-out stage answer "synthesize" and walk past its own workers.
 [stages.investigate.transitions.synthesize]
 hint = "Analysis is out of revisits - synthesize from what came back"
+condition = "dead_end"
 transform = "compact"
 
 # ─── Stage 2: Analyze ─────────────────────────────────────────────────────────
