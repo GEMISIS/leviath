@@ -58,13 +58,31 @@ pub(crate) fn resource_metadata_url(www_authenticate: Option<&str>) -> Option<St
 
 /// The well-known protected-resource metadata URL for an MCP endpoint.
 ///
-/// Per RFC 9728 the document lives at the *origin*, so any path on the MCP URL
-/// is dropped.
+/// RFC 9728 §3.1 inserts `/.well-known/oauth-protected-resource` *between* the
+/// host and the resource's path, rather than replacing the path. So the
+/// metadata for `https://host/mcp/` lives at
+/// `https://host/.well-known/oauth-protected-resource/mcp/`, and only a
+/// resource at the root has its document at the bare well-known path.
+///
+/// Dropping the path instead is what made every path-hosted server 404 here
+/// whenever it did not send a `resource_metadata` hint. GitHub's MCP server is
+/// the case that surfaced it: it serves the document at the suffixed URL, and
+/// nothing at the bare one.
 pub(crate) fn well_known_resource_url(mcp_url: &Url) -> Url {
-    // Joining a constant, valid path onto an already-parsed URL cannot fail.
-    mcp_url
-        .join("/.well-known/oauth-protected-resource")
-        .expect("well-known path is always joinable")
+    let mut url = mcp_url.clone();
+    // A path of "/" is the root case, where the suffix would add a stray
+    // trailing slash the spec does not ask for.
+    let suffix = match mcp_url.path() {
+        "/" | "" => String::new(),
+        path => path.to_string(),
+    };
+    // Clearing these matters: the metadata document is addressed by path alone,
+    // and carrying the resource's query string over would ask for a URL the
+    // server never advertised.
+    url.set_query(None);
+    url.set_fragment(None);
+    url.set_path(&format!("/.well-known/oauth-protected-resource{suffix}"));
+    url
 }
 
 /// Whether a discovery URL is safe to fetch.
@@ -163,12 +181,60 @@ mod tests {
 
     // ─── well-known derivation ────────────────────────────────────────────
 
+    /// RFC 9728 §3.1: the path is *kept*, after the well-known segment. This is
+    /// the derivation GitHub's MCP server actually publishes, and the bare
+    /// origin form it 404s.
     #[test]
-    fn well_known_resource_drops_the_mcp_path() {
+    fn well_known_resource_keeps_the_mcp_path() {
         let url = Url::parse("https://mcp.example.com/some/mcp").unwrap();
         assert_eq!(
             well_known_resource_url(&url).as_str(),
-            "https://mcp.example.com/.well-known/oauth-protected-resource"
+            "https://mcp.example.com/.well-known/oauth-protected-resource/some/mcp"
+        );
+    }
+
+    /// A trailing slash is part of the path and survives, because the resource
+    /// identifier it belongs to is a different string without it.
+    #[test]
+    fn well_known_resource_preserves_a_trailing_slash() {
+        let url = Url::parse("https://api.githubcopilot.com/mcp/").unwrap();
+        assert_eq!(
+            well_known_resource_url(&url).as_str(),
+            "https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp/"
+        );
+    }
+
+    /// A resource at the root has no path to append, so the document sits at the
+    /// bare well-known path with no trailing slash bolted on.
+    #[test]
+    fn well_known_resource_at_the_root_has_no_suffix() {
+        for root in ["https://mcp.example.com", "https://mcp.example.com/"] {
+            assert_eq!(
+                well_known_resource_url(&u(root)).as_str(),
+                "https://mcp.example.com/.well-known/oauth-protected-resource",
+                "{root}"
+            );
+        }
+    }
+
+    /// The query belongs to the MCP endpoint, not to its metadata document.
+    #[test]
+    fn well_known_resource_drops_query_and_fragment() {
+        let url = Url::parse("https://mcp.example.com/mcp?tenant=a#frag").unwrap();
+        assert_eq!(
+            well_known_resource_url(&url).as_str(),
+            "https://mcp.example.com/.well-known/oauth-protected-resource/mcp"
+        );
+    }
+
+    /// The port is part of the origin and has to survive, or discovery leaves
+    /// the server entirely.
+    #[test]
+    fn well_known_resource_keeps_a_nonstandard_port() {
+        let url = Url::parse("https://mcp.example.com:8443/mcp").unwrap();
+        assert_eq!(
+            well_known_resource_url(&url).as_str(),
+            "https://mcp.example.com:8443/.well-known/oauth-protected-resource/mcp"
         );
     }
 

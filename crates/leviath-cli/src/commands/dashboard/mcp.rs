@@ -273,13 +273,16 @@ async fn run_login(ctx: &McpContext, name: &str) -> McpOutcome {
         )
         .await
     {
-        Ok(auth) => {
-            store.set(name, auth);
+        Ok(leviath_mcp::LoginOutcome::Authenticated(auth)) => {
+            store.set(name, *auth);
             match store.save(&ctx.store_path) {
                 Ok(()) => ok(format!("Authenticated with '{name}'")),
                 Err(e) => fail(format!("Login succeeded but saving failed: {e}")),
             }
         }
+        Ok(leviath_mcp::LoginOutcome::NotRequired) => ok(format!(
+            "'{name}' needs no login: it accepted the configured request"
+        )),
         Err(e) => fail(format!("Login failed for '{name}': {e}")),
     }
 }
@@ -767,6 +770,45 @@ mod tests {
         );
         let store = AuthStore::load(&ctx.store_path).unwrap();
         assert_eq!(store.get("navigator").unwrap().access_token, "tui-access");
+    }
+
+    /// Pressing login in the dashboard on a header-authenticated server reports
+    /// that none is needed, rather than a discovery failure it cannot act on.
+    #[tokio::test]
+    async fn background_login_says_so_when_no_login_is_needed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        // Publishes no OAuth metadata, so an attempted discovery fails loudly.
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::post(|| async { axum::http::StatusCode::OK }),
+        );
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path(), no_browser);
+        let mut server = MCPServerConfig::http("hub", format!("{base}/mcp"));
+        server.headers.insert(
+            "Authorization".to_string(),
+            "Bearer configured-token".to_string(),
+        );
+        write_config(&ctx, server);
+
+        let outcome = run_login(&ctx, "hub").await;
+        assert!(outcome.ok, "got: {}", outcome.message);
+        assert!(
+            outcome.message.contains("needs no login"),
+            "got: {}",
+            outcome.message
+        );
+        assert!(
+            AuthStore::load(&ctx.store_path)
+                .unwrap()
+                .get("hub")
+                .is_none()
+        );
     }
 
     #[tokio::test]

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::types::{AppState, err};
 use crate::config::Config;
-use leviath_mcp::{AuthStore, MCPClient, MCPServerConfig, OAuthClient};
+use leviath_mcp::{AuthStore, LoginOutcome, MCPClient, MCPServerConfig, OAuthClient};
 
 /// Where `lev serve` reads and writes MCP state, plus the seams the login flow
 /// needs. Cheap to clone (paths + fn pointers).
@@ -87,6 +87,10 @@ fn auth_status(server: &MCPServerConfig, store: &AuthStore, now: u64) -> String 
     match store.get(&server.name) {
         Some(auth) if auth.is_expired_at(now) => "expired".to_string(),
         Some(_) => "authenticated".to_string(),
+        // A configured `Authorization` header is a credential too, and calling
+        // it "none" is what puts a login button in front of a server that needs
+        // no login.
+        None if server.has_auth_header() => "header".to_string(),
         None => "none".to_string(),
     }
 }
@@ -225,7 +229,7 @@ pub(super) async fn login(
 
     let mut store = AuthStore::load(&admin.store_path).unwrap_or_default();
     let reuse = store.get(&name).map(|a| a.client_id.clone());
-    let auth = match OAuthClient::new()
+    let outcome = match OAuthClient::new()
         .login(
             &url,
             &server.headers,
@@ -235,10 +239,17 @@ pub(super) async fn login(
         )
         .await
     {
-        Ok(auth) => auth,
+        Ok(outcome) => outcome,
         Err(e) => return err(StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
     };
-    store.set(&name, auth);
+    // A server that answered the probe wants no OAuth, so there is nothing to
+    // store. Reporting it as an error would be wrong: the caller asked whether a
+    // login was needed, and the answer is no.
+    let LoginOutcome::Authenticated(auth) = outcome else {
+        return Json(serde_json::json!({ "status": "not_required", "server": name }))
+            .into_response();
+    };
+    store.set(&name, *auth);
     if let Err(e) = store.save(&admin.store_path) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
@@ -603,6 +614,44 @@ mod tests {
         // Now status shows authenticated.
         let (_, body) = send(&app, "GET", "/api/mcp/servers/navigator/status", None).await;
         assert_eq!(body["auth"], "authenticated");
+    }
+
+    /// The website's login button on a header-authenticated server. It used to
+    /// surface the discovery 404 as a bad gateway; the honest answer is that no
+    /// login is needed.
+    #[tokio::test]
+    async fn login_reports_not_required_when_headers_already_satisfy_the_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        // Publishes no OAuth metadata, so an attempted discovery fails loudly.
+        let mcp =
+            axum::Router::new().route("/mcp", axum::routing::post(|| async { StatusCode::OK }));
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, mcp,
+        )));
+
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state_at(dir.path(), never_opens));
+        send(
+            &app,
+            "POST",
+            "/api/mcp/servers",
+            Some(serde_json::json!({
+                "name": "hub",
+                "url": format!("{base}/mcp"),
+                "headers": { "Authorization": "Bearer configured-token" },
+            })),
+        )
+        .await;
+
+        let (status_code, body) = send(&app, "POST", "/api/mcp/servers/hub/login", None).await;
+        assert_eq!(status_code, StatusCode::OK, "login body: {body}");
+        assert_eq!(body["status"], "not_required");
+        // `never_opens` would have failed the flow had discovery been attempted.
+
+        // And the listing calls it credentialed, so no UI offers a login here.
+        let (_, body) = send(&app, "GET", "/api/mcp/servers/hub/status", None).await;
+        assert_eq!(body["auth"], "header");
     }
 
     #[tokio::test]

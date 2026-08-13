@@ -6,7 +6,7 @@
 use clap::{Args, Subcommand};
 
 use crate::config::Config;
-use leviath_mcp::{AuthStore, MCPClient, MCPServerConfig, OAuthClient};
+use leviath_mcp::{AuthStore, LoginOutcome, MCPClient, MCPServerConfig, OAuthClient};
 
 /// Arguments for `lev mcp`.
 #[derive(Args)]
@@ -211,7 +211,7 @@ async fn login(name: &str, env: &McpEnv) -> anyhow::Result<()> {
     let mut store = AuthStore::load_with(&env.store_path, env.credential_store.as_deref())?;
     // Reuse a prior registration if we have one, so re-login doesn't re-register.
     let reuse = store.get(name).map(|a| a.client_id.clone());
-    let auth = OAuthClient::new()
+    let outcome = OAuthClient::new()
         .login(
             &url,
             &server.headers,
@@ -220,9 +220,16 @@ async fn login(name: &str, env: &McpEnv) -> anyhow::Result<()> {
             reuse.as_deref(),
         )
         .await?;
-    store.set(name, auth);
-    store.save_with(&env.store_path, env.credential_store.as_deref())?;
-    println!("✓ Authenticated with '{name}'.");
+    match outcome {
+        LoginOutcome::Authenticated(auth) => {
+            store.set(name, *auth);
+            store.save_with(&env.store_path, env.credential_store.as_deref())?;
+            println!("✓ Authenticated with '{name}'.");
+        }
+        LoginOutcome::NotRequired => {
+            println!("'{name}' does not need a login: it accepted the configured request.");
+        }
+    }
     Ok(())
 }
 
@@ -378,6 +385,10 @@ fn auth_status(server: &MCPServerConfig, store: &AuthStore, now: u64) -> String 
     match store.get(&server.name) {
         Some(auth) if auth.is_expired_at(now) => "expired".to_string(),
         Some(_) => "authenticated".to_string(),
+        // A configured `Authorization` header is a credential too. Calling it
+        // "none" reads as "log in here", which is the prompt that sends people
+        // into an OAuth flow their server never wanted.
+        None if server.has_auth_header() => "header".to_string(),
         None => "none".to_string(),
     }
 }
@@ -821,6 +832,77 @@ mod tests {
             let _ = reqwest::Client::new().get(&cb).send().await;
         });
         true
+    }
+
+    /// An MCP endpoint that takes its own API token and publishes no OAuth
+    /// metadata whatsoever, which is what a server like GitHub's looks like once
+    /// you have configured a header for it.
+    async fn mock_token_authenticated_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        // Answers everything, and publishes no OAuth metadata at all, so a login
+        // that goes looking for some fails loudly. That the header is what earns
+        // the `200` is `leviath-mcp`'s test to make; this one is about what the
+        // CLI does with the answer.
+        let app = Router::new().route("/mcp", post(|| async { StatusCode::OK }));
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+        base
+    }
+
+    /// Adding a header-authenticated server must not chase an OAuth login it
+    /// cannot complete. Before this, `add` printed a discovery 404 and told the
+    /// user to run `lev mcp login`, which then printed the same 404 forever.
+    #[tokio::test]
+    async fn add_with_an_auth_header_does_not_chase_an_oauth_login() {
+        let base = mock_token_authenticated_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let env = env_at(dir.path(), auto_consent, 1_000);
+
+        let add = AddArgs {
+            name: "hub".to_string(),
+            url: Some(format!("{base}/mcp")),
+            command: None,
+            args: vec![],
+            env: vec![],
+            headers: vec!["Authorization=Bearer configured-token".to_string()],
+            no_login: false,
+        };
+        execute_with(
+            McpArgs {
+                command: McpCommand::Add(add),
+            },
+            &env,
+        )
+        .await
+        .expect("adding a header-authenticated server must succeed");
+
+        let config = Config::load_from_path_public(&env.config_path).unwrap();
+        assert_eq!(
+            config.mcp_servers[0].headers.get("Authorization").unwrap(),
+            "Bearer configured-token"
+        );
+        // Nothing to store: the header is the credential, and it stays in the
+        // config rather than being duplicated into the OAuth store.
+        let stored = AuthStore::load(&env.store_path).unwrap();
+        assert!(stored.get("hub").is_none());
+
+        // And an explicit login says so rather than failing.
+        login("hub", &env)
+            .await
+            .expect("an explicit login on such a server is a no-op, not an error");
+        assert!(
+            AuthStore::load(&env.store_path)
+                .unwrap()
+                .get("hub")
+                .is_none()
+        );
+
+        // The listing reports the header as the credential it is. "none" here
+        // is what tells a user to go and log in.
+        let store = AuthStore::load(&env.store_path).unwrap();
+        assert_eq!(auth_status(&config.mcp_servers[0], &store, 1_000), "header");
     }
 
     #[tokio::test]
