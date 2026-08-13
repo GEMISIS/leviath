@@ -852,9 +852,58 @@ fn failover_is_recorded_in_the_stage_log() {
 }
 
 #[test]
-fn an_exhausted_fallback_list_still_terminates() {
-    // Last provider standing: the run ends, but with the readable message
-    // rather than the raw JSON body the issue reported.
+fn an_exhausted_fallback_list_pauses_on_credits_instead_of_dying() {
+    // Last provider standing and the account is out of credits: that is an
+    // account state, not a defect in the run, so the run pauses for a
+    // `lev resume` instead of ending (issue #413). The retry stays staged.
+    let (mut world, tx) = world_with_results();
+    let mut si = stage_with_fallback();
+    si.fallbacks.clear();
+    let e = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            si,
+            StageIoBuffer::default(),
+        ))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(credits_exhausted()),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    assert!(
+        world.get::<ReadyToInfer>(e).is_some(),
+        "the retry is staged"
+    );
+    assert!(world.get::<AwaitingInference>(e).is_none());
+    assert!(world.get::<ResolveTransition>(e).is_none());
+    assert!(world.get::<StageOutcome>(e).is_none());
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Paused
+    );
+    // The stage log says why the run stopped moving, since `lev ps` alone
+    // only shows PAUSED.
+    let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
+    let line = logs
+        .iter()
+        .map(|(_, l)| l.as_str())
+        .find(|l| l.starts_with("[paused]"))
+        .expect("the pause is written to the stage log");
+    assert!(line.contains("out of credits"), "{line}");
+    assert!(line.contains("lev resume"), "{line}");
+}
+
+#[test]
+fn an_exhausted_fallback_list_still_terminates_on_a_dead_key() {
+    // A rejected key does not fix itself with a top-up, so every
+    // provider-fatal reason other than exhausted credits still ends the run
+    // with the readable message rather than the raw JSON body.
     let (mut world, tx) = world_with_results();
     let mut si = stage_with_fallback();
     si.fallbacks.clear();
@@ -862,7 +911,10 @@ fn an_exhausted_fallback_list_still_terminates() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
-        result: Err(credits_exhausted()),
+        result: Err(leviath_providers::ProviderError::Unavailable {
+            reason: leviath_providers::UnavailableReason::AuthFailed,
+            detail: "HTTP 401 Unauthorized".to_string(),
+        }),
     })
     .unwrap();
 
@@ -873,7 +925,7 @@ fn an_exhausted_fallback_list_still_terminates() {
     let AgentStatus::Error { message } = &world.get::<AgentState>(e).unwrap().status else {
         panic!("an exhausted chain is a terminal error");
     };
-    assert!(message.starts_with("out of credits:"), "{message}");
+    assert!(message.starts_with("the API key was rejected"), "{message}");
 }
 
 #[test]
@@ -1009,13 +1061,18 @@ fn collect_works_without_the_breaker_installed() {
 #[test]
 fn an_unusable_provider_without_a_stage_component_still_terminates() {
     // `StageInference` is optional on the query, so the failover branch has to
-    // cope with its absence rather than assuming one is attached.
+    // cope with its absence rather than assuming one is attached. A dead key
+    // rather than dead credits, because exhausted credits pause instead of
+    // terminating (issue #413).
     let (mut world, tx) = world_with_results();
     let e = world.spawn((agent_state(), AwaitingInference)).id();
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
-        result: Err(credits_exhausted()),
+        result: Err(leviath_providers::ProviderError::Unavailable {
+            reason: leviath_providers::UnavailableReason::AuthFailed,
+            detail: "HTTP 401 Unauthorized".to_string(),
+        }),
     })
     .unwrap();
 

@@ -208,6 +208,7 @@ pub fn fail_stalled_dispatch(
     mut agents: Query<StalledDispatchQuery>,
     timeout: Option<Res<StallTimeout>>,
     clock: Option<Res<StallClock>>,
+    circuits: Option<Res<super::circuit::ProviderCircuits>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -232,6 +233,34 @@ pub fn fail_stalled_dispatch(
         }
         if now.saturating_sub(stall.since) < limit as i64 {
             continue; // still inside the grace period
+        }
+        // A circuit that opened because the account ran out of credits is an
+        // account state, not a dead end: pause the run for a resume instead of
+        // failing it, keeping `ReadyToInfer` so the retry is already staged
+        // (issue #413). Any other reason still fails below - a missing
+        // provider or a rejected key does not fix itself with a top-up.
+        let credits_out = stall.reason == StallReason::ProviderCircuitOpen
+            && circuits
+                .as_ref()
+                .and_then(|c| c.last_reason(&si.provider_name))
+                == Some(leviath_providers::UnavailableReason::CreditsExhausted);
+        if credits_out {
+            let message = format!(
+                "out of credits on '{}'; pausing this run - top up the account, \
+                 then `lev resume` it",
+                si.provider_name
+            );
+            tracing::warn!(
+                provider = %si.provider_name,
+                stalled_secs = now.saturating_sub(stall.since),
+                "out of credits; pausing the run for a resume"
+            );
+            if let Some(mut buffer) = buffer {
+                buffer.logs.push((0, format!("[paused] {message}")));
+            }
+            state.status = AgentStatus::Paused;
+            commands.entity(entity).remove::<DispatchStall>();
+            continue;
         }
         let message = stall.reason.give_up_message(&si.provider_name);
         tracing::error!(
@@ -591,6 +620,74 @@ mod tests {
             "got: {status:?}"
         );
         assert!(world.get::<ReadyToInfer>(e).is_none());
+    }
+
+    #[test]
+    fn a_run_out_of_credits_is_paused_for_a_resume_not_failed() {
+        // Issue #413: exhausted credits are an account state the operator can
+        // fix, so the watchdog pauses the run instead of ending it. The
+        // `ReadyToInfer` marker stays, so a resume re-dispatches the same
+        // inference.
+        let mut world = World::new();
+        world.insert_resource(StallTimeout(60));
+        let mut circuits = super::super::circuit::ProviderCircuits::default();
+        let policy = super::super::circuit::CircuitPolicy::default();
+        for i in 0..3 {
+            circuits.record_failure(
+                "ghost",
+                leviath_providers::UnavailableReason::CreditsExhausted,
+                NOW - 3 + i,
+                &policy,
+            );
+        }
+        world.insert_resource(circuits);
+        let e = spawn_stalled(&mut world, StallReason::ProviderCircuitOpen, 61);
+
+        run(&mut world);
+
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Paused
+        );
+        assert!(
+            world.get::<ReadyToInfer>(e).is_some(),
+            "the retry is staged"
+        );
+        assert!(world.get::<DispatchStall>(e).is_none());
+        let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
+        let line = logs
+            .iter()
+            .map(|(_, l)| l.as_str())
+            .find(|l| l.starts_with("[paused]"))
+            .expect("the pause is written to the stage log");
+        assert!(line.contains("out of credits"), "{line}");
+        assert!(line.contains("lev resume"), "{line}");
+    }
+
+    #[test]
+    fn a_circuit_open_for_a_dead_key_still_fails_the_run() {
+        // The pause is only for credits: a rejected key does not fix itself
+        // with a top-up, so any other recorded reason keeps today's failure.
+        let mut world = World::new();
+        world.insert_resource(StallTimeout(60));
+        let mut circuits = super::super::circuit::ProviderCircuits::default();
+        let policy = super::super::circuit::CircuitPolicy::default();
+        circuits.record_failure(
+            "ghost",
+            leviath_providers::UnavailableReason::AuthFailed,
+            NOW - 1,
+            &policy,
+        );
+        world.insert_resource(circuits);
+        let e = spawn_stalled(&mut world, StallReason::ProviderCircuitOpen, 61);
+
+        run(&mut world);
+
+        let status = &world.get::<AgentState>(e).unwrap().status;
+        assert!(
+            matches!(status, AgentStatus::Error { message } if message.contains("out of service")),
+            "got: {status:?}"
+        );
     }
 
     #[test]

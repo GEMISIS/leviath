@@ -821,6 +821,16 @@ impl PipelineWorld {
     pub fn resume(&mut self, agent: AgentId) -> bool {
         match self.agent_status(agent) {
             Some(AgentStatus::Paused | AgentStatus::Idle) => {
+                // An explicit resume says conditions have changed - most often
+                // a top-up after a run paused on exhausted credits (issue
+                // #413). A tripped breaker would otherwise hold the retry
+                // until its cooldown lapses, making the resume look ignored.
+                if let Some(mut circuits) = self
+                    .world
+                    .get_resource_mut::<crate::pipeline::ProviderCircuits>()
+                {
+                    circuits.reset();
+                }
                 self.set_status(agent, AgentStatus::Active)
             }
             _ => false,
@@ -1939,6 +1949,34 @@ mod tests {
         assert!(world.resume(e));
         world.run_until_idle(30).await;
         assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
+    }
+
+    #[tokio::test]
+    async fn resume_resets_the_provider_circuits() {
+        // Issue #413: a run paused on exhausted credits comes back through an
+        // explicit resume. If the breaker kept its state, the retry would sit
+        // out the rest of the cooldown and the resume would look ignored.
+        let mut world = build_world(registry_with(vec![text("t1")]));
+        let e = spawn(&mut world);
+        assert!(world.pause(e));
+
+        let policy = crate::pipeline::CircuitPolicy {
+            failures_before_open: 1,
+            cooldown_secs: 300,
+        };
+        let mut circuits = crate::pipeline::ProviderCircuits::default();
+        circuits.record_failure(
+            "openrouter",
+            leviath_providers::UnavailableReason::CreditsExhausted,
+            chrono::Utc::now().timestamp(),
+            &policy,
+        );
+        world.world_mut().insert_resource(circuits);
+        world.world_mut().insert_resource(policy);
+        assert_eq!(world.open_circuits().len(), 1);
+
+        assert!(world.resume(e));
+        assert!(world.open_circuits().is_empty());
     }
 
     #[tokio::test]
