@@ -33,7 +33,7 @@ panel and answer. `lev respond` does the same from the shell.
 
 ## What's on screen
 
-- **Run table**: title and run id, blueprint, stage, status, tokens, and start time, with
+- **Agent run table**: title and run id, blueprint, stage, status, tokens, and start time, with
   sub-agents nested under their parent. Titles are auto-generated per run. The model, iteration,
   and context-window occupancy live in the detail view.
 - **Detail view**: per-stage tabs or a graph view of the workflow, a context-window visualization,
@@ -82,7 +82,7 @@ skips marked runs that have already finished.
 
 ### Starting a run (`n`)
 
-Agents on the left, the task on the right. Once it starts, the dashboard opens that run's page, and
+Agent blueprints on the left, the task on the right. Once it starts, the dashboard opens that run's page, and
 `Esc` from there goes back to the list rather than back into the form.
 
 | Key | Action |

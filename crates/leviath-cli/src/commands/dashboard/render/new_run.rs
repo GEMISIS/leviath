@@ -37,7 +37,7 @@ impl Dashboard {
 
     fn draw_new_run_agents(&self, frame: &mut Frame, area: Rect) {
         let visible = self.filtered_new_run_agents();
-        let header = Row::new(["Agent", "Source", "Description"].into_iter().map(|h| {
+        let header = Row::new(["Blueprint", "Source", "Description"].into_iter().map(|h| {
             Cell::from(Span::styled(
                 h,
                 Style::default().add_modifier(Modifier::BOLD),
@@ -64,9 +64,9 @@ impl Dashboard {
         // The filter reads as part of the title, the way the main list's does,
         // so there is no separate line to notice.
         let title = match self.new_run_filter.is_empty() {
-            true => format!(" Agents ({}) ", visible.len()),
+            true => format!(" Agent Blueprints ({}) ", visible.len()),
             false => format!(
-                " Agents  /{}▌  {}/{} ",
+                " Agent Blueprints  /{}▌  {}/{} ",
                 self.new_run_filter,
                 visible.len(),
                 self.new_run_agents.len()
@@ -103,8 +103,10 @@ impl Dashboard {
 
         if visible.is_empty() {
             let hint = match self.new_run_filter.is_empty() {
-                true => "No agents found. `lev setup` installs the bundled ones.".to_string(),
-                false => format!("No agents match \"{}\".", self.new_run_filter),
+                true => {
+                    "No agent blueprints found. `lev setup` installs the bundled ones.".to_string()
+                }
+                false => format!("No agent blueprints match \"{}\".", self.new_run_filter),
             };
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(C_DIM)))),
@@ -123,7 +125,7 @@ impl Dashboard {
         let agent = self
             .new_run_selected_agent()
             .map(|a| a.name.clone())
-            .unwrap_or_else(|| "no agent selected".to_string());
+            .unwrap_or_else(|| "no agent blueprint selected".to_string());
         self.new_run_task.set_block(
             Block::default()
                 .borders(Borders::ALL)
@@ -288,7 +290,7 @@ mod tests {
     fn the_screen_lists_agents_with_their_source() {
         let mut dash = screen();
         let out = rendered(&mut dash);
-        assert!(out.contains("Agents (2)"), "{out}");
+        assert!(out.contains("Agent Blueprints (2)"), "{out}");
         assert!(out.contains("alpha"), "{out}");
         assert!(out.contains("installed"), "{out}");
         assert!(out.contains("bundled"), "{out}");
@@ -310,9 +312,12 @@ mod tests {
         let mut dash = make_test_dashboard();
         dash.new_run_screen = true;
         let out = rendered(&mut dash);
-        assert!(out.contains("No agents found"), "{out}");
+        assert!(out.contains("No agent blueprints found"), "{out}");
         assert!(out.contains("lev setup"), "{out}");
-        assert!(out.contains("no agent selected"), "task title: {out}");
+        assert!(
+            out.contains("no agent blueprint selected"),
+            "task title: {out}"
+        );
     }
 
     #[test]
@@ -320,7 +325,7 @@ mod tests {
         let mut dash = screen();
         dash.new_run_filter = "zzz".to_string();
         let out = rendered(&mut dash);
-        assert!(out.contains("No agents match"), "{out}");
+        assert!(out.contains("No agent blueprints match"), "{out}");
     }
 
     #[test]

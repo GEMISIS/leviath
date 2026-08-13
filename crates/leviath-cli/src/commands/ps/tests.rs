@@ -139,12 +139,12 @@ fn stage_cell_shows_position_only_for_multi_stage_blueprints() {
 fn format_runs_handles_empty() {
     assert_eq!(
         format_runs(&[], &[], &healthy_daemon(), 0),
-        "no runs active"
+        "no agent runs active"
     );
 }
 
 /// Issue #205: a scheduler spawns a run, the run dies on its first inference,
-/// and the daemon unloads it. Nothing is running, but "no runs active" is the
+/// and the daemon unloads it. Nothing is running, but "no agent runs active" is the
 /// answer that cost forty minutes of spawn-and-revert, because it reads exactly
 /// like a run that was never spawned. The row has to be there, with the reason.
 #[test]
@@ -158,7 +158,7 @@ fn format_runs_shows_a_finished_run_when_nothing_is_running() {
     died.last_progress_at = Some(1_140);
 
     let out = format_runs(&[], &[died], &healthy_daemon(), 1_200);
-    assert_ne!(out, "no runs active");
+    assert_ne!(out, "no agent runs active");
     let lines: Vec<&str> = out.lines().collect();
     assert!(lines[0].starts_with("RUN"), "header row: {out}");
     assert!(lines[1].contains("worker-1785616492"), "{out}");
@@ -183,7 +183,7 @@ fn format_runs_lists_finished_runs_after_the_live_ones() {
 }
 
 /// An empty listing while a provider is down is the reporter's end state:
-/// every run dead and reaped, and `lev ps` saying only "no runs active",
+/// every run dead and reaped, and `lev ps` saying only "no agent runs active",
 /// which reads as an idle daemon rather than one that cannot start anything.
 #[test]
 fn an_empty_listing_still_says_why_nothing_is_running() {
@@ -195,7 +195,7 @@ fn an_empty_listing_still_says_why_nothing_is_running() {
         ..healthy_daemon()
     };
     let out = format_runs(&[], &[], &health, 0);
-    assert!(out.starts_with("no runs active"), "{out}");
+    assert!(out.starts_with("no agent runs active"), "{out}");
     assert!(out.contains("1 provider is out of service:"), "{out}");
     assert!(out.contains("openrouter (credits-exhausted"), "{out}");
 }

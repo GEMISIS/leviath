@@ -33,7 +33,7 @@ pub enum Commands {
     /// Run an agent
     Run(commands::run::RunArgs),
 
-    /// List runs in the shared-world daemon
+    /// List agent runs in the shared-world daemon
     #[command(long_about = commands::ps::PS_LONG_ABOUT)]
     Ps(commands::ps::PsArgs),
 

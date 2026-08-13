@@ -366,9 +366,9 @@ fn print_agent_listing(
     // and telling someone to run `lev setup` because they asked to see the
     // catalog would be a non sequitur.
     if filter.shows_agents() && !found_runnable {
-        println!("No agents installed yet.");
+        println!("No agent blueprints installed yet.");
         println!();
-        println!("To install the bundled agents:");
+        println!("To install the bundled agent blueprints:");
         println!("  lev setup");
         println!();
         println!("To create your own:");

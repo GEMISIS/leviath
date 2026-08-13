@@ -267,7 +267,7 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
         spawn_outcome_tx,
     ));
 
-    dashboard.add_log("Dashboard started. Press `n` to start a run.".to_string());
+    dashboard.add_log("Dashboard started. Press `n` to start an agent run.".to_string());
 
     dashboard
 }
@@ -639,7 +639,7 @@ mod tests {
         // An empty dashboard still draws its chrome. Without this the test
         // would pass just as happily against a `draw` that returned early.
         let buf = crate::commands::dashboard::test_support::rendered_buffer(&terminal);
-        assert!(buf.contains("Runs"), "{buf}");
+        assert!(buf.contains("Agent Runs"), "{buf}");
     }
 
     #[test]
