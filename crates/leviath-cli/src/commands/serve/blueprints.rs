@@ -134,6 +134,7 @@ pub(super) fn read_blueprint_info(manifest_path: &Path, dir: &Path) -> Option<Bl
         description: bp.description,
         path: dir.to_string_lossy().to_string(),
         stages: bp.stages.iter().map(|s| s.name.clone()).collect(),
+        manifest: content,
     })
 }
 
@@ -276,16 +277,29 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// `GET /api/blueprints/{name}`: one blueprint, with its manifest text.
+///
+/// The manifest is read here rather than listed, because a listing that
+/// carried every manifest would send the contents of every agent on the
+/// machine to answer a question about their names.
+///
+/// A blueprint the catalog found but whose manifest cannot be read is a 500
+/// rather than a detail response without one: the caller asked for the file,
+/// and answering with everything except the file is how a console ends up
+/// showing a manifest it invented.
 pub(super) async fn get_blueprint(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
-) -> Result<Json<BlueprintInfo>, StatusCode> {
+) -> Result<Json<BlueprintDetail>, StatusCode> {
     let blueprints = discover_blueprints(&state.config);
-    blueprints
+    let mut info = blueprints
         .into_iter()
         .find(|b| b.name == name)
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    // Taken out of the info rather than read again: discovery already read
+    // this file to build everything else in the response.
+    let manifest = std::mem::take(&mut info.manifest);
+    Ok(Json(BlueprintDetail { info, manifest }))
 }
 
 pub(super) async fn create_blueprint(
@@ -330,6 +344,9 @@ pub(super) async fn create_blueprint(
         description: bp.description,
         path: dir.to_string_lossy().to_string(),
         stages: bp.stages.iter().map(|s| s.name.clone()).collect(),
+        // The text just written. Not serialized on this route, which returns
+        // the catalog shape, but carried so the value is never a lie.
+        manifest: body.manifest,
     }))
 }
 
@@ -372,6 +389,9 @@ pub(super) async fn update_blueprint(
         description: bp.description,
         path: dir.to_string_lossy().to_string(),
         stages: bp.stages.iter().map(|s| s.name.clone()).collect(),
+        // The text just written. Not serialized on this route, which returns
+        // the catalog shape, but carried so the value is never a lie.
+        manifest: body.manifest,
     }))
 }
 
@@ -400,10 +420,22 @@ pub(super) async fn delete_blueprint(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/blueprints/validate`: parse, validate and lint a manifest.
+///
+/// An optional `name` says which existing blueprint this manifest is an edit
+/// of, which is what lets the lint find that agent's own `tools/*.rhai`. An
+/// unusable name (one that is not a safe path component) is treated as no name
+/// rather than a 400: the caller asked for a verdict on a manifest, and the
+/// manifest can still be judged against the built-in tools.
 pub(super) async fn validate_blueprint(
     Json(body): Json<ValidateBlueprintReq>,
 ) -> Json<ValidateResponse> {
-    Json(validate_manifest_text(&body.manifest))
+    let dir = body
+        .name
+        .as_deref()
+        .and_then(|name| blueprint_dir(name).ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    Json(validate_manifest_text(&body.manifest, &dir))
 }
 
 /// Parse, validate and lint a manifest posted as text.
@@ -413,11 +445,14 @@ pub(super) async fn validate_blueprint(
 /// invalid alongside the structural errors. Warnings and notes are reported
 /// separately and do not.
 ///
-/// The manifest arrives as text with no directory behind it, so the lint runs
-/// against the built-in tool set only: an agent's own `tools/*.rhai` cannot be
-/// resolved from a POST body, and an env that claimed otherwise would report
-/// every one of them as unknown.
-fn validate_manifest_text(manifest: &str) -> ValidateResponse {
+/// `dir` is the agent's own directory when the request named one, and that is
+/// what makes the tool check meaningful: the lint resolves `tools/*.rhai`
+/// relative to it, so validating an edit of an existing agent without it
+/// reported every tool that agent defines as unknown and refused the save.
+/// A manifest typed from nothing has no directory to offer, and then the lint
+/// runs against the built-in tool set alone, which is the most that can be
+/// said about it.
+fn validate_manifest_text(manifest: &str, dir: &Path) -> ValidateResponse {
     let bp = match parse_manifest(manifest) {
         Ok(bp) => bp,
         Err(e) => return ValidateResponse::invalid(vec![e.to_string()]),
@@ -426,7 +461,7 @@ fn validate_manifest_text(manifest: &str) -> ValidateResponse {
         return ValidateResponse::invalid(vec![e.to_string()]);
     }
 
-    let env = crate::lint::LintEnv::offline(std::path::Path::new("."));
+    let env = crate::lint::LintEnv::offline(dir);
     let findings = crate::lint::lint_manifest(manifest, &bp, &env);
     let (errors, warnings): (Vec<_>, Vec<_>) = findings
         .iter()
@@ -674,6 +709,7 @@ mod canonicalize_tests {
             description: String::new(),
             path: path.to_string(),
             stages: vec![],
+            manifest: String::new(),
         }
     }
 
@@ -846,6 +882,67 @@ system_prompt = "Plan the work"
         let bp: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(bp["name"].as_str().unwrap(), "test-bp");
         assert_eq!(bp["version"].as_str().unwrap(), "1.0.0");
+        // The manifest text comes with it. Without this a console has to guess
+        // what it is editing, and the guesses available to a browser are a
+        // local draft or a copy bundled at build time - neither of which is
+        // the file the daemon runs.
+        assert_eq!(bp["manifest"].as_str().unwrap(), test_manifest());
+    }
+
+    /// The listing must not carry manifests: it answers "what agents are
+    /// there", and one manifest per agent would make that question cost the
+    /// contents of every agent on the machine.
+    #[tokio::test]
+    async fn the_listing_does_not_carry_manifests() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("test-bp");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("agent.leviath"), test_manifest()).unwrap();
+
+        let state = test_state_with_path(dir.path().to_path_buf());
+        let app = Router::new()
+            .route("/api/blueprints", get(list_blueprints))
+            .with_state(state);
+        let req = Request::builder()
+            .uri("/api/blueprints")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let items = page["items"].as_array().expect("an items array");
+        assert!(!items.is_empty(), "the agent is listed");
+        assert!(
+            items.iter().all(|b| b.get("manifest").is_none()),
+            "the listing stays a catalog: {items:?}"
+        );
+    }
+
+    /// A manifest that cannot be read is not discovered at all, so the detail
+    /// route answers 404 rather than inventing a blueprint with no text. This
+    /// is why the route needs no "could not read it" arm: there is no state in
+    /// which discovery succeeds and the manifest is missing.
+    #[tokio::test]
+    async fn a_blueprint_whose_manifest_cannot_be_read_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("test-bp");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        // A directory where the manifest should be: it exists, and no platform
+        // will read it as text.
+        std::fs::create_dir_all(agent_dir.join("agent.leviath")).unwrap();
+
+        let state = test_state_with_path(dir.path().to_path_buf());
+        let app = Router::new()
+            .route("/api/blueprints/{name}", get(get_blueprint))
+            .with_state(state);
+        let req = Request::builder()
+            .uri("/api/blueprints/test-bp")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1404,7 +1501,7 @@ available_tools = ["read_file", "raed_file", "ask_user_text"]
 [context.regions]
 system = { kind = "pinned", max_tokens = 1000 }
 "#;
-        let result = validate_manifest_text(manifest);
+        let result = validate_manifest_text(manifest, Path::new("."));
         assert!(!result.valid);
         let errors = result.errors.expect("the typo is an error");
         assert_eq!(errors.len(), 1);
@@ -1424,6 +1521,103 @@ system = { kind = "pinned", max_tokens = 1000 }
         );
     }
 
+    /// An agent's own `tools/*.rhai` resolve when the request says which agent
+    /// this is.
+    ///
+    /// This is the fault that stopped any tool-bearing agent being saved from
+    /// the console: the lint was rooted at the daemon's working directory, so
+    /// every tool the agent itself defines came back as unknown, at error
+    /// severity, and the pre-flight refused the save. The pair matters more
+    /// than either half - rooted at the agent the grant is fine, rooted
+    /// anywhere else it is an error - so both are asserted against the same
+    /// manifest.
+    #[tokio::test]
+    async fn a_manifest_naming_its_agent_resolves_that_agents_own_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = dir.path().join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        std::fs::write(
+            tools.join("web_search.rhai"),
+            "// @tool web_search\n// @description searches\n\"found\"",
+        )
+        .unwrap();
+        let manifest = r#"
+[agent]
+name = "toolful"
+version = "0.1.0"
+description = "d"
+
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Main"
+max_iterations = 5
+available_tools = ["web_search"]
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#;
+
+        let rooted = validate_manifest_text(manifest, dir.path());
+        assert!(
+            rooted.valid,
+            "the agent's own tool resolves: {:?}",
+            rooted.errors
+        );
+
+        // The same manifest judged from somewhere that has no such tools/ is
+        // exactly the failure users hit.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let unrooted = validate_manifest_text(manifest, elsewhere.path());
+        assert!(!unrooted.valid);
+        let errors = unrooted.errors.expect("the grant resolves to nothing");
+        assert!(errors[0].contains("unknown-tool"), "{errors:?}");
+    }
+
+    /// The handler turns the request's `name` into that agent's directory, and
+    /// tolerates a name it cannot use rather than failing the whole request.
+    #[tokio::test]
+    async fn validate_accepts_a_blueprint_name_and_ignores_an_unusable_one() {
+        let app = Router::new().route("/api/blueprints/validate", post(validate_blueprint));
+        let manifest = r#"
+[agent]
+name = "plain"
+version = "0.1.0"
+description = "d"
+
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Main"
+max_iterations = 5
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#;
+        // A traversal attempt is not a 400 here: the manifest can still be
+        // judged, just without a directory behind it.
+        for name in [
+            serde_json::json!("../../etc"),
+            serde_json::json!("no-such-agent"),
+            serde_json::Value::Null,
+        ] {
+            let body = serde_json::json!({ "manifest": manifest, "name": name }).to_string();
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/blueprints/validate")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), axum::http::StatusCode::OK, "{name}");
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let out: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(out["valid"], serde_json::json!(true), "{name}");
+        }
+    }
+
     /// Warnings alone leave the blueprint valid.
     #[tokio::test]
     async fn validate_blueprint_with_only_warnings_stays_valid() {
@@ -1439,7 +1633,7 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 [context.regions]
 system = { kind = "pinned", max_tokens = 1000 }
 "#;
-        let result = validate_manifest_text(manifest);
+        let result = validate_manifest_text(manifest, Path::new("."));
         assert!(result.valid);
         assert!(result.errors.is_none());
         assert_eq!(result.warnings.expect("no max_iterations").len(), 1);
