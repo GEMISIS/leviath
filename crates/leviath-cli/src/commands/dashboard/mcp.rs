@@ -193,6 +193,10 @@ fn auth_status(server: &MCPServerConfig, store: &AuthStore, now: u64) -> String 
     match store.get(&server.name) {
         Some(auth) if auth.is_expired_at(now) => "expired".to_string(),
         Some(_) => "authenticated".to_string(),
+        // A configured `Authorization` header is a credential too, and "none"
+        // in this column is what sends someone to press login on a server that
+        // needs none.
+        None if server.has_auth_header() => "header".to_string(),
         None => "none".to_string(),
     }
 }
@@ -803,12 +807,12 @@ mod tests {
             "got: {}",
             outcome.message
         );
-        assert!(
-            AuthStore::load(&ctx.store_path)
-                .unwrap()
-                .get("hub")
-                .is_none()
-        );
+        let store = AuthStore::load(&ctx.store_path).unwrap();
+        assert!(store.get("hub").is_none());
+
+        // The screen's own column agrees, so nobody presses login again.
+        let config = Config::load_from_path_public(&ctx.config_path).unwrap();
+        assert_eq!(auth_status(&config.mcp_servers[0], &store, 0), "header");
     }
 
     #[tokio::test]
