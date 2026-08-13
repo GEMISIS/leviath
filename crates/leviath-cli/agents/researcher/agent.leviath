@@ -65,7 +65,7 @@ transform = "direct"
 # whether it needs more sources or is ready to summarize.
 [stages.analyze]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.6:27b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Analyze and synthesize findings"
 available_tools = ["read_file", "web_fetch", "context_write", "context_append"]
 max_iterations = 20
