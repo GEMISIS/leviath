@@ -362,8 +362,13 @@ pub const MIGRATIONS: &[Migration] = &[];
 /// What to do about the binary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinaryStep {
-    /// Run this, argv-style.
-    Run(Vec<String>),
+    /// Run these, argv-style, in order, stopping at the first failure.
+    ///
+    /// A sequence rather than one command because a package manager will not
+    /// see a release published minutes ago until its own index is refreshed,
+    /// so the refresh and the upgrade are two commands that only make sense
+    /// together.
+    Run(Vec<Vec<String>>),
     /// There is nothing to run here. Tell the user this instead.
     Advise(String),
 }
@@ -403,19 +408,40 @@ pub enum ConfigState {
     Unreadable(String),
 }
 
-/// The upgrade step for an install method: a command, or the reason there
-/// isn't one.
+/// One line naming every command a [`BinaryStep::Run`] will run, in order.
+///
+/// Joined with `&&` because that is both how the sequence behaves (each
+/// command only runs if the one before it succeeded) and what a user would
+/// paste into a shell to do it themselves.
+pub fn render_commands(commands: &[Vec<String>]) -> String {
+    commands
+        .iter()
+        .map(|argv| argv.join(" "))
+        .collect::<Vec<_>>()
+        .join(" && ")
+}
+
+/// The upgrade step for an install method: the commands to run, or the reason
+/// there are none.
 pub fn binary_step(method: &InstallMethod) -> BinaryStep {
     match method {
+        // `brew update` first, every time. Homebrew upgrades against the tap
+        // metadata it already has, so a formula published minutes ago is
+        // invisible to `brew upgrade` on its own and the command cheerfully
+        // reports the installed version as the latest. That is what sent
+        // people to `brew update && brew upgrade leviath` by hand. The formula
+        // name carries the channel, so this is the same two steps for
+        // `leviath`, `leviath-alpha` and `leviath-beta`.
         InstallMethod::Homebrew { formula } => BinaryStep::Run(vec![
-            "brew".to_string(),
-            "upgrade".to_string(),
-            formula.clone(),
+            vec!["brew".to_string(), "update".to_string()],
+            vec!["brew".to_string(), "upgrade".to_string(), formula.clone()],
         ]),
+        // Scoop has the same shape: a bare `scoop update` refreshes the
+        // buckets, and `scoop update <app>` upgrades against whatever the
+        // buckets already said.
         InstallMethod::Scoop { package } => BinaryStep::Run(vec![
-            "scoop".to_string(),
-            "update".to_string(),
-            package.clone(),
+            vec!["scoop".to_string(), "update".to_string()],
+            vec!["scoop".to_string(), "update".to_string(), package.clone()],
         ]),
         // Deliberately not run. `cargo install` rebuilds the whole workspace
         // from source, which is minutes of CPU nobody asked for by typing
@@ -429,14 +455,14 @@ pub fn binary_step(method: &InstallMethod) -> BinaryStep {
         // One shell, one pipeline. `LEVIATH_CHANNEL=beta curl ... | sh` is the
         // form to never generate: the assignment belongs to `curl`, the piped
         // shell never sees it, and the installer silently takes stable.
-        InstallMethod::Script { channel } => BinaryStep::Run(vec![
+        InstallMethod::Script { channel } => BinaryStep::Run(vec![vec![
             "sh".to_string(),
             "-c".to_string(),
             format!(
                 "curl -fsSL {INSTALL_URL} | sh -s -- --channel {}",
                 channel.id()
             ),
-        ]),
+        ]]),
         InstallMethod::Unknown { path } => BinaryStep::Advise(format!(
             "`lev` is at {}, which is not where any installer Leviath ships puts it. \
              Update it the way you installed it, or re-install with \
@@ -517,7 +543,9 @@ pub fn format_plan(plan: &UpdatePlan, version: &str) -> String {
     );
 
     match &plan.binary {
-        BinaryStep::Run(argv) => out.push_str(&format!("  binary   {}\n", argv.join(" "))),
+        BinaryStep::Run(commands) => {
+            out.push_str(&format!("  binary   {}\n", render_commands(commands)));
+        }
         BinaryStep::Advise(text) => out.push_str(&format!("  binary   {text}\n")),
     }
 
@@ -568,7 +596,15 @@ pub fn format_plan(plan: &UpdatePlan, version: &str) -> String {
 /// shape is explicit and does not move when a type gains a field.
 pub fn plan_json(plan: &UpdatePlan, version: &str) -> serde_json::Value {
     let binary = match &plan.binary {
-        BinaryStep::Run(argv) => serde_json::json!({ "action": "run", "command": argv }),
+        // `commands` is a list of argv lists. The old `command` key held a
+        // single argv and is kept alongside it, holding the last command (the
+        // upgrade itself), so a script reading it still sees the step that
+        // does the work rather than the index refresh in front of it.
+        BinaryStep::Run(commands) => serde_json::json!({
+            "action": "run",
+            "commands": commands,
+            "command": commands.last(),
+        }),
         BinaryStep::Advise(text) => serde_json::json!({ "action": "advise", "message": text }),
     };
     let agents: Vec<serde_json::Value> = plan
@@ -681,14 +717,17 @@ fn agreed(args: &UpdateArgs, env: &UpdateEnv, question: &str) -> bool {
 
 /// Step one: the binary.
 fn update_binary(args: &UpdateArgs, env: &UpdateEnv, plan: &UpdatePlan) -> anyhow::Result<()> {
-    let argv = match &plan.binary {
+    let commands = match &plan.binary {
         BinaryStep::Advise(text) => {
             println!("  {text}");
             return Ok(());
         }
-        BinaryStep::Run(argv) => argv,
+        BinaryStep::Run(commands) => commands,
     };
-    let shown = argv.join(" ");
+    // Asked about as one question, because they are one action: refreshing a
+    // package index without then upgrading would be a strange thing to agree
+    // to on its own.
+    let shown = render_commands(commands);
     if !agreed(args, env, &format!("Run `{shown}`?")) {
         println!("  left the binary alone");
         return Ok(());
@@ -697,7 +736,10 @@ fn update_binary(args: &UpdateArgs, env: &UpdateEnv, plan: &UpdatePlan) -> anyho
         println!("  would run: {shown}");
         return Ok(());
     }
-    (env.runner)(argv)
+    for argv in commands {
+        (env.runner)(argv)?;
+    }
+    Ok(())
 }
 
 /// Step two: the bundled blueprints.
