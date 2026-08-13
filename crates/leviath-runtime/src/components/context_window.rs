@@ -84,7 +84,83 @@ pub(super) fn cache_hint_sort_priority(hint: leviath_core::CacheHint) -> u8 {
         CacheHint::Always => 0,               // Pinned, CompactHistory - most stable
         CacheHint::SlidingPrefix { .. } => 1, // Partially stable
         CacheHint::UntilChanged => 2,         // Compacting - changes on compaction
-        CacheHint::Never => 3,                // Temporary, Clearable - changes every iteration
+        // Same tier as UntilChanged on purpose: the hint marks where a cache
+        // breakpoint belongs, never where a block belongs in the prompt.
+        CacheHint::RecentlyChanged => 2,
+        CacheHint::Never => 3, // Temporary, Clearable - changes every iteration
+    }
+}
+
+/// The most cache breakpoints assembly will let the system blocks claim.
+///
+/// Anthropic allows four `cache_control` blocks across the whole request and
+/// the provider hands the system blocks first claim on that budget, so leaving
+/// one run unclaimed is what keeps a breakpoint available for the messages.
+const MAX_SYSTEM_CACHE_RUNS: usize = 3;
+
+/// Split the volatile tier of the system prompt at its most recently changed
+/// block, by retagging that block and every block after it as
+/// [`leviath_core::CacheHint::RecentlyChanged`].
+///
+/// Providers place one cache breakpoint per run of same-hint blocks, so with a
+/// single `UntilChanged` run the only breakpoint sits at the end of the tier.
+/// A block mutating in the middle of that run therefore invalidates the whole
+/// run, and every block after the mutation is re-sent as a cache write. Adding
+/// a boundary just before the changed block gives the unchanged head of the
+/// tier a cache entry of its own. Only the breakpoint metadata moves: block
+/// order and block text are both left exactly as the sort left them, and this
+/// runs after the sort so it cannot influence ordering at all. The effect on
+/// cache-write volume is not measurable inside this repository.
+///
+/// `recency` carries the newest entry timestamp of the region behind each
+/// `UntilChanged` block, in the order those blocks were assembled. The sort is
+/// stable and every block in the tier shares one sort priority, so that order
+/// is also the order the blocks appear in now.
+///
+/// Nothing is retagged when the newest block is already the first one (there is
+/// no stable head to protect), or when the blocks already fill the run budget.
+fn mark_recently_changed_run(blocks: &mut [leviath_providers::SystemBlock], recency: &[i64]) {
+    use leviath_core::CacheHint;
+
+    let mut volatile: Vec<usize> = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        if block.cache_hint == CacheHint::UntilChanged {
+            volatile.push(index);
+        }
+    }
+
+    // The first block carrying the newest timestamp. Ties resolve to the
+    // earliest block, which is the conservative choice: when two regions were
+    // written in the same second, both of them changed, and the boundary
+    // belongs ahead of the earlier one.
+    let mut boundary = 0usize;
+    let mut newest = i64::MIN;
+    for (position, &stamp) in recency.iter().enumerate() {
+        if stamp > newest {
+            newest = stamp;
+            boundary = position;
+        }
+    }
+    if boundary == 0 {
+        return;
+    }
+
+    // Count the breakpoints the provider would place today. Splitting the
+    // volatile tier adds exactly one, so refusing at the limit is what keeps
+    // the messages breakpoint from being squeezed out.
+    let mut runs = 0usize;
+    for index in 0..blocks.len() {
+        let hint = blocks[index].cache_hint;
+        if hint != CacheHint::Never && blocks.get(index + 1).map(|b| b.cache_hint) != Some(hint) {
+            runs += 1;
+        }
+    }
+    if runs >= MAX_SYSTEM_CACHE_RUNS {
+        return;
+    }
+
+    for &index in volatile.iter().skip(boundary) {
+        blocks[index].cache_hint = CacheHint::RecentlyChanged;
     }
 }
 
@@ -540,6 +616,10 @@ impl ContextWindow {
 
         let mut system_blocks = Vec::new();
         let mut messages: Vec<leviath_providers::Message> = Vec::new();
+        // One entry per `UntilChanged` system block, in assembly order, holding
+        // the newest entry timestamp of the region that produced it. Feeds the
+        // cache-breakpoint split after the sort.
+        let mut volatile_recency: Vec<i64> = Vec::new();
 
         for region in &self.regions {
             // A region this stage does not attend to is held but not shown.
@@ -554,6 +634,10 @@ impl ContextWindow {
             if region.content.is_empty() && !is_custom {
                 continue;
             }
+
+            // Where this region's system blocks begin, so the recency mapping
+            // below covers exactly the blocks this region adds.
+            let first_new_block = system_blocks.len();
 
             match &region.kind {
                 // System-level content → system blocks
@@ -784,6 +868,22 @@ impl ContextWindow {
                     });
                 }
             }
+
+            // The newest entry timestamp stands in for "when did this region
+            // last change". Regions are append-mostly and timestamps only move
+            // forward, so the block holding the newest entry is the one that
+            // mutated most recently.
+            let mut newest = i64::MIN;
+            for entry in &region.content {
+                if entry.timestamp > newest {
+                    newest = entry.timestamp;
+                }
+            }
+            for block in &system_blocks[first_new_block..] {
+                if block.cache_hint == CacheHint::UntilChanged {
+                    volatile_recency.push(newest);
+                }
+            }
         }
 
         // ── Sort system blocks for optimal prefix caching ────────────────
@@ -793,6 +893,12 @@ impl ContextWindow {
         // they form the cacheable prefix, with volatile blocks
         // (Compacting, Temporary, Clearable) after.
         system_blocks.sort_by_key(|block| cache_hint_sort_priority(block.cache_hint));
+
+        // ── Spend a cache breakpoint on the volatile boundary ────────────
+        //
+        // Runs strictly after the sort, so it can only change breakpoint
+        // metadata: the block order and the block text are already final.
+        mark_recently_changed_run(&mut system_blocks, &volatile_recency);
 
         // ── Sanitize orphaned tool_use / tool_result blocks ──────────────
         //
@@ -872,8 +978,9 @@ impl ContextWindow {
         // prompt caching. We place a cache breakpoint near the end of the
         // stable prefix to maximize cache hits.
         //
-        // Anthropic allows up to 4 breakpoints. We use 1 on messages
-        // (system blocks already have cache_control via CacheHint).
+        // Anthropic allows up to 4 breakpoints. Exactly 1 lands on the
+        // messages; the system blocks get theirs from their cache hints, and
+        // [`MAX_SYSTEM_CACHE_RUNS`] caps those at 3 so this one always fits.
         // Place it on the 4th-from-last message to give a buffer for the
         // new messages added each iteration (typically 2-3).
         if messages.len() >= 5 {
@@ -982,5 +1089,281 @@ impl ContextWindow {
             .iter()
             .filter_map(|r| r.taint_level().map(|t| (r.name.clone(), t)))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leviath_core::{CacheHint, Region, RegionKind};
+    use leviath_providers::SystemBlock;
+
+    /// A system block carrying only the hint under test.
+    fn block(hint: CacheHint) -> SystemBlock {
+        SystemBlock {
+            text: "x".to_string(),
+            cache_hint: hint,
+        }
+    }
+
+    /// The number of cache breakpoints the Anthropic provider would place on
+    /// these system blocks: one per contiguous run of same-hint cacheable
+    /// blocks. Mirrors `system_cache_breakpoints` so the ceiling can be
+    /// asserted from this side of the crate boundary.
+    fn provider_system_breakpoints(blocks: &[SystemBlock]) -> usize {
+        let mut runs = 0;
+        for (index, block) in blocks.iter().enumerate() {
+            let hint = block.cache_hint;
+            if hint != CacheHint::Never && blocks.get(index + 1).map(|b| b.cache_hint) != Some(hint)
+            {
+                runs += 1;
+            }
+        }
+        runs
+    }
+
+    /// A region holding one entry stamped at `timestamp`.
+    fn stamped_region(name: &str, kind: RegionKind, timestamp: i64) -> Region {
+        let mut region = Region::new(name.to_string(), kind, 10_000);
+        region.add_entry(format!("{name} contents"), 10).unwrap();
+        region.content[0].timestamp = timestamp;
+        region
+    }
+
+    fn hashmap_region(name: &str, timestamp: i64) -> Region {
+        stamped_region(
+            name,
+            RegionKind::HashMap {
+                max_entries: Some(16),
+            },
+            timestamp,
+        )
+    }
+
+    #[test]
+    fn recently_changed_sorts_with_until_changed() {
+        assert_eq!(
+            cache_hint_sort_priority(CacheHint::RecentlyChanged),
+            cache_hint_sort_priority(CacheHint::UntilChanged)
+        );
+        assert_eq!(cache_hint_sort_priority(CacheHint::RecentlyChanged), 2);
+    }
+
+    #[test]
+    fn mark_recently_changed_run_splits_at_the_newest_block() {
+        // Always, three volatile blocks, and a trailing uncacheable block. The
+        // third volatile block is the one that just changed.
+        let mut blocks = vec![
+            block(CacheHint::Always),
+            block(CacheHint::UntilChanged),
+            block(CacheHint::UntilChanged),
+            block(CacheHint::UntilChanged),
+            block(CacheHint::Never),
+        ];
+        mark_recently_changed_run(&mut blocks, &[10, 20, 90]);
+
+        let hints: Vec<CacheHint> = blocks.iter().map(|b| b.cache_hint).collect();
+        assert_eq!(
+            hints,
+            vec![
+                CacheHint::Always,
+                CacheHint::UntilChanged,
+                CacheHint::UntilChanged,
+                CacheHint::RecentlyChanged,
+                CacheHint::Never,
+            ]
+        );
+        // Always run, stable volatile head, changed volatile tail. The
+        // uncacheable trailing block claims nothing.
+        assert_eq!(provider_system_breakpoints(&blocks), 3);
+    }
+
+    #[test]
+    fn mark_recently_changed_run_retags_every_block_after_the_boundary() {
+        let mut blocks = vec![
+            block(CacheHint::UntilChanged),
+            block(CacheHint::UntilChanged),
+            block(CacheHint::UntilChanged),
+        ];
+        mark_recently_changed_run(&mut blocks, &[1, 7, 5]);
+
+        let hints: Vec<CacheHint> = blocks.iter().map(|b| b.cache_hint).collect();
+        assert_eq!(
+            hints,
+            vec![
+                CacheHint::UntilChanged,
+                CacheHint::RecentlyChanged,
+                CacheHint::RecentlyChanged,
+            ]
+        );
+    }
+
+    #[test]
+    fn mark_recently_changed_run_ties_resolve_to_the_earliest_block() {
+        // Two regions written in the same second both changed, so the boundary
+        // belongs ahead of the earlier one.
+        let mut blocks = vec![
+            block(CacheHint::UntilChanged),
+            block(CacheHint::UntilChanged),
+            block(CacheHint::UntilChanged),
+        ];
+        mark_recently_changed_run(&mut blocks, &[1, 9, 9]);
+
+        assert_eq!(blocks[0].cache_hint, CacheHint::UntilChanged);
+        assert_eq!(blocks[1].cache_hint, CacheHint::RecentlyChanged);
+        assert_eq!(blocks[2].cache_hint, CacheHint::RecentlyChanged);
+    }
+
+    #[test]
+    fn mark_recently_changed_run_leaves_a_headless_tier_alone() {
+        // The newest block is already first, so there is no stable head to put
+        // behind a breakpoint.
+        let mut blocks = vec![
+            block(CacheHint::UntilChanged),
+            block(CacheHint::UntilChanged),
+        ];
+        mark_recently_changed_run(&mut blocks, &[42, 1]);
+        assert!(
+            blocks
+                .iter()
+                .all(|b| b.cache_hint == CacheHint::UntilChanged)
+        );
+    }
+
+    #[test]
+    fn mark_recently_changed_run_leaves_a_tierless_prompt_alone() {
+        // No volatile blocks at all means an empty recency list.
+        let mut blocks = vec![block(CacheHint::Always), block(CacheHint::Never)];
+        mark_recently_changed_run(&mut blocks, &[]);
+        assert_eq!(blocks[0].cache_hint, CacheHint::Always);
+        assert_eq!(blocks[1].cache_hint, CacheHint::Never);
+    }
+
+    #[test]
+    fn mark_recently_changed_run_refuses_when_the_run_budget_is_full() {
+        // Always, SlidingPrefix and UntilChanged already claim three
+        // breakpoints. Splitting further would take the messages' one.
+        let mut blocks = vec![
+            block(CacheHint::Always),
+            block(CacheHint::SlidingPrefix {
+                stable_fraction: 0.75,
+            }),
+            block(CacheHint::UntilChanged),
+            block(CacheHint::UntilChanged),
+        ];
+        assert_eq!(provider_system_breakpoints(&blocks), 3);
+
+        mark_recently_changed_run(&mut blocks, &[1, 99]);
+
+        assert_eq!(blocks[2].cache_hint, CacheHint::UntilChanged);
+        assert_eq!(blocks[3].cache_hint, CacheHint::UntilChanged);
+        assert_eq!(provider_system_breakpoints(&blocks), 3);
+    }
+
+    #[test]
+    fn assemble_marks_the_volatile_tail_without_moving_any_block() {
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(stamped_region("brief", RegionKind::Pinned, 1));
+        window.add_region(hashmap_region("spec", 100));
+        window.add_region(hashmap_region("data_preview", 200));
+        window.add_region(hashmap_region("results", 300));
+        window.add_region(stamped_region("scratch", RegionKind::Temporary, 400));
+
+        let assembled = window.assemble();
+
+        // Declaration order inside each tier is exactly what it was: the split
+        // only rewrites cache hints.
+        let texts: Vec<&str> = assembled
+            .system_blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect();
+        assert!(texts[0].contains("brief contents"));
+        assert!(texts[1].starts_with("[spec]:"));
+        assert!(texts[2].starts_with("[data_preview]:"));
+        assert!(texts[3].starts_with("[results]:"));
+        assert!(texts[4].starts_with("[scratch]:"));
+
+        let hints: Vec<CacheHint> = assembled
+            .system_blocks
+            .iter()
+            .map(|b| b.cache_hint)
+            .collect();
+        assert_eq!(
+            hints,
+            vec![
+                CacheHint::Always,
+                CacheHint::UntilChanged,
+                CacheHint::UntilChanged,
+                CacheHint::RecentlyChanged,
+                CacheHint::Never,
+            ]
+        );
+    }
+
+    #[test]
+    fn assemble_leaves_a_flat_window_untouched() {
+        // One pinned block and one working region: the flat shape that already
+        // caches well keeps a single volatile run and a single breakpoint.
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(stamped_region("brief", RegionKind::Pinned, 1));
+        window.add_region(hashmap_region("results", 300));
+
+        let assembled = window.assemble();
+        let hints: Vec<CacheHint> = assembled
+            .system_blocks
+            .iter()
+            .map(|b| b.cache_hint)
+            .collect();
+        assert_eq!(hints, vec![CacheHint::Always, CacheHint::UntilChanged]);
+        assert_eq!(provider_system_breakpoints(&assembled.system_blocks), 2);
+    }
+
+    #[test]
+    fn assemble_stays_within_four_cache_breakpoints() {
+        let mut window = ContextWindow::new(1_000_000);
+        window.add_region(stamped_region("brief", RegionKind::Pinned, 1));
+        window.add_region(stamped_region(
+            "history",
+            RegionKind::CompactHistory {
+                source_region: "conversation".to_string(),
+            },
+            2,
+        ));
+        for (index, name) in ["spec", "data_preview", "scripts", "results"]
+            .iter()
+            .enumerate()
+        {
+            window.add_region(hashmap_region(name, 100 + index as i64));
+        }
+        window.add_region(stamped_region("scratch", RegionKind::Clearable, 500));
+
+        let mut conversation = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            100_000,
+        );
+        for turn in 0..8 {
+            conversation
+                .add_entry(format!("User: turn {turn}"), 10)
+                .unwrap();
+        }
+        window.add_region(conversation);
+
+        let assembled = window.assemble();
+        let system = provider_system_breakpoints(&assembled.system_blocks);
+        let message = assembled
+            .messages
+            .iter()
+            .filter(|m| m.cache_breakpoint)
+            .count();
+
+        assert!(system <= MAX_SYSTEM_CACHE_RUNS, "system runs: {system}");
+        assert_eq!(message, 1);
+        let total = system + message;
+        assert!(total <= 4, "total breakpoints: {total}");
     }
 }

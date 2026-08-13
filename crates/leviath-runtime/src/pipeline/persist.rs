@@ -179,9 +179,10 @@ pub fn reflect_interaction_status(
 /// Position used to stand in for "has run", which is only true of a linear
 /// blueprint. A graph reaches its stages in whatever order its edges describe,
 /// so every branch the run went past without taking was filed as `Complete`
-/// with an empty `region_tokens` - and since that map is a snapshot, an empty
-/// one in the middle of the sequence made the next real stage appear to have
-/// written every region from nothing (#372).
+/// with an empty `region_tokens` - and since that map holds the high-water mark
+/// each region reached rather than what the stage itself added, an empty one in
+/// the middle of the sequence made the next real stage appear to have written
+/// every region from nothing (#372).
 ///
 /// `started_at`/`ended_at` are stamped once and never overwritten, so repeated
 /// calls are idempotent.

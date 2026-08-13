@@ -109,7 +109,10 @@ pub use embed::{
 };
 pub use fanout::{FanOutSpawner, FanOutSpawnerRes};
 pub use host::{ControlOp, SpawnArgs, WorldEvent, WorldHost};
-pub use inference_bridge::RetryPolicy;
+pub use inference_bridge::{
+    CAPACITY_BASE_DELAY_SECS, CAPACITY_MAX_DELAY_SECS, DEFAULT_RETRY_ATTEMPTS,
+    DEFAULT_RETRY_BASE_DELAY_MS, MAX_TOTAL_BACKOFF_SECS, RetryPolicy,
+};
 pub use inference_pool::{InferencePoolConfig, InferencePools};
 pub use interaction_hub::InteractionHub;
 pub use pipeline::{ModelDefaults, ResolvedStage, ToolService, is_stage_specific};

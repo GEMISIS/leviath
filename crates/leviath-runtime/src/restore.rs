@@ -3,7 +3,8 @@
 //!
 //! When the daemon restarts, the CLI reloads each non-terminal run's blueprint
 //! and spawns a fresh agent, then calls [`restore_agent`] to overlay the persisted
-//! context, jump to the persisted stage + iteration, and restore token totals. The
+//! context, jump to the persisted stage + iteration, and restore token totals,
+//! plus [`restore_stage_ledger`] for the run's per-stage history. The
 //! agent keeps the `ReadyToInfer` marker `spawn_agent` set, so **any inference
 //! that was in flight when the daemon stopped is re-issued** on the next tick -
 //! nothing is left stuck awaiting a job that died with the old process.
@@ -190,6 +191,43 @@ pub fn restore_agent(
         state.status = AgentStatus::Active;
     }
     world.entity_mut(entity).insert(totals);
+}
+
+/// Put the persisted per-stage ledger back on a just-spawned `entity`, matching
+/// `records` (as read from the run's `stages.json`) onto the blueprint-seeded
+/// [`StageLedger`](crate::pipeline::StageLedger) **by stage name**.
+///
+/// Nothing else rebuilds this. `spawn_agent` seeds one all-zero record per
+/// blueprint stage, so without this a reloaded run came back with no tokens, no
+/// `entered` flags and no timestamps against any stage - and since the persist
+/// tick writes the whole ledger, the next one wrote those zeros over the real
+/// `stages.json`. The run-level totals in `meta.json` survived that, so the run
+/// looked healthy while `lev stages` and the stages API served zeroed records
+/// (issue #415).
+///
+/// The seeded shape wins: a persisted record whose stage the blueprint no longer
+/// has is dropped, and a stage with no persisted record keeps its zeroed one.
+/// Matching on name rather than position is what keeps a blueprint that gained
+/// or lost a stage from filing one stage's history under another; the seeded
+/// `index` is kept for the same reason.
+///
+/// Call after [`restore_agent`]. An agent without a ledger (a test world, or one
+/// spawned outside the blueprint path) is left alone.
+pub fn restore_stage_ledger(
+    world: &mut World,
+    entity: Entity,
+    records: &[leviath_core::run_meta::StageRecord],
+) {
+    let Some(mut ledger) = world.get_mut::<crate::pipeline::StageLedger>(entity) else {
+        return;
+    };
+    for rec in ledger.0.iter_mut() {
+        if let Some(saved) = records.iter().find(|saved| saved.name == rec.name) {
+            let index = rec.index;
+            *rec = saved.clone();
+            rec.index = index;
+        }
+    }
 }
 
 /// The synthesized result for a call whose completion never reached the journal.
@@ -446,6 +484,71 @@ mod tests {
         let taint = region.taint.as_ref().unwrap();
         assert_eq!(taint.entry_taint(0), Some(TaintLevel::Private));
         assert_eq!(taint.entry_taint(1), Some(TaintLevel::Public));
+    }
+
+    /// The per-stage ledger was the one piece of persisted state nothing
+    /// rebuilt, so a reloaded run came back with every stage at zero - and
+    /// because the persist tick rewrites `stages.json` whole, the next one
+    /// wrote those zeros over the run's real history (issue #415).
+    #[test]
+    fn restore_stage_ledger_overlays_the_persisted_records_by_name() {
+        use crate::pipeline::StageLedger;
+        use leviath_core::run_meta::{StageRecord, StageRunStatus};
+
+        let (mut world, entity) = agent_world();
+        // An agent with no ledger at all is left alone rather than panicking.
+        restore_stage_ledger(&mut world, entity, &[StageRecord::new("s0".to_string(), 0)]);
+        assert!(world.get::<StageLedger>(entity).is_none());
+
+        world.entity_mut(entity).insert(StageLedger(vec![
+            StageRecord::new("s0".to_string(), 0),
+            StageRecord::new("s1".to_string(), 1),
+        ]));
+        // `s1` as the run left it, filed under a stale index; plus a record for
+        // a stage this blueprint no longer has.
+        let mut saved = StageRecord::new("s1".to_string(), 4);
+        saved.status = StageRunStatus::Complete;
+        saved.entered = true;
+        saved.prompt_tokens = 900;
+        saved.completion_tokens = 30;
+        saved.cached_tokens = 12;
+        saved.cache_write_tokens = 4;
+        saved.first_call_prompt_tokens = Some(300);
+        saved.runaway_warned = true;
+        saved.region_tokens.insert("conversation".to_string(), 120);
+        saved.started_at = Some(5);
+        saved.ended_at = Some(9);
+        restore_stage_ledger(
+            &mut world,
+            entity,
+            &[saved, StageRecord::new("removed".to_string(), 9)],
+        );
+
+        let ledger = world.get::<StageLedger>(entity).unwrap();
+        assert_eq!(
+            ledger.0.len(),
+            2,
+            "a record for a stage the blueprint no longer has is dropped, not appended"
+        );
+        // Nothing persisted against `s0`: its seeded record stands.
+        assert_eq!(ledger.0[0].prompt_tokens, 0);
+        assert_eq!(ledger.0[0].status, StageRunStatus::Pending);
+        assert!(!ledger.0[0].entered);
+        // `s1` comes back whole, under its blueprint index rather than the
+        // stale persisted one.
+        assert_eq!(ledger.0[1].index, 1);
+        assert_eq!(ledger.0[1].name, "s1");
+        assert_eq!(ledger.0[1].prompt_tokens, 900);
+        assert_eq!(ledger.0[1].completion_tokens, 30);
+        assert_eq!(ledger.0[1].cached_tokens, 12);
+        assert_eq!(ledger.0[1].cache_write_tokens, 4);
+        assert_eq!(ledger.0[1].first_call_prompt_tokens, Some(300));
+        assert!(ledger.0[1].runaway_warned);
+        assert_eq!(ledger.0[1].region_tokens.get("conversation"), Some(&120));
+        assert_eq!(ledger.0[1].started_at, Some(5));
+        assert_eq!(ledger.0[1].ended_at, Some(9));
+        assert_eq!(ledger.0[1].status, StageRunStatus::Complete);
+        assert!(ledger.0[1].entered);
     }
 
     #[test]

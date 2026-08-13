@@ -37,7 +37,7 @@ pub use openrouter::OpenRouterProvider;
 pub use provider::{
     ContentBlock, DEFAULT_INFERENCE_TIMEOUT_SECS, FinishReason, InferenceRequest,
     InferenceResponse, Message, MessageContent, ModelCapabilities, ModelCapabilityOverride,
-    ModelInfo, Provider, ProviderConfig, ProviderError, RateLimitConfig, Result, SystemBlock,
-    TokenUsage, Tool, ToolCall, UnavailableReason, build_http_client,
+    ModelInfo, Provider, ProviderConfig, ProviderError, RateLimitConfig, Result, RetryAdvice,
+    SystemBlock, TokenUsage, Tool, ToolCall, UnavailableReason, build_http_client,
 };
 pub use rhai_provider::RhaiProvider;

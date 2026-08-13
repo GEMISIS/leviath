@@ -1901,6 +1901,46 @@ some_custom_thing = \"forwarded to the script\"
         assert_eq!(disabled.limits.interaction_timeout_secs, 0);
     }
 
+    /// The retry schedule is the shipped one unless someone says otherwise, so
+    /// an existing install's behaviour does not change under it (issue #417).
+    #[test]
+    fn the_inference_retry_schedule_defaults_and_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let load = |name: &str, body: String| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            with_tracing(|| Config::load_from_path(&path)).unwrap()
+        };
+
+        let old = load(
+            "old.toml",
+            format!(
+                "{}\n[limits]\nmax_concurrent_tools = 4\n",
+                config_toml_without_limits()
+            ),
+        );
+        assert_eq!(
+            old.limits.inference_retry_attempts,
+            leviath_runtime::DEFAULT_RETRY_ATTEMPTS
+        );
+        assert_eq!(
+            old.limits.inference_retry_base_ms,
+            leviath_runtime::DEFAULT_RETRY_BASE_DELAY_MS
+        );
+
+        // An operator riding out longer provider outages, on a slower blip
+        // schedule of their own choosing.
+        let tuned = load(
+            "tuned.toml",
+            format!(
+                "{}\n[limits]\ninference_retry_attempts = 8\ninference_retry_base_ms = 2000\n",
+                config_toml_without_limits()
+            ),
+        );
+        assert_eq!(tuned.limits.inference_retry_attempts, 8);
+        assert_eq!(tuned.limits.inference_retry_base_ms, 2000);
+    }
+
     #[test]
     fn exact_token_counting_parses_when_set() {
         let dir = tempfile::tempdir().unwrap();
@@ -3208,6 +3248,8 @@ enabled = false
                 provider_failures_before_open: 5,
                 provider_circuit_cooldown_secs: 120,
                 interaction_timeout_secs: 120,
+                inference_retry_attempts: 6,
+                inference_retry_base_ms: 250,
             },
             batch_tool_hint: true,
             shell_hint: false,
@@ -3323,6 +3365,8 @@ enabled = false
             Some("leviath-prod")
         );
         assert_eq!(deserialized.limits.default_max_iterations, Some(99));
+        assert_eq!(deserialized.limits.inference_retry_attempts, 6);
+        assert_eq!(deserialized.limits.inference_retry_base_ms, 250);
         assert_eq!(
             deserialized.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-key")

@@ -39,6 +39,8 @@ wedge_timeout_secs = 0
 provider_failures_before_open = 3
 provider_circuit_cooldown_secs = 300
 interaction_timeout_secs = 3600
+inference_retry_attempts = 4
+inference_retry_base_ms = 1000
 # How much an agent may write to disk. Unset in code and written by `lev setup`:
 # delete either line to remove that limit. Running out of disk is refused
 # separately and is not configurable.

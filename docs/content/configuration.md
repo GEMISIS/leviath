@@ -121,6 +121,8 @@ wedge_timeout_secs        = 0    # fail a run nothing can reach any more; 0 is o
 provider_failures_before_open  = 3     # pull a provider after this many failures in a row
 provider_circuit_cooldown_secs = 300   # how long before it is tried again
 interaction_timeout_secs  = 3600 # release a prompt nobody answered
+inference_retry_attempts  = 4    # tries per inference, the first one included
+inference_retry_base_ms   = 1000 # first retry wait for an ordinary blip; it doubles
 max_tool_call_write_bytes = 2147483648   # 2 GiB; delete the line for no limit
 max_run_write_bytes       = 10737418240  # 10 GiB; delete the line for no limit
 ```
@@ -140,10 +142,12 @@ max_run_write_bytes       = 10737418240  # 10 GiB; delete the line for no limit
 | `provider_failures_before_open` | `3` | Failures in a row before a provider is pulled. See below |
 | `provider_circuit_cooldown_secs` | `300` | How long a pulled provider waits before one request tests it. A success restores it, a failure restarts the wait |
 | `interaction_timeout_secs` | `3600` | How long a prompt may go unanswered. See below |
+| `inference_retry_attempts` | `4` | Tries per inference, the first included. See below |
+| `inference_retry_base_ms` | `1000` | First retry wait for an ordinary blip, doubling each retry. See below |
 | `max_tool_call_write_bytes` | unset | Most one tool call may write. See below |
 | `max_run_write_bytes` | unset | Most a whole run may write. See below |
 
-Seven of those need more than a table cell.
+Eight of those need more than a table cell.
 
 **`exact_token_counting`** measures each assembled request before sending it and refuses one that
 would overflow the window. On providers with a remote counting endpoint that costs a network round
@@ -168,6 +172,22 @@ outside Leviath is tracking your slots. See [External work queues](/docs/work-qu
 or a rejected key, before that provider is taken out of service for every run. Three rather than one,
 because a single payment error can just be one oversized request. `0` disables it and leaves per-run
 failover to cope alone.
+
+**`inference_retry_attempts`** and **`inference_retry_base_ms`** set how hard a failed model call
+is retried before the agent is failed and its finished work is thrown away. Only a *transient*
+failure is retried at all: a reset connection, a timeout, a 429, a 5xx. A rejected key or an
+over-long request fails on the first answer, because the second would be the same.
+
+There are two schedules, and only the blip one is configurable. An ordinary blip waits
+`inference_retry_base_ms` and doubles, so the default four attempts are 1s, 2s, 4s. A **capacity**
+refusal - a 429, or Anthropic's 529 "overloaded" - waits 15s, 30s, then 60s per further attempt
+instead, because an overload window lasts minutes and a second of waiting only buys another refusal.
+When the provider sends a `Retry-After`, that answer wins over both, capped at a minute.
+
+Raising `inference_retry_attempts` is therefore how a run rides out a longer outage: `6` gives a
+capacity failure about four minutes of waiting rather than about one and a half. Whatever you set,
+the retries of a single request sleep **at most five minutes in total**, and the request itself is
+still bounded by its stage's `request_timeout_secs`, so a run can never wait indefinitely.
 
 **`interaction_timeout_secs`** puts a deadline on any prompt that waits on a person: `ask_user_*`,
 tool approvals, taint gates, and interaction points. When it expires the daemon resolves the prompt

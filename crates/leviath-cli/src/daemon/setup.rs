@@ -257,6 +257,14 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     world
         .world_mut()
         .init_resource::<leviath_runtime::pipeline::ProviderCircuits>();
+    // How hard a transient inference failure is retried before the agent is
+    // failed and its finished work discarded (issue #417).
+    world
+        .world_mut()
+        .insert_resource(leviath_runtime::pipeline::InferenceRetryTuning {
+            max_attempts: parts.config.limits.inference_retry_attempts,
+            base_delay_ms: parts.config.limits.inference_retry_base_ms,
+        });
     // Share the hub with the tick loop so a blocked agent's open prompt is
     // reflected into its status (Active ↔ Waiting) for the dashboard to surface.
     world.insert_interaction_hub(hub.clone());

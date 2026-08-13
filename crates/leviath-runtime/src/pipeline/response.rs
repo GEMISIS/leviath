@@ -152,6 +152,11 @@ pub fn collect_inference(
                     // number that is neither what it costs per call nor what it
                     // holds. The largest it reached is the one that says
                     // whether it is earning its place.
+                    //
+                    // Every region the window carries, not only the ones this
+                    // stage assembles: a stage layout hides the regions it does
+                    // not declare rather than dropping them, and they are
+                    // recorded here all the same.
                     for region in window.iter().flat_map(|w| w.regions.iter()) {
                         let seen = rec.region_tokens.entry(region.name.clone()).or_insert(0);
                         *seen = (*seen).max(region.current_tokens);

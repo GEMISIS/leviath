@@ -299,7 +299,7 @@ async fn infer_rate_limited_without_limiter() {
         FakeExecutor::with_responses(vec![Err(HostHttpError::RateLimited { retry_after: None })]);
     let p = build(&src, exec).unwrap();
     let err = p.infer(&request("m")).await.err().unwrap();
-    assert!(matches!(err, ProviderError::RateLimitExceeded));
+    assert!(matches!(err, ProviderError::RateLimitExceeded { .. }));
 }
 
 #[tokio::test]
@@ -348,7 +348,7 @@ async fn infer_http_429_maps_to_rate_limit() {
         }),
     );
     let err = p.infer(&request("m")).await.err().unwrap();
-    assert!(matches!(err, ProviderError::RateLimitExceeded));
+    assert!(matches!(err, ProviderError::RateLimitExceeded { .. }));
 }
 
 #[tokio::test]

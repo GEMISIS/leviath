@@ -138,15 +138,26 @@ pub(crate) fn build_request(
     }
 }
 
-/// Build the [`RetryPolicy`] for a job, applying a stage's per-stage inference
-/// wall-clock cap when configured. Starts from the default policy and, when the
-/// stage set `request_timeout_secs` (from `[stages.<name>.model]`), overrides its
-/// `job_timeout`; otherwise the default job timeout stands. Pure so the override
-/// branch is unit-testable without driving the ECS dispatch.
+/// Build the [`RetryPolicy`] for a job from the operator's `[limits]` retry
+/// schedule, applying a stage's per-stage inference wall-clock cap when
+/// configured.
+///
+/// `tuning` carries the two configurable numbers (`[limits]
+/// inference_retry_attempts` and `inference_retry_base_ms`); everything else -
+/// the capacity schedule and the total-backoff ceiling - comes from the default
+/// policy. When the stage set `request_timeout_secs` (from
+/// `[stages.<name>.model]`) that overrides `job_timeout`; otherwise the default
+/// job timeout stands. Pure so both branches are unit-testable without driving
+/// the ECS dispatch.
 pub(crate) fn retry_policy_for(
     config: Option<&InferenceConfig>,
+    tuning: InferenceRetryTuning,
 ) -> crate::inference_bridge::RetryPolicy {
-    let mut policy = crate::inference_bridge::RetryPolicy::default();
+    let mut policy = crate::inference_bridge::RetryPolicy {
+        max_attempts: tuning.max_attempts,
+        base_delay: std::time::Duration::from_millis(tuning.base_delay_ms),
+        ..crate::inference_bridge::RetryPolicy::default()
+    };
     if let Some(secs) = config.and_then(|c| c.request_timeout_secs) {
         policy.job_timeout = std::time::Duration::from_secs(secs);
     }
@@ -225,6 +236,7 @@ pub fn dispatch_inference(
     providers: Res<Providers>,
     circuits: Option<Res<ProviderCircuits>>,
     policy: Option<Res<CircuitPolicy>>,
+    retry: Option<Res<InferenceRetryTuning>>,
     par_commands: ParallelCommands,
 ) {
     // Fan out across ready agents: request assembly (`build_request`) is the
@@ -242,6 +254,9 @@ pub fn dispatch_inference(
     crate::tick_scope::clear();
     let now = chrono::Utc::now().timestamp();
     let circuit_policy = policy.map(|p| *p).unwrap_or_default();
+    // The daemon inserts this from `[limits]`; a world that never set it (every
+    // embedded host, and most tests) gets the built-in schedule.
+    let retry_tuning = retry.map(|r| *r).unwrap_or_default();
     let circuits = circuits.as_deref();
     agents.par_iter().for_each(
         |(entity, state, window, config, si, in_flight, progress, stalled)| {
@@ -321,7 +336,7 @@ pub fn dispatch_inference(
                         job,
                         stage.outcomes.clone(),
                         stage.wake.clone(),
-                        retry_policy_for(config),
+                        retry_policy_for(config, retry_tuning),
                         cancel.clone(),
                     ),
                     move |message| {
