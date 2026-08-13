@@ -665,6 +665,40 @@ mod tests {
     }
 
     #[test]
+    fn the_credits_pause_copes_without_a_stage_log_buffer() {
+        // `StageIoBuffer` is optional on the query, so the pause has to land
+        // even when there is no stage log to explain it in.
+        let mut world = World::new();
+        world.insert_resource(StallTimeout(60));
+        let mut circuits = super::super::circuit::ProviderCircuits::default();
+        let policy = super::super::circuit::CircuitPolicy::default();
+        for i in 0..3 {
+            circuits.record_failure(
+                "ghost",
+                leviath_providers::UnavailableReason::CreditsExhausted,
+                NOW - 3 + i,
+                &policy,
+            );
+        }
+        world.insert_resource(circuits);
+        let e = world
+            .spawn((
+                agent_state(),
+                stage_inference(),
+                stalled_for(StallReason::ProviderCircuitOpen, 61),
+                ReadyToInfer,
+            ))
+            .id();
+
+        run(&mut world);
+
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Paused
+        );
+    }
+
+    #[test]
     fn a_circuit_open_for_a_dead_key_still_fails_the_run() {
         // The pause is only for credits: a rejected key does not fix itself
         // with a top-up, so any other recorded reason keeps today's failure.

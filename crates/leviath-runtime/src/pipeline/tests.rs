@@ -900,6 +900,30 @@ fn an_exhausted_fallback_list_pauses_on_credits_instead_of_dying() {
 }
 
 #[test]
+fn the_credits_pause_copes_without_a_stage_log_buffer() {
+    // `StageIoBuffer` is optional on the query, so the pause has to land even
+    // when there is no stage log to explain it in.
+    let (mut world, tx) = world_with_results();
+    let mut si = stage_with_fallback();
+    si.fallbacks.clear();
+    let e = world.spawn((agent_state(), AwaitingInference, si)).id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(credits_exhausted()),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Paused
+    );
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+}
+
+#[test]
 fn an_exhausted_fallback_list_still_terminates_on_a_dead_key() {
     // A rejected key does not fix itself with a top-up, so every
     // provider-fatal reason other than exhausted credits still ends the run
