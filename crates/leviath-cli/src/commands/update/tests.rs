@@ -362,17 +362,25 @@ fn script_destinations_grow_by_two_when_a_home_resolves() {
 
 // ─── The command per method ───────────────────────────────────────────────────
 
-/// The exact command each method runs, and the two that run nothing.
+/// The exact commands each method runs, and the two that run nothing.
+///
+/// Both package managers refresh their index first. Without it they answer
+/// from metadata they already had, so a release published minutes earlier is
+/// invisible and the upgrade reports the installed version as the newest one -
+/// which is what sent people to `brew update && brew upgrade leviath` by hand.
 #[test]
-fn each_install_method_maps_to_one_command() {
+fn each_install_method_maps_to_its_commands() {
     assert_eq!(
         binary_step(&InstallMethod::Homebrew {
             formula: "leviath-beta".to_string()
         }),
         BinaryStep::Run(vec![
-            "brew".to_string(),
-            "upgrade".to_string(),
-            "leviath-beta".to_string()
+            vec!["brew".to_string(), "update".to_string()],
+            vec![
+                "brew".to_string(),
+                "upgrade".to_string(),
+                "leviath-beta".to_string()
+            ]
         ])
     );
     assert_eq!(
@@ -380,9 +388,12 @@ fn each_install_method_maps_to_one_command() {
             package: "leviath-alpha".to_string()
         }),
         BinaryStep::Run(vec![
-            "scoop".to_string(),
-            "update".to_string(),
-            "leviath-alpha".to_string()
+            vec!["scoop".to_string(), "update".to_string()],
+            vec![
+                "scoop".to_string(),
+                "update".to_string(),
+                "leviath-alpha".to_string()
+            ]
         ])
     );
     // A cargo install is a compile. It is described, never started.
@@ -399,6 +410,55 @@ fn each_install_method_maps_to_one_command() {
     assert!(unknown.contains("/somewhere/odd/lev"), "{unknown}");
 }
 
+/// The plan shows every command it will run, joined the way a user would type
+/// them, so `--check` and the confirmation prompt name the refresh as well as
+/// the upgrade.
+#[test]
+fn the_rendered_commands_read_as_one_shell_line() {
+    assert_eq!(
+        render_commands(&[
+            vec!["brew".to_string(), "update".to_string()],
+            vec![
+                "brew".to_string(),
+                "upgrade".to_string(),
+                "leviath".to_string()
+            ],
+        ]),
+        "brew update && brew upgrade leviath"
+    );
+    // One command renders as itself, with no stray separator.
+    assert_eq!(
+        render_commands(&[vec!["scoop".to_string(), "update".to_string()]]),
+        "scoop update"
+    );
+}
+
+/// A failed index refresh stops there. Upgrading against metadata that failed
+/// to refresh is the situation this whole change exists to avoid, so it must
+/// not happen quietly as a second command.
+#[test]
+fn a_failed_first_command_does_not_run_the_second() {
+    with_tracing(|| {
+        let fixture = Fixture::new();
+        let args = UpdateArgs {
+            yes: true,
+            ..UpdateArgs::default()
+        };
+        // `false` makes every runner call fail, so the first one does.
+        let env = fixture.env("/opt/homebrew/Cellar/leviath/0.3.4/bin/lev", false, false);
+
+        let err =
+            execute_with(&args, &env, "0.3.4").expect_err("a failed refresh fails the update");
+
+        assert!(err.to_string().contains("failed"), "{err}");
+        assert_eq!(
+            fixture.recorder.ran(),
+            vec![vec!["brew".to_string(), "update".to_string()]],
+            "the upgrade never ran"
+        );
+    });
+}
+
 /// The installer invocation, which is the one command here that is easy to get
 /// silently wrong.
 ///
@@ -410,9 +470,13 @@ fn each_install_method_maps_to_one_command() {
 #[test]
 fn the_install_script_is_invoked_with_the_channel_as_an_argument() {
     for channel in [Channel::Stable, Channel::Beta, Channel::Alpha] {
-        let BinaryStep::Run(argv) = binary_step(&InstallMethod::Script { channel }) else {
+        let BinaryStep::Run(commands) = binary_step(&InstallMethod::Script { channel }) else {
             panic!("the script method runs a command");
         };
+        // The installer fetches what it needs itself, so there is nothing to
+        // refresh in front of it: one command, not two.
+        assert_eq!(commands.len(), 1);
+        let argv = &commands[0];
         assert_eq!(argv[0], "sh");
         assert_eq!(argv[1], "-c");
         assert_eq!(
@@ -761,13 +825,19 @@ fn yes_and_install_agents_run_the_command_and_install_the_blueprints() {
 
         execute_with(&args, &env, "0.3.4").expect("the whole flow succeeds");
 
+        // Both commands actually reach the runner, in order. The refresh is
+        // the half that was missing, so asserting only the upgrade would pass
+        // against the bug this fixes.
         assert_eq!(
             fixture.recorder.ran(),
-            vec![vec![
-                "brew".to_string(),
-                "upgrade".to_string(),
-                "leviath-beta".to_string()
-            ]]
+            vec![
+                vec!["brew".to_string(), "update".to_string()],
+                vec![
+                    "brew".to_string(),
+                    "upgrade".to_string(),
+                    "leviath-beta".to_string()
+                ]
+            ]
         );
         assert!(
             fixture.recorder.asked().is_empty(),
@@ -1010,7 +1080,8 @@ fn a_blueprint_that_cannot_be_installed_warns_rather_than_aborting() {
 
         execute_with(&args, &env, "0.3.4").expect("a failed install is a warning");
 
-        assert_eq!(fixture.recorder.ran().len(), 1, "the binary still updated");
+        // Two: the index refresh and the upgrade itself.
+        assert_eq!(fixture.recorder.ran().len(), 2, "the binary still updated");
     });
 }
 
