@@ -257,6 +257,11 @@ type PersistenceQuery = (
         Option<&'static crate::interaction_points::InteractionPointRounds>,
         Option<&'static crate::persistence::RunOutcomeFlags>,
         Option<&'static crate::persistence::FinalOutput>,
+        // The other two reasons a run can be parked. Read here because this is
+        // where they are queryable, and recorded on `meta.json` so a client
+        // does not have to reconstruct them from what it can see.
+        Option<&'static crate::gate_prompt::AwaitingGatePrompt>,
+        Option<&'static super::WaitingForChildren>,
     ),
 );
 
@@ -287,7 +292,15 @@ pub fn dispatch_persistence(
         parent_ref,
         children,
         fan_out_waiting,
-        (awaiting_point, ip_cursor, ip_rounds, outcome_flags, final_output),
+        (
+            awaiting_point,
+            ip_cursor,
+            ip_rounds,
+            outcome_flags,
+            final_output,
+            gate_prompt,
+            waiting_for_children,
+        ),
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -376,6 +389,12 @@ pub fn dispatch_persistence(
                 totals,
                 flags: &flags,
                 final_output,
+                parked: crate::persistence::ParkedBy {
+                    interaction: awaiting_point.is_some(),
+                    approval: gate_prompt.is_some_and(|g| g.0 > 0),
+                    fan_out: fan_out_waiting.is_some(),
+                    children: waiting_for_children.is_some(),
+                },
             },
             crate::persistence::RunPosition {
                 stage_index: cursor.index,

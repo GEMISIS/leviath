@@ -11,6 +11,7 @@ use bevy_ecs::prelude::*;
 use leviath_core::RegionKind;
 use leviath_core::run_meta::{
     ContextSnapshot, RegionEntrySnapshot, RegionSnapshot, RunMeta, RunStatus, StageRunStatus,
+    WaitingOn,
 };
 
 use crate::components::{AgentState, AgentStatus, ContextWindow};
@@ -281,6 +282,59 @@ pub struct RunMetaSources<'a> {
     pub flags: &'a RunOutcomeFlags,
     /// The submitted answer, when the run has produced one.
     pub final_output: Option<&'a FinalOutput>,
+    /// Which of the four parking markers the agent is carrying, if any. Read
+    /// off the entity by the caller, which is where they are queryable.
+    pub parked: ParkedBy,
+}
+
+/// The parking markers an agent carries, as plain booleans.
+///
+/// Booleans rather than the components themselves so the mapping below stays a
+/// pure function with no ECS in it: the caller is the one system that can see
+/// these, and this is the shape it hands over.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ParkedBy {
+    /// An interaction point is holding for an answer.
+    pub interaction: bool,
+    /// One or more tool calls are holding for approval.
+    pub approval: bool,
+    /// A fan-out stage's workers are still running.
+    pub fan_out: bool,
+    /// Spawned sub-agents are still running.
+    pub children: bool,
+}
+
+/// Why a parked run is parked, or `None` when it is not parked.
+///
+/// Only ever set alongside [`AgentStatus::Waiting`]: every other status either
+/// moves on its own or has ended, and answering "waiting on a person" for a
+/// finished run would be worse than saying nothing.
+///
+/// The order is what a person can act on first. A run holding a question and a
+/// fan-out at once is one somebody can unblock right now, so the question
+/// wins; between the two engine-side reasons, a fan-out is the more specific
+/// claim (its parent is held by its own workers, not by sub-agents it spawned
+/// at a stage boundary), so it is reported ahead of the general one.
+pub fn waiting_on_from(status: &AgentStatus, parked: ParkedBy) -> Option<WaitingOn> {
+    if *status != AgentStatus::Waiting {
+        return None;
+    }
+    if parked.interaction {
+        return Some(WaitingOn::User);
+    }
+    if parked.approval {
+        return Some(WaitingOn::Approval);
+    }
+    if parked.fan_out {
+        return Some(WaitingOn::FanOut);
+    }
+    if parked.children {
+        return Some(WaitingOn::Children);
+    }
+    // Waiting with no marker: the status was set by something that has since
+    // dropped its marker, and inventing a reason would be worse than leaving
+    // the field off.
+    None
 }
 
 /// Where the run has got to, and when.
@@ -314,6 +368,7 @@ pub fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> RunMeta {
         totals,
         flags,
         final_output,
+        parked,
     } = sources;
     let RunPosition {
         stage_index,
@@ -366,6 +421,7 @@ pub fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> RunMeta {
         yolo: md.unattended,
         read_paths: md.read_paths,
         final_output: final_output.map(|o| o.0.descriptor()),
+        waiting_on: waiting_on_from(&state.status, parked),
         output_request: md.output_request.clone(),
     }
 }
@@ -611,6 +667,147 @@ mod tests {
         assert_eq!(t.cache_write_tokens, 1);
     }
 
+    /// Each marker names its own reason, and only while the run is parked.
+    #[test]
+    fn each_parking_marker_names_its_own_reason() {
+        let cases = [
+            (
+                ParkedBy {
+                    interaction: true,
+                    ..Default::default()
+                },
+                WaitingOn::User,
+            ),
+            (
+                ParkedBy {
+                    approval: true,
+                    ..Default::default()
+                },
+                WaitingOn::Approval,
+            ),
+            (
+                ParkedBy {
+                    fan_out: true,
+                    ..Default::default()
+                },
+                WaitingOn::FanOut,
+            ),
+            (
+                ParkedBy {
+                    children: true,
+                    ..Default::default()
+                },
+                WaitingOn::Children,
+            ),
+        ];
+        for (parked, expected) in cases {
+            assert_eq!(
+                waiting_on_from(&AgentStatus::Waiting, parked),
+                Some(expected),
+                "{parked:?}"
+            );
+            // The same markers on a run that is not parked say nothing: an
+            // active or finished run is not waiting on anybody.
+            for status in [
+                AgentStatus::Active,
+                AgentStatus::Complete,
+                AgentStatus::Cancelled,
+            ] {
+                assert_eq!(waiting_on_from(&status, parked), None, "{status:?}");
+            }
+        }
+    }
+
+    /// The whole point of the field: a fan-out parent is not waiting on a
+    /// person, and must not be reported as if it were.
+    #[test]
+    fn a_fan_out_parent_is_never_reported_as_waiting_on_a_person() {
+        let parent = ParkedBy {
+            fan_out: true,
+            ..Default::default()
+        };
+        let reason = waiting_on_from(&AgentStatus::Waiting, parent);
+        assert_eq!(reason, Some(WaitingOn::FanOut));
+        assert_ne!(reason, Some(WaitingOn::User));
+        assert_ne!(reason, Some(WaitingOn::Approval));
+    }
+
+    /// A run holding a question *and* engine-side work reports the question:
+    /// it is the half somebody can act on now.
+    #[test]
+    fn a_question_outranks_the_engine_side_reasons() {
+        let both = ParkedBy {
+            interaction: true,
+            approval: true,
+            fan_out: true,
+            children: true,
+        };
+        assert_eq!(
+            waiting_on_from(&AgentStatus::Waiting, both),
+            Some(WaitingOn::User)
+        );
+        // Without the question, an approval is still a person's to give.
+        assert_eq!(
+            waiting_on_from(
+                &AgentStatus::Waiting,
+                ParkedBy {
+                    interaction: false,
+                    ..both
+                }
+            ),
+            Some(WaitingOn::Approval)
+        );
+        // And between the two engine-side reasons, the specific one wins.
+        assert_eq!(
+            waiting_on_from(
+                &AgentStatus::Waiting,
+                ParkedBy {
+                    fan_out: true,
+                    children: true,
+                    ..Default::default()
+                }
+            ),
+            Some(WaitingOn::FanOut)
+        );
+    }
+
+    /// Parked with no marker at all: the field is left off rather than filled
+    /// with a guess.
+    #[test]
+    fn waiting_with_no_marker_reports_nothing() {
+        assert_eq!(
+            waiting_on_from(&AgentStatus::Waiting, ParkedBy::default()),
+            None
+        );
+    }
+
+    /// The reason reaches `meta.json`, which is the file every client reads.
+    #[test]
+    fn build_run_meta_records_why_a_run_is_parked() {
+        let meta = build_run_meta(
+            RunMetaSources {
+                md: &metadata(),
+                state: &state(AgentStatus::Waiting),
+                totals: &TokenTotals::default(),
+                flags: &RunOutcomeFlags::default(),
+                final_output: None,
+                parked: ParkedBy {
+                    children: true,
+                    ..Default::default()
+                },
+            },
+            RunPosition {
+                stage_index: 0,
+                now_secs: 0,
+                last_progress_at: None,
+                depth: 0,
+                max_child_depth: 0,
+            },
+        );
+        assert_eq!(meta.status, RunStatus::WaitingInput);
+        assert_eq!(meta.waiting_on, Some(WaitingOn::Children));
+    }
+
     #[test]
     fn build_run_meta_fills_dynamic_and_static_fields() {
         let md = metadata();
@@ -630,6 +827,7 @@ mod tests {
                 totals: &totals,
                 flags: &RunOutcomeFlags::default(),
                 final_output: None,
+                parked: ParkedBy::default(),
             },
             RunPosition {
                 stage_index: 1,
@@ -679,6 +877,7 @@ mod tests {
                 totals: &TokenTotals::default(),
                 flags: &RunOutcomeFlags::default(),
                 final_output: None,
+                parked: ParkedBy::default(),
             },
             RunPosition {
                 stage_index: 1,
@@ -703,6 +902,7 @@ mod tests {
                 totals: &TokenTotals::default(),
                 flags: &flags,
                 final_output: None,
+                parked: ParkedBy::default(),
             },
             RunPosition {
                 stage_index: 0,
@@ -730,6 +930,7 @@ mod tests {
                     totals: &TokenTotals::default(),
                     flags: &flags,
                     final_output: None,
+                    parked: ParkedBy::default(),
                 },
                 RunPosition {
                     stage_index: 0,
@@ -752,6 +953,7 @@ mod tests {
                 totals: &TokenTotals::default(),
                 flags: &wrote,
                 final_output: None,
+                parked: ParkedBy::default(),
             },
             RunPosition {
                 stage_index: 0,
@@ -775,6 +977,7 @@ mod tests {
                 totals: &TokenTotals::default(),
                 flags: &incapable,
                 final_output: None,
+                parked: ParkedBy::default(),
             },
             RunPosition {
                 stage_index: 0,
@@ -799,6 +1002,7 @@ mod tests {
                 totals: &TokenTotals::default(),
                 flags: &RunOutcomeFlags::default(),
                 final_output: None,
+                parked: ParkedBy::default(),
             },
             RunPosition {
                 stage_index: 2,
@@ -832,6 +1036,7 @@ mod tests {
                 totals: &TokenTotals::default(),
                 flags: &RunOutcomeFlags::default(),
                 final_output: Some(&submitted),
+                parked: ParkedBy::default(),
             },
             RunPosition {
                 stage_index: 0,
@@ -866,6 +1071,7 @@ mod tests {
                 totals: &TokenTotals::default(),
                 flags: &RunOutcomeFlags::default(),
                 final_output: None,
+                parked: ParkedBy::default(),
             },
             RunPosition {
                 stage_index: 0,

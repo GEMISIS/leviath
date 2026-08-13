@@ -1062,6 +1062,7 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "blueprints.query",
     "blueprints.manifest",
     "blueprints.validate.name",
+    "runs.waiting_on",
 ];
 
 /// The server's numeric limits.

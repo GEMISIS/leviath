@@ -659,6 +659,7 @@ mod tests {
                 format: Some("a2ui".to_string()),
                 ..Default::default()
             }),
+            waiting_on: None,
         };
         std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
         // The answer's bytes live beside the descriptor, so a reload has

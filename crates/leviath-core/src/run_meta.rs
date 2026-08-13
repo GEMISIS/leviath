@@ -52,6 +52,35 @@ impl std::fmt::Display for RunStatus {
     }
 }
 
+/// Why a run is parked, for a run whose status is
+/// [`RunStatus::WaitingInput`].
+///
+/// That status means "this run is not moving", which is true of four quite
+/// different situations, only two of which a person can do anything about. A
+/// client with nothing but the status has to guess, and the guess most of them
+/// reach for - no pending interaction plus some visible children - is wrong
+/// whenever the children have paged out of view or the interaction fetch has
+/// not landed yet. Then a run that needs nobody is badged as needing you,
+/// which is how a badge worth interrupting someone for stops being one.
+///
+/// Deliberately a separate field rather than new [`RunStatus`] variants: the
+/// status is matched exhaustively across the codebase and serialized two ways
+/// on the wire, so splitting it would break every consumer to express
+/// something that is not a new state. The run really is waiting; this says on
+/// what.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitingOn {
+    /// A person: an interaction point is holding for an answer.
+    User,
+    /// A person: one or more tool calls are holding for approval.
+    Approval,
+    /// Sub-agents this run spawned, at a `requires_children` boundary.
+    Children,
+    /// The workers of this run's own fan-out stage.
+    FanOut,
+}
+
 /// Metadata for a single background agent run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunMeta {
@@ -192,6 +221,16 @@ pub struct RunMeta {
     /// run on every listing and must stay small no matter how long an answer is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_output: Option<crate::output::FinalOutputDescriptor>,
+
+    /// Why this run is parked, when it is. `None` on every other status, and
+    /// on a run written before this field existed.
+    ///
+    /// Additive on purpose: `default` means a `meta.json` from an older build
+    /// still loads, and `skip_serializing_if` means a run that is not parked
+    /// writes exactly the file it wrote before, so an older build reading a
+    /// newer run sees nothing new either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_on: Option<WaitingOn>,
     /// The output shape this run was launched asking for, when the caller
     /// overrode the blueprint's.
     ///
@@ -380,6 +419,7 @@ impl RunMeta {
             depth: 0,
             max_child_depth: 0,
             final_output: None,
+            waiting_on: None,
             output_request: None,
             flags: RunFlags::default(),
             yolo: false,
@@ -677,6 +717,64 @@ mod tests {
         m.updated_at = 0;
         m.touch();
         assert!(m.updated_at > 0);
+    }
+
+    /// A `meta.json` written before `waiting_on` existed still loads.
+    ///
+    /// This is the whole compatibility question for the field, and it is worth
+    /// a test rather than a reading of the serde attributes: every run already
+    /// on disk was written by a build that had never heard of it, and a
+    /// deserialize that insisted on the key would make every one of them
+    /// unreadable.
+    #[test]
+    fn a_run_written_before_waiting_on_existed_still_loads() {
+        let mut original = sample_meta();
+        original.status = RunStatus::WaitingInput;
+        let mut value = serde_json::to_value(&original).unwrap();
+        // Whatever the current build writes, an older file simply has no such
+        // key. Removing it reproduces that exactly.
+        value
+            .as_object_mut()
+            .expect("meta is an object")
+            .remove("waiting_on");
+        assert!(value.get("waiting_on").is_none(), "the old shape");
+
+        let back: RunMeta = serde_json::from_value(value).unwrap();
+        assert_eq!(back.waiting_on, None);
+        assert_eq!(back.status, RunStatus::WaitingInput);
+        assert_eq!(back.run_id, original.run_id);
+    }
+
+    /// A run that is not parked writes the file it always wrote, so an older
+    /// build reading a newer run sees nothing it does not understand.
+    #[test]
+    fn a_run_that_is_not_parked_writes_no_waiting_on_key() {
+        let mut m = sample_meta();
+        m.status = RunStatus::Running;
+        m.waiting_on = None;
+        let json = serde_json::to_value(&m).unwrap();
+        assert!(json.get("waiting_on").is_none(), "{json}");
+
+        m.waiting_on = Some(WaitingOn::FanOut);
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(json["waiting_on"], serde_json::json!("fan_out"));
+    }
+
+    /// Every variant is on the wire in snake_case, the way `RunStatus` is, and
+    /// round-trips.
+    #[test]
+    fn waiting_on_serializes_in_snake_case() {
+        for (variant, wire) in [
+            (WaitingOn::User, "user"),
+            (WaitingOn::Approval, "approval"),
+            (WaitingOn::Children, "children"),
+            (WaitingOn::FanOut, "fan_out"),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, format!("\"{wire}\""));
+            let back: WaitingOn = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
     }
 
     #[test]

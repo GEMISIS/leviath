@@ -1518,6 +1518,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             yolo: false,
             read_paths: None,
             final_output: None,
+            waiting_on: None,
             output_request: None,
         };
         std::fs::write(
@@ -1617,6 +1618,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             yolo: false,
             read_paths: None,
             final_output: None,
+            waiting_on: None,
             output_request: None,
         };
         std::fs::write(
