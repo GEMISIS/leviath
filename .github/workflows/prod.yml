@@ -360,6 +360,32 @@ jobs:
   # the tap has to be told what just shipped, or `brew upgrade` never fires.
   # Its own job, not a step on `deploy`: a failure here must be loud without
   # retroactively failing a release that did publish.
+  notify-site:
+    name: Refresh leviath.dev
+    needs: [deploy, check-beta]
+    if: needs.check-beta.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to leviath.dev
+        env:
+          # Same token and the same reason as the tap bump below: GITHUB_TOKEN is
+          # scoped to this repo, so reaching another one needs the PAT. It only
+          # needs leviath.dev added to its repository access (Contents: read and
+          # write, which is what a dispatch requires) - no new secret.
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          VERSION: ${{ needs.check-beta.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The site reports the stable channel: the version beside its install
+          # command and the release notes behind it are both generated from this
+          # release and this repo's CHANGELOG.md. It refreshed on a daily timer,
+          # which has no relationship to when a promotion lands - 0.3.7 shipped at
+          # 18:34 and the day's refresh had run at 07:53, so the site advertised
+          # 0.2.0 for eleven hours over a command that installed 0.3.7.
+          jq -nc --arg version "$VERSION"             '{event_type:"release-stable",
+              client_payload:{channel:"stable", version:$version}}'             | gh api repos/GEMISIS/leviath.dev/dispatches --input -
+          echo "Asked leviath.dev to refresh for $VERSION."
+
   bump-tap:
     name: Bump tap manifests (stable)
     needs: [deploy, check-beta]
