@@ -11,6 +11,32 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## 0.3.6 - 2026-08-13
+
+- Fixed: adding an MCP server that authenticates with a header no longer chases
+  an OAuth login it cannot complete. `lev mcp add --header "Authorization=..."`,
+  `lev mcp login`, and the browser console's login button all ended in
+  `failed to fetch resource metadata: HTTP 404 Not Found`, while the header
+  itself worked the whole time. Leviath now asks the server whether it wants
+  credentials before starting a flow, and says so when it does not.
+- Fixed: `lev mcp add --arg -y` was rejected as an unknown flag. The arguments
+  after `--arg` belong to the server's command line, not to `lev`, so the
+  documented way to add a stdio server (`npx -y <package>`, which is how most
+  MCP servers are published) failed at the first command.
+- Fixed: OAuth discovery finds the metadata document for a server hosted at a
+  path. RFC 9728 puts it at `/.well-known/oauth-protected-resource/<path>`;
+  Leviath dropped the path and asked for the bare well-known URL, which such a
+  server does not serve. A server that sends a `resource_metadata` hint was
+  unaffected, which is why this went unnoticed.
+- Fixed: a `${VAR}` credential in an MCP header is expanded everywhere it is
+  used. The login probe sent the reference literally, so a server that checks
+  the value refused it and Leviath concluded an OAuth login was needed; the
+  Test action in the dashboard and over the API refused the variable outright,
+  so a server that worked for an agent failed its own test.
+- Changed: `lev mcp list` reports a server holding a configured `Authorization`
+  header as `header` rather than `none`. Reading as unauthenticated is what
+  pointed people at a login that does not apply.
+
 ## 0.3.5 - 2026-08-12
 
 - Fixed: the fan-out agents no longer skip their own fan-out. A
