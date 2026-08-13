@@ -1,4 +1,4 @@
-//! `lev ps` - list the agents running in the shared-world daemon.
+//! `lev ps` - list the runs in the shared-world daemon.
 //!
 //! Queries the daemon over its control socket and prints one line per run. The
 //! query + formatting cores are tested here; the socket-path resolution + connect
@@ -15,7 +15,7 @@ use crate::runstate;
 
 /// `lev ps --help`. Every status an operator can see, and what to do about it.
 pub const PS_LONG_ABOUT: &str = "\
-List agents running in the shared-world daemon.
+List runs in the shared-world daemon.
 
 Columns: RUN, STATUS, STAGE (with position when the blueprint has several),
 ITER (iterations in the current stage), TOOLS (tool calls so far), and AGE.
@@ -394,14 +394,14 @@ pub fn format_runs(
     now: i64,
 ) -> String {
     if runs.is_empty() && finished.is_empty() {
-        // "no agents running" on its own is the most misleading thing this
+        // "no runs active" on its own is the most misleading thing this
         // command can say while a provider is down: it is what an operator sees
         // once even the finished records have aged out, and it reads as an idle
         // daemon rather than a factory that cannot start anything (issue #201).
         // Say why the list is empty.
         return match providers_footer(health) {
-            Some(footer) => format!("no agents running\n\n{footer}"),
-            None => "no agents running".to_string(),
+            Some(footer) => format!("no runs active\n\n{footer}"),
+            None => "no runs active".to_string(),
         };
     }
     // READS only appears when some run has `[read_paths]` to report, which is

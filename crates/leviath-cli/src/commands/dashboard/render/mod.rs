@@ -105,7 +105,7 @@ impl Dashboard {
         let agent = match self.selected_agent() {
             Some(a) => a.clone(),
             None => {
-                let msg = ratatui::widgets::Paragraph::new("No agent selected.").block(
+                let msg = ratatui::widgets::Paragraph::new("No run selected.").block(
                     ratatui::widgets::Block::default()
                         .borders(ratatui::widgets::Borders::ALL)
                         .title(" Detail "),
