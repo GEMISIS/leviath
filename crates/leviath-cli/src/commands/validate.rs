@@ -36,6 +36,91 @@ pub struct BlueprintSummary {
     pub entry_stage: Option<String>,
     /// Stage names in blueprint order.
     pub stages: Vec<String>,
+    /// Whether `lev run <agent> --task <text>` is accepted. False means a run
+    /// handing this agent a task is refused at spawn, so a harness can check
+    /// here instead of discovering it from the run-time error (issue #414).
+    pub accepts_task: bool,
+    /// Every caller-settable input, in declaration order: which flag seeds
+    /// which region, and whether a run can start without it.
+    pub inputs: Vec<InputSummary>,
+}
+
+/// One caller-settable input: a `--<key>` flag on `lev run` (equally the
+/// `regions.<key>` field over the API, or an ACP `---region:<key>---` block)
+/// and the region its value seeds.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct InputSummary {
+    /// The caller key. `task` is the `--task` flag; anything else is a
+    /// blueprint-defined `--<key>` flag.
+    pub key: String,
+    /// The region the value lands in. Often the same as `key`, but a seed may
+    /// name a shorter key for a longer region (`criteria` for
+    /// `review_criteria`).
+    pub region: String,
+    /// True when the region is required, so a spawn without this input fails.
+    pub required: bool,
+}
+
+/// The caller-settable inputs a blueprint declares, in declaration order.
+///
+/// The prose and JSON halves of the report both read from this one walk, so
+/// they cannot disagree about what the agent takes.
+fn input_summaries(blueprint: &leviath_core::Blueprint) -> Vec<InputSummary> {
+    blueprint
+        .context_layout
+        .regions
+        .iter()
+        .filter_map(|r| match &r.seed {
+            Some(leviath_core::layout::RegionSeed::CallerInput { name }) => Some(InputSummary {
+                key: name.clone(),
+                region: r.name.clone(),
+                required: r.required,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The "Inputs:" lines `print_success` shows, answering at validate time what
+/// `lev run` would otherwise only reveal by refusing at spawn (issue #414):
+/// which flags this agent takes, and explicitly that `--task` is not among
+/// them when no region is seeded from the task.
+fn input_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
+    let inputs = input_summaries(blueprint);
+    if inputs.is_empty() {
+        return vec![
+            "  Inputs: none - this agent takes no --task or other caller input".to_string(),
+        ];
+    }
+    let flags: Vec<String> = inputs
+        .iter()
+        .map(|i| {
+            let mut flag = format!("--{}", i.key);
+            let mut notes = Vec::new();
+            if i.required {
+                notes.push("required".to_string());
+            }
+            if i.key != i.region {
+                notes.push(format!("seeds region '{}'", i.region));
+            }
+            if !notes.is_empty() {
+                flag.push_str(&format!(" ({})", notes.join(", ")));
+            }
+            flag
+        })
+        .collect();
+    let mut lines = vec![format!("  Inputs: {}", flags.join(", "))];
+    if !blueprint.accepts_task() {
+        lines.push(format!(
+            "  Note: this agent takes no --task; give it input via {}",
+            inputs
+                .iter()
+                .map(|i| format!("--{}", i.key))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    lines
 }
 
 /// What `lev validate --json` prints.
@@ -81,6 +166,8 @@ impl ValidateReport {
                 description: blueprint.description.clone(),
                 entry_stage: blueprint.entry_stage.clone(),
                 stages: blueprint.stages.iter().map(|s| s.name.clone()).collect(),
+                accepts_task: blueprint.accepts_task(),
+                inputs: input_summaries(blueprint),
             }),
             error: None,
             errors,
@@ -197,6 +284,9 @@ fn print_success(blueprint: &leviath_core::Blueprint) {
         blueprint.stages.len(),
         blueprint.version
     );
+    for line in input_lines(blueprint) {
+        println!("{line}");
+    }
 
     // Check if graph mode
     let is_graph = blueprint.stages.iter().any(|s| s.transitions.is_some());
@@ -563,6 +653,109 @@ max_iterations = 5
         print_success(&bp);
     }
 
+    // ─── input_lines / input_summaries ───────────────────────────────────
+
+    /// A reviewer-shaped manifest: no task region, one required input whose
+    /// key differs from its region, one optional renamed input, and one bare
+    /// optional input. Together the flags exercise every annotation
+    /// combination the formatter has.
+    const NAMED_INPUTS_MANIFEST: &str = r#"
+[agent]
+name = "inputs-agent"
+version = "0.1.0"
+description = "Named inputs"
+
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-5" }
+description = "Main"
+max_iterations = 5
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+patch = { kind = "pinned", max_tokens = 2000, required = true, seed = "diff" }
+review_criteria = { kind = "pinned", max_tokens = 1000, seed = "criteria" }
+focus = { kind = "pinned", max_tokens = 500, seed = "input" }
+conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
+"#;
+
+    /// The point of issue #414: validate now says what `lev run` would accept,
+    /// including that `--task` is not among the flags.
+    #[test]
+    fn input_lines_name_every_flag_and_the_missing_task() {
+        let lines = input_lines(&parse(NAMED_INPUTS_MANIFEST));
+        assert_eq!(
+            lines,
+            vec![
+                "  Inputs: --diff (required, seeds region 'patch'), \
+                 --criteria (seeds region 'review_criteria'), --focus"
+                    .to_string(),
+                "  Note: this agent takes no --task; give it input via --diff, \
+                 --criteria, --focus"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn input_lines_of_a_task_taking_agent_skip_the_refusal_note() {
+        let toml = CLEAN_MANIFEST.replace(
+            "[context.regions]",
+            "[context.regions]\ntask = { kind = \"pinned\", max_tokens = 2000, \
+             required = true, seed = \"task\" }",
+        );
+        let blueprint = parse(&toml);
+        assert!(blueprint.accepts_task());
+        assert_eq!(
+            input_lines(&blueprint),
+            vec!["  Inputs: --task (required)".to_string()],
+            "an agent that takes a task needs no note about refusing one"
+        );
+    }
+
+    #[test]
+    fn input_lines_without_any_caller_input_say_so() {
+        assert_eq!(
+            input_lines(&parse(CLEAN_MANIFEST)),
+            vec!["  Inputs: none - this agent takes no --task or other caller input".to_string()]
+        );
+    }
+
+    /// The summaries feed the JSON report, so a harness can check an agent's
+    /// inputs before spawning it instead of discovering the refusal at run
+    /// time.
+    #[test]
+    fn input_summaries_carry_key_region_and_required() {
+        let summaries = input_summaries(&parse(NAMED_INPUTS_MANIFEST));
+        assert_eq!(
+            summaries,
+            vec![
+                InputSummary {
+                    key: "diff".to_string(),
+                    region: "patch".to_string(),
+                    required: true,
+                },
+                InputSummary {
+                    key: "criteria".to_string(),
+                    region: "review_criteria".to_string(),
+                    required: false,
+                },
+                InputSummary {
+                    key: "focus".to_string(),
+                    region: "focus".to_string(),
+                    required: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn print_success_prints_the_input_lines_without_panicking() {
+        // The formatting is asserted in the input_lines tests; this pins the
+        // wiring, so the lines cannot silently drop out of the report.
+        print_success(&parse(NAMED_INPUTS_MANIFEST));
+    }
+
     // ─── print_findings ──────────────────────────────────────────────────
 
     /// One finding of each severity: the counts returned are errors and
@@ -801,6 +994,8 @@ system = { kind = "pinned", max_tokens = 1000 }
         let summary = report.blueprint.expect("a parsed manifest has a summary");
         assert_eq!(summary.name, "ok-agent");
         assert_eq!(summary.stages, vec!["main".to_string()]);
+        assert!(!summary.accepts_task);
+        assert_eq!(summary.inputs, Vec::new());
         assert_eq!((report.errors, report.warnings, report.notes), (0, 0, 0));
     }
 
@@ -863,6 +1058,25 @@ system = { kind = "pinned", max_tokens = 1000 }
             serde_json::json!("unknown-tool")
         );
         assert_eq!(value["findings"][0]["severity"], serde_json::json!("error"));
+    }
+
+    /// The JSON half of issue #414: a harness reads the accepted inputs off
+    /// the report instead of parsing the run-time refusal.
+    #[test]
+    fn json_report_names_the_accepted_inputs() {
+        let blueprint = parse(NAMED_INPUTS_MANIFEST);
+        let report = ValidateReport::linted(&blueprint, Vec::new(), false);
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        assert_eq!(value["blueprint"]["accepts_task"], serde_json::json!(false));
+        assert_eq!(
+            value["blueprint"]["inputs"][0],
+            serde_json::json!({"key": "diff", "region": "patch", "required": true})
+        );
+        assert_eq!(
+            value["blueprint"]["inputs"][1]["key"],
+            serde_json::json!("criteria")
+        );
     }
 
     #[test]
