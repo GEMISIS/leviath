@@ -56,6 +56,14 @@ fn default_interaction_timeout_secs() -> u64 {
     leviath_runtime::interaction_hub::DEFAULT_INTERACTION_TIMEOUT_SECS
 }
 
+fn default_inference_retry_attempts() -> u32 {
+    leviath_runtime::DEFAULT_RETRY_ATTEMPTS
+}
+
+fn default_inference_retry_base_ms() -> u64 {
+    leviath_runtime::DEFAULT_RETRY_BASE_DELAY_MS
+}
+
 /// Runtime resource limits with safe defaults baked in.
 ///
 /// Both fields default to a bounded value so a fresh install can't accidentally
@@ -223,6 +231,40 @@ pub struct LimitsConfig {
     #[serde(default = "default_interaction_timeout_secs")]
     pub interaction_timeout_secs: u64,
 
+    /// How many times an inference is attempted, the first try included,
+    /// before the agent is failed with whatever the provider last said.
+    ///
+    /// Only a transient failure is retried at all - a reset connection, a
+    /// timeout, a 429, a 5xx. An authentication error or an over-long request
+    /// fails on the first answer, since the second would be identical.
+    ///
+    /// Defaults to `4`, which is one try and three retries. `1` turns retrying
+    /// off. The wait between retries is `inference_retry_base_ms`, doubling each
+    /// time, so the default schedule is 1s, 2s, 4s.
+    ///
+    /// Raising it lengthens how long a run rides out a provider **overload**
+    /// (an Anthropic 529, or a 429), which is retried on its own much slower
+    /// schedule of 15s, 30s, then 60s per further attempt - that case is why the
+    /// key exists (issue #417). Whatever this is set to, the retries of one
+    /// request may sleep at most five minutes in total.
+    ///
+    /// Read once at daemon start, so a change needs a daemon restart.
+    #[serde(default = "default_inference_retry_attempts")]
+    pub inference_retry_attempts: u32,
+
+    /// The wait before the first inference retry, in milliseconds, doubling for
+    /// each retry after it. Defaults to `1000`, so the schedule is 1s, 2s, 4s.
+    ///
+    /// This is the *blip* schedule and is meant to stay short: a reset
+    /// connection or a 500 is usually gone by the next attempt. A provider
+    /// overload does not use it - see `inference_retry_attempts` - so raising
+    /// this to wait out an outage is the wrong lever and only delays ordinary
+    /// failures.
+    ///
+    /// Read once at daemon start, so a change needs a daemon restart.
+    #[serde(default = "default_inference_retry_base_ms")]
+    pub inference_retry_base_ms: u64,
+
     /// Most bytes one tool call may write to disk. Unset is unlimited.
     ///
     /// **Unset in code, set by `lev setup`.** How much an agent should write is
@@ -280,6 +322,8 @@ impl Default for LimitsConfig {
             provider_failures_before_open: default_provider_failures_before_open(),
             provider_circuit_cooldown_secs: default_provider_circuit_cooldown_secs(),
             interaction_timeout_secs: default_interaction_timeout_secs(),
+            inference_retry_attempts: default_inference_retry_attempts(),
+            inference_retry_base_ms: default_inference_retry_base_ms(),
             // Deliberately `None` here and concrete in `lev setup`: the code
             // imposes no ceiling on a user who never opened the config, and a
             // fresh install gets a number written where it can be seen and

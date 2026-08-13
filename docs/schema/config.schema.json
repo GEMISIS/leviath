@@ -162,6 +162,18 @@
           "default": 3600,
           "description": "How long a prompt waits for a person before resolving as cancelled. `0` waits forever. This is what releases an interaction point that holds under --yolo, so the default means such a run sits for an hour looking dead."
         },
+        "inference_retry_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4,
+          "description": "How many times an inference is attempted, the first try included, before the agent is failed. Only transient failures are retried. `1` turns retrying off. A provider overload (429, or Anthropic's 529) uses a slower schedule of 15s, 30s, then 60s per further attempt, so raising this is how a run rides out a longer outage. The retries of one request may sleep at most five minutes in total whatever this is set to."
+        },
+        "inference_retry_base_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1000,
+          "description": "The wait before the first inference retry, in milliseconds, doubling for each retry after it. This is the schedule for ordinary blips such as a reset connection or a 500; a provider overload does not use it."
+        },
         "max_tool_call_write_bytes": {
           "type": "integer",
           "minimum": 0,

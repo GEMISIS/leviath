@@ -197,7 +197,12 @@ pub fn map_rhai_err(err: Box<EvalAltResult>) -> ProviderError {
                 .and_then(|d| d.as_bool().ok())
                 .unwrap_or(false);
             return match kind.as_deref() {
-                Some("rate_limited") => ProviderError::RateLimitExceeded,
+                // A script reports the kind and nothing else, so there is no
+                // `Retry-After` to carry; the retry loop falls back to its own
+                // capacity backoff.
+                Some("rate_limited") => ProviderError::RateLimitExceeded {
+                    retry_after_secs: None,
+                },
                 Some("transport") | Some("server") => ProviderError::RequestFailed(message),
                 // A script's `api` error is the same shape a built-in provider
                 // gets back from an HTTP call, so it classifies the same way:

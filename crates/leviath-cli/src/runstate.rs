@@ -798,8 +798,15 @@ fn write_stages_index_to(dir: &std::path::Path, stages: &[StageRecord]) -> anyho
 
 /// Read the stages index for a run, or return an empty vec on any error.
 pub fn read_stages_index(run_id: &str) -> Vec<StageRecord> {
-    let path = run_dir(run_id).join("stages.json");
-    let json = match std::fs::read_to_string(&path) {
+    read_stages_index_from(&run_dir(run_id))
+}
+
+/// [`read_stages_index`] for a run directory the caller already holds.
+///
+/// Restart recovery works from its configured runs directory rather than the
+/// home one, so it cannot resolve the path itself.
+pub fn read_stages_index_from(dir: &std::path::Path) -> Vec<StageRecord> {
+    let json = match std::fs::read_to_string(dir.join("stages.json")) {
         Ok(j) => j,
         Err(_) => return Vec::new(),
     };

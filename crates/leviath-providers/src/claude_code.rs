@@ -345,7 +345,11 @@ fn classify_error(json: &serde_json::Value) -> ProviderError {
         || lowered.contains("too many requests")
         || lowered.contains("usage limit")
     {
-        return ProviderError::RateLimitExceeded;
+        // No hint to carry: this comes from the CLI's own text, and a
+        // subprocess has no response headers to read a `Retry-After` from.
+        return ProviderError::RateLimitExceeded {
+            retry_after_secs: None,
+        };
     }
 
     // Not authenticated: permanent until the user acts. `ApiError` carries none
@@ -832,7 +836,9 @@ mod tests {
             let err = classify(body);
             assert_eq!(
                 std::mem::discriminant(&err),
-                std::mem::discriminant(&ProviderError::RateLimitExceeded),
+                std::mem::discriminant(&ProviderError::RateLimitExceeded {
+                    retry_after_secs: None,
+                }),
                 "{body}"
             );
             assert!(err.is_transient(), "{body}");

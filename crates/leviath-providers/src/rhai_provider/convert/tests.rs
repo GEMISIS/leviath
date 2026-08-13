@@ -121,7 +121,7 @@ fn map_err_kinds() {
     };
     assert!(matches!(
         map_rhai_err(mk("rate_limited")),
-        ProviderError::RateLimitExceeded
+        ProviderError::RateLimitExceeded { .. }
     ));
     assert!(matches!(
         map_rhai_err(mk("transport")),
@@ -206,7 +206,10 @@ fn host_err_maps_round_trip() {
     let e = host_err_to_rhai(HostHttpError::RateLimited {
         retry_after: Some(5),
     });
-    assert!(matches!(map_rhai_err(e), ProviderError::RateLimitExceeded));
+    assert!(matches!(
+        map_rhai_err(e),
+        ProviderError::RateLimitExceeded { .. }
+    ));
     let e = host_err_to_rhai(HostHttpError::Api("HTTP 500: x".to_string()));
     assert!(matches!(map_rhai_err(e), ProviderError::ApiError(_)));
     let e = host_err_to_rhai(HostHttpError::Transport("reset".to_string()));
@@ -237,7 +240,10 @@ fn parse_inference_and_chunk_reject_unconvertible_dynamic() {
 #[test]
 fn host_err_rate_limited_without_retry_after() {
     let e = host_err_to_rhai(HostHttpError::RateLimited { retry_after: None });
-    assert!(matches!(map_rhai_err(e), ProviderError::RateLimitExceeded));
+    assert!(matches!(
+        map_rhai_err(e),
+        ProviderError::RateLimitExceeded { .. }
+    ));
 }
 
 #[test]

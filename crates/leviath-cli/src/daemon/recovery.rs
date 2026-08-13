@@ -8,8 +8,10 @@
 //! which skips the required-at-spawn region gate since the window is restored
 //! from a snapshot; restores the
 //! persisted context / stage / iteration / token totals via
-//! [`leviath_runtime::restore::restore_agent`], and preserves the original run
-//! metadata. Anything unreadable or un-reloadable is skipped (logged), never fatal.
+//! [`leviath_runtime::restore::restore_agent`], puts the run's per-stage ledger
+//! back from `stages.json` via
+//! [`leviath_runtime::restore::restore_stage_ledger`], and preserves the
+//! original run metadata. Anything unreadable or un-reloadable is skipped (logged), never fatal.
 //!
 //! One exception to the "re-issue inference" resume: a run that was parked at a
 //! stage-boundary interaction point (e.g. `plan_approval`) wrote an
@@ -257,7 +259,8 @@ fn is_terminal(status: &RunStatus) -> bool {
 }
 
 /// Reload one run: spawn it fresh from its blueprint, then overlay the persisted
-/// context / stage / totals and preserve the original run metadata.
+/// context / stage / totals / per-stage ledger and preserve the original run
+/// metadata.
 fn reload_one(
     world: &mut PipelineWorld,
     deps: SpawnDeps<'_>,
@@ -354,6 +357,19 @@ fn reload_one(
         stage_index,
         iteration,
         totals,
+    );
+
+    // Put the per-stage ledger back too. `build_agent_for_reload` seeds one
+    // all-zero record per blueprint stage, and the persist tick rewrites
+    // `stages.json` whole, so skipping this did not merely fail to restore the
+    // run's stage history - the next tick wrote zeros over the file that held
+    // it, while `meta.json`'s run totals went on looking correct (issue #415).
+    // No file (a run from before the ledger, or one that stopped before its
+    // first persist) leaves the seeded records as they are.
+    leviath_runtime::restore::restore_stage_ledger(
+        world.world_mut(),
+        entity,
+        &crate::runstate::read_stages_index_from(run_dir),
     );
 
     // A tool batch was in flight when the daemon died and its results never
@@ -1855,6 +1871,100 @@ mod tests {
                 .get::<TokenTotals>(restored[0].1.entity())
                 .is_some()
         );
+    }
+
+    /// A restart used to bring every stage back at zero: nothing rebuilt the
+    /// ledger from `stages.json`, so the blueprint-seeded (all-zero) one was
+    /// written straight over the real file on the next persist tick, and the
+    /// run's whole per-stage history went with it while `meta.json` still
+    /// looked healthy (issue #415).
+    #[tokio::test]
+    async fn reload_restores_the_persisted_stage_ledger() {
+        use leviath_core::run_meta::{StageRecord, StageRunStatus};
+        use leviath_runtime::pipeline::StageLedger;
+
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let runs = tempfile::tempdir().unwrap();
+        write_run(
+            runs.path(),
+            "run-stages",
+            manifest.to_str().unwrap(),
+            RunStatus::Running,
+            None,
+        );
+        // The ledger as the run left it: `analyze` ran and finished, the run
+        // stopped in `implement`, `review` was never reached. The trailing
+        // record names a stage this blueprint no longer has.
+        let mut analyze = StageRecord::new("analyze".to_string(), 0);
+        analyze.status = StageRunStatus::Complete;
+        analyze.entered = true;
+        analyze.prompt_tokens = 1_234;
+        analyze.completion_tokens = 56;
+        analyze.cached_tokens = 7;
+        analyze.cache_write_tokens = 8;
+        analyze.first_call_prompt_tokens = Some(400);
+        analyze.runaway_warned = true;
+        analyze
+            .region_tokens
+            .insert("conversation".to_string(), 900);
+        analyze.started_at = Some(10);
+        analyze.ended_at = Some(20);
+        let mut implement = StageRecord::new("implement".to_string(), 1);
+        implement.status = StageRunStatus::Active;
+        implement.entered = true;
+        implement.prompt_tokens = 77;
+        implement.started_at = Some(20);
+        let removed = StageRecord::new("removed_stage".to_string(), 7);
+        std::fs::write(
+            runs.path().join("run-stages").join("stages.json"),
+            serde_json::to_string(&vec![analyze, implement, removed]).unwrap(),
+        )
+        .unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let restored = reload_persisted_agents(
+            &mut world,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
+            runs.path(),
+        );
+        assert_eq!(restored.len(), 1);
+
+        let ledger = world
+            .world()
+            .get::<StageLedger>(restored[0].1.entity())
+            .expect("a reloaded agent carries a stage ledger");
+        // One record per blueprint stage, in blueprint order: the record for a
+        // stage that no longer exists is dropped rather than appended.
+        let names: Vec<&str> = ledger.0.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["analyze", "implement", "review"]);
+        assert_eq!(ledger.0[0].prompt_tokens, 1_234);
+        assert_eq!(ledger.0[0].completion_tokens, 56);
+        assert_eq!(ledger.0[0].cached_tokens, 7);
+        assert_eq!(ledger.0[0].cache_write_tokens, 8);
+        assert_eq!(ledger.0[0].first_call_prompt_tokens, Some(400));
+        assert!(ledger.0[0].runaway_warned);
+        assert_eq!(ledger.0[0].region_tokens.get("conversation"), Some(&900));
+        assert_eq!(ledger.0[0].started_at, Some(10));
+        assert_eq!(ledger.0[0].ended_at, Some(20));
+        assert_eq!(ledger.0[0].status, StageRunStatus::Complete);
+        assert!(ledger.0[0].entered);
+        assert_eq!(ledger.0[1].prompt_tokens, 77);
+        assert!(ledger.0[1].entered);
+        // A stage with nothing persisted against it keeps the seeded record.
+        assert_eq!(ledger.0[2].prompt_tokens, 0);
+        assert!(!ledger.0[2].entered);
+        assert_eq!(ledger.0[2].index, 2);
     }
 
     #[tokio::test]

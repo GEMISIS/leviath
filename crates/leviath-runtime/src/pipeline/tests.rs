@@ -451,6 +451,32 @@ async fn dispatch_moves_agent_to_awaiting_and_runs_the_job() {
     assert!(outcome.result.is_ok());
 }
 
+/// The daemon's `[limits]` retry schedule reaches a dispatched job. A world
+/// that never inserts the resource takes the built-in one, which every other
+/// dispatch test here exercises (issue #417).
+#[tokio::test]
+async fn dispatch_uses_the_configured_retry_schedule() {
+    let (mut world, mut rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    world.insert_resource(InferenceRetryTuning {
+        max_attempts: 2,
+        base_delay_ms: 5,
+    });
+    let e = world
+        .spawn((
+            agent_state(),
+            window(),
+            stage("m", vec![], None),
+            ReadyToInfer,
+        ))
+        .id();
+
+    run(&mut world);
+
+    assert!(world.get::<AwaitingInference>(e).is_some());
+    let outcome = rx.recv().await.expect("outcome");
+    assert!(outcome.result.is_ok());
+}
+
 #[tokio::test]
 async fn dispatch_skips_when_pool_full() {
     let mut cfg = InferencePoolConfig::new();
@@ -1555,6 +1581,54 @@ fn dispatch_persistence_emits_stage_index_and_drains_io_buffer() {
     assert_eq!(job.log_appends, vec![(0, "[tool] x: y".to_string())]);
     // The buffer was drained in place.
     assert!(world.get::<StageIoBuffer>(e).unwrap().output.is_empty());
+}
+
+/// The persist tick rewrites `stages.json` whole, so what the reload leaves in
+/// the ledger is what lands on disk. A reload that left the spawn-seeded zeros
+/// there did not merely lose the run's stage history, it erased the copy that
+/// was still on disk (issue #415).
+#[test]
+fn a_restored_ledger_reaches_the_persist_tick_instead_of_the_seeded_zeros() {
+    let (mut world, mut rx) = world_with_persistence();
+    let e = world
+        .spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 1 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            // What `spawn_agent` seeds: names and nothing else.
+            ledger2(),
+        ))
+        .id();
+
+    // The reload as it was: no ledger restore, so the tick ships zeros over the
+    // real record of the run's first stage.
+    run_dispatch_persistence(&mut world);
+    let before = snapshot_job(rx.try_recv().expect("job sent"));
+    assert_eq!(before.stages[0].prompt_tokens, 0);
+
+    // The reload as it is: the persisted records go back on first.
+    let mut plan = leviath_core::run_meta::StageRecord::new("plan".to_string(), 0);
+    plan.entered = true;
+    plan.prompt_tokens = 4_096;
+    plan.completion_tokens = 128;
+    crate::restore::restore_stage_ledger(&mut world, e, &[plan]);
+    world
+        .get_mut::<PersistWatermark>(e)
+        .expect("watermark present")
+        .backdate(0);
+
+    run_dispatch_persistence(&mut world);
+    let after = snapshot_job(rx.try_recv().expect("job sent"));
+    assert_eq!(after.stages[0].prompt_tokens, 4_096);
+    assert_eq!(after.stages[0].completion_tokens, 128);
+    assert_eq!(
+        after.stages[0].status,
+        leviath_core::run_meta::StageRunStatus::Complete,
+        "a stage the run had entered and left reconciles as complete, not skipped"
+    );
 }
 
 /// Every snapshot carries the answer's bytes whenever the agent holds them.
@@ -6337,9 +6411,13 @@ fn stage_setup_from_threads_request_timeout() {
 #[test]
 fn retry_policy_for_overrides_job_timeout_when_set() {
     let default = crate::inference_bridge::RetryPolicy::default();
+    let tuning = InferenceRetryTuning::default();
 
     // No config at all → default policy unchanged.
-    assert_eq!(retry_policy_for(None).job_timeout, default.job_timeout);
+    assert_eq!(
+        retry_policy_for(None, tuning).job_timeout,
+        default.job_timeout
+    );
 
     // Config present but no per-stage timeout → default still stands.
     let cfg_none = InferenceConfig {
@@ -6347,7 +6425,7 @@ fn retry_policy_for_overrides_job_timeout_when_set() {
         ..Default::default()
     };
     assert_eq!(
-        retry_policy_for(Some(&cfg_none)).job_timeout,
+        retry_policy_for(Some(&cfg_none), tuning).job_timeout,
         default.job_timeout
     );
 
@@ -6357,10 +6435,44 @@ fn retry_policy_for_overrides_job_timeout_when_set() {
         request_timeout_secs: Some(120),
         ..Default::default()
     };
-    let policy = retry_policy_for(Some(&cfg_some));
+    let policy = retry_policy_for(Some(&cfg_some), tuning);
     assert_eq!(policy.job_timeout, std::time::Duration::from_secs(120));
     assert_eq!(policy.max_attempts, default.max_attempts);
     assert_eq!(policy.base_delay, default.base_delay);
+}
+
+/// The `[limits]` retry schedule reaches the policy, and reaches only the two
+/// numbers it owns: the capacity backoff and the total-backoff ceiling are the
+/// runtime's own bound on a provider outage and are not an operator's to raise
+/// (issue #417).
+#[test]
+fn retry_policy_for_takes_the_configured_schedule() {
+    let default = crate::inference_bridge::RetryPolicy::default();
+    let policy = retry_policy_for(
+        None,
+        InferenceRetryTuning {
+            max_attempts: 9,
+            base_delay_ms: 250,
+        },
+    );
+    assert_eq!(policy.max_attempts, 9);
+    assert_eq!(policy.base_delay, std::time::Duration::from_millis(250));
+    assert_eq!(policy.capacity_base_delay, default.capacity_base_delay);
+    assert_eq!(policy.capacity_max_delay, default.capacity_max_delay);
+    assert_eq!(policy.max_total_backoff, default.max_total_backoff);
+}
+
+/// An unset resource is the shipped schedule, so an embedded host that never
+/// inserts one behaves exactly as the daemon's default config does.
+#[test]
+fn the_default_retry_tuning_is_the_shipped_schedule() {
+    let default = crate::inference_bridge::RetryPolicy::default();
+    let tuning = InferenceRetryTuning::default();
+    assert_eq!(tuning.max_attempts, default.max_attempts);
+    assert_eq!(
+        std::time::Duration::from_millis(tuning.base_delay_ms),
+        default.base_delay
+    );
 }
 
 #[test]

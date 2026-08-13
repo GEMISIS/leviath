@@ -2824,7 +2824,9 @@ mod tests {
         let err = provider.infer(&simple_request()).await.unwrap_err();
         assert_eq!(
             std::mem::discriminant(&err),
-            std::mem::discriminant(&ProviderError::RateLimitExceeded)
+            std::mem::discriminant(&ProviderError::RateLimitExceeded {
+                retry_after_secs: None,
+            })
         );
     }
 
@@ -2837,7 +2839,9 @@ mod tests {
         let err = provider.infer(&simple_request()).await.unwrap_err();
         assert_eq!(
             std::mem::discriminant(&err),
-            std::mem::discriminant(&ProviderError::RateLimitExceeded)
+            std::mem::discriminant(&ProviderError::RateLimitExceeded {
+                retry_after_secs: None,
+            })
         );
     }
 

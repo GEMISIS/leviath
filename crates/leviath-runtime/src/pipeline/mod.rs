@@ -131,6 +131,36 @@ pub struct StageInference {
 #[derive(Resource)]
 pub struct Providers(pub ProviderRegistry);
 
+/// The operator's retry schedule for inference, from `[limits]`.
+///
+/// A world resource rather than constants because the daemon serves it from
+/// `[limits] inference_retry_attempts` and `inference_retry_base_ms`. Absent
+/// means the built-in schedule, which is what these defaults are.
+///
+/// Only the two ordinary-failure numbers are configurable. The capacity
+/// schedule and the total-backoff ceiling stay fixed (see
+/// [`crate::inference_bridge::RetryPolicy`]): they exist to bound a provider
+/// outage, and a bound an operator can raise without limit is not one.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InferenceRetryTuning {
+    /// Total attempts including the first. See
+    /// [`crate::inference_bridge::RetryPolicy::max_attempts`].
+    pub max_attempts: u32,
+    /// The first backoff after an ordinary transient failure, in milliseconds,
+    /// doubling per retry. See
+    /// [`crate::inference_bridge::RetryPolicy::base_delay`].
+    pub base_delay_ms: u64,
+}
+
+impl Default for InferenceRetryTuning {
+    fn default() -> Self {
+        Self {
+            max_attempts: crate::inference_bridge::DEFAULT_RETRY_ATTEMPTS,
+            base_delay_ms: crate::inference_bridge::DEFAULT_RETRY_BASE_DELAY_MS,
+        }
+    }
+}
+
 /// The plumbing the inference-dispatch system needs: the per-model pools, the
 /// channel to report outcomes on, the tick wake handle, and a runtime handle to
 /// spawn the (bounded, per-request) worker tasks onto.

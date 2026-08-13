@@ -546,6 +546,10 @@ pub struct StageRecord {
     /// knows. Recorded as the largest each region reached while the stage was
     /// active, which is the number that decides whether a region is earning its
     /// place.
+    ///
+    /// Every region the window carries is measured, including the ones a stage
+    /// layout hides rather than declares, so a stage can list a region it never
+    /// assembled into a request.
     #[serde(default)]
     pub region_tokens: std::collections::BTreeMap<String, usize>,
     /// Prompt tokens billed by this stage's first call, the baseline the

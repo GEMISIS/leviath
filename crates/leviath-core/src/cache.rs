@@ -13,6 +13,16 @@ pub enum CacheHint {
     Always,
     /// Cache until content hash changes (compacting regions between compaction events).
     UntilChanged,
+    /// Same cacheability as [`CacheHint::UntilChanged`], and additionally marks
+    /// the start of the most recently changed stretch of that tier.
+    ///
+    /// A provider that spends one cache breakpoint per run of same-hint blocks
+    /// sees the change of hint as a run boundary, so the blocks ahead of the
+    /// mutation end up in a cache entry of their own instead of sharing one
+    /// with the block that just changed. Nothing else about the block differs:
+    /// assembly sorts it to the same position as `UntilChanged`, and its text
+    /// is untouched.
+    RecentlyChanged,
     /// Cache the stable prefix of a sliding window.
     /// `stable_fraction` is 0.0..1.0 (default 0.75 = oldest 75% of messages are stable).
     SlidingPrefix {
@@ -44,6 +54,14 @@ mod tests {
     #[test]
     fn cache_hint_until_changed_equality() {
         assert_eq!(CacheHint::UntilChanged, CacheHint::UntilChanged);
+    }
+
+    #[test]
+    fn cache_hint_recently_changed_is_distinct_from_until_changed() {
+        assert_eq!(CacheHint::RecentlyChanged, CacheHint::RecentlyChanged);
+        assert_ne!(CacheHint::RecentlyChanged, CacheHint::UntilChanged);
+        let dbg = format!("{:?}", CacheHint::RecentlyChanged);
+        assert!(dbg.contains("RecentlyChanged"));
     }
 
     #[test]
@@ -88,6 +106,7 @@ mod tests {
         let hints = vec![
             CacheHint::Always,
             CacheHint::UntilChanged,
+            CacheHint::RecentlyChanged,
             CacheHint::SlidingPrefix {
                 stable_fraction: 0.75,
             },

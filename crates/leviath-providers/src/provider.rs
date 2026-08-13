@@ -167,7 +167,12 @@ pub enum ProviderError {
 
     /// Rate limit exceeded
     #[error("Rate limit exceeded")]
-    RateLimitExceeded,
+    RateLimitExceeded {
+        /// What the provider's `Retry-After` header asked for, in seconds, when
+        /// it sent one. Carried out of the provider layer so the retry loop can
+        /// wait as long as the server said instead of guessing (issue #417).
+        retry_after_secs: Option<u64>,
+    },
 
     /// Invalid response from provider
     #[error("Invalid response: {0}")]
@@ -187,7 +192,83 @@ pub enum ProviderError {
     Other(String),
 }
 
+/// The message fragments that mean "the provider has no capacity right now":
+/// a 429 rate limit, or Anthropic's 529 "overloaded".
+///
+/// Kept apart from [`SERVER_ERROR_SIGNALS`] because the two deserve different
+/// waits. A 500 or a dropped connection is a blip that a second or two clears;
+/// a capacity refusal is a window that lasts minutes, and retrying it on
+/// blip-sized backoff just spends the attempts without ever leaving the window
+/// (issue #417).
+const CAPACITY_SIGNALS: [&str; 5] = [
+    // Rate limiting (a provider that maps 429 to ApiError rather than
+    // RateLimitExceeded, e.g. Ollama).
+    "429",
+    "too many requests",
+    "rate limit",
+    // Anthropic returns 529 "overloaded" when the model is saturated.
+    "529",
+    "overloaded",
+];
+
+/// The message fragments that mean the server failed on its own account: an
+/// ordinary 5xx, which is usually gone by the next attempt.
+const SERVER_ERROR_SIGNALS: [&str; 8] = [
+    "500",
+    "502",
+    "503",
+    "504",
+    "internal server error",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+];
+
+/// Whether a lowercased error message contains any of `signals`.
+fn mentions_any(message: &str, signals: &[&str]) -> bool {
+    signals.iter().any(|s| message.contains(s))
+}
+
+/// What the retry loop should do about a failed attempt, beyond the yes/no of
+/// [`ProviderError::is_transient`].
+///
+/// The provider layer is the only place that knows whether a failure was the
+/// provider running out of capacity and whether the server said when to come
+/// back, and neither survives being flattened into an error string. Carrying
+/// both here is what lets the dispatch layer honor a `Retry-After` and back off
+/// on a capacity-sized schedule rather than a blip-sized one (issue #417).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RetryAdvice {
+    /// Whether the provider refused for want of capacity (429, or a 529
+    /// "overloaded"), as opposed to failing for its own reasons.
+    pub capacity: bool,
+    /// How many seconds the provider's `Retry-After` header asked the caller to
+    /// wait. `None` when it sent no hint, which is the usual case for a 529.
+    pub retry_after_secs: Option<u64>,
+}
+
 impl ProviderError {
+    /// What to do about this failure if it is retried: see [`RetryAdvice`].
+    ///
+    /// Only a capacity refusal ever carries advice. Everything else answers
+    /// with the default, which asks for the ordinary schedule.
+    pub fn retry_advice(&self) -> RetryAdvice {
+        match self {
+            ProviderError::RateLimitExceeded { retry_after_secs } => RetryAdvice {
+                capacity: true,
+                retry_after_secs: *retry_after_secs,
+            },
+            // A provider that reports 429/529 as a plain API error (Ollama, and
+            // Anthropic's 529) leaves only the message to read. The header is
+            // gone by then, so these get the capacity schedule with no hint.
+            ProviderError::ApiError(msg) => RetryAdvice {
+                capacity: mentions_any(&msg.to_ascii_lowercase(), &CAPACITY_SIGNALS),
+                retry_after_secs: None,
+            },
+            _ => RetryAdvice::default(),
+        }
+    }
+
     /// Whether this failure is worth retrying - a transient network or
     /// server-side issue (connection reset, timeout, 429, 5xx / "overloaded") -
     /// as opposed to a permanent one (auth, invalid request, token limit)
@@ -197,32 +278,14 @@ impl ProviderError {
             // Network-level failures: connection reset, timeout, DNS, TLS.
             ProviderError::RequestFailed(_) => true,
             // 429 - back off and retry.
-            ProviderError::RateLimitExceeded => true,
-            // We only have the message, so match the common server-side (5xx)
-            // signals - including Anthropic's 529 "overloaded". 4xx client
-            // errors carry none of these and stay permanent.
+            ProviderError::RateLimitExceeded { .. } => true,
+            // We only have the message, so match the common capacity and
+            // server-side (5xx) signals - including Anthropic's 529
+            // "overloaded". 4xx client errors carry none of these and stay
+            // permanent.
             ProviderError::ApiError(msg) => {
                 let m = msg.to_ascii_lowercase();
-                [
-                    // Rate limiting (a provider that maps 429 to ApiError rather
-                    // than RateLimitExceeded, e.g. Ollama).
-                    "429",
-                    "too many requests",
-                    "rate limit",
-                    // Server-side 5xx (and Anthropic's 529 "overloaded").
-                    "500",
-                    "502",
-                    "503",
-                    "504",
-                    "529",
-                    "overloaded",
-                    "internal server error",
-                    "bad gateway",
-                    "service unavailable",
-                    "gateway timeout",
-                ]
-                .iter()
-                .any(|s| m.contains(s))
+                mentions_any(&m, &CAPACITY_SIGNALS) || mentions_any(&m, &SERVER_ERROR_SIGNALS)
             }
             // A malformed response, an over-limit request, an unusable
             // provider, or an unknown error won't be fixed by retrying.
@@ -925,6 +988,20 @@ pub fn parse_openai_finish_reason(reason: &str) -> FinishReason {
     }
 }
 
+/// How long a response's `Retry-After` header asks the caller to wait.
+///
+/// Only the delta-seconds form is read. The header's other form is an HTTP
+/// date, which every provider API in use here answers with seconds instead, and
+/// reading it would mean trusting the server's clock against ours; an
+/// unparseable value is treated as no hint at all, which falls back to the
+/// caller's own backoff.
+fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+}
+
 /// Check an HTTP response for errors and return it on success.
 ///
 /// - On 429 (rate limit): notifies the optional rate limiter and returns `RateLimitExceeded`.
@@ -940,15 +1017,16 @@ pub async fn check_http_response(
     let status = response.status();
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
         // Extract retry-after *before* consuming the response body.
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok());
+        let retry_after = retry_after_secs(response.headers());
         if let Some(l) = limiter {
             l.handle_rate_limit(retry_after).await;
         }
-        return Err(ProviderError::RateLimitExceeded);
+        // The hint rides along on the error: the client-side limiter paces the
+        // *next* request, while the dispatch layer's retry loop is what decides
+        // how long this one waits before trying again (issue #417).
+        return Err(ProviderError::RateLimitExceeded {
+            retry_after_secs: retry_after,
+        });
     }
     if !status.is_success() {
         let error_body = response.text().await.unwrap_or_else(|e| e.to_string());
@@ -1151,7 +1229,12 @@ mod tests {
     fn provider_error_is_transient_classification() {
         // Network + rate-limit + 5xx / overloaded ⇒ retry.
         assert!(ProviderError::RequestFailed("connection reset".into()).is_transient());
-        assert!(ProviderError::RateLimitExceeded.is_transient());
+        assert!(
+            ProviderError::RateLimitExceeded {
+                retry_after_secs: None
+            }
+            .is_transient()
+        );
         assert!(ProviderError::ApiError("HTTP 503 Service Unavailable".into()).is_transient());
         assert!(ProviderError::ApiError("HTTP 429 Too Many Requests".into()).is_transient());
         assert!(ProviderError::ApiError("rate limit exceeded".into()).is_transient());
@@ -1174,6 +1257,69 @@ mod tests {
             }
             .is_transient()
         );
+    }
+
+    // ─── Retry advice (issue #417) ──────────────────────────────────────────
+
+    #[test]
+    fn a_capacity_refusal_is_told_apart_from_an_ordinary_server_failure() {
+        // The distinction the slow backoff hangs on: a 429 or a 529 describes a
+        // window that lasts minutes, a 500 or a reset connection a blip.
+        for err in [
+            ProviderError::RateLimitExceeded {
+                retry_after_secs: None,
+            },
+            ProviderError::ApiError("HTTP 529: {\"type\":\"overloaded_error\"}".into()),
+            ProviderError::ApiError("HTTP 429 Too Many Requests".into()),
+            ProviderError::ApiError("Overloaded".into()),
+            ProviderError::ApiError("rate limit exceeded".into()),
+        ] {
+            assert!(err.retry_advice().capacity, "{err}");
+        }
+        for err in [
+            ProviderError::ApiError("HTTP 500 Internal Server Error".into()),
+            ProviderError::ApiError("HTTP 502 Bad Gateway".into()),
+            ProviderError::RequestFailed("connection reset".into()),
+            ProviderError::Other("mystery".into()),
+            ProviderError::TokenLimitExceeded { used: 9, max: 8 },
+        ] {
+            assert!(!err.retry_advice().capacity, "{err}");
+        }
+    }
+
+    #[test]
+    fn only_a_rate_limit_carries_the_servers_own_answer() {
+        // The header exists on the 429 path and nowhere else, so every other
+        // error asks for the caller's own backoff rather than a wait it made up.
+        assert_eq!(
+            ProviderError::RateLimitExceeded {
+                retry_after_secs: Some(42),
+            }
+            .retry_advice()
+            .retry_after_secs,
+            Some(42)
+        );
+        assert_eq!(
+            ProviderError::ApiError("HTTP 529 overloaded".into())
+                .retry_advice()
+                .retry_after_secs,
+            None
+        );
+        assert_eq!(
+            ProviderError::RequestFailed("reset".into())
+                .retry_advice()
+                .retry_after_secs,
+            None
+        );
+    }
+
+    #[test]
+    fn no_advice_at_all_is_the_ordinary_schedule() {
+        // The default is what a permanent error and a plain blip both answer,
+        // and it must not accidentally read as "at capacity".
+        let advice = RetryAdvice::default();
+        assert!(!advice.capacity);
+        assert_eq!(advice.retry_after_secs, None);
     }
 
     // ─── Provider-fatal classification (issue #201) ─────────────────────────
@@ -1306,7 +1452,9 @@ mod tests {
         for err in [
             ProviderError::InvalidResponse("garbage".into()),
             ProviderError::TokenLimitExceeded { used: 9, max: 8 },
-            ProviderError::RateLimitExceeded,
+            ProviderError::RateLimitExceeded {
+                retry_after_secs: Some(5),
+            },
             ProviderError::Other("mystery".into()),
         ] {
             assert_eq!(err.unavailable_reason(), None, "{err}");
@@ -1371,7 +1519,11 @@ mod tests {
 
     #[test]
     fn provider_error_rate_limit_display() {
-        let err = ProviderError::RateLimitExceeded;
+        let err = ProviderError::RateLimitExceeded {
+            retry_after_secs: Some(30),
+        };
+        // The hint is for the retry loop, not for the reader: the message stays
+        // the one sentence a user needs.
         assert_eq!(err.to_string(), "Rate limit exceeded");
     }
 
@@ -1836,9 +1988,14 @@ mod tests {
     async fn check_http_response_rate_limited_without_limiter_returns_rate_limit_exceeded() {
         let response = spawn_mock_response(429, "Too Many Requests", &[], b"slow down").await;
         let err = check_http_response(response, None).await.unwrap_err();
+        // A 429 with no header is still a capacity refusal, with no hint to
+        // honor - the retry loop falls back to its own capacity backoff.
         assert_eq!(
-            std::mem::discriminant(&err),
-            std::mem::discriminant(&ProviderError::RateLimitExceeded)
+            err.retry_advice(),
+            RetryAdvice {
+                capacity: true,
+                retry_after_secs: None,
+            }
         );
     }
 
@@ -1859,9 +2016,15 @@ mod tests {
         let err = check_http_response(response, Some(&limiter))
             .await
             .unwrap_err();
+        // The header reaches the limiter *and* the error: the limiter paces the
+        // next request, the error tells the retry loop how long to wait before
+        // repeating this one (issue #417).
         assert_eq!(
-            std::mem::discriminant(&err),
-            std::mem::discriminant(&ProviderError::RateLimitExceeded)
+            err.retry_advice(),
+            RetryAdvice {
+                capacity: true,
+                retry_after_secs: Some(2),
+            }
         );
     }
 
@@ -1882,9 +2045,14 @@ mod tests {
         let err = check_http_response(response, Some(&limiter))
             .await
             .unwrap_err();
+        // An HTTP-date or any other unreadable value is no hint at all, which
+        // is the same answer as a missing header rather than a failure.
         assert_eq!(
-            std::mem::discriminant(&err),
-            std::mem::discriminant(&ProviderError::RateLimitExceeded)
+            err.retry_advice(),
+            RetryAdvice {
+                capacity: true,
+                retry_after_secs: None,
+            }
         );
     }
 
