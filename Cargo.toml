@@ -20,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.5"
+version = "0.3.6"
 edition = "2024"
 license = "MIT"
 authors = ["Gerald McAlister <gemisis@users.noreply.github.com>"]
@@ -96,18 +96,18 @@ allow_attributes_without_reason = "deny"
 # `leviath-testkit` stays path-only ON PURPOSE: cargo strips path-only
 # dev-dependencies when publishing, which is what keeps the testkit private
 # to the repo while every crate that dev-depends on it still publishes.
-leviath = { path = "crates/leviath", version = "0.3.5" }
-leviath-core = { path = "crates/leviath-core", version = "0.3.5" }
-leviath-net = { path = "crates/leviath-net", version = "0.3.5" }
-leviath-agent-client = { path = "crates/leviath-agent-client", version = "0.3.5" }
-leviath-runtime = { path = "crates/leviath-runtime", version = "0.3.5" }
-leviath-providers = { path = "crates/leviath-providers", version = "0.3.5" }
-leviath-mcp = { path = "crates/leviath-mcp", version = "0.3.5" }
-leviath-scripting = { path = "crates/leviath-scripting", version = "0.3.5" }
-leviath-package = { path = "crates/leviath-package", version = "0.3.5" }
-leviath-tools = { path = "crates/leviath-tools", version = "0.3.5" }
-leviath-sys = { path = "crates/leviath-sys", version = "0.3.5" }
-leviath-telemetry = { path = "crates/leviath-telemetry", version = "0.3.5" }
+leviath = { path = "crates/leviath", version = "0.3.6" }
+leviath-core = { path = "crates/leviath-core", version = "0.3.6" }
+leviath-net = { path = "crates/leviath-net", version = "0.3.6" }
+leviath-agent-client = { path = "crates/leviath-agent-client", version = "0.3.6" }
+leviath-runtime = { path = "crates/leviath-runtime", version = "0.3.6" }
+leviath-providers = { path = "crates/leviath-providers", version = "0.3.6" }
+leviath-mcp = { path = "crates/leviath-mcp", version = "0.3.6" }
+leviath-scripting = { path = "crates/leviath-scripting", version = "0.3.6" }
+leviath-package = { path = "crates/leviath-package", version = "0.3.6" }
+leviath-tools = { path = "crates/leviath-tools", version = "0.3.6" }
+leviath-sys = { path = "crates/leviath-sys", version = "0.3.6" }
+leviath-telemetry = { path = "crates/leviath-telemetry", version = "0.3.6" }
 leviath-testkit = { path = "crates/leviath-testkit" }
 
 # External dependencies
