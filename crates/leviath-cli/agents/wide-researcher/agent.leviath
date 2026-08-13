@@ -42,14 +42,12 @@ web_fetch  = "landscape"
 read_file  = "landscape"
 list_dir   = "landscape"
 
+# The only way forward. Covering the threads in parallel is what this blueprint
+# is for, so it is not a choice: an edge straight to `compare` used to sit here
+# for areas that "turned out to be narrow", and a model that took it compared a
+# landscape nothing had investigated. One thread is a fan-out of one.
 [stages.survey.transitions.investigate]
 hint = "Landscape mapped - the threads worth covering are identified"
-transform = "direct"
-
-# Still available when the survey found one thread rather than several: no point
-# spinning up a fan-out to cover a single topic.
-[stages.survey.transitions.compare]
-hint = "The area turned out to be narrow - one thread, no need to split it"
 transform = "direct"
 
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
@@ -113,9 +111,12 @@ for a narrow area.
 condition = "error"
 transform = "direct"
 
-# Un-exhaustible escape (lint: dead-end-possible).
+# Un-exhaustible escape (lint: dead-end-possible). Conditioned, like every
+# other escape here: unconditioned, it sat on the model's menu and let a
+# fan-out stage answer "summarize" and walk past its own workers.
 [stages.investigate.transitions.summarize]
 hint = "Comparison is out of revisits - write the overview from what came back"
+condition = "dead_end"
 transform = "compact"
 
 # ─── Stage 2: Compare ─────────────────────────────────────────────────────────
@@ -147,16 +148,19 @@ If `error_report` says a previous stage hit its iteration cap, that stage was cu
 off before finishing - treat its coverage as incomplete when judging the field.
 """
 
-[stages.compare.transitions.survey]
-hint = "Coverage gaps - survey additional areas"
-transform = "compact"
-
+# One way forward: a thread worth comparing is worth reading properly before the
+# overview is written, so `deep_dive` is required rather than offered. The "do we
+# need more" decision now lives in `deep_dive`, which is the first stage to have
+# actually read a thread in depth and can judge whether the landscape is thin.
 [stages.compare.transitions.deep_dive]
-hint = "An interesting thread deserves a focused deep read"
+hint = "Threads compared - read the most significant one in depth"
 transform = "compact"
 
+# Un-exhaustible escape (lint: dead-end-possible): once `deep_dive` has spent its
+# revisits there is nowhere else to go, and the overview still gets written.
 [stages.compare.transitions.summarize]
-hint = "Comparison complete - write the overview"
+hint = "Deep dives are out of revisits - write the overview from the comparison"
+condition = "dead_end"
 transform = "compact"
 
 [stages.compare.transitions.error_recovery]
@@ -186,16 +190,19 @@ web_search = "landscape"
 web_fetch  = "landscape"
 read_file  = "landscape"
 
+# This is where the run decides whether it has enough, because it is the first
+# stage that has read a thread properly rather than surveyed it. Three ways out:
+# another thread, more breadth, or the deliverable.
 [stages.deep_dive.transitions.compare]
-hint = "Thread explored - resume comparing"
+hint = "Thread explored - compare again to pick the next one worth reading"
 transform = "compact"
 
-# Un-exhaustible escape (lint: dead-end-possible): when every looping
-# target has spent its max_revisits budget, the run can still move forward
-# to the deliverable instead of dead-ending.
+[stages.deep_dive.transitions.survey]
+hint = "This depth exposed gaps in the landscape - survey additional areas"
+transform = "compact"
+
 [stages.deep_dive.transitions.summarize]
-hint = "Comparison is out of revisits - write the overview with this depth"
-condition = "dead_end"
+hint = "The significant threads have been read in depth - write the overview"
 transform = "compact"
 
 [stages.deep_dive.transitions.error_recovery]
