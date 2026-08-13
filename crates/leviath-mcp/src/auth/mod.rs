@@ -153,6 +153,7 @@ impl OAuthClient {
         &self,
         mcp_url: &str,
         headers: &HashMap<String, String>,
+        allow_env: &[String],
         opener: BrowserOpener,
         now: u64,
         reuse_client_id: Option<&str>,
@@ -163,7 +164,7 @@ impl OAuthClient {
         // An unreachable server still goes down the discovery path, which is
         // where the useful error message comes from. Only a live answer that
         // asked for nothing ends the flow here.
-        let www_authenticate = match self.probe_challenge(&mcp, headers).await {
+        let www_authenticate = match self.probe_challenge(&mcp, headers, allow_env).await {
             Probe::Satisfied => return Ok(LoginOutcome::NotRequired),
             Probe::Challenge(header) => header,
             Probe::Unreachable => None,
@@ -486,9 +487,20 @@ impl OAuthClient {
     /// The headers matter: a server configured with an API token of its own
     /// answers this request normally, and asking it to run a browser login
     /// afterwards is asking for a second credential it never wanted.
-    async fn probe_challenge(&self, mcp: &Url, headers: &HashMap<String, String>) -> Probe {
+    async fn probe_challenge(
+        &self,
+        mcp: &Url,
+        headers: &HashMap<String, String>,
+        allow_env: &[String],
+    ) -> Probe {
         let mut request = self.http.post(mcp.clone()).body("{}");
         for (name, value) in headers {
+            // Expand exactly as the transport will. Probing with a literal
+            // `${TOKEN}` asks the server a question about a credential nobody
+            // will ever send it, and a server that checks the value answers
+            // `401` - sending a correctly configured client into an OAuth flow
+            // it does not need.
+            let value = crate::transport::http::expand_env_allowing(value, allow_env);
             request = request.header(name, value);
         }
         let Ok(response) = request.send().await else {
@@ -1337,6 +1349,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 1_000,
                 None,
@@ -1360,6 +1373,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 Some("existing-client"),
@@ -1384,6 +1398,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -1403,6 +1418,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -1421,6 +1437,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -1763,6 +1780,7 @@ mod tests {
             .login(
                 &format!("{base}/mcp"),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -1800,6 +1818,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &headers,
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -1824,6 +1843,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 failing_opener,
                 0,
                 None,
@@ -1841,6 +1861,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -1858,6 +1879,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -1877,6 +1899,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -1897,6 +1920,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -1916,6 +1940,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -1932,6 +1957,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -1951,6 +1977,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -1970,6 +1997,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -2013,6 +2041,7 @@ mod tests {
             .login(
                 &format!("{base}/mcp"),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -2033,6 +2062,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -2056,6 +2086,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -2073,6 +2104,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -2092,6 +2124,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -2115,6 +2148,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -2147,6 +2181,7 @@ mod tests {
                 .login(
                     "http://mcp.example.invalid/mcp",
                     &HashMap::new(),
+                    &[],
                     auto_consent(),
                     0,
                     None,
@@ -2162,6 +2197,7 @@ mod tests {
                 .login(
                     &format!("{}/mcp", server.base),
                     &HashMap::new(),
+                    &[],
                     auto_consent(),
                     0,
                     None,
@@ -2177,6 +2213,7 @@ mod tests {
                 .login(
                     &format!("{}/mcp", server.base),
                     &HashMap::new(),
+                    &[],
                     auto_consent(),
                     0,
                     None,
@@ -2211,6 +2248,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -2234,6 +2272,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -2253,6 +2292,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -2275,6 +2315,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 forge,
                 0,
                 None,
@@ -2364,7 +2405,7 @@ mod tests {
         let mcp = Url::parse("http://127.0.0.1:1/mcp").unwrap();
         assert_eq!(
             OAuthClient::new()
-                .probe_challenge(&mcp, &HashMap::new())
+                .probe_challenge(&mcp, &HashMap::new(), &[])
                 .await
                 .label(),
             "unreachable"
@@ -2397,7 +2438,10 @@ mod tests {
 
         // Same server, same endpoint: the headers are the only difference.
         assert_eq!(
-            client.probe_challenge(&mcp, &HashMap::new()).await.label(),
+            client
+                .probe_challenge(&mcp, &HashMap::new(), &[])
+                .await
+                .label(),
             "challenge",
             "no credentials, so the server should ask for some"
         );
@@ -2406,9 +2450,67 @@ mod tests {
             "Bearer configured-token".to_string(),
         )]);
         assert_eq!(
-            client.probe_challenge(&mcp, &headers).await.label(),
+            client.probe_challenge(&mcp, &headers, &[]).await.label(),
             "satisfied",
             "the configured header should be enough"
+        );
+    }
+
+    /// The probe has to send what the transport will send, `${VAR}` expanded
+    /// and all. A server that checks the *value* of the credential rejects a
+    /// literal `${TOKEN}`, and a correctly configured client was being sent
+    /// into an OAuth flow on the strength of that rejection.
+    #[tokio::test]
+    async fn the_probe_expands_variables_the_way_the_transport_will() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route(
+            "/mcp",
+            post(|headers: axum::http::HeaderMap| async move {
+                // Only the expanded value is accepted.
+                match headers
+                    .get(reqwest::header::AUTHORIZATION)
+                    .map(|v| v.as_bytes())
+                {
+                    Some(b"Bearer the-real-value") => StatusCode::OK,
+                    _ => StatusCode::UNAUTHORIZED,
+                }
+            }),
+        );
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+
+        let mcp = Url::parse(&format!("{base}/mcp")).unwrap();
+        let headers = HashMap::from([(
+            "Authorization".to_string(),
+            "Bearer ${LEVIATH_PROBE_TEST_TOKEN}".to_string(),
+        )]);
+        let client = OAuthClient::new();
+        let allow = ["LEVIATH_PROBE_TEST_TOKEN".to_string()];
+
+        let (allowed, refused) = temp_env::async_with_vars(
+            [("LEVIATH_PROBE_TEST_TOKEN", Some("the-real-value"))],
+            async {
+                let allowed = client.probe_challenge(&mcp, &headers, &allow).await;
+                // The same header with no allowlist: the value is refused, so
+                // the server sees a credential it does not recognise and OAuth
+                // genuinely is the right answer.
+                let refused = client.probe_challenge(&mcp, &headers, &[]).await;
+                (allowed, refused)
+            },
+        )
+        .await;
+
+        assert_eq!(
+            allowed.label(),
+            "satisfied",
+            "an allowed variable expands, so the server accepts the request"
+        );
+        assert_eq!(
+            refused.label(),
+            "challenge",
+            "a refused variable leaves a credential the server rejects"
         );
     }
 
@@ -2429,6 +2531,7 @@ mod tests {
             .login(
                 &format!("{base}/mcp"),
                 &HashMap::from([("Authorization".to_string(), "Bearer tok".to_string())]),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -2448,6 +2551,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -2467,6 +2571,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
+                &[],
                 auto_consent(),
                 0,
                 None,
@@ -2500,7 +2605,7 @@ mod tests {
     #[tokio::test]
     async fn login_rejects_a_bad_mcp_url() {
         let err = OAuthClient::new()
-            .login("not a url", &HashMap::new(), auto_consent(), 0, None)
+            .login("not a url", &HashMap::new(), &[], auto_consent(), 0, None)
             .await
             .expect_err("bad url must fail");
         assert!(
