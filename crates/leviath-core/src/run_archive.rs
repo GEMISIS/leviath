@@ -1005,8 +1005,17 @@ mod tests {
         }
     }
 
+    /// The instant the fixture pretends it is, on every construction.
+    ///
+    /// Arbitrary, and deliberately not the wall clock: `RunMeta::new` stamps
+    /// `started_at`/`updated_at` from it, and these tests build the fixture
+    /// once to write and again to compare against. Two reads straddling a
+    /// second boundary produced two unequal `RunMeta`s, which failed whichever
+    /// round-trip assertion happened to span the tick.
+    const FIXTURE_NOW: i64 = 1_700_000_000;
+
     fn meta() -> RunMeta {
-        RunMeta::new(
+        let mut meta = RunMeta::new(
             "run-1".to_string(),
             "coder".to_string(),
             "/agents/coder".to_string(),
@@ -1014,7 +1023,28 @@ mod tests {
             Some("anthropic/claude".to_string()),
             "/work".to_string(),
             2,
-        )
+        );
+        meta.started_at = FIXTURE_NOW;
+        meta.updated_at = FIXTURE_NOW;
+        meta
+    }
+
+    /// Two constructions of the fixture are equal however much time passes
+    /// between them. This is the property every round-trip assertion in this
+    /// module rests on, and the one a wall-clock stamp quietly broke.
+    #[test]
+    fn the_fixture_does_not_move_with_the_clock() {
+        let first = meta();
+        let mut later = meta();
+        // Rather than sleeping across a real second boundary, move the clock
+        // the way it would have moved: an unpinned fixture differs by exactly
+        // this, and a pinned one is rebuilt identically.
+        assert_eq!(first, later, "the fixture is rebuilt identically");
+        later.started_at += 1;
+        assert_ne!(
+            first, later,
+            "and the comparison is sensitive to the field that used to drift"
+        );
     }
 
     fn entry(content: &str, tokens: usize) -> RegionEntrySnapshot {
