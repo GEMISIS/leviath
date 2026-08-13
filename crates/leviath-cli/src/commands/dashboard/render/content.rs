@@ -203,14 +203,19 @@ impl Dashboard {
         let is_context = self.stage_content_mode == StageContentMode::Context;
         let is_output = self.stage_content_mode == StageContentMode::Output;
 
-        // Build content lines
-        let (all_lines, context_cursor_line): (Vec<Line>, Option<usize>) = if is_context {
-            self.build_context_lines(agent, render_width)
+        // Build content lines. `showing_final_output` records whether the
+        // Output pane fell back to the run's final answer, so the file-path
+        // hint below can point at the file actually being shown.
+        let (all_lines, context_cursor_line, showing_final_output): (
+            Vec<Line>,
+            Option<usize>,
+            bool,
+        ) = if is_context {
+            let (lines, cursor) = self.build_context_lines(agent, render_width);
+            (lines, cursor, false)
         } else {
-            (
-                self.build_output_lines(agent, is_output, render_width),
-                None,
-            )
+            let (lines, showing_final) = self.build_output_lines(agent, is_output, render_width);
+            (lines, None, showing_final)
         };
 
         // ── Error / Cancelled banner ─────────────────────────────────────
@@ -408,15 +413,24 @@ impl Dashboard {
 
         // Bottom-left file path hint
         let file_path_hint = {
-            let file_name = match self.stage_content_mode {
-                StageContentMode::Output => "output.log",
-                StageContentMode::Logs => "logs.log",
-                StageContentMode::Context => "context.json",
+            let raw = if showing_final_output {
+                // The pane fell back to the run's final answer, which lives in
+                // the `final_output` sidecar beside `meta.json` rather than in
+                // the stage's `output.log`; name the file actually shown.
+                runstate::final_output_path(&runstate::run_dir(&agent.id))
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                let file_name = match self.stage_content_mode {
+                    StageContentMode::Output => "output.log",
+                    StageContentMode::Logs => "logs.log",
+                    StageContentMode::Context => "context.json",
+                };
+                runstate::stage_dir(&agent.id, self.selected_stage)
+                    .join(file_name)
+                    .to_string_lossy()
+                    .to_string()
             };
-            let raw = runstate::stage_dir(&agent.id, self.selected_stage)
-                .join(file_name)
-                .to_string_lossy()
-                .to_string();
             // Display-only `~` abbreviation of the OS home directory;
             // deliberately NOT the LEVIATH_HOME-aware resolver (see the
             // header's workdir line for the same choice).
@@ -655,25 +669,63 @@ impl Dashboard {
         }
     }
 
+    /// The run's final answer, when the selected stage is the one that
+    /// submitted it.
+    ///
+    /// A `mode = "output"` stage answers through `submit_output`, which lands
+    /// in the run's `final_output` sidecar rather than the stage's
+    /// `output.log`. The descriptor records which stage submitted, so the
+    /// answer only stands in for that stage's otherwise empty Output pane -
+    /// every other stage keeps its honest empty state.
+    fn final_output_for_selected_stage(&self, agent: &DashboardAgent) -> Option<String> {
+        let final_output = crate::runstate::read_final_output(&agent.id)?;
+        let selected_name = agent.stages.get(self.selected_stage)?.name.as_str();
+        if final_output.stage == selected_name {
+            Some(final_output.content)
+        } else {
+            None
+        }
+    }
+
+    /// The Output or Logs view's lines, plus whether the Output view fell back
+    /// to the run's final answer (so the file-path hint can name that file
+    /// instead of the stage's `output.log`).
     fn build_output_lines(
         &self,
         agent: &DashboardAgent,
         is_output: bool,
         render_width: u16,
-    ) -> Vec<Line<'static>> {
+    ) -> (Vec<Line<'static>>, bool) {
+        let mut showing_final_output = false;
         let content = if is_output {
             // When a document is up for review (a pending interaction's body,
             // e.g. the plan being approved), show just that current instance -
             // not the full accumulated output history. `[l]` still shows logs.
             match self.reviewing_body() {
                 Some(body) => body,
-                None => runstate::tail_stage_output(&agent.id, self.selected_stage, 131_072),
+                None => {
+                    let tail = runstate::tail_stage_output(&agent.id, self.selected_stage, 131_072);
+                    if tail.is_empty() {
+                        // Nothing in the stage's output.log. If this stage
+                        // submitted the run's final answer, show that instead
+                        // of a permanent "No output yet" (issue #410).
+                        match self.final_output_for_selected_stage(agent) {
+                            Some(answer) => {
+                                showing_final_output = true;
+                                answer
+                            }
+                            None => tail,
+                        }
+                    } else {
+                        tail
+                    }
+                }
             }
         } else {
             runstate::tail_stage_log(&agent.id, self.selected_stage, 131_072)
         };
 
-        if is_output && !content.is_empty() {
+        let lines = if is_output && !content.is_empty() {
             crate::render::markdown_to_text(&content, render_width).lines
         } else if !is_output {
             content
@@ -711,7 +763,8 @@ impl Dashboard {
                 .collect()
         } else {
             Vec::new()
-        }
+        };
+        (lines, showing_final_output)
     }
 }
 
@@ -1172,6 +1225,60 @@ mod tests {
         make_test_agent(run_id, AgentDisplayStatus::Active)
     }
 
+    /// Seed a run whose answer arrived through `submit_output`: the
+    /// `final_output` descriptor in `meta.json` plus the sidecar beside it,
+    /// submitted by `stage`, with no `output.log` anywhere. Returns an agent
+    /// pointed at that run.
+    fn setup_run_state_agent_with_final_output(
+        run_id: &str,
+        stage: &str,
+        content: &str,
+    ) -> DashboardAgent {
+        // Same defensive cleanup as `setup_run_state_agent_with_logs`: a stale
+        // directory from an earlier panicked test must not leak in.
+        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+        let answer = leviath_core::output::FinalOutput::new(
+            content,
+            Some("markdown".to_string()),
+            stage.to_string(),
+            42,
+        );
+        let mut meta = runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/p".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        meta.final_output = Some(answer.descriptor());
+        runstate::create_run(&meta).unwrap();
+        runstate::write_final_output(&runstate::run_dir(run_id), &answer.content).unwrap();
+
+        make_test_agent(run_id, AgentDisplayStatus::Complete)
+    }
+
+    /// A minimal stage record carrying just the name the final-output fallback
+    /// compares against.
+    fn make_stage_record(name: &str) -> crate::runstate::StageRecord {
+        crate::runstate::StageRecord {
+            name: name.to_string(),
+            index: 0,
+            status: crate::runstate::StageRunStatus::Active,
+            entered: true,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            region_tokens: Default::default(),
+            first_call_prompt_tokens: None,
+            runaway_warned: false,
+            started_at: None,
+            ended_at: None,
+        }
+    }
+
     #[test]
     fn render_content_pane_logs_mode_shows_tool_count_badge() {
         crate::runstate::with_isolated_runs_dir(
@@ -1293,7 +1400,7 @@ mod tests {
                 );
 
                 let dash = make_test_dashboard();
-                let lines = dash.build_output_lines(&agent, false, 100);
+                let (lines, _showing_final) = dash.build_output_lines(&agent, false, 100);
                 let text: String = lines
                     .iter()
                     .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1321,8 +1428,11 @@ mod tests {
                     setup_run_state_agent_with_logs(run_id, &[], Some("# Heading\n\nbody text"));
 
                 let dash = make_test_dashboard();
-                let lines = dash.build_output_lines(&agent, true, 100);
+                let (lines, showing_final) = dash.build_output_lines(&agent, true, 100);
                 assert!(!lines.is_empty());
+                // A non-empty output.log is the real stage output, not the
+                // final-answer fallback.
+                assert!(!showing_final);
                 let text: String = lines
                     .iter()
                     .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1330,6 +1440,154 @@ mod tests {
                     .join("\n");
                 assert!(text.contains("Heading"));
                 assert!(text.contains("body text"));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+            },
+        );
+    }
+
+    #[test]
+    fn build_output_lines_falls_back_to_final_output_for_the_submitting_stage() {
+        crate::runstate::with_isolated_runs_dir(
+            "build_output_lines_falls_back_to_final_output_for_the_submitting_stage",
+            |_d| {
+                let run_id = "test-content-final-output-match";
+                // A `mode = "output"` stage writes nothing to output.log; its
+                // answer lives only in the final_output sidecar (issue #410).
+                let mut agent = setup_run_state_agent_with_final_output(
+                    run_id,
+                    "present",
+                    "# The Answer\n\nall done",
+                );
+                agent.stages = vec![make_stage_record("present")];
+
+                let dash = make_test_dashboard();
+                let (lines, showing_final) = dash.build_output_lines(&agent, true, 100);
+                assert!(showing_final);
+                let text: String = lines
+                    .iter()
+                    .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(text.contains("The Answer"));
+                assert!(text.contains("all done"));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+            },
+        );
+    }
+
+    #[test]
+    fn build_output_lines_ignores_final_output_submitted_by_another_stage() {
+        crate::runstate::with_isolated_runs_dir(
+            "build_output_lines_ignores_final_output_submitted_by_another_stage",
+            |_d| {
+                let run_id = "test-content-final-output-other-stage";
+                let mut agent =
+                    setup_run_state_agent_with_final_output(run_id, "present", "the answer");
+                // The selected stage (index 0) is not the one that submitted,
+                // so its Output pane keeps the honest empty state.
+                agent.stages = vec![make_stage_record("draft")];
+
+                let backend = TestBackend::new(120, 40);
+                let mut terminal = Terminal::new(backend).unwrap();
+                let mut dash = make_test_dashboard();
+                let (lines, showing_final) = dash.build_output_lines(&agent, true, 100);
+                assert!(lines.is_empty());
+                assert!(!showing_final);
+
+                dash.stage_content_mode = StageContentMode::Output;
+                terminal
+                    .draw(|f| {
+                        let area = Rect::new(0, 0, 100, 20);
+                        dash.render_content_pane(f, area, &agent, 100);
+                    })
+                    .unwrap();
+                let buf = rendered_buffer(&terminal);
+                assert!(buf.contains("No output yet for draft"), "{buf}");
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+            },
+        );
+    }
+
+    #[test]
+    fn build_output_lines_ignores_final_output_without_a_stage_record() {
+        crate::runstate::with_isolated_runs_dir(
+            "build_output_lines_ignores_final_output_without_a_stage_record",
+            |_d| {
+                let run_id = "test-content-final-output-no-record";
+                // No stage records at all: the selected stage has no name to
+                // compare against the descriptor's, so nothing substitutes.
+                let agent =
+                    setup_run_state_agent_with_final_output(run_id, "present", "the answer");
+                assert!(agent.stages.is_empty());
+
+                let dash = make_test_dashboard();
+                let (lines, showing_final) = dash.build_output_lines(&agent, true, 100);
+                assert!(lines.is_empty());
+                assert!(!showing_final);
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+            },
+        );
+    }
+
+    #[test]
+    fn build_output_lines_prefers_stage_output_over_final_output() {
+        crate::runstate::with_isolated_runs_dir(
+            "build_output_lines_prefers_stage_output_over_final_output",
+            |_d| {
+                let run_id = "test-content-final-output-tail-wins";
+                let mut agent =
+                    setup_run_state_agent_with_final_output(run_id, "present", "the answer");
+                agent.stages = vec![make_stage_record("present")];
+                // The stage also wrote real output, which always wins over the
+                // final-answer fallback.
+                runstate::append_stage_output(run_id, 0, "streamed stage output");
+
+                let dash = make_test_dashboard();
+                let (lines, showing_final) = dash.build_output_lines(&agent, true, 100);
+                assert!(!showing_final);
+                let text: String = lines
+                    .iter()
+                    .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(text.contains("streamed stage output"));
+                assert!(!text.contains("the answer"));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+            },
+        );
+    }
+
+    #[test]
+    fn render_content_pane_final_output_fallback_names_the_final_output_file() {
+        crate::runstate::with_isolated_runs_dir(
+            "render_content_pane_final_output_fallback_names_the_final_output_file",
+            |_d| {
+                let run_id = "test-content-final-output-hint";
+                let mut agent =
+                    setup_run_state_agent_with_final_output(run_id, "present", "the answer");
+                agent.stages = vec![make_stage_record("present")];
+
+                let backend = TestBackend::new(120, 40);
+                let mut terminal = Terminal::new(backend).unwrap();
+                let mut dash = make_test_dashboard();
+                dash.stage_content_mode = StageContentMode::Output;
+                terminal
+                    .draw(|f| {
+                        let area = Rect::new(0, 0, 100, 20);
+                        dash.render_content_pane(f, area, &agent, 100);
+                    })
+                    .unwrap();
+                let buf = rendered_buffer(&terminal);
+                assert!(buf.contains("the answer"), "{buf}");
+                // The hint names the file actually shown, not the stage's
+                // (empty) output.log.
+                assert!(buf.contains(leviath_core::FINAL_OUTPUT_FILE), "{buf}");
+                assert!(!buf.contains("output.log"), "{buf}");
 
                 let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
             },
@@ -1503,9 +1761,11 @@ mod tests {
     fn build_output_lines_non_run_state() {
         let dash = make_test_dashboard();
         let agent = make_test_agent("run-nrs", AgentDisplayStatus::Active);
-        // is_run_state is false, so content will be empty
-        let lines = dash.build_output_lines(&agent, true, 80);
+        // is_run_state is false, so content will be empty; there is no run on
+        // disk either, so the final-answer fallback finds nothing.
+        let (lines, showing_final) = dash.build_output_lines(&agent, true, 80);
         assert!(lines.is_empty());
+        assert!(!showing_final);
     }
 
     #[test]
@@ -1971,7 +2231,7 @@ mod tests {
         let dash = make_test_dashboard();
         let agent = make_test_agent("run-logs-nrs", AgentDisplayStatus::Active);
         // non-run-state, is_output = false
-        let lines = dash.build_output_lines(&agent, false, 80);
+        let (lines, _showing_final) = dash.build_output_lines(&agent, false, 80);
         // Should be empty because no disk content
         assert!(lines.is_empty());
     }
