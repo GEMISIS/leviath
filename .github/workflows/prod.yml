@@ -360,47 +360,6 @@ jobs:
   # the tap has to be told what just shipped, or `brew upgrade` never fires.
   # Its own job, not a step on `deploy`: a failure here must be loud without
   # retroactively failing a release that did publish.
-  notify-site:
-    name: Refresh leviath.dev
-    needs: [deploy, check-beta]
-    if: needs.check-beta.outputs.skip != 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Ask leviath.dev to redeploy
-        env:
-          # Same token and the same reason as the tap bump below: GITHUB_TOKEN is
-          # scoped to this repo, so reaching another one needs the PAT. It needs
-          # leviath.dev added to its repository access with `Actions: read and
-          # write` - see the note below for why Actions and not Contents.
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          VERSION: ${{ needs.check-beta.outputs.version }}
-        run: |
-          set -euo pipefail
-
-          # What this does and does not refresh. The site takes the version it
-          # prints from leviath-dist's Homebrew formula, not from this release,
-          # because every install route it offers resolves there and taking the
-          # number from here is what let it advertise 0.3.7 while `brew upgrade`
-          # was still a no-op on 0.2.0. So this cannot move the version: the tap
-          # has not bumped yet by definition. It refreshes the release notes,
-          # and it is a second chance if the tap's own dispatch never arrives.
-          #
-          # `workflow run` rather than a repository dispatch, because a
-          # fine-grained PAT carries one permission set across every repository
-          # selected for it. A repository dispatch needs Contents: write, which
-          # would also hand this token write access to this repository's
-          # contents; starting a workflow needs Actions: write, which is enough
-          # to run the deploy and not enough to push anything.
-          if ! err=$(gh workflow run deploy.yml --repo GEMISIS/leviath.dev 2>&1); then
-            # A warning, not a failure. The release itself is fine and the site
-            # keeps a daily refresh, so this costs freshness rather than
-            # correctness - failing the promotion over it would be a lie about
-            # what went wrong.
-            echo "::warning::Could not start the leviath.dev deploy; it will refresh on its daily run instead. Give RELEASE_TOKEN access to GEMISIS/leviath.dev with 'Actions: read and write'. GitHub said: ${err}"
-            exit 0
-          fi
-          echo "Asked leviath.dev to redeploy after $VERSION."
-
   bump-tap:
     name: Bump tap manifests (stable)
     needs: [deploy, check-beta]
