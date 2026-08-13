@@ -92,10 +92,12 @@ pub struct SpawnArgs {
     pub output: Option<leviath_core::output::OutputSpec>,
 }
 
-/// One row of a run listing ([`ControlRequest::List`]): a live run, its status,
+/// One row of a run listing (`ControlRequest::List`): a live run, its status,
 /// and enough context to judge whether that status is a problem.
 ///
-/// [`ControlRequest::List`]: crate::control_socket::ControlRequest::List
+/// The request type is named rather than linked because it lives behind the
+/// `control-socket` feature while this type does not, and an intra-doc link
+/// into a module that may not be compiled fails the docs build.
 ///
 /// `lev ps` used to be a run id and a status word, which is why issue #184
 /// happened: `waiting` on its own says nothing about whether a person is needed,
