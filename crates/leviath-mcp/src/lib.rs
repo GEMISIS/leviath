@@ -18,7 +18,9 @@ pub mod transport;
 #[cfg(test)]
 mod test_support;
 
-pub use auth::{AuthStore, BrowserOpener, OAuthClient, ServerAuth, StoredTokenRefresher};
+pub use auth::{
+    AuthStore, BrowserOpener, LoginOutcome, OAuthClient, ServerAuth, StoredTokenRefresher,
+};
 pub use client::{EmbeddedResource, MCPClient, ToolResult};
 pub use discovery::{MCPServerConfig, MCPTransport, ResolvedTransport, ToolDiscovery};
 pub use execution::ToolExecutor;

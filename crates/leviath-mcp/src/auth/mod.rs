@@ -62,6 +62,59 @@ struct RegistrationResponse {
     client_id: String,
 }
 
+/// What an MCP endpoint said when asked, with the configured headers, whether
+/// it wants credentials.
+enum Probe {
+    /// It asked for credentials: a `401`/`403`, a `WWW-Authenticate`, or both.
+    /// The header, when present, names where the metadata lives.
+    Challenge(Option<String>),
+    /// It answered the request as it stood, so nothing needs logging in. Either
+    /// the server is open, or the headers already configured for it are enough.
+    Satisfied,
+    /// It did not answer at all. Says nothing either way, so the caller carries
+    /// on to discovery, where a failure produces a message worth reading.
+    Unreachable,
+}
+
+#[cfg(test)]
+impl Probe {
+    /// A one-word name for the variant, so a test can assert on it with
+    /// `assert_eq!` rather than a `matches!` whose other arm never runs.
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Challenge(_) => "challenge",
+            Self::Satisfied => "satisfied",
+            Self::Unreachable => "unreachable",
+        }
+    }
+}
+
+/// The result of [`OAuthClient::login`].
+#[derive(Debug)]
+pub enum LoginOutcome {
+    /// The browser flow ran and produced credentials worth storing.
+    ///
+    /// Boxed because it is much larger than the other variant, and every caller
+    /// stores it rather than reading it in place.
+    Authenticated(Box<ServerAuth>),
+    /// The server does not want an OAuth login. There is nothing to store, and
+    /// nothing went wrong.
+    NotRequired,
+}
+
+impl LoginOutcome {
+    /// The credentials this login produced, or `None` if none were needed.
+    ///
+    /// For a caller that only wants to store what came back and has nothing to
+    /// say about the other case.
+    pub fn authenticated(self) -> Option<ServerAuth> {
+        match self {
+            Self::Authenticated(auth) => Some(*auth),
+            Self::NotRequired => None,
+        }
+    }
+}
+
 /// Drives OAuth against one MCP server's authorization server.
 pub struct OAuthClient {
     http: reqwest::Client,
@@ -84,7 +137,13 @@ impl OAuthClient {
         Self { http }
     }
 
-    /// Run the full interactive login for `mcp_url` and return the tokens.
+    /// Run the full interactive login for `mcp_url`.
+    ///
+    /// Returns [`LoginOutcome::NotRequired`] when the server answers a probe
+    /// carrying `headers` without demanding credentials. A server configured
+    /// with its own API token is the ordinary case: there is no OAuth flow to
+    /// run, and pushing one anyway is what sent every such server into a
+    /// discovery request it does not serve.
     ///
     /// `now` (Unix seconds) is passed in rather than read from the clock so the
     /// computed `expires_at` is deterministic under test. `reuse_client_id`
@@ -97,11 +156,20 @@ impl OAuthClient {
         opener: BrowserOpener,
         now: u64,
         reuse_client_id: Option<&str>,
-    ) -> anyhow::Result<ServerAuth> {
+    ) -> anyhow::Result<LoginOutcome> {
         let mcp = Url::parse(mcp_url)
             .map_err(|e| anyhow::anyhow!("Invalid MCP server url '{}': {}", mcp_url, e))?;
 
-        let (resource, server_meta) = self.discover(&mcp, headers).await?;
+        // An unreachable server still goes down the discovery path, which is
+        // where the useful error message comes from. Only a live answer that
+        // asked for nothing ends the flow here.
+        let www_authenticate = match self.probe_challenge(&mcp, headers).await {
+            Probe::Satisfied => return Ok(LoginOutcome::NotRequired),
+            Probe::Challenge(header) => header,
+            Probe::Unreachable => None,
+        };
+
+        let (resource, server_meta) = self.discover(&mcp, www_authenticate.as_deref()).await?;
 
         // Bind the loopback listener first, so its port is known before both
         // registration (which needs the redirect URI) and the authorize URL.
@@ -160,13 +228,13 @@ impl OAuthClient {
             )
             .await?;
 
-        Ok(build_server_auth(
+        Ok(LoginOutcome::Authenticated(Box::new(build_server_auth(
             resource,
             &server_meta,
             client_id,
             token,
             now,
-        ))
+        ))))
     }
 
     /// Refresh `auth` non-interactively. Never opens a browser.
@@ -265,12 +333,9 @@ impl OAuthClient {
     async fn discover(
         &self,
         mcp: &Url,
-        headers: &HashMap<String, String>,
+        www_authenticate: Option<&str>,
     ) -> anyhow::Result<(String, AuthServerMetadata)> {
-        // A probe request surfaces the WWW-Authenticate hint; a server that
-        // answers it without auth still yields the well-known document.
-        let www_authenticate = self.probe_challenge(mcp, headers).await;
-        let hinted = metadata::resource_metadata_url(www_authenticate.as_deref());
+        let hinted = metadata::resource_metadata_url(www_authenticate);
         // The hint comes out of a header the *remote server* wrote, and whatever
         // it names is then fetched by us, from inside the user's network. Bind it
         // to the MCP server's own origin: a server may point at its own metadata
@@ -415,25 +480,37 @@ impl OAuthClient {
         Ok(serde_json::from_value(value)?)
     }
 
-    /// Probe the MCP endpoint and return its `WWW-Authenticate` header, if any.
+    /// Probe the MCP endpoint with the configured headers to see whether it
+    /// demands OAuth at all.
     ///
-    /// A network failure here is not fatal: discovery falls back to the
-    /// well-known path, so a `None` simply means "no hint".
-    async fn probe_challenge(
-        &self,
-        mcp: &Url,
-        headers: &HashMap<String, String>,
-    ) -> Option<String> {
+    /// The headers matter: a server configured with an API token of its own
+    /// answers this request normally, and asking it to run a browser login
+    /// afterwards is asking for a second credential it never wanted.
+    async fn probe_challenge(&self, mcp: &Url, headers: &HashMap<String, String>) -> Probe {
         let mut request = self.http.post(mcp.clone()).body("{}");
         for (name, value) in headers {
             request = request.header(name, value);
         }
-        let response = request.send().await.ok()?;
-        response
+        let Ok(response) = request.send().await else {
+            return Probe::Unreachable;
+        };
+        let challenge = response
             .headers()
             .get(reqwest::header::WWW_AUTHENTICATE)
             .and_then(|v| v.to_str().ok())
-            .map(str::to_string)
+            .map(str::to_string);
+        // A 401 or 403 is the server asking for credentials, whether or not it
+        // bothered to describe how. Anything else, with no challenge attached,
+        // means the request was accepted as it stood.
+        let demands_auth = matches!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        );
+        match (challenge, demands_auth) {
+            (Some(header), _) => Probe::Challenge(Some(header)),
+            (None, true) => Probe::Challenge(None),
+            (None, false) => Probe::Satisfied,
+        }
     }
 
     /// Register this client dynamically (RFC 7591), returning its id.
@@ -1265,7 +1342,9 @@ mod tests {
                 None,
             )
             .await
-            .expect("login should complete");
+            .expect("login should complete")
+            .authenticated()
+            .expect("the flow should have produced credentials");
 
         assert_eq!(auth.access_token, "new-access");
         assert_eq!(auth.refresh_token.as_deref(), Some("new-refresh"));
@@ -1286,7 +1365,9 @@ mod tests {
                 Some("existing-client"),
             )
             .await
-            .expect("login should complete");
+            .expect("login should complete")
+            .authenticated()
+            .expect("the flow should have produced credentials");
         assert_eq!(
             server.registrations.load(Ordering::SeqCst),
             0,
@@ -1308,7 +1389,9 @@ mod tests {
                 None,
             )
             .await
-            .expect("openid recovery should work");
+            .expect("openid recovery should work")
+            .authenticated()
+            .expect("the flow should have produced credentials");
         assert_eq!(auth.access_token, "new-access");
     }
 
@@ -1325,7 +1408,9 @@ mod tests {
                 None,
             )
             .await
-            .expect("openid fallback should work");
+            .expect("openid fallback should work")
+            .authenticated()
+            .expect("the flow should have produced credentials");
         assert_eq!(auth.access_token, "new-access");
     }
 
@@ -1624,16 +1709,19 @@ mod tests {
         assert!(err.to_string().contains("refresh failed"), "got: {err}");
     }
 
+    /// A server that demands auth but does not say where its metadata lives.
+    /// The fallback URL has to be the RFC 9728 one, which keeps the resource's
+    /// path after the well-known segment. Serving the document *only* at the
+    /// suffixed path is what makes this test fail if the path is dropped, which
+    /// is exactly how GitHub's MCP server behaves.
     #[tokio::test]
-    async fn discovery_without_a_www_authenticate_uses_the_well_known_path() {
-        // A server that answers the probe *without* a challenge still resolves
-        // via the well-known document.
+    async fn a_bare_challenge_falls_back_to_the_path_suffixed_well_known_url() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new()
-            .route("/mcp", post(|| async { StatusCode::OK }))
+            .route("/mcp", post(|| async { StatusCode::UNAUTHORIZED }))
             .route(
-                "/.well-known/oauth-protected-resource",
+                "/.well-known/oauth-protected-resource/mcp",
                 get({
                     let base = base.clone();
                     move || {
@@ -1680,7 +1768,9 @@ mod tests {
                 None,
             )
             .await
-            .expect("well-known discovery should work");
+            .expect("well-known discovery should work")
+            .authenticated()
+            .expect("the flow should have produced credentials");
         assert_eq!(auth.access_token, "at");
     }
 
@@ -1715,7 +1805,9 @@ mod tests {
                 None,
             )
             .await
-            .expect("login with probe headers should complete");
+            .expect("login with probe headers should complete")
+            .authenticated()
+            .expect("the flow should have produced credentials");
     }
 
     #[tokio::test]
@@ -1737,7 +1829,9 @@ mod tests {
                 None,
             )
             .await
-            .expect("login should complete even without a browser");
+            .expect("login should complete even without a browser")
+            .authenticated()
+            .expect("the flow should have produced credentials");
     }
 
     #[tokio::test]
@@ -1752,7 +1846,9 @@ mod tests {
                 None,
             )
             .await
-            .expect("login should complete with default scopes");
+            .expect("login should complete with default scopes")
+            .authenticated()
+            .expect("the flow should have produced credentials");
     }
 
     #[tokio::test]
@@ -1767,7 +1863,9 @@ mod tests {
                 None,
             )
             .await
-            .expect("login should complete");
+            .expect("login should complete")
+            .authenticated()
+            .expect("the flow should have produced credentials");
         // The resource identifier defaulted to the MCP URL itself.
         assert_eq!(auth.resource, format!("{}/mcp", server.base));
     }
@@ -2022,7 +2120,9 @@ mod tests {
                 None,
             )
             .await
-            .expect("an absent issuer is not itself a failure");
+            .expect("an absent issuer is not itself a failure")
+            .authenticated()
+            .expect("the flow should have produced credentials");
         assert!(!auth.access_token.is_empty());
     }
 
@@ -2260,13 +2360,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_challenge_of_a_dead_server_is_none() {
+    async fn probe_of_a_dead_server_is_unreachable() {
         let mcp = Url::parse("http://127.0.0.1:1/mcp").unwrap();
-        assert!(
+        assert_eq!(
             OAuthClient::new()
                 .probe_challenge(&mcp, &HashMap::new())
                 .await
-                .is_none()
+                .label(),
+            "unreachable"
+        );
+    }
+
+    /// The case this whole path exists for. A server holding its own API token
+    /// answers the probe normally, so there is no OAuth flow to run, and the
+    /// old code went looking for a discovery document such a server does not
+    /// publish.
+    #[tokio::test]
+    async fn probe_with_headers_the_server_accepts_is_satisfied() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route(
+            "/mcp",
+            post(|headers: axum::http::HeaderMap| async move {
+                match headers.get(reqwest::header::AUTHORIZATION) {
+                    Some(_) => StatusCode::OK,
+                    None => StatusCode::UNAUTHORIZED,
+                }
+            }),
+        );
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+
+        let mcp = Url::parse(&format!("{base}/mcp")).unwrap();
+        let client = OAuthClient::new();
+
+        // Same server, same endpoint: the headers are the only difference.
+        assert_eq!(
+            client.probe_challenge(&mcp, &HashMap::new()).await.label(),
+            "challenge",
+            "no credentials, so the server should ask for some"
+        );
+        let headers = HashMap::from([(
+            "Authorization".to_string(),
+            "Bearer configured-token".to_string(),
+        )]);
+        assert_eq!(
+            client.probe_challenge(&mcp, &headers).await.label(),
+            "satisfied",
+            "the configured header should be enough"
+        );
+    }
+
+    /// End to end through `login`: a server the headers already satisfy must
+    /// come back as "nothing to do" rather than being dragged into discovery.
+    /// The endpoint below serves no metadata at all, so a login that tries to
+    /// discover fails loudly here.
+    #[tokio::test]
+    async fn login_is_not_required_when_the_configured_headers_suffice() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route("/mcp", post(|| async { StatusCode::OK }));
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+
+        let outcome = OAuthClient::new()
+            .login(
+                &format!("{base}/mcp"),
+                &HashMap::from([("Authorization".to_string(), "Bearer tok".to_string())]),
+                auto_consent(),
+                0,
+                None,
+            )
+            .await
+            .expect("a server that wants nothing is not a login failure");
+        assert!(
+            outcome.authenticated().is_none(),
+            "there are no credentials to store"
         );
     }
 

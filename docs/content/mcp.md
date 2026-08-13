@@ -41,6 +41,16 @@ lev mcp remove <name>
 `Name: value` form an HTTP header is usually written in, so `Authorization: Bearer ...` is rejected
 with `--header must be KEY=VALUE`.
 
+There are two ways an HTTP server authenticates you, and Leviath picks between them by asking the
+server rather than by guessing. If a `--header` you configured is enough, as it is for a server that
+takes an API token of its own, `add` reports that no login is needed and stores nothing. If the
+server answers with a `401` instead, the OAuth flow runs and the tokens land in the credential
+store. `lev mcp login` on an already-satisfied server says so rather than failing.
+
+> [!NOTE]
+> GitHub's MCP server accepts either. A personal access token in an `Authorization` header needs no
+> login at all, and the same endpoint runs the browser flow if you configure no header.
+
 Or configure in `~/.leviath/config.toml`:
 
 ```toml

@@ -176,6 +176,18 @@ impl MCPServerConfig {
             .map(|_| ())
             .map_err(|e| anyhow::anyhow!("mcp_servers entry '{}' {}", self.name, e))
     }
+
+    /// Whether a credential is configured as a request header.
+    ///
+    /// Such a server carries its own authentication and wants no OAuth login,
+    /// so a listing that reported it as unauthenticated would be pointing the
+    /// user at a flow that does not apply. HTTP header names are
+    /// case-insensitive, and this comparison is too.
+    pub fn has_auth_header(&self) -> bool {
+        self.headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("authorization"))
+    }
 }
 
 /// Tool discovery service that aggregates tools from multiple MCP servers.
@@ -259,6 +271,38 @@ impl Default for ToolDiscovery {
 mod tests {
     use super::*;
     use crate::test_support::always_on_tracing_guard;
+
+    // --- configured credentials ---
+
+    /// The distinction that decides whether anything offers the user a login.
+    #[test]
+    fn an_authorization_header_counts_as_a_configured_credential() {
+        let mut server = MCPServerConfig::http("s", "https://mcp.example.com/mcp");
+        assert!(!server.has_auth_header(), "no headers at all");
+
+        server
+            .headers
+            .insert("X-Trace".to_string(), "on".to_string());
+        assert!(!server.has_auth_header(), "an unrelated header is not one");
+
+        server
+            .headers
+            .insert("Authorization".to_string(), "Bearer t".to_string());
+        assert!(server.has_auth_header());
+    }
+
+    /// HTTP header names are case-insensitive, and a config written
+    /// `authorization = "..."` is the same credential.
+    #[test]
+    fn the_authorization_header_is_matched_case_insensitively() {
+        for spelling in ["authorization", "AUTHORIZATION", "AuThOrIzAtIoN"] {
+            let mut server = MCPServerConfig::http("s", "https://mcp.example.com/mcp");
+            server
+                .headers
+                .insert(spelling.to_string(), "Bearer t".to_string());
+            assert!(server.has_auth_header(), "{spelling}");
+        }
+    }
 
     // --- ToolMetadata serde ---
 

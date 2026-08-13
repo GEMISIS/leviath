@@ -905,12 +905,13 @@
         "tags": [
           "mcp"
         ],
-        "summary": "Begin the OAuth flow for this server",
+        "summary": "Begin the OAuth flow for this server, or report that it needs no login",
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
           }
-        }
+        },
+        "description": "Returns `{\"status\": \"authenticated\"}` when the browser flow completed and credentials were stored, or `{\"status\": \"not_required\"}` when the server answered a probe carrying its configured headers, which means there is no OAuth flow to run."
       }
     },
     "/api/mcp/servers/{name}/test": {
