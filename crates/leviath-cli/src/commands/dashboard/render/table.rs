@@ -49,6 +49,10 @@ impl Dashboard {
 
         let spinner_frame = SPINNER[(self.tick_count as usize) % SPINNER.len()];
 
+        // A mark column appears only while at least one run is marked, so the
+        // table looks exactly as before until the feature is used.
+        let any_marked = !self.marked.is_empty();
+
         let rows: Vec<Row> = self
             .display_indices
             .iter()
@@ -89,11 +93,22 @@ impl Dashboard {
                     agent.status.to_string()
                 };
                 let short_id = agent.id.split('-').next_back().unwrap_or("").to_string();
-                let title_cell = Cell::from(Line::from(vec![
-                    Span::styled(tree_prefix, Style::default().fg(C_DIM)),
-                    Span::styled(title_str, Style::default().fg(C_WHITE)),
-                    Span::styled(format!(" #{}", short_id), Style::default().fg(C_DIM)),
-                ]));
+                let mut title_spans = Vec::new();
+                if any_marked {
+                    if self.marked.contains(&agent.id) {
+                        title_spans.push(Span::styled("✓ ", Style::default().fg(C_ACCENT)));
+                    } else {
+                        // Unmarked rows get the same width, so titles stay aligned.
+                        title_spans.push(Span::raw("  "));
+                    }
+                }
+                title_spans.push(Span::styled(tree_prefix, Style::default().fg(C_DIM)));
+                title_spans.push(Span::styled(title_str, Style::default().fg(C_WHITE)));
+                title_spans.push(Span::styled(
+                    format!(" #{}", short_id),
+                    Style::default().fg(C_DIM),
+                ));
+                let title_cell = Cell::from(Line::from(title_spans));
                 Row::new(vec![
                     title_cell,
                     Cell::from(agent.blueprint_name.clone()),
@@ -106,25 +121,28 @@ impl Dashboard {
             .collect();
 
         let empty_state_msg: Option<String> = if self.agents.is_empty() {
-            Some("  No agents running. Press `n` to start one.".to_string())
+            Some("  No runs yet. Press `n` to start one.".to_string())
         } else if self.display_indices.is_empty() {
-            Some(format!("  No agents match \"{}\".", self.list_search_query))
+            Some(format!("  No runs match \"{}\".", self.list_search_query))
         } else {
             None
         };
 
-        let list_title = if !self.list_search_query.is_empty() {
+        let mut list_title = if !self.list_search_query.is_empty() {
             format!(
-                " Agents  /{}/  {}/{} ",
+                " Runs  /{}/  {}/{} ",
                 self.list_search_query,
                 self.display_indices.len(),
                 self.agents.len()
             )
         } else if self.list_search_mode {
-            format!(" Agents  /{}▌ ", self.list_search_query)
+            format!(" Runs  /{}▌ ", self.list_search_query)
         } else {
-            " Agents ".to_string()
+            " Runs ".to_string()
         };
+        if any_marked {
+            list_title = format!("{} {} marked ", list_title.trim_end(), self.marked.len());
+        }
 
         // Register for wheel hit-testing and show which pane holds focus.
         self.pane_rects.push((PaneId::RunTable, area));
@@ -508,6 +526,8 @@ impl Dashboard {
             Span::raw(" sort  "),
             Span::styled("[d]", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" delete  "),
+            Span::styled("[space]", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" mark  "),
         ];
         if can_kill {
             spans.push(Span::styled(
@@ -1200,5 +1220,58 @@ mod tests {
         let line = dash.build_detail_help_bar();
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains("[i]"));
+    }
+
+    // ── Marks for group kill / delete ─────────────────────────────────────
+
+    #[test]
+    fn marked_rows_show_a_check_and_the_title_counts_them() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-2", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.marked.insert("run-1".to_string());
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("✓ My Test #1"), "{buf}");
+        assert!(!buf.contains("✓ My Test #2"), "{buf}");
+        assert!(buf.contains("My Test #2"), "the unmarked row still renders");
+        assert!(buf.contains("1 marked"), "{buf}");
+    }
+
+    #[test]
+    fn table_without_marks_shows_no_check_or_count() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(!buf.contains('✓'), "{buf}");
+        assert!(!buf.contains("marked"), "{buf}");
+    }
+
+    #[test]
+    fn main_list_help_bar_offers_the_mark_key() {
+        let dash = make_test_dashboard();
+        let line = dash.build_main_list_help_bar();
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("[space] mark"), "{text}");
     }
 }

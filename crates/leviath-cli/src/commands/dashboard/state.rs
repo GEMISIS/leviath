@@ -33,6 +33,11 @@ pub(crate) struct Dashboard {
     pub(super) pending_confirm: Option<(ConfirmAction, crate::tui::widgets::confirm::Confirm)>,
     /// How the run list is ordered; `s` cycles it.
     pub(super) sort_mode: SortMode,
+    /// Run ids marked with Space on the main list, so a kill or delete can act
+    /// on several runs at once. Keyed by id rather than row position, so marks
+    /// survive re-sorting and filtering; ids whose runs disappear are pruned by
+    /// [`update_display_indices`](Self::update_display_indices).
+    pub(super) marked: std::collections::HashSet<String>,
     /// Which main-screen pane holds keyboard focus (Tab toggles).
     pub(super) main_focus: MainPane,
     /// Scroll position of the log panel (tail-anchored; End resumes tailing).
@@ -242,6 +247,10 @@ impl Dashboard {
     /// list_search_query. Every mode's order is total (id tie-break), so a
     /// status change alone never reshuffles rows.
     pub(super) fn update_display_indices(&mut self) {
+        // Drop marks whose runs no longer exist, so a deleted or vanished run
+        // cannot linger in a later group kill or delete.
+        let agents = &self.agents;
+        self.marked.retain(|id| agents.iter().any(|a| a.id == *id));
         let query = self.list_search_query.to_lowercase();
         let status_priority = |s: &AgentDisplayStatus| -> u8 {
             match s {
@@ -648,7 +657,7 @@ impl Dashboard {
                         };
                         Self::push_toast(
                             &mut self.toasts,
-                            format!("Agent '{}' failed{}", name, preview),
+                            format!("Run '{}' failed{}", name, preview),
                             ToastLevel::Error,
                             50,
                         );
@@ -658,7 +667,7 @@ impl Dashboard {
                     ) {
                         Self::push_toast(
                             &mut self.toasts,
-                            format!("Agent '{}' completed", name),
+                            format!("Run '{}' completed", name),
                             ToastLevel::Info,
                             35,
                         );
@@ -733,7 +742,7 @@ impl Dashboard {
                                     .unwrap_or(truncate(&agent.blueprint_name, 20));
                                 Self::push_toast(
                                     &mut self.toasts,
-                                    format!("Agent '{}' needs input", name),
+                                    format!("Run '{}' needs input", name),
                                     ToastLevel::Warning,
                                     35,
                                 );
@@ -757,7 +766,7 @@ impl Dashboard {
                         let name = run.title.clone().unwrap_or(truncate(&run.agent_name, 20));
                         Self::push_toast(
                             &mut self.toasts,
-                            format!("Agent '{}' needs input", name),
+                            format!("Run '{}' needs input", name),
                             ToastLevel::Warning,
                             35,
                         );
@@ -769,7 +778,7 @@ impl Dashboard {
                         let name = run.title.clone().unwrap_or(truncate(&run.agent_name, 20));
                         Self::push_toast(
                             &mut self.toasts,
-                            format!("Agent '{}' completed", name),
+                            format!("Run '{}' completed", name),
                             ToastLevel::Info,
                             35,
                         );
@@ -860,10 +869,33 @@ impl Dashboard {
         self.update_display_indices();
     }
 
-    /// Open the kill confirmation for the selected agent, if it is killable.
+    /// Open the kill confirmation. Acts on every marked run that is killable
+    /// when any are marked, else on the selected run if it is killable.
     pub(super) fn request_kill(&mut self) {
         use crate::tui::widgets::confirm::Confirm;
         use ratatui::text::Line;
+        if !self.marked.is_empty() {
+            // Marked but already-finished runs are skipped, the same way `x`
+            // on a finished run does nothing.
+            let run_ids: Vec<String> = self
+                .agents
+                .iter()
+                .filter(|a| self.marked.contains(&a.id) && a.status.is_killable())
+                .map(|a| a.id.clone())
+                .collect();
+            if run_ids.is_empty() {
+                return;
+            }
+            let body = if run_ids.len() == 1 {
+                "Cancel 1 run? Its state stays on disk.".to_string()
+            } else {
+                format!("Cancel {} runs? Their state stays on disk.", run_ids.len())
+            };
+            let dialog =
+                Confirm::new("Kill runs?", vec![Line::from(body)], "Kill", "Cancel").danger();
+            self.pending_confirm = Some((ConfirmAction::Kill { run_ids }, dialog));
+            return;
+        }
         let Some(agent) = self.selected_agent() else {
             return;
         };
@@ -885,13 +917,42 @@ impl Dashboard {
             "Cancel",
         )
         .danger();
-        self.pending_confirm = Some((ConfirmAction::Kill { run_id }, dialog));
+        self.pending_confirm = Some((
+            ConfirmAction::Kill {
+                run_ids: vec![run_id],
+            },
+            dialog,
+        ));
     }
 
-    /// Open the delete confirmation for the selected agent.
+    /// Open the delete confirmation. Acts on every marked run when any are
+    /// marked, else on the selected run.
     pub(super) fn request_delete(&mut self) {
         use crate::tui::widgets::confirm::Confirm;
         use ratatui::text::Line;
+        if !self.marked.is_empty() {
+            // Every marked id names a live run: `update_display_indices` prunes
+            // marks whenever the agent list changes, so no emptiness check is
+            // needed here.
+            let run_ids: Vec<String> = self
+                .agents
+                .iter()
+                .filter(|a| self.marked.contains(&a.id))
+                .map(|a| a.id.clone())
+                .collect();
+            let body = if run_ids.len() == 1 {
+                "Delete 1 run and its on-disk state? This is permanent.".to_string()
+            } else {
+                format!(
+                    "Delete {} runs and their on-disk state? This is permanent.",
+                    run_ids.len()
+                )
+            };
+            let dialog =
+                Confirm::new("Delete runs?", vec![Line::from(body)], "Delete", "Cancel").danger();
+            self.pending_confirm = Some((ConfirmAction::Delete { run_ids }, dialog));
+            return;
+        }
         let Some(agent) = self.selected_agent() else {
             return;
         };
@@ -906,7 +967,12 @@ impl Dashboard {
             "Cancel",
         )
         .danger();
-        self.pending_confirm = Some((ConfirmAction::Delete { run_id }, dialog));
+        self.pending_confirm = Some((
+            ConfirmAction::Delete {
+                run_ids: vec![run_id],
+            },
+            dialog,
+        ));
     }
 
     /// Ask the daemon to cancel `run_id` and mark the row cancelled. The one
@@ -2279,7 +2345,7 @@ mod tests {
         let mut meta = runstate::RunMeta::new(
             run_id.to_string(),
             // Use the (unique-per-test) run_id as the agent name too, so toast
-            // messages ("Agent '<name>' ...") can be unambiguously matched even
+            // messages ("Run '<name>' ...") can be unambiguously matched even
             // when tests run concurrently against the shared real runs dir.
             run_id.to_string(),
             "/nonexistent/agent/path".to_string(),
@@ -3400,5 +3466,47 @@ mod tests {
         dash.sync_interactions(&ControlClient::new(control_id(&dir.path().join("nope"))))
             .await;
         assert!(dash.pending_interactions.is_empty());
+    }
+
+    // ── Marks for group kill / delete ─────────────────────────────────────
+
+    #[test]
+    fn stale_marks_are_pruned_when_their_run_disappears() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-2", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.marked.insert("run-1".to_string());
+        dash.marked.insert("run-2".to_string());
+        dash.agents.retain(|a| a.id != "run-2");
+        dash.update_display_indices();
+        assert!(dash.marked.contains("run-1"), "the live run stays marked");
+        assert!(!dash.marked.contains("run-2"), "the gone run is pruned");
+    }
+
+    #[test]
+    fn marks_survive_filtering_and_resorting() {
+        let mut dash = make_test_dashboard();
+        let mut hidden = make_test_agent("run-1", AgentDisplayStatus::Active);
+        hidden.blueprint_name = "alpha".to_string();
+        dash.agents.push(hidden);
+        let mut shown = make_test_agent("run-2", AgentDisplayStatus::Complete);
+        shown.blueprint_name = "beta".to_string();
+        dash.agents.push(shown);
+        dash.update_display_indices();
+        dash.marked.insert("run-1".to_string());
+
+        // A filter that hides the marked run does not drop its mark.
+        dash.list_search_query = "beta".to_string();
+        dash.update_display_indices();
+        assert_eq!(dash.display_indices.len(), 1);
+        assert!(dash.marked.contains("run-1"));
+
+        // Neither does re-sorting: marks key by id, not row.
+        dash.list_search_query.clear();
+        dash.cycle_sort_mode();
+        assert!(dash.marked.contains("run-1"));
     }
 }

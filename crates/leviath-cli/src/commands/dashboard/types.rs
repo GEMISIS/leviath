@@ -126,10 +126,12 @@ pub(super) struct ContextTreeState {
 /// A destructive action waiting on its confirmation dialog.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum ConfirmAction {
-    /// Cancel the run via the daemon (the row stays, marked cancelled).
-    Kill { run_id: String },
-    /// Cancel and permanently delete the run's on-disk state.
-    Delete { run_id: String },
+    /// Cancel the runs via the daemon (the rows stay, marked cancelled).
+    /// Carries one id for the selected run, several when runs are marked.
+    Kill { run_ids: Vec<String> },
+    /// Cancel and permanently delete the runs' on-disk state.
+    /// Carries one id for the selected run, several when runs are marked.
+    Delete { run_ids: Vec<String> },
     /// Remove an MCP server from the config.
     McpRemove { name: String },
     /// Turn on unattended runs for the new-run screen.

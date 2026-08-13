@@ -33,7 +33,7 @@ panel and answer. `lev respond` does the same from the shell.
 
 ## What's on screen
 
-- **Agent table**: title and run id, blueprint, stage, status, tokens, and start time, with
+- **Run table**: title and run id, blueprint, stage, status, tokens, and start time, with
   sub-agents nested under their parent. Titles are auto-generated per run. The model, iteration,
   and context-window occupancy live in the detail view.
 - **Detail view**: per-stage tabs or a graph view of the workflow, a context-window visualization,
@@ -66,13 +66,19 @@ MCP servers (`m`), and a stage explorer for branching agents (`g`, from the deta
 | `s` | Cycle the sort: start time (default), recent activity, or status groups |
 | `x` | Kill the selected run. Asks first |
 | `d` | Delete the run. Permanent, and asks first |
+| `Space` | Mark or unmark the selected run, then move down a row |
 | `p` / `r` | Pause / resume the selected run |
 | `m` | Manage MCP servers |
-| `Esc` | Clear the filter |
+| `Esc` | Clear the filter, or clear the marks once no filter is set |
 | `q` / `Ctrl-C` | Quit |
 
 By default runs are listed newest first and keep their row for their whole life, so nothing jumps
 around when a run finishes. The sort indicator sits in the table's top-right corner.
+
+Marking selects several runs at once: press `Space` on each run, then `x` or `d` acts on all of
+them behind one confirmation. Marked rows show a check mark, the pane title counts them, and marks
+follow the run rather than the row, so sorting or filtering never changes what is marked. A kill
+skips marked runs that have already finished.
 
 ### Starting a run (`n`)
 
