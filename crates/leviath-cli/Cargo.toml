@@ -37,7 +37,7 @@ mimalloc-allocator = ["dep:mimalloc", "dep:leviath-alloc", "leviath-alloc/mimall
 # table on purpose: only the composition-root binary should pick an allocator,
 # never a library crate.
 mimalloc = { version = "0.1", optional = true }
-leviath-alloc = { path = "../leviath-alloc", version = "0.3.8", optional = true }
+leviath-alloc = { path = "../leviath-alloc", version = "0.3.9", optional = true }
 leviath-core = { workspace = true }
 # The outbound-request policy (SSRF checks + the shared client).
 leviath-net = { workspace = true }
