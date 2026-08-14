@@ -26,62 +26,50 @@ impl WorldHost {
         // report that one's wait reason as this run's.
         let entity = agent.resolve_in(world)?;
         let state = world.get::<AgentState>(entity)?;
-        if state.status != AgentStatus::Waiting {
-            return None;
-        }
-        if world
-            .get::<crate::gate_prompt::AwaitingGatePrompt>(entity)
-            .is_some()
-        {
-            return Some(WaitReason::TaintGate);
-        }
-        if world
-            .get::<crate::interaction_points::AwaitingInteractionPoint>(entity)
-            .is_some()
-        {
-            return Some(WaitReason::InteractionPoint);
-        }
-        if let Some(fanout) = world.get::<crate::fanout::FanOutWaiting>(entity) {
-            return Some(WaitReason::FanOutWorkers {
-                outstanding: fanout.outstanding(),
-            });
-        }
-        if world
-            .get::<crate::pipeline::WaitingForChildren>(entity)
-            .is_some()
-        {
-            let outstanding = world
-                .get::<SubAgentChildren>(entity)
-                .map(|c| {
-                    c.children
-                        .iter()
-                        .filter(|&&child| {
-                            world
-                                .get::<AgentState>(child)
-                                .is_some_and(|s| !crate::pipeline::is_terminal_status(&s.status))
-                        })
-                        .count()
-                })
-                .unwrap_or(0);
-            return Some(WaitReason::Children { outstanding });
-        }
-        if world.get::<AwaitingInteraction>(entity).is_some() {
-            // The hub is keyed by agent id, and one agent can only be parked on
-            // one prompt at a time, so the first match is the one blocking it.
-            let kind = self
-                .interactions
-                .pending()
-                .into_iter()
-                .find(|(agent_id, _)| *agent_id == state.agent_id)
-                .map(|(_, req)| req.kind);
-            return Some(match kind {
-                Some(leviath_core::interaction::InteractionKind::ToolApproval) => {
-                    WaitReason::ToolApproval
-                }
-                _ => WaitReason::UserPrompt,
-            });
-        }
-        None
+        // The precedence itself lives in `leviath_core`, shared with the
+        // persistence system that writes the same answer to `meta.json`: two
+        // copies of it would disagree the first time either was edited.
+        leviath_core::run_meta::wait_reason_from(
+            state.status == AgentStatus::Waiting,
+            &leviath_core::run_meta::WaitMarkers {
+                gate_prompt: world
+                    .get::<crate::gate_prompt::AwaitingGatePrompt>(entity)
+                    .is_some(),
+                interaction_point: world
+                    .get::<crate::interaction_points::AwaitingInteractionPoint>(entity)
+                    .is_some(),
+                fan_out_outstanding: world
+                    .get::<crate::fanout::FanOutWaiting>(entity)
+                    .map(|f| f.outstanding()),
+                children_outstanding: world
+                    .get::<crate::pipeline::WaitingForChildren>(entity)
+                    .map(|_| {
+                        world
+                            .get::<SubAgentChildren>(entity)
+                            .map(|c| {
+                                c.children
+                                    .iter()
+                                    .filter(|&&child| {
+                                        world.get::<AgentState>(child).is_some_and(|s| {
+                                            !crate::pipeline::is_terminal_status(&s.status)
+                                        })
+                                    })
+                                    .count()
+                            })
+                            .unwrap_or(0)
+                    }),
+                // The hub is keyed by agent id, and one agent can only be
+                // parked on one prompt at a time, so the first match is the
+                // one blocking it.
+                interaction: self
+                    .interactions
+                    .pending()
+                    .into_iter()
+                    .find(|(agent_id, _)| *agent_id == state.agent_id)
+                    .map(|(_, req)| req.kind),
+                awaiting_interaction: world.get::<AwaitingInteraction>(entity).is_some(),
+            },
+        )
     }
 
     /// One listing row for a run, read off the live world.

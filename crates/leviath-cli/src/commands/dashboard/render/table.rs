@@ -61,7 +61,14 @@ impl Dashboard {
                 let agent = &self.agents[idx];
                 // Tree-connector prefix (parent → child nesting); empty when flat.
                 let tree_prefix = self.tree_prefixes.get(pos).cloned().unwrap_or_default();
-                let status_color = agent.status.color();
+                // A parked run only wears the attention colour when a person is
+                // actually needed. A parent whose workers are still running is
+                // healthy, and colouring it like a question is what taught
+                // people to ignore the colour.
+                let status_color = match &agent.wait_reason {
+                    Some(reason) if !reason.needs_a_person() => C_DIM,
+                    _ => agent.status.color(),
+                };
                 let started_str = relative_time(agent.started_at);
                 let title_str = agent
                     .title
@@ -87,10 +94,16 @@ impl Dashboard {
                 } else {
                     truncate(&agent.stage, 14)
                 };
-                let status_str = if matches!(agent.status, AgentDisplayStatus::Active) {
-                    format!("{} ACTIVE", spinner_frame)
-                } else {
-                    agent.status.to_string()
+                let status_str = match (&agent.status, &agent.wait_reason) {
+                    (AgentDisplayStatus::Active, _) => format!("{} ACTIVE", spinner_frame),
+                    // The reason replaces the word rather than following it.
+                    // "WAITING" already means "parked", so it is the half that
+                    // says nothing, and this column is too narrow to carry
+                    // both without truncating the half that does.
+                    (AgentDisplayStatus::Waiting, Some(reason)) => {
+                        format!("{GLYPH_WAITING}{reason}")
+                    }
+                    (status, _) => status.to_string(),
                 };
                 let short_id = agent.id.split('-').next_back().unwrap_or("").to_string();
                 let mut title_spans = Vec::new();
@@ -574,6 +587,7 @@ mod tests {
             cached_tokens: 10,
             iteration: 3,
             waiting_prompt: None,
+            wait_reason: None,
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
@@ -1223,6 +1237,62 @@ mod tests {
         let line = dash.build_detail_help_bar();
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains("[i]"));
+    }
+
+    // ── Why a run is waiting ──────────────────────────────────────────────
+
+    /// A parked run says what it is parked on, so WAITING stops meaning four
+    /// different things.
+    #[test]
+    fn a_waiting_row_names_what_it_is_waiting_on() {
+        use leviath_core::run_meta::WaitReason;
+
+        for (reason, expected) in [
+            (WaitReason::ToolApproval, "tool approval"),
+            (WaitReason::FanOutWorkers { outstanding: 3 }, "workers(3)"),
+            (WaitReason::Children { outstanding: 2 }, "children(2)"),
+        ] {
+            let backend = TestBackend::new(120, 40);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut dash = make_test_dashboard();
+            let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+            agent.wait_reason = Some(reason);
+            dash.agents.push(agent);
+            dash.update_display_indices();
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    dash.draw_agent_table(f, area);
+                })
+                .unwrap();
+            let buf = rendered_buffer(&terminal);
+            assert!(buf.contains(expected), "expected {expected}: {buf}");
+            // The reason replaces the bare word: this column is too narrow to
+            // carry both, and the word is the half that says nothing.
+            assert!(!buf.contains("WAITING"), "{buf}");
+        }
+    }
+
+    /// A run whose `meta.json` predates the field renders exactly as it did
+    /// before, rather than claiming a reason nobody recorded.
+    #[test]
+    fn a_waiting_row_without_a_reason_reads_as_it_always_did() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.wait_reason = None;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("WAITING"), "{buf}");
+        assert!(!buf.contains("workers("), "{buf}");
     }
 
     // ── Marks for group kill / delete ─────────────────────────────────────

@@ -239,6 +239,14 @@ pub struct DashboardAgent {
     pub iteration: usize,
     /// The question a waiting run is asking, in one line, for the list row.
     pub waiting_prompt: Option<String>,
+    /// Why a waiting run is parked, when `meta.json` says.
+    ///
+    /// WAITING on its own reads as "go and answer it", which is wrong for a
+    /// parent whose fan-out workers are still churning. `None` on a run that
+    /// is not parked, and on one written by a build from before the field
+    /// existed, which is why the row falls back to the bare status rather
+    /// than assuming.
+    pub wait_reason: Option<leviath_core::run_meta::WaitReason>,
     /// Full structured interaction request (populated for WaitingInput agents)
     pub pending_request: Option<interaction::InteractionRequest>,
     /// The request_id we most recently submitted a response for, used to suppress
@@ -555,6 +563,7 @@ mod tests {
             cached_tokens: 0,
             iteration: 1,
             waiting_prompt: None,
+            wait_reason: None,
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,

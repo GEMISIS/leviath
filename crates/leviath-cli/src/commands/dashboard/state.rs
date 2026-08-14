@@ -749,6 +749,7 @@ impl Dashboard {
                             }
                             agent.waiting_prompt = waiting_prompt;
                             agent.pending_request = pending_request;
+                            agent.wait_reason = run.waiting_on.clone();
                         }
                     }
                 } else {
@@ -756,6 +757,9 @@ impl Dashboard {
                     agent.pending_request = None;
                     agent.last_answered_request_id = None;
                 }
+                // Read every tick, not only while waiting: a run that stops
+                // being parked must stop claiming a reason.
+                agent.wait_reason = run.waiting_on.clone();
             } else {
                 // New agent - toasts only after the initial sync (avoid flooding on startup)
                 if self.initial_sync_done {
@@ -796,6 +800,7 @@ impl Dashboard {
                     cached_tokens: run.cached_tokens,
                     iteration: run.iteration,
                     waiting_prompt,
+                    wait_reason: run.waiting_on.clone(),
                     pending_request,
                     last_answered_request_id: None,
                     context_snapshot,
@@ -1153,6 +1158,7 @@ mod tests {
             cached_tokens: 0,
             iteration: 0,
             waiting_prompt: None,
+            wait_reason: None,
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
