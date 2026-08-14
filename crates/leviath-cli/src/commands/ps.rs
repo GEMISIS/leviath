@@ -258,6 +258,10 @@ pub fn format_offline(runs: &[OfflineRun], now: i64) -> Option<String> {
 fn status_cell(entry: &RunListEntry) -> String {
     match (&entry.status, &entry.wait_reason) {
         (AgentStatus::Waiting, Some(reason)) => format!("waiting: {reason}"),
+        // A run parked until the machine is fixed is the one that most needs
+        // explaining, so a bare `paused` would be the worst answer here: it
+        // reads as a deliberate pause somebody can undo whenever they like.
+        (AgentStatus::Paused, Some(reason)) => format!("paused: {reason}"),
         (status, _) if entry.empty_output => format!("{status} (no output)"),
         (status, _) => status.to_string(),
     }

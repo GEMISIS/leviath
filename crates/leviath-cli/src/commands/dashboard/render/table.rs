@@ -103,6 +103,13 @@ impl Dashboard {
                     (AgentDisplayStatus::Waiting, Some(reason)) => {
                         format!("{GLYPH_WAITING}{reason}")
                     }
+                    // A run parked until the machine is fixed carries a reason
+                    // too, and it is the one row where a bare PAUSED would be
+                    // actively misleading: it reads as somebody's own decision
+                    // rather than something waiting on them.
+                    (AgentDisplayStatus::Paused, Some(reason)) => {
+                        format!("{GLYPH_PENDING}{reason}")
+                    }
                     (status, _) => status.to_string(),
                 };
                 let short_id = agent.id.split('-').next_back().unwrap_or("").to_string();
@@ -1271,6 +1278,56 @@ mod tests {
             // carry both, and the word is the half that says nothing.
             assert!(!buf.contains("WAITING"), "{buf}");
         }
+    }
+
+    /// A run parked until the machine is fixed says what it needs, rather than
+    /// showing a bare PAUSED that reads as somebody's own decision.
+    #[test]
+    fn a_parked_row_names_what_the_machine_is_missing() {
+        use leviath_core::run_meta::{SetupBlocker, WaitReason};
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Paused);
+        agent.wait_reason = Some(WaitReason::NeedsSetup {
+            blocker: SetupBlocker::ProviderMissing,
+            remedy: "add it to config.toml".to_string(),
+        });
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("needs provider"), "{buf}");
+        assert!(
+            !buf.contains("PAUSED"),
+            "the reason replaces the word: {buf}"
+        );
+    }
+
+    /// A run somebody paused themselves has no reason, and reads as it always
+    /// did.
+    #[test]
+    fn a_row_paused_by_a_person_reads_as_it_always_did() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Paused));
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("PAUSED"), "{buf}");
     }
 
     /// A run whose `meta.json` predates the field renders exactly as it did
