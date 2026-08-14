@@ -11,6 +11,72 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## 0.3.9 - 2026-08-14
+
+- Added: a parked run says what it is parked on. `WaitingInput` covered four
+  different situations - a question for a person, tool calls held for
+  approval, a parent held by its own fan-out, and a parent held for
+  sub-agents - and only the first two are anybody's to act on, so a parent
+  whose children were still working showed as "needs you" in every client.
+  `meta.json` now carries `waiting_on`, `lev ps` and the dashboard print it
+  in place of the bare status word, and only a run somebody can actually
+  unblock wears the warning colour. The field is skipped when absent, so a
+  run that is not parked writes the file it always wrote.
+- Added: the same reason rides the websocket. A subscriber watching live had
+  to fetch the run to find out whether `waiting` meant "go and answer
+  something" or "its workers are still going". `agent_status` now carries
+  it, and because the reason is part of the change key, a parent whose
+  outstanding-worker count falls sends a fresh event instead of leaving a
+  subscriber on a stale count.
+- Changed: a run whose provider is not configured, whose key was rejected,
+  whose key lacks access, or whose account is empty now parks instead of
+  failing. Every one of those is deterministic, outside the run's control,
+  and undone by one edit somewhere else, so ending the run threw away
+  everything it had done to punish somebody for a typo. It parks with its
+  retry still staged and `lev resume` picks it up once the machine is fixed.
+  The pause is typed rather than a sentence, since a missing provider and an
+  empty account are different screens to send somebody to. Unattended runs
+  still fail, because a scheduler watching for a terminal status would wait
+  for ever for one that never came.
+- Fixed: `lev update` refreshes its package index before upgrading, so a
+  version published minutes earlier is found instead of requiring a manual
+  `brew update` first. Alpha and beta are handled alongside stable.
+- Fixed: the reason a run was parked survives a daemon restart. The marker
+  lived only in the world, so a reloaded run came back as a bare `Paused` and
+  the next persist tick wrote null over the recorded reason - and nothing
+  would have recomputed it, because a paused run is never dispatched again.
+- Fixed: every code stage has a local model it can actually reach. `coder`
+  and `reviewer` named `devstral:24b` as their only ollama candidate, so
+  somebody running locally with `qwen3.5:9b` - what every other stage asks
+  for - had six stages fall through the whole candidate list and find
+  nothing. The specialist is still tried first.
+- Changed: one local model across every bundled blueprint. The ollama entry
+  was the only one that switched model family between tiers, so a local run
+  needed two unrelated pulls to use one agent. Standardised on `qwen3.5:9b`,
+  already 31 of the 37 entries.
+- Added: `GET /api/tools` lists what an agent on this machine can actually
+  use, with each tool's source, so a console no longer ships a hardcoded
+  list that omits the tools you wrote and offers ones that do not exist. It
+  reports the scripts that failed to compile too.
+- Added: `/api/scripts` reads and writes script files by kind, scoped to an
+  agent or to the machine-wide directory, so they no longer have to be
+  edited on the box. Writes sit behind `--allow-admin` and are unmounted
+  without it, because a `.rhai` file is executable code every agent then
+  runs.
+- Added: `GET /api/config` enumerates custom gateways and `PUT` adds, edits
+  and removes them by name, which lets a browser change a gateway's URL
+  without ever being handed its key. The people most likely to want a form
+  for provider setup were the ones the config API could not describe.
+- Added: `GET /api/blueprints/{name}` returns the agent's manifest text. A
+  browser could name the file it was editing but not read it, so it fell
+  back to a draft in local storage or a copy bundled at build time, which on
+  a second machine could be many versions behind what is installed.
+- Fixed: blueprint validation lints against the agent's own directory rather
+  than the daemon's working directory, so an agent's `tools/*.rhai` resolves
+  and its tools stop coming back as `unknown-tool`. A console using this as
+  a pre-flight could not save any agent with script tools, bundled ones
+  included.
+
 ## 0.3.8 - 2026-08-13
 
 - Fixed: a fan-out split whose answer is not a JSON array no longer ends the
