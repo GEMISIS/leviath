@@ -161,7 +161,7 @@ transform = "direct"
 # at once, so verification stays in the merge, where `workflow`'s VERIFY line is.
 [stages.review_worker]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Review one area of the change in depth"
 available_tools = ["read_file", "list_dir", "submit_output"]
 allow_as_worker = true
@@ -198,7 +198,7 @@ instructions = "One finding per line, most severe first, as `severity | file:lin
 # ─── Stage 4: Deep review ─────────────────────────────────────────────────────
 [stages.deep_review]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "In-depth analysis of correctness, security, and architecture"
 available_tools = ["read_file", "list_dir", "bash", "context_write", "context_append"]
 max_iterations = 25

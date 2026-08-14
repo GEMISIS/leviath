@@ -260,7 +260,7 @@ edit_options = ["Add detail - expand a section"]
 # user's approved GOAL is never renegotiated here, only the technical route.
 [stages.prototype]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "devstral:24b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Spike the riskiest assumption in the approved plan before executing it"
 available_tools = ["read_file", "list_dir", "write_file", "edit_file", "bash", "context_write", "context_append"]
 max_iterations = 15
@@ -336,7 +336,7 @@ condition = "dead_end"
 
 [stages.implement]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Write code according to the approved plan"
 available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "ask_user_text", "ask_user_confirm", "context_append"]
 max_iterations = 50
@@ -463,7 +463,7 @@ condition = "dead_end"
 
 [stages.review]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Review the implementation and evaluate code quality"
 available_tools = ["read_file", "list_dir", "bash"]
 max_iterations = 20
@@ -549,7 +549,7 @@ transform = "direct"
 # before handing back to implement.
 [stages.reassess]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Step back after no progress: diagnose the dead end and re-plan"
 available_tools = ["read_file", "list_dir", "bash", "context_write", "context_append"]
 max_iterations = 8
