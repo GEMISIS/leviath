@@ -50,6 +50,32 @@ fn status_cell_spells_out_why_a_run_is_waiting() {
     assert_eq!(status_cell(&e), "waiting: children(2)");
 }
 
+/// A run parked until the machine is fixed says so here too.
+///
+/// This is the row where a bare `paused` would be worst: it reads as somebody
+/// having stopped the run on purpose, when in fact the run is waiting on them.
+#[test]
+fn status_cell_spells_out_what_a_parked_run_needs() {
+    use leviath_core::run_meta::SetupBlocker;
+    let mut e = entry("run-a", AgentStatus::Paused);
+    e.wait_reason = Some(WaitReason::NeedsSetup {
+        blocker: SetupBlocker::CreditsExhausted,
+        remedy: "top up the account".to_string(),
+    });
+    assert_eq!(status_cell(&e), "paused: needs credits");
+
+    e.wait_reason = Some(WaitReason::NeedsSetup {
+        blocker: SetupBlocker::ProviderMissing,
+        remedy: "add it to config.toml".to_string(),
+    });
+    assert_eq!(status_cell(&e), "paused: needs provider");
+
+    // A run somebody paused themselves has no reason, and still reads as the
+    // deliberate thing it is.
+    e.wait_reason = None;
+    assert_eq!(status_cell(&e), "paused");
+}
+
 /// A `Waiting` the host could not attribute still has to render, and it must
 /// read as the bare status rather than as a half-written reason.
 #[test]
