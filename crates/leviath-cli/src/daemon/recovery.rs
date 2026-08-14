@@ -372,6 +372,26 @@ fn reload_one(
         &crate::runstate::read_stages_index_from(run_dir),
     );
 
+    // A run parked until the machine is fixed keeps its reason across a
+    // restart. Without this the marker is a live component nothing rebuilds,
+    // so the run returns as a bare `Paused` and the next persist tick computes
+    // `waiting_on` from markers that are no longer there and writes `null`
+    // over the recorded reason - the same shape as the stage ledger above,
+    // where not restoring did not merely lose the value but erased the file
+    // that held it. The run is not re-dispatched while paused, so nothing
+    // would recompute it either.
+    if let Some(leviath_core::run_meta::WaitReason::NeedsSetup { blocker, remedy }) =
+        &meta.waiting_on
+    {
+        world
+            .world_mut()
+            .entity_mut(entity)
+            .insert(leviath_runtime::pipeline::PausedForSetup {
+                blocker: *blocker,
+                remedy: remedy.clone(),
+            });
+    }
+
     // A tool batch was in flight when the daemon died and its results never
     // reached the window: replay what the journal recorded - real results for
     // completed calls, verify-first errors for interrupted ones - so the
@@ -1879,6 +1899,64 @@ mod tests {
     /// written straight over the real file on the next persist tick, and the
     /// run's whole per-stage history went with it while `meta.json` still
     /// looked healthy (issue #415).
+    /// A run parked until the machine is fixed keeps its reason across a
+    /// daemon restart.
+    ///
+    /// The marker is a live component, so without restoring it the run comes
+    /// back as a bare `Paused` and the next persist tick recomputes
+    /// `waiting_on` from markers that are gone - writing `null` over the
+    /// reason rather than merely failing to show it. Nothing recomputes it
+    /// either, because a paused run is never dispatched.
+    #[tokio::test]
+    async fn reload_keeps_the_reason_a_parked_run_was_parked_for() {
+        use leviath_core::run_meta::{SetupBlocker, WaitReason};
+
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let runs = tempfile::tempdir().unwrap();
+        write_run(
+            runs.path(),
+            "run-parked",
+            manifest.to_str().unwrap(),
+            RunStatus::Paused,
+            None,
+        );
+        // Rewrite meta with the reason the run stopped for.
+        let meta_path = runs.path().join("run-parked").join("meta.json");
+        let mut meta: leviath_core::run_meta::RunMeta =
+            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        meta.waiting_on = Some(WaitReason::NeedsSetup {
+            blocker: SetupBlocker::ProviderMissing,
+            remedy: "add it to config.toml".to_string(),
+        });
+        std::fs::write(&meta_path, serde_json::to_string(&meta).unwrap()).unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let restored = reload_persisted_agents(
+            &mut world,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
+            runs.path(),
+        );
+        assert_eq!(restored.len(), 1);
+
+        let parked = world
+            .world()
+            .get::<leviath_runtime::pipeline::PausedForSetup>(restored[0].1.entity())
+            .expect("the reason came back with the run");
+        assert_eq!(parked.blocker, SetupBlocker::ProviderMissing);
+        assert_eq!(parked.remedy, "add it to config.toml");
+    }
+
     #[tokio::test]
     async fn reload_restores_the_persisted_stage_ledger() {
         use leviath_core::run_meta::{StageRecord, StageRunStatus};
