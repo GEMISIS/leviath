@@ -283,6 +283,9 @@ type DispatchToolsQuery = (
     Option<&'static StageCursor>,
     Option<&'static RunMetadata>,
     Option<&'static crate::components::OutputValidators>,
+    // For the submit_output guard: a submission that is exactly the name of a
+    // stage in this blueprint is a routing token, not an answer.
+    Option<&'static crate::pipeline::transition::AgentBlueprint>,
 );
 
 /// The resources the daemon installs, which a bare world does not have.
@@ -358,6 +361,7 @@ pub fn dispatch_tools(
         cursor,
         metadata,
         validators,
+        blueprint,
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -429,13 +433,19 @@ pub fn dispatch_tools(
             // async lane can reach. Recorded here and committed after the loop,
             // because `commands` cannot be borrowed inside it.
             if crate::output_tool::is_output_tool(&c.name) {
+                let stage_names: Vec<String> = blueprint
+                    .map(|bp| bp.0.stages.iter().map(|s| s.name.clone()).collect())
+                    .unwrap_or_default();
                 let (text, output) = crate::output_tool::handle_output_tool(
                     &c.arguments,
-                    stage_inf.output.as_ref(),
-                    validators,
-                    &state.current_stage,
+                    &crate::output_tool::OutputContext {
+                        spec: stage_inf.output.as_ref(),
+                        validators,
+                        stage: &state.current_stage,
+                        stage_names: &stage_names,
+                        workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
+                    },
                     chrono::Utc::now().timestamp(),
-                    metadata.map(|m| std::path::Path::new(&m.workdir)),
                     &mut window,
                 );
                 // A refused submission leaves any earlier one alone: a bad

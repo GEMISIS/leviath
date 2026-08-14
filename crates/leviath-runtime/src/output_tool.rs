@@ -45,9 +45,57 @@ pub const FINAL_OUTPUT_REGION_TOKENS: usize = 2_000;
 const MIRROR_TRUNCATION_MARKER: &str =
     "\n[...the full answer is on the run's final output, not in context]";
 
+/// The stage name a submission is really just naming, if it is doing that.
+///
+/// A stage entered by a `dead_end` edge sees a heavily compacted context and a
+/// prompt that has, moments earlier, been asking it which edge to take. Some
+/// models answer that older question: they call `submit_output` with the name of
+/// a stage. Every check in [`handle_output_tool`] passes - it is non-empty, it is
+/// valid text, no schema forbids it - and the run finishes `complete` with one
+/// word as its deliverable. That is worse than an error, because `complete`
+/// reads as success to every consumer: a benchmark harness scored such a run 0.0
+/// and carried it in a results matrix as finished until a person read the answer.
+///
+/// Matched against the blueprint's own stage names rather than a general "single
+/// short word" rule. A one-word answer is often perfectly legitimate - a
+/// classifier replying `positive`, a yes/no question - and refusing those would
+/// break working agents to catch this one. A submission that is exactly the name
+/// of a stage in the same blueprint is not a plausible answer to anything.
+///
+/// Case-insensitive because the token is being echoed by a model, and `Analyze`
+/// is the same mistake as `analyze`.
+fn routing_token<'a>(content: &str, stage_names: &'a [String]) -> Option<&'a str> {
+    let trimmed = content.trim();
+    stage_names
+        .iter()
+        .find(|name| name.eq_ignore_ascii_case(trimmed))
+        .map(String::as_str)
+}
+
 /// Whether a tool name is the final-output tool this module handles.
 pub fn is_output_tool(name: &str) -> bool {
     name == leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
+}
+
+/// Everything a submission is judged against that is not the submission.
+///
+/// Grouped rather than threaded positionally: these five travel together, three
+/// of them are `Option<&_>`, and the two `&str`-ish ones sit adjacent - a
+/// transposition type-checks, and the compiler is the only thing that was ever
+/// going to notice. Adding the stage-name list as a seventh positional argument
+/// is what pushed this over the workspace's argument-count lint, which does not
+/// permit a suppression.
+pub struct OutputContext<'a> {
+    /// The shape this stage asked for: format, schema, validator.
+    pub spec: Option<&'a OutputSpec>,
+    /// The agent's own Rhai validators, by script name.
+    pub validators: Option<&'a crate::components::OutputValidators>,
+    /// The stage doing the submitting, recorded on the answer.
+    pub stage: &'a str,
+    /// Every stage name in this blueprint, for the routing-token guard.
+    pub stage_names: &'a [String],
+    /// Where relative artifact paths resolve from.
+    pub workdir: Option<&'a std::path::Path>,
 }
 
 /// Apply a `submit_output` call.
@@ -57,18 +105,22 @@ pub fn is_output_tool(name: &str) -> bool {
 /// been told why, so the caller must leave any previously submitted output in
 /// place: a rejected correction should not erase a good answer.
 ///
-/// `spec` is the shape resolved for this stage (agent, stage, and caller
+/// `ctx.spec` is the shape resolved for this stage (agent, stage, and caller
 /// combined). `None` means no level asked for a particular shape, which is not
 /// an error - the stage still wanted an answer, just not a specific form.
 pub fn handle_output_tool(
     args: &serde_json::Value,
-    spec: Option<&OutputSpec>,
-    validators: Option<&crate::components::OutputValidators>,
-    stage: &str,
+    ctx: &OutputContext<'_>,
     now: i64,
-    workdir: Option<&std::path::Path>,
     window: &mut ContextWindow,
 ) -> (String, Option<FinalOutput>) {
+    let OutputContext {
+        spec,
+        validators,
+        stage,
+        stage_names,
+        workdir,
+    } = *ctx;
     let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
         return ("[error] missing 'content' argument".to_string(), None);
     };
@@ -76,6 +128,17 @@ pub fn handle_output_tool(
         return (
             "[error] final output is empty - submit the answer itself, not a placeholder"
                 .to_string(),
+            None,
+        );
+    }
+
+    // A routing token is not an answer, however well-formed it is.
+    if let Some(token) = routing_token(content, stage_names) {
+        return (
+            format!(
+                "[error] '{token}' is the name of a stage in this agent, not an answer. \
+                 Submit the finished work itself - the whole thing, as the reader will see it."
+            ),
             None,
         );
     }

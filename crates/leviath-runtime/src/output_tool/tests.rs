@@ -53,11 +53,14 @@ fn a_submission_is_recorded_verbatim_and_mirrored_into_the_region() {
     let mut w = win();
     let (ack, output) = handle_output_tool(
         &json!({"content": "Renamed two helpers and updated their callers."}),
-        Some(&spec(Some("markdown"), None)),
-        None,
-        "summary",
+        &OutputContext {
+            spec: Some(&spec(Some("markdown"), None)),
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         1234,
-        None,
         &mut w,
     );
     let output = output.expect("the submission was accepted");
@@ -81,11 +84,14 @@ fn an_unrecognized_format_is_carried_through_without_inspection() {
     let a2ui = r#"{"root":{"component":"Card","children":[{"component":"Text"}]}}"#;
     let (_, output) = handle_output_tool(
         &json!({ "content": a2ui }),
-        Some(&spec(Some("a2ui"), None)),
-        None,
-        "summary",
+        &OutputContext {
+            spec: Some(&spec(Some("a2ui"), None)),
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     let output = output.expect("accepted");
@@ -100,11 +106,14 @@ fn a_format_with_no_schema_never_parses_the_content() {
     let mut w = win();
     let (_, output) = handle_output_tool(
         &json!({"content": "<report><finding>one</finding></report>"}),
-        Some(&spec(Some("xml"), None)),
-        None,
-        "summary",
+        &OutputContext {
+            spec: Some(&spec(Some("xml"), None)),
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert_eq!(
@@ -122,11 +131,14 @@ fn a_format_checks_well_formedness_but_not_shape() {
     // Parses, but has nothing anyone asked for. Accepted: no schema was given.
     let (_, output) = handle_output_tool(
         &json!({"content": r#"{"totally":"unexpected"}"#}),
-        Some(&spec(Some("json"), None)),
-        None,
-        "summary",
+        &OutputContext {
+            spec: Some(&spec(Some("json"), None)),
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(output.is_some(), "shape is not the format check's business");
@@ -134,11 +146,14 @@ fn a_format_checks_well_formedness_but_not_shape() {
     // Does not parse. Refused, with no schema involved.
     let (message, refused) = handle_output_tool(
         &json!({"content": "this is not JSON at all"}),
-        Some(&spec(Some("json"), None)),
-        None,
-        "summary",
+        &OutputContext {
+            spec: Some(&spec(Some("json"), None)),
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(refused.is_none());
@@ -150,11 +165,14 @@ fn no_spec_at_all_still_records_an_answer() {
     let mut w = win();
     let (_, output) = handle_output_tool(
         &json!({"content": "done"}),
-        None,
-        None,
-        "summary",
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     let output = output.expect("accepted");
@@ -172,11 +190,14 @@ fn a_submission_matching_its_schema_is_accepted() {
     });
     let (_, output) = handle_output_tool(
         &json!({"content": r#"{"summary":"two files changed"}"#}),
-        Some(&spec(Some("json"), Some(schema))),
-        None,
-        "summary",
+        &OutputContext {
+            spec: Some(&spec(Some("json"), Some(schema))),
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(output.is_some());
@@ -192,11 +213,14 @@ fn a_submission_violating_its_schema_is_refused_and_records_nothing() {
     });
     let (message, output) = handle_output_tool(
         &json!({"content": r#"{"nope":1}"#}),
-        Some(&spec(Some("json"), Some(schema))),
-        None,
-        "summary",
+        &OutputContext {
+            spec: Some(&spec(Some("json"), Some(schema))),
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(output.is_none(), "nothing recorded");
@@ -215,11 +239,14 @@ fn content_that_is_not_json_fails_a_schema_check_with_a_readable_reason() {
     let mut w = win();
     let (message, output) = handle_output_tool(
         &json!({"content": "plain prose"}),
-        Some(&spec(None, Some(json!({"type": "object"})))),
-        None,
-        "summary",
+        &OutputContext {
+            spec: Some(&spec(None, Some(json!({"type": "object"})))),
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(output.is_none());
@@ -233,13 +260,16 @@ fn an_uncompilable_schema_records_the_submission_unchecked() {
     let mut w = win();
     let (_, output) = handle_output_tool(
         &json!({"content": "anything"}),
-        // A misspelled `type` is the schema this workspace already uses to mean
+        &OutputContext {
+            spec: // A misspelled `type` is the schema this workspace already uses to mean
         // "will not compile" (a typo'd Rhai `@param n strng` produces exactly it).
         Some(&spec(None, Some(json!({"type": "strng"})))),
-        None,
-        "summary",
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(output.is_some(), "a broken schema does not block the run");
@@ -248,7 +278,18 @@ fn an_uncompilable_schema_records_the_submission_unchecked() {
 #[test]
 fn a_missing_content_argument_is_refused() {
     let mut w = win();
-    let (message, output) = handle_output_tool(&json!({}), None, None, "summary", 0, None, &mut w);
+    let (message, output) = handle_output_tool(
+        &json!({}),
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
+        0,
+        &mut w,
+    );
     assert!(output.is_none());
     assert!(message.starts_with("[error]"), "{message}");
     assert!(message.contains("content"), "{message}");
@@ -260,11 +301,14 @@ fn a_blank_submission_is_refused() {
     for blank in ["", "   ", "\n\t "] {
         let (message, output) = handle_output_tool(
             &json!({ "content": blank }),
-            None,
-            None,
-            "summary",
+            &OutputContext {
+                spec: None,
+                validators: None,
+                stage: "summary",
+                stage_names: &[],
+                workdir: None,
+            },
             0,
-            None,
             &mut w,
         );
         assert!(output.is_none(), "{blank:?} should not count as an answer");
@@ -278,11 +322,14 @@ fn an_oversized_submission_is_truncated_and_the_model_is_told() {
     let huge = "x".repeat(leviath_core::output::MAX_FINAL_OUTPUT_BYTES + 10);
     let (ack, output) = handle_output_tool(
         &json!({ "content": huge }),
-        None,
-        None,
-        "summary",
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     let output = output.expect("accepted, just shortened");
@@ -301,21 +348,27 @@ fn a_second_submission_replaces_the_first() {
     let mut w = win();
     let (_, first) = handle_output_tool(
         &json!({"content": "draft"}),
-        None,
-        None,
-        "summary",
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         1,
-        None,
         &mut w,
     );
     assert_eq!(first.expect("accepted").content, "draft");
     let (_, second) = handle_output_tool(
         &json!({"content": "final"}),
-        None,
-        None,
-        "summary",
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         2,
-        None,
         &mut w,
     );
     assert_eq!(second.expect("accepted").content, "final");
@@ -330,11 +383,14 @@ fn a_window_without_the_region_still_records_the_output() {
     bare.add_region(Region::new("task".to_string(), RegionKind::Pinned, 1_000));
     let (_, output) = handle_output_tool(
         &json!({"content": "done"}),
-        None,
-        None,
-        "summary",
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut bare,
     );
     assert_eq!(output.expect("accepted").content, "done");
@@ -355,11 +411,14 @@ fn artifacts_inside_the_workdir_are_recorded() {
             "content": "2 rows gathered, written to results.csv",
             "artifacts": ["results.csv", "notes/summary.md"],
         }),
-        None,
-        None,
-        "present",
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "present",
+            stage_names: &[],
+            workdir: Some(dir.path()),
+        },
         0,
-        Some(dir.path()),
         &mut w,
     );
     let output = output.expect("accepted");
@@ -377,11 +436,14 @@ fn an_artifact_outside_the_workdir_refuses_the_whole_submission() {
     let mut w = win();
     let (message, output) = handle_output_tool(
         &json!({ "content": "done", "artifacts": ["../../etc/passwd"] }),
-        None,
-        None,
-        "present",
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "present",
+            stage_names: &[],
+            workdir: Some(dir.path()),
+        },
         0,
-        Some(dir.path()),
         &mut w,
     );
     assert!(output.is_none(), "nothing recorded");
@@ -395,11 +457,14 @@ fn no_artifacts_argument_records_an_empty_list() {
     let mut w = win();
     let (_, output) = handle_output_tool(
         &json!({ "content": "done" }),
-        None,
-        None,
-        "present",
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "present",
+            stage_names: &[],
+            workdir: Some(dir.path()),
+        },
         0,
-        Some(dir.path()),
         &mut w,
     );
     assert!(output.expect("accepted").artifacts.is_empty());
@@ -412,11 +477,14 @@ fn artifacts_with_no_workdir_are_refused() {
     let mut w = win();
     let (message, output) = handle_output_tool(
         &json!({ "content": "done", "artifacts": ["results.csv"] }),
-        None,
-        None,
-        "present",
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "present",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(output.is_none());
@@ -433,11 +501,14 @@ fn a_long_answer_is_mirrored_as_a_bounded_preview() {
     let long = "y".repeat(200_000);
     let (_, output) = handle_output_tool(
         &json!({ "content": long }),
-        None,
-        None,
-        "summary",
+        &OutputContext {
+            spec: None,
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     // The component keeps the whole thing.
@@ -464,11 +535,14 @@ fn a_submission_that_is_not_the_format_it_claims_is_refused() {
     let mut w = win();
     let (message, output) = handle_output_tool(
         &json!({ "content": "```json\n{\"a\":1}\n```" }),
-        Some(&spec(Some("json"), None)),
-        None,
-        "summary",
+        &OutputContext {
+            spec: Some(&spec(Some("json"), None)),
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(output.is_none(), "nothing recorded");
@@ -480,11 +554,14 @@ fn a_well_formed_submission_in_a_known_format_is_accepted() {
     let mut w = win();
     let (_, output) = handle_output_tool(
         &json!({ "content": "<report><finding/></report>" }),
-        Some(&spec(Some("xml"), None)),
-        None,
-        "summary",
+        &OutputContext {
+            spec: Some(&spec(Some("xml"), None)),
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(output.is_some());
@@ -497,11 +574,14 @@ fn an_unknown_format_is_still_never_inspected() {
     let mut w = win();
     let (_, output) = handle_output_tool(
         &json!({ "content": "anything at all, really" }),
-        Some(&spec(Some("a2ui"), None)),
-        None,
-        "summary",
+        &OutputContext {
+            spec: Some(&spec(Some("a2ui"), None)),
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(output.is_some());
@@ -514,14 +594,17 @@ fn the_format_check_reports_before_the_schema_check() {
     let mut w = win();
     let (message, output) = handle_output_tool(
         &json!({ "content": "not json at all" }),
-        Some(&spec(
-            Some("json"),
-            Some(json!({"type": "object", "required": ["summary"]})),
-        )),
-        None,
-        "summary",
+        &OutputContext {
+            spec: Some(&spec(
+                Some("json"),
+                Some(json!({"type": "object", "required": ["summary"]})),
+            )),
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(output.is_none());
@@ -564,11 +647,14 @@ fn an_agent_supplied_validator_rejects_a_bad_answer() {
     let mut w = win();
     let (message, output) = handle_output_tool(
         &json!({"content": r#"{"nope":1}"#}),
-        Some(&spec_with_validator("a2ui")),
-        Some(&vals),
-        "summary",
+        &OutputContext {
+            spec: Some(&spec_with_validator("a2ui")),
+            validators: Some(&vals),
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(output.is_none(), "nothing recorded");
@@ -589,11 +675,14 @@ fn an_agent_supplied_validator_accepts_a_good_answer() {
     let mut w = win();
     let (_, output) = handle_output_tool(
         &json!({"content": r#"{"root":{"component":"Card"}}"#}),
-        Some(&spec_with_validator("a2ui")),
-        Some(&vals),
-        "summary",
+        &OutputContext {
+            spec: Some(&spec_with_validator("a2ui")),
+            validators: Some(&vals),
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(output.is_some());
@@ -607,11 +696,14 @@ fn a_broken_validator_records_the_submission_unchecked() {
     let mut w = win();
     let (_, output) = handle_output_tool(
         &json!({"content": "the agent's perfectly good answer"}),
-        Some(&spec_with_validator("a2ui")),
-        Some(&vals),
-        "summary",
+        &OutputContext {
+            spec: Some(&spec_with_validator("a2ui")),
+            validators: Some(&vals),
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(
@@ -627,11 +719,14 @@ fn a_named_validator_with_nothing_compiled_is_skipped() {
     let mut w = win();
     let (_, output) = handle_output_tool(
         &json!({"content": "anything"}),
-        Some(&spec_with_validator("a2ui")),
-        None,
-        "summary",
+        &OutputContext {
+            spec: Some(&spec_with_validator("a2ui")),
+            validators: None,
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
         0,
-        None,
         &mut w,
     );
     assert!(output.is_some());
@@ -660,4 +755,109 @@ fn a_region_with_room_keeps_what_it_can_and_says_it_was_cut() {
 #[test]
 fn an_answer_that_fits_is_mirrored_whole() {
     assert_eq!(fit_to_region("short", 100), "short");
+}
+
+/// Everything a submission is judged against, with no blueprint behind it.
+fn ctx<'a>(stage: &'a str, stage_names: &'a [String]) -> OutputContext<'a> {
+    OutputContext {
+        spec: None,
+        validators: None,
+        stage,
+        stage_names,
+        workdir: None,
+    }
+}
+
+/// The reported failure, reproduced: a dead-ended run completing `complete`
+/// with a routing token as its whole deliverable.
+///
+/// A benchmark run exhausted its report stage's iterations, dead-ended into the
+/// output stage with a heavily compacted context, and submitted the literal
+/// string `analyze` - one of the blueprint's transition-choice tokens. Every
+/// check passed, so the run reported success with a one-word answer, scored 0.0,
+/// and sat in a results matrix as finished until a person read it.
+#[test]
+fn a_transition_token_is_refused_rather_than_recorded_as_the_answer() {
+    let mut w = win();
+    let stages = ["gather", "analyze", "report"].map(str::to_string);
+    let (message, output) = handle_output_tool(
+        &json!({"content": "analyze"}),
+        &ctx("report", &stages),
+        0,
+        &mut w,
+    );
+    assert!(output.is_none(), "a stage name is not an answer");
+    assert!(message.starts_with("[error]"), "{message}");
+    assert!(message.contains("analyze"), "{message}");
+    assert!(message.contains("name of a stage"), "{message}");
+    // Nothing reached the region either: a refused submission records nothing.
+    assert_eq!(region_text(&w), "");
+}
+
+#[test]
+fn a_routing_token_is_caught_whatever_its_case_or_padding() {
+    // The model is echoing a token it half-remembers, so it arrives however it
+    // arrives.
+    let mut w = win();
+    let stages = ["analyze".to_string()];
+    for content in ["Analyze", "  analyze\n", "ANALYZE"] {
+        let (message, output) = handle_output_tool(
+            &json!({ "content": content }),
+            &ctx("report", &stages),
+            0,
+            &mut w,
+        );
+        assert!(output.is_none(), "{content} should be refused");
+        assert!(message.starts_with("[error]"), "{message}");
+    }
+}
+
+/// The guard is deliberately narrow: it knows this blueprint's stage names, not
+/// "short answers are suspicious".
+#[test]
+fn a_one_word_answer_that_is_not_a_stage_name_is_still_an_answer() {
+    // A classifier answering `positive`, a yes/no question. Refusing these to
+    // catch the routing case would break working agents.
+    let mut w = win();
+    let stages = ["gather", "analyze"].map(str::to_string);
+    let (_, output) = handle_output_tool(
+        &json!({"content": "positive"}),
+        &ctx("classify", &stages),
+        0,
+        &mut w,
+    );
+    assert_eq!(
+        output.expect("a one-word answer is accepted").content,
+        "positive"
+    );
+}
+
+/// A submission that merely *contains* a stage name is untouched: the guard is
+/// for a reply that is nothing but the token.
+#[test]
+fn a_real_answer_mentioning_a_stage_name_is_recorded() {
+    let mut w = win();
+    let stages = ["analyze".to_string()];
+    let content = "The analyze stage found three regressions, listed below.";
+    let (_, output) = handle_output_tool(
+        &json!({ "content": content }),
+        &ctx("report", &stages),
+        0,
+        &mut w,
+    );
+    assert_eq!(output.expect("accepted").content, content);
+}
+
+/// With no blueprint in hand there is nothing to compare against, and the
+/// submission is taken at face value - the pre-existing behaviour.
+#[test]
+fn without_stage_names_a_submission_is_accepted_as_before() {
+    let mut w = win();
+    let (_, output) = handle_output_tool(
+        &json!({"content": "analyze"}),
+        &ctx("report", &[]),
+        0,
+        &mut w,
+    );
+    assert_eq!(output.expect("accepted").content, "analyze");
 }

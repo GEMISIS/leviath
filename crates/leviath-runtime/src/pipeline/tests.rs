@@ -13862,3 +13862,79 @@ fn not_summarizable_does_not_protect_a_region_from_clear() {
         "clear still clears it"
     );
 }
+
+/// A `submit_output` whose whole content is the name of another stage is
+/// refused where the blueprint is in hand to notice.
+///
+/// The reported run dead-ended into its output stage and submitted the literal
+/// string `analyze` - a transition-choice token - which passed every check and
+/// became the deliverable. `complete` with a one-word answer is worse than an
+/// error: a benchmark harness scored it 0.0 and carried it as finished.
+#[tokio::test]
+async fn dispatch_tools_refuses_a_submission_that_is_only_a_stage_name() {
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let mut call = tc("c1", leviath_core::blueprint::SUBMIT_OUTPUT_TOOL);
+    call.arguments = serde_json::json!({ "content": "analyze" });
+    let (_, result) = infer_with(vec![call]);
+    let bp = blueprint(vec![
+        stage_named("gather", None, false, None),
+        stage_named("analyze", None, false, None),
+        stage_named("report", None, true, None),
+    ]);
+    let e = world
+        .spawn((
+            agent_state(),
+            offering(&[leviath_core::blueprint::SUBMIT_OUTPUT_TOOL]),
+            result,
+            conv_window(),
+            AgentBlueprint(bp),
+            ReadyForTools,
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    // Nothing went to the async lane, so the window is the only record.
+    let refusal = conversation_text(&world, e);
+    assert!(refusal.contains("name of a stage"), "{refusal}");
+    // And nothing was recorded as the run's answer.
+    assert!(world.get::<crate::persistence::FinalOutput>(e).is_none());
+}
+
+/// The same call with a real answer still lands, so the guard is not simply
+/// refusing everything a dead-ended stage submits.
+#[tokio::test]
+async fn dispatch_tools_records_a_real_submission_with_the_blueprint_present() {
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let mut call = tc("c1", leviath_core::blueprint::SUBMIT_OUTPUT_TOOL);
+    call.arguments = serde_json::json!({ "content": "Three regressions, listed below." });
+    let (_, result) = infer_with(vec![call]);
+    let bp = blueprint(vec![stage_named("analyze", None, true, None)]);
+    let e = world
+        .spawn((
+            agent_state(),
+            offering(&[leviath_core::blueprint::SUBMIT_OUTPUT_TOOL]),
+            result,
+            conv_window(),
+            AgentBlueprint(bp),
+            ReadyForTools,
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    let recorded = world
+        .get::<crate::persistence::FinalOutput>(e)
+        .expect("the answer was recorded");
+    assert_eq!(recorded.0.content, "Three regressions, listed below.");
+}
