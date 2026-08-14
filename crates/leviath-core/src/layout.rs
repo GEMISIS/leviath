@@ -522,6 +522,14 @@ pub struct RegionDefinition {
     #[serde(default = "default_true")]
     pub summarizable: bool,
 
+    /// What this region does when a write does not fit.
+    ///
+    /// Declared per region rather than per stage: whether losing the oldest
+    /// entry is acceptable is a property of what the region holds, and does not
+    /// change depending on which stage is writing to it.
+    #[serde(default)]
+    pub admission: crate::region::Admission,
+
     /// Optional custom message shown to the agent when this region is required
     /// but empty. Falls back to a generated default when `None`.
     #[serde(default)]
@@ -552,6 +560,7 @@ impl RegionDefinition {
             required: false,
             required_message: None,
             summarizable: true,
+            admission: crate::region::Admission::default(),
             seed: None,
         }
     }

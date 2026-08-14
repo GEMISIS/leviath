@@ -4763,6 +4763,65 @@ notes = { kind = "sliding_window", max_items = 20 }
     assert!(region("notes").summarizable, "and defaults to on");
 }
 
+/// `admission` parses, defaults to evicting, and refuses a value it does not
+/// know rather than falling back.
+///
+/// Falling back would be the dangerous reading: an author who typed
+/// `admission = "rejcet"` wants their curated region protected, and silently
+/// giving them the evicting default would drop the entries they were trying to
+/// keep, with nothing said.
+#[test]
+fn parse_manifest_reads_the_admission_setting() {
+    let toml = r#"
+[agent]
+name = "curator"
+
+[context.regions]
+sources = { kind = "temporary", max_tokens = 100, admission = "reject" }
+scratch = { kind = "temporary", max_tokens = 100, admission = "evict" }
+notes = { kind = "temporary", max_tokens = 100 }
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    let region = |name: &str| {
+        bp.context_layout
+            .regions
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("{name} declared"))
+    };
+    assert_eq!(
+        region("sources").admission,
+        crate::region::Admission::Reject,
+        "the setting is read"
+    );
+    assert_eq!(
+        region("scratch").admission,
+        crate::region::Admission::Evict,
+        "and its other value"
+    );
+    assert_eq!(
+        region("notes").admission,
+        crate::region::Admission::Evict,
+        "and absence means the behaviour every region had before"
+    );
+
+    let bad = r#"
+[agent]
+name = "curator"
+
+[context.regions]
+sources = { kind = "temporary", max_tokens = 100, admission = "rejcet" }
+"#;
+    let err = parse_manifest(bad).expect_err("an unknown value is refused");
+    let message = err.to_string();
+    assert!(message.contains("sources"), "{message}");
+    assert!(
+        message.contains("rejcet"),
+        "names what was written: {message}"
+    );
+    assert!(message.contains("reject"), "and what was meant: {message}");
+}
+
 /// A region definition written before this field existed deserializes as
 /// summarizable, so an archived layout does not come back protected by
 /// accident - or, worse, unprotected when it was not.

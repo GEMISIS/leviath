@@ -160,6 +160,7 @@ and pass on the first attempt, which looks exactly like a stage that finished it
 | `seed` | unset | What the region starts with. See below |
 | `required` | `false` | The stage re-runs rather than moving on while this region is empty |
 | `summarizable` | `true` | Set false to keep an edge `transform = "compact"` from paraphrasing this region. See [transforms](/docs/stages#carrying-context-across-an-edge) |
+| `admission` | `"evict"` | What happens when a write does not fit. `"reject"` refuses it instead of dropping something. See [letting the agent decide what to forget](#letting-the-agent-decide-what-to-forget) |
 | `required_message` | generated | What the model is told when a required region is empty. Supports `{region}` |
 
 **Resolved budget** is the phrase used for the number a region actually gets, once the percentage
@@ -286,6 +287,54 @@ flowchart TD
   T -->|compacting / compact_history| S["Summarize into a compact form"]
   T -->|clearable / temporary| CL["Trimmed or cleared under budget pressure"]
 ```
+
+## Letting the agent decide what to forget
+
+Everything above is reactive: a region crosses a threshold and the runtime makes room. That is the
+right default, and it has a blind spot. The runtime knows sizes; only the agent knows when it is
+*done* with something. A gather stage that fetches a spec, pulls out the three paragraphs that
+matter and writes them to a curated region has no further use for the raw text - but the raw text
+sits there until pressure happens to push it out, or, with a generous budget, until the run ends.
+
+An agent can release an entry the moment it is spent:
+
+```
+context_delete { region: "sources", key: "rfc-9110" }
+context_delete { region: "sources", index: 2 }
+context_delete { region: "sources", oldest: 3 }
+```
+
+Name the entry by `key` if it was written with one, by `index` as shown in `context_list`, or ask
+for the oldest few. Releasing returns the tokens immediately.
+
+Giving an entry a key when you write it is what makes the first form possible:
+
+```
+context_append { region: "sources", key: "rfc-9110", content: "<the raw spec>" }
+```
+
+### Making the agent choose
+
+By default a full region evicts, and the agent is never told. For a region holding material the
+agent curated, that is the wrong trade: whichever write arrives when the region is full silently
+decides what was least important.
+
+`admission = "reject"` hands that decision back:
+
+```toml
+[context.regions]
+sources = { kind = "temporary", budget = "30%", admission = "reject" }
+```
+
+Now a write that does not fit fails, and the agent is told the region is full and to release
+something first. Nothing already in the region is lost to a write the agent did not know would
+displace it. A region set this way is also exempt from the window-level eviction cascade - otherwise
+`reject` would only change which code did the silent dropping.
+
+This turns memory management into an explicit decision: *you must choose what to forget before you
+can read more*. It is a better failure mode than a silent omission the agent never learns about, and
+it is a genuinely different memory discipline from mechanical eviction - worth reaching for when the
+region holds findings rather than transcript.
 
 ## Routing tool output
 

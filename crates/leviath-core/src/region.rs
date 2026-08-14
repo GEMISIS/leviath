@@ -456,7 +456,39 @@ pub struct Region {
     /// and kind cannot tell a transcript from a table of results (#369).
     #[serde(default = "crate::region::default_true")]
     pub summarizable: bool,
+
+    /// What this region does when a write does not fit. See [`Admission`].
+    #[serde(default)]
+    pub admission: Admission,
 }
+
+/// What a region does when a write does not fit.
+///
+/// The default is what every region did before this existed: make room. That
+/// is the right behaviour for a transcript, where the oldest turn is the least
+/// useful thing present and losing it costs nothing anyone will notice.
+///
+/// It is the wrong behaviour for a region holding material the agent chose to
+/// keep. There, silently dropping the oldest entry is a decision about what
+/// matters, taken by whichever write happened to arrive when the region was
+/// full - and the agent never learns it happened. [`Admission::Reject`] hands
+/// that decision back: the write fails, the agent is told the region is full,
+/// and it releases what it is finished with before adding more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Admission {
+    /// Make room for the write - roll off the oldest entry, or let the
+    /// window-level cascade reclaim the region.
+    #[default]
+    Evict,
+    /// Refuse the write and say so. Nothing already in the region is lost to a
+    /// write the agent did not know would displace it.
+    Reject,
+}
+
+mod schema;
+
+pub use schema::{ContentFormat, RegionSchema, Validator};
 
 /// Serde default for a flag that is on unless a blueprint turns it off.
 pub(crate) fn default_true() -> bool {
@@ -476,6 +508,7 @@ impl Region {
             taint: None,
             needs_message_compaction: false,
             summarizable: true,
+            admission: Admission::default(),
         }
     }
 
@@ -516,14 +549,37 @@ impl Region {
         metadata: Option<serde_json::Value>,
         kind: EntryKind,
         taint_level: crate::taint::TaintLevel,
+        key: Option<&str>,
     ) -> crate::error::Result<()> {
         if let Some(schema) = &self.schema {
             schema.validate(&content)?;
         }
 
         if self.current_tokens + tokens > self.max_tokens {
+            // Which failure this is depends on whether anything would have been
+            // dropped to fit. A region that never evicts reports being full,
+            // because "release something" is advice the agent can act on;
+            // reporting the budget would invite it to retry a smaller write
+            // into a region that is not going to take one.
+            if self.admission == Admission::Reject && !self.content.is_empty() {
+                return Err(crate::error::Error::RegionFull {
+                    region: self.name.clone(),
+                    used: self.current_tokens,
+                    max: self.max_tokens,
+                });
+            }
             return Err(crate::error::Error::TokenBudgetExceeded {
                 used: self.current_tokens + tokens,
+                max: self.max_tokens,
+            });
+        }
+        // Checked before the push, not after: `enforce_sliding_window` runs on
+        // the way out and would already have dropped the oldest entry by the
+        // time anything could refuse.
+        if self.admission == Admission::Reject && self.would_roll_off() {
+            return Err(crate::error::Error::RegionFull {
+                region: self.name.clone(),
+                used: self.current_tokens,
                 max: self.max_tokens,
             });
         }
@@ -534,7 +590,7 @@ impl Region {
             timestamp: chrono::Utc::now().timestamp(),
             metadata,
             kind,
-            key: None,
+            key: key.map(str::to_string),
         });
         self.current_tokens += tokens;
 
@@ -550,6 +606,64 @@ impl Region {
         Ok(())
     }
 
+    /// Whether one more entry would push a sliding window past its item cap.
+    ///
+    /// Only sliding windows roll off by count; every other kind is bounded by
+    /// tokens alone and is answered by the budget check above.
+    fn would_roll_off(&self) -> bool {
+        match &self.kind {
+            RegionKind::SlidingWindow { max_items, .. } => self.content.len() + 1 > *max_items,
+            _ => false,
+        }
+    }
+
+    /// Add an entry under `key`, so the agent can name it again to release it.
+    ///
+    /// Distinct from [`upsert_by_key`](Self::upsert_by_key), which replaces:
+    /// appending two sources under one key should keep both halves, the way an
+    /// unkeyed append keeps everything appended before it.
+    pub fn add_keyed_entry(
+        &mut self,
+        key: &str,
+        content: String,
+        tokens: usize,
+    ) -> crate::error::Result<()> {
+        self.push_entry(
+            content,
+            tokens,
+            None,
+            EntryKind::default(),
+            crate::taint::TaintLevel::Public,
+            Some(key),
+        )
+    }
+
+    /// Remove the entry at `index`, counting from the oldest. Returns whether
+    /// there was one.
+    ///
+    /// The companion to keys, for entries that never had one: an agent that has
+    /// just listed a region can name a position in what it read back.
+    pub fn remove_at(&mut self, index: usize) -> bool {
+        if index >= self.content.len() {
+            return false;
+        }
+        let entry = self.content.remove(index);
+        self.current_tokens = self.current_tokens.saturating_sub(entry.tokens);
+        true
+    }
+
+    /// Drop the `n` oldest entries, returning how many were actually removed.
+    ///
+    /// Fewer than `n` when the region holds fewer, which is not an error: the
+    /// agent asked for room and got as much as there was.
+    pub fn release_oldest(&mut self, n: usize) -> usize {
+        let count = n.min(self.content.len());
+        for _ in 0..count {
+            self.remove_oldest();
+        }
+        count
+    }
+
     /// Add an entry with a taint level. Used when taint tracking is enabled.
     pub fn add_tainted_entry(
         &mut self,
@@ -557,7 +671,14 @@ impl Region {
         tokens: usize,
         taint_level: crate::taint::TaintLevel,
     ) -> crate::error::Result<()> {
-        self.push_entry(content, tokens, None, EntryKind::default(), taint_level)
+        self.push_entry(
+            content,
+            tokens,
+            None,
+            EntryKind::default(),
+            taint_level,
+            None,
+        )
     }
 
     /// Add a typed entry with a taint level.
@@ -575,7 +696,7 @@ impl Region {
         kind: EntryKind,
         taint_level: crate::taint::TaintLevel,
     ) -> crate::error::Result<()> {
-        self.push_entry(content, tokens, None, kind, taint_level)
+        self.push_entry(content, tokens, None, kind, taint_level, None)
     }
 
     /// Add a validation schema to this region.
@@ -595,6 +716,7 @@ impl Region {
             None,
             EntryKind::default(),
             crate::taint::TaintLevel::Public,
+            None,
         )
     }
 
@@ -611,6 +733,7 @@ impl Region {
             Some(metadata),
             EntryKind::default(),
             crate::taint::TaintLevel::Public,
+            None,
         )
     }
 
@@ -631,6 +754,7 @@ impl Region {
             None,
             kind,
             crate::taint::TaintLevel::Public,
+            None,
         )
     }
 
@@ -963,136 +1087,6 @@ pub struct RegionEntry {
 
 /// Validation schema for a region's content.
 ///
-/// Enforces that content matches expected format (e.g., mermaid diagrams only,
-/// JSON only, code only). Schemas can include multiple validators that are
-/// checked when content is added to a region.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RegionSchema {
-    /// Expected content format
-    pub format: ContentFormat,
-
-    /// Optional custom validation script (Rhai)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub custom_script: Option<String>,
-}
-
-impl Clone for RegionSchema {
-    fn clone(&self) -> Self {
-        Self {
-            format: self.format.clone(),
-            custom_script: self.custom_script.clone(),
-        }
-    }
-}
-
-impl RegionSchema {
-    /// Create a new schema with the specified format.
-    pub fn new(format: ContentFormat) -> Self {
-        Self {
-            format,
-            custom_script: None,
-        }
-    }
-
-    /// Add a custom validation script.
-    pub fn with_custom_script(mut self, script: String) -> Self {
-        self.custom_script = Some(script);
-        self
-    }
-
-    /// Validate content against this schema.
-    pub fn validate(&self, content: &str) -> crate::error::Result<()> {
-        match &self.format {
-            ContentFormat::Json => {
-                serde_json::from_str::<serde_json::Value>(content).map_err(|e| {
-                    crate::error::Error::ValidationFailed(format!("Invalid JSON: {}", e))
-                })?;
-            }
-            ContentFormat::Mermaid => {
-                // Basic mermaid syntax validation
-                if !content.contains("graph")
-                    && !content.contains("sequenceDiagram")
-                    && !content.contains("classDiagram")
-                    && !content.contains("stateDiagram")
-                    && !content.contains("erDiagram")
-                    && !content.contains("journey")
-                    && !content.contains("gantt")
-                    && !content.contains("pie")
-                    && !content.contains("flowchart")
-                {
-                    return Err(crate::error::Error::ValidationFailed(
-                        "Mermaid diagrams must contain a valid diagram type (graph, sequenceDiagram, etc.)".to_string()
-                    ));
-                }
-            }
-            ContentFormat::Code { .. } => {
-                // Basic code validation - just check it's not empty
-                if content.trim().is_empty() {
-                    return Err(crate::error::Error::ValidationFailed(
-                        "Code cannot be empty".to_string(),
-                    ));
-                }
-            }
-            ContentFormat::Markdown => {
-                // Markdown is very permissive, just check it's not empty
-                if content.trim().is_empty() {
-                    return Err(crate::error::Error::ValidationFailed(
-                        "Markdown content cannot be empty".to_string(),
-                    ));
-                }
-            }
-            ContentFormat::Text | ContentFormat::Custom { .. } => {
-                // Text has no restrictions, Custom is handled by scripting layer
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Content format types that can be enforced via schemas.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ContentFormat {
-    /// Plain text, no formatting requirements
-    Text,
-
-    /// Valid JSON
-    Json,
-
-    /// Mermaid diagram syntax
-    Mermaid,
-
-    /// Source code in a specific language
-    Code {
-        /// The language label, used for the fence and nothing else - no
-        /// per-language parsing happens.
-        language: String,
-    },
-
-    /// Markdown formatted text
-    Markdown,
-
-    /// Custom format with user-defined validation
-    Custom {
-        /// The author's own name for the format, matched against the validator
-        /// registered for it.
-        format_name: String,
-    },
-}
-
-/// Trait for content validators.
-///
-/// Validators check whether content meets specific requirements before
-/// it's added to a region. This enables enforcing architectural constraints
-/// like "only mermaid diagrams in the architecture region".
-pub trait Validator: Send + Sync {
-    /// Validate content and return an error message if invalid.
-    fn validate(&self, content: &str) -> std::result::Result<(), crate::error::ValidationError>;
-
-    /// Get a description of what this validator checks.
-    fn description(&self) -> &str;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3342,5 +3336,175 @@ mod tests {
         region.evict_lru_entry();
         assert_eq!(region.entry_count(), 0);
         assert_eq!(region.current_tokens, 0);
+    }
+
+    /// Keys used to be a HashMap-only idea at the tool layer. The region API
+    /// never cared, so an entry on any kind can carry one - which is what makes
+    /// `context_delete` work on a sources region.
+    #[test]
+    fn a_keyed_entry_can_be_added_to_any_region_kind_and_found_again() {
+        for kind in [
+            RegionKind::Temporary,
+            RegionKind::Clearable,
+            RegionKind::Pinned,
+        ] {
+            let mut region = Region::new("r".to_string(), kind.clone(), 1000);
+            region
+                .add_keyed_entry("doc", "body".to_string(), 10)
+                .unwrap();
+            assert_eq!(
+                region.get_by_key("doc").map(|e| e.content.as_str()),
+                Some("body"),
+                "{kind:?}"
+            );
+            assert!(region.remove_by_key("doc"), "{kind:?}");
+            assert_eq!(region.current_tokens, 0, "{kind:?}");
+        }
+    }
+
+    /// Appending the same key twice keeps both, unlike `upsert_by_key`. Two
+    /// halves of one source are still both wanted; an append that quietly
+    /// replaced the first half would lose content the agent had gathered.
+    #[test]
+    fn appending_under_one_key_twice_keeps_both_entries() {
+        let mut region = Region::new("r".to_string(), RegionKind::Temporary, 1000);
+        region
+            .add_keyed_entry("doc", "first".to_string(), 5)
+            .unwrap();
+        region
+            .add_keyed_entry("doc", "second".to_string(), 5)
+            .unwrap();
+        assert_eq!(region.content.len(), 2);
+        assert_eq!(region.current_tokens, 10);
+    }
+
+    /// A refused write leaves nothing behind - notably no half-added entry
+    /// waiting to be given a key.
+    #[test]
+    fn a_refused_keyed_write_adds_nothing() {
+        let mut region = Region::new("r".to_string(), RegionKind::Temporary, 10);
+        assert!(
+            region
+                .add_keyed_entry("doc", "too big".to_string(), 99)
+                .is_err()
+        );
+        assert!(region.content.is_empty());
+        assert_eq!(region.current_tokens, 0);
+    }
+
+    /// Releasing by position, including the out-of-range answer an agent gets
+    /// when it names one that is not there.
+    #[test]
+    fn remove_at_releases_by_position_and_reports_a_miss() {
+        let mut region = Region::new("r".to_string(), RegionKind::Temporary, 1000);
+        for text in ["a", "b", "c"] {
+            region.add_entry(text.to_string(), 5).unwrap();
+        }
+        assert!(region.remove_at(1));
+        assert_eq!(region.current_tokens, 10);
+        let left: Vec<_> = region.content.iter().map(|e| e.content.as_str()).collect();
+        assert_eq!(left, vec!["a", "c"]);
+
+        assert!(!region.remove_at(9), "nothing at that position");
+        assert_eq!(region.content.len(), 2, "a miss changes nothing");
+    }
+
+    /// Asking for more than the region holds is not an error: the agent wanted
+    /// room and got as much as there was.
+    #[test]
+    fn release_oldest_takes_what_it_can_and_says_how_much() {
+        let mut region = Region::new("r".to_string(), RegionKind::Temporary, 1000);
+        for text in ["a", "b", "c"] {
+            region.add_entry(text.to_string(), 5).unwrap();
+        }
+        assert_eq!(region.release_oldest(2), 2);
+        assert_eq!(
+            region.content.first().map(|e| e.content.as_str()),
+            Some("c"),
+            "the oldest two went"
+        );
+        assert_eq!(region.release_oldest(10), 1, "only one was left");
+        assert_eq!(region.release_oldest(3), 0, "and now none");
+        assert_eq!(region.current_tokens, 0);
+    }
+
+    /// The two refusals a `reject` region can give, and the distinction between
+    /// them. An empty region reports the budget, because "release something"
+    /// would be advice with nothing to act on - the write is simply too big.
+    #[test]
+    fn a_reject_region_distinguishes_being_full_from_an_oversized_write() {
+        let mut region = Region::new("r".to_string(), RegionKind::Temporary, 100);
+        region.admission = Admission::Reject;
+
+        // Asserted through the message rather than the variant, because the
+        // message is what reaches the agent - and it carries the region, the
+        // usage and the ceiling, so it pins the payload too.
+        //
+        // Empty: nothing to release, so this is a budget problem.
+        let err = region
+            .add_entry("huge".to_string(), 500)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exceeds token budget"), "{err}");
+
+        region.add_entry("fits".to_string(), 90).unwrap();
+        let err = region
+            .add_entry("more".to_string(), 50)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Region 'r' is full"), "{err}");
+        assert!(err.contains("90/100 tokens"), "{err}");
+        assert!(err.contains("release an entry"), "says what to do: {err}");
+    }
+
+    /// The count-based half: a sliding window under `reject` refuses rather
+    /// than rolling the oldest entry off. Checked before the push, because
+    /// `enforce_sliding_window` runs on the way out and would already have
+    /// dropped it.
+    #[test]
+    fn a_reject_sliding_window_refuses_rather_than_rolling_off() {
+        let mut region = Region::new(
+            "r".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 2,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+            1000,
+        );
+        region.admission = Admission::Reject;
+        region.add_entry("one".to_string(), 5).unwrap();
+        region.add_entry("two".to_string(), 5).unwrap();
+
+        let err = region
+            .add_entry("three".to_string(), 5)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is full"), "{err}");
+        assert_eq!(region.content.len(), 2);
+        assert_eq!(
+            region.content.first().map(|e| e.content.as_str()),
+            Some("one"),
+            "the oldest survived"
+        );
+
+        // The same window under the default still rolls off, which is what
+        // every existing blueprint depends on.
+        let mut evicting = Region::new(
+            "r".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 2,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+            1000,
+        );
+        for text in ["one", "two", "three"] {
+            evicting.add_entry(text.to_string(), 5).unwrap();
+        }
+        assert_eq!(evicting.content.len(), 2);
+        assert_eq!(
+            evicting.content.first().map(|e| e.content.as_str()),
+            Some("two"),
+            "the oldest rolled off as it always did"
+        );
     }
 }

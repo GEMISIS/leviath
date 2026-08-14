@@ -70,6 +70,26 @@ pub enum Error {
         max: usize,
     },
 
+    /// A region under `admission = "reject"` is full, and the write was
+    /// refused rather than something else being dropped to fit it.
+    ///
+    /// Distinct from [`Error::TokenBudgetExceeded`] because the remedy is
+    /// different: that one says this single write is too big for the region,
+    /// this one says the region is full and the agent has to decide what it is
+    /// finished with.
+    #[error(
+        "Region '{region}' is full ({used}/{max} tokens) and does not evict automatically - \
+         release an entry before adding another"
+    )]
+    RegionFull {
+        /// The region that refused the write.
+        region: String,
+        /// Tokens the region currently holds.
+        used: usize,
+        /// The region's ceiling.
+        max: usize,
+    },
+
     /// Pinned regions alone exceed total token budget
     #[error("Pinned regions ({pinned_tokens}) exceed total budget ({total_budget})")]
     PinnedRegionsOverBudget {
