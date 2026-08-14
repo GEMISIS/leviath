@@ -9775,6 +9775,9 @@ fn collect_compaction_stores_summary_and_clears_source() {
     let e = world.spawn((compacting_window(), AwaitingCompaction)).id();
     tx.send(CompactionOutcome {
         entity: e,
+        usage: Vec::new(),
+        provider_name: "p".to_string(),
+        model: "m".to_string(),
         result: Ok(vec![("conv".to_string(), "the summary".to_string())]),
     })
     .unwrap();
@@ -9786,6 +9789,91 @@ fn collect_compaction_stores_summary_and_clears_source() {
     assert!(w.get_region("history").unwrap().current_tokens > 0); // summary stored
     assert!(world.get::<ReadyToInfer>(e).is_some());
     assert!(world.get::<AwaitingCompaction>(e).is_none());
+}
+
+/// Compaction is the largest uncounted cost a run had: a summarize call sees
+/// a whole region, so it can be the most expensive request in the run, and its
+/// outcome channel carried only the summaries. A run that compacted reported a
+/// fraction of what it was billed.
+#[test]
+fn compaction_calls_are_counted_one_record_per_region() {
+    let (mut world, tx) = world_with_compaction_results();
+    // Carries a stage, so each record is attributed to the stage that paid for
+    // it. The failing-batch test below deliberately has none, which is the
+    // stage-less path.
+    let e = world
+        .spawn((
+            compacting_window(),
+            AwaitingCompaction,
+            crate::persistence::TokenTotals::default(),
+            AgentState {
+                current_stage: "analyze".to_string(),
+                iteration: 3,
+                ..agent_state()
+            },
+        ))
+        .id();
+    let usage = |prompt| leviath_providers::TokenUsage {
+        prompt_tokens: prompt,
+        completion_tokens: 10,
+        cached_tokens: 0,
+        cache_write_tokens: 0,
+        total_tokens: prompt + 10,
+    };
+    tx.send(CompactionOutcome {
+        entity: e,
+        // Two regions summarized: two calls, two costs.
+        usage: vec![usage(7000), usage(3000)],
+        provider_name: "p".to_string(),
+        model: "m".to_string(),
+        result: Ok(vec![("conv".to_string(), "the summary".to_string())]),
+    })
+    .unwrap();
+
+    run_collect_compaction(&mut world);
+
+    let totals = world.get::<crate::persistence::TokenTotals>(e).unwrap();
+    assert_eq!(totals.prompt_tokens, 10_000);
+    assert_eq!(totals.completion_tokens, 20);
+}
+
+/// A batch that failed partway still billed for the calls that ran before it
+/// gave up. Discarding the summaries is a decision about the window; it does
+/// not un-bill the requests.
+#[test]
+fn a_failed_compaction_batch_still_counts_the_calls_that_ran() {
+    let (mut world, tx) = world_with_compaction_results();
+    let e = world
+        .spawn((
+            compacting_window(),
+            AwaitingCompaction,
+            crate::persistence::TokenTotals::default(),
+        ))
+        .id();
+    tx.send(CompactionOutcome {
+        entity: e,
+        usage: vec![leviath_providers::TokenUsage {
+            prompt_tokens: 4000,
+            completion_tokens: 40,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            total_tokens: 4040,
+        }],
+        provider_name: "p".to_string(),
+        model: "m".to_string(),
+        result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
+    })
+    .unwrap();
+
+    run_collect_compaction(&mut world);
+
+    assert_eq!(
+        world
+            .get::<crate::persistence::TokenTotals>(e)
+            .unwrap()
+            .prompt_tokens,
+        4000
+    );
 }
 
 #[test]
@@ -9800,6 +9888,9 @@ fn collect_compaction_error_leaves_context_and_readies() {
         .current_tokens;
     tx.send(CompactionOutcome {
         entity: e,
+        usage: Vec::new(),
+        provider_name: "p".to_string(),
+        model: "m".to_string(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
     })
     .unwrap();
@@ -9825,6 +9916,9 @@ fn collect_compaction_drops_stale_outcome() {
     let ghost = world.spawn_empty().id();
     tx.send(CompactionOutcome {
         entity: ghost,
+        usage: Vec::new(),
+        provider_name: "p".to_string(),
+        model: "m".to_string(),
         result: Ok(vec![]),
     })
     .unwrap();
@@ -9850,6 +9944,9 @@ fn collect_compaction_summary_for_unpaired_region_is_skipped() {
     let e = world.spawn((w, AwaitingCompaction)).id();
     tx.send(CompactionOutcome {
         entity: e,
+        usage: Vec::new(),
+        provider_name: "p".to_string(),
+        model: "m".to_string(),
         // "lone" exists but is unpaired (history None); "gone" doesn't exist
         // at all (get_region_mut None) - both no-op branches.
         result: Ok(vec![
@@ -10588,6 +10685,53 @@ fn collect_choice_enters_chosen_stage() {
     assert_eq!(world.get::<AgentState>(e).unwrap().current_stage, "b");
 }
 
+/// Routing calls are short but not free, and a branching run makes one at
+/// every stage boundary. The response was already in hand here with its usage
+/// on it; nothing read it, so the whole class went unbilled.
+#[test]
+fn a_routing_call_is_counted_against_the_run() {
+    let (mut world, tx) = world_with_transition_results();
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        stage_named("b", None, false, None),
+    ]);
+    let e = spawn_responding_agent(
+        &mut world,
+        bp,
+        vec![si("m0"), si("m1")],
+        vec![plain_edge("b")],
+    );
+    world
+        .entity_mut(e)
+        .insert(crate::persistence::TokenTotals::default());
+    let mut response = resp("b");
+    response.tokens_used = leviath_providers::TokenUsage {
+        prompt_tokens: 300,
+        completion_tokens: 3,
+        cached_tokens: 1,
+        cache_write_tokens: 2,
+        total_tokens: 303,
+    };
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Ok(response),
+    })
+    .unwrap();
+
+    run_collect_transition(&mut world);
+
+    let totals = world
+        .get::<crate::persistence::TokenTotals>(e)
+        .expect("totals");
+    assert_eq!(totals.prompt_tokens, 300);
+    assert_eq!(totals.completion_tokens, 3);
+    assert_eq!(totals.cached_tokens, 1);
+    assert_eq!(totals.cache_write_tokens, 2);
+    // The routing decision still lands - counting it changed nothing else.
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+}
+
 /// A transition choice that lands after the run was cancelled is discarded.
 /// Notably the no-match arm sets `Complete` unconditionally, which would
 /// report a cancelled run as having finished normally.
@@ -10959,6 +11103,9 @@ fn collect_compaction_records_success_and_failure() {
         .id();
     tx.send(CompactionOutcome {
         entity: e,
+        usage: Vec::new(),
+        provider_name: "p".to_string(),
+        model: "m".to_string(),
         result: Ok(vec![("conv".to_string(), "summary".to_string())]),
     })
     .unwrap();
@@ -10973,6 +11120,9 @@ fn collect_compaction_records_success_and_failure() {
         .id();
     tx.send(CompactionOutcome {
         entity: e2,
+        usage: Vec::new(),
+        provider_name: "p".to_string(),
+        model: "m".to_string(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
     })
     .unwrap();

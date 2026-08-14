@@ -172,6 +172,47 @@ pub struct ContextDelta {
     pub regions: Vec<RegionDelta>,
 }
 
+/// Which provider call a [`RunRecord::InferenceUsage`] belongs to.
+///
+/// A run bills for more than its stage turns, and the three auxiliary kinds are
+/// invisible in every other surface: they do not appear in the stage ledger and
+/// nothing else names them. Recording which kind spent the tokens is what turns
+/// a total into an explanation - "this run cost double what its stages did
+/// because its edges compact" is a sentence the journal can now support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InferenceKind {
+    /// An ordinary stage turn: the agent thinking or calling tools. The default
+    /// so a journal written before this field existed reads back as stage work,
+    /// which is what every record in one is.
+    #[default]
+    Stage,
+    /// A region-summarizing call, from memory pressure or an edge transform.
+    Compaction,
+    /// The one-off call that names the run.
+    Title,
+    /// A call asking the model which stage to move to next.
+    Routing,
+}
+
+impl InferenceKind {
+    /// A short stable label, for logs and wire formats that want a string.
+    pub fn label(&self) -> &'static str {
+        match self {
+            InferenceKind::Stage => "stage",
+            InferenceKind::Compaction => "compaction",
+            InferenceKind::Title => "title",
+            InferenceKind::Routing => "routing",
+        }
+    }
+
+    /// Whether this call is stage work the agent asked for, as opposed to
+    /// machinery the runtime ran on its behalf.
+    pub fn is_stage_work(&self) -> bool {
+        matches!(self, InferenceKind::Stage)
+    }
+}
+
 /// One entry in the run journal. Folding the sequence reconstructs the run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RunRecord {
@@ -201,6 +242,44 @@ pub enum RunRecord {
         request: InferenceRequestRecord,
         /// The response.
         response: InferenceResponseRecord,
+        /// Unix seconds.
+        at: i64,
+    },
+    /// What one provider call cost, written as it lands.
+    ///
+    /// [`RunRecord::Progress`] carries cumulative counters, so two calls between
+    /// two ticks are indistinguishable downstream: their sum arrives as one
+    /// number, and a chart of it shows a spike no single call ever made. This
+    /// record is per call, so token-over-time telemetry is exact and "no request
+    /// ever exceeded the window" is provable from the journal rather than
+    /// inferred from region-size checkpoints.
+    ///
+    /// Deliberately lighter than [`RunRecord::Inference`], which carries the
+    /// full request and response: every call re-sends the whole window, so
+    /// journaling those bodies for each of them would multiply the file by the
+    /// context size. The window is already recoverable from the surrounding
+    /// [`RunRecord::ContextCheckpoint`] and [`RunRecord::ContextDiff`] records.
+    InferenceUsage {
+        /// Which kind of call this was.
+        #[serde(default)]
+        kind: InferenceKind,
+        /// The stage the run was in. Empty for a call with no stage of its own
+        /// (the title call, which runs once at spawn).
+        stage: String,
+        /// The stage-local iteration index.
+        iteration: usize,
+        /// The provider that served the call.
+        provider: String,
+        /// The model the call targeted.
+        model: String,
+        /// Prompt tokens billed.
+        prompt_tokens: usize,
+        /// Completion tokens billed.
+        completion_tokens: usize,
+        /// Tokens read from provider cache.
+        cached_tokens: usize,
+        /// Tokens written to provider cache.
+        cache_write_tokens: usize,
         /// Unix seconds.
         at: i64,
     },
@@ -656,6 +735,34 @@ pub struct PendingToolBatch {
     pub calls: Vec<ToolCallRecord>,
 }
 
+/// One provider call's cost, as folded out of the journal.
+///
+/// The flattened form of [`RunRecord::InferenceUsage`], so a consumer walking a
+/// folded run does not have to match the record enum to read a number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InferenceUsageRecord {
+    /// Which kind of call this was.
+    pub kind: InferenceKind,
+    /// The stage the run was in, empty for the title call.
+    pub stage: String,
+    /// The stage-local iteration index.
+    pub iteration: usize,
+    /// The provider that served the call.
+    pub provider: String,
+    /// The model the call targeted.
+    pub model: String,
+    /// Prompt tokens billed.
+    pub prompt_tokens: usize,
+    /// Completion tokens billed.
+    pub completion_tokens: usize,
+    /// Tokens read from provider cache.
+    pub cached_tokens: usize,
+    /// Tokens written to provider cache.
+    pub cache_write_tokens: usize,
+    /// Unix seconds.
+    pub at: i64,
+}
+
 /// The state reconstructed from a run journal - enough to resume or inspect the
 /// run at its latest recorded point.
 #[derive(Debug, Clone, PartialEq)]
@@ -670,6 +777,13 @@ pub struct FoldedRun {
     pub messages: Vec<MessageRecord>,
     /// Number of inferences recorded.
     pub inference_count: usize,
+    /// Per-call usage, in the order the calls landed.
+    ///
+    /// The point of keeping every entry rather than a running sum: a sum is
+    /// already available from [`RunMeta`], and what it cannot answer is whether
+    /// any single call exceeded the window, or which kind of call the spend went
+    /// to.
+    pub inference_usage: Vec<InferenceUsageRecord>,
     /// Number of tool calls recorded.
     pub tool_call_count: usize,
     /// A dispatched tool batch whose results never made it into the context
@@ -715,6 +829,7 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
         },
         messages: Vec::new(),
         inference_count: 0,
+        inference_usage: Vec::new(),
         tool_call_count: 0,
         pending_batch: None,
     };
@@ -733,6 +848,35 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
                 folded.identity.world_id = world_id.clone();
             }
             RunRecord::Inference { .. } => folded.inference_count += 1,
+            RunRecord::InferenceUsage {
+                kind,
+                stage,
+                iteration,
+                provider,
+                model,
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                cache_write_tokens,
+                at,
+            } => {
+                // Counted alongside the heavy variant: both name one provider
+                // call, and a consumer asking "how many calls" should not have
+                // to know which of the two the writer chose.
+                folded.inference_count += 1;
+                folded.inference_usage.push(InferenceUsageRecord {
+                    kind: *kind,
+                    stage: stage.clone(),
+                    iteration: *iteration,
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    prompt_tokens: *prompt_tokens,
+                    completion_tokens: *completion_tokens,
+                    cached_tokens: *cached_tokens,
+                    cache_write_tokens: *cache_write_tokens,
+                    at: *at,
+                });
+            }
             RunRecord::ToolBatch {
                 calls,
                 stage_index,
@@ -951,9 +1095,13 @@ impl PointFolder {
                 apply_delta(&mut self.context, delta);
                 *at
             }
-            // Non-context records don't add a timeline point.
+            // Non-context records don't add a timeline point. Usage included:
+            // it says what a call cost, not what the window then held, and
+            // emitting a point per call would double the timeline with entries
+            // whose context is identical to their neighbour's.
             RunRecord::OwnershipChanged { .. }
             | RunRecord::Inference { .. }
+            | RunRecord::InferenceUsage { .. }
             | RunRecord::ToolBatch { .. }
             | RunRecord::ToolCallDone { .. }
             | RunRecord::Message { .. } => return ControlFlow::Continue(()),
@@ -1495,6 +1643,18 @@ mod tests {
                 },
                 at: 102,
             },
+            RunRecord::InferenceUsage {
+                kind: InferenceKind::Compaction,
+                stage: "plan".to_string(),
+                iteration: 2,
+                provider: "anthropic".to_string(),
+                model: "claude-sonnet-5".to_string(),
+                prompt_tokens: 7000,
+                completion_tokens: 70,
+                cached_tokens: 12,
+                cache_write_tokens: 34,
+                at: 102,
+            },
             RunRecord::ToolBatch {
                 calls: vec![ToolCallRecord {
                     id: "c1".to_string(),
@@ -1810,8 +1970,10 @@ mod tests {
         // Ownership was reassigned mid-journal.
         assert_eq!(folded.identity.machine_id, "machine-b");
         assert_eq!(folded.identity.world_id, "world-y");
-        // Counters.
-        assert_eq!(folded.inference_count, 1);
+        // Counters. Two inferences: the fixture carries one record of each
+        // kind, and both name one provider call.
+        assert_eq!(folded.inference_count, 2);
+        assert_eq!(folded.inference_usage.len(), 1);
         assert_eq!(folded.tool_call_count, 1);
         // One inbound message recorded.
         assert_eq!(folded.messages.len(), 1);
@@ -2429,5 +2591,153 @@ mod tests {
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].context.stage_name, "review");
         assert_eq!(points[0].context.regions[0].entries[0].tokens, 4);
+    }
+
+    /// Each kind has to survive the wire under its own name: the label is what
+    /// a consumer groups a token chart by, so a rename that silently reordered
+    /// the enum would re-attribute somebody's spend.
+    #[test]
+    fn every_inference_kind_has_a_distinct_label_and_serialized_name() {
+        let all = [
+            (InferenceKind::Stage, "stage"),
+            (InferenceKind::Compaction, "compaction"),
+            (InferenceKind::Title, "title"),
+            (InferenceKind::Routing, "routing"),
+        ];
+        for (kind, label) in all {
+            assert_eq!(kind.label(), label);
+            assert_eq!(serde_json::to_value(kind).unwrap(), label);
+        }
+        let labels: std::collections::HashSet<_> = all.iter().map(|(k, _)| k.label()).collect();
+        assert_eq!(labels.len(), all.len(), "labels must not collide");
+    }
+
+    /// Only stage turns are work the agent asked for. The other three are
+    /// machinery the runtime ran on its behalf, which is the split anything
+    /// reporting "what did my agent actually do" needs.
+    #[test]
+    fn only_a_stage_turn_counts_as_stage_work() {
+        assert!(InferenceKind::Stage.is_stage_work());
+        for kind in [
+            InferenceKind::Compaction,
+            InferenceKind::Title,
+            InferenceKind::Routing,
+        ] {
+            assert!(
+                !kind.is_stage_work(),
+                "{kind:?} is machinery, not stage work"
+            );
+        }
+    }
+
+    /// A journal written before the field existed has to read back as stage
+    /// work rather than failing to parse - every record in one is a stage turn,
+    /// because nothing else was ever written.
+    #[test]
+    fn a_usage_record_without_a_kind_reads_back_as_stage_work() {
+        let json = serde_json::json!({
+            "InferenceUsage": {
+                "stage": "plan",
+                "iteration": 1,
+                "provider": "anthropic",
+                "model": "claude-sonnet-5",
+                "prompt_tokens": 10,
+                "completion_tokens": 2,
+                "cached_tokens": 0,
+                "cache_write_tokens": 0,
+                "at": 5,
+            }
+        });
+        // Compared whole rather than destructured: the point is that the
+        // missing field defaults and every present one still lands, and a
+        // destructure that pulled out `kind` alone would pass even if the rest
+        // had been dropped.
+        let record: RunRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            record,
+            RunRecord::InferenceUsage {
+                kind: InferenceKind::Stage,
+                stage: "plan".to_string(),
+                iteration: 1,
+                provider: "anthropic".to_string(),
+                model: "claude-sonnet-5".to_string(),
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
+                at: 5,
+            }
+        );
+    }
+
+    /// The point of the record. Folding keeps every call in order, so a
+    /// consumer can ask what any single one cost - which the cumulative
+    /// counters cannot answer, because two calls between two ticks arrive as
+    /// their sum.
+    #[test]
+    fn folding_keeps_each_call_separate_instead_of_summing_them() {
+        let usage = |kind, prompt, at| RunRecord::InferenceUsage {
+            kind,
+            stage: "plan".to_string(),
+            iteration: 1,
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-5".to_string(),
+            prompt_tokens: prompt,
+            completion_tokens: 1,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            at,
+        };
+        // The shape the issue reported: a compaction call and a stage call
+        // landing between the same two progress ticks.
+        let folded = fold(&[
+            header(),
+            usage(InferenceKind::Compaction, 7000, 1),
+            usage(InferenceKind::Stage, 21_000, 2),
+        ])
+        .unwrap();
+
+        assert_eq!(folded.inference_count, 2);
+        let seen: Vec<_> = folded
+            .inference_usage
+            .iter()
+            .map(|u| (u.kind, u.prompt_tokens))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (InferenceKind::Compaction, 7000),
+                (InferenceKind::Stage, 21_000)
+            ]
+        );
+        // The whole reason this exists: their sum is 28k, and a reader of the
+        // cumulative counter alone would see one 28k request and reasonably ask
+        // whether a 32k window had been violated. Neither call came close.
+        assert!(
+            folded
+                .inference_usage
+                .iter()
+                .all(|u| u.prompt_tokens < 32_000),
+            "no single call exceeded the window, and the journal can now prove it"
+        );
+    }
+
+    /// The heavy variant and the light one both name one provider call, so a
+    /// consumer counting calls should not have to know which the writer chose.
+    #[test]
+    fn both_inference_record_kinds_count_as_one_call_each() {
+        let records = all_record_kinds();
+        let folded = fold(&records).unwrap();
+        let written = records
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    RunRecord::Inference { .. } | RunRecord::InferenceUsage { .. }
+                )
+            })
+            .count();
+        assert_eq!(folded.inference_count, written);
+        assert_eq!(folded.inference_usage.len(), 1);
     }
 }

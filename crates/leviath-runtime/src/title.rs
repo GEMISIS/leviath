@@ -206,6 +206,8 @@ pub fn dispatch_title(
             TitleJob {
                 entity,
                 provider,
+                provider_name: provider_name.clone(),
+                model: model.clone(),
                 request: title_request(&meta.task, &model),
                 permit,
             },
@@ -220,20 +222,52 @@ pub fn dispatch_title(
     }
 }
 
+/// What `collect_title` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type CollectTitleQuery = (
+    &'static mut RunMetadata,
+    Option<&'static mut crate::persistence::TokenTotals>,
+);
+
 /// Collect system: store each finished title into its run's metadata. A
 /// provider error or empty reply changes nothing; either way the in-flight
-/// marker comes off.
+/// marker comes off. What the call billed is counted either way - see the note
+/// in the body.
 pub fn collect_title(
     mut results: ResMut<TitleResults>,
-    mut agents: Query<&mut RunMetadata, With<AwaitingTitle>>,
+    mut agents: Query<CollectTitleQuery, With<AwaitingTitle>>,
+    persist: Option<Res<crate::pipeline::PersistenceStage>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok(mut meta) = agents.get_mut(outcome.entity) else {
+        let Ok((mut meta, mut totals)) = agents.get_mut(outcome.entity) else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
         crate::tick_scope::enter(outcome.entity);
+        // Counted before the reply is examined. A title the sanitizer rejects
+        // was still served and still billed, and a run that reports less
+        // because its title came back empty would be reporting the one thing
+        // this cannot depend on.
+        if let Some(usage) = &outcome.usage {
+            crate::inference_usage::record_call(
+                totals.as_deref_mut(),
+                persist.as_deref(),
+                Some(&meta),
+                &crate::inference_usage::CallUsage {
+                    kind: leviath_core::run_archive::InferenceKind::Title,
+                    // No stage of its own: titling runs once at spawn, beside
+                    // the run rather than inside any of its stages.
+                    stage: "",
+                    iteration: 0,
+                    provider: &outcome.provider_name,
+                    model: &outcome.model,
+                    usage,
+                },
+            );
+        }
         if let Ok(raw) = outcome.result {
             let title = sanitize_title(&raw);
             if !title.is_empty() {
@@ -400,6 +434,8 @@ mod tests {
             TitleJob {
                 entity: bevy_ecs::entity::Entity::PLACEHOLDER,
                 provider: Arc::new(Hang),
+                provider_name: "mock".to_string(),
+                model: "m".to_string(),
                 request: title_request("task", "m"),
                 permit: pools.try_acquire("m").expect("free"),
             },
@@ -484,6 +520,9 @@ mod tests {
         tx.send(TitleOutcome {
             entity: ghost,
             result: Ok("t".to_string()),
+            usage: None,
+            provider_name: "mock".to_string(),
+            model: "m".to_string(),
         })
         .unwrap();
         world.insert_resource(TitleResults(rx));
@@ -691,5 +730,125 @@ mod tests {
         );
         let long = "x".repeat(TITLE_MAX_LEN * 2);
         assert_eq!(sanitize_title(&long).chars().count(), TITLE_MAX_LEN);
+    }
+
+    /// The title call bills like any other and used to be counted like none:
+    /// its outcome channel carried the reply the collector wanted and dropped
+    /// the usage nobody read, so a run's reported spend was short by one call
+    /// it had definitely made.
+    #[test]
+    fn a_title_call_is_counted_against_the_run_that_paid_for_it() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                metadata(Some("mock/m")),
+                AwaitingTitle,
+                crate::persistence::TokenTotals::default(),
+            ))
+            .id();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(TitleOutcome {
+            entity,
+            result: Ok("Release notes".to_string()),
+            usage: Some(leviath_providers::TokenUsage {
+                prompt_tokens: 900,
+                completion_tokens: 12,
+                cached_tokens: 3,
+                cache_write_tokens: 4,
+                total_tokens: 912,
+            }),
+            provider_name: "mock".to_string(),
+            model: "m".to_string(),
+        })
+        .unwrap();
+        world.insert_resource(TitleResults(rx));
+        run_collect(&mut world);
+
+        let totals = world
+            .get::<crate::persistence::TokenTotals>(entity)
+            .expect("totals");
+        assert_eq!(totals.prompt_tokens, 900);
+        assert_eq!(totals.completion_tokens, 12);
+        assert_eq!(totals.cached_tokens, 3);
+        assert_eq!(totals.cache_write_tokens, 4);
+        // And the reply still lands - counting it did not cost the feature.
+        assert_eq!(
+            world.get::<RunMetadata>(entity).unwrap().title.as_deref(),
+            Some("Release notes")
+        );
+    }
+
+    /// A reply the sanitizer throws away was still served and still billed.
+    /// Counting only titles that survive would make a run's reported cost
+    /// depend on whether the model happened to answer usefully.
+    #[test]
+    fn a_rejected_title_is_still_counted() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                metadata(Some("mock/m")),
+                AwaitingTitle,
+                crate::persistence::TokenTotals::default(),
+            ))
+            .id();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(TitleOutcome {
+            entity,
+            // Sanitizes to nothing, so no title is stored.
+            result: Ok("   ".to_string()),
+            usage: Some(leviath_providers::TokenUsage {
+                prompt_tokens: 500,
+                completion_tokens: 1,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
+                total_tokens: 501,
+            }),
+            provider_name: "mock".to_string(),
+            model: "m".to_string(),
+        })
+        .unwrap();
+        world.insert_resource(TitleResults(rx));
+        run_collect(&mut world);
+
+        assert!(world.get::<RunMetadata>(entity).unwrap().title.is_none());
+        assert_eq!(
+            world
+                .get::<crate::persistence::TokenTotals>(entity)
+                .unwrap()
+                .prompt_tokens,
+            500
+        );
+    }
+
+    /// A call that never reached a provider has nothing to attribute. Reporting
+    /// a zero-token call would put a point on a token chart for a request that
+    /// was never made.
+    #[test]
+    fn a_failed_title_call_adds_nothing() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                metadata(Some("mock/m")),
+                AwaitingTitle,
+                crate::persistence::TokenTotals::default(),
+            ))
+            .id();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(TitleOutcome {
+            entity,
+            result: Err(ProviderError::Other("down".to_string())),
+            usage: None,
+            provider_name: "mock".to_string(),
+            model: "m".to_string(),
+        })
+        .unwrap();
+        world.insert_resource(TitleResults(rx));
+        run_collect(&mut world);
+
+        let totals = world
+            .get::<crate::persistence::TokenTotals>(entity)
+            .expect("totals");
+        assert_eq!(totals.prompt_tokens, 0);
+        assert_eq!(totals.completion_tokens, 0);
     }
 }

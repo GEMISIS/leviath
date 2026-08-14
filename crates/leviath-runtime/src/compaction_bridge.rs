@@ -29,6 +29,11 @@ pub struct CompactionJob {
     pub entity: Entity,
     /// The compaction provider (resolved for the compaction model).
     pub provider: Arc<dyn Provider>,
+    /// The name of that provider, for the usage records. The trait object above
+    /// cannot answer for itself which registry entry it came from.
+    pub provider_name: String,
+    /// The model the requests target, for the usage records.
+    pub model: String,
     /// One `(region_name, request)` per region to summarize.
     pub requests: Vec<(String, InferenceRequest)>,
     /// The per-model pool permit, held for the whole batch.
@@ -42,6 +47,18 @@ pub struct CompactionOutcome {
     pub entity: Entity,
     /// Per-region summaries, or the error compaction failed with.
     pub result: Result<Vec<(String, String)>, ProviderError>,
+    /// What each completed call billed, one entry per region actually
+    /// summarized.
+    ///
+    /// Carried separately from `result` because the two do not have the same
+    /// length when a batch fails partway: the summaries are discarded whole
+    /// (compaction is all-or-nothing for the window), but the calls that
+    /// already ran were still billed and still have to be counted.
+    pub usage: Vec<leviath_providers::TokenUsage>,
+    /// The provider that served the batch.
+    pub provider_name: String,
+    /// The model the batch targeted.
+    pub model: String,
 }
 
 /// Run one compaction job: summarize each region sequentially with the permit
@@ -60,15 +77,21 @@ pub async fn run_compaction_job(
     let CompactionJob {
         entity,
         provider,
+        provider_name,
+        model,
         requests,
         permit,
     } = job;
 
     let mut summaries = Vec::new();
+    let mut usage = Vec::new();
     let mut result = Ok(());
     for (region, request) in requests {
         match tokio::time::timeout(deadline, provider.infer(&request)).await {
-            Ok(Ok(response)) => summaries.push((region, response.content)),
+            Ok(Ok(response)) => {
+                usage.push(response.tokens_used);
+                summaries.push((region, response.content));
+            }
             Ok(Err(e)) => {
                 result = Err(e);
                 break;
@@ -88,6 +111,9 @@ pub async fn run_compaction_job(
     let outcome = CompactionOutcome {
         entity,
         result: result.map(|()| summaries),
+        usage,
+        provider_name,
+        model,
     };
     let _ = results.send(outcome);
     wake.notify_one();
@@ -210,6 +236,8 @@ mod tests {
             entity: Entity::from_raw_u32(3)
                 .expect("a small literal index is always a valid entity id"),
             provider,
+            provider_name: "p".to_string(),
+            model: "m".to_string(),
             requests: regions
                 .into_iter()
                 .map(|r| (r.to_string(), request()))

@@ -48,6 +48,11 @@ fn spawn_supervised_compaction(stage: &InferenceStage, entity: Entity, job: Comp
             let _ = lost_outcomes.send(CompactionOutcome {
                 entity,
                 result: Err(leviath_providers::ProviderError::Other(message)),
+                // A job that never ran billed nothing. Empty rather than
+                // absent: there is no call to attribute, not an unknown cost.
+                usage: Vec::new(),
+                provider_name: String::new(),
+                model: String::new(),
             });
             lost_wake.notify_one();
         },
@@ -136,6 +141,8 @@ pub fn dispatch_compaction(
             CompactionJob {
                 entity,
                 provider,
+                provider_name: config.provider.clone(),
+                model: config.model.clone(),
                 requests,
                 permit,
             },
@@ -147,6 +154,18 @@ pub fn dispatch_compaction(
     }
 }
 
+/// What `collect_compaction` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type CollectCompactionQuery = (
+    &'static mut ContextWindow,
+    Option<&'static mut crate::telemetry::StageActivity>,
+    Option<&'static mut crate::persistence::TokenTotals>,
+    Option<&'static crate::persistence::RunMetadata>,
+    Option<&'static AgentState>,
+);
+
 /// Compaction-collect system: drain finished compaction jobs and apply each
 /// summary into its paired `CompactHistory` region, clearing the summarized
 /// source region. A provider error leaves the context untouched (best-effort).
@@ -154,18 +173,14 @@ pub fn dispatch_compaction(
 /// of `AgentEngine::compact_region`.)
 pub fn collect_compaction(
     mut results: ResMut<CompactionResults>,
-    mut agents: Query<
-        (
-            &mut ContextWindow,
-            Option<&mut crate::telemetry::StageActivity>,
-        ),
-        With<AwaitingCompaction>,
-    >,
+    mut agents: Query<CollectCompactionQuery, With<AwaitingCompaction>>,
+    persist: Option<Res<crate::pipeline::PersistenceStage>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((mut window, activity)) = agents.get_mut(outcome.entity) else {
+        let Ok((mut window, activity, mut totals, md, state)) = agents.get_mut(outcome.entity)
+        else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
         crate::tick_scope::enter(outcome.entity);
@@ -175,6 +190,28 @@ pub fn collect_compaction(
                 .push(crate::telemetry::ActivityRecord::Compaction {
                     success: outcome.result.is_ok(),
                 });
+        }
+        // One record per call, not one per batch. A batch summarizes a region
+        // each, so folding them into a single number would recreate downstream
+        // exactly the ambiguity this record exists to remove.
+        //
+        // Counted even when the batch failed partway: the calls that already
+        // ran were billed, and the summaries being discarded is a decision
+        // about the window, not about the invoice.
+        for usage in &outcome.usage {
+            crate::inference_usage::record_call(
+                totals.as_deref_mut(),
+                persist.as_deref(),
+                md,
+                &crate::inference_usage::CallUsage {
+                    kind: leviath_core::run_archive::InferenceKind::Compaction,
+                    stage: state.map_or("", |s| s.current_stage.as_str()),
+                    iteration: state.map_or(0, |s| s.iteration),
+                    provider: &outcome.provider_name,
+                    model: &outcome.model,
+                    usage,
+                },
+            );
         }
         if let Ok(summaries) = outcome.result {
             for (region_name, summary) in summaries {
@@ -392,6 +429,8 @@ pub fn dispatch_edge_compact(
                     CompactionJob {
                         entity,
                         provider,
+                        provider_name: config.provider.clone(),
+                        model: config.model.clone(),
                         requests,
                         permit,
                     },

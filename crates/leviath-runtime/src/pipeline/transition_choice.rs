@@ -258,6 +258,7 @@ type CollectTransitionChoiceQuery = (
     &'static AwaitingTransitionResponse,
     Option<&'static mut crate::persistence::RunOutcomeFlags>,
     Option<&'static crate::persistence::RunMetadata>,
+    Option<&'static mut crate::persistence::TokenTotals>,
 );
 
 /// Transition-choice collect: drain completed routing inferences, match each to a
@@ -268,6 +269,7 @@ pub fn collect_transition_choice(
     mut results: ResMut<TransitionResults>,
     mut agents: Query<CollectTransitionChoiceQuery>,
     sink: Option<Res<crate::host::WorldEventSink>>,
+    persist: Option<Res<crate::pipeline::PersistenceStage>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -284,6 +286,7 @@ pub fn collect_transition_choice(
             resp,
             mut flags,
             metadata,
+            mut totals,
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -311,6 +314,28 @@ pub fn collect_transition_choice(
                 continue;
             }
         };
+
+        // Routing calls are short but not free, and one fires at every stage
+        // boundary of every branching run. Read off the stage's own inference
+        // config, which is what dispatch resolved the provider from.
+        //
+        // Indexed rather than looked up, like the `bp.0.stages[cursor.index]`
+        // below it: `StageInferences` is built one entry per stage at spawn, so
+        // a cursor that could miss here would already have panicked there.
+        let si = &stage_infs.0[cursor.index];
+        crate::inference_usage::record_call(
+            totals.as_deref_mut(),
+            persist.as_deref(),
+            metadata,
+            &crate::inference_usage::CallUsage {
+                kind: leviath_core::run_archive::InferenceKind::Routing,
+                stage: &state.current_stage,
+                iteration: state.iteration,
+                provider: &si.provider_name,
+                model: &si.model,
+                usage: &response.tokens_used,
+            },
+        );
 
         let choice = response.content.trim().to_string();
         let tokens = leviath_core::estimate_tokens(&choice);
