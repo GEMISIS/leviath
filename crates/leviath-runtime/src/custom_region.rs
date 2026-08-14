@@ -27,6 +27,14 @@ pub struct AssembleMeta {
     pub stage_iterations: usize,
     /// Model id serving this stage.
     pub model: String,
+    /// Hash of the system prefix the *previous* request sent, when there was
+    /// one.
+    ///
+    /// Only the message breakpoint reads it, and only to decide whether writing
+    /// that cache entry can pay for itself. `None` means nobody is tracking (a
+    /// first request, or a caller with no state to keep), and the breakpoint is
+    /// placed as it always was.
+    pub previous_system_hash: Option<u64>,
 }
 
 /// What `on_write` decided about an incoming entry.
@@ -594,6 +602,7 @@ mod tests {
                         stage_name: "plan".to_string(),
                         stage_iterations: 2,
                         model: "m1".to_string(),
+                        previous_system_hash: None,
                     },
                     window_current: 50,
                     window_max: 2000,

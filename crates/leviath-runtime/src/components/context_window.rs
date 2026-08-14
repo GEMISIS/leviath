@@ -72,6 +72,27 @@ pub struct AssembledContext {
     pub system_blocks: Vec<leviath_providers::SystemBlock>,
     /// Conversation messages with proper role typing.
     pub messages: Vec<leviath_providers::Message>,
+    /// Hash of the system prefix this assembly produced.
+    ///
+    /// Handed back so the caller can pass it as
+    /// [`crate::custom_region::AssembleMeta::previous_system_hash`] next time
+    /// and let the breakpoint decision below be made on evidence rather than
+    /// hope.
+    pub system_hash: u64,
+}
+
+/// A stable digest of the assembled system prefix.
+///
+/// Over the block texts in final order, which is exactly the byte sequence
+/// Anthropic prefix-matches against. Hints are excluded deliberately: they
+/// decide ordering, and ordering is already reflected in the sequence.
+fn system_prefix_hash(blocks: &[leviath_providers::SystemBlock]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for block in blocks {
+        block.text.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Sort priority for a system block's cache hint.
@@ -893,6 +914,8 @@ impl ContextWindow {
         // they form the cacheable prefix, with volatile blocks
         // (Compacting, Temporary, Clearable) after.
         system_blocks.sort_by_key(|block| cache_hint_sort_priority(block.cache_hint));
+        // After the sort, because the order is part of what Anthropic matches.
+        let system_hash = system_prefix_hash(&system_blocks);
 
         // ── Spend a cache breakpoint on the volatile boundary ────────────
         //
@@ -983,7 +1006,24 @@ impl ContextWindow {
         // [`MAX_SYSTEM_CACHE_RUNS`] caps those at 3 so this one always fits.
         // Place it on the 4th-from-last message to give a buffer for the
         // new messages added each iteration (typically 2-3).
-        if messages.len() >= 5 {
+        //
+        // Skipped entirely when the system prefix moved since the last request.
+        // Anthropic caches by prefix, so this breakpoint's entry covers every
+        // system block as well as the messages before it - and a prefix that
+        // changed has already invalidated that entry before it could be read.
+        // The 1.25x write is still charged. Measured on a run whose bulk region
+        // grew every turn: 3.3M cache-write tokens against 267k reads, a 0.074
+        // hit rate, for a prefix that was never going to match. Sending the
+        // churn at the base rate instead is the same request for less money.
+        //
+        // Re-armed the moment the prefix settles, so a steady-state run keeps
+        // the caching it was always getting.
+        let prefix_moved = meta
+            .previous_system_hash
+            .is_some_and(|previous| previous != system_hash);
+        if prefix_moved {
+            // Nothing to place: the entry could not be read back.
+        } else if messages.len() >= 5 {
             let bp_idx = messages.len() - 4;
             messages[bp_idx].cache_breakpoint = true;
         } else if messages.len() >= 2 {
@@ -1017,6 +1057,7 @@ impl ContextWindow {
         AssembledContext {
             system_blocks,
             messages,
+            system_hash,
         }
     }
 
