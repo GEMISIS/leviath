@@ -173,6 +173,8 @@ Base path `/api`; all JSON unless noted.
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation. The listing is paginated and takes `q` |
 | `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key |
 | `GET /api/models` | Enumerate models |
+| `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
+| `GET /api/scripts?agent=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the agent's Rhai. Writes need admin. See [below](#tools-and-scripts) |
 | `GET /api/mcp/servers` · `GET /{name}/status` · `POST /{name}/login` · `POST /{name}/test` | MCP servers (add/remove need admin) |
 | `GET /api/doctor` | The checks `lev doctor` runs, as data. A failing check is `ok: false` inside a 200, never an HTTP error |
 | `GET /api/fs/dirs?path=&hidden=` | One directory level of subdirectory names, for a folder picker. Absolute paths only, fenced by `--workdir-root`; `hidden=true` includes dot-prefixed names |
@@ -333,6 +335,47 @@ in the response says where the window actually began. That is what keeps the pie
 offset past the end of the file returns 416 rather than an empty window, so a loop cannot spin.
 
 A whole-file read serializes exactly as it always has. `offset` is omitted when it is zero.
+
+## Tools and scripts
+
+`GET /api/tools` answers what an agent on **this** machine can call, which is not a question a
+client can answer for itself. Every entry carries a `source`:
+
+| `source` | Means |
+|---|---|
+| `builtin` | Compiled into this Leviath. Every agent has it |
+| `subagent` | A sub-agent tool, for an agent that may spawn children |
+| `agent` | A `.rhai` in that agent's own `tools/`. Only that agent has it |
+| `global` | A `.rhai` in `~/.leviath/tools/`. Every agent on the machine has it |
+
+Pass `?agent=<name>` to include the fourth. Script-backed entries also carry the `path` they came
+from. A separate `skipped` list carries the `.rhai` files that were found and cannot be offered,
+with the reason each was passed over, so a file with a syntax error does not simply look like a file
+nobody wrote. MCP tools are not here: they depend on a server being reachable rather than on
+anything installed, and `/api/mcp/servers/{name}` already answers for them.
+
+`GET /api/scripts` is the same ground from the editor's side, over the four kinds of Rhai an agent
+can carry: `tool`, `region_hook`, `stage_hook` and `output_validator`. Only tools have a directory of
+their own (`<agent>/tools/`, plus the global one); the other three are named by path in the manifest
+and resolved against the agent's own directory, so the listing derives them from what the manifest
+declares and the read and write routes address them at `<agent>/<name>.rhai`. A hook a manifest
+declares inside a subdirectory is outside what `{name}` can address, and is left out rather than
+listed under a name that would fetch nothing.
+
+`GET/PUT/DELETE /api/scripts/{kind}/{name}` reads and writes one file, scoped by `?agent=<name>` or,
+with no `agent`, the global tools directory. `POST /api/scripts/validate` takes `kind` and `content`
+and compiles without writing, so an editor can check before saving instead of saving and waiting for
+a run to fail.
+
+> [!WARNING]
+> `PUT` and `DELETE` are **not mounted at all** without `lev serve --allow-admin`, exactly like the
+> MCP add/remove routes and `PUT /api/config`. A `.rhai` file is executable code every agent then
+> runs, so a session that can write one can run code on the host. The `GET` routes stay open, so an
+> editor degrades to read-only rather than disappearing.
+
+A write that does not compile is still saved, with `compiles: false` and the compiler's complaint in
+the response. A draft is worth keeping, and a tool that does not compile is skipped at spawn rather
+than breaking the agent.
 
 ## Feature detection
 

@@ -8,6 +8,27 @@ use leviath_runtime::control_socket::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::task::JoinHandle;
 
+/// Run `f` with `LEVIATH_HOME` redirected at a fresh scratch root, handing it
+/// that root.
+///
+/// Every path the tools and scripts routes touch - the installed agents
+/// directory and the global `.rhai` directory - hangs off that variable, so a
+/// test that did not set it would read (and, for the write routes, *write*) a
+/// developer's real `~/.leviath`. One `temp_env` call rather than a nested one:
+/// it serializes process-wide and holds its lock across the future.
+pub(super) async fn with_home<R, Fut>(f: impl FnOnce(std::path::PathBuf) -> Fut) -> R
+where
+    Fut: std::future::Future<Output = R>,
+{
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let root = dir.path().to_path_buf();
+    temp_env::async_with_vars(
+        [("LEVIATH_HOME", Some(root.clone().into_os_string()))],
+        f(root),
+    )
+    .await
+}
+
 /// A control client pointing at an address with no daemon - used by tests that
 /// never exercise agent actions (read/websocket/polling/config paths).
 pub(super) fn no_daemon_client() -> ControlClient {

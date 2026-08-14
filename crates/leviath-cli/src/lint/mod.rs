@@ -26,7 +26,7 @@
 //! [`Blueprint::validate`]: leviath_core::Blueprint::validate
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use leviath_core::Blueprint;
 use leviath_core::blueprint::StageMode;
@@ -173,22 +173,12 @@ impl LintEnv {
     /// cost a registry build per agent to say something the spawn will say
     /// louder a moment later.
     pub fn offline(agent_dir: &Path) -> Self {
-        let mut known_tools: HashSet<String> = leviath_tools::BuiltinTools::new(
-            leviath_tools::ToolContext::new(agent_dir.to_path_buf()),
-        )
-        .names()
-        .into_iter()
-        .collect();
-        known_tools.extend(leviath_tools::BuiltinTools::subagent_tool_names());
-
-        // The agent's own `tools/`, plus the global one every agent gets.
-        let dirs: Vec<PathBuf> = [Some(agent_dir.join("tools")), leviath_core::tools_dir()]
-            .into_iter()
-            .flatten()
-            .filter(|d| d.is_dir())
-            .collect();
-        let (set, _skipped) = leviath_scripting::ScriptToolSet::discover(&dirs);
-        known_tools.extend(set.names());
+        // The four discovery rules live in `tool_inventory` rather than here,
+        // because `GET /api/tools` has to answer the same question and two
+        // copies of "where does a tool come from" would not have stayed equal.
+        // The lint wants only the names; the endpoint wants the sources too.
+        let known_tools =
+            crate::tool_inventory::ToolInventory::discover(Some(agent_dir), None).names();
 
         Self {
             known_tools,

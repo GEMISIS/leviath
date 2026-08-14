@@ -7,6 +7,33 @@ use axum::response::Json;
 use super::types::*;
 use crate::config::Config;
 
+/// Every `[model_providers]` entry as the API reports it, name-sorted.
+///
+/// Sorted because the config holds them in a `HashMap`, whose iteration order
+/// differs between two calls on one machine, and a list that reorders itself
+/// under a form is a list nobody can edit.
+fn gateways_of(c: &Config) -> Vec<GatewayInfo> {
+    let mut gateways: Vec<GatewayInfo> = c
+        .model_providers
+        .iter()
+        .map(|(name, p)| GatewayInfo {
+            name: name.clone(),
+            base_url: p.base_url.clone(),
+            has_api_key: p.api_key.is_some(),
+            script: p.script.clone(),
+            // Names only. See `GatewayInfo::extra_keys`: these values are
+            // forwarded into a script and routinely hold credentials.
+            extra_keys: {
+                let mut keys: Vec<String> = p.extra.keys().cloned().collect();
+                keys.sort();
+                keys
+            },
+        })
+        .collect();
+    gateways.sort_by(|a, b| a.name.cmp(&b.name));
+    gateways
+}
+
 /// Redacted view of a config — booleans for keys, never their values.
 fn redact(c: &Config) -> RedactedConfig {
     RedactedConfig {
@@ -16,6 +43,7 @@ fn redact(c: &Config) -> RedactedConfig {
         has_google_key: c.providers.google_api_key.is_some(),
         has_openrouter_key: c.openrouter_api_key.is_some(),
         ollama_base_url: c.ollama_base_url.clone(),
+        gateways: gateways_of(c),
         agent_paths: c.agent_paths.clone(),
         mcp_server_count: c.mcp_servers.len(),
         api_version: API_VERSION.to_string(),
@@ -64,6 +92,26 @@ pub(super) async fn put_config(
     if let Some(v) = req.ollama_base_url {
         config.ollama_base_url = Some(v);
     }
+    // Field by field, like everything above: a gateway names only what it is
+    // changing, so a console can edit a base URL without knowing the key or
+    // sending it back through the browser.
+    for gateway in req.gateways.unwrap_or_default() {
+        let entry = config.model_providers.entry(gateway.name).or_default();
+        if let Some(v) = gateway.base_url {
+            entry.base_url = Some(v);
+        }
+        if let Some(v) = gateway.api_key {
+            entry.api_key = Some(v);
+        }
+        if let Some(v) = gateway.script {
+            entry.script = Some(v);
+        }
+    }
+    // Removals run last, so one request that both edits and deletes cannot
+    // depend on which half was applied first.
+    for name in req.remove_gateways.unwrap_or_default() {
+        config.model_providers.remove(&name);
+    }
 
     config.save_to_path_public(path).map_err(|e| {
         err(
@@ -101,11 +149,47 @@ fn validate_key_format(provider: &str, key: &str) -> (bool, Option<String>) {
                 (true, None)
             }
         }
-        other => (false, Some(format!("Unknown provider `{other}`."))),
+        // A custom gateway is custom precisely because its key has no house
+        // format to check, so an unknown name is no longer a rejection: the
+        // only thing that can be said about the key is that it is not empty.
+        _ => match key.trim().is_empty() {
+            true => (false, Some("Key must not be empty.".to_string())),
+            false => (true, None),
+        },
+    }
+}
+
+/// Format-only check of a gateway's base URL.
+///
+/// Shape only, like the key check beside it: no request is made, because
+/// `POST /api/config/validate` promises not to touch the network and a form
+/// that hangs on an unreachable host is worse than one that says nothing. The
+/// scheme is what people actually get wrong - a bare `api.example.com`, or an
+/// `ollama serve` address pasted without one.
+fn validate_base_url(url: &str) -> (bool, Option<String>) {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return (false, Some("Base URL must not be empty.".to_string()));
+    }
+    match trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        true => (true, None),
+        false => (
+            false,
+            Some("Base URL must start with `http://` or `https://`.".to_string()),
+        ),
     }
 }
 
 pub(super) async fn validate_config_key(Json(req): Json<ValidateKeyReq>) -> Json<ValidateKeyResp> {
+    // The URL is checked first: a gateway with both wrong is more usefully
+    // told about the address than about the key, since the key cannot be
+    // judged beyond being present.
+    if let Some(base_url) = &req.base_url {
+        let (valid, message) = validate_base_url(base_url);
+        if !valid {
+            return Json(ValidateKeyResp { valid, message });
+        }
+    }
     let (valid, message) = validate_key_format(&req.provider, &req.key);
     Json(ValidateKeyResp { valid, message })
 }
@@ -432,6 +516,7 @@ mod tests {
             has_google_key: false,
             has_openrouter_key: false,
             ollama_base_url: None,
+            gateways: Vec::new(),
             agent_paths: vec![],
             mcp_server_count: 2,
             api_version: API_VERSION.to_string(),
@@ -455,6 +540,7 @@ mod tests {
             has_google_key: false,
             has_openrouter_key: false,
             ollama_base_url: Some("http://localhost:11434".to_string()),
+            gateways: Vec::new(),
             agent_paths: vec![],
             mcp_server_count: 0,
             api_version: API_VERSION.to_string(),
@@ -570,6 +656,90 @@ mod tests {
         );
     }
 
+    /// A gateway can be created, then edited field by field, then removed,
+    /// without the caller ever holding its key.
+    ///
+    /// This is the whole point of the partial update reaching gateways: a
+    /// browser form that had to send the key back to change a URL would have
+    /// to have been given the key, which `GET /api/config` deliberately never
+    /// does.
+    #[tokio::test]
+    async fn put_config_edits_a_gateway_without_being_told_its_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+        let state = || state_with_config_path(path.clone());
+
+        // Create.
+        let resp = put_config_request(
+            state(),
+            r#"{"gateways":[{"name":"groq","base_url":"https://api.groq.com","api_key":"sk-secret","script":"groq.rhai"}]}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let saved = Config::load_from_path_public(&path).unwrap();
+        assert_eq!(
+            saved.model_providers["groq"].script.as_deref(),
+            Some("groq.rhai"),
+            "the script backing the gateway is written too"
+        );
+
+        // Edit only the URL. The key is not sent, and must survive.
+        let resp = put_config_request(
+            state(),
+            r#"{"gateways":[{"name":"groq","base_url":"https://eu.groq.com"}]}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let saved = Config::load_from_path_public(&path).unwrap();
+        let gateway = &saved.model_providers["groq"];
+        assert_eq!(gateway.base_url.as_deref(), Some("https://eu.groq.com"));
+        assert_eq!(
+            gateway.api_key.as_deref(),
+            Some("sk-secret"),
+            "an unsent key is left alone, not cleared"
+        );
+
+        // A second gateway leaves the first alone.
+        let resp = put_config_request(state(), r#"{"gateways":[{"name":"other"}]}"#).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let saved = Config::load_from_path_public(&path).unwrap();
+        assert_eq!(saved.model_providers.len(), 2);
+
+        // Remove takes a list of its own, because omitting a gateway above
+        // means "leave it alone" and so can never mean "delete it".
+        let resp = put_config_request(state(), r#"{"remove_gateways":["other"]}"#).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let saved = Config::load_from_path_public(&path).unwrap();
+        assert!(saved.model_providers.contains_key("groq"));
+        assert!(!saved.model_providers.contains_key("other"));
+    }
+
+    /// The response a write returns reports the gateway the same redacted way
+    /// a read does, so a form can render straight from it.
+    #[tokio::test]
+    async fn put_config_returns_the_gateway_redacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+
+        let resp = put_config_request(
+            state_with_config_path(path),
+            r#"{"gateways":[{"name":"groq","api_key":"sk-secret"}]}"#,
+        )
+        .await;
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["gateways"][0]["name"], serde_json::json!("groq"));
+        assert_eq!(json["gateways"][0]["has_api_key"], serde_json::json!(true));
+        assert!(
+            !String::from_utf8_lossy(&body).contains("sk-secret"),
+            "the write's own response must not hand the key back"
+        );
+    }
+
     #[tokio::test]
     async fn put_config_read_failure_is_500() {
         // config_path points at a directory, so reading it as a file fails.
@@ -601,7 +771,80 @@ mod tests {
         assert_eq!(validate_key_format("google", "g"), (true, None));
         assert!(!validate_key_format("google", "  ").0);
         assert_eq!(validate_key_format("openrouter", "or"), (true, None));
-        assert!(!validate_key_format("unknown", "x").0);
+        // A name this build does not know is a custom gateway, not a mistake.
+        // Its key has no house format, so the only judgement available is
+        // whether one was given at all.
+        assert_eq!(validate_key_format("my-gateway", "anything"), (true, None));
+        assert!(!validate_key_format("my-gateway", "   ").0);
+    }
+
+    // ─── custom gateways ──────────────────────────────────────────────────────
+
+    /// The key never leaves the process, and neither does anything in `extra`.
+    ///
+    /// `extra` is forwarded into a provider script, so people keep credentials
+    /// there. Reporting its names is what a form needs; reporting its values
+    /// would be the same disclosure the `has_*_key` booleans exist to prevent.
+    #[test]
+    fn a_gateways_secrets_are_reported_as_presence_not_value() {
+        let mut config = Config::default();
+        config.model_providers.insert(
+            "groq".to_string(),
+            crate::config::ModelProviderConfig {
+                script: Some("groq.rhai".to_string()),
+                api_key: Some("sk-secret-value".to_string()),
+                base_url: Some("https://api.groq.com".to_string()),
+                rate_limit: None,
+                extra: [(
+                    "signing_secret".to_string(),
+                    toml::Value::String("hunter2".to_string()),
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+
+        let redacted = redact(&config);
+        let gateway = &redacted.gateways[0];
+        assert_eq!(gateway.name, "groq");
+        assert_eq!(gateway.base_url.as_deref(), Some("https://api.groq.com"));
+        assert!(gateway.has_api_key);
+        assert_eq!(gateway.extra_keys, vec!["signing_secret".to_string()]);
+
+        // The whole serialized document, because a leak anywhere in it is a
+        // leak: a field added later would otherwise carry the value silently.
+        let json = serde_json::to_string(&redacted).expect("serializes");
+        assert!(!json.contains("sk-secret-value"), "{json}");
+        assert!(!json.contains("hunter2"), "{json}");
+    }
+
+    /// Name-sorted, because the config holds gateways in a `HashMap` and a
+    /// list that reorders itself between two reads cannot be edited in a form.
+    #[test]
+    fn gateways_are_reported_in_a_stable_order() {
+        let mut config = Config::default();
+        for name in ["zulu", "alpha", "mike"] {
+            config
+                .model_providers
+                .insert(name.to_string(), Default::default());
+        }
+        let names: Vec<String> = gateways_of(&config).into_iter().map(|g| g.name).collect();
+        assert_eq!(names, vec!["alpha", "mike", "zulu"]);
+    }
+
+    #[test]
+    fn a_config_with_no_gateways_reports_none() {
+        assert_eq!(gateways_of(&Config::default()), Vec::new());
+    }
+
+    /// A base URL is checked for shape only, and the scheme is the part people
+    /// actually leave off.
+    #[test]
+    fn a_base_url_is_checked_for_its_scheme() {
+        assert_eq!(validate_base_url("https://api.example.com"), (true, None));
+        assert_eq!(validate_base_url("http://localhost:11434"), (true, None));
+        assert!(!validate_base_url("api.example.com").0);
+        assert!(!validate_base_url("  ").0);
     }
 
     #[tokio::test]
@@ -626,6 +869,62 @@ mod tests {
         let v: ValidateKeyResp = serde_json::from_slice(&bytes).unwrap();
         assert!(!v.valid);
         assert!(v.message.is_some());
+    }
+
+    /// A gateway is checked on its URL as well as its key, and the URL is what
+    /// answers when it is wrong.
+    #[tokio::test]
+    async fn validate_config_key_endpoint_checks_a_gateways_base_url() {
+        let check = |body: serde_json::Value| async move {
+            let app = Router::new().route(
+                "/api/config/validate",
+                axum::routing::post(validate_config_key),
+            );
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/config/validate")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<ValidateKeyResp>(&bytes).unwrap()
+        };
+
+        // A URL with no scheme is rejected, and the message names the URL
+        // rather than the key, which is the part that is fine.
+        let bad = check(serde_json::json!({
+            "provider": "my-gateway",
+            "key": "anything",
+            "base_url": "api.example.com",
+        }))
+        .await;
+        assert!(!bad.valid);
+        assert!(
+            bad.message.unwrap_or_default().contains("Base URL"),
+            "the address is what is wrong"
+        );
+
+        // A good URL falls through to the key check, which for a custom
+        // gateway only asks that a key was given at all.
+        let good = check(serde_json::json!({
+            "provider": "my-gateway",
+            "key": "anything",
+            "base_url": "https://api.example.com",
+        }))
+        .await;
+        assert!(good.valid, "{:?}", good.message);
+
+        // And an empty key still fails once the URL is fine.
+        let empty = check(serde_json::json!({
+            "provider": "my-gateway",
+            "key": "  ",
+            "base_url": "https://api.example.com",
+        }))
+        .await;
+        assert!(!empty.valid);
     }
 
     #[tokio::test]

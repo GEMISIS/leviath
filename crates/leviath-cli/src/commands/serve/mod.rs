@@ -7,6 +7,7 @@ mod agents;
 mod auth;
 mod blueprints;
 mod config;
+mod config_types;
 mod cursor;
 mod doctor;
 mod fs;
@@ -14,10 +15,12 @@ mod interactions;
 mod mcp;
 mod polling;
 mod runs;
+mod scripts;
 mod search;
 #[cfg(test)]
 mod testutil;
 mod tls;
+mod tools;
 mod tree;
 mod types;
 mod websocket;
@@ -121,6 +124,15 @@ fn api_router() -> Router<AppState> {
         .route("/api/doctor", get(doctor::run_doctor))
         // Filesystem - directory browsing for the console's folder picker.
         .route("/api/fs/dirs", get(fs::list_dirs))
+        // Tools - what an agent on this machine can actually call. Read-only:
+        // there is nothing to write, since a tool is either built in or a file
+        // the scripts routes below own.
+        .route("/api/tools", get(tools::list_tools))
+        // Scripts - the read half of the Rhai surface. The write half is
+        // mounted by `execute_with_shutdown`, behind `--allow-admin`.
+        .route("/api/scripts", get(scripts::list_scripts))
+        .route("/api/scripts/validate", post(scripts::validate_script))
+        .route("/api/scripts/{kind}/{name}", get(scripts::get_script))
         // Config
         .route("/api/config", get(config::get_config))
         .route("/api/config/validate", post(config::validate_config_key))
@@ -327,7 +339,16 @@ async fn execute_with_shutdown(
             .route("/api/mcp/servers/{name}", delete(mcp::remove_server))
             // Config-write persists provider secrets to disk, so it is gated the
             // same way as MCP admin: unmounted (404) unless --allow-admin.
-            .route("/api/config", put(config::put_config)),
+            .route("/api/config", put(config::put_config))
+            // A `.rhai` file is executable code every agent then runs, so
+            // writing one is the same category of act as adding an MCP server
+            // rather than the same category as saving a blueprint. Unmounted
+            // (404) unless --allow-admin; the GET half above stays open so an
+            // editor degrades to read-only instead of disappearing.
+            .route(
+                "/api/scripts/{kind}/{name}",
+                put(scripts::put_script).delete(scripts::delete_script),
+            ),
         false => app,
     };
 
@@ -1965,6 +1986,84 @@ system_prompt = "Run"
                     false => assert_eq!(status, 405, "the admin route must not be mounted"),
                     true => assert_ne!(status, 405, "the admin route must be mounted"),
                 }
+
+                let _ = stop_tx.send(());
+                let _ = server.await;
+            }
+        })
+        .await;
+    }
+
+    /// The script write routes are mounted only with `--allow-admin`, for the
+    /// same reason the MCP ones are: a `.rhai` file is executable code every
+    /// agent then runs, so a browser session that can `PUT` one can run code on
+    /// the host. The `GET` half stays mounted either way, so an editor degrades
+    /// to read-only instead of disappearing.
+    ///
+    /// `LEVIATH_HOME` is redirected alongside the config path because the
+    /// mounted case really does write a file, and it must not be a developer's
+    /// own `~/.leviath/tools`. One `temp_env` call, since it serializes
+    /// process-wide and holds its lock across the future.
+    #[tokio::test]
+    async fn the_script_write_routes_are_mounted_only_with_allow_admin() {
+        let home = tempfile::tempdir().expect("a temp dir");
+        let root = home.path().to_path_buf();
+        let mut vars = crate::config::config_isolation_vars(&root);
+        vars.push(("LEVIATH_HOME", Some(root.clone().into_os_string())));
+
+        temp_env::async_with_vars(vars, async move {
+            for allow_admin in [false, true] {
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+                let args = ServeArgs {
+                    port: 0,
+                    host: "127.0.0.1".to_string(),
+                    cors: None,
+                    token: Some("t".to_string()),
+                    allow_admin,
+                    workdir_root: None,
+                    no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
+                };
+                let server = tokio::spawn(execute_with_shutdown(
+                    args,
+                    no_daemon_control(),
+                    Box::pin(async move {
+                        let _ = stop_rx.await;
+                    }),
+                    Some(ready_tx),
+                ));
+                let addr = ready_rx.await.expect("bound");
+                let client = reqwest::Client::new();
+
+                let write = client
+                    .put(format!("http://{addr}/api/scripts/tool/gate"))
+                    .bearer_auth("t")
+                    .json(&serde_json::json!({ "content": "// @tool gate\n1" }))
+                    .send()
+                    .await
+                    .expect("request")
+                    .status()
+                    .as_u16();
+                // 405 is the signature of "this path exists for GET but PUT is
+                // not mounted", the same reading the MCP test above relies on.
+                match allow_admin {
+                    false => assert_eq!(write, 405, "the write route must not be mounted"),
+                    true => assert_ne!(write, 405, "the write route must be mounted"),
+                }
+
+                // The read half answers either way. Nothing was written when
+                // admin was off, so a 404 is as much a mounted route as a 200.
+                let read = client
+                    .get(format!("http://{addr}/api/scripts"))
+                    .bearer_auth("t")
+                    .send()
+                    .await
+                    .expect("request")
+                    .status()
+                    .as_u16();
+                assert_eq!(read, 200, "the read routes are never gated");
 
                 let _ = stop_tx.send(());
                 let _ = server.await;

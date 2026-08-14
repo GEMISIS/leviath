@@ -387,6 +387,21 @@ impl ScriptToolSet {
         self.tools.values().map(|t| t.meta.clone()).collect()
     }
 
+    /// The metadata of every tool paired with the file it was compiled from.
+    ///
+    /// [`metas`](Self::metas) answers what a tool advertises; a caller listing
+    /// tools for a picker also has to say *where* each one came from, because
+    /// "the agent's own file" and "a global drop-in every agent gets" are
+    /// different answers to whether the tool travels with the agent. Recovering
+    /// the path through [`get`](Self::get) would mean a lookup whose miss arm
+    /// can never be taken.
+    pub fn sources(&self) -> Vec<(ScriptToolMeta, PathBuf)> {
+        self.tools
+            .values()
+            .map(|t| (t.meta.clone(), t.source_path.clone()))
+            .collect()
+    }
+
     /// Number of tools in the set.
     pub fn len(&self) -> usize {
         self.tools.len()
@@ -396,6 +411,25 @@ impl ScriptToolSet {
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
+}
+
+/// Answer "would this text become a tool" for source that has no file yet.
+///
+/// [`ScriptToolSet::discover`] asks the same two questions of files already on
+/// disk: are the annotations parseable, and does Rhai accept the script. An
+/// editor has to be able to ask before saving, and the only alternative was
+/// writing the candidate into a directory every agent executes from and reading
+/// the answer back out of the skipped list.
+///
+/// `label` is what the error message names the source as, since there is no
+/// path to name. A sibling `tool.toml` cannot apply here for the same reason:
+/// nothing is on disk to sit beside.
+pub fn check_source(label: &str, source: &str) -> Result<ScriptToolMeta> {
+    let meta = parse_annotations(source)?;
+    Engine::new()
+        .compile(source)
+        .map_err(|e| Error::CompilationFailed(format!("{label}: {e}")))?;
+    Ok(meta)
 }
 
 /// Compile a single `.rhai` file into a [`ScriptTool`], resolving metadata from a
@@ -1173,6 +1207,48 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].path.ends_with("broken.rhai"));
         assert!(!skipped[0].reason.is_empty());
+    }
+
+    /// `sources` pairs each tool with the file it came from, which is what a
+    /// caller needs to say whether a name is the agent's own script or a global
+    /// drop-in. The two dirs hold the same tool name, so this also pins that the
+    /// winner's path is reported rather than the shadowed one's.
+    #[test]
+    fn sources_pairs_each_tool_with_the_file_it_came_from() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        std::fs::write(dir_a.path().join("dup.rhai"), "// @tool dup\n1").unwrap();
+        std::fs::write(dir_b.path().join("dup.rhai"), "// @tool dup\n2").unwrap();
+
+        let (set, _) =
+            ScriptToolSet::discover(&[dir_a.path().to_path_buf(), dir_b.path().to_path_buf()]);
+        let sources = set.sources();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].0.name, "dup");
+        assert_eq!(sources[0].1, dir_a.path().join("dup.rhai"));
+    }
+
+    // ── check_source ──
+
+    #[test]
+    fn check_source_accepts_a_script_that_would_become_a_tool() {
+        let meta = check_source("draft", "// @tool draft\n// @description d\n1").unwrap();
+        assert_eq!(meta.name, "draft");
+        assert_eq!(meta.description, "d");
+    }
+
+    #[test]
+    fn check_source_rejects_missing_annotations() {
+        let err = check_source("draft", "1").unwrap_err();
+        assert!(err.to_string().contains("@tool"), "{err}");
+    }
+
+    /// The annotations parse but Rhai does not accept the body, which is the
+    /// half `parse_annotations` alone would let through.
+    #[test]
+    fn check_source_rejects_a_script_rhai_will_not_compile() {
+        let err = check_source("draft", "// @tool draft\nlet").unwrap_err();
+        assert!(err.to_string().contains("draft"), "{err}");
     }
 
     #[test]

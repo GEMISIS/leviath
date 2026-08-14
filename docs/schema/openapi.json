@@ -43,6 +43,9 @@
     },
     {
       "name": "events"
+    },
+    {
+      "name": "scripts"
     }
   ],
   "paths": {
@@ -1119,6 +1122,204 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/tools": {
+      "get": {
+        "tags": [
+          "scripts"
+        ],
+        "summary": "Tools an agent on this machine can call",
+        "description": "Built-ins, sub-agent tools, the named agent's own `tools/*.rhai` and the global ones, each with a `source`. `skipped` carries the `.rhai` files that were found and could not be offered, with the reason. MCP tools are not included; `/api/mcp/servers/{name}` answers for those.",
+        "parameters": [
+          {
+            "name": "agent",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Scope to this agent's own directory."
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
+      }
+    },
+    "/api/scripts": {
+      "get": {
+        "tags": [
+          "scripts"
+        ],
+        "summary": "Rhai scripts this scope can see",
+        "description": "Script tools from the agent's `tools/` and the global directory, plus the region hooks, stage hooks and output validators the agent's manifest declares. Each entry carries its kind, its source (`agent` or `global`) and whether it compiles right now.",
+        "parameters": [
+          {
+            "name": "agent",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Scope to this agent's own directory."
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
+      }
+    },
+    "/api/scripts/validate": {
+      "post": {
+        "tags": [
+          "scripts"
+        ],
+        "summary": "Compile a script without writing it",
+        "description": "Takes `kind` and `content`, plus `hooks` for a stage hook, and answers with `valid` and the compiler's complaint. Writes nothing and runs nothing: every compiler here stops at the AST.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
+      }
+    },
+    "/api/scripts/{kind}/{name}": {
+      "get": {
+        "tags": [
+          "scripts"
+        ],
+        "summary": "A script's source text",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "tool",
+                "region_hook",
+                "stage_hook",
+                "output_validator"
+              ]
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The file's name without its `.rhai` extension."
+          },
+          {
+            "name": "agent",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Scope to this agent's own directory."
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "scripts"
+        ],
+        "summary": "Write a script",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because a `.rhai` file is executable code every agent then runs. A file that does not compile is still written, and the response says so.",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "tool",
+                "region_hook",
+                "stage_hook",
+                "output_validator"
+              ]
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The file's name without its `.rhai` extension."
+          },
+          {
+            "name": "agent",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Scope to this agent's own directory."
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "scripts"
+        ],
+        "summary": "Delete a script",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed.",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "tool",
+                "region_hook",
+                "stage_hook",
+                "output_validator"
+              ]
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The file's name without its `.rhai` extension."
+          },
+          {
+            "name": "agent",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Scope to this agent's own directory."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
           }
         }
       }
