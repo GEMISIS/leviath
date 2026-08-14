@@ -2930,6 +2930,45 @@ async fn wait_reason_is_none_unless_the_agent_is_waiting() {
     assert_eq!(host.wait_reason(e), None);
 }
 
+/// A run parked until the machine is fixed explains itself to `lev ps` too,
+/// not only to `meta.json`.
+///
+/// It is `Paused` rather than `Waiting`, which is the point: nothing is
+/// holding a prompt open for it, so the listing has to treat paused as parked
+/// or the one run that most needs explaining would be the one that says
+/// nothing.
+#[tokio::test]
+async fn wait_reason_explains_a_run_parked_until_the_machine_is_fixed() {
+    use leviath_core::run_meta::SetupBlocker;
+    let mut host = host_with(vec![]);
+    let e = spawn(&mut host, "run-a", "run-a");
+    {
+        let world = host.world_mut().world_mut();
+        world
+            .get_mut::<AgentState>(e.entity())
+            .expect("spawned agent has state")
+            .status = AgentStatus::Paused;
+        world
+            .entity_mut(e.entity())
+            .insert(crate::pipeline::PausedForSetup {
+                blocker: SetupBlocker::ProviderMissing,
+                remedy: "add it to config.toml".to_string(),
+            });
+    }
+
+    let reason = host
+        .wait_reason(e)
+        .expect("a parked run says what it needs");
+    assert_eq!(
+        reason,
+        WaitReason::NeedsSetup {
+            blocker: SetupBlocker::ProviderMissing,
+            remedy: "add it to config.toml".to_string(),
+        }
+    );
+    assert!(reason.needs_a_person());
+}
+
 /// An entity the world no longer holds cannot be explained either.
 #[tokio::test]
 async fn wait_reason_is_none_for_an_unknown_entity() {

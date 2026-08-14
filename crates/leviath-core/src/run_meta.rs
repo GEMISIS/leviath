@@ -101,6 +101,71 @@ pub enum WaitReason {
         /// Children that have not reached a terminal status.
         outstanding: usize,
     },
+
+    /// Parked because something on the machine has to change before this run
+    /// can go on: a provider it needs is not configured, a key was rejected,
+    /// an account is out of credits.
+    ///
+    /// These used to end the run. They are all deterministic and all outside
+    /// the run's control, so ending it threw away everything it had done to
+    /// punish a person for a typo in `config.toml`. The run holds its place
+    /// instead, and `lev resume` picks it up once the machine is fixed.
+    ///
+    /// The distinction that matters is not "is there a fix" but "does the fix
+    /// let *this* run continue": a broken blueprint is equally deterministic
+    /// and equally fixable, and still cannot be resumed into, because the
+    /// blueprint was read at spawn.
+    NeedsSetup {
+        /// Which kind of problem, so a client can offer the right thing to do
+        /// rather than parse the sentence below.
+        blocker: SetupBlocker,
+        /// What to do about it, in a sentence, for whoever reads the run.
+        remedy: String,
+    },
+}
+
+/// What is stopping a [`WaitReason::NeedsSetup`] run, in a form a client can
+/// branch on.
+///
+/// One variant per remedy, not per error: these are the cases whose *fixes*
+/// differ. Topping up an account, adding a provider to `config.toml` and
+/// replacing a rejected key are three different screens, and a console that
+/// had only the sentence would be reduced to matching on its wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupBlocker {
+    /// The stage names a provider this install has not configured.
+    ProviderMissing,
+    /// The account behind the provider is out of credits.
+    CreditsExhausted,
+    /// The key was rejected.
+    AuthFailed,
+    /// The key is valid but not allowed to use the model.
+    Forbidden,
+    /// Every candidate is out of service, for reasons that do not agree or are
+    /// not known. The remedy names what was tried last.
+    ProvidersUnavailable,
+}
+
+impl std::fmt::Display for SetupBlocker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ProviderMissing => f.write_str("provider"),
+            Self::CreditsExhausted => f.write_str("credits"),
+            Self::AuthFailed => f.write_str("key"),
+            Self::Forbidden => f.write_str("access"),
+            Self::ProvidersUnavailable => f.write_str("providers"),
+        }
+    }
+}
+
+/// What a parked run needs, gathered where the markers are visible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupNeeded {
+    /// Which kind of problem it is.
+    pub blocker: SetupBlocker,
+    /// What to do about it.
+    pub remedy: String,
 }
 
 impl WaitReason {
@@ -120,6 +185,9 @@ impl std::fmt::Display for WaitReason {
             Self::InteractionPoint => f.write_str("checkpoint"),
             Self::FanOutWorkers { outstanding } => write!(f, "workers({outstanding})"),
             Self::Children { outstanding } => write!(f, "children({outstanding})"),
+            // The remedy is a sentence; this is a table cell. The blocker is
+            // the half that fits, and the half that says which screen to open.
+            Self::NeedsSetup { blocker, .. } => write!(f, "needs {blocker}"),
         }
     }
 }
@@ -145,6 +213,9 @@ pub struct WaitMarkers {
     /// Whether a hub request is holding it at all. Separate from the kind
     /// because the kind can be unknown while the block is real.
     pub awaiting_interaction: bool,
+    /// The run is parked until the machine is fixed, and this is what it
+    /// needs.
+    pub needs_setup: Option<SetupNeeded>,
 }
 
 /// Why a parked run is parked, or `None` when it is not parked or nothing has
@@ -154,9 +225,17 @@ pub struct WaitMarkers {
 /// stage checkpoint each open a hub request of their own, so both also look
 /// like a generic prompt; asking the specific markers first is what keeps them
 /// from all reporting as one.
-pub fn wait_reason_from(waiting: bool, markers: &WaitMarkers) -> Option<WaitReason> {
-    if !waiting {
+pub fn wait_reason_from(parked: bool, markers: &WaitMarkers) -> Option<WaitReason> {
+    if !parked {
         return None;
+    }
+    // First, because it outranks everything: a run whose provider is missing
+    // is not going to be unblocked by answering a prompt.
+    if let Some(need) = &markers.needs_setup {
+        return Some(WaitReason::NeedsSetup {
+            blocker: need.blocker,
+            remedy: need.remedy.clone(),
+        });
     }
     if markers.gate_prompt {
         return Some(WaitReason::TaintGate);
@@ -944,6 +1023,84 @@ mod tests {
             ),
             Some(WaitReason::FanOutWorkers { outstanding: 2 })
         );
+    }
+
+    /// A run parked until the machine is fixed says so before anything else.
+    ///
+    /// It outranks every other marker on purpose: answering a prompt does not
+    /// help a run whose provider is not configured, so sending someone to the
+    /// prompt would be sending them to the wrong screen.
+    #[test]
+    fn needing_setup_outranks_every_other_reason() {
+        let need = SetupNeeded {
+            blocker: SetupBlocker::ProviderMissing,
+            remedy: "add it to config.toml".to_string(),
+        };
+        let reason = wait_reason_from(
+            true,
+            &WaitMarkers {
+                needs_setup: Some(need.clone()),
+                // Everything else at once, so precedence is being tested
+                // rather than the absence of competition.
+                gate_prompt: true,
+                interaction_point: true,
+                fan_out_outstanding: Some(2),
+                children_outstanding: Some(3),
+                awaiting_interaction: true,
+                interaction: Some(crate::interaction::InteractionKind::ToolApproval),
+            },
+        );
+        assert_eq!(
+            reason,
+            Some(WaitReason::NeedsSetup {
+                blocker: SetupBlocker::ProviderMissing,
+                remedy: "add it to config.toml".to_string(),
+            })
+        );
+        assert!(
+            reason.unwrap().needs_a_person(),
+            "nothing resolves this without somebody"
+        );
+    }
+
+    /// Each blocker is its own value on the wire, so a console can offer the
+    /// right remedy instead of matching on the sentence.
+    #[test]
+    fn every_blocker_has_its_own_wire_name_and_label() {
+        for (blocker, wire, label) in [
+            (
+                SetupBlocker::ProviderMissing,
+                "provider_missing",
+                "provider",
+            ),
+            (
+                SetupBlocker::CreditsExhausted,
+                "credits_exhausted",
+                "credits",
+            ),
+            (SetupBlocker::AuthFailed, "auth_failed", "key"),
+            (SetupBlocker::Forbidden, "forbidden", "access"),
+            (
+                SetupBlocker::ProvidersUnavailable,
+                "providers_unavailable",
+                "providers",
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(blocker).unwrap(), wire);
+            assert_eq!(blocker.to_string(), label);
+            let back: SetupBlocker = serde_json::from_value(serde_json::json!(wire)).unwrap();
+            assert_eq!(back, blocker);
+            // The row renders the kind, not the sentence: a remedy is a
+            // sentence and this is a table cell.
+            assert_eq!(
+                WaitReason::NeedsSetup {
+                    blocker,
+                    remedy: "a whole sentence that would not fit".to_string(),
+                }
+                .to_string(),
+                format!("needs {label}")
+            );
+        }
     }
 
     /// A generic hub block reports what kind of prompt it is, so "approve this

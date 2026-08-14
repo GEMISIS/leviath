@@ -183,7 +183,23 @@ type StalledDispatchQuery = (
     &'static StageInference,
     &'static mut AgentState,
     Option<&'static mut StageIoBuffer>,
+    Option<&'static crate::persistence::RunMetadata>,
 );
+
+/// A run parked until the machine is fixed, and what to do about it.
+///
+/// The message is the same one that used to be the run's epitaph. It is now
+/// attached to a run that is still alive, which is the whole change: every
+/// reason this marker exists for is deterministic, outside the run's control,
+/// and undone by one edit somewhere else.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct PausedForSetup {
+    /// Which kind of problem, so a client can offer the right remedy rather
+    /// than match on the sentence.
+    pub blocker: leviath_core::run_meta::SetupBlocker,
+    /// What a person has to do before `lev resume` will get anywhere.
+    pub remedy: String,
+}
 
 /// Dispatch-stall watchdog: fail any agent whose dispatch has been declining for
 /// an unresolvable reason longer than [`StallTimeout`].
@@ -217,7 +233,7 @@ pub fn fail_stalled_dispatch(
         return; // watchdog disabled
     }
     let now = clock.map_or_else(now_secs, |c| (c.0)());
-    for (entity, stall, si, mut state, buffer) in agents.iter_mut() {
+    for (entity, stall, si, mut state, buffer, md) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active || !stall.reason.needs_a_person() {
             continue;
@@ -234,48 +250,90 @@ pub fn fail_stalled_dispatch(
         if now.saturating_sub(stall.since) < limit as i64 {
             continue; // still inside the grace period
         }
-        // A circuit that opened because the account ran out of credits is an
-        // account state, not a dead end: pause the run for a resume instead of
-        // failing it, keeping `ReadyToInfer` so the retry is already staged
-        // (issue #413). Any other reason still fails below - a missing
-        // provider or a rejected key does not fix itself with a top-up.
-        let credits_out = stall.reason == StallReason::ProviderCircuitOpen
-            && circuits
-                .as_ref()
-                .and_then(|c| c.last_reason(&si.provider_name))
-                == Some(leviath_providers::UnavailableReason::CreditsExhausted);
-        if credits_out {
-            let message = format!(
-                "out of credits on '{}'; pausing this run - top up the account, \
-                 then `lev resume` it",
+        // Everything that reaches here is deterministic and outside the run's
+        // control: a provider that is not configured, a key that was rejected,
+        // an account with no credits. One edit elsewhere undoes any of them,
+        // and the run's context is intact, so ending it would throw the work
+        // away to punish somebody for a typo. It waits instead.
+        // Which kind of problem, from the breaker's own record of why each
+        // provider went out of service. The three have three different fixes,
+        // so they are three different answers rather than one "unavailable".
+        use leviath_core::run_meta::SetupBlocker;
+        let last_reason = circuits
+            .as_ref()
+            .and_then(|c| c.last_reason(&si.provider_name));
+        let blocker = match stall.reason {
+            StallReason::ProviderCircuitOpen => match last_reason {
+                Some(leviath_providers::UnavailableReason::CreditsExhausted) => {
+                    SetupBlocker::CreditsExhausted
+                }
+                Some(leviath_providers::UnavailableReason::AuthFailed) => SetupBlocker::AuthFailed,
+                Some(leviath_providers::UnavailableReason::Forbidden) => SetupBlocker::Forbidden,
+                // Unreachable, or nothing recorded: the account and the key
+                // are both fine as far as anyone knows, so neither screen is
+                // the right one to send somebody to.
+                _ => SetupBlocker::ProvidersUnavailable,
+            },
+            _ => SetupBlocker::ProviderMissing,
+        };
+        let message = match blocker {
+            SetupBlocker::CreditsExhausted => format!(
+                "out of credits on '{}': top up the account, then `lev resume` \
+                 this run",
                 si.provider_name
-            );
-            tracing::warn!(
+            ),
+            SetupBlocker::AuthFailed => format!(
+                "'{}' rejected the API key: replace it with `lev setup`, then \
+                 `lev resume` this run",
+                si.provider_name
+            ),
+            SetupBlocker::Forbidden => format!(
+                "'{}' will not serve this model to that key: check the account's \
+                 plan and model permissions, then `lev resume` this run",
+                si.provider_name
+            ),
+            _ => stall.reason.give_up_message(&si.provider_name),
+        };
+        // Unless nobody is there to read it. An unattended run was launched by
+        // a scheduler or a harness, which is watching for a terminal status
+        // and will wait for ever for one that never comes - so for those,
+        // failing is the honest answer and stays what it was.
+        let unattended = md.is_some_and(|m| m.unattended);
+        if unattended {
+            tracing::error!(
                 provider = %si.provider_name,
+                reason = stall.reason.label(),
                 stalled_secs = now.saturating_sub(stall.since),
-                "out of credits; pausing the run for a resume"
+                "failing an unattended run: nobody is there to fix it"
             );
             if let Some(mut buffer) = buffer {
-                buffer.logs.push((0, format!("[paused] {message}")));
+                buffer.logs.push((0, format!("[stalled] {message}")));
             }
-            state.status = AgentStatus::Paused;
-            commands.entity(entity).remove::<DispatchStall>();
+            state.status = AgentStatus::Error { message };
+            commands
+                .entity(entity)
+                .remove::<ReadyToInfer>()
+                .remove::<DispatchStall>();
             continue;
         }
-        let message = stall.reason.give_up_message(&si.provider_name);
-        tracing::error!(
+        tracing::warn!(
             provider = %si.provider_name,
             reason = stall.reason.label(),
             stalled_secs = now.saturating_sub(stall.since),
-            "failing a run whose provider will never resolve"
+            "pausing a run until the machine is fixed"
         );
         if let Some(mut buffer) = buffer {
-            buffer.logs.push((0, format!("[stalled] {message}")));
+            buffer.logs.push((0, format!("[paused] {message}")));
         }
-        state.status = AgentStatus::Error { message };
+        state.status = AgentStatus::Paused;
+        // `ReadyToInfer` stays on purpose: the retry is already staged, so a
+        // resume re-dispatches rather than rebuilding anything.
         commands
             .entity(entity)
-            .remove::<ReadyToInfer>()
+            .insert(PausedForSetup {
+                blocker,
+                remedy: message,
+            })
             .remove::<DispatchStall>();
     }
 }
@@ -323,6 +381,9 @@ mod tests {
     }
 
     /// Spawn an agent that has been stalled for `age` seconds for `reason`.
+    ///
+    /// Attended, because that is the ordinary case: a person started it and
+    /// can fix whatever is wrong. [`spawn_stalled_unattended`] is the other.
     fn spawn_stalled(world: &mut World, reason: StallReason, age: i64) -> Entity {
         world
             .spawn((
@@ -333,6 +394,52 @@ mod tests {
                 ReadyToInfer,
             ))
             .id()
+    }
+
+    /// The same, launched by something that is not watching.
+    fn spawn_stalled_unattended(world: &mut World, reason: StallReason, age: i64) -> Entity {
+        let e = spawn_stalled(world, reason, age);
+        world.entity_mut(e).insert(run_metadata(true));
+        e
+    }
+
+    /// Run metadata carrying only the field the watchdog reads.
+    fn run_metadata(unattended: bool) -> crate::persistence::RunMetadata {
+        crate::persistence::RunMetadata {
+            run_id: "r".to_string(),
+            agent_name: "a".to_string(),
+            agent_path: String::new(),
+            task: String::new(),
+            model: None,
+            workdir: String::new(),
+            num_stages: 1,
+            started_at: 0,
+            parent_run_id: None,
+            metadata: std::collections::HashMap::new(),
+            callback_url: None,
+            callback_secret: None,
+            title: None,
+            unattended,
+            read_paths: None,
+            output_request: None,
+        }
+    }
+
+    /// Assert a run is parked for setup, with `remedy` naming what to do.
+    fn assert_paused_for_setup(world: &World, e: Entity, remedy: &str) {
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Paused,
+            "a fixable problem parks the run rather than ending it"
+        );
+        let marker = world
+            .get::<PausedForSetup>(e)
+            .expect("a parked run says what to do");
+        assert!(marker.remedy.contains(remedy), "{}", marker.remedy);
+        // The retry stays staged, so a resume re-dispatches rather than
+        // rebuilding anything.
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<DispatchStall>(e).is_none());
     }
 
     /// Run the watchdog with the clock pinned to [`NOW`], so an age of `n` is
@@ -349,11 +456,33 @@ mod tests {
         schedule.run(world);
     }
 
+    /// A provider that is not configured is one config edit away from being
+    /// configured, so the run waits for that edit instead of dying for it.
     #[test]
-    fn a_provider_that_will_never_resolve_fails_the_run() {
+    fn a_provider_that_will_never_resolve_parks_the_run_for_a_person() {
         let mut world = World::new();
         world.insert_resource(StallTimeout(60));
         let e = spawn_stalled(&mut world, StallReason::ProviderMissing, 61);
+
+        run(&mut world);
+
+        assert_paused_for_setup(&world, e, "not configured");
+        // The operator sees why in the stage log the dashboard renders.
+        let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
+        assert!(
+            logs.iter().any(|(_, line)| line.starts_with("[paused]")),
+            "expected a [paused] log line, got: {logs:?}"
+        );
+    }
+
+    /// Unless nobody is watching. A scheduler polling for a terminal status
+    /// would wait for ever for one that never came, so an unattended run still
+    /// fails - the one case where an error is the more useful answer.
+    #[test]
+    fn an_unattended_run_still_fails_because_nobody_will_fix_it() {
+        let mut world = World::new();
+        world.insert_resource(StallTimeout(60));
+        let e = spawn_stalled_unattended(&mut world, StallReason::ProviderMissing, 61);
 
         run(&mut world);
 
@@ -363,10 +492,8 @@ mod tests {
                 if message.contains("ghost") && message.contains("not configured")),
             "got: {status:?}"
         );
-        // Taken out of dispatch, and the stall record is spent.
         assert!(world.get::<ReadyToInfer>(e).is_none());
-        assert!(world.get::<DispatchStall>(e).is_none());
-        // The operator sees why in the stage log the dashboard renders.
+        assert!(world.get::<PausedForSetup>(e).is_none());
         let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
         assert!(
             logs.iter().any(|(_, line)| line.starts_with("[stalled]")),
@@ -400,11 +527,7 @@ mod tests {
 
         run(&mut world);
 
-        let status = &world.get::<AgentState>(e).unwrap().status;
-        assert!(
-            matches!(status, AgentStatus::Error { message } if message.contains("ghost")),
-            "got: {status:?}"
-        );
+        assert_paused_for_setup(&world, e, "ghost");
     }
 
     #[test]
@@ -429,11 +552,7 @@ mod tests {
 
         run_on_the_wall_clock(&mut world);
 
-        let status = &world.get::<AgentState>(e).unwrap().status;
-        assert!(
-            matches!(status, AgentStatus::Error { message } if message.contains("ghost")),
-            "got: {status:?}"
-        );
+        assert_paused_for_setup(&world, e, "ghost");
     }
 
     #[test]
@@ -488,11 +607,7 @@ mod tests {
             world.get::<AgentState>(inside).unwrap().status,
             AgentStatus::Active
         );
-        let status = &world.get::<AgentState>(past).unwrap().status;
-        assert!(
-            matches!(status, AgentStatus::Error { message } if message.contains("ghost")),
-            "got: {status:?}"
-        );
+        assert_paused_for_setup(&world, past, "ghost");
     }
 
     #[test]
@@ -526,11 +641,7 @@ mod tests {
 
         run(&mut world);
 
-        let status = &world.get::<AgentState>(e).unwrap().status;
-        assert!(
-            matches!(status, AgentStatus::Error { message } if message.contains("ghost")),
-            "got: {status:?}"
-        );
+        assert_paused_for_setup(&world, e, "ghost");
     }
 
     #[test]
@@ -613,13 +724,7 @@ mod tests {
 
         run(&mut world);
 
-        let status = &world.get::<AgentState>(e).unwrap().status;
-        assert!(
-            matches!(status, AgentStatus::Error { message }
-                if message.contains("out of service") && message.contains("fallback_order")),
-            "got: {status:?}"
-        );
-        assert!(world.get::<ReadyToInfer>(e).is_none());
+        assert_paused_for_setup(&world, e, "out of service");
     }
 
     #[test]
@@ -698,29 +803,93 @@ mod tests {
         );
     }
 
+    /// Each way a provider can go out of service gets its own answer, because
+    /// each has its own fix: top up, replace the key, or check the plan. A
+    /// client that had only "unavailable" would have to send everyone to the
+    /// same screen and hope.
     #[test]
-    fn a_circuit_open_for_a_dead_key_still_fails_the_run() {
-        // The pause is only for credits: a rejected key does not fix itself
-        // with a top-up, so any other recorded reason keeps today's failure.
+    fn each_kind_of_provider_failure_names_its_own_remedy() {
+        use leviath_core::run_meta::SetupBlocker;
+        let cases = [
+            (
+                leviath_providers::UnavailableReason::CreditsExhausted,
+                SetupBlocker::CreditsExhausted,
+                "top up",
+            ),
+            (
+                leviath_providers::UnavailableReason::AuthFailed,
+                SetupBlocker::AuthFailed,
+                "rejected the API key",
+            ),
+            (
+                leviath_providers::UnavailableReason::Forbidden,
+                SetupBlocker::Forbidden,
+                "will not serve this model",
+            ),
+            (
+                // Nothing anyone can point at: neither the account nor the key
+                // is known to be wrong, so neither screen is the right one.
+                leviath_providers::UnavailableReason::Unreachable,
+                SetupBlocker::ProvidersUnavailable,
+                "out of service",
+            ),
+        ];
+        for (reason, expected, remedy) in cases {
+            let mut world = World::new();
+            world.insert_resource(StallTimeout(60));
+            let mut circuits = super::super::circuit::ProviderCircuits::default();
+            let policy = super::super::circuit::CircuitPolicy::default();
+            circuits.record_failure("ghost", reason, NOW - 1, &policy);
+            world.insert_resource(circuits);
+            let e = spawn_stalled(&mut world, StallReason::ProviderCircuitOpen, 61);
+
+            run(&mut world);
+
+            assert_paused_for_setup(&world, e, remedy);
+            assert_eq!(
+                world.get::<PausedForSetup>(e).unwrap().blocker,
+                expected,
+                "{reason:?}"
+            );
+        }
+    }
+
+    /// `StageIoBuffer` is optional on the query, so the unattended failure has
+    /// to land even when there is no stage log to explain it in.
+    #[test]
+    fn an_unattended_failure_copes_without_a_stage_log_buffer() {
         let mut world = World::new();
         world.insert_resource(StallTimeout(60));
-        let mut circuits = super::super::circuit::ProviderCircuits::default();
-        let policy = super::super::circuit::CircuitPolicy::default();
-        circuits.record_failure(
-            "ghost",
-            leviath_providers::UnavailableReason::AuthFailed,
-            NOW - 1,
-            &policy,
-        );
-        world.insert_resource(circuits);
-        let e = spawn_stalled(&mut world, StallReason::ProviderCircuitOpen, 61);
+        let e = world
+            .spawn((
+                agent_state(),
+                stage_inference(),
+                stalled_for(StallReason::ProviderMissing, 61),
+                run_metadata(true),
+                ReadyToInfer,
+            ))
+            .id();
 
         run(&mut world);
 
-        let status = &world.get::<AgentState>(e).unwrap().status;
-        assert!(
-            matches!(status, AgentStatus::Error { message } if message.contains("out of service")),
-            "got: {status:?}"
+        let status = format!("{:?}", world.get::<AgentState>(e).unwrap().status);
+        assert!(status.contains("Error"), "{status}");
+    }
+
+    /// A provider that was never configured is a different fix again, and the
+    /// one case that does not go through the breaker at all.
+    #[test]
+    fn a_missing_provider_is_its_own_kind_of_blocker() {
+        use leviath_core::run_meta::SetupBlocker;
+        let mut world = World::new();
+        world.insert_resource(StallTimeout(60));
+        let e = spawn_stalled(&mut world, StallReason::ProviderMissing, 61);
+
+        run(&mut world);
+
+        assert_eq!(
+            world.get::<PausedForSetup>(e).unwrap().blocker,
+            SetupBlocker::ProviderMissing
         );
     }
 

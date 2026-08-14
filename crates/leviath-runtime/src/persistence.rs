@@ -371,7 +371,14 @@ pub fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> RunMeta {
         yolo: md.unattended,
         read_paths: md.read_paths,
         final_output: final_output.map(|o| o.0.descriptor()),
-        waiting_on: wait_reason_from(state.status == AgentStatus::Waiting, &parked),
+        // Paused counts as parked here, not just Waiting: a run held until the
+        // machine is fixed is exactly the case where a reader most needs to be
+        // told why, and it is `Paused` rather than `Waiting` because nothing is
+        // holding a prompt open for it.
+        waiting_on: wait_reason_from(
+            matches!(state.status, AgentStatus::Waiting | AgentStatus::Paused),
+            &parked,
+        ),
         output_request: md.output_request.clone(),
     }
 }

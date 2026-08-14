@@ -40,6 +40,7 @@ pub(crate) fn to_inference_result(
 /// lifetimes: the borrow is bound when the query is fetched.
 type InferenceQuery = (
     &'static mut AgentState,
+    Option<&'static crate::persistence::RunMetadata>,
     Option<&'static mut crate::persistence::TokenTotals>,
     Option<&'static StageCursor>,
     Option<&'static ContextWindow>,
@@ -65,8 +66,17 @@ pub fn collect_inference(
     let policy = policy.map(|p| *p).unwrap_or_default();
     let now = chrono::Utc::now().timestamp();
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((mut state, totals, cursor, window, mut ledger, buffer, mut inference, activity)) =
-            agents.get_mut(outcome.entity)
+        let Ok((
+            mut state,
+            md,
+            totals,
+            cursor,
+            window,
+            mut ledger,
+            buffer,
+            mut inference,
+            activity,
+        )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
@@ -236,12 +246,18 @@ pub fn collect_inference(
                 // resumes. Failing here would make the run permanently
                 // unresumable, so it pauses instead, still pointed at the same
                 // inference, and a `lev resume` re-dispatches it (issue #413).
-                if err.unavailable_reason()
-                    == Some(leviath_providers::UnavailableReason::CreditsExhausted)
+                // Unattended is the exception: a scheduler or a benchmark is
+                // watching for a terminal status and would wait for ever for
+                // one that never comes, so for those a failure is the honest
+                // answer.
+                let attended = !md.is_some_and(|m| m.unattended);
+                if attended
+                    && err.unavailable_reason()
+                        == Some(leviath_providers::UnavailableReason::CreditsExhausted)
                 {
                     let message = format!(
-                        "out of credits ({err}); pausing this run - top up the \
-                         account, then `lev resume` it"
+                        "out of credits ({err}): top up the account, then \
+                         `lev resume` this run"
                     );
                     tracing::warn!(error = %err, "out of credits; pausing the run for a resume");
                     if let Some(mut buffer) = buffer {
@@ -252,6 +268,10 @@ pub fn collect_inference(
                         .entity(outcome.entity)
                         .remove::<AwaitingInference>()
                         .remove::<InFlightWork>()
+                        .insert(crate::pipeline::PausedForSetup {
+                            blocker: leviath_core::run_meta::SetupBlocker::CreditsExhausted,
+                            remedy: message,
+                        })
                         .insert(ReadyToInfer);
                     continue;
                 }

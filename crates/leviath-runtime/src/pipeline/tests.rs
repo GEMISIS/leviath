@@ -925,6 +925,65 @@ fn an_exhausted_fallback_list_pauses_on_credits_instead_of_dying() {
     assert!(line.contains("lev resume"), "{line}");
 }
 
+/// An unattended run out of credits still fails.
+///
+/// Pausing is right for a person, who can top up and resume. It is wrong for
+/// a scheduler or a benchmark, which is watching for a terminal status and
+/// would wait for ever for one that never arrives - so the one case where an
+/// error is more useful than patience keeps getting one.
+#[test]
+fn an_unattended_run_out_of_credits_fails_rather_than_waiting_for_nobody() {
+    let (mut world, tx) = world_with_results();
+    let mut si = stage_with_fallback();
+    si.fallbacks.clear();
+    let mut md = run_metadata();
+    md.unattended = true;
+    let e = world.spawn((agent_state(), AwaitingInference, si, md)).id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(credits_exhausted()),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    let status = format!("{:?}", world.get::<AgentState>(e).unwrap().status);
+    assert!(status.contains("Error"), "{status}");
+    assert!(world.get::<crate::pipeline::PausedForSetup>(e).is_none());
+    assert!(world.get::<ResolveTransition>(e).is_some());
+}
+
+/// The attended run says what to do, in a form a client can read rather than
+/// only a log line.
+#[test]
+fn a_credits_pause_records_the_remedy_on_the_run() {
+    let (mut world, tx) = world_with_results();
+    let mut si = stage_with_fallback();
+    si.fallbacks.clear();
+    let e = world
+        .spawn((agent_state(), AwaitingInference, si, run_metadata()))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(credits_exhausted()),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Paused
+    );
+    let parked = world
+        .get::<crate::pipeline::PausedForSetup>(e)
+        .expect("the run says what it needs");
+    assert!(parked.remedy.contains("top up"), "{}", parked.remedy);
+    assert!(parked.remedy.contains("lev resume"), "{}", parked.remedy);
+}
+
 #[test]
 fn the_credits_pause_copes_without_a_stage_log_buffer() {
     // `StageIoBuffer` is optional on the query, so the pause has to land even
@@ -1702,6 +1761,45 @@ fn dispatch_persistence_records_why_a_run_is_parked() {
     run_dispatch_persistence(&mut world);
     let moving = snapshot_job(rx.try_recv().expect("job sent"));
     assert_eq!(moving.meta.waiting_on, None);
+}
+
+/// A run parked until the machine is fixed says so in `meta.json`, with the
+/// kind of problem and what to do about it.
+///
+/// Through the real system rather than the mapper: the marker lives on the
+/// entity and the persist query is the only thing that can see it, so a query
+/// that forgot to select it would leave the field empty with every unit test
+/// still passing.
+#[test]
+fn dispatch_persistence_records_what_a_parked_run_needs() {
+    use leviath_core::run_meta::{SetupBlocker, WaitReason};
+
+    let (mut world, mut rx) = world_with_persistence();
+    let mut state = agent_state();
+    state.status = AgentStatus::Paused;
+    world.spawn((
+        run_metadata(),
+        state,
+        conv_window(),
+        StageCursor { index: 0 },
+        TokenTotals::default(),
+        PersistWatermark::default(),
+        crate::pipeline::PausedForSetup {
+            blocker: SetupBlocker::CreditsExhausted,
+            remedy: "top up the account, then `lev resume` this run".to_string(),
+        },
+    ));
+
+    run_dispatch_persistence(&mut world);
+    let job = snapshot_job(rx.try_recv().expect("job sent"));
+
+    // Paused, not errored: the run is still there to be resumed into.
+    assert_eq!(job.meta.status, leviath_core::run_meta::RunStatus::Paused);
+    let Some(WaitReason::NeedsSetup { blocker, remedy }) = job.meta.waiting_on else {
+        panic!("a parked run says what it needs: {:?}", job.meta.waiting_on);
+    };
+    assert_eq!(blocker, SetupBlocker::CreditsExhausted);
+    assert!(remedy.contains("top up"), "{remedy}");
 }
 
 /// Tool approvals are a person's to give, so a run holding them says so.
