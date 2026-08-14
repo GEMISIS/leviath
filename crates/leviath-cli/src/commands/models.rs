@@ -112,6 +112,23 @@ pub fn closed_catalog_models() -> Vec<(String, String)> {
         .collect()
 }
 
+/// Context-window size per `(provider, model)`, from the same table.
+///
+/// Every provider, not only the closed catalogs: the question here is "how big
+/// is this window", and an OpenRouter row that names a size is as useful as an
+/// Anthropic one. A model absent from the table simply is not consulted.
+pub fn builtin_model_windows() -> std::collections::HashMap<(String, String), usize> {
+    builtin_table()
+        .into_iter()
+        .map(|e| {
+            (
+                (e.provider.to_string(), e.model_id.to_string()),
+                e.caps.max_context_tokens,
+            )
+        })
+        .collect()
+}
+
 /// Hard-coded capability table for well-known models.
 ///
 /// This is used when the provider API is not reachable or `--remote` is not

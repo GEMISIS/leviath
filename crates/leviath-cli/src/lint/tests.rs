@@ -18,6 +18,17 @@ conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
     )
 }
 
+impl LintEnv {
+    /// A default env that also knows how big the shipped models' windows are,
+    /// which is what the percentage-budget check needs to say a number.
+    fn default_with_windows() -> Self {
+        Self {
+            model_windows: crate::commands::models::builtin_model_windows(),
+            ..Self::default()
+        }
+    }
+}
+
 /// Lint a manifest whose text and blueprint come from the same source, which is
 /// the only pairing production ever passes.
 fn lint(content: &str, env: &LintEnv) -> Vec<LintFinding> {
@@ -1823,4 +1834,149 @@ max_iterations = 5
         "{:?}",
         codes(&findings)
     );
+}
+
+/// A manifest whose region layout is spelled out, so a budget can be varied.
+fn manifest_with_regions(regions: &str) -> String {
+    format!(
+        r#"
+[agent]
+name = "lint-fixture"
+version = "0.1.0"
+description = "a fixture"
+
+[stages.work]
+mode = "autonomous"
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
+max_iterations = 10
+allow_complete = true
+
+[context.regions]
+system = {{ kind = "pinned", max_tokens = 1000 }}
+conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
+{regions}
+"#
+    )
+}
+
+/// The reported case, reproduced with the bundled researcher's own numbers.
+///
+/// `raw_findings = {{ kind = "temporary", budget = "38%" }}` means "hold the last
+/// ~76k of raw source material" against a 200k window. Against a 1M window the
+/// same line is a 380k ceiling that oldest-first eviction never reaches, so the
+/// region hoards. A measured run grew 3k -> 196k tokens per request and burned
+/// 3.3M cache-write tokens without finishing.
+#[test]
+fn a_percentage_budget_on_an_evicting_region_is_warned_with_the_resolved_ceiling() {
+    let toml = manifest_with_regions(r#"raw_findings = { kind = "temporary", budget = "38%" }"#);
+    let findings = lint(&toml, &LintEnv::default_with_windows());
+    let found = findings
+        .iter()
+        .find(|f| f.code == "unbounded-percentage-budget")
+        .expect("the region is warned about");
+    assert_eq!(found.severity, LintSeverity::Warning);
+    // The number is the whole point: "38%" is not alarming until the
+    // denominator is named.
+    assert!(found.message.contains("380000"), "{}", found.message);
+    assert!(
+        found.message.contains("claude-sonnet-5"),
+        "{}",
+        found.message
+    );
+    assert!(found.message.contains("1000000"), "{}", found.message);
+    assert!(
+        found
+            .fix
+            .as_deref()
+            .unwrap_or_default()
+            .contains("max_tokens"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn a_percentage_budget_with_a_max_guard_is_left_alone() {
+    // The fix the issue reports as working completely.
+    let toml = manifest_with_regions(
+        r#"raw_findings = { kind = "temporary", budget = "38%", max_tokens = 24000 }"#,
+    );
+    assert!(
+        !codes(&lint(&toml, &LintEnv::default_with_windows()))
+            .contains(&"unbounded-percentage-budget")
+    );
+}
+
+#[test]
+fn an_absolute_budget_is_never_warned_about() {
+    let toml =
+        manifest_with_regions(r#"raw_findings = { kind = "temporary", max_tokens = 24000 }"#);
+    assert!(
+        !codes(&lint(&toml, &LintEnv::default_with_windows()))
+            .contains(&"unbounded-percentage-budget")
+    );
+}
+
+/// A region that holds what it is given has no bound to fail to reach, so a
+/// percentage there means exactly what its author intended.
+#[test]
+fn a_pinned_region_with_a_percentage_budget_is_fine() {
+    let toml = manifest_with_regions(r#"notes = { kind = "pinned", budget = "38%" }"#);
+    assert!(
+        !codes(&lint(&toml, &LintEnv::default_with_windows()))
+            .contains(&"unbounded-percentage-budget")
+    );
+}
+
+#[test]
+fn every_evicting_kind_is_covered_not_just_temporary() {
+    for decl in [
+        r#"r = { kind = "clearable", budget = "38%" }"#,
+        r#"r = { kind = "sliding_window", max_items = 20, budget = "38%" }"#,
+        r#"r = { kind = "compacting", compact_at = 0.8, budget = "38%" }"#,
+    ] {
+        let toml = manifest_with_regions(decl);
+        assert!(
+            codes(&lint(&toml, &LintEnv::default_with_windows()))
+                .contains(&"unbounded-percentage-budget"),
+            "{decl}"
+        );
+    }
+}
+
+/// Without a window there is no number to report, and a warning that cannot say
+/// what "38%" comes to is one nobody acts on.
+#[test]
+fn nothing_is_said_when_no_declared_model_has_a_known_window() {
+    let toml = manifest_with_regions(r#"raw_findings = { kind = "temporary", budget = "38%" }"#);
+    assert!(!codes(&lint(&toml, &LintEnv::default())).contains(&"unbounded-percentage-budget"));
+}
+
+/// One warning per region, not per layout that declares it: the fix is on the
+/// declaration.
+#[test]
+fn a_region_declared_in_two_layouts_is_named_once() {
+    let toml = r#"
+[agent]
+name = "lint-fixture"
+version = "0.1.0"
+description = "a fixture"
+
+[stages.work]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+allow_complete = true
+
+[stages.work.context.regions]
+raw_findings = { kind = "temporary", budget = "38%" }
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+raw_findings = { kind = "temporary", budget = "38%" }
+"#;
+    let hits = codes(&lint(toml, &LintEnv::default_with_windows()))
+        .into_iter()
+        .filter(|c| *c == "unbounded-percentage-budget")
+        .count();
+    assert_eq!(hits, 1);
 }

@@ -159,6 +159,15 @@ pub struct LintEnv {
     /// granted is the interesting part, a safe-commands block is honoured whole
     /// or not at all.
     pub safe_commands_granted: Option<bool>,
+
+    /// Context-window size per `(provider, model)`, for the models this build
+    /// ships a capability row for.
+    ///
+    /// Only needed to say what a percentage budget *resolves to*: "38%" is not
+    /// alarming until you know the denominator is a million. Empty skips the
+    /// unbounded-percentage check, because a warning that cannot name a number
+    /// is a warning nobody acts on.
+    pub model_windows: HashMap<(String, String), usize>,
 }
 
 impl LintEnv {
@@ -186,6 +195,7 @@ impl LintEnv {
             available_providers: None,
             read_paths: None,
             safe_commands_granted: None,
+            model_windows: crate::commands::models::builtin_model_windows(),
         }
     }
 
@@ -262,6 +272,7 @@ pub fn lint_manifest(content: &str, blueprint: &Blueprint, env: &LintEnv) -> Vec
     findings.extend(lint_output_reachable(blueprint));
     findings.extend(lint_dead_end_possible(blueprint));
     findings.extend(lint_compacted_deliverables(blueprint));
+    findings.extend(lint_unbounded_percentage(blueprint, env));
 
     let agent_permissions = blueprint.agent_tool_permissions();
 
