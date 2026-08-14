@@ -76,6 +76,7 @@ impl WorldHost {
                     cache_write_tokens: totals.cache_write_tokens,
                     context_tokens,
                     terminal,
+                    wait_reason: self.wait_reason(agent),
                 }
             };
             let max_tokens = self
@@ -107,8 +108,13 @@ impl WorldHost {
                     e.iteration,
                     e.tool_calls,
                     e.accepts_messages,
+                    e.wait_reason.clone(),
                 )
             };
+            // The reason is part of the key, so a parent whose worker count
+            // falls sends an event: that is progress, and a subscriber that
+            // only heard "waiting" once would show a stale count for the rest
+            // of the fan-out. Bounded by the number of workers.
             if prev.as_ref().map(status_key) != Some(status_key(&cur)) {
                 let _ = self.events.send(WorldEvent::Status {
                     run_id: run_id.clone(),
@@ -118,6 +124,7 @@ impl WorldHost {
                     iteration: cur.iteration,
                     tool_calls: cur.tool_calls,
                     accepts_messages: cur.accepts_messages,
+                    wait_reason: cur.wait_reason.clone(),
                 });
             }
 

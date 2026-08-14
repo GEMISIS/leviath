@@ -73,7 +73,7 @@ impl std::fmt::Display for RunStatus {
 /// exhaustively across the codebase and serialized two ways on the wire, so
 /// splitting it would break every consumer to express something that is not a
 /// new state. The run really is waiting; this says on what.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reason")]
 pub enum WaitReason {
     /// Blocked on a tool-approval prompt. Needs a person (or `--yolo`).
@@ -131,7 +131,7 @@ pub enum WaitReason {
 /// differ. Topping up an account, adding a provider to `config.toml` and
 /// replacing a rejected key are three different screens, and a console that
 /// had only the sentence would be reduced to matching on its wording.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SetupBlocker {
     /// The stage names a provider this install has not configured.

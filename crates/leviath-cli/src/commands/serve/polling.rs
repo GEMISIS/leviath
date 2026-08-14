@@ -95,6 +95,7 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             iteration,
             tool_calls,
             accepts_messages,
+            wait_reason,
         } => ServerEvent::AgentStatus {
             agent_id,
             run_id,
@@ -103,6 +104,7 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             iteration,
             tool_calls,
             accepts_messages,
+            wait_reason,
         },
         WorldEvent::Tokens {
             run_id,
@@ -343,6 +345,7 @@ mod tests {
     use crate::config::Config;
     use crate::runstate::{RunMeta, create_run};
     use leviath_core::interaction::InteractionRequest;
+    use leviath_core::run_meta::WaitReason;
     use leviath_runtime::control_socket::{ControlClient, bind_control_listener, control_id};
     use std::sync::Arc;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -427,7 +430,8 @@ mod tests {
                 stage: "s".into(),
                 iteration: 1,
                 tool_calls: 0,
-                accepts_messages: true
+                accepts_messages: true,
+                wait_reason: None,
             }),
             "agent_status"
         );
@@ -541,9 +545,44 @@ mod tests {
                 iteration: 0,
                 tool_calls: 0,
                 accepts_messages: true,
+                wait_reason: None,
             },
         );
         assert_eq!(tag(&rx.try_recv().unwrap()), "agent_status");
+    }
+
+    /// The reason a run is parked has to survive the hop onto the websocket,
+    /// not just the status label. A subscriber that receives `waiting` with the
+    /// reason stripped is back to fetching the run to find out whether anyone
+    /// is needed, which is the guess this vocabulary exists to remove.
+    #[tokio::test]
+    async fn a_parked_run_carries_its_reason_onto_the_socket() {
+        let (state, mut rx) = state_with(no_daemon_client());
+        let client = reqwest::Client::new();
+        handle_event(
+            &state,
+            &client,
+            WorldEvent::Status {
+                run_id: "r".into(),
+                agent_id: "a".into(),
+                status: "waiting".into(),
+                stage: "s".into(),
+                iteration: 0,
+                tool_calls: 0,
+                accepts_messages: false,
+                wait_reason: Some(WaitReason::FanOutWorkers { outstanding: 3 }),
+            },
+        );
+        // Asserted on the serialized form rather than by destructuring, because
+        // the JSON is what a subscriber actually receives: this pins the field
+        // name and the tagging a client parses, not just that the value made it
+        // into the enum.
+        let sent = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        assert_eq!(sent["type"], "agent_status");
+        assert_eq!(
+            sent["wait_reason"],
+            serde_json::json!({ "reason": "fan_out_workers", "outstanding": 3 })
+        );
     }
 
     #[tokio::test]
@@ -900,6 +939,7 @@ mod tests {
                 iteration: 0,
                 tool_calls: 0,
                 accepts_messages: true,
+                wait_reason: None,
             }],
         );
         let (state, mut rx) = state_with(control);
@@ -942,6 +982,7 @@ mod tests {
                     iteration: 0,
                     tool_calls: 0,
                     accepts_messages: true,
+                    wait_reason: None,
                 })
                 .unwrap();
                 line.push('\n');

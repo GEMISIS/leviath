@@ -52,6 +52,13 @@ pub enum WorldEvent {
         tool_calls: usize,
         /// Whether the current stage accepts messages.
         accepts_messages: bool,
+        /// Why the run is parked, when it is.
+        ///
+        /// A subscriber watching live otherwise sees a run turn `waiting` or
+        /// `paused` and has to fetch the run to learn whether that means "go
+        /// and answer something" or "its workers are still going" - which is
+        /// the guess this vocabulary exists to remove.
+        wait_reason: Option<leviath_core::run_meta::WaitReason>,
     },
     /// A run's token totals changed.
     Tokens {
@@ -214,4 +221,7 @@ pub(super) struct Emitted {
     pub(super) cache_write_tokens: usize,
     pub(super) context_tokens: usize,
     pub(super) terminal: bool,
+    /// Why the run is parked, so a change of reason counts as a change worth
+    /// telling subscribers about.
+    pub(super) wait_reason: Option<leviath_core::run_meta::WaitReason>,
 }

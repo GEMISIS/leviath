@@ -636,6 +636,7 @@ mod tests {
                 iteration: 1,
                 tool_calls: 0,
                 accepts_messages: true,
+                wait_reason: None,
             },
             ServerEvent::ContextUpdate {
                 agent_id: "a".to_string(),
@@ -1026,6 +1027,7 @@ mod tests {
             iteration: 1,
             tool_calls: 0,
             accepts_messages: true,
+            wait_reason: None,
         };
         assert_eq!(ev.run_id(), "run-123");
     }
@@ -1108,6 +1110,7 @@ mod tests {
             iteration: 1,
             tool_calls: 0,
             accepts_messages: true,
+            wait_reason: None,
         };
         let non_matching = ServerEvent::AgentStatus {
             agent_id: "a".to_string(),
@@ -1117,6 +1120,7 @@ mod tests {
             iteration: 1,
             tool_calls: 0,
             accepts_messages: true,
+            wait_reason: None,
         };
 
         assert_eq!(matching.run_id(), filter);
@@ -1133,6 +1137,7 @@ mod tests {
             iteration: 3,
             tool_calls: 0,
             accepts_messages: false,
+            wait_reason: None,
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert!(json.contains("\"type\":\"agent_status\""));

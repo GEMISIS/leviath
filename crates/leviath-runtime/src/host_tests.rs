@@ -2379,6 +2379,49 @@ async fn emit_events_broadcasts_agent_changes() {
     );
 }
 
+/// A subscriber watching live gets the same vocabulary `lev ps` and the
+/// dashboard use, so it never has to fetch the run to find out whether a parked
+/// run needs a person. And because the reason is part of the change key, a
+/// parked run that swaps one blocker for another sends a fresh event rather
+/// than sitting on the stale one: the status label is `waiting` either way.
+#[tokio::test]
+async fn a_status_event_carries_why_a_run_is_parked_and_re_fires_when_that_changes() {
+    let mut host = host_with(vec![text("done")]);
+    let mut rx = host.subscribe();
+    let entity = spawn(&mut host, "run-a", "agent-a");
+    {
+        let world = host.world_mut().world_mut();
+        let mut agent = world.entity_mut(entity.entity());
+        agent.get_mut::<AgentState>().unwrap().status = AgentStatus::Waiting;
+        agent.insert(crate::gate_prompt::AwaitingGatePrompt(1));
+    }
+
+    host.emit_events();
+    let reason = std::iter::from_fn(|| rx.try_recv().ok())
+        .find_map(|e| match e {
+            WorldEvent::Status { wait_reason, .. } => wait_reason,
+            _ => None,
+        })
+        .expect("a waiting run's status event should say why");
+    assert_eq!(reason, leviath_core::run_meta::WaitReason::TaintGate);
+
+    // Same status, same stage, same iteration: only the blocker moves.
+    {
+        let world = host.world_mut().world_mut();
+        let mut agent = world.entity_mut(entity.entity());
+        agent.remove::<crate::gate_prompt::AwaitingGatePrompt>();
+        agent.insert(crate::interaction_points::AwaitingInteractionPoint);
+    }
+    host.emit_events();
+    let reason = std::iter::from_fn(|| rx.try_recv().ok())
+        .find_map(|e| match e {
+            WorldEvent::Status { wait_reason, .. } => wait_reason,
+            _ => None,
+        })
+        .expect("a run that swapped blockers should send the new one");
+    assert_eq!(reason, leviath_core::run_meta::WaitReason::InteractionPoint);
+}
+
 #[tokio::test]
 async fn emit_events_unloads_terminal_agents_when_safe() {
     let mut host = host_with(vec![]);
@@ -3341,6 +3384,7 @@ fn every_world_event_variant_carries_its_run_id() {
             iteration: 1,
             tool_calls: 0,
             accepts_messages: false,
+            wait_reason: None,
         },
         WorldEvent::Tokens {
             run_id: rid.clone(),
