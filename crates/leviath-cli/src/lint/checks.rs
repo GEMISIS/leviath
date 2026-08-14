@@ -595,3 +595,114 @@ pub(super) fn lint_compacted_deliverables(blueprint: &Blueprint) -> Vec<LintFind
         })
         .collect()
 }
+
+/// A region that evicts, bounded by a share of a window nobody has measured.
+///
+/// Percentage budgets exist so an author's intent survives a change of model:
+/// "35%" means the same thing whatever the window. For a *fixed* region that
+/// holds. For one whose whole design is to evict, it does not - because eviction
+/// only ever runs at the bound, so the bound is the discipline, and a percentage
+/// re-reads that discipline every time the model changes.
+///
+/// The bundled researcher declares `raw_findings = { kind = "temporary", budget
+/// = "38%" }`. Written against ~200k windows that means "hold the last ~76k of
+/// raw source material" - sane. Resolved against a 1M window the same line means
+/// a 380k ceiling: oldest-first eviction exists, and never triggers, because the
+/// bound is never reached. A measured run grew monotonically from 3k to 196k
+/// tokens per request over 31 requests and burned 3.3M cache-write tokens
+/// without finishing. `max_tokens = 24000` fixed it completely.
+///
+/// Nothing errored, which is the point. The failure is invisible until the bill
+/// arrives, so it is worth saying out loud at the only moment somebody is
+/// looking at the blueprint.
+///
+/// Warned once per region name however many layouts declare it: the fix is on
+/// the declaration.
+pub(super) fn lint_unbounded_percentage(blueprint: &Blueprint, env: &LintEnv) -> Vec<LintFinding> {
+    let Some((model, window)) = widest_declared_window(blueprint, env) else {
+        // No window in hand means no number to put in the sentence, and the
+        // sentence is the whole value: "38% might be large" is not actionable.
+        return Vec::new();
+    };
+
+    let mut named: Vec<(&str, usize, f64)> = Vec::new();
+    for layout in std::iter::once(&blueprint.context_layout).chain(
+        blueprint
+            .stages
+            .iter()
+            .filter_map(|s| s.context_layout.as_ref()),
+    ) {
+        for region in &layout.regions {
+            let leviath_core::layout::BudgetSpec::Percent {
+                percent, max: None, ..
+            } = region.budget
+            else {
+                continue;
+            };
+            if !evicts_at_its_bound(&region.kind) {
+                continue;
+            }
+            if named.iter().any(|(name, _, _)| *name == region.name) {
+                continue;
+            }
+            named.push((&region.name, region.budget.resolve(window), percent));
+        }
+    }
+
+    named
+        .into_iter()
+        .map(|(region, ceiling, percent)| {
+            LintFinding::new(
+                LintSeverity::Warning,
+                "unbounded-percentage-budget",
+                format!(
+                    "region '{region}' evicts at its bound, and its budget \
+                     \"{pct:.0}%\" resolves to {ceiling} tokens on {model} \
+                     ({window} window) - a bound that large may never be reached, \
+                     so the region hoards instead of evicting",
+                    pct = percent * 100.0,
+                ),
+            )
+            .with_fix(format!(
+                "add max_tokens to [context.regions] {region} - the percentage \
+                 still applies on smaller windows, and the guard keeps eviction \
+                 running on larger ones"
+            ))
+        })
+        .collect()
+}
+
+/// The largest context window among the models this blueprint names, and which
+/// model that is.
+///
+/// The largest rather than the average: it is the one that turns a modest
+/// percentage into a hoard, and the blueprint will meet it as soon as anybody
+/// runs a stage on it.
+fn widest_declared_window<'a>(blueprint: &Blueprint, env: &'a LintEnv) -> Option<(&'a str, usize)> {
+    blueprint
+        .stages
+        .iter()
+        .flat_map(|stage| stage.model.models.iter())
+        .filter_map(|m| {
+            env.model_windows
+                .get_key_value(&(m.provider.clone(), m.model.clone()))
+                .map(|((_, model), window)| (model.as_str(), *window))
+        })
+        .max_by_key(|(_, window)| *window)
+}
+
+/// Whether this kind of region drops content when it reaches its ceiling.
+///
+/// The kinds that do are the ones the warning is about: a bound they cannot
+/// reach is a mechanism that never runs. Everything else either holds what it is
+/// given (`Pinned`, `Checklist`) or is bounded by something other than a token
+/// count, and a percentage there is exactly as intended.
+fn evicts_at_its_bound(kind: &leviath_core::RegionKind) -> bool {
+    matches!(
+        kind,
+        leviath_core::RegionKind::Temporary
+            | leviath_core::RegionKind::Clearable
+            | leviath_core::RegionKind::SlidingWindow { .. }
+            | leviath_core::RegionKind::Compacting { .. }
+    )
+}

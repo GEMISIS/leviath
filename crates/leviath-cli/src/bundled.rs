@@ -783,6 +783,7 @@ mod tests {
             available_providers: None,
             read_paths: None,
             safe_commands_granted: None,
+            model_windows: crate::commands::models::builtin_model_windows(),
         }
     }
 
