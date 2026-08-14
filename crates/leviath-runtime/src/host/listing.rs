@@ -30,7 +30,7 @@ impl WorldHost {
         // persistence system that writes the same answer to `meta.json`: two
         // copies of it would disagree the first time either was edited.
         leviath_core::run_meta::wait_reason_from(
-            state.status == AgentStatus::Waiting,
+            matches!(state.status, AgentStatus::Waiting | AgentStatus::Paused),
             &leviath_core::run_meta::WaitMarkers {
                 gate_prompt: world
                     .get::<crate::gate_prompt::AwaitingGatePrompt>(entity)
@@ -68,6 +68,12 @@ impl WorldHost {
                     .find(|(agent_id, _)| *agent_id == state.agent_id)
                     .map(|(_, req)| req.kind),
                 awaiting_interaction: world.get::<AwaitingInteraction>(entity).is_some(),
+                needs_setup: world
+                    .get::<crate::pipeline::PausedForSetup>(entity)
+                    .map(|p| leviath_core::run_meta::SetupNeeded {
+                        blocker: p.blocker,
+                        remedy: p.remedy.clone(),
+                    }),
             },
         )
     }

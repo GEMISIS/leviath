@@ -263,6 +263,7 @@ type PersistenceQuery = (
         Option<&'static crate::gate_prompt::AwaitingGatePrompt>,
         Option<&'static super::WaitingForChildren>,
         Option<&'static crate::components::AwaitingInteraction>,
+        Option<&'static super::PausedForSetup>,
     ),
 );
 
@@ -302,6 +303,7 @@ pub fn dispatch_persistence(
             gate_prompt,
             waiting_for_children,
             awaiting_interaction,
+            paused_for_setup,
         ),
     ) in agents.iter_mut()
     {
@@ -407,6 +409,10 @@ pub fn dispatch_persistence(
                             .map(|(_, req)| req.kind)
                     }),
                     awaiting_interaction: awaiting_interaction.is_some(),
+                    needs_setup: paused_for_setup.map(|p| leviath_core::run_meta::SetupNeeded {
+                        blocker: p.blocker,
+                        remedy: p.remedy.clone(),
+                    }),
                 },
             },
             crate::persistence::RunPosition {

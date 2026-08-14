@@ -819,6 +819,13 @@ impl PipelineWorld {
     /// Resume a paused agent. `Idle` is also accepted (resume-as-nudge for an
     /// agent that has not ticked yet); anything else returns `false`.
     pub fn resume(&mut self, agent: AgentId) -> bool {
+        // Resolved once, up front. Doing it again inside the arm below would
+        // be a second check that cannot fail - the status lookup already
+        // proved the entity is here - and an arm nothing can reach is an arm
+        // nothing can test.
+        let Some(entity) = agent.resolve_in(&self.world) else {
+            return false;
+        };
         match self.agent_status(agent) {
             Some(AgentStatus::Paused | AgentStatus::Idle) => {
                 // An explicit resume says conditions have changed - most often
@@ -831,6 +838,13 @@ impl PipelineWorld {
                 {
                     circuits.reset();
                 }
+                // The run no longer claims to need setup. If the machine was
+                // not actually fixed the watchdog re-parks it a minute later
+                // with a fresh message, which is better than carrying a stale
+                // one that describes a problem somebody may have just solved.
+                self.world
+                    .entity_mut(entity)
+                    .remove::<crate::pipeline::PausedForSetup>();
                 self.set_status(agent, AgentStatus::Active)
             }
             _ => false,
@@ -1632,8 +1646,10 @@ mod tests {
         assert_eq!(stall.reason, crate::pipeline::StallReason::ProviderMissing);
 
         // Backdate it past the grace period, as the host's redrive timer would
-        // find it on a later tick, and the run fails with an answer rather than
-        // hanging.
+        // find it on a later tick. The run stops claiming to be working and
+        // says what it needs instead of hanging - and, since a missing
+        // provider is one config edit away from being present, it parks rather
+        // than dies, so the edit can be followed by `lev resume`.
         let past =
             chrono::Utc::now().timestamp() - crate::pipeline::DEFAULT_STALL_TIMEOUT_SECS as i64 - 1;
         world
@@ -1643,15 +1659,19 @@ mod tests {
             .since = past;
         world.run_to_fixed_point();
 
-        let status = world.agent_status(e);
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Paused));
+        let parked = world
+            .world()
+            .get::<crate::pipeline::PausedForSetup>(e.entity())
+            .expect("it says what to do");
         assert!(
-            matches!(status, Some(AgentStatus::Error { ref message })
-                if message.contains("script") && message.contains("not configured")),
-            "got: {status:?}"
+            parked.remedy.contains("script") && parked.remedy.contains("not configured"),
+            "{}",
+            parked.remedy
         );
         assert!(
-            world.world().get::<ReadyToInfer>(e.entity()).is_none(),
-            "and it is out of the dispatch systems"
+            world.world().get::<ReadyToInfer>(e.entity()).is_some(),
+            "the retry stays staged, so a resume re-dispatches it"
         );
     }
 
@@ -1977,6 +1997,53 @@ mod tests {
 
         assert!(world.resume(e));
         assert!(world.open_circuits().is_empty());
+    }
+
+    /// An id belonging to another world names a different agent here, so
+    /// resuming with one refuses rather than resuming whatever happens to sit
+    /// at that entity index. This is the check `AgentId` exists for.
+    #[tokio::test]
+    async fn resume_refuses_an_id_from_another_world() {
+        let mut theirs = build_world(registry_with(vec![text("t1")]));
+        let e = spawn(&mut theirs);
+        assert!(theirs.pause(e));
+
+        let mut ours = build_world(registry_with(vec![text("t1")]));
+        assert!(
+            !ours.resume(e),
+            "an id from elsewhere is not ours to resume"
+        );
+        // And the run it really names is untouched.
+        assert_eq!(theirs.agent_status(e), Some(AgentStatus::Paused));
+    }
+
+    /// Resuming drops the "needs setup" note.
+    ///
+    /// If the machine was not actually fixed the watchdog re-parks the run a
+    /// minute later with a fresh message, which is better than carrying a
+    /// stale one describing a problem somebody may have just solved.
+    #[tokio::test]
+    async fn resume_clears_the_note_saying_what_the_run_needed() {
+        let mut world = build_world(registry_with(vec![text("t1")]));
+        let e = spawn(&mut world);
+        assert!(world.pause(e));
+        world
+            .world_mut()
+            .entity_mut(e.entity())
+            .insert(crate::pipeline::PausedForSetup {
+                blocker: leviath_core::run_meta::SetupBlocker::ProviderMissing,
+                remedy: "add it to config.toml".to_string(),
+            });
+
+        assert!(world.resume(e));
+
+        assert!(
+            world
+                .world()
+                .get::<crate::pipeline::PausedForSetup>(e.entity())
+                .is_none(),
+            "a resumed run no longer claims to need setup"
+        );
     }
 
     #[tokio::test]
