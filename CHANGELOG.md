@@ -11,6 +11,68 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## 0.3.10 - 2026-08-14
+
+- Fixed: a run now reports what it was actually billed. A run makes four kinds
+  of provider call - stage turns, region compaction, the call that names the
+  run, and the call that picks the next stage - and only the first was counted.
+  The other three dropped their token usage where their results were collected,
+  because each of those channels carried only the summary, title or stage name
+  its collector wanted. Measured against a provider serving known amounts, a
+  two-stage run with one compacting edge billed 12,000 prompt tokens and
+  reported 4,000. Runs that compact, title or branch will now report more than
+  they did, because they were always billed more than they reported.
+- Added: `run.lvr` records what each provider call cost, as it lands. The
+  cumulative counters on progress records mean two calls between two ticks
+  arrive downstream as their sum, so a chart of them shows a spike no single
+  call ever made - the reported case being a run pinned to a 32k window
+  appearing to make a 56k request. Each record names which kind of call it was,
+  so "this run cost double what its stages did because its edges compact" is
+  now answerable, and "no request ever exceeded the window" is provable from
+  the journal instead of inferred from region sizes.
+- Added: an agent can release a context entry it has finished with, rather than
+  waiting for something to be evicted. A stage that fetches a source, takes the
+  three paragraphs that matter and writes them somewhere curated has no further
+  use for the raw text - but the runtime only knows sizes, so the raw text sat
+  there until pressure happened to push it out. `context_delete` now names an
+  entry by key, by position, or as the oldest few, and `context_list` numbers
+  its entries so there is something to name.
+- Fixed: a key given to `context_append` or `context_write` is honoured on every
+  kind of region. It was only ever stored on key-value regions; everywhere else
+  the argument was accepted and discarded, so an agent could name an entry, see
+  a success message, and then be told that entry did not exist when it tried to
+  release it.
+- Added: `admission = "reject"` on a region refuses a write that does not fit,
+  instead of dropping whichever entry happened to be oldest. Silently evicting
+  is a decision about what matters, taken by whichever write arrived when the
+  region was full, and the agent never learned it happened. A region set this
+  way is also exempt from the window-wide eviction cascade, or the setting would
+  only change which part of the runtime did the dropping. The default is
+  unchanged.
+- Fixed: Anthropic runs stop paying to cache a prefix that already changed.
+  Caching works by prefix, so when a mutable region changed since the previous
+  request the cache entry is invalidated before it can ever be read - and the
+  write premium is charged anyway. One measured run bought 3.3M cache-write
+  tokens against 267k reads. The cache breakpoint is now skipped while the
+  prefix is moving and re-armed as soon as it settles, so a steady-state run
+  keeps the caching it always had.
+- Fixed: a stage's instructions get their own region even when the blueprint
+  does not declare one. Without it the prompt went to whichever pinned region
+  came first, usually the one holding the caller's task - sized for a sentence,
+  not for a stage's instructions - and a small window turned that into a spawn
+  failure that read as the caller's fault.
+- Added: `lev validate` warns when a region designed to evict is bounded by a
+  percentage. Eviction only runs at the bound, so the bound is the discipline,
+  and a percentage re-reads it every time somebody runs a bigger model: `38%`
+  written against a 200k window becomes a 380k ceiling that oldest-first
+  eviction never reaches, and the region hoards instead. The warning names the
+  resolved number, since that is the part worth acting on.
+- Fixed: a run can no longer finish by submitting the name of one of its own
+  stages as its answer. A run that dead-ended into its output stage submitted
+  the literal string `analyze` and reported `complete`, which reads as success
+  to every consumer there is. The submission is handed back to the model to
+  answer again rather than failing the run outright.
+
 ## 0.3.9 - 2026-08-14
 
 - Added: a parked run says what it is parked on. `WaitingInput` covered four
