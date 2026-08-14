@@ -87,12 +87,15 @@ pub(crate) fn build_request(
     provider: &Arc<dyn Provider>,
     stage_name: &str,
     stage_iterations: usize,
-) -> InferenceRequest {
+    previous_system_hash: Option<u64>,
+) -> (InferenceRequest, u64) {
     let assembled = window.assemble_with_meta(&crate::custom_region::AssembleMeta {
         stage_name: stage_name.to_string(),
         stage_iterations,
         model: stage.model.clone(),
+        previous_system_hash,
     });
+    let system_hash = assembled.system_hash;
     let remaining = window.max_tokens.saturating_sub(window.current_tokens);
     let caps = provider.capabilities(&stage.model);
     let output_cap = config
@@ -126,7 +129,7 @@ pub(crate) fn build_request(
     let mut system = hint_blocks(config, &filtered_tools, std::env::consts::OS);
     system.extend(assembled.system_blocks);
 
-    InferenceRequest {
+    let request = InferenceRequest {
         system,
         messages: assembled.messages,
         model: stage.model.clone(),
@@ -135,7 +138,8 @@ pub(crate) fn build_request(
         tools: filtered_tools,
         extra,
         request_timeout_secs: config.and_then(|c| c.request_timeout_secs),
-    }
+    };
+    (request, system_hash)
 }
 
 /// Build the [`RetryPolicy`] for a job from the operator's `[limits]` retry
@@ -223,7 +227,16 @@ type InferenceQuery = (
     Option<&'static InFlightWork>,
     Option<&'static StageProgress>,
     Option<&'static DispatchStall>,
+    Option<&'static SystemPrefixHash>,
 );
+
+/// The system prefix the last request sent, as a digest.
+///
+/// Kept per agent because that is the granularity Anthropic's prefix cache
+/// works at: one run's blocks, in one order. Absent before the first request,
+/// which is exactly when there is nothing to invalidate.
+#[derive(bevy_ecs::component::Component, Debug, Clone, Copy)]
+pub struct SystemPrefixHash(pub u64);
 
 /// Inference-dispatch system: for every `ReadyToInfer` agent, resolve its
 /// provider and, **if a per-model permit is free**, build the request, spawn the
@@ -259,7 +272,7 @@ pub fn dispatch_inference(
     let retry_tuning = retry.map(|r| *r).unwrap_or_default();
     let circuits = circuits.as_deref();
     agents.par_iter().for_each(
-        |(entity, state, window, config, si, in_flight, progress, stalled)| {
+        |(entity, state, window, config, si, in_flight, progress, stalled, prefix)| {
             crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
                 if state.status != AgentStatus::Active {
                     return; // paused / waiting / cancelled - don't start new work
@@ -307,14 +320,22 @@ pub fn dispatch_inference(
                     stall(StallReason::PoolFull);
                     return;
                 };
-                let request = build_request(
+                let (request, system_hash) = build_request(
                     window,
                     config,
                     si,
                     &provider,
                     &state.current_stage,
                     progress.map(|p| p.iterations).unwrap_or(0),
+                    prefix.map(|p| p.0),
                 );
+                // Remembered for the next request, which is the only way the
+                // breakpoint decision can be made on evidence.
+                par_commands.command_scope(|mut commands| {
+                    commands
+                        .entity(entity)
+                        .insert(SystemPrefixHash(system_hash));
+                });
                 let job = InferenceJob {
                     entity,
                     provider,

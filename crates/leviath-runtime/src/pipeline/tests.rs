@@ -109,7 +109,7 @@ fn build_request_threads_stage_meta_into_custom_region_render() {
         ),
     );
     let si = stage("model-x", vec![], None);
-    let req = build_request(&w, None, &si, &provider(true, 500), "implement", 4);
+    let req = build_request(&w, None, &si, &provider(true, 500), "implement", 4, None).0;
     assert!(
         req.system.iter().any(|b| b.text == "implement#4@model-x"),
         "system blocks: {:?}",
@@ -139,7 +139,9 @@ fn build_request_filters_tools_and_uses_config_overrides() {
         &provider(true, 9999),
         "test-stage",
         0,
-    );
+        None,
+    )
+    .0;
     assert_eq!(req.tools.len(), 1); // filtered to "keep"
     assert_eq!(req.tools[0].name, "keep");
     assert_eq!(req.max_tokens, 42); // config output cap wins
@@ -164,10 +166,21 @@ fn build_request_threads_per_stage_timeout() {
         &provider(true, 500),
         "test-stage",
         0,
-    );
+        None,
+    )
+    .0;
     assert_eq!(req.request_timeout_secs, Some(120));
 
-    let req_none = build_request(&window(), None, &si, &provider(true, 500), "test-stage", 0);
+    let req_none = build_request(
+        &window(),
+        None,
+        &si,
+        &provider(true, 500),
+        "test-stage",
+        0,
+        None,
+    )
+    .0;
     assert_eq!(req_none.request_timeout_secs, None);
 }
 
@@ -191,7 +204,9 @@ fn build_request_passes_through_extra_params() {
         &provider(true, 500),
         "test-stage",
         0,
-    );
+        None,
+    )
+    .0;
     assert_eq!(req.extra, serde_json::json!({ "top_p": 0.9 }));
 }
 
@@ -223,7 +238,9 @@ fn build_request_prepends_batch_hint_when_enabled() {
         &provider(true, 500),
         "test-stage",
         0,
-    );
+        None,
+    )
+    .0;
     // The hint is prepended ahead of the stage's own system block(s).
     assert_eq!(
         req.system.first().map(|b| b.text.as_str()),
@@ -257,7 +274,9 @@ fn build_request_omits_batch_hint_when_disabled_or_absent() {
         &provider(true, 500),
         "test-stage",
         0,
-    );
+        None,
+    )
+    .0;
     assert!(!req.system.is_empty());
     assert!(req.system.iter().all(|b| b.text != BATCH_TOOL_HINT));
     // Absent config → no hint.
@@ -268,7 +287,9 @@ fn build_request_omits_batch_hint_when_disabled_or_absent() {
         &provider(true, 500),
         "test-stage",
         0,
-    );
+        None,
+    )
+    .0;
     assert!(!req_none.system.is_empty());
     assert!(req_none.system.iter().all(|b| b.text != BATCH_TOOL_HINT));
 }
@@ -356,7 +377,9 @@ fn build_request_puts_the_hints_ahead_of_the_stage_context() {
         &provider(true, 500),
         "test-stage",
         0,
-    );
+        None,
+    )
+    .0;
     let hints = hint_blocks(Some(&cfg), &si.tools, std::env::consts::OS);
     for (i, hint) in hints.iter().enumerate() {
         assert_eq!(req.system[i].text, hint.text);
@@ -372,7 +395,16 @@ fn build_request_puts_the_hints_ahead_of_the_stage_context() {
 #[test]
 fn build_request_all_tools_default_temperature_no_config() {
     let si = stage("m", vec![tool("a"), tool("b")], None); // None filter = all
-    let req = build_request(&window(), None, &si, &provider(true, 500), "test-stage", 0);
+    let req = build_request(
+        &window(),
+        None,
+        &si,
+        &provider(true, 500),
+        "test-stage",
+        0,
+        None,
+    )
+    .0;
     assert_eq!(req.tools.len(), 2);
     assert_eq!(req.temperature, 0.7); // default when supported and no config
     assert_eq!(req.max_tokens, 500); // capability cap when no config override
@@ -381,7 +413,16 @@ fn build_request_all_tools_default_temperature_no_config() {
 #[test]
 fn build_request_empty_filter_is_all_and_no_temperature_when_unsupported() {
     let si = stage("m", vec![tool("a")], Some(vec![])); // empty filter = all
-    let req = build_request(&window(), None, &si, &provider(false, 500), "test-stage", 0);
+    let req = build_request(
+        &window(),
+        None,
+        &si,
+        &provider(false, 500),
+        "test-stage",
+        0,
+        None,
+    )
+    .0;
     assert_eq!(req.tools.len(), 1);
     assert_eq!(req.temperature, 0.0); // model doesn't support temperature
 }
@@ -13937,4 +13978,89 @@ async fn dispatch_tools_records_a_real_submission_with_the_blueprint_present() {
         .get::<crate::persistence::FinalOutput>(e)
         .expect("the answer was recorded");
     assert_eq!(recorded.0.content, "Three regressions, listed below.");
+}
+
+// ── the message cache breakpoint and a churning system prefix ──
+
+/// A window with one pinned region and enough conversation to earn a breakpoint.
+fn breakpoint_window(pinned: &str) -> ContextWindow {
+    let mut w = ContextWindow::new(100_000);
+    let mut region = Region::new("facts".to_string(), RegionKind::Pinned, 10_000);
+    let _ = region.add_entry(pinned.to_string(), 10);
+    w.add_region(region);
+    let mut conv = Region::new(
+        "conversation".to_string(),
+        RegionKind::SlidingWindow {
+            max_items: 50,
+            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+        },
+        10_000,
+    );
+    for i in 0..6 {
+        let _ = conv.add_entry(format!("turn {i}"), 5);
+    }
+    w.add_region(conv);
+    w
+}
+
+fn assembled_with_prev(
+    window: &ContextWindow,
+    previous: Option<u64>,
+) -> crate::components::AssembledContext {
+    window.assemble_with_meta(&crate::custom_region::AssembleMeta {
+        stage_name: "work".to_string(),
+        stage_iterations: 0,
+        model: "m".to_string(),
+        previous_system_hash: previous,
+    })
+}
+
+/// The first request has nothing to invalidate, so it caches as it always did.
+#[test]
+fn the_message_breakpoint_is_placed_when_nothing_came_before() {
+    let w = breakpoint_window("stable facts");
+    let out = assembled_with_prev(&w, None);
+    assert!(out.messages.iter().any(|m| m.cache_breakpoint));
+}
+
+/// The reported waste: the prefix moved, so the entry this breakpoint would
+/// write is invalidated before it can be read - and the 1.25x write is charged
+/// anyway. Measured at 3.3M write tokens against 267k reads on one run.
+#[test]
+fn the_message_breakpoint_is_skipped_when_the_system_prefix_moved() {
+    let first = assembled_with_prev(&breakpoint_window("facts as of turn 1"), None);
+    let churned = breakpoint_window("facts as of turn 2, now longer");
+    let second = assembled_with_prev(&churned, Some(first.system_hash));
+
+    assert_ne!(first.system_hash, second.system_hash, "the prefix moved");
+    assert!(
+        !second.messages.iter().any(|m| m.cache_breakpoint),
+        "writing a cache entry the next request cannot read is money for nothing"
+    );
+}
+
+/// Re-armed the moment the prefix settles, so a steady-state run keeps the
+/// caching it was always getting.
+#[test]
+fn the_message_breakpoint_returns_once_the_prefix_settles() {
+    let w = breakpoint_window("stable facts");
+    let first = assembled_with_prev(&w, None);
+    let second = assembled_with_prev(&w, Some(first.system_hash));
+
+    assert_eq!(first.system_hash, second.system_hash);
+    assert!(
+        second.messages.iter().any(|m| m.cache_breakpoint),
+        "an unchanged prefix is exactly what caching is for"
+    );
+}
+
+/// The digest is over the assembled prefix, so identical content assembles to
+/// the same number and different content does not.
+#[test]
+fn the_prefix_hash_tracks_the_prefix() {
+    let a = assembled_with_prev(&breakpoint_window("one"), None);
+    let b = assembled_with_prev(&breakpoint_window("one"), None);
+    let c = assembled_with_prev(&breakpoint_window("two"), None);
+    assert_eq!(a.system_hash, b.system_hash);
+    assert_ne!(a.system_hash, c.system_hash);
 }

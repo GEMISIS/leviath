@@ -2004,6 +2004,7 @@ mod tests {
             stage_name: "plan".to_string(),
             stage_iterations: 7,
             model: "m".to_string(),
+            previous_system_hash: None,
         });
         assert_eq!(assembled.system_blocks[0].text, "<brain iter=7>");
     }
