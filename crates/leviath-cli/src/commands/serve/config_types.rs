@@ -62,6 +62,11 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "logs.stream",
     "context.history.page",
     "runs.waiting_on",
+    // The same vocabulary on the websocket, not just on the run. Worth
+    // announcing separately: a client that has it can render a parked run's
+    // reason straight from the event stream, and one that doesn't has to
+    // re-fetch the run every time a status arrives.
+    "events.waiting_on",
     "blueprints.envelope",
     "blueprints.query",
     "blueprints.manifest",

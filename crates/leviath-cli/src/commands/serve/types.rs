@@ -115,6 +115,14 @@ pub enum ServerEvent {
         /// stage that declared `accepts_messages = false`, and for a run that
         /// has finished.
         accepts_messages: bool,
+        /// Why the run is parked, when it is.
+        ///
+        /// Omitted for a run that is moving. Without it a subscriber sees a
+        /// run turn `waiting` or `paused` and has to fetch the run to learn
+        /// whether somebody is needed, which is the guess this vocabulary
+        /// exists to remove.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_reason: Option<leviath_core::run_meta::WaitReason>,
     },
     /// How full the run's context window is, after a turn changed it.
     ContextUpdate {
@@ -1091,6 +1099,7 @@ mod tests {
             iteration: 5,
             tool_calls: 12,
             accepts_messages: true,
+            wait_reason: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"agent_status\""));
@@ -1338,6 +1347,7 @@ mod tests {
                     iteration: 0,
                     tool_calls: 0,
                     accepts_messages: false,
+                    wait_reason: None,
                 },
                 "r1",
             ),
