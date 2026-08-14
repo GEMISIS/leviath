@@ -60,6 +60,7 @@ pub fn collect_inference(
     mut agents: Query<InferenceQuery, With<AwaitingInference>>,
     mut circuits: Option<ResMut<ProviderCircuits>>,
     policy: Option<Res<CircuitPolicy>>,
+    persist: Option<Res<crate::pipeline::persist::PersistenceStage>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -69,7 +70,7 @@ pub fn collect_inference(
         let Ok((
             mut state,
             md,
-            totals,
+            mut totals,
             cursor,
             window,
             mut ledger,
@@ -148,9 +149,19 @@ pub fn collect_inference(
         match outcome.result {
             Ok(response) => {
                 state.iteration += 1;
-                if let Some(mut totals) = totals {
-                    totals.add_usage(&response.tokens_used);
-                }
+                crate::inference_usage::record_call(
+                    totals.as_deref_mut(),
+                    persist.as_deref(),
+                    md,
+                    &crate::inference_usage::CallUsage {
+                        kind: leviath_core::run_archive::InferenceKind::Stage,
+                        stage: &state.current_stage,
+                        iteration: state.iteration,
+                        provider: &called_provider,
+                        model: &called_model,
+                        usage: &response.tokens_used,
+                    },
+                );
                 // Accrue this iteration's tokens against the current stage record.
                 if let Some(rec) = ledger.as_deref_mut().and_then(|l| l.0.get_mut(idx)) {
                     rec.prompt_tokens += response.tokens_used.prompt_tokens;

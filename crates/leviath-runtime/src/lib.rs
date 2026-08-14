@@ -78,6 +78,7 @@ pub(crate) mod gate_prompt;
 pub mod host;
 pub(crate) mod inference_bridge;
 pub mod inference_pool;
+pub mod inference_usage;
 pub mod interaction_hub;
 pub mod interaction_points;
 pub(crate) mod lane_supervisor;

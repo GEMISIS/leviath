@@ -149,6 +149,8 @@ pub fn dispatch_content_summary(
             CompactionJob {
                 entity,
                 provider,
+                provider_name: config.provider.clone(),
+                model: config.model.clone(),
                 requests,
                 permit,
             },
@@ -809,6 +811,9 @@ mod tests {
         // A successful summary replaces the region's content.
         tx.send(CompactionOutcome {
             entity: e,
+            usage: Vec::new(),
+            provider_name: "p".to_string(),
+            model: "m".to_string(),
             result: Ok(vec![("task".to_string(), "SHORT".to_string())]),
         })
         .unwrap();
@@ -831,6 +836,9 @@ mod tests {
             .id();
         tx.send(CompactionOutcome {
             entity: e2,
+            usage: Vec::new(),
+            provider_name: "p".to_string(),
+            model: "m".to_string(),
             result: Err(leviath_providers::ProviderError::Other("x".to_string())),
         })
         .unwrap();
@@ -838,6 +846,9 @@ mod tests {
         tx.send(CompactionOutcome {
             entity: Entity::from_raw_u32(9999)
                 .expect("a small literal index is always a valid entity id"),
+            usage: Vec::new(),
+            provider_name: "p".to_string(),
+            model: "m".to_string(),
             result: Ok(vec![("task".to_string(), "ignored".to_string())]),
         })
         .unwrap();

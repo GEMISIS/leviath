@@ -25,6 +25,11 @@ pub struct TitleJob {
     pub entity: Entity,
     /// The provider resolved for the title model.
     pub provider: Arc<dyn Provider>,
+    /// The name of that provider, for the usage record. The trait object above
+    /// cannot answer for itself which registry entry it came from.
+    pub provider_name: String,
+    /// The model the request targets, for the usage record.
+    pub model: String,
     /// The one-shot titling request.
     pub request: InferenceRequest,
     /// The per-model pool permit, held for the call.
@@ -38,6 +43,13 @@ pub struct TitleOutcome {
     pub entity: Entity,
     /// The raw model reply (sanitized by the collect system), or the error.
     pub result: Result<String, ProviderError>,
+    /// What the call billed, when it completed. `None` for a call that failed
+    /// or timed out, which is the only case where nothing was served.
+    pub usage: Option<leviath_providers::TokenUsage>,
+    /// The provider that served the call.
+    pub provider_name: String,
+    /// The model the call targeted.
+    pub model: String,
 }
 
 /// Run one title job: make the call with the permit held, release the slot,
@@ -56,19 +68,35 @@ pub async fn run_title_job(
     let TitleJob {
         entity,
         provider,
+        provider_name,
+        model,
         request,
         permit,
     } = job;
 
-    let result = match tokio::time::timeout(deadline, provider.infer(&request)).await {
-        Ok(outcome) => outcome.map(|r| r.content),
-        Err(_) => Err(leviath_providers::ProviderError::Other(format!(
-            "title generation exceeded the {}s deadline and was aborted to free the pool slot",
-            deadline.as_secs()
-        ))),
+    // The usage travels beside the reply rather than being folded into it: the
+    // collect system wants the title, the run's accounting wants the tokens,
+    // and dropping the half this channel had no use for is how the title call
+    // came to be billed and counted nowhere.
+    let (result, usage) = match tokio::time::timeout(deadline, provider.infer(&request)).await {
+        Ok(Ok(r)) => (Ok(r.content), Some(r.tokens_used)),
+        Ok(Err(e)) => (Err(e), None),
+        Err(_) => (
+            Err(leviath_providers::ProviderError::Other(format!(
+                "title generation exceeded the {}s deadline and was aborted to free the pool slot",
+                deadline.as_secs()
+            ))),
+            None,
+        ),
     };
     drop(permit); // free the pool slot before the collect system runs
 
-    let _ = results.send(TitleOutcome { entity, result });
+    let _ = results.send(TitleOutcome {
+        entity,
+        result,
+        usage,
+        provider_name,
+        model,
+    });
     wake.notify_one();
 }

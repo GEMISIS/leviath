@@ -714,6 +714,7 @@ fn journal_highlights(meta: &RunMeta, q: &str) -> Option<Highlight> {
             | RunRecord::OwnershipChanged { .. }
             | RunRecord::StatusChanged { .. }
             | RunRecord::Inference { .. }
+            | RunRecord::InferenceUsage { .. }
             | RunRecord::ToolCallDone { .. }
             | RunRecord::Message { .. } => None,
         }
