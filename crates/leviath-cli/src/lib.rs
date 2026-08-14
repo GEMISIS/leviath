@@ -27,6 +27,7 @@ pub mod runstate;
 pub mod shell_keys;
 #[cfg(test)]
 mod test_support;
+pub mod tool_inventory;
 pub mod tools;
 pub mod tui;
 pub mod workdir_guard;
