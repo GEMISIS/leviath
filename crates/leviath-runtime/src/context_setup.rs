@@ -237,6 +237,70 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
     window.current_tokens = window.calculate_tokens();
 }
 
+/// Give the stage prompts a region of their own when the blueprint did not.
+///
+/// [`STAGE_INSTRUCTIONS_REGION`] is, in this file's own words further up, "the
+/// runtime's to fill, not something an author has to remember to re-declare".
+/// It was only ever *used* when an author declared it, though - and when they
+/// did not, the prompt went into whatever pinned region happened to be first.
+/// That is usually `task`, whose budget is sized for a sentence from the caller
+/// and not for a stage's instructions.
+///
+/// Under window pressure that is a spawn failure rather than a squeeze:
+///
+/// ```text
+/// stage system prompt does not fit region 'task' (2887 > 2560)
+/// ```
+///
+/// The workaround is to floor every `task` declaration with a `min_tokens` sized
+/// for the largest *stage prompt* - which couples an unrelated region's floor to
+/// prompt lengths, and only shows up at spawn on a small window, so it reads as
+/// the caller's fault rather than as routing.
+///
+/// Sized to the largest prompt the blueprint actually carries, because that is
+/// the one that has to fit and anything beyond it is budget taken from the work.
+/// A blueprint whose stages have no prompts gets no region: there would be
+/// nothing to put in it.
+///
+/// Capped at a quarter of the window, which is what keeps
+/// this from turning a real failure into a silent one. A prompt larger than the
+/// whole window cannot be made to fit by giving it a bigger region, and a spawn
+/// that says so is right to. What changes is only which region the message
+/// names: `stage_instructions`, which is where the prompt was going, rather than
+/// `task`, which is the caller's.
+///
+/// [`STAGE_INSTRUCTIONS_REGION`]: leviath_core::layout::STAGE_INSTRUCTIONS_REGION
+pub fn ensure_stage_instructions_region(window: &mut ContextWindow, prompts: &[Option<String>]) {
+    let declared = leviath_core::layout::STAGE_INSTRUCTIONS_REGION;
+    if window.get_region(declared).is_some() {
+        return;
+    }
+    // The wrapper travels with the prompt, so it is measured with it.
+    let widest = prompts
+        .iter()
+        .flatten()
+        .map(|p| leviath_core::estimate_tokens(&format!("[Stage instructions: {p}]")))
+        .max();
+    let Some(widest) = widest.filter(|t| *t > 0) else {
+        return;
+    };
+    let ceiling = window.max_tokens / INSTRUCTIONS_SHARE_OF_WINDOW;
+    window.add_region(Region::new(
+        declared.to_string(),
+        RegionKind::Pinned,
+        widest.min(ceiling),
+    ));
+}
+
+/// The largest share of the window an auto-created instructions region may take,
+/// as a divisor: a quarter.
+///
+/// Only ever a ceiling - the region is sized to the prompt it has to hold, and
+/// this is what it may not exceed. A quarter is generous for instructions and
+/// still leaves the window mostly for the work; a prompt that will not fit in it
+/// is one no region size was going to rescue.
+const INSTRUCTIONS_SHARE_OF_WINDOW: usize = 4;
+
 #[cfg(test)]
 mod tests {
     use super::{
