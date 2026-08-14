@@ -1653,10 +1653,13 @@ fn a_restored_ledger_reaches_the_persist_tick_instead_of_the_seeded_zeros() {
 /// with every unit test still passing.
 #[test]
 fn dispatch_persistence_records_why_a_run_is_parked() {
-    use leviath_core::run_meta::WaitingOn;
+    use leviath_core::run_meta::WaitReason;
 
     // A parent held by its own fan-out: waiting, and needing nobody.
     let (mut world, mut rx) = world_with_persistence();
+    // Two spawned children, so the recorded count is a real number rather
+    // than the no-children fallback.
+    let kids: Vec<Entity> = (0..2).map(|_| world.spawn_empty().id()).collect();
     let mut state = agent_state();
     state.status = AgentStatus::Waiting;
     let e = world
@@ -1668,6 +1671,10 @@ fn dispatch_persistence_records_why_a_run_is_parked() {
             TokenTotals::default(),
             PersistWatermark::default(),
             crate::pipeline::WaitingForChildren,
+            crate::components::SubAgentChildren {
+                children: kids,
+                max_child_depth: 3,
+            },
         ))
         .id();
 
@@ -1679,7 +1686,7 @@ fn dispatch_persistence_records_why_a_run_is_parked() {
     );
     assert_eq!(
         job.meta.waiting_on,
-        Some(WaitingOn::Children),
+        Some(WaitReason::Children { outstanding: 2 }),
         "a run held for its sub-agents says so"
     );
 
@@ -1703,9 +1710,9 @@ fn dispatch_persistence_records_why_a_run_is_parked() {
 /// record with nothing outstanding is not something to interrupt anybody for.
 #[test]
 fn dispatch_persistence_reports_outstanding_tool_approvals() {
-    use leviath_core::run_meta::WaitingOn;
+    use leviath_core::run_meta::WaitReason;
 
-    for (outstanding, expected) in [(2usize, Some(WaitingOn::Approval)), (0, None)] {
+    for (outstanding, expected) in [(2usize, Some(WaitReason::TaintGate)), (0, None)] {
         let (mut world, mut rx) = world_with_persistence();
         let mut state = agent_state();
         state.status = AgentStatus::Waiting;

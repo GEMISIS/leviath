@@ -52,33 +52,131 @@ impl std::fmt::Display for RunStatus {
     }
 }
 
-/// Why a run is parked, for a run whose status is
-/// [`RunStatus::WaitingInput`].
+/// Why a run's status is [`RunStatus::WaitingInput`].
 ///
-/// That status means "this run is not moving", which is true of four quite
-/// different situations, only two of which a person can do anything about. A
-/// client with nothing but the status has to guess, and the guess most of them
-/// reach for - no pending interaction plus some visible children - is wrong
-/// whenever the children have paged out of view or the interaction fetch has
-/// not landed yet. Then a run that needs nobody is badged as needing you,
-/// which is how a badge worth interrupting someone for stops being one.
+/// `WaitingInput` alone is several unrelated situations wearing one word, and
+/// they call for opposite responses: a fan-out parent whose workers are
+/// churning is healthy and needs nothing, while a run parked on a
+/// tool-approval prompt is stopped dead until a person answers it. Issue #184
+/// is what happens when the two are indistinguishable - an operator reading
+/// `waiting` across a factory concluded it had stalled and started killing
+/// healthy runs. Issue #431 is the same conflation reaching every client that
+/// reads `meta.json`.
 ///
-/// Deliberately a separate field rather than new [`RunStatus`] variants: the
-/// status is matched exhaustively across the codebase and serialized two ways
-/// on the wire, so splitting it would break every consumer to express
-/// something that is not a new state. The run really is waiting; this says on
-/// what.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum WaitingOn {
-    /// A person: an interaction point is holding for an answer.
-    User,
-    /// A person: one or more tool calls are holding for approval.
-    Approval,
-    /// Sub-agents this run spawned, at a `requires_children` boundary.
-    Children,
-    /// The workers of this run's own fan-out stage.
-    FanOut,
+/// Derived on demand from markers the engine already sets, by
+/// [`wait_reason_from`]; nothing tracks it separately, so it cannot fall out of
+/// sync with the status it explains. It lives here rather than in the runtime
+/// because it is both reported live over the control socket and written to
+/// `meta.json`, and one vocabulary across those two is the whole point.
+///
+/// Deliberately not new [`RunStatus`] variants: the status is matched
+/// exhaustively across the codebase and serialized two ways on the wire, so
+/// splitting it would break every consumer to express something that is not a
+/// new state. The run really is waiting; this says on what.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "reason")]
+pub enum WaitReason {
+    /// Blocked on a tool-approval prompt. Needs a person (or `--yolo`).
+    ToolApproval,
+
+    /// Blocked on a question the agent itself asked (`ask_user_*`,
+    /// `present_for_review`). Needs a person.
+    UserPrompt,
+
+    /// Blocked on a taint-gate clearance prompt. Needs a person.
+    TaintGate,
+
+    /// Blocked on a blueprint stage-boundary checkpoint. Needs a person.
+    InteractionPoint,
+
+    /// Parked while fan-out workers run. Healthy; resolves on its own.
+    FanOutWorkers {
+        /// Workers still to finish, counting both running and not-yet-started.
+        outstanding: usize,
+    },
+
+    /// Parked while spawned sub-agents run (`requires_children`). Healthy;
+    /// resolves on its own.
+    Children {
+        /// Children that have not reached a terminal status.
+        outstanding: usize,
+    },
+}
+
+impl WaitReason {
+    /// Whether clearing this needs a person. `false` means the run is parked on
+    /// other work and will move on by itself.
+    pub fn needs_a_person(&self) -> bool {
+        !matches!(self, Self::FanOutWorkers { .. } | Self::Children { .. })
+    }
+}
+
+impl std::fmt::Display for WaitReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ToolApproval => f.write_str("tool approval"),
+            Self::UserPrompt => f.write_str("user prompt"),
+            Self::TaintGate => f.write_str("taint gate"),
+            Self::InteractionPoint => f.write_str("checkpoint"),
+            Self::FanOutWorkers { outstanding } => write!(f, "workers({outstanding})"),
+            Self::Children { outstanding } => write!(f, "children({outstanding})"),
+        }
+    }
+}
+
+/// The parking markers an agent carries, gathered by whoever can see them.
+///
+/// The live listing reads these straight off the world; the persistence system
+/// reads them off its query. Both then hand them here, so the precedence below
+/// is written once instead of once per surface - two copies of it would
+/// disagree the first time either was edited.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WaitMarkers {
+    /// A taint-gate clearance prompt is outstanding.
+    pub gate_prompt: bool,
+    /// A blueprint stage-boundary checkpoint is holding.
+    pub interaction_point: bool,
+    /// Fan-out workers still to finish, when this run is a fan-out parent.
+    pub fan_out_outstanding: Option<usize>,
+    /// Sub-agents still running, when this run is held for its children.
+    pub children_outstanding: Option<usize>,
+    /// The kind of hub request holding this run, when one is.
+    pub interaction: Option<crate::interaction::InteractionKind>,
+    /// Whether a hub request is holding it at all. Separate from the kind
+    /// because the kind can be unknown while the block is real.
+    pub awaiting_interaction: bool,
+}
+
+/// Why a parked run is parked, or `None` when it is not parked or nothing has
+/// claimed it.
+///
+/// Order matters, and it is the specific claim first. A taint-gate block and a
+/// stage checkpoint each open a hub request of their own, so both also look
+/// like a generic prompt; asking the specific markers first is what keeps them
+/// from all reporting as one.
+pub fn wait_reason_from(waiting: bool, markers: &WaitMarkers) -> Option<WaitReason> {
+    if !waiting {
+        return None;
+    }
+    if markers.gate_prompt {
+        return Some(WaitReason::TaintGate);
+    }
+    if markers.interaction_point {
+        return Some(WaitReason::InteractionPoint);
+    }
+    if let Some(outstanding) = markers.fan_out_outstanding {
+        return Some(WaitReason::FanOutWorkers { outstanding });
+    }
+    if let Some(outstanding) = markers.children_outstanding {
+        return Some(WaitReason::Children { outstanding });
+    }
+    if markers.awaiting_interaction {
+        return Some(match markers.interaction {
+            Some(crate::interaction::InteractionKind::ToolApproval) => WaitReason::ToolApproval,
+            _ => WaitReason::UserPrompt,
+        });
+    }
+    None
 }
 
 /// Metadata for a single background agent run.
@@ -223,14 +321,16 @@ pub struct RunMeta {
     pub final_output: Option<crate::output::FinalOutputDescriptor>,
 
     /// Why this run is parked, when it is. `None` on every other status, and
-    /// on a run written before this field existed.
+    /// on a run written before this field existed. Same vocabulary the live
+    /// listing reports, so `lev ps` and a client reading this file describe a
+    /// run the same way.
     ///
     /// Additive on purpose: `default` means a `meta.json` from an older build
     /// still loads, and `skip_serializing_if` means a run that is not parked
     /// writes exactly the file it wrote before, so an older build reading a
     /// newer run sees nothing new either.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub waiting_on: Option<WaitingOn>,
+    pub waiting_on: Option<WaitReason>,
     /// The output shape this run was launched asking for, when the caller
     /// overrode the blueprint's.
     ///
@@ -755,26 +855,175 @@ mod tests {
         let json = serde_json::to_value(&m).unwrap();
         assert!(json.get("waiting_on").is_none(), "{json}");
 
-        m.waiting_on = Some(WaitingOn::FanOut);
+        m.waiting_on = Some(WaitReason::FanOutWorkers { outstanding: 3 });
         let json = serde_json::to_value(&m).unwrap();
-        assert_eq!(json["waiting_on"], serde_json::json!("fan_out"));
+        assert_eq!(
+            json["waiting_on"],
+            serde_json::json!({"reason": "fan_out_workers", "outstanding": 3})
+        );
     }
 
     /// Every variant is on the wire in snake_case, the way `RunStatus` is, and
-    /// round-trips.
+    /// round-trips. The counted ones carry their number with them, which is
+    /// what lets a client say "waiting on 3 of them" rather than "waiting".
     #[test]
-    fn waiting_on_serializes_in_snake_case() {
+    fn wait_reason_serializes_in_snake_case() {
         for (variant, wire) in [
-            (WaitingOn::User, "user"),
-            (WaitingOn::Approval, "approval"),
-            (WaitingOn::Children, "children"),
-            (WaitingOn::FanOut, "fan_out"),
+            (WaitReason::ToolApproval, "tool_approval"),
+            (WaitReason::UserPrompt, "user_prompt"),
+            (WaitReason::TaintGate, "taint_gate"),
+            (WaitReason::InteractionPoint, "interaction_point"),
+            (
+                WaitReason::FanOutWorkers { outstanding: 3 },
+                "fan_out_workers",
+            ),
+            (WaitReason::Children { outstanding: 1 }, "children"),
         ] {
-            let json = serde_json::to_string(&variant).unwrap();
-            assert_eq!(json, format!("\"{wire}\""));
-            let back: WaitingOn = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_value(&variant).unwrap();
+            assert_eq!(json["reason"], serde_json::json!(wire));
+            let back: WaitReason = serde_json::from_value(json).unwrap();
             assert_eq!(back, variant);
         }
+    }
+
+    /// Each marker names its own reason, and the counted ones carry the count.
+    ///
+    /// The precedence is the specific claim first: a taint gate and a
+    /// checkpoint each open a hub request of their own, so a generic-prompt
+    /// answer would swallow both.
+    #[test]
+    fn each_marker_names_its_own_reason_specific_first() {
+        let cases = [
+            (
+                WaitMarkers {
+                    gate_prompt: true,
+                    awaiting_interaction: true,
+                    ..Default::default()
+                },
+                WaitReason::TaintGate,
+            ),
+            (
+                WaitMarkers {
+                    interaction_point: true,
+                    awaiting_interaction: true,
+                    ..Default::default()
+                },
+                WaitReason::InteractionPoint,
+            ),
+            (
+                WaitMarkers {
+                    fan_out_outstanding: Some(5),
+                    ..Default::default()
+                },
+                WaitReason::FanOutWorkers { outstanding: 5 },
+            ),
+            (
+                WaitMarkers {
+                    children_outstanding: Some(4),
+                    ..Default::default()
+                },
+                WaitReason::Children { outstanding: 4 },
+            ),
+        ];
+        for (markers, expected) in cases {
+            assert_eq!(
+                wait_reason_from(true, &markers),
+                Some(expected),
+                "{markers:?}"
+            );
+        }
+        // A parent holding both kinds of sub-work reports the more specific one.
+        assert_eq!(
+            wait_reason_from(
+                true,
+                &WaitMarkers {
+                    fan_out_outstanding: Some(2),
+                    children_outstanding: Some(9),
+                    ..Default::default()
+                }
+            ),
+            Some(WaitReason::FanOutWorkers { outstanding: 2 })
+        );
+    }
+
+    /// A generic hub block reports what kind of prompt it is, so "approve this
+    /// tool call" and "answer this question" are not the same row.
+    #[test]
+    fn a_hub_block_reports_the_kind_of_prompt_holding_it() {
+        let held = |kind| WaitMarkers {
+            awaiting_interaction: true,
+            interaction: kind,
+            ..Default::default()
+        };
+        assert_eq!(
+            wait_reason_from(
+                true,
+                &held(Some(crate::interaction::InteractionKind::ToolApproval))
+            ),
+            Some(WaitReason::ToolApproval)
+        );
+        // Anything else the agent asked for is a question for a person. The
+        // kind can also be unknown while the block is real, which reads the
+        // same way: somebody is being waited on.
+        assert_eq!(
+            wait_reason_from(
+                true,
+                &held(Some(crate::interaction::InteractionKind::FreeText))
+            ),
+            Some(WaitReason::UserPrompt)
+        );
+        assert_eq!(
+            wait_reason_from(true, &held(None)),
+            Some(WaitReason::UserPrompt)
+        );
+    }
+
+    /// Parked with nothing claiming it: the field is left off rather than
+    /// filled with a guess, and a run that is not parked never has one.
+    #[test]
+    fn nothing_claiming_a_parked_run_reports_no_reason() {
+        assert_eq!(wait_reason_from(true, &WaitMarkers::default()), None);
+        assert_eq!(
+            wait_reason_from(
+                false,
+                &WaitMarkers {
+                    gate_prompt: true,
+                    ..Default::default()
+                }
+            ),
+            None,
+            "a run that is not waiting is not waiting on anything"
+        );
+    }
+
+    /// The rendered form every text surface uses, counts included. Narrow
+    /// enough for a table column, which is why it is not the variant name.
+    #[test]
+    fn every_reason_renders_for_a_narrow_column() {
+        assert_eq!(WaitReason::ToolApproval.to_string(), "tool approval");
+        assert_eq!(WaitReason::UserPrompt.to_string(), "user prompt");
+        assert_eq!(WaitReason::TaintGate.to_string(), "taint gate");
+        assert_eq!(WaitReason::InteractionPoint.to_string(), "checkpoint");
+        assert_eq!(
+            WaitReason::FanOutWorkers { outstanding: 3 }.to_string(),
+            "workers(3)"
+        );
+        assert_eq!(
+            WaitReason::Children { outstanding: 2 }.to_string(),
+            "children(2)"
+        );
+    }
+
+    /// Only the two engine-side reasons resolve on their own; the rest are a
+    /// person's to clear. This is the predicate a badge should be built on.
+    #[test]
+    fn only_the_engine_side_reasons_need_nobody() {
+        assert!(WaitReason::ToolApproval.needs_a_person());
+        assert!(WaitReason::UserPrompt.needs_a_person());
+        assert!(WaitReason::TaintGate.needs_a_person());
+        assert!(WaitReason::InteractionPoint.needs_a_person());
+        assert!(!WaitReason::FanOutWorkers { outstanding: 2 }.needs_a_person());
+        assert!(!WaitReason::Children { outstanding: 2 }.needs_a_person());
     }
 
     #[test]

@@ -257,11 +257,12 @@ type PersistenceQuery = (
         Option<&'static crate::interaction_points::InteractionPointRounds>,
         Option<&'static crate::persistence::RunOutcomeFlags>,
         Option<&'static crate::persistence::FinalOutput>,
-        // The other two reasons a run can be parked. Read here because this is
+        // The remaining reasons a run can be parked. Read here because this is
         // where they are queryable, and recorded on `meta.json` so a client
         // does not have to reconstruct them from what it can see.
         Option<&'static crate::gate_prompt::AwaitingGatePrompt>,
         Option<&'static super::WaitingForChildren>,
+        Option<&'static crate::components::AwaitingInteraction>,
     ),
 );
 
@@ -300,6 +301,7 @@ pub fn dispatch_persistence(
             final_output,
             gate_prompt,
             waiting_for_children,
+            awaiting_interaction,
         ),
     ) in agents.iter_mut()
     {
@@ -389,11 +391,22 @@ pub fn dispatch_persistence(
                 totals,
                 flags: &flags,
                 final_output,
-                parked: crate::persistence::ParkedBy {
-                    interaction: awaiting_point.is_some(),
-                    approval: gate_prompt.is_some_and(|g| g.0 > 0),
-                    fan_out: fan_out_waiting.is_some(),
-                    children: waiting_for_children.is_some(),
+                parked: leviath_core::run_meta::WaitMarkers {
+                    gate_prompt: gate_prompt.is_some_and(|g| g.0 > 0),
+                    interaction_point: awaiting_point.is_some(),
+                    fan_out_outstanding: fan_out_waiting.map(|f| f.outstanding()),
+                    // The count needs each child's status, which this query
+                    // cannot reach; the listing computes it live. Recording
+                    // the reason without the number is the honest half.
+                    children_outstanding: waiting_for_children
+                        .map(|_| children.map(|c| c.children.len()).unwrap_or(0)),
+                    interaction: hub.as_ref().and_then(|h| {
+                        h.pending()
+                            .into_iter()
+                            .find(|(agent_id, _)| *agent_id == state.agent_id)
+                            .map(|(_, req)| req.kind)
+                    }),
+                    awaiting_interaction: awaiting_interaction.is_some(),
                 },
             },
             crate::persistence::RunPosition {

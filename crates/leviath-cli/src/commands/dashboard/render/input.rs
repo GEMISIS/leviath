@@ -237,6 +237,7 @@ mod tests {
             cached_tokens: 10,
             iteration: 3,
             waiting_prompt: Some("What should I do?".to_string()),
+            wait_reason: None,
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,

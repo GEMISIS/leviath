@@ -1020,6 +1020,7 @@ mod tests {
             cached_tokens: 0,
             iteration: 0,
             waiting_prompt: None,
+            wait_reason: None,
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
