@@ -342,7 +342,7 @@ impl BuiltinTools {
                         },
                         "key": {
                             "type": "string",
-                            "description": "Key for the entry"
+                            "description": "Optional name for this entry. Naming it lets you release it later with context_delete once you are done with it - worth doing for anything bulky you expect to finish with, like a fetched source you plan to distill."
                         },
                         "content": {
                             "type": "string",
@@ -372,7 +372,7 @@ impl BuiltinTools {
             },
             Tool {
                 name: "context_delete".to_string(),
-                description: "Remove a specific keyed entry from a section of your context window.".to_string(),
+                description: "Release an entry you are finished with from a section of your context window, freeing its tokens. Use this when you have distilled what matters out of something bulky and no longer need the original - a source you have summarized, a file you have extracted from. Name the entry by 'key' if you gave it one, by 'index' as shown in context_list, or drop the oldest few with 'oldest'.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -382,10 +382,18 @@ impl BuiltinTools {
                         },
                         "key": {
                             "type": "string",
-                            "description": "Key of the entry to remove"
+                            "description": "Key of the entry to release, if it has one"
+                        },
+                        "index": {
+                            "type": "integer",
+                            "description": "Position of the entry to release, counting from 0 as the oldest, as shown by context_list"
+                        },
+                        "oldest": {
+                            "type": "integer",
+                            "description": "Release this many of the oldest entries. Use when you need room and the oldest material is the least useful."
                         }
                     },
-                    "required": ["region", "key"]
+                    "required": ["region"]
                 }),
             },
             Tool {

@@ -110,7 +110,7 @@ back into the system prompt on later turns.
 | `context_write` | Store or replace a keyed entry in a named section. | `region`, `content`, `key` (optional) |
 | `context_append` | Add to a section without replacing existing content. | `region`, `content`, `key` (optional) |
 | `context_read` | Read a section, or a specific keyed entry within it. | `region`, `key` (optional) |
-| `context_delete` | Remove a specific keyed entry from a section. | `region`, `key` |
+| `context_delete` | Release an entry the agent is finished with, freeing its tokens. See [letting the agent decide what to forget](/docs/context#letting-the-agent-decide-what-to-forget). | `region`, and one of `key` / `index` / `oldest` |
 | `context_list` | List sections with their token counts and entry counts. | `region` (optional) |
 | `todo_add` | Add an open item to a [checklist region](/docs/context#tracking-work-with-a-checklist), returning its id. | `region`, `item` |
 | `todo_done` | Tick a checklist item off. | `region`, `id` |

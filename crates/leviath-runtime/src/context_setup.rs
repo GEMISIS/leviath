@@ -31,6 +31,7 @@ pub fn init_window_seeded(
             region_def.max_tokens,
         );
         region.summarizable = region_def.summarizable;
+        region.admission = region_def.admission;
         window.add_region(region);
     }
 
@@ -162,6 +163,7 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
             region_def.max_tokens,
         );
         new_region.summarizable = region_def.summarizable;
+        new_region.admission = region_def.admission;
 
         if let Some(existing) = window.get_region(&region_def.name) {
             // Carry entries verbatim - kind, metadata, key, timestamp survive
@@ -219,6 +221,7 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
             existing.max_tokens,
         );
         carried.summarizable = existing.summarizable;
+        carried.admission = existing.admission;
         // Verbatim, exactly as above: these are the regions whose typed turns
         // a rebuild would flatten.
         for entry in &existing.content {

@@ -209,6 +209,20 @@ pub(super) fn parse_region_layout(
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
+        // Default `evict`: making room is what every region did before this
+        // setting existed, and it is right for the transcript regions that are
+        // the majority of them.
+        let admission = match region_value.get("admission").and_then(|v| v.as_str()) {
+            Some("reject") => crate::region::Admission::Reject,
+            Some("evict") | None => crate::region::Admission::Evict,
+            Some(other) => {
+                return Err(crate::error::Error::ValidationFailed(format!(
+                    "region '{region_name}' has admission = \"{other}\"; \
+                     expected \"evict\" or \"reject\""
+                )));
+            }
+        };
+
         let seed = parse_region_seed(region_name, region_value.get("seed"));
 
         // Percentage regions contribute their (unknown) size at resolution, so
@@ -221,6 +235,7 @@ pub(super) fn parse_region_layout(
             .with_budget(budget)
             .with_required(required, required_message);
         def.summarizable = summarizable;
+        def.admission = admission;
         if let Some(f) = compact_at_field {
             def = def.with_compact_at(f);
         }

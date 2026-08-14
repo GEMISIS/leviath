@@ -324,13 +324,32 @@ impl ContextWindow {
         content: String,
         tokens: usize,
     ) -> leviath_core::Result<()> {
+        self.add_to_region_keyed(region_name, None, content, tokens)
+    }
+
+    /// Add an entry that may carry a key, so the agent can name it again to
+    /// release it.
+    ///
+    /// Routed through the same private `write_to_region` tail
+    /// as the unkeyed path, so a keyed write still passes the region's
+    /// `on_write` hook and still gets `on_overflow` a chance to make room.
+    /// Writing keys through a shortcut instead is how they came to be honoured
+    /// on one region kind and dropped on the rest.
+    pub fn add_to_region_keyed(
+        &mut self,
+        region_name: &str,
+        key: Option<&str>,
+        content: String,
+        tokens: usize,
+    ) -> leviath_core::Result<()> {
         let Some((content, tokens)) =
             self.on_write_outcome(region_name, content, tokens, &leviath_core::EntryKind::Text)
         else {
             return Ok(()); // the region's script dropped the entry
         };
-        self.write_to_region(region_name, tokens, &mut |region, tokens| {
-            region.add_entry(content.clone(), tokens)
+        self.write_to_region(region_name, tokens, &mut |region, tokens| match key {
+            Some(k) => region.add_keyed_entry(k, content.clone(), tokens),
+            None => region.add_entry(content.clone(), tokens),
         })
     }
 
@@ -433,18 +452,26 @@ impl ContextWindow {
 
         let initial_tokens = self.current_tokens;
 
+        // A region under `admission = "reject"` is exempt from every phase
+        // below. Refusing writes to protect what a region holds would mean
+        // nothing if the window-level cascade could take the same entries a
+        // moment later - `reject` would only change which code did the silent
+        // dropping. The agent releases from these, or nothing does.
+        let evictable = |r: &Region| {
+            r.admission != leviath_core::region::Admission::Reject
+                && matches!(
+                    r.kind,
+                    RegionKind::Clearable
+                        | RegionKind::Temporary
+                        | RegionKind::Custom {
+                            persistent: false,
+                            ..
+                        }
+                )
+        };
+
         // Check if we have any evictable regions
-        let has_evictable = self.regions.iter().any(|r| {
-            matches!(
-                r.kind,
-                RegionKind::Clearable
-                    | RegionKind::Temporary
-                    | RegionKind::Custom {
-                        persistent: false,
-                        ..
-                    }
-            )
-        });
+        let has_evictable = self.regions.iter().any(evictable);
 
         if !has_evictable {
             tracing::warn!(
@@ -455,7 +482,10 @@ impl ContextWindow {
 
         // Phase 1: Clear Clearable regions (all-or-nothing)
         for region in &mut self.regions {
-            if matches!(region.kind, RegionKind::Clearable) && !region.content.is_empty() {
+            if matches!(region.kind, RegionKind::Clearable)
+                && region.admission != leviath_core::region::Admission::Reject
+                && !region.content.is_empty()
+            {
                 let freed = region.current_tokens;
                 region.clear();
                 self.current_tokens -= freed;
@@ -494,7 +524,8 @@ impl ContextWindow {
                     persistent: false,
                     ..
                 }
-            ) || region.content.is_empty()
+            ) || region.admission == leviath_core::region::Admission::Reject
+                || region.content.is_empty()
             {
                 continue;
             }
@@ -544,7 +575,8 @@ impl ContextWindow {
                             persistent: false,
                             ..
                         }
-                ) && let Some(entry) = region.remove_oldest()
+                ) && region.admission != leviath_core::region::Admission::Reject
+                    && let Some(entry) = region.remove_oldest()
                 {
                     let freed = entry.tokens;
                     self.current_tokens -= freed;

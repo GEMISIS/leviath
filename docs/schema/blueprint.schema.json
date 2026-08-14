@@ -374,6 +374,7 @@
         "min_tokens": { "type": "integer", "minimum": 0 },
         "required": { "type": "boolean", "default": false },
           "summarizable": { "type": "boolean", "default": true, "description": "Set false to keep an edge transform = \"compact\" from handing this region to the summarizer. Protects the region wherever it is used, and wins over an explicit compact list." },
+        "admission": { "enum": ["evict", "reject"], "default": "evict", "description": "What the region does when a write does not fit. \"evict\" makes room by dropping the oldest entry; \"reject\" refuses the write and tells the agent to release something first, so nothing is discarded without the agent knowing." },
         "required_message": {
           "type": "string",
           "description": "Shown when a required region is empty. `{region}` interpolates."

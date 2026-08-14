@@ -145,8 +145,11 @@ pub fn handle_context_tool(
                 // so a custom region's on_write hook sees the write.
                 region.clear();
                 window.current_tokens = window.calculate_tokens();
-                match window.add_to_region(region_name, content.to_string(), tokens) {
-                    Ok(()) => format!("Stored in '{region_name}' section."),
+                match window.add_to_region_keyed(region_name, key, content.to_string(), tokens) {
+                    Ok(()) => match key {
+                        Some(k) => format!("Stored in '{region_name}' section under key '{k}'."),
+                        None => format!("Stored in '{region_name}' section."),
+                    },
                     Err(e) => format!("[error] {e}"),
                 }
             }
@@ -189,9 +192,17 @@ pub fn handle_context_tool(
                     }
                 }
             } else {
-                // Same routing rationale as context_write above.
-                match window.add_to_region(region_name, content.to_string(), tokens) {
-                    Ok(()) => format!("Appended to '{region_name}' section."),
+                // Same routing rationale as context_write above. The key is
+                // honoured here rather than dropped: it was accepted on every
+                // region kind and only ever stored on HashMap ones, so an agent
+                // could name an entry that `context_delete` could never find.
+                match window.add_to_region_keyed(region_name, key, content.to_string(), tokens) {
+                    Ok(()) => match key {
+                        Some(k) => {
+                            format!("Appended to '{region_name}' section under key '{k}'.")
+                        }
+                        None => format!("Appended to '{region_name}' section."),
+                    },
                     Err(e) => format!("[error] {e}"),
                 }
             }
@@ -244,18 +255,49 @@ pub fn handle_context_tool(
             let Some(region_name) = args.get("region").and_then(|v| v.as_str()) else {
                 return "[error] missing 'region' argument".to_string();
             };
-            let Some(key) = args.get("key").and_then(|v| v.as_str()) else {
-                return "[error] missing 'key' argument".to_string();
-            };
             if window.get_region(region_name).is_none() {
                 return region_not_found(region_name, window);
             }
+            let key = args.get("key").and_then(|v| v.as_str());
+            let index = args.get("index").and_then(serde_json::Value::as_u64);
+            let oldest = args.get("oldest").and_then(serde_json::Value::as_u64);
             let region = window.get_region_mut(region_name).expect("region present");
-            if region.remove_by_key(key) {
-                format!("Removed '{key}' from '{region_name}' section.")
-            } else {
-                format!("[not found] No entry with key '{key}' in region '{region_name}'")
-            }
+            // One selector at a time, checked in the order an agent is most
+            // likely to have meant. Naming none of them is the interesting
+            // error: "delete from this region" without saying what would have
+            // to guess, and guessing here destroys something.
+            let result = match (key, index, oldest) {
+                (Some(k), _, _) => {
+                    if region.remove_by_key(k) {
+                        format!("Released '{k}' from '{region_name}'.")
+                    } else {
+                        format!("[not found] No entry with key '{k}' in region '{region_name}'")
+                    }
+                }
+                (None, Some(i), _) => {
+                    let at = usize::try_from(i).unwrap_or(usize::MAX);
+                    if region.remove_at(at) {
+                        format!("Released entry {at} from '{region_name}'.")
+                    } else {
+                        format!(
+                            "[not found] Region '{}' has {} entries, so there is none at {}",
+                            region_name,
+                            region.content.len(),
+                            at
+                        )
+                    }
+                }
+                (None, None, Some(n)) => {
+                    let want = usize::try_from(n).unwrap_or(usize::MAX);
+                    let freed = region.release_oldest(want);
+                    format!("Released the {freed} oldest entries from '{region_name}'.")
+                }
+                (None, None, None) => {
+                    "[error] name what to release: 'key', 'index', or 'oldest'".to_string()
+                }
+            };
+            window.current_tokens = window.calculate_tokens();
+            result
         }
         "context_list" => {
             let region_name = args.get("region").and_then(|v| v.as_str());
@@ -264,11 +306,14 @@ pub fn handle_context_tool(
                     Some(r) => r,
                     None => return region_not_found(rname, window),
                 };
+                // Numbered, because the index is how an unkeyed entry is named
+                // to `context_delete`. Listing entries the agent then cannot
+                // refer to is what made release a keyed-only feature.
                 let mut lines = Vec::new();
-                for entry in &region.content {
+                for (i, entry) in region.content.iter().enumerate() {
                     match &entry.key {
-                        Some(k) => lines.push(format!("  {} ({} tokens)", k, entry.tokens)),
-                        None => lines.push(format!("  (entry, {} tokens)", entry.tokens)),
+                        Some(k) => lines.push(format!("  [{}] {} ({} tokens)", i, k, entry.tokens)),
+                        None => lines.push(format!("  [{}] ({} tokens)", i, entry.tokens)),
                     }
                 }
                 if lines.is_empty() {
@@ -765,8 +810,11 @@ mod tests {
     fn delete_branches() {
         let mut w = win();
         assert!(call(&mut w, "context_delete", json!({})).contains("missing 'region'"));
+        // Naming a region but nothing in it is the one case worth refusing:
+        // guessing what to release destroys something.
         assert!(
-            call(&mut w, "context_delete", json!({"region": "files"})).contains("missing 'key'")
+            call(&mut w, "context_delete", json!({"region": "files"}))
+                .contains("name what to release")
         );
         assert!(
             call(
@@ -797,7 +845,7 @@ mod tests {
                 "context_delete",
                 json!({"region": "files", "key": "k"})
             )
-            .contains("Removed 'k'")
+            .contains("Released 'k'")
         );
     }
 
@@ -815,13 +863,14 @@ mod tests {
             "context_write",
             json!({"region": "notes", "content": "n"}),
         );
-        assert!(call(&mut w, "context_list", json!({"region": "notes"})).contains("(entry,"));
+        // Numbered so the entry can be named back to context_delete.
+        assert!(call(&mut w, "context_list", json!({"region": "notes"})).contains("[0] ("));
         call(
             &mut w,
             "context_write",
             json!({"region": "files", "content": "c", "key": "a.rs"}),
         );
-        assert!(call(&mut w, "context_list", json!({"region": "files"})).contains("a.rs ("));
+        assert!(call(&mut w, "context_list", json!({"region": "files"})).contains("[0] a.rs ("));
 
         // All regions - covers every kind's label.
         let all = call(&mut w, "context_list", json!({}));
@@ -867,5 +916,245 @@ mod tests {
     fn unknown_tool_errors() {
         let mut w = win();
         assert!(call(&mut w, "context_frobnicate", json!({})).contains("Unknown context tool"));
+    }
+
+    /// The bug under the feature request. `key` was accepted on every region
+    /// and stored on HashMap ones only, so an agent could name an entry on a
+    /// `temporary` region - exactly the kind holding fetched sources - and then
+    /// never be able to release it.
+    #[test]
+    fn a_key_on_an_ordinary_region_can_be_used_to_release_the_entry() {
+        let mut w = win();
+        call(
+            &mut w,
+            "context_append",
+            json!({"region": "notes", "key": "rfc-9110", "content": "the raw spec text"}),
+        );
+        call(
+            &mut w,
+            "context_append",
+            json!({"region": "notes", "key": "blog", "content": "a second source"}),
+        );
+
+        let listed = call(&mut w, "context_list", json!({"region": "notes"}));
+        assert!(listed.contains("rfc-9110"), "{listed}");
+
+        let released = call(
+            &mut w,
+            "context_delete",
+            json!({"region": "notes", "key": "rfc-9110"}),
+        );
+        assert!(released.contains("Released 'rfc-9110'"), "{released}");
+        let after = call(&mut w, "context_list", json!({"region": "notes"}));
+        assert!(!after.contains("rfc-9110"), "{after}");
+        assert!(
+            after.contains("blog"),
+            "the other source is untouched: {after}"
+        );
+    }
+
+    /// `context_write` replaces a region's content, and a key given with it
+    /// names the replacement - so the entry a stage rewrites each pass can
+    /// still be released by name.
+    #[test]
+    fn context_write_names_its_entry_when_given_a_key() {
+        let mut w = win();
+        let out = call(
+            &mut w,
+            "context_write",
+            json!({"region": "notes", "key": "plan", "content": "v1"}),
+        );
+        assert!(out.contains("under key 'plan'"), "{out}");
+
+        // Rewriting replaces, and the key still finds it.
+        call(
+            &mut w,
+            "context_write",
+            json!({"region": "notes", "key": "plan", "content": "v2"}),
+        );
+        assert_eq!(w.get_region("notes").unwrap().content.len(), 1);
+        let released = call(
+            &mut w,
+            "context_delete",
+            json!({"region": "notes", "key": "plan"}),
+        );
+        assert!(released.contains("Released 'plan'"), "{released}");
+    }
+
+    /// Releasing an entry has to return its tokens, or "release something to
+    /// make room" is advice that does not work.
+    #[test]
+    fn releasing_an_entry_frees_its_tokens() {
+        let mut w = win();
+        call(
+            &mut w,
+            "context_append",
+            json!({"region": "notes", "key": "big", "content": "x".repeat(400)}),
+        );
+        let held = w.get_region("notes").unwrap().current_tokens;
+        assert!(held > 0);
+        let before_window = w.current_tokens;
+
+        call(
+            &mut w,
+            "context_delete",
+            json!({"region": "notes", "key": "big"}),
+        );
+
+        assert_eq!(w.get_region("notes").unwrap().current_tokens, 0);
+        assert!(w.current_tokens < before_window, "the window recounted");
+    }
+
+    /// Not everything the agent wants to release was written with a key -
+    /// tool output and seeded material arrive unkeyed. The position shown by
+    /// `context_list` is how those are named.
+    #[test]
+    fn an_unkeyed_entry_can_be_released_by_position_or_by_age() {
+        let mut w = win();
+        for text in ["first", "second", "third"] {
+            call(
+                &mut w,
+                "context_append",
+                json!({"region": "notes", "content": text}),
+            );
+        }
+
+        let out = call(
+            &mut w,
+            "context_delete",
+            json!({"region": "notes", "index": 1}),
+        );
+        assert!(out.contains("Released entry 1"), "{out}");
+        let listed = call(&mut w, "context_read", json!({"region": "notes"}));
+        assert!(!listed.contains("second"), "{listed}");
+        assert!(
+            listed.contains("first") && listed.contains("third"),
+            "{listed}"
+        );
+
+        let out = call(
+            &mut w,
+            "context_delete",
+            json!({"region": "notes", "oldest": 5}),
+        );
+        assert!(
+            out.contains("Released the 2 oldest"),
+            "asked for 5, had 2: {out}"
+        );
+        assert_eq!(w.get_region("notes").unwrap().content.len(), 0);
+    }
+
+    /// An index past the end names nothing. Reported rather than silently
+    /// ignored, so the agent does not believe it released something.
+    #[test]
+    fn releasing_a_position_that_does_not_exist_says_so() {
+        let mut w = win();
+        call(
+            &mut w,
+            "context_append",
+            json!({"region": "notes", "content": "only one"}),
+        );
+        let out = call(
+            &mut w,
+            "context_delete",
+            json!({"region": "notes", "index": 7}),
+        );
+        assert!(out.contains("[not found]"), "{out}");
+        assert!(
+            out.contains("1 entries"),
+            "says what is actually there: {out}"
+        );
+        assert_eq!(w.get_region("notes").unwrap().content.len(), 1);
+    }
+
+    /// The point of admission control: a full region refuses the write and says
+    /// what to do, instead of dropping whichever entry happened to be oldest.
+    /// The agent finds out, which under eviction it never did.
+    #[test]
+    fn a_reject_region_refuses_a_write_instead_of_dropping_something() {
+        let mut w = win();
+        let mut region = Region::new("curated".to_string(), RegionKind::Temporary, 200);
+        region.admission = leviath_core::region::Admission::Reject;
+        w.add_region(region);
+
+        call(
+            &mut w,
+            "context_append",
+            json!({"region": "curated", "key": "kept", "content": "x".repeat(600)}),
+        );
+        let held = w.get_region("curated").unwrap().content.len();
+        assert_eq!(held, 1);
+
+        let refused = call(
+            &mut w,
+            "context_append",
+            json!({"region": "curated", "key": "extra", "content": "y".repeat(600)}),
+        );
+        assert!(refused.contains("[error]"), "{refused}");
+        assert!(refused.contains("full"), "{refused}");
+        assert!(
+            refused.contains("release an entry"),
+            "says what to do: {refused}"
+        );
+        // Nothing was displaced to make room.
+        assert_eq!(w.get_region("curated").unwrap().content.len(), 1);
+        assert!(
+            w.get_region("curated")
+                .unwrap()
+                .get_by_key("kept")
+                .is_some(),
+            "the earlier entry survived the refused write"
+        );
+
+        // Release, and the same write now fits: the loop the agent is meant to
+        // run closes.
+        call(
+            &mut w,
+            "context_delete",
+            json!({"region": "curated", "key": "kept"}),
+        );
+        let accepted = call(
+            &mut w,
+            "context_append",
+            json!({"region": "curated", "key": "extra", "content": "y".repeat(600)}),
+        );
+        assert!(!accepted.contains("[error]"), "{accepted}");
+    }
+
+    /// A sliding window under `reject` refuses rather than rolling off, which
+    /// is the count-based half of the same guarantee.
+    #[test]
+    fn a_reject_sliding_window_refuses_instead_of_rolling_off() {
+        let mut w = win();
+        let mut region = Region::new(
+            "recent".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 2,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+            5000,
+        );
+        region.admission = leviath_core::region::Admission::Reject;
+        w.add_region(region);
+
+        for text in ["one", "two"] {
+            let out = call(
+                &mut w,
+                "context_append",
+                json!({"region": "recent", "content": text}),
+            );
+            assert!(!out.contains("[error]"), "{out}");
+        }
+        let refused = call(
+            &mut w,
+            "context_append",
+            json!({"region": "recent", "content": "three"}),
+        );
+        assert!(refused.contains("full"), "{refused}");
+        let held = call(&mut w, "context_read", json!({"region": "recent"}));
+        assert!(
+            held.contains("one"),
+            "the oldest was not rolled off: {held}"
+        );
     }
 }
