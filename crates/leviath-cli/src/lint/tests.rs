@@ -487,6 +487,33 @@ available_tools = ["github__create_issue"]
     assert!(lint(&toml, &env).is_empty());
 }
 
+/// A stage granting a whole connector has a tool set nobody can enumerate at
+/// lint time - it is whatever that server advertises at spawn, which is the
+/// point of naming the server. So a permission that looks orphaned might name
+/// a tool the connector grants, and the check has nothing to tell them apart
+/// with. Skipped rather than guessed, the same way an MCP tool name is never
+/// reported as unknown.
+#[test]
+fn a_stage_granting_a_connector_does_not_get_orphan_permission_errors() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["read_file"]
+available_connectors = ["github"]
+
+[stages.main.tool_permissions]
+create_issue = "ask"
+"#,
+    );
+    assert!(
+        lint(&toml, &LintEnv::default()).is_empty(),
+        "the permission may well name a tool the connector grants"
+    );
+}
+
 #[test]
 fn a_permission_for_an_ungranted_tool_is_an_error() {
     let toml = manifest(
