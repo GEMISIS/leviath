@@ -166,9 +166,10 @@ pub async fn persistence_worker(
                     // Record what the write actually put on disk, not what this
                     // job hoped to - deriving the watermark from the job rather
                     // than the write is the shape of the bug being fixed.
-                    if let Some(key) =
-                        write_snapshot(&runs_dir, &job, &machine_id, &world_id, prev, written).await
-                    {
+                    let outcome =
+                        write_snapshot(&runs_dir, &job, &machine_id, &world_id, prev, written)
+                            .await;
+                    if let Some(key) = outcome.output {
                         last_output.insert(job.run_id.clone(), key);
                     }
                     // Drop a fully-terminal run's cached digest (it won't be
@@ -178,7 +179,12 @@ pub async fn persistence_worker(
                     if is_terminal_run(&job.meta.status) {
                         last_context.remove(&job.run_id);
                         last_output.remove(&job.run_id);
-                    } else {
+                    } else if outcome.archived {
+                        // Only for a record that reached the file. If the append
+                        // failed, the digest stays at the last state a reader
+                        // can actually rebuild, so the next write diffs against
+                        // that instead - which re-records everything the failed
+                        // one carried and puts the archive back in step.
                         last_context.insert(
                             job.run_id.clone(),
                             run_archive::digest_context(&job.context),
@@ -327,6 +333,26 @@ fn load_or_create_machine_id(runs_dir: &Path) -> String {
 /// Write one job's `meta.json` + `context.json` under `<runs_dir>/<run_id>/`,
 /// each via a temp file + atomic rename. Best-effort: logs and returns on any
 /// error. Serialization is infallible for these plain serde structs, so a
+/// What one snapshot write actually managed to put on disk.
+///
+/// The two answers are independent and both matter to what the lane remembers
+/// next time. `output` is the sidecar watermark; `archived` says whether the
+/// journal record for this state reached `run.lvr`.
+#[derive(Default)]
+struct WriteOutcome {
+    /// The `final_output` sidecar this write landed, if it wrote one.
+    output: Option<(i64, usize)>,
+    /// Whether the run-archive record for this snapshot was durably appended.
+    ///
+    /// The lane keeps a digest of the last archived context so the next write
+    /// can be a compact diff. Advancing that digest for a record that never
+    /// landed is unrecoverable: every later diff is then relative to a state no
+    /// reader can reconstruct, so the folded archive drifts from the run for
+    /// the rest of its life - while `context.json`, written whole each time,
+    /// stays correct. One swallowed append error was enough (issue #455).
+    archived: bool,
+}
+
 /// serialize error is a bug rather than a runtime condition (`.expect`).
 async fn write_snapshot(
     runs_dir: &Path,
@@ -335,13 +361,13 @@ async fn write_snapshot(
     world_id: &str,
     prev_context: Option<&run_archive::ContextDigest>,
     written_output: Option<(i64, usize)>,
-) -> Option<(i64, usize)> {
+) -> WriteOutcome {
     let dir = runs_dir.join(&job.run_id);
     if let Err(e) = create_private_dir(&dir).await {
         tracing::warn!(run_id = %job.run_id, error = %e, "persistence: create run dir failed");
-        return None;
+        return WriteOutcome::default();
     }
-    append_run_archive(&dir, job, machine_id, world_id, prev_context).await;
+    let archived = append_run_archive(&dir, job, machine_id, world_id, prev_context).await;
     let meta_json = serde_json::to_string_pretty(&job.meta).expect("RunMeta always serializes");
     write_bytes_atomic(&dir.join("meta.json"), meta_json.into_bytes(), &job.run_id).await;
     // Compact, not pretty: the context is the largest file the lane writes and
@@ -435,7 +461,10 @@ async fn write_snapshot(
             let _ = tokio::fs::remove_file(&interactions_path).await;
         }
     }
-    wrote_output
+    WriteOutcome {
+        output: wrote_output,
+        archived,
+    }
 }
 
 /// Append this snapshot to the run's portable archive (`<run_dir>/run.lvr`).
@@ -457,7 +486,7 @@ async fn append_run_archive(
     machine_id: &str,
     world_id: &str,
     prev_context: Option<&run_archive::ContextDigest>,
-) {
+) -> bool {
     use leviath_core::run_archive::{RunIdentity, RunRecord};
 
     let path = dir.join("run.lvr");
@@ -512,11 +541,18 @@ async fn append_run_archive(
 
     match open_private_append(&path).await {
         Ok(mut file) => {
-            let _ = file.write_all(&buf).await;
-            let _ = file.flush().await;
+            // A partial write leaves a torn frame, which the lenient reader
+            // stops at - so the tail is lost either way and this must report
+            // failure, not success.
+            let written = file.write_all(&buf).await.is_ok() && file.flush().await.is_ok();
+            if !written {
+                tracing::warn!(run_id = %job.run_id, "persistence: run archive write failed");
+            }
+            written
         }
         Err(e) => {
             tracing::warn!(run_id = %job.run_id, error = %e, "persistence: run archive append failed");
+            false
         }
     }
 }

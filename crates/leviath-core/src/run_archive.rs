@@ -2740,4 +2740,79 @@ mod tests {
         assert_eq!(folded.inference_count, written);
         assert_eq!(folded.inference_usage.len(), 1);
     }
+
+    /// Replaying a journal has to land on exactly the state the run was in.
+    ///
+    /// Issue #455 reports evictable regions drifting - a folded `logs` region
+    /// holding entries the live agent had already lost, and elsewhere fewer
+    /// than it held. This walks a region through the mutations a temporary
+    /// region actually performs (append, evict-oldest, evict-and-append in one
+    /// step, clear) and checks the digest -> delta -> apply chain reproduces
+    /// every intermediate state exactly.
+    #[test]
+    fn probe_replay_matches_every_step() {
+        fn region(name: &str, entries: &[(&str, usize)]) -> RegionSnapshot {
+            RegionSnapshot {
+                name: name.to_string(),
+                kind: "temporary".to_string(),
+                current_tokens: entries.iter().map(|(_, t)| *t).sum(),
+                max_tokens: 1000,
+                entries: entries
+                    .iter()
+                    .map(|(c, t)| RegionEntrySnapshot {
+                        content: c.to_string(),
+                        tokens: *t,
+                        key: None,
+                        kind: crate::region::EntryKind::Text,
+                        metadata: None,
+                        taint: crate::taint::TaintLevel::Public,
+                    })
+                    .collect(),
+            }
+        }
+        fn snap(entries: &[(&str, usize)]) -> ContextSnapshot {
+            let r = region("logs", entries);
+            ContextSnapshot {
+                stage_name: "s".to_string(),
+                total_tokens: r.current_tokens,
+                max_tokens: 1000,
+                regions: vec![r],
+            }
+        }
+
+        let steps: Vec<ContextSnapshot> = vec![
+            snap(&[]),
+            snap(&[("a", 10)]),
+            snap(&[("a", 10), ("b", 20)]),
+            snap(&[("a", 10), ("b", 20), ("c", 30)]),
+            // Evict oldest.
+            snap(&[("b", 20), ("c", 30)]),
+            // Evict and append in one step - what a temporary region does when
+            // an add pushes it over its bound.
+            snap(&[("c", 30), ("d", 40)]),
+            // Several evictions at once.
+            snap(&[("d", 40)]),
+            // Repeated identical content, the case a content hash cannot tell
+            // apart by value alone.
+            snap(&[("d", 40), ("x", 5)]),
+            snap(&[("x", 5), ("x", 5)]),
+            snap(&[("x", 5)]),
+            snap(&[]),
+        ];
+
+        // Fold exactly as the lane writes and the reader replays: retain a
+        // digest, diff the next snapshot against it, apply to the running base.
+        let mut base = steps[0].clone();
+        let mut digest = digest_context(&steps[0]);
+        for (i, next) in steps.iter().enumerate().skip(1) {
+            let delta = diff_context_digest(&digest, next);
+            apply_delta(&mut base, &delta);
+            assert_eq!(
+                base, *next,
+                "step {i}: replay drifted from the live state\n  delta was {:?}",
+                delta.regions
+            );
+            digest = digest_context(next);
+        }
+    }
 }
