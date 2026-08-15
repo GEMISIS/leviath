@@ -137,6 +137,14 @@ pub async fn persistence_worker(
         std::collections::HashMap::new();
     let mut last_context: std::collections::HashMap<String, run_archive::ContextDigest> =
         std::collections::HashMap::new();
+    // The status last written into the archive, so a change of status can be
+    // recorded as the event it is. `Progress` carries the whole `RunMeta` and
+    // therefore the status too, but only as a value that happens to differ
+    // from the previous record's - a post-mortem asking "when did this die,
+    // and to what" had to diff its way there, and a run whose last act was to
+    // go terminal might have no `Progress` after it at all.
+    let mut last_status: std::collections::HashMap<String, leviath_core::run_meta::RunStatus> =
+        std::collections::HashMap::new();
     while let Some(first) = jobs.recv().await {
         // Drain whatever else is already queued and process it as one batch,
         // keeping only the NEWEST snapshot per run: each snapshot carries the
@@ -166,9 +174,17 @@ pub async fn persistence_worker(
                     // Record what the write actually put on disk, not what this
                     // job hoped to - deriving the watermark from the job rather
                     // than the write is the shape of the bug being fixed.
-                    let outcome =
-                        write_snapshot(&runs_dir, &job, &machine_id, &world_id, prev, written)
-                            .await;
+                    let status_before = last_status.get(&job.run_id);
+                    let outcome = write_snapshot(
+                        &runs_dir,
+                        &job,
+                        &machine_id,
+                        &world_id,
+                        prev,
+                        written,
+                        status_before,
+                    )
+                    .await;
                     if let Some(key) = outcome.output {
                         last_output.insert(job.run_id.clone(), key);
                     }
@@ -176,9 +192,13 @@ pub async fn persistence_worker(
                     // written again), so the map stays bounded by the set of
                     // *live* runs rather than every run the daemon has ever
                     // seen.
+                    if outcome.archived {
+                        last_status.insert(job.run_id.clone(), job.meta.status.clone());
+                    }
                     if is_terminal_run(&job.meta.status) {
                         last_context.remove(&job.run_id);
                         last_output.remove(&job.run_id);
+                        last_status.remove(&job.run_id);
                     } else if outcome.archived {
                         // Only for a record that reached the file. If the append
                         // failed, the digest stays at the last state a reader
@@ -297,7 +317,7 @@ fn is_terminal_run(status: &leviath_core::run_meta::RunStatus) -> bool {
     use leviath_core::run_meta::RunStatus;
     matches!(
         status,
-        RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled
+        leviath_core::run_meta::RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled
     )
 }
 
@@ -361,13 +381,15 @@ async fn write_snapshot(
     world_id: &str,
     prev_context: Option<&run_archive::ContextDigest>,
     written_output: Option<(i64, usize)>,
+    status_before: Option<&leviath_core::run_meta::RunStatus>,
 ) -> WriteOutcome {
     let dir = runs_dir.join(&job.run_id);
     if let Err(e) = create_private_dir(&dir).await {
         tracing::warn!(run_id = %job.run_id, error = %e, "persistence: create run dir failed");
         return WriteOutcome::default();
     }
-    let archived = append_run_archive(&dir, job, machine_id, world_id, prev_context).await;
+    let archived =
+        append_run_archive(&dir, job, machine_id, world_id, prev_context, status_before).await;
     let meta_json = serde_json::to_string_pretty(&job.meta).expect("RunMeta always serializes");
     write_bytes_atomic(&dir.join("meta.json"), meta_json.into_bytes(), &job.run_id).await;
     // Compact, not pretty: the context is the largest file the lane writes and
@@ -486,6 +508,7 @@ async fn append_run_archive(
     machine_id: &str,
     world_id: &str,
     prev_context: Option<&run_archive::ContextDigest>,
+    status_before: Option<&leviath_core::run_meta::RunStatus>,
 ) -> bool {
     use leviath_core::run_archive::{RunIdentity, RunRecord};
 
@@ -537,6 +560,20 @@ async fn append_run_archive(
             };
             run_archive::write_record(&mut buf, &checkpoint).expect("writing to a Vec never fails");
         }
+    }
+
+    // Beside whatever else this write records: a *change* of status is an
+    // event in its own right, and the one a post-mortem looks for first.
+    //
+    // Only a change. The first write has no previous status to differ from,
+    // and the `Header` it goes out with already carries the run's opening
+    // state - a `StatusChanged` there would say the same thing twice.
+    if status_before.is_some_and(|before| before != &job.meta.status) {
+        let changed = RunRecord::StatusChanged {
+            status: job.meta.status.clone(),
+            at,
+        };
+        run_archive::write_record(&mut buf, &changed).expect("writing to a Vec never fails");
     }
 
     // Open and write share one outcome, because they share one meaning: either
@@ -788,7 +825,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut j = job("run-perms");
         j.final_output = Some("the answer".to_string());
-        write_snapshot(dir.path(), &j, "m", "w", None, None).await;
+        write_snapshot(dir.path(), &j, "m", "w", None, None, None).await;
 
         let run_dir = dir.path().join("run-perms");
         for name in ["meta.json", "context.json", leviath_core::FINAL_OUTPUT_FILE] {
@@ -814,7 +851,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut j = job("run-answer");
         j.final_output = Some("metric,value\nrows,2\n".to_string());
-        write_snapshot(dir.path(), &j, "m", "w", None, None).await;
+        write_snapshot(dir.path(), &j, "m", "w", None, None, None).await;
 
         let written = std::fs::read_to_string(
             dir.path()
@@ -850,7 +887,7 @@ mod tests {
 
         // `None` is what the lane knows after the job that would have written
         // the bytes was coalesced away: nothing has been written for this run.
-        write_snapshot(dir.path(), &j, "m", "w", None, None).await;
+        write_snapshot(dir.path(), &j, "m", "w", None, None, None).await;
 
         let sidecar = dir
             .path()
@@ -891,7 +928,7 @@ mod tests {
             .join("run-heartbeat")
             .join(leviath_core::FINAL_OUTPUT_FILE);
 
-        write_snapshot(dir.path(), &j, "m", "w", None, None).await;
+        write_snapshot(dir.path(), &j, "m", "w", None, None, None).await;
         assert!(sidecar.exists(), "first write lands");
         // Replace it with a marker: if the skip does not hold, the marker is
         // overwritten, which is a difference a mere "file exists" cannot see.
@@ -904,6 +941,7 @@ mod tests {
             "w",
             None,
             Some((100, "the answer".len())),
+            None,
         )
         .await;
         assert_eq!(
@@ -925,6 +963,7 @@ mod tests {
             "w",
             None,
             Some((100, "the answer".len())),
+            None,
         )
         .await;
         assert_eq!(
@@ -939,7 +978,7 @@ mod tests {
     #[tokio::test]
     async fn no_answer_writes_no_sidecar() {
         let dir = tempfile::tempdir().expect("temp dir");
-        write_snapshot(dir.path(), &job("run-silent"), "m", "w", None, None).await;
+        write_snapshot(dir.path(), &job("run-silent"), "m", "w", None, None, None).await;
         assert!(
             !dir.path()
                 .join("run-silent")
@@ -962,7 +1001,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let run = dir.path().join("run-perms");
 
-        write_snapshot(dir.path(), &job("run-perms"), "m", "w", None, None).await;
+        write_snapshot(dir.path(), &job("run-perms"), "m", "w", None, None, None).await;
         append_stage_line(&run, 0, "output.log", "a line of agent output", "run-perms").await;
         append_stage_line(&run, 0, "logs.log", "a line of tool activity", "run-perms").await;
         append_record(
@@ -1051,6 +1090,7 @@ mod tests {
             "world-y",
             None,
             None,
+            None,
         )
         .await;
 
@@ -1082,13 +1122,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first = job_with_context("run-1", 1);
         let second = job_with_context("run-1", 3); // grew by 2 entries
-        write_snapshot(dir.path(), &first, "m", "w", None, None).await;
+        write_snapshot(dir.path(), &first, "m", "w", None, None, None).await;
         write_snapshot(
             dir.path(),
             &second,
             "m",
             "w",
             Some(&run_archive::digest_context(&first.context)),
+            None,
             None,
         )
         .await;
@@ -1118,10 +1159,10 @@ mod tests {
         use leviath_core::run_archive::{RunRecord, read_archive};
         let dir = tempfile::tempdir().unwrap();
         // First process writes the archive.
-        write_snapshot(dir.path(), &job("run-1"), "m1", "w1", None, None).await;
+        write_snapshot(dir.path(), &job("run-1"), "m1", "w1", None, None, None).await;
         // A "restarted" worker (no prior context) writes to the existing archive:
         // it records an ownership handoff + a fresh context re-anchor, not a Header.
-        write_snapshot(dir.path(), &job("run-1"), "m2", "w2", None, None).await;
+        write_snapshot(dir.path(), &job("run-1"), "m2", "w2", None, None, None).await;
 
         let bytes = std::fs::read(dir.path().join("run-1").join("run.lvr")).unwrap();
         let (_v, records) = read_archive(&mut bytes.as_slice()).unwrap();
@@ -1150,11 +1191,17 @@ mod tests {
     #[test]
     fn is_terminal_run_classifies_statuses() {
         use leviath_core::run_meta::RunStatus;
-        assert!(is_terminal_run(&RunStatus::Complete));
+        assert!(is_terminal_run(
+            &leviath_core::run_meta::RunStatus::Complete
+        ));
         assert!(is_terminal_run(&RunStatus::Error));
         assert!(is_terminal_run(&RunStatus::Cancelled));
-        assert!(!is_terminal_run(&RunStatus::Running));
-        assert!(!is_terminal_run(&RunStatus::CompleteInteractive));
+        assert!(!is_terminal_run(
+            &leviath_core::run_meta::RunStatus::Running
+        ));
+        assert!(!is_terminal_run(
+            &leviath_core::run_meta::RunStatus::CompleteInteractive
+        ));
     }
 
     /// Snapshots queued behind a slow write are coalesced latest-wins per run:
@@ -1285,7 +1332,7 @@ mod tests {
         // A job carrying fan-out state writes fanout.json.
         let mut fo_job = job("run-1");
         fo_job.fanout = Some(r#"{"resume":"me"}"#.to_string());
-        write_snapshot(dir.path(), &fo_job, "m", "w", None, None).await;
+        write_snapshot(dir.path(), &fo_job, "m", "w", None, None, None).await;
         assert!(path.exists());
         // A later job without fan-out state removes the now-stale file.
         write_snapshot(
@@ -1294,6 +1341,7 @@ mod tests {
             "m",
             "w",
             Some(&run_archive::digest_context(&fo_job.context)),
+            None,
             None,
         )
         .await;
@@ -1307,7 +1355,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let run_dir = dir.path().join("run-1");
         std::fs::create_dir_all(run_dir.join("run.lvr")).unwrap();
-        write_snapshot(dir.path(), &job("run-1"), "m", "w", None, None).await;
+        write_snapshot(dir.path(), &job("run-1"), "m", "w", None, None, None).await;
         // meta.json still written despite the archive failure.
         assert!(run_dir.join("meta.json").exists());
     }
@@ -1447,6 +1495,7 @@ mod tests {
             "world-test",
             None,
             None,
+            None,
         )
         .await;
 
@@ -1482,6 +1531,7 @@ mod tests {
             "world-test",
             None,
             None,
+            None,
         )
         .await;
         let audit =
@@ -1505,6 +1555,7 @@ mod tests {
             "world-test",
             None,
             None,
+            None,
         )
         .await;
         let written = std::fs::read_to_string(&path).unwrap();
@@ -1516,6 +1567,7 @@ mod tests {
             &job("r"),
             "machine-test",
             "world-test",
+            None,
             None,
             None,
         )
@@ -1542,6 +1594,7 @@ mod tests {
             },
             "machine-test",
             "world-test",
+            None,
             None,
             None,
         )
@@ -1584,6 +1637,7 @@ mod tests {
             "world-test",
             None,
             None,
+            None,
         )
         .await;
     }
@@ -1613,6 +1667,7 @@ mod tests {
             },
             "machine-test",
             "world-test",
+            None,
             None,
             None,
         )
@@ -1650,6 +1705,7 @@ mod tests {
             "world-test",
             None,
             None,
+            None,
         )
         .await;
 
@@ -1672,14 +1728,14 @@ mod tests {
         let j = job_with_context("run-torn", 3);
 
         // Nothing in the way: the record lands and the write says so.
-        let ok = write_snapshot(dir.path(), &j, "m", "w", None, None).await;
+        let ok = write_snapshot(dir.path(), &j, "m", "w", None, None, None).await;
         assert!(ok.archived, "an unobstructed append lands");
 
         // Now make `run.lvr` unopenable and try again.
         let blocked = tempfile::tempdir().expect("temp dir");
         let run_dir = blocked.path().join(&j.run_id);
         std::fs::create_dir_all(run_dir.join("run.lvr")).expect("occupy the archive path");
-        let failed = write_snapshot(blocked.path(), &j, "m", "w", None, None).await;
+        let failed = write_snapshot(blocked.path(), &j, "m", "w", None, None, None).await;
         assert!(
             !failed.archived,
             "an append that could not open its file must not report success"
@@ -1747,6 +1803,54 @@ mod tests {
             folded.context.regions[0].entries.len(),
             5,
             "folds to what the run actually held"
+        );
+    }
+
+    /// A run's terminal transition is recorded as an event, not left to be
+    /// inferred by diffing metadata between records.
+    ///
+    /// Issue #456 asked for this from the post-mortem side: the journals of 31
+    /// runs that died on an empty account carried no statement of when or to
+    /// what, so working it out meant correlating daemon logs that a harness
+    /// had sent to /dev/null.
+    #[tokio::test]
+    async fn a_change_of_status_is_journalled_as_its_own_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut running = job("run-status");
+        running.meta.status = leviath_core::run_meta::RunStatus::Running;
+        let mut done = job("run-status");
+        done.meta.status = leviath_core::run_meta::RunStatus::Complete;
+
+        // Two batches through *one* worker: the lane remembers the last status
+        // it archived for the life of the worker, which is how a long-running
+        // daemon sees the transition. Sending both at once would coalesce them
+        // to the newest and there would be no transition to see.
+        let (tx, rx) = mpsc::unbounded_channel();
+        let runs_dir = dir.path().to_path_buf();
+        let worker = tokio::spawn(async move { persistence_worker(Some(runs_dir), rx).await });
+        tx.send(PersistMsg::Snapshot(Box::new(running))).unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tx.send(PersistMsg::Snapshot(Box::new(done))).unwrap();
+        drop(tx);
+        worker
+            .await
+            .expect("the worker exits when the channel closes");
+
+        let bytes = std::fs::read(dir.path().join("run-status").join("run.lvr")).unwrap();
+        let (_, records) =
+            leviath_core::run_archive::read_archive_lenient(&mut bytes.as_slice()).unwrap();
+        let changes: Vec<&leviath_core::run_meta::RunStatus> = records
+            .iter()
+            .filter_map(|r| match r {
+                leviath_core::run_archive::RunRecord::StatusChanged { status, .. } => Some(status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            changes,
+            vec![&leviath_core::run_meta::RunStatus::Complete],
+            "the transition, and not the opening status the Header already carries"
         );
     }
 }

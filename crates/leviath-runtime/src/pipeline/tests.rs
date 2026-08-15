@@ -972,8 +972,15 @@ fn an_exhausted_fallback_list_pauses_on_credits_instead_of_dying() {
 /// a scheduler or a benchmark, which is watching for a terminal status and
 /// would wait for ever for one that never arrives - so the one case where an
 /// error is more useful than patience keeps getting one.
+/// An empty account parks an unattended run too.
+///
+/// It used to fail, and that cost a benchmark round 31 runs (issue #456). The
+/// error also arrived as three different terminal shapes depending on where it
+/// landed - the worst being a run that died on its output stage and recorded
+/// "never called submit_output", which names the wrong cause entirely. Parking
+/// at the point of failure collapses all three into one answer.
 #[test]
-fn an_unattended_run_out_of_credits_fails_rather_than_waiting_for_nobody() {
+fn an_unattended_run_out_of_credits_parks_instead_of_losing_its_work() {
     let (mut world, tx) = world_with_results();
     let mut si = stage_with_fallback();
     si.fallbacks.clear();
@@ -990,9 +997,21 @@ fn an_unattended_run_out_of_credits_fails_rather_than_waiting_for_nobody() {
     run_collect(&mut world);
 
     let status = format!("{:?}", world.get::<AgentState>(e).unwrap().status);
-    assert!(status.contains("Error"), "{status}");
-    assert!(world.get::<crate::pipeline::PausedForSetup>(e).is_none());
-    assert!(world.get::<ResolveTransition>(e).is_some());
+    assert!(status.contains("Paused"), "{status}");
+    let parked = world
+        .get::<crate::pipeline::PausedForSetup>(e)
+        .expect("parked, with the reason a client can read");
+    assert_eq!(
+        parked.blocker,
+        leviath_core::run_meta::SetupBlocker::CreditsExhausted
+    );
+    // Not routed into the transition logic, which is what let a credits
+    // failure on an output stage be recorded as a missing answer.
+    assert!(world.get::<ResolveTransition>(e).is_none());
+    assert!(
+        world.get::<ReadyToInfer>(e).is_some(),
+        "the retry is staged"
+    );
 }
 
 /// The attended run says what to do, in a form a client can read rather than
