@@ -276,20 +276,24 @@ pub fn fail_stalled_dispatch(
             },
             _ => SetupBlocker::ProviderMissing,
         };
-        let message = match blocker {
-            SetupBlocker::CreditsExhausted => format!(
-                "out of credits on '{}': top up the account, then `lev resume` \
-                 this run",
-                si.provider_name
-            ),
+        // What to fix, and - separately - whether this run will still be there
+        // to pick it up. The two were one string, so a run the branch below
+        // *failed* was told to `lev resume` it, which is not a thing that
+        // works on a failed run (issue #456).
+        let remedy = match blocker {
+            SetupBlocker::CreditsExhausted => {
+                format!(
+                    "out of credits on '{}': top up the account",
+                    si.provider_name
+                )
+            }
             SetupBlocker::AuthFailed => format!(
-                "'{}' rejected the API key: replace it with `lev setup`, then \
-                 `lev resume` this run",
+                "'{}' rejected the API key: replace it with `lev setup`",
                 si.provider_name
             ),
             SetupBlocker::Forbidden => format!(
                 "'{}' will not serve this model to that key: check the account's \
-                 plan and model permissions, then `lev resume` this run",
+                 plan and model permissions",
                 si.provider_name
             ),
             _ => stall.reason.give_up_message(&si.provider_name),
@@ -306,6 +310,9 @@ pub fn fail_stalled_dispatch(
                 stalled_secs = now.saturating_sub(stall.since),
                 "failing an unattended run: nobody is there to fix it"
             );
+            // No `lev resume` here: this run is ending, and pointing somebody
+            // at a command that will not work is worse than saying nothing.
+            let message = format!("{remedy}; this run has ended and cannot be resumed");
             if let Some(mut buffer) = buffer {
                 buffer.logs.push((0, format!("[stalled] {message}")));
             }
@@ -322,6 +329,8 @@ pub fn fail_stalled_dispatch(
             stalled_secs = now.saturating_sub(stall.since),
             "pausing a run until the machine is fixed"
         );
+        // Paused, so resume is the truthful next step and is worth naming.
+        let message = format!("{remedy}, then `lev resume` this run");
         if let Some(mut buffer) = buffer {
             buffer.logs.push((0, format!("[paused] {message}")));
         }
