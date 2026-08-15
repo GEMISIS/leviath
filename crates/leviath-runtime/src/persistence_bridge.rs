@@ -539,22 +539,20 @@ async fn append_run_archive(
         }
     }
 
-    match open_private_append(&path).await {
-        Ok(mut file) => {
-            // A partial write leaves a torn frame, which the lenient reader
-            // stops at - so the tail is lost either way and this must report
-            // failure, not success.
-            let written = file.write_all(&buf).await.is_ok() && file.flush().await.is_ok();
-            if !written {
-                tracing::warn!(run_id = %job.run_id, "persistence: run archive write failed");
-            }
-            written
-        }
-        Err(e) => {
-            tracing::warn!(run_id = %job.run_id, error = %e, "persistence: run archive append failed");
-            false
-        }
+    // Open and write share one outcome, because they share one meaning: either
+    // the record is on disk or it is not. A partial write counts as failure -
+    // it leaves a torn frame the lenient reader stops at, so the tail is lost
+    // either way.
+    let landed = match open_private_append(&path).await {
+        // `and` rather than `?`: the flush runs either way, which is harmless
+        // after a failed write, and the write's error is the one reported.
+        Ok(mut file) => file.write_all(&buf).await.and(file.flush().await),
+        Err(e) => Err(e),
+    };
+    if let Err(e) = &landed {
+        tracing::warn!(run_id = %job.run_id, error = %e, "persistence: run archive append failed");
     }
+    landed.is_ok()
 }
 
 /// Append one line (with a trailing newline) to `stages/<idx>/<file>` under the
@@ -1657,5 +1655,98 @@ mod tests {
 
         // context.json still written despite the meta.json rename conflict.
         assert!(run_dir.join("context.json").exists());
+    }
+
+    /// The archive append is best-effort, and the lane keeps a digest of the
+    /// last *archived* context so the next write can be a compact diff.
+    /// Advancing that digest for a record that never landed is unrecoverable:
+    /// every later delta is then relative to a state no reader can rebuild, so
+    /// the folded archive drifts from the run for the rest of its life while
+    /// `context.json` - written whole each time - stays correct (issue #455).
+    ///
+    /// A directory where `run.lvr` should be is the cheapest real append
+    /// failure: the open fails, the rest of the write still succeeds.
+    #[tokio::test]
+    async fn a_failed_archive_append_is_reported_so_the_baseline_can_stay_put() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let j = job_with_context("run-torn", 3);
+
+        // Nothing in the way: the record lands and the write says so.
+        let ok = write_snapshot(dir.path(), &j, "m", "w", None, None).await;
+        assert!(ok.archived, "an unobstructed append lands");
+
+        // Now make `run.lvr` unopenable and try again.
+        let blocked = tempfile::tempdir().expect("temp dir");
+        let run_dir = blocked.path().join(&j.run_id);
+        std::fs::create_dir_all(run_dir.join("run.lvr")).expect("occupy the archive path");
+        let failed = write_snapshot(blocked.path(), &j, "m", "w", None, None).await;
+        assert!(
+            !failed.archived,
+            "an append that could not open its file must not report success"
+        );
+        // The rest of the write is unaffected - this is why the failure is
+        // invisible without the flag, and why `context.json` stays right while
+        // the journal drifts.
+        assert!(
+            run_dir.join("context.json").exists(),
+            "the context snapshot is still written"
+        );
+    }
+
+    /// End to end through the lane: when the archive append fails, the digest
+    /// the next diff rebases on must stay where it was.
+    ///
+    /// Observable from the archive itself. The lane anchors with a full
+    /// `ContextCheckpoint` whenever it has no prior digest for a run, so if the
+    /// baseline were advanced past the failed write, the second snapshot would
+    /// be recorded as a compact `Progress` diff against a state that was never
+    /// written - and the archive would be unfoldable from its own contents.
+    /// Holding the baseline means the second write re-anchors instead.
+    #[tokio::test]
+    async fn a_run_whose_append_failed_re_anchors_instead_of_diffing_against_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        // Occupy the archive path so the first append cannot open it.
+        let run_dir = dir.path().join("run-torn");
+        std::fs::create_dir_all(run_dir.join("run.lvr")).unwrap();
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(PersistMsg::Snapshot(Box::new(job_with_context(
+            "run-torn", 2,
+        ))))
+        .unwrap();
+        drop(tx);
+        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
+
+        // The context still landed; only the journal did not.
+        assert!(run_dir.join("context.json").exists());
+
+        // Free the path and send a second, different snapshot.
+        std::fs::remove_dir(run_dir.join("run.lvr")).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(PersistMsg::Snapshot(Box::new(job_with_context(
+            "run-torn", 5,
+        ))))
+        .unwrap();
+        drop(tx);
+        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
+
+        let bytes = std::fs::read(run_dir.join("run.lvr")).unwrap();
+        let (_, records) =
+            leviath_core::run_archive::read_archive_lenient(&mut bytes.as_slice()).unwrap();
+        assert!(
+            records.iter().any(|r| matches!(
+                r,
+                leviath_core::run_archive::RunRecord::ContextCheckpoint { .. }
+            )),
+            "the second write re-anchored with a full snapshot: {records:?}"
+        );
+        // And the archive folds to the run's real state rather than to a
+        // diff against something absent.
+        let folded = leviath_core::run_archive::fold(&records).expect("has a header");
+        assert_eq!(
+            folded.context.regions[0].entries.len(),
+            5,
+            "folds to what the run actually held"
+        );
     }
 }
