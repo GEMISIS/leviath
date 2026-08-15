@@ -434,6 +434,26 @@ impl McpPool {
         }
     }
 
+    /// Which server advertises each cached tool, for the same `configs`.
+    ///
+    /// Derived from the same cache rather than stored separately: every def
+    /// filed under a config's signature came from that config's server, so a
+    /// second map would only be a chance for the two to disagree.
+    pub fn cached_owners_for(
+        &self,
+        configs: &[MCPServerConfig],
+    ) -> leviath_runtime::pipeline::ToolOwners {
+        let cache = self
+            .connected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        configs
+            .iter()
+            .filter_map(|c| cache.get(&signature(c)).map(|defs| (c, defs)))
+            .flat_map(|(c, defs)| defs.iter().map(|t| (t.name.clone(), c.name.clone())))
+            .collect()
+    }
+
     /// The cached defs for every config in `configs` (pool must already be warm
     /// for them - call [`Self::ensure`] first). Unknown/unconnected configs
     /// contribute nothing. This is the sync read the spawner uses.

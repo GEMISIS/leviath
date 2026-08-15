@@ -68,6 +68,10 @@ pub struct SpawnDeps<'a> {
     pub shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
     /// Tool definitions those MCP servers advertise.
     pub mcp_tool_defs: &'a [Tool],
+    /// Which server advertises each of them, for a stage that grants a whole
+    /// connector. Travels beside the defs because it is only knowable where
+    /// they are registered - a `Tool` carries no owner.
+    pub mcp_tool_owners: &'a leviath_runtime::pipeline::ToolOwners,
     /// Where this agent's interaction prompts are parked.
     pub hub: &'a InteractionHub,
     /// Spawn time, injected so a test does not depend on the wall clock.
@@ -530,7 +534,10 @@ fn build_agent_inner(
             args.model.as_deref(),
             &model_defaults(deps.config),
             registry,
-            &all_tool_defs,
+            leviath_runtime::pipeline::ToolCatalog {
+                defs: &all_tool_defs,
+                owners: deps.mcp_tool_owners,
+            },
             args.yolo,
             args.output.as_ref(),
         )?
@@ -568,12 +575,24 @@ fn build_agent_inner(
     // policy layer (between stage and global in `resolve_policy`) - without this
     // the manifest's top-level block would be silently ignored.
     let agent_perms = blueprint.agent_tool_permissions();
-    // Each stage's `available_tools` (Layer-1 allowlist), captured before the
-    // blueprint moves - a `dynamic_tools` agent re-filters against these on refresh.
+    // Each stage's Layer-1 allowlist, captured before the blueprint moves - a
+    // `dynamic_tools` agent re-filters against these on refresh.
+    //
+    // Connector grants are expanded here rather than left for the refresh to
+    // redo, so the refresh filters against exactly the list spawn resolved.
+    // Re-expanding would ask the same question of a table that cannot have
+    // changed - MCP defs are fixed for the run - and could only differ by
+    // being wrong.
     let stage_available: Vec<Vec<String>> = blueprint
         .stages
         .iter()
-        .map(|s| s.available_tools.clone())
+        .map(|s| {
+            leviath_runtime::pipeline::expand_connector_grants(
+                &s.available_tools,
+                &s.available_connectors,
+                deps.mcp_tool_owners,
+            )
+        })
         .collect();
     // Alongside it, each stage's `required_tools` - the human tools it keeps even
     // when nobody is watching - so a refresh re-applies the same unattended cut.
@@ -1451,6 +1470,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -1484,6 +1504,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                     config: &Config::default(),
                     shared_mcp: mcp,
                     mcp_tool_defs: &[],
+                    mcp_tool_owners: &Default::default(),
                     hub: &hub,
                     now_secs: 100,
                     subagent_tx: sub_tx(),
@@ -1533,6 +1554,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                     config: &Config::default(),
                     shared_mcp: mcp,
                     mcp_tool_defs: &[],
+                    mcp_tool_owners: &Default::default(),
                     hub: &hub,
                     now_secs: 100,
                     subagent_tx: sub_tx(),
@@ -1566,6 +1588,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -1628,6 +1651,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -1656,6 +1680,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -1688,6 +1713,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &config,
                 shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -1742,6 +1768,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -1788,6 +1815,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -1822,6 +1850,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -1859,6 +1888,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -1892,6 +1922,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -1949,6 +1980,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &InteractionHub::new(),
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2001,6 +2033,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2041,6 +2074,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2080,6 +2114,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2118,6 +2153,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &InteractionHub::new(),
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2157,6 +2193,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2198,6 +2235,7 @@ system = { kind = "pinned", max_tokens = 1000 }
         shared_mcp: // taint_tracking defaults to false
             mcp,
         mcp_tool_defs: &[],
+        mcp_tool_owners: &Default::default(),
         hub: &hub,
         now_secs: 100,
         subagent_tx: sub_tx(),
@@ -2229,6 +2267,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2278,6 +2317,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2337,6 +2377,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2390,6 +2431,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &config,
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2467,6 +2509,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2527,6 +2570,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &config,
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2578,6 +2622,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &config,
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2632,6 +2677,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &config,
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2820,6 +2866,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2868,6 +2915,7 @@ system_prompt = "SYSTEM_PROMPT_PLACEHOLDER"
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2914,6 +2962,7 @@ available_tools = []
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -2960,6 +3009,7 @@ available_tools = []
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -3009,6 +3059,7 @@ system_prompt = "be brief"
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -3081,6 +3132,7 @@ system_prompt = "be brief"
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -3121,6 +3173,7 @@ system_prompt = "be brief"
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -3150,6 +3203,7 @@ system_prompt = "be brief"
                 config: &config,
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -3179,6 +3233,7 @@ system_prompt = "be brief"
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -3210,6 +3265,7 @@ system_prompt = "be brief"
                 config: &config,
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),
@@ -3235,6 +3291,7 @@ system_prompt = "be brief"
                 config: &Config::default(),
                 shared_mcp: mcp,
                 mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
                 hub: &hub,
                 now_secs: 100,
                 subagent_tx: sub_tx(),

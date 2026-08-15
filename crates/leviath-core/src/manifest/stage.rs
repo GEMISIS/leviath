@@ -13,6 +13,7 @@ const STAGE_KEYS: &[&str] = &[
     "allow_as_worker",
     "allow_blocking_tools",
     "allow_complete",
+    "available_connectors",
     "available_tools",
     "batch_tool_hint",
     "context",
@@ -246,6 +247,18 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         .and_then(|v| v.as_array())
     {
         stage.available_tools = tools_arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+
+    // Whole MCP servers this stage may use, resolved at spawn against what
+    // each actually advertises.
+    if let Some(arr) = stage_value
+        .get("available_connectors")
+        .and_then(|v| v.as_array())
+    {
+        stage.available_connectors = arr
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect();
