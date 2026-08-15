@@ -551,7 +551,7 @@ for line in sys.stdin:
             // A stdio server has no OAuth bearer (the `None` auth path).
             let defs = pool.ensure(&cfg).await;
             assert_eq!(defs.len(), 1);
-            assert_eq!(defs[0].name, "echo");
+            assert_eq!(defs[0].name, "s__echo");
             // Second ensure of the same signature hits the cache (no reconnect).
             let again = pool.ensure(&cfg).await;
             assert_eq!(again.len(), 1);
@@ -645,7 +645,7 @@ for line in sys.stdin:
         })
         .await;
         assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "remote_tool");
+        assert_eq!(defs[0].name, "remote__remote_tool");
     }
 
     #[tokio::test]

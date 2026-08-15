@@ -74,7 +74,28 @@ headers = { Authorization = "Bearer ${MY_TOKEN}" }   # ${VAR} is expanded
 ## Discovery and invocation
 
 On connect, Leviath discovers the server's tools and exposes them to any stage whose
-`available_tools` includes them:
+`available_tools` includes them.
+
+### How an MCP tool is named
+
+Always `<server>__<tool>`: the name you gave the server, two underscores, the name the server gives
+the tool. A `github` server offering `create_issue` is advertised as `github__create_issue`.
+
+The server is always part of the name, not only when something would clash. Two servers that both
+offer `search` become `github__search` and `gitlab__search`, so a grant says which one it means and
+keeps meaning that however your `config.toml` is ordered.
+
+> [!NOTE]
+> The separator is `__`, not a dot. The advertised name goes to the model provider, which accepts
+> only `[A-Za-z0-9_-]` and rejects the whole request otherwise - so any other character, a dot
+> included, is rewritten to `_`. A server named `my.tools` offering `find.all` is advertised as
+> `my_tools__find_all`. In the rare case two servers' names sanitize to the same string, the second
+> gets a `_2` suffix.
+
+Calls route back to the owning server under the tool's original name, so the server never sees the
+qualified form.
+
+
 
 ```mermaid
 sequenceDiagram
@@ -100,9 +121,13 @@ Name the server instead:
 
 ```toml
 [stages.triage]
-available_tools = ["read_file"]
+available_tools = ["read_file", "gitlab__create_issue"]
 available_connectors = ["github"]
 ```
+
+That stage gets the built-in `read_file`, one named tool from `gitlab`, and everything `github`
+advertises. The two forms mix freely, and a tool named individually *and* covered by a connector is
+granted once.
 
 The connector is resolved at spawn against what the server actually advertises then, and merged
 with `available_tools`, so the two mix freely. A tool the server gains next month is offered
@@ -118,11 +143,11 @@ through the same `tool_permissions`, the same taint gate, and the same approval 
 you named by hand.
 
 > [!NOTE]
-> There is no wildcard form of `available_tools` and cannot usefully be one. An MCP tool's
-> advertised name does not reliably carry its server - Leviath prefers the bare tool name and only
-> prefixes with the server on a collision, so `github`'s `create_issue` is usually advertised as
-> just `create_issue`. There is no prefix a pattern could match on, which is why a grant names the
-> server and Leviath answers for what it owns.
+> There is no wildcard form of `available_tools`, and a connector grant is not sugar for one.
+> Names are server-qualified, so `github__*` would *usually* work - but not reliably enough to
+> build on: a server named `my.tools` sanitizes to `my_tools`, and a name collision appends `_2`,
+> so matching the string is a guess where the connector grant is a fact. `available_connectors`
+> asks Leviath which tools a server owns rather than inferring it from how they are spelled.
 
 ## OAuth, safely
 
