@@ -261,10 +261,13 @@ pub fn collect_inference(
                 // watching for a terminal status and would wait for ever for
                 // one that never comes, so for those a failure is the honest
                 // answer.
-                let attended = !md.is_some_and(|m| m.unattended);
-                if attended
-                    && err.unavailable_reason()
-                        == Some(leviath_providers::UnavailableReason::CreditsExhausted)
+                // Unattended included. A run that hit an empty account has
+                // done real work and needs one edit elsewhere to continue, so
+                // ending it throws that away to punish somebody for a billing
+                // lapse. A harness that cannot rescue it cancels instead
+                // (issue #456).
+                if err.unavailable_reason()
+                    == Some(leviath_providers::UnavailableReason::CreditsExhausted)
                 {
                     let message = format!(
                         "out of credits ({err}): top up the account, then \

@@ -298,35 +298,19 @@ pub fn fail_stalled_dispatch(
             ),
             _ => stall.reason.give_up_message(&si.provider_name),
         };
-        // Unless nobody is there to read it. An unattended run was launched by
-        // a scheduler or a harness, which is watching for a terminal status
-        // and will wait for ever for one that never comes - so for those,
-        // failing is the honest answer and stays what it was.
-        let unattended = md.is_some_and(|m| m.unattended);
-        if unattended {
-            tracing::error!(
-                provider = %si.provider_name,
-                reason = stall.reason.label(),
-                stalled_secs = now.saturating_sub(stall.since),
-                "failing an unattended run: nobody is there to fix it"
-            );
-            // No `lev resume` here: this run is ending, and pointing somebody
-            // at a command that will not work is worse than saying nothing.
-            let message = format!("{remedy}; this run has ended and cannot be resumed");
-            if let Some(mut buffer) = buffer {
-                buffer.logs.push((0, format!("[stalled] {message}")));
-            }
-            state.status = AgentStatus::Error { message };
-            commands
-                .entity(entity)
-                .remove::<ReadyToInfer>()
-                .remove::<DispatchStall>();
-            continue;
-        }
+        // Every run parks, unattended included. This used to fail an
+        // unattended one on the reasoning that a scheduler watches for a
+        // terminal status and would wait for ever for one that never comes.
+        // That undersold harnesses: `paused` is visible in `meta.json` and
+        // `lev ps --json`, and one that can top up an account and `lev resume`
+        // gets its work back. One that cannot is no worse off than before -
+        // it cancels the run, which is a decision it can make in a second,
+        // where a failed run's work is gone for good (issue #456).
         tracing::warn!(
             provider = %si.provider_name,
             reason = stall.reason.label(),
             stalled_secs = now.saturating_sub(stall.since),
+            unattended = md.is_some_and(|m| m.unattended),
             "pausing a run until the machine is fixed"
         );
         // Paused, so resume is the truthful next step and is worth naming.
@@ -484,29 +468,31 @@ mod tests {
         );
     }
 
-    /// Unless nobody is watching. A scheduler polling for a terminal status
-    /// would wait for ever for one that never came, so an unattended run still
-    /// fails - the one case where an error is the more useful answer.
+    /// Nobody watching is not a reason to throw the work away.
+    ///
+    /// This used to fail, on the reasoning that a scheduler polls for a
+    /// terminal status and would wait for ever for one that never came. A
+    /// benchmark round lost 31 runs and a tier to that (issue #456): the
+    /// account needed topping up, which is one edit elsewhere, and every one
+    /// of those runs had already done real work. A harness that can rescue a
+    /// paused run now gets to; one that cannot cancels it, which costs a
+    /// second, where a failed run's work is gone.
     #[test]
-    fn an_unattended_run_still_fails_because_nobody_will_fix_it() {
+    fn an_unattended_run_parks_like_any_other_rather_than_losing_its_work() {
         let mut world = World::new();
         world.insert_resource(StallTimeout(60));
         let e = spawn_stalled_unattended(&mut world, StallReason::ProviderMissing, 61);
 
         run(&mut world);
 
-        let status = &world.get::<AgentState>(e).unwrap().status;
-        assert!(
-            matches!(status, AgentStatus::Error { message }
-                if message.contains("ghost") && message.contains("not configured")),
-            "got: {status:?}"
-        );
-        assert!(world.get::<ReadyToInfer>(e).is_none());
-        assert!(world.get::<PausedForSetup>(e).is_none());
+        assert_paused_for_setup(&world, e, "not configured");
+        // The staged retry survives, so a resume re-dispatches rather than
+        // rebuilding - the whole point of parking instead of failing.
+        assert!(world.get::<ReadyToInfer>(e).is_some());
         let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
         assert!(
-            logs.iter().any(|(_, line)| line.starts_with("[stalled]")),
-            "expected a [stalled] log line, got: {logs:?}"
+            logs.iter().any(|(_, line)| line.starts_with("[paused]")),
+            "expected a [paused] log line, got: {logs:?}"
         );
     }
 
@@ -866,7 +852,7 @@ mod tests {
     /// `StageIoBuffer` is optional on the query, so the unattended failure has
     /// to land even when there is no stage log to explain it in.
     #[test]
-    fn an_unattended_failure_copes_without_a_stage_log_buffer() {
+    fn an_unattended_park_copes_without_a_stage_log_buffer() {
         let mut world = World::new();
         world.insert_resource(StallTimeout(60));
         let e = world
@@ -882,7 +868,7 @@ mod tests {
         run(&mut world);
 
         let status = format!("{:?}", world.get::<AgentState>(e).unwrap().status);
-        assert!(status.contains("Error"), "{status}");
+        assert!(status.contains("Paused"), "{status}");
     }
 
     /// A provider that was never configured is a different fix again, and the
