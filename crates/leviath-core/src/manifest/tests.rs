@@ -4822,6 +4822,44 @@ sources = { kind = "temporary", max_tokens = 100, admission = "rejcet" }
     assert!(message.contains("reject"), "and what was meant: {message}");
 }
 
+/// `available_connectors` parses, and its absence is an empty list rather than
+/// anything implied - a stage that names no server grants no server.
+#[test]
+fn parse_manifest_reads_available_connectors() {
+    let toml = r#"
+[agent]
+name = "triage"
+
+[stages.look]
+available_tools = ["read_file"]
+available_connectors = ["github", "database"]
+
+[stages.plain]
+available_tools = ["read_file"]
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    let stage = |name: &str| {
+        bp.stages
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} declared"))
+    };
+    assert_eq!(
+        stage("look").available_connectors,
+        vec!["github".to_string(), "database".to_string()],
+        "read in the order written, since that is the order their tools are granted in"
+    );
+    assert_eq!(
+        stage("look").available_tools,
+        vec!["read_file".to_string()],
+        "and the exact-match list is left exactly as it was"
+    );
+    assert!(
+        stage("plain").available_connectors.is_empty(),
+        "a stage that names no connector grants none"
+    );
+}
+
 /// A region definition written before this field existed deserializes as
 /// summarizable, so an archived layout does not come back protected by
 /// accident - or, worse, unprotected when it was not.
