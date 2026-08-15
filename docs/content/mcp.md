@@ -95,6 +95,15 @@ keeps meaning that however your `config.toml` is ordered.
 Calls route back to the owning server under the tool's original name, so the server never sees the
 qualified form.
 
+Tools used to be advertised bare, with the server prefixed only on a clash, so a blueprint written
+against that naming grants `create_issue` where the tool is now `github__create_issue`. Such a grant
+still resolves, **as long as exactly one server offers a tool by that name**. Two do and the name is
+genuinely ambiguous: it resolves to nothing and the manifest has to say which. Worth updating the
+manifest either way, since the ambiguity can arrive later when somebody adds a second server.
+
+A built-in is never captured this way - `read_file` matches the built-in, whatever any server calls
+its own tools.
+
 
 
 ```mermaid
