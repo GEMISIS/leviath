@@ -967,6 +967,32 @@ for line in sys.stdin:
         );
     }
 
+    /// A blueprint granting a whole connector needs to turn a server's name
+    /// into the tools it covers, and the advertised name cannot answer for
+    /// itself: the first server's tool keeps its bare name, and only the
+    /// second gets a `beta__` prefix. So the table has to say who owns what,
+    /// including for the one whose name carries no hint at all.
+    #[tokio::test]
+    async fn tool_owners_names_the_server_behind_each_advertised_tool() {
+        let _guard = always_on_tracing_guard();
+        let mut executor = ToolExecutor::new();
+
+        let a = spawn_named("search").await;
+        let a_names = executor.add_client_advertised("alpha".to_string(), a, &HashSet::new());
+        let b = spawn_named("search").await;
+        let reserved: HashSet<String> = a_names.iter().map(|t| t.name.clone()).collect();
+        let _ = executor.add_client_advertised("beta".to_string(), b, &reserved);
+
+        let owners = executor.tool_owners();
+        assert_eq!(
+            owners.get("search").map(String::as_str),
+            Some("alpha"),
+            "the bare name belongs to whoever claimed it first, which no prefix records"
+        );
+        assert_eq!(owners.get("beta__search").map(String::as_str), Some("beta"));
+        assert_eq!(owners.len(), 2);
+    }
+
     #[tokio::test]
     async fn add_client_reserving_nothing_registers_identity_aliases() {
         let _guard = always_on_tracing_guard();
