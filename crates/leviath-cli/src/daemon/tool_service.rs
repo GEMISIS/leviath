@@ -2780,11 +2780,11 @@ for line in sys.stdin:
     async fn mcp_allow_ok_success_returns_text() {
         let hub = InteractionHub::new();
         let mut allow = HashMap::new();
-        allow.insert("stub_mcp_tool".to_string(), ToolPolicy::Allow);
+        allow.insert("stub__stub_mcp_tool".to_string(), ToolPolicy::Allow);
         let state = state_with(&hub, mcp_with_stub(MCP_STUB_SUCCESS).await, allow);
         let out = dispatch_tools(
             state,
-            vec![call("c1", "stub_mcp_tool", serde_json::json!({}))],
+            vec![call("c1", "stub__stub_mcp_tool", serde_json::json!({}))],
             noop_progress(),
         )
         .await;
@@ -2795,11 +2795,11 @@ for line in sys.stdin:
     async fn mcp_allow_ok_error_result_is_prefixed() {
         let hub = InteractionHub::new();
         let mut allow = HashMap::new();
-        allow.insert("stub_mcp_tool".to_string(), ToolPolicy::Allow);
+        allow.insert("stub__stub_mcp_tool".to_string(), ToolPolicy::Allow);
         let state = state_with(&hub, mcp_with_stub(MCP_STUB_ERROR).await, allow);
         let out = dispatch_tools(
             state,
-            vec![call("c1", "stub_mcp_tool", serde_json::json!({}))],
+            vec![call("c1", "stub__stub_mcp_tool", serde_json::json!({}))],
             noop_progress(),
         )
         .await;

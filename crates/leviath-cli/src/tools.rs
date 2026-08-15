@@ -701,17 +701,17 @@ for line in sys.stdin:
         .await;
 
         assert_eq!(registry.mcp_tool_defs.len(), 1);
-        assert_eq!(registry.mcp_tool_defs[0].name, "echo");
+        assert_eq!(registry.mcp_tool_defs[0].name, "stub-server__echo");
 
         registry.shutdown().await;
     }
 
     #[tokio::test]
-    async fn build_advertises_two_servers_and_namespaces_a_collision() {
-        // Two stdio servers each exposing an `echo` tool. The second is
-        // advertised under a namespaced name so the LLM never sees a duplicate,
-        // and the reserved-name closure (which reads already-advertised names)
-        // runs on the second server.
+    async fn build_advertises_two_servers_under_their_own_names() {
+        // Two stdio servers each exposing an `echo` tool. Both are advertised
+        // server-qualified, so the LLM never sees a duplicate and neither name
+        // depends on config order. The reserved-name closure (which reads
+        // already-advertised names) still runs on the second server.
         with_tracing(|| {});
         let registry = with_temp_home(|| async {
             let config = Config {
@@ -738,8 +738,9 @@ for line in sys.stdin:
             .iter()
             .map(|t| t.name.as_str())
             .collect();
-        // First server keeps `echo`; the second is disambiguated.
-        assert!(names.contains(&"echo"), "names: {names:?}");
+        // Both are server-qualified: neither keeps the bare `echo`, so which
+        // server registered first does not decide who owns the plain name.
+        assert!(names.contains(&"alpha__echo"), "names: {names:?}");
         assert!(names.contains(&"beta__echo"), "names: {names:?}");
         registry.shutdown().await;
     }
@@ -813,7 +814,7 @@ for line in sys.stdin:
         .await;
 
         assert_eq!(registry.mcp_tool_defs.len(), 1);
-        assert_eq!(registry.mcp_tool_defs[0].name, "remote_tool");
+        assert_eq!(registry.mcp_tool_defs[0].name, "remote__remote_tool");
         registry.shutdown().await;
     }
 

@@ -1109,7 +1109,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         );
         let defs = pool.cached_defs_for(&servers);
         assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "stub_search");
+        assert_eq!(defs[0].name, "search__stub_search");
     }
 
     #[tokio::test]
@@ -1159,7 +1159,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         );
         let defs = pool.cached_defs_for(&servers);
         assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "stub_search");
+        assert_eq!(defs[0].name, "search__stub_search");
     }
 
     #[tokio::test]

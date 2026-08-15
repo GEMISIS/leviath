@@ -141,6 +141,27 @@ Naming a tool here also settles the `blocking-tool-in-autonomous-stage` lint for
 it is how you say you meant it. See
 [human-in-the-loop tools](/docs/tools#these-tools-need-someone-there).
 
+#### Naming a tool from an MCP server
+
+An MCP tool is always named `<server>__<tool>` - the server it came from, two underscores, the tool
+the server calls it:
+
+```toml
+available_tools = ["read_file", "github__create_issue"]
+```
+
+The server is part of the name whether or not anything would have collided, so two servers that both
+offer `search` are `github__search` and `gitlab__search`, and a grant means the same thing however
+your `config.toml` is ordered.
+
+The separator is `__` rather than a dot because the name is passed to the model provider, and
+providers only accept `[A-Za-z0-9_-]`. A dot anywhere in a server or tool name is rewritten to `_`
+for the same reason, so a server called `my.tools` offering `find.all` is advertised as
+`my_tools__find_all`.
+
+To grant a server's whole set instead of naming its tools one at a time, see
+[granting a whole server](/docs/mcp#granting-a-whole-server).
+
 ## Context regions
 
 `[context.regions]` defines the memory layout. There are nine region kinds (the default is

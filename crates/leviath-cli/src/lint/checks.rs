@@ -69,9 +69,11 @@ pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lint
 
     if !env.known_tools.is_empty() {
         for tool in &stage.available_tools {
-            // `server__tool` is an MCP name. It resolves only once that server
-            // is installed and connected, which is not a property of the
-            // manifest, so it is never this check's business.
+            // `server__tool` is an MCP name, and every MCP name has that shape:
+            // advertised names are always server-qualified, so the test is
+            // exact rather than a heuristic. Such a name resolves only once
+            // that server is installed and connected, which is not a property
+            // of the manifest, so it is never this check's business.
             if tool.contains("__") || env.known_tools.contains(tool) {
                 continue;
             }

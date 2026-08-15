@@ -86,14 +86,16 @@ impl ToolExecutor {
             let name = self.unique_advertised_name(&tool.name, &server_name, reserved);
             self.aliases
                 .insert(name.clone(), (server_name.clone(), tool.name.clone()));
-            if name != tool.name {
-                tracing::debug!(
-                    server = %server_name,
-                    original = %tool.name,
-                    advertised = %name,
-                    "Renamed MCP tool to satisfy provider naming rules"
-                );
-            }
+            // Unconditional: every advertised name is server-qualified, so it
+            // never equals the original and there is nothing to compare
+            // against. The line is what ties the name the model sees back to
+            // the name the server knows.
+            tracing::debug!(
+                server = %server_name,
+                original = %tool.name,
+                advertised = %name,
+                "advertising MCP tool under its server-qualified name"
+            );
             advertised.push(ToolMetadata {
                 name,
                 description: tool.description.clone(),
@@ -120,9 +122,27 @@ impl ToolExecutor {
 
     /// Compute a unique, provider-safe advertised name for `original`.
     ///
-    /// Prefers the sanitized name; on a clash with `reserved` or an existing
-    /// alias, prefixes with the server name; if that still clashes, appends a
-    /// numeric suffix.
+    /// **Always** `<server>__<tool>`, sanitized. The server is part of the name
+    /// whether or not anything would have collided, because the alternative -
+    /// bare name, prefixed only on a clash - made the name a function of
+    /// registration order. Two servers both advertising `search` gave the bare
+    /// name to whichever appeared first in `config.toml`, so a blueprint saying
+    /// `available_tools = ["search"]` meant a different server's tool depending
+    /// on the order of a file it does not control, and reordering that file
+    /// silently re-pointed the grant.
+    ///
+    /// Qualifying every name removes the question. `alpha__search` and
+    /// `beta__search` say which server they came from, and neither depends on
+    /// who registered first.
+    ///
+    /// `__` rather than the `.` this reads more naturally as: the advertised
+    /// name has to match `^[A-Za-z0-9_-]{1,64}$` or the provider rejects the
+    /// whole request, and [`sanitize_tool_name`] would rewrite a dot to `_`
+    /// anyway - so a manifest written with one would match nothing.
+    ///
+    /// A numeric suffix still resolves the residual case: two servers whose
+    /// *names* sanitize to the same thing, or a qualified name that collides
+    /// with a reserved built-in.
     fn unique_advertised_name(
         &self,
         original: &str,
@@ -131,17 +151,13 @@ impl ToolExecutor {
     ) -> String {
         let free = |name: &str| !reserved.contains(name) && !self.aliases.contains_key(name);
 
-        let base = sanitize_tool_name(original);
-        if free(&base) {
-            return base;
-        }
-        let prefixed = sanitize_tool_name(&format!("{server}__{original}"));
-        if free(&prefixed) {
-            return prefixed;
+        let qualified = sanitize_tool_name(&format!("{server}__{original}"));
+        if free(&qualified) {
+            return qualified;
         }
         let mut n = 2;
         loop {
-            let candidate = sanitize_tool_name(&format!("{prefixed}_{n}"));
+            let candidate = sanitize_tool_name(&format!("{qualified}_{n}"));
             if free(&candidate) {
                 return candidate;
             }
@@ -151,11 +167,14 @@ impl ToolExecutor {
 
     /// Which server advertises each tool: advertised name -> server name.
     ///
-    /// The routing table read the other way round. A blueprint that grants a
+    /// The routing table read the other way round: a blueprint that grants a
     /// whole server needs to turn that server's name into the set of tools it
-    /// covers, and the advertised name cannot answer for itself - see
-    /// `unique_advertised_name`, which prefers the bare tool name and only
-    /// prefixes with the server on a collision.
+    /// covers.
+    ///
+    /// Advertised names are server-qualified, so most of them carry the answer
+    /// in the string - but not reliably enough to parse it back out. A server
+    /// named `my.server` sanitizes to `my_server`, and a collision appends
+    /// `_2`, so splitting on `__` is a guess where this is a fact.
     pub fn tool_owners(&self) -> HashMap<String, String> {
         self.aliases
             .iter()
@@ -531,7 +550,9 @@ for line in sys.stdin:
         assert!(executor.remove_client("nope").is_none());
         let mut taken = executor.remove_client("server1").expect("was registered");
         assert_eq!(executor.server_count(), 0);
-        let result = executor.execute("echo", serde_json::json!({})).await;
+        let result = executor
+            .execute("server1__echo", serde_json::json!({}))
+            .await;
         assert!(result.is_err(), "the removed server's tools route nowhere");
         // The caller owns the shutdown; this is what ends the child process.
         taken.shutdown().await.expect("shutdown is best-effort Ok");
@@ -545,7 +566,7 @@ for line in sys.stdin:
         let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
 
         let result = executor
-            .execute("echo", serde_json::json!({"text": "hi"}))
+            .execute("server1__echo", serde_json::json!({"text": "hi"}))
             .await
             .expect("execute should succeed");
         assert!(result.success);
@@ -579,7 +600,7 @@ for line in sys.stdin:
         let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
 
         let result = executor
-            .execute("echo", serde_json::json!({}))
+            .execute("server1__echo", serde_json::json!({}))
             .await
             .expect("execute should succeed");
         assert!(result.success);
@@ -821,13 +842,22 @@ for line in sys.stdin:
 
     // ─── unique_advertised_name ───────────────────────────────────────────
 
+    /// Every advertised name carries its server, whether or not anything would
+    /// have collided. The old scheme handed out the bare name first, which made
+    /// it depend on which server registered earliest.
     #[test]
-    fn unique_name_prefers_the_sanitized_base() {
+    fn unique_name_always_qualifies_with_the_server() {
         let exec = ToolExecutor::new();
         let reserved = HashSet::new();
         assert_eq!(
             exec.unique_advertised_name("github.search", "gh", &reserved),
-            "github_search"
+            "gh__github_search",
+            "qualified, and the dot sanitized to satisfy the provider rule"
+        );
+        assert_eq!(
+            exec.unique_advertised_name("search", "alpha", &reserved),
+            "alpha__search",
+            "qualified even with nothing to collide with"
         );
     }
 
@@ -923,12 +953,12 @@ for line in sys.stdin:
         let mut executor = ToolExecutor::new();
         let client = spawn_named("github.search").await;
         let advertised = executor.add_client_advertised("gh".to_string(), client, &HashSet::new());
-        assert_eq!(advertised[0].name, "github_search");
+        assert_eq!(advertised[0].name, "gh__github_search");
 
         // The LLM calls the advertised name; the server is called with its
         // original name ("github.search").
         let result = executor
-            .execute("github_search", serde_json::json!({}))
+            .execute("gh__github_search", serde_json::json!({}))
             .await
             .expect("advertised name routes");
         assert!(result.success);
@@ -942,7 +972,7 @@ for line in sys.stdin:
 
         let a = spawn_named("search").await;
         let a_names = executor.add_client_advertised("alpha".to_string(), a, &HashSet::new());
-        assert_eq!(a_names[0].name, "search");
+        assert_eq!(a_names[0].name, "alpha__search");
 
         let b = spawn_named("search").await;
         // Reserve what alpha already advertised.
@@ -953,7 +983,7 @@ for line in sys.stdin:
         // Both route to their own server with the original name "search".
         assert!(
             executor
-                .execute("search", serde_json::json!({}))
+                .execute("alpha__search", serde_json::json!({}))
                 .await
                 .unwrap()
                 .success
@@ -968,10 +998,9 @@ for line in sys.stdin:
     }
 
     /// A blueprint granting a whole connector needs to turn a server's name
-    /// into the tools it covers, and the advertised name cannot answer for
-    /// itself: the first server's tool keeps its bare name, and only the
-    /// second gets a `beta__` prefix. So the table has to say who owns what,
-    /// including for the one whose name carries no hint at all.
+    /// into the tools it covers. The advertised name usually carries it, but
+    /// parsing it back out is a guess - a server named `my.server` sanitizes to
+    /// `my_server`, and a collision appends `_2` - so the table answers instead.
     #[tokio::test]
     async fn tool_owners_names_the_server_behind_each_advertised_tool() {
         let _guard = always_on_tracing_guard();
@@ -985,9 +1014,9 @@ for line in sys.stdin:
 
         let owners = executor.tool_owners();
         assert_eq!(
-            owners.get("search").map(String::as_str),
+            owners.get("alpha__search").map(String::as_str),
             Some("alpha"),
-            "the bare name belongs to whoever claimed it first, which no prefix records"
+            "each name says which server it came from, whoever registered first"
         );
         assert_eq!(owners.get("beta__search").map(String::as_str), Some("beta"));
         assert_eq!(owners.len(), 2);
@@ -1001,7 +1030,7 @@ for line in sys.stdin:
         let _ = executor.add_client_advertised("s".to_string(), client, &HashSet::new());
         assert!(
             executor
-                .execute("plain", serde_json::json!({}))
+                .execute("s__plain", serde_json::json!({}))
                 .await
                 .unwrap()
                 .success
