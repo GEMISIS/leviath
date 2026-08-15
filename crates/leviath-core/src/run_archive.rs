@@ -38,18 +38,12 @@
 //! region). [`diff_context`]/[`apply_delta`] compute and replay those diffs, and
 //! [`fold`] reconstructs the current state from the whole journal.
 
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::ops::ControlFlow;
 
 use serde::{Deserialize, Serialize};
 
 use crate::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot, RunMeta, RunStatus};
-
-/// File magic identifying a leviath run archive (`b"LVR1"`).
-pub const RUN_ARCHIVE_MAGIC: &[u8; 4] = b"LVR1";
-
-/// The archive format version this build writes.
-pub const RUN_ARCHIVE_VERSION: u16 = 1;
 
 /// Identity + ownership of a run.
 ///
@@ -590,132 +584,12 @@ pub fn apply_delta(base: &mut ContextSnapshot, delta: &ContextDelta) {
     }
 }
 
-// ─── codec ──────────────────────────────────────────────────────────────────
+mod codec;
 
-/// Write the archive preamble (magic + version). Call once at file start.
-pub fn write_archive_start(w: &mut dyn Write, version: u16) -> io::Result<()> {
-    w.write_all(RUN_ARCHIVE_MAGIC)?;
-    w.write_all(&version.to_be_bytes())?;
-    Ok(())
-}
-
-/// Read + validate the archive preamble, returning the format version.
-pub fn read_archive_start(r: &mut dyn Read) -> io::Result<u16> {
-    let mut magic = [0u8; 4];
-    r.read_exact(&mut magic)?;
-    if &magic != RUN_ARCHIVE_MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "not a leviath run archive (bad magic)",
-        ));
-    }
-    let mut version = [0u8; 2];
-    r.read_exact(&mut version)?;
-    Ok(u16::from_be_bytes(version))
-}
-
-/// Append one framed record. The frame length is a `u64` so it can never
-/// overflow the prefix (a `RunRecord` always serializes to JSON).
-pub fn write_record(w: &mut dyn Write, record: &RunRecord) -> io::Result<()> {
-    let payload = serde_json::to_vec(record).expect("a RunRecord always serializes to JSON");
-    let len = payload.len() as u64;
-    w.write_all(&len.to_be_bytes())?;
-    w.write_all(&payload)?;
-    Ok(())
-}
-
-/// Fill `buf` from `r`, returning `false` on a clean end-of-stream (zero bytes
-/// available at the call) and erroring only on a *partial* read (truncation).
-fn read_exact_or_eof(r: &mut dyn Read, buf: &mut [u8]) -> io::Result<bool> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        match r.read(&mut buf[filled..])? {
-            0 => {
-                if filled == 0 {
-                    return Ok(false); // clean EOF at a record boundary
-                }
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "truncated run-archive frame",
-                ));
-            }
-            n => filled += n,
-        }
-    }
-    Ok(true)
-}
-
-/// The largest a single archive frame may claim to be.
-///
-/// Generous by design - a record holds one context snapshot, and 256 MiB is far
-/// past anything a real run writes - because this is a sanity bound on a length
-/// prefix, not a size policy. What it rules out is a torn or corrupt prefix
-/// being taken at its word and turned straight into an allocation.
-const MAX_RECORD_BYTES: u64 = 256 * 1024 * 1024;
-
-/// Read the next framed record, or `None` at a clean end-of-stream.
-pub fn read_record(r: &mut dyn Read) -> io::Result<Option<RunRecord>> {
-    let mut len_bytes = [0u8; 8];
-    if !read_exact_or_eof(r, &mut len_bytes)? {
-        return Ok(None);
-    }
-    let len = u64::from_be_bytes(len_bytes);
-    // A torn tail is the reason `read_archive_lenient` exists, and a torn
-    // *length prefix* is exactly where a nonsense `u64` comes from. Allocating
-    // it first would abort the process on a crash-truncated archive - during
-    // daemon recovery, which is the one moment the lenient reader is there to
-    // survive. Rejecting it makes the frame an ordinary error, so recovery
-    // folds back to the last intact record instead.
-    if len > MAX_RECORD_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("run-archive frame claims {len} bytes, over the {MAX_RECORD_BYTES} cap"),
-        ));
-    }
-    let mut payload = vec![0u8; len as usize];
-    if !read_exact_or_eof(r, &mut payload)? {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "truncated run-archive frame",
-        ));
-    }
-    let record = serde_json::from_slice(&payload)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    Ok(Some(record))
-}
-
-/// Read the whole archive: validate the preamble, then read every record.
-pub fn read_archive(r: &mut dyn Read) -> io::Result<(u16, Vec<RunRecord>)> {
-    let version = read_archive_start(r)?;
-    let mut records = Vec::new();
-    while let Some(record) = read_record(r)? {
-        records.push(record);
-    }
-    Ok((version, records))
-}
-
-/// Read the archive tolerantly: validate the preamble strictly, then read records
-/// until a clean end-of-stream **or the first unreadable frame**, returning the
-/// records collected so far.
-///
-/// A crash while the persistence lane is appending a record can leave a partial
-/// final frame (a truncated length prefix or payload). The strict [`read_archive`]
-/// would reject the whole file for that torn tail - and once a fallback-resume
-/// appends fresh records *past* the torn bytes, the archive would stay unreadable
-/// forever. This variant instead stops at the torn tail and keeps everything valid
-/// before it, so recovery can still fold the archive to its last intact point. The
-/// preamble is still validated strictly, so a file that isn't a run archive at all
-/// still errors rather than folding to nothing.
-pub fn read_archive_lenient(r: &mut dyn Read) -> io::Result<(u16, Vec<RunRecord>)> {
-    let version = read_archive_start(r)?;
-    let mut records = Vec::new();
-    // A torn/invalid frame ends the read early with whatever preceded it, rather
-    // than propagating the error.
-    while let Ok(Some(record)) = read_record(r) {
-        records.push(record);
-    }
-    Ok((version, records))
-}
+pub use codec::{
+    Frame, RUN_ARCHIVE_MAGIC, RUN_ARCHIVE_VERSION, read_archive, read_archive_lenient,
+    read_archive_start, read_frame, read_record, write_archive_start, write_record,
+};
 
 // ─── fold ───────────────────────────────────────────────────────────────────
 
@@ -1013,14 +887,22 @@ pub fn visit_archive_points(
     visit: &mut dyn FnMut(PointRef<'_>) -> ControlFlow<()>,
 ) -> io::Result<()> {
     read_archive_start(r)?;
-    let mut folder = match read_record(r) {
-        Ok(Some(first)) => match PointFolder::start(&first) {
+    // The first record has to be a Header, and a Header is a kind every build
+    // knows - so an unreadable frame here means this is not a foldable archive.
+    let mut folder = match read_frame(r) {
+        Ok(Some(Frame::Record(first))) => match PointFolder::start(&first) {
             Some(folder) => folder,
             None => return Ok(()),
         },
         _ => return Ok(()),
     };
-    while let Ok(Some(record)) = read_record(r) {
+    // A record kind from a later build is stepped over rather than ending the
+    // walk: it carries no context change this build can apply, and everything
+    // after it still does.
+    while let Ok(Some(frame)) = read_frame(r) {
+        let Frame::Record(record) = frame else {
+            continue;
+        };
         if folder.push(&record, visit).is_break() {
             return Ok(());
         }
@@ -1142,7 +1024,9 @@ pub fn replay_points(records: &[RunRecord]) -> Vec<RunPoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests write through the trait now; the codec moved out.
     use crate::run_meta::RunStatus;
+    use std::io::Write;
 
     fn identity() -> RunIdentity {
         RunIdentity {
@@ -1744,11 +1628,18 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
+    /// The preamble round-trips the version it was written with. Previously
+    /// checked with an arbitrary 7; that now names a framing generation this
+    /// build cannot read, and is refused - see
+    /// `an_archive_from_a_newer_format_is_refused_with_both_versions_named`.
     #[test]
     fn read_archive_start_reports_version() {
         let mut buf = Vec::new();
-        write_archive_start(&mut buf, 7).unwrap();
-        assert_eq!(read_archive_start(&mut buf.as_slice()).unwrap(), 7);
+        write_archive_start(&mut buf, RUN_ARCHIVE_VERSION).unwrap();
+        assert_eq!(
+            read_archive_start(&mut buf.as_slice()).unwrap(),
+            RUN_ARCHIVE_VERSION
+        );
     }
 
     #[test]
@@ -2814,5 +2705,165 @@ mod tests {
             );
             digest = digest_context(next);
         }
+    }
+
+    /// One frame from a later build, written the way a later build would write
+    /// it: correctly framed, with a variant name this one has never heard of.
+    fn trailing_message() -> RunRecord {
+        RunRecord::Message {
+            message: MessageRecord {
+                role: "user".to_string(),
+                content: "after the unknown".to_string(),
+            },
+            at: 9,
+        }
+    }
+
+    /// Returns the archive and the size of the unknown frame's payload, so a
+    /// caller can assert on the exact `Frame` it expects back.
+    fn archive_with_an_unknown_record() -> (Vec<u8>, usize) {
+        let mut buf = Vec::new();
+        write_archive_start(&mut buf, RUN_ARCHIVE_VERSION).unwrap();
+        write_record(&mut buf, &header()).unwrap();
+        let payload =
+            serde_json::to_vec(&serde_json::json!({ "SomethingNew": { "whatever": 1 } })).unwrap();
+        buf.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        buf.extend_from_slice(&payload);
+        write_record(&mut buf, &trailing_message()).unwrap();
+        (buf, payload.len())
+    }
+
+    /// A record's variant name, read off its serialized form. Avoids a match
+    /// whose unreached arms would be uncovered, and pins the wire spelling.
+    fn record_kind(record: &RunRecord) -> String {
+        serde_json::to_value(record)
+            .expect("a RunRecord always serializes")
+            .as_object()
+            .expect("externally tagged, so an object")
+            .keys()
+            .next()
+            .expect("with exactly one key")
+            .clone()
+    }
+
+    /// The forward-compatibility guarantee, and the reason it is worth having:
+    /// adding a record kind used to truncate the journal for every older
+    /// reader. The lenient reader stopped at the first unknown record and
+    /// returned the prefix, so a build predating `InferenceUsage` would have
+    /// read a 0.3.10 journal as "header, then nothing" - with no error.
+    #[test]
+    fn an_unknown_record_kind_is_stepped_over_not_treated_as_the_end() {
+        let (buf, _) = archive_with_an_unknown_record();
+        let (version, records) = read_archive_lenient(&mut buf.as_slice()).unwrap();
+        assert_eq!(version, RUN_ARCHIVE_VERSION);
+        let kinds: Vec<String> = records.iter().map(record_kind).collect();
+        assert_eq!(
+            kinds,
+            vec!["Header".to_string(), "Message".to_string()],
+            "the header, and the readable record after the gap"
+        );
+        assert_eq!(records[1], trailing_message(), "intact, not just present");
+    }
+
+    /// The streaming reader skips the same way the buffering one does. It has
+    /// its own loop, so "both apply the rule" is a claim that needs checking
+    /// rather than assuming.
+    #[test]
+    fn the_streaming_reader_also_steps_over_an_unknown_record() {
+        // A context record *after* the unknown frame: the only way to reach it
+        // is to step over that frame, so the point count is the proof.
+        let (mut buf, _) = archive_with_an_unknown_record();
+        write_record(
+            &mut buf,
+            &RunRecord::ContextCheckpoint {
+                snapshot: ContextSnapshot {
+                    stage_name: "s".to_string(),
+                    total_tokens: 1,
+                    max_tokens: 10,
+                    regions: vec![],
+                },
+                at: 11,
+            },
+        )
+        .unwrap();
+        let mut points = 0usize;
+        visit_archive_points(&mut buf.as_slice(), &mut |_point| {
+            points += 1;
+            ControlFlow::Continue(())
+        })
+        .expect("a valid preamble");
+        assert_eq!(points, 1, "the walk got past the unknown frame");
+    }
+
+    /// The frame reader distinguishes "cannot parse this" from "cannot find
+    /// the end of this". Only the second is fatal, and the difference is what
+    /// makes stepping over the first safe.
+    #[test]
+    fn a_frame_reports_whether_its_payload_was_readable() {
+        let (buf, unknown_bytes) = archive_with_an_unknown_record();
+        let mut r = buf.as_slice();
+        read_archive_start(&mut r).unwrap();
+
+        let mut frames = Vec::new();
+        while let Some(frame) = read_frame(&mut r).expect("no torn frames here") {
+            frames.push(frame);
+        }
+        assert_eq!(
+            frames,
+            vec![
+                Frame::Record(Box::new(header())),
+                // Stepped over, and it says how far.
+                Frame::Unreadable {
+                    bytes: unknown_bytes
+                },
+                Frame::Record(Box::new(trailing_message())),
+            ],
+            "one frame per record, with the unreadable one accounted for rather than ending the read"
+        );
+    }
+
+    /// A torn tail still ends the read. Skipping is for frames whose bytes are
+    /// all present; a truncated one has no known length to step over.
+    #[test]
+    fn a_torn_frame_still_ends_the_read() {
+        let mut buf = Vec::new();
+        write_archive_start(&mut buf, RUN_ARCHIVE_VERSION).unwrap();
+        write_record(&mut buf, &header()).unwrap();
+        // A length prefix promising more than follows.
+        buf.extend_from_slice(&999u64.to_be_bytes());
+        buf.extend_from_slice(b"not enough");
+
+        let (_, records) = read_archive_lenient(&mut buf.as_slice()).unwrap();
+        assert_eq!(records.len(), 1, "everything intact before the tear");
+    }
+
+    /// An archive from a future framing generation is refused rather than
+    /// misread. Reading it anyway would not fail cleanly - it would take
+    /// whatever the length prefixes happened to say and produce nonsense.
+    #[test]
+    fn an_archive_from_a_newer_format_is_refused_with_both_versions_named() {
+        let mut buf = Vec::new();
+        write_archive_start(&mut buf, RUN_ARCHIVE_VERSION + 1).unwrap();
+        write_record(&mut buf, &header()).unwrap();
+
+        let err = read_archive_lenient(&mut buf.as_slice()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains(&(RUN_ARCHIVE_VERSION + 1).to_string()),
+            "{message}"
+        );
+        assert!(message.contains("upgrade leviath"), "{message}");
+    }
+
+    /// An older archive is read normally: framing has not changed under it, so
+    /// the only difference is which record kinds it happens to contain.
+    #[test]
+    fn an_archive_from_an_older_format_still_reads() {
+        let mut buf = Vec::new();
+        write_archive_start(&mut buf, 0).unwrap();
+        write_record(&mut buf, &header()).unwrap();
+        let (version, records) = read_archive_lenient(&mut buf.as_slice()).unwrap();
+        assert_eq!(version, 0);
+        assert_eq!(records.len(), 1);
     }
 }
