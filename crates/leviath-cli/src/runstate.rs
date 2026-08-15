@@ -2024,6 +2024,61 @@ mod tests {
         });
     }
 
+    /// A record kind written by a later build is stepped over, so the records
+    /// after it still reach the caller.
+    ///
+    /// This is the CLI half of the guarantee. The reader here has its own loop
+    /// over frames, separate from the ones in `leviath-core`, so "every reader
+    /// skips" is a claim that has to be checked per reader rather than assumed
+    /// from the primitive being right.
+    #[test]
+    fn streaming_records_steps_over_a_record_kind_from_a_later_build() {
+        with_isolated_runs_dir("visit-records-unknown-kind", |_dir| {
+            use leviath_core::run_archive::{self, RunRecord};
+
+            let run_id = "unknown-kind";
+            std::fs::create_dir_all(run_dir(run_id)).unwrap();
+            write_minimal_archive(run_id);
+
+            // Append a well-framed record this build has no variant for, then
+            // one it does.
+            let mut extra = Vec::new();
+            let payload =
+                serde_json::to_vec(&serde_json::json!({ "FromTheFuture": { "x": 1 } })).unwrap();
+            extra.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+            extra.extend_from_slice(&payload);
+            run_archive::write_record(
+                &mut extra,
+                &RunRecord::Message {
+                    message: leviath_core::run_archive::MessageRecord {
+                        role: "user".to_string(),
+                        content: "after the gap".to_string(),
+                    },
+                    at: 2,
+                },
+            )
+            .unwrap();
+            let path = run_dir(run_id).join("run.lvr");
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes.extend_from_slice(&extra);
+            std::fs::write(&path, bytes).unwrap();
+
+            let seen = std::cell::RefCell::new(Vec::new());
+            let visited = visit_run_records(run_id, &mut |record| {
+                if let RunRecord::Message { message, .. } = record {
+                    seen.borrow_mut().push(message.content.clone());
+                }
+                std::ops::ControlFlow::Continue(())
+            });
+            assert!(visited.is_some());
+            assert_eq!(
+                seen.into_inner(),
+                vec!["after the gap".to_string()],
+                "the readable record past the unknown one still arrives"
+            );
+        });
+    }
+
     /// Write a two-record archive (Header + one ContextCheckpoint) for `run_id`.
     fn write_minimal_archive(run_id: &str) {
         use leviath_core::run_archive::{self, RunIdentity, RunRecord};
