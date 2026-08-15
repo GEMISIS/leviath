@@ -195,6 +195,12 @@
           "description": "The only tools the model is offered here. Anything absent is refused at dispatch.",
           "items": { "type": "string" }
         },
+        "available_connectors": {
+          "type": "array",
+          "description": "MCP servers whose whole tool set this stage may use, by server name. Resolved at spawn against what each server actually advertises, and merged with available_tools - so a tool the server gains later is offered without editing the manifest.",
+          "items": { "type": "string" },
+          "$comment": "Kept separate from available_tools because that field is exact-match, and because an MCP tool's advertised name does not reliably carry its server - there is no prefix a wildcard could match."
+        },
         "require_output": {
           "type": "boolean",
           "default": false,

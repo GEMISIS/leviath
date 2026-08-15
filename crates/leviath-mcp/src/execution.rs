@@ -149,6 +149,20 @@ impl ToolExecutor {
         }
     }
 
+    /// Which server advertises each tool: advertised name -> server name.
+    ///
+    /// The routing table read the other way round. A blueprint that grants a
+    /// whole server needs to turn that server's name into the set of tools it
+    /// covers, and the advertised name cannot answer for itself - see
+    /// `unique_advertised_name`, which prefers the bare tool name and only
+    /// prefixes with the server on a collision.
+    pub fn tool_owners(&self) -> HashMap<String, String> {
+        self.aliases
+            .iter()
+            .map(|(advertised, (server, _))| (advertised.clone(), server.clone()))
+            .collect()
+    }
+
     /// Execute a tool by its advertised name, routing to the owning server.
     pub async fn execute(
         &mut self,

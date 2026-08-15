@@ -439,6 +439,27 @@ pub struct Stage {
     #[serde(default)]
     pub required_tools: Vec<String>,
 
+    /// MCP servers whose whole tool set this stage may use.
+    ///
+    /// `available_tools` is an exact-match list, which makes a server's tools
+    /// the author's problem to enumerate - and a server's tool list is not the
+    /// author's to know. It is whatever that server advertises today. A tool
+    /// added to the server later is simply never offered, with nothing said,
+    /// so the stage quietly cannot do a thing its author believed it could.
+    ///
+    /// Naming the server instead defers the question to spawn, when the answer
+    /// is known. Resolved against what the server actually advertises then,
+    /// and merged with whatever `available_tools` names, so the two can be
+    /// mixed freely.
+    ///
+    /// Kept separate from `available_tools` rather than spelled as a wildcard
+    /// in it, for two reasons. That field's contract is exact-match and every
+    /// consumer reads it that way; and the advertised name of an MCP tool does
+    /// not reliably carry its server, so there is no prefix a wildcard could
+    /// match on (see `unique_advertised_name` in `leviath-mcp`).
+    #[serde(default)]
+    pub available_connectors: Vec<String>,
+
     /// Maximum iterations for this stage
     pub max_iterations: Option<usize>,
 
@@ -591,6 +612,7 @@ impl Stage {
             description: None,
             model,
             available_tools: Vec::new(),
+            available_connectors: Vec::new(),
             required_tools: Vec::new(),
             max_iterations: None,
             mode: StageMode::Autonomous,

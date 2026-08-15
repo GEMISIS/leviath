@@ -206,6 +206,7 @@ async fn an_agent_runs_a_tool_and_the_file_lands_on_disk() {
         runs_dir: runs.path().to_path_buf(),
         shared_mcp: mcp,
         mcp_tool_defs: vec![],
+        mcp_tool_owners: Default::default(),
         mcp_pool: leviath_cli::daemon::mcp_pool::McpPool::for_daemon(
             Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             &[],

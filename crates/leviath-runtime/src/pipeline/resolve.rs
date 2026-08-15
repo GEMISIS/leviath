@@ -194,9 +194,80 @@ fn user_default_model(
     None
 }
 
+/// Which MCP server advertises each tool: advertised name -> server name.
+///
+/// Built where the servers are registered, because that is the only place the
+/// mapping exists. A [`Tool`] carries a name, a description and a schema, and
+/// the advertised name does not reliably contain the server: `leviath-mcp`
+/// prefers the bare tool name and only prefixes with the server on a collision,
+/// so `github`'s `create_issue` is usually advertised as `create_issue`. There
+/// is no string pattern that answers "does this tool belong to github", which
+/// is why a grant names the server and this table answers for it.
+pub type ToolOwners = std::collections::HashMap<String, String>;
+
+/// Every tool a run could offer, and which MCP server each came from.
+///
+/// The two travel together because a connector grant needs both: the defs to
+/// filter, and the ownership to know what a server's name covers. Passed as one
+/// value rather than two adjacent `&`s - `resolve_stages` was already at the
+/// argument-count limit, and two references of different types next to each
+/// other is exactly the pair a reader transposes.
+#[derive(Clone, Copy)]
+pub struct ToolCatalog<'a> {
+    /// Every tool definition available to the run.
+    pub defs: &'a [Tool],
+    /// Which MCP server advertises each of them. Empty for a run with no MCP
+    /// servers, which makes every connector grant resolve to nothing.
+    pub owners: &'a ToolOwners,
+}
+
+/// A stage's Layer-1 grant list: the names it asked for, plus every tool
+/// belonging to a server it named.
+///
+/// Connector grants are resolved here rather than at parse time because the
+/// answer only exists once the servers are connected - which is the whole point
+/// of naming a server instead of its tools. A connector that resolves to
+/// nothing (server not installed, or not connected this run) contributes
+/// nothing, exactly as an `available_tools` name matching nothing does.
+///
+/// Order is `available_tools` first, then each connector's tools in the order
+/// the servers were named, and the result is de-duplicated: a tool named
+/// individually *and* covered by a connector is granted once.
+pub fn expand_connector_grants(
+    available: &[String],
+    connectors: &[String],
+    owners: &ToolOwners,
+) -> Vec<String> {
+    if connectors.is_empty() {
+        return available.to_vec();
+    }
+    let mut granted: Vec<String> = available.to_vec();
+    for server in connectors {
+        // Sorted so a stage's advertised tool order does not depend on hash
+        // iteration - the model sees this list, and a set that reshuffles
+        // between runs is a difference nobody can explain.
+        let mut owned: Vec<&String> = owners
+            .iter()
+            .filter(|(_, owner)| *owner == server)
+            .map(|(tool, _)| tool)
+            .collect();
+        owned.sort();
+        for tool in owned {
+            if !granted.contains(tool) {
+                granted.push(tool.clone());
+            }
+        }
+    }
+    granted
+}
+
 /// Filter `all` tool defs down to those a stage's `available_tools` names
 /// (alias-resolved). Shared by spawn-time stage resolution and the mid-run
 /// tool-service refresh so both apply Layer-1 identically.
+///
+/// Connector grants are expanded into `available` by
+/// [`expand_connector_grants`] before this sees it, so both callers apply one
+/// rule and this stays an exact-match filter.
 pub fn filter_tools_by_available(all: &[Tool], available: &[String]) -> Vec<Tool> {
     if available.is_empty() {
         return Vec::new();
@@ -326,7 +397,7 @@ pub fn resolve_stages(
     model_override: Option<&str>,
     defaults: &ModelDefaults,
     registry: &ProviderRegistry,
-    all_tool_defs: &[Tool],
+    catalog: ToolCatalog<'_>,
     unattended: bool,
     output_request: Option<&leviath_core::output::OutputSpec>,
 ) -> Result<Vec<ResolvedStage>, String> {
@@ -352,12 +423,13 @@ pub fn resolve_stages(
             // set by name (alias-resolved). A name matching nothing (a typo, or an
             // MCP tool whose server isn't installed) is simply omitted. An
             // unattended run also loses the tools that block on a person.
-            let mut tools = filter_tools_for_stage(
-                all_tool_defs,
+            let granted = expand_connector_grants(
                 &stage.available_tools,
-                &stage.required_tools,
-                unattended,
+                &stage.available_connectors,
+                catalog.owners,
             );
+            let mut tools =
+                filter_tools_for_stage(catalog.defs, &granted, &stage.required_tools, unattended);
             let output = leviath_core::resolve_output_spec(
                 blueprint.output.as_ref(),
                 stage.output.as_ref(),
@@ -377,6 +449,18 @@ pub fn resolve_stages(
 
 #[cfg(test)]
 mod tests {
+    /// A catalog over `defs` with no MCP servers behind it, which is what every
+    /// test that is not about connectors wants.
+    fn catalog(defs: &[Tool]) -> ToolCatalog<'_> {
+        // A leaked empty map: `ToolCatalog` borrows, and a local would not
+        // outlive the call in the expression position these are used in.
+        static EMPTY: std::sync::OnceLock<ToolOwners> = std::sync::OnceLock::new();
+        ToolCatalog {
+            defs,
+            owners: EMPTY.get_or_init(ToolOwners::new),
+        }
+    }
+
     use super::*;
     use leviath_core::blueprint::ModelEntry;
     use std::collections::HashMap;
@@ -580,7 +664,7 @@ mod tests {
             None,
             &ModelDefaults::default(),
             &registry_with(&["anthropic"]),
-            &tools,
+            catalog(&tools),
             false,
             None,
         )
@@ -602,7 +686,7 @@ mod tests {
             None,
             &ModelDefaults::default(),
             &registry_with(&[]),
-            &[],
+            catalog(&[]),
             false,
             None,
         )
@@ -627,7 +711,7 @@ mod tests {
             Some("ghost/x"),
             &ModelDefaults::default(),
             &registry_with(&["anthropic"]),
-            &[],
+            catalog(&[]),
             false,
             None,
         )
@@ -695,7 +779,7 @@ mod tests {
             None,
             &ModelDefaults::default(),
             &registry_with(&["anthropic"]),
-            &tools,
+            catalog(&tools),
             false,
             None,
         )
@@ -964,7 +1048,7 @@ mod tests {
             None,
             &ModelDefaults::default(),
             &registry,
-            &[],
+            catalog(&[]),
             false,
             None,
         )
@@ -1030,7 +1114,7 @@ mod tests {
             None,
             &ModelDefaults::default(),
             &registry_with(&["anthropic"]),
-            &ask_and_read_defs(),
+            catalog(&ask_and_read_defs()),
             true,
             None,
         )
@@ -1094,7 +1178,7 @@ mod tests {
             None,
             &ModelDefaults::default(),
             &registry_with(&["anthropic"]),
-            &submit_tool_defs(),
+            catalog(&submit_tool_defs()),
             false,
             request,
         )
@@ -1212,15 +1296,147 @@ mod tests {
             None,
             &ModelDefaults::default(),
             &registry_with(&["anthropic"]),
-            &[Tool {
+            catalog(&[Tool {
                 name: "read_file".to_string(),
                 description: "read a file".to_string(),
                 parameters: serde_json::Value::Null,
-            }],
+            }]),
             false,
             None,
         )
         .expect("anthropic is registered");
         assert_eq!(resolved[0].tools[0].description, "read a file");
+    }
+
+    fn owners(pairs: &[(&str, &str)]) -> ToolOwners {
+        pairs
+            .iter()
+            .map(|(tool, server)| (tool.to_string(), server.to_string()))
+            .collect()
+    }
+
+    fn granted_names(v: &[String]) -> Vec<&str> {
+        v.iter().map(String::as_str).collect()
+    }
+
+    /// The point of the feature: a stage names the server, and every tool that
+    /// server advertises is granted - including ones added after the manifest
+    /// was written, which is what naming them individually could never keep up
+    /// with.
+    #[test]
+    fn a_connector_grant_covers_every_tool_its_server_advertises() {
+        let owned = owners(&[
+            ("create_issue", "github"),
+            ("list_prs", "github"),
+            ("query", "database"),
+        ]);
+        let granted =
+            expand_connector_grants(&["read_file".to_string()], &["github".to_string()], &owned);
+        assert_eq!(
+            granted_names(&granted),
+            vec!["read_file", "create_issue", "list_prs"],
+            "the stage's own names first, then the connector's, and nothing \
+             belonging to a server it did not name"
+        );
+    }
+
+    /// Sorted within a connector, so the set the model is offered does not
+    /// reshuffle between runs of the same blueprint - a difference nobody could
+    /// explain and every prompt cache would notice.
+    #[test]
+    fn a_connectors_tools_are_granted_in_a_stable_order() {
+        let owned = owners(&[("zeta", "srv"), ("alpha", "srv"), ("mid", "srv")]);
+        let first = expand_connector_grants(&[], &["srv".to_string()], &owned);
+        assert_eq!(granted_names(&first), vec!["alpha", "mid", "zeta"]);
+        // Re-expanding the same inputs gives the same answer, whatever the map
+        // iterates in.
+        for _ in 0..8 {
+            assert_eq!(
+                expand_connector_grants(&[], &["srv".to_string()], &owned),
+                first
+            );
+        }
+    }
+
+    /// A tool named individually and also covered by a connector is granted
+    /// once. Duplicates would reach the provider as a repeated tool definition.
+    #[test]
+    fn a_tool_named_twice_is_granted_once() {
+        let owned = owners(&[("create_issue", "github")]);
+        let granted = expand_connector_grants(
+            &["create_issue".to_string()],
+            &["github".to_string()],
+            &owned,
+        );
+        assert_eq!(granted_names(&granted), vec!["create_issue"]);
+    }
+
+    /// A connector that resolves to nothing - server not installed, or not
+    /// connected this run - contributes nothing, exactly as an `available_tools`
+    /// name matching nothing does. Silence is right here: whether a server is
+    /// present is not a property of the manifest.
+    #[test]
+    fn an_unresolvable_connector_grants_nothing_and_keeps_the_rest() {
+        let granted = expand_connector_grants(
+            &["read_file".to_string()],
+            &["not_installed".to_string()],
+            &ToolOwners::new(),
+        );
+        assert_eq!(granted_names(&granted), vec!["read_file"]);
+    }
+
+    /// A stage that grants no connector is untouched, which is every stage in
+    /// every blueprint written before this existed.
+    #[test]
+    fn no_connectors_means_the_list_is_returned_as_written() {
+        let owned = owners(&[("create_issue", "github")]);
+        let available = vec!["read_file".to_string(), "write_file".to_string()];
+        assert_eq!(expand_connector_grants(&available, &[], &owned), available);
+    }
+
+    /// End to end through stage resolution: the connector's tools are actually
+    /// advertised to the model, and a tool from an unnamed server is not.
+    #[test]
+    fn a_stage_granting_a_connector_is_offered_its_tools() {
+        let defs: Vec<Tool> = ["create_issue", "list_prs", "query"]
+            .iter()
+            .map(|n| Tool {
+                name: n.to_string(),
+                description: String::new(),
+                parameters: serde_json::Value::Null,
+            })
+            .collect();
+        let owned = owners(&[
+            ("create_issue", "github"),
+            ("list_prs", "github"),
+            ("query", "database"),
+        ]);
+        let mut stage =
+            leviath_core::Stage::new("work".to_string(), model_cfg(vec![("anthropic", "m")]));
+        stage.available_tools = vec![];
+        stage.available_connectors = vec!["github".to_string()];
+        let bp = Blueprint::new(
+            "t".to_string(),
+            "d".to_string(),
+            vec![stage],
+            leviath_core::layout::ContextLayout::new(vec![], 1000),
+        );
+
+        let resolved = resolve_stages(
+            &bp,
+            None,
+            &ModelDefaults::default(),
+            &registry_with(&["anthropic"]),
+            ToolCatalog {
+                defs: &defs,
+                owners: &owned,
+            },
+            false,
+            None,
+        )
+        .expect("anthropic is registered");
+
+        let offered: Vec<&str> = resolved[0].tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(offered, vec!["create_issue", "list_prs"]);
     }
 }

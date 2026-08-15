@@ -151,6 +151,7 @@ pub async fn setup_daemon_host_with(
         runs_dir,
         shared_mcp: registry.mcp,
         mcp_tool_defs: registry.mcp_tool_defs,
+        mcp_tool_owners: registry.mcp_tool_owners,
         mcp_pool,
         runtime,
         now_secs: || chrono::Utc::now().timestamp(),
@@ -196,6 +197,8 @@ pub struct HostParts {
     pub shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
     /// The tools those servers advertise.
     pub mcp_tool_defs: Vec<Tool>,
+    /// Which MCP server advertises each of those.
+    pub mcp_tool_owners: leviath_runtime::pipeline::ToolOwners,
     /// The pool that keeps per-agent MCP servers warm.
     pub mcp_pool: Arc<crate::daemon::mcp_pool::McpPool>,
     /// The tokio runtime the async lanes run on.
@@ -289,6 +292,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
             config: &parts.config,
             shared_mcp: parts.shared_mcp.clone(),
             mcp_tool_defs: &parts.mcp_tool_defs,
+            mcp_tool_owners: &parts.mcp_tool_owners,
             hub: &hub,
             now_secs: (parts.now_secs)(),
             subagent_tx: subagent_tx.clone(),
@@ -317,6 +321,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         config: reloader.clone(),
         shared_mcp: parts.shared_mcp.clone(),
         mcp_tool_defs: parts.mcp_tool_defs.clone(),
+        mcp_tool_owners: parts.mcp_tool_owners.clone(),
         mcp_pool: parts.mcp_pool.clone(),
         hub: hub.clone(),
         subagent_tx: subagent_tx.clone(),
@@ -373,6 +378,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     let reload_reloader = reloader.clone();
     let reload_mcp = parts.shared_mcp.clone();
     let reload_defs = parts.mcp_tool_defs.clone();
+    let reload_owners = parts.mcp_tool_owners.clone();
     let reload_hub = hub.clone();
     let reload_tx = subagent_tx.clone();
     let reload_runs = parts.runs_dir.clone();
@@ -388,6 +394,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
                 config: &reload_config,
                 shared_mcp: reload_mcp.clone(),
                 mcp_tool_defs: &reload_defs,
+                mcp_tool_owners: &reload_owners,
                 hub: &reload_hub,
                 now_secs: (parts.now_secs)(),
                 subagent_tx: reload_tx.clone(),
@@ -450,7 +457,12 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         // The reload path deliberately doesn't do this: it must not overwrite a
         // recovering run's own metadata.
         write_placeholder_meta(&spawn_runs_dir, args);
-        let defs = per_agent_mcp_defs(&spawn_pool, &parts.mcp_tool_defs, &args.blueprint_path);
+        let (defs, owners) = per_agent_mcp_defs(
+            &spawn_pool,
+            &parts.mcp_tool_defs,
+            &parts.mcp_tool_owners,
+            &args.blueprint_path,
+        );
         // Hold the blueprint's per-agent servers open for this run's life;
         // the reap hook releases them (idle-disconnect follows).
         spawn_pool.lease_blueprint(&args.blueprint_path, &args.run_id);
@@ -465,6 +477,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
                 config: &config,
                 shared_mcp: parts.shared_mcp.clone(),
                 mcp_tool_defs: &defs,
+                mcp_tool_owners: &owners,
                 hub: &hub,
                 now_secs: (parts.now_secs)(),
                 subagent_tx: subagent_tx.clone(),
@@ -601,14 +614,20 @@ async fn warm_fanout_worker_mcp(
 fn per_agent_mcp_defs(
     pool: &crate::daemon::mcp_pool::McpPool,
     global: &[Tool],
+    global_owners: &leviath_runtime::pipeline::ToolOwners,
     blueprint_path: &str,
-) -> Vec<Tool> {
+) -> (Vec<Tool>, leviath_runtime::pipeline::ToolOwners) {
     let mut defs = global.to_vec();
+    let mut owners = global_owners.clone();
     if let Ok(toml) = std::fs::read_to_string(blueprint_path) {
         let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(&toml);
         defs.extend(pool.cached_defs_for(&servers));
+        // A blueprint's own servers can grant connectors too, and they are the
+        // likelier case: a manifest that declares a server is the one whose
+        // author wants to name it.
+        owners.extend(pool.cached_owners_for(&servers));
     }
-    defs
+    (defs, owners)
 }
 
 #[cfg(test)]
@@ -1228,11 +1247,17 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             description: String::new(),
             parameters: serde_json::json!({}),
         }];
-        let defs = per_agent_mcp_defs(&pool, &global, &manifest.to_string_lossy());
+        let (defs, _) = per_agent_mcp_defs(
+            &pool,
+            &global,
+            &Default::default(),
+            &manifest.to_string_lossy(),
+        );
         let names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["global_tool", "stub_search"]);
         // Missing manifest → just the global defs (read-error arm).
-        let only_global = per_agent_mcp_defs(&pool, &global, "/no/such/x");
+        let (only_global, _) =
+            per_agent_mcp_defs(&pool, &global, &Default::default(), "/no/such/x");
         assert_eq!(only_global.len(), 1);
         assert_eq!(only_global[0].name, "global_tool");
     }
@@ -1255,6 +1280,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             runs_dir: runs.path().to_path_buf(),
             shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             mcp_tool_defs: Vec::new(),
+            mcp_tool_owners: Default::default(),
             mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
                 Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 &[],
@@ -1283,6 +1309,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             runs_dir: runs.path().to_path_buf(),
             shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             mcp_tool_defs: Vec::new(),
+            mcp_tool_owners: Default::default(),
             mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
                 Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 &[],
@@ -1321,6 +1348,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             runs_dir: runs.path().to_path_buf(),
             shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             mcp_tool_defs: Vec::new(),
+            mcp_tool_owners: Default::default(),
             mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
                 Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 &[],
@@ -1354,6 +1382,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             runs_dir: runs.path().to_path_buf(),
             shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             mcp_tool_defs: Vec::new(),
+            mcp_tool_owners: Default::default(),
             mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
                 Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 &[],
@@ -1432,6 +1461,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             runs_dir: runs.path().to_path_buf(),
             shared_mcp: mcp,
             mcp_tool_defs: vec![],
+            mcp_tool_owners: Default::default(),
             mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
                 Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 &[],
@@ -1536,6 +1566,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             runs_dir: runs.path().to_path_buf(),
             shared_mcp: mcp,
             mcp_tool_defs: vec![],
+            mcp_tool_owners: Default::default(),
             mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
                 Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 &[],
@@ -1572,6 +1603,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             runs_dir: runs.path().to_path_buf(),
             shared_mcp: mcp,
             mcp_tool_defs: vec![],
+            mcp_tool_owners: Default::default(),
             mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
                 Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 &[],

@@ -90,6 +90,16 @@ pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lint
         }
     }
 
+    // A stage granting a whole connector has a tool set nobody can enumerate
+    // here: it is whatever that server advertises at spawn, which is the point
+    // of naming the server. So a permission that looks orphaned might name a
+    // tool the connector grants, and the check has nothing to tell it apart
+    // with. Skipped rather than guessed, the same way an MCP tool name is never
+    // reported as unknown above.
+    if !stage.available_connectors.is_empty() {
+        return findings;
+    }
+
     let granted: HashSet<&str> = stage.available_tools.iter().map(String::as_str).collect();
     for tool in stage.tool_permissions.keys() {
         if granted.contains(tool.as_str()) {

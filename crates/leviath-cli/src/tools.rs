@@ -23,6 +23,10 @@ pub struct ToolRegistry {
     pub mcp: Arc<Mutex<ToolExecutor>>,
     /// MCP tool definitions to advertise, resolved once at spawn.
     pub mcp_tool_defs: Vec<Tool>,
+    /// Which server advertises each of those, for a stage that grants a whole
+    /// connector. A `Tool` carries no owner, so this is the only record of it
+    /// once the defs are flattened into one list.
+    pub mcp_tool_owners: leviath_runtime::pipeline::ToolOwners,
     /// Which names dispatch to `builtins` rather than to MCP.
     pub builtin_names: HashSet<String>,
 }
@@ -128,10 +132,15 @@ impl ToolRegistry {
             }
         }
 
+        // Read off the executor rather than accumulated alongside the loop
+        // above: the executor is what actually assigned each advertised name,
+        // so it cannot disagree with itself.
+        let mcp_tool_owners = mcp_executor.tool_owners();
         Self {
             builtins,
             mcp: Arc::new(Mutex::new(mcp_executor)),
             mcp_tool_defs,
+            mcp_tool_owners,
             builtin_names,
         }
     }

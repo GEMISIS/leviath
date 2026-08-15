@@ -83,6 +83,9 @@ impl EmbedSpawner {
         // seam, not the spawner.
         let workdir = PathBuf::from(&args.workdir);
         let all_tool_defs = BasicToolService::tool_defs(&workdir);
+        // The embedded runtime connects no MCP servers, so nothing is owned by
+        // one and a connector grant resolves to nothing here.
+        let owners = crate::pipeline::ToolOwners::new();
         let stages = {
             let registry = &world
                 .world()
@@ -94,7 +97,10 @@ impl EmbedSpawner {
                 args.model.as_deref(),
                 &self.defaults,
                 registry,
-                &all_tool_defs,
+                crate::pipeline::ToolCatalog {
+                    defs: &all_tool_defs,
+                    owners: &owners,
+                },
                 args.yolo,
                 args.output.as_ref(),
             )?

@@ -38,6 +38,8 @@ pub struct DaemonFanOutSpawner {
     pub shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
     /// Tool definitions from `shared_mcp`, resolved once rather than per worker.
     pub mcp_tool_defs: Vec<Tool>,
+    /// Which server advertises each of them, for a stage granting a connector.
+    pub mcp_tool_owners: leviath_runtime::pipeline::ToolOwners,
     /// Shared MCP pool for per-agent `[[mcp_servers]]` - a fan-out worker
     /// advertises its blueprint's already-connected servers and lazily warms any
     /// uncached ones for subsequent workers of the same type.
@@ -63,20 +65,25 @@ impl DaemonFanOutSpawner {
     /// the daemon's tick, on the runtime) so a subsequent worker of the same type
     /// advertises it. Returns just the global defs when the manifest is unreadable
     /// or declares no servers.
-    fn worker_mcp_defs(&self, blueprint_path: &str) -> Vec<Tool> {
+    fn worker_mcp_defs(
+        &self,
+        blueprint_path: &str,
+    ) -> (Vec<Tool>, leviath_runtime::pipeline::ToolOwners) {
         let mut defs = self.mcp_tool_defs.clone();
+        let mut owners = self.mcp_tool_owners.clone();
         let Ok(toml) = std::fs::read_to_string(blueprint_path) else {
-            return defs;
+            return (defs, owners);
         };
         let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(&toml);
         if servers.is_empty() {
-            return defs;
+            return (defs, owners);
         }
         defs.extend(self.mcp_pool.cached_defs_for(&servers));
+        owners.extend(self.mcp_pool.cached_owners_for(&servers));
         // Warm any not-yet-connected servers for the next worker of this type, on
         // a detached task (we run inside the tick, on the runtime).
         tokio::runtime::Handle::current().spawn(self.mcp_pool.clone().ensure_all(servers));
-        defs
+        (defs, owners)
     }
 }
 
@@ -140,7 +147,7 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         // are already connected in the shared pool (a `worker_stage` worker shares
         // the parent's - already warmed by the parent's preprocessor; the first
         // `worker_agent`/`worker_query` worker warms them here for its siblings).
-        let mcp_defs = self.worker_mcp_defs(&args.blueprint_path);
+        let (mcp_defs, mcp_owners) = self.worker_mcp_defs(&args.blueprint_path);
         // The worker holds its blueprint's per-agent servers open like any
         // other run; the reap hook releases the lease when the worker ends.
         self.mcp_pool
@@ -154,6 +161,7 @@ impl FanOutSpawner for DaemonFanOutSpawner {
                 config: &config,
                 shared_mcp: self.shared_mcp.clone(),
                 mcp_tool_defs: &mcp_defs,
+                mcp_tool_owners: &mcp_owners,
                 hub: &self.hub,
                 now_secs: (self.now_secs)(),
                 subagent_tx: self.subagent_tx.clone(),
@@ -389,6 +397,7 @@ mod tests {
             )),
             shared_mcp: shared_mcp.clone(),
             mcp_tool_defs: vec![],
+            mcp_tool_owners: Default::default(),
             mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(shared_mcp, &[]),
             hub: InteractionHub::new(),
             subagent_tx: tokio::sync::mpsc::unbounded_channel().0,
@@ -428,16 +437,16 @@ mod tests {
             }],
         );
         let defs = spawner.worker_mcp_defs(&manifest.to_string_lossy());
-        let names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+        let names: Vec<&str> = defs.0.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["global_tool", "srv_tool"]);
         // An unreadable manifest → just the global defs (read-error arm).
         let only_global = spawner.worker_mcp_defs("/no/such/agent.leviath");
-        assert_eq!(only_global.len(), 1);
-        assert_eq!(only_global[0].name, "global_tool");
+        assert_eq!(only_global.0.len(), 1);
+        assert_eq!(only_global.0[0].name, "global_tool");
         // A manifest with no [[mcp_servers]] → just the global defs.
         let empty = dir.path().join("empty.leviath");
         std::fs::write(&empty, "[agent]\nname = \"e\"\n").unwrap();
-        assert_eq!(spawner.worker_mcp_defs(&empty.to_string_lossy()).len(), 1);
+        assert_eq!(spawner.worker_mcp_defs(&empty.to_string_lossy()).0.len(), 1);
     }
 
     /// Build a world with a live parent agent (from `manifest`) and return the
@@ -486,6 +495,7 @@ mod tests {
                 config: &spawner.config.current(),
                 shared_mcp: spawner.shared_mcp.clone(),
                 mcp_tool_defs: &spawner.mcp_tool_defs,
+                mcp_tool_owners: &spawner.mcp_tool_owners,
                 hub: &spawner.hub,
                 now_secs: 100,
                 subagent_tx: spawner.subagent_tx.clone(),
