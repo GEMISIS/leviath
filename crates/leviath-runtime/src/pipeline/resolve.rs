@@ -1439,4 +1439,106 @@ mod tests {
         let offered: Vec<&str> = resolved[0].tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(offered, vec!["create_issue", "list_prs"]);
     }
+
+    /// Two servers advertising the same tool name, which is the case worth
+    /// pinning: `leviath-mcp` gives the first registrant the bare name and
+    /// prefixes the second, so the advertised names never collide - and a
+    /// grant of either kind has to reach exactly one server's tool.
+    #[test]
+    fn same_named_tools_on_two_servers_stay_separable() {
+        // What `unique_advertised_name` produces for two servers that both
+        // advertise `search`: alpha registered first and kept the bare name.
+        let owned = owners(&[
+            ("search", "alpha"),
+            ("beta__search", "beta"),
+            ("only_beta", "beta"),
+        ]);
+
+        // Naming a tool individually reaches one server's, not both.
+        let just_beta = expand_connector_grants(&["beta__search".to_string()], &[], &owned);
+        assert_eq!(granted_names(&just_beta), vec!["beta__search"]);
+
+        let just_alpha = expand_connector_grants(&["search".to_string()], &[], &owned);
+        assert_eq!(granted_names(&just_alpha), vec!["search"]);
+
+        // A connector grant takes that server's tools and none of the other's,
+        // even though one of them is named identically on the far side.
+        let all_beta = expand_connector_grants(&[], &["beta".to_string()], &owned);
+        assert_eq!(granted_names(&all_beta), vec!["beta__search", "only_beta"]);
+        let all_alpha = expand_connector_grants(&[], &["alpha".to_string()], &owned);
+        assert_eq!(granted_names(&all_alpha), vec!["search"]);
+
+        // And the two mix: a whole connector plus one tool from the other.
+        let mixed = expand_connector_grants(&["search".to_string()], &["beta".to_string()], &owned);
+        assert_eq!(
+            granted_names(&mixed),
+            vec!["search", "beta__search", "only_beta"]
+        );
+    }
+
+    /// Granting two connectors at once keeps both servers' sets whole, with no
+    /// entry lost to the other and none duplicated.
+    #[test]
+    fn granting_two_connectors_keeps_both_sets_whole() {
+        let owned = owners(&[
+            ("search", "alpha"),
+            ("only_alpha", "alpha"),
+            ("beta__search", "beta"),
+            ("only_beta", "beta"),
+        ]);
+        let granted =
+            expand_connector_grants(&[], &["alpha".to_string(), "beta".to_string()], &owned);
+        assert_eq!(
+            granted_names(&granted),
+            vec!["only_alpha", "search", "beta__search", "only_beta"],
+            "each server's tools, sorted within the server, in the order named"
+        );
+    }
+
+    /// The whole point of separability: what the model is actually offered.
+    /// A stage granting only beta must not be handed alpha's `search`, even
+    /// though alpha's tool is the one wearing the plain name.
+    #[test]
+    fn a_stage_granting_one_of_two_colliding_servers_is_offered_only_its_tools() {
+        let defs: Vec<Tool> = ["search", "beta__search", "only_beta"]
+            .iter()
+            .map(|n| Tool {
+                name: n.to_string(),
+                description: String::new(),
+                parameters: serde_json::Value::Null,
+            })
+            .collect();
+        let owned = owners(&[
+            ("search", "alpha"),
+            ("beta__search", "beta"),
+            ("only_beta", "beta"),
+        ]);
+        let mut stage =
+            leviath_core::Stage::new("work".to_string(), model_cfg(vec![("anthropic", "m")]));
+        stage.available_tools = vec![];
+        stage.available_connectors = vec!["beta".to_string()];
+        let bp = Blueprint::new(
+            "t".to_string(),
+            "d".to_string(),
+            vec![stage],
+            leviath_core::layout::ContextLayout::new(vec![], 1000),
+        );
+
+        let resolved = resolve_stages(
+            &bp,
+            None,
+            &ModelDefaults::default(),
+            &registry_with(&["anthropic"]),
+            ToolCatalog {
+                defs: &defs,
+                owners: &owned,
+            },
+            false,
+            None,
+        )
+        .expect("anthropic is registered");
+
+        let offered: Vec<&str> = resolved[0].tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(offered, vec!["beta__search", "only_beta"]);
+    }
 }
