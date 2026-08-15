@@ -272,14 +272,68 @@ pub fn filter_tools_by_available(all: &[Tool], available: &[String]) -> Vec<Tool
     if available.is_empty() {
         return Vec::new();
     }
+    let wanted: std::collections::HashSet<&str> = available
+        .iter()
+        .map(|n| leviath_tools::canonical_tool_name(n))
+        .collect();
+    // Names that match nothing get one more chance, as a server-qualified MCP
+    // tool. Computed once rather than per candidate, and only from the names
+    // that actually missed - so a stage whose grants all resolve does no extra
+    // work.
+    let unmatched: Vec<&str> = wanted
+        .iter()
+        .copied()
+        .filter(|n| !all.iter().any(|t| t.name == *n))
+        .collect();
+    let recovered = recover_unqualified(all, &unmatched);
     all.iter()
-        .filter(|t| {
-            available
-                .iter()
-                .any(|n| leviath_tools::canonical_tool_name(n) == t.name)
-        })
+        .filter(|t| wanted.contains(t.name.as_str()) || recovered.contains(t.name.as_str()))
         .cloned()
         .collect()
+}
+
+/// MCP tools named without their server, matched to the qualified name when
+/// exactly one server offers them.
+///
+/// MCP tools were advertised bare until they became `<server>__<tool>`, so a
+/// blueprint written against the old naming says `create_issue` where the tool
+/// is now `github__create_issue`. Left alone that grant matches nothing and the
+/// tool is silently not offered - the failure issue #454 was about, and not one
+/// worth introducing while fixing it.
+///
+/// Three things keep this from doing harm:
+///
+/// - It only ever sees names that matched **nothing**. A built-in `read_file`
+///   matches itself, so a server that also offers `read_file` can never capture
+///   the grant.
+/// - It requires exactly one candidate. Two servers offering `create_issue`
+///   leave the name unresolved, because it genuinely is ambiguous and the
+///   manifest has to say which - the old naming's silent "whichever registered
+///   first" is what is being removed, not reproduced.
+/// - It matches on the qualified shape, so `create_issue` finds
+///   `github__create_issue` and not some unrelated tool ending in those
+///   characters.
+fn recover_unqualified<'a>(
+    all: &'a [Tool],
+    unmatched: &[&str],
+) -> std::collections::HashSet<&'a str> {
+    let mut recovered = std::collections::HashSet::new();
+    for name in unmatched {
+        let suffix = format!("__{name}");
+        let mut candidates = all
+            .iter()
+            .filter(|t| t.name.ends_with(&suffix) && t.name.len() > suffix.len());
+        let (Some(only), None) = (candidates.next(), candidates.next()) else {
+            continue;
+        };
+        tracing::debug!(
+            wrote = %name,
+            resolved = %only.name,
+            "a stage names an MCP tool without its server; resolved because exactly one offers it"
+        );
+        recovered.insert(only.name.as_str());
+    }
+    recovered
 }
 
 /// The stage's Layer-1 tool set for a run that may have nobody watching.
@@ -1540,5 +1594,74 @@ mod tests {
 
         let offered: Vec<&str> = resolved[0].tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(offered, vec!["beta__search", "only_beta"]);
+    }
+    fn defs_named(names: &[&str]) -> Vec<Tool> {
+        names
+            .iter()
+            .map(|n| Tool {
+                name: n.to_string(),
+                description: String::new(),
+                parameters: serde_json::Value::Null,
+            })
+            .collect()
+    }
+
+    fn offered(tools: &[Tool]) -> Vec<&str> {
+        tools.iter().map(|t| t.name.as_str()).collect()
+    }
+
+    /// A blueprint written before MCP names carried their server keeps working
+    /// when the answer is unambiguous. Breaking it would drop the tool
+    /// silently, which is the failure the connector work exists to fix.
+    #[test]
+    fn a_grant_naming_an_mcp_tool_without_its_server_still_resolves() {
+        let defs = defs_named(&["github__create_issue", "read_file"]);
+        let tools = filter_tools_by_available(&defs, &["create_issue".to_string()]);
+        assert_eq!(offered(&tools), vec!["github__create_issue"]);
+    }
+
+    /// Two servers offering it means the name really is ambiguous, and there is
+    /// nothing to choose between them. It resolves to no tool rather than to
+    /// one of them - the old naming's silent "whichever registered first" is
+    /// the behaviour being removed, not reproduced.
+    #[test]
+    fn an_ambiguous_unqualified_grant_resolves_to_nothing() {
+        let defs = defs_named(&["github__create_issue", "gitlab__create_issue"]);
+        let tools = filter_tools_by_available(&defs, &["create_issue".to_string()]);
+        assert_eq!(offered(&tools), Vec::<&str>::new());
+    }
+
+    /// The case that matters most, because getting it wrong would break a
+    /// working stage rather than fail to fix a broken one: a built-in matches
+    /// itself, so a server offering a tool of the same name cannot capture the
+    /// grant. The fallback only ever sees names that matched nothing.
+    #[test]
+    fn a_builtin_is_never_captured_by_a_server_offering_the_same_name() {
+        let defs = defs_named(&["read_file", "scratch__read_file"]);
+        let tools = filter_tools_by_available(&defs, &["read_file".to_string()]);
+        assert_eq!(
+            offered(&tools),
+            vec!["read_file"],
+            "the built-in, not the server's tool of the same name"
+        );
+    }
+
+    /// A name that already matches an advertised tool is never rewritten, so
+    /// the fallback cannot redirect a grant that was correct to begin with -
+    /// even when another tool ends the same way.
+    #[test]
+    fn an_already_qualified_grant_is_untouched() {
+        let defs = defs_named(&["github__search", "other__github__search"]);
+        let tools = filter_tools_by_available(&defs, &["github__search".to_string()]);
+        assert_eq!(offered(&tools), vec!["github__search"]);
+    }
+
+    /// A name matching nothing at all is still simply omitted, as it always
+    /// was: a typo, or an MCP server that is not installed.
+    #[test]
+    fn a_name_matching_nothing_is_still_omitted() {
+        let defs = defs_named(&["read_file"]);
+        let tools = filter_tools_by_available(&defs, &["nonsense".to_string()]);
+        assert!(offered(&tools).is_empty());
     }
 }
