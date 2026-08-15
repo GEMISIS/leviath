@@ -719,6 +719,48 @@ Everything persistent sits under the data root, `<home>/.leviath`, which `LEVIAT
 
 The daemon's control socket, its token, its pid file, and a build marker live here too.
 
+### What a run directory holds
+
+Four things, with different jobs:
+
+| File | What it is | Rewritten or appended |
+|---|---|---|
+| `meta.json` | The run's current status, model, token totals, wait reason | Rewritten whole |
+| `context.json` | The context window as it stands right now | Rewritten whole |
+| `stages.json` | Per-stage names and status | Rewritten whole |
+| `run.lvr` | The journal: every step, in order | Append-only |
+
+The first three answer "what is true now" and are cheap to read. `run.lvr` answers "how did it get
+here", and is what [`lev context`](/docs/cli) replays and what a daemon restart folds to recover a
+run.
+
+### The `run.lvr` format
+
+A four-byte magic (`LVR1`), a two-byte format version, then a sequence of records. Each record is
+an eight-byte big-endian length followed by that many bytes of JSON.
+
+```
+LVR1 | u16 version | [ u64 length | JSON payload ] ...
+```
+
+Folding the records in order reconstructs the run. Most are a `Progress` record carrying a diff
+against the previous context, anchored by a full `ContextCheckpoint` whenever the writer has no
+previous state to diff against.
+
+**Adding a record kind is not a breaking change.** Frames carry their length, so a reader that
+meets a record kind it does not know steps over it and keeps going. That is what lets a newer
+Leviath write records an older one can still read around, and it is why the version below does not
+move when a kind is added.
+
+**The version marks a change to the framing** - the preamble, the length prefix, or the payload
+encoding - not to the record set. A build refuses an archive whose version is higher than it
+understands, rather than reading it: at that point it cannot find the record boundaries, so it
+would not fail cleanly, it would produce nonsense. An older version reads normally.
+
+**A torn tail is tolerated.** A crash mid-append leaves a partial final frame, and readers stop
+there and keep everything before it - so an interrupted run still recovers to its last intact
+point.
+
 ## `policy.toml`
 
 Taint-gate policy lives in its own file, not in `config.toml`. It sits in your platform's config

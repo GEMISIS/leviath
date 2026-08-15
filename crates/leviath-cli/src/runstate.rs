@@ -168,7 +168,10 @@ impl<T> StatCache<T> {
 pub fn read_run_archive(run_id: &str) -> Option<Vec<leviath_core::run_archive::RunRecord>> {
     let path = run_dir(run_id).join("run.lvr");
     let bytes = std::fs::read(&path).ok()?;
-    leviath_core::run_archive::read_archive(&mut bytes.as_slice())
+    // Lenient, not strict: this reads an archive some other build may have
+    // written, so a record kind added later must be stepped over rather than
+    // rejecting the file (or, worse, truncating it silently).
+    leviath_core::run_archive::read_archive_lenient(&mut bytes.as_slice())
         .ok()
         .map(|(_version, records)| records)
 }
@@ -185,7 +188,12 @@ pub fn visit_run_records(
     let file = std::fs::File::open(&path).ok()?;
     let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
     leviath_core::run_archive::read_archive_start(&mut reader).ok()?;
-    while let Ok(Some(record)) = leviath_core::run_archive::read_record(&mut reader) {
+    // A frame this build cannot parse is skipped, not treated as the end: it
+    // was written by a later version and the records after it are still ours.
+    while let Ok(Some(frame)) = leviath_core::run_archive::read_frame(&mut reader) {
+        let leviath_core::run_archive::Frame::Record(record) = frame else {
+            continue;
+        };
         if visit(&record).is_break() {
             break;
         }
