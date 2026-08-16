@@ -12,15 +12,18 @@
 //! **What it does not fix.** Every listing here still walks the runs directory
 //! and parses every `meta.json`, because that is the only index there is.
 //! Pagination bounds what crosses the wire and what the browser holds; it does
-//! not bound the server's work, and runs are never pruned. The guard that does
-//! bound the damage is [`MAX_SEARCH_SCAN`], on the filesystem-reading half of
-//! search.
+//! not bound the server's work. The guard that does bound the damage is
+//! [`MAX_SEARCH_SCAN`], on the filesystem-reading half of search.
+//!
+//! Pruning is [`delete_run`] and [`delete_runs`], which is the other half of
+//! that story: the listing can now be made smaller, not only paged over.
 
 use std::collections::HashSet;
 
-use axum::extract::Query;
+use axum::extract::{Path as AxumPath, Query};
 use axum::http::StatusCode;
 use axum::response::Json;
+use serde::{Deserialize, Serialize};
 
 use super::cursor::{self, Cursor, CursorKey};
 use super::search;
@@ -788,3 +791,154 @@ fn build_item(meta: &RunMeta, resolved: &Resolved, highlights: Option<Vec<Highli
 #[cfg(test)]
 #[path = "runs_tests.rs"]
 mod tests;
+
+/// Why a run named in a bulk delete was left alone.
+#[derive(Debug, Serialize)]
+pub(super) struct SkippedRun {
+    /// The run that was not deleted.
+    pub(super) id: String,
+    /// A sentence saying why, for a console to show verbatim.
+    pub(super) reason: String,
+}
+
+/// What a bulk delete did.
+///
+/// Reports per-run outcomes rather than a count, because the interesting result
+/// of "clear everything older than a month" is which runs survived it: a live
+/// run and a run that was already gone are both non-deletions and a caller that
+/// only got `deleted: 12` cannot tell them apart, or tell the user why the list
+/// did not empty.
+#[derive(Debug, Serialize)]
+pub(super) struct DeleteRunsResp {
+    /// Ids whose directories are gone.
+    pub(super) deleted: Vec<String>,
+    /// Ids that were left, each with a reason.
+    pub(super) skipped: Vec<SkippedRun>,
+}
+
+/// Query for `DELETE /api/runs`.
+#[derive(Debug, Deserialize)]
+pub(super) struct DeleteRunsQuery {
+    /// Delete every finished run last updated strictly before this unix time.
+    pub(super) before: Option<i64>,
+    /// Delete exactly these runs, comma-separated.
+    pub(super) ids: Option<String>,
+}
+
+/// Whether a run may be removed, or the reason it may not.
+///
+/// One definition for the single and bulk routes, so a run that 409s on its own
+/// cannot be silently deleted as part of a sweep.
+fn deletable(id: &str) -> Result<(), (StatusCode, String)> {
+    let dir = runstate::run_dir(id);
+    if !dir.exists() {
+        return Err((StatusCode::NOT_FOUND, format!("Run '{id}' not found")));
+    }
+    // Judged from the run's own record, not by asking the daemon: a daemon that
+    // is down must not make every run undeletable. A directory whose `meta.json`
+    // is unreadable is deletable - such a run is skipped by `list_runs`, so
+    // refusing here would make the unreadable ones permanent, which is exactly
+    // the corner an operator most wants to clear.
+    match runstate::read_meta(id) {
+        Ok(meta) if !runstate::is_terminal_status(&meta.status) => Err((
+            StatusCode::CONFLICT,
+            format!(
+                "Run '{id}' is {}; cancel it before deleting it",
+                meta.status
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Remove a run's directory, having already decided it may go.
+fn remove_run(id: &str) -> Result<(), (StatusCode, String)> {
+    std::fs::remove_dir_all(runstate::run_dir(id)).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to delete run '{id}': {e}"),
+        )
+    })
+}
+
+/// `DELETE /api/runs/{id}`: remove a finished run's record from disk.
+///
+/// Separate from `DELETE /api/agents/{id}`, which cancels. The two verbs mean
+/// genuinely different things - one stops the work, the other forgets it
+/// happened - and answering 204 to both would leave a client unable to say
+/// which it got (issue #463).
+///
+/// The deletion is real: the directory and everything in it, including the
+/// transcript. That is the point of the route. A console that offered a
+/// "Delete" which only hid the run locally would tell somebody clearing a
+/// sensitive transcript that it was gone when it was not.
+///
+/// **409** on a live run - removing a directory out from under a running agent
+/// is a different and much larger feature, and refusing is the honest answer.
+/// **404** on a run that is already gone, so a client that lost the response to
+/// its own delete can repeat it rather than treat a missing run as a failure.
+pub(super) async fn delete_run(
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    // `run_dir` maps an unsafe id to a path that cannot exist, so a traversal
+    // attempt arrives here as an ordinary miss rather than a removed directory.
+    deletable(&id).map_err(|(code, msg)| err(code, msg))?;
+    remove_run(&id).map_err(|(code, msg)| err(code, msg))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/runs?before=<unix>` or `?ids=a,b`: prune many runs at once.
+///
+/// The realistic use is "clear everything older than a month", and one request
+/// per run over a few hundred runs is its own problem.
+///
+/// Partial success is the normal outcome, not an error: a sweep that meets one
+/// live run has still correctly deleted the rest, so this answers 200 with the
+/// per-run verdicts rather than failing the whole request. The single-run route
+/// is the one that reports a status per outcome.
+///
+/// Neither parameter is a **400** rather than "every run": a bulk delete with no
+/// predicate is much more likely to be a client that failed to build its query
+/// than an operator asking to erase the machine's entire history.
+pub(super) async fn delete_runs(
+    Query(query): Query<DeleteRunsQuery>,
+) -> Result<Json<DeleteRunsResp>, (StatusCode, Json<ErrorResponse>)> {
+    let targets: Vec<String> = match (&query.ids, query.before) {
+        (Some(ids), _) => {
+            let ids = comma_list(ids);
+            if ids.len() > MAX_IDS {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "`ids` names {} runs; at most {MAX_IDS} may be deleted at once",
+                        ids.len()
+                    ),
+                ));
+            }
+            ids
+        }
+        // Scoped to terminal runs at selection time as well as in `deletable`,
+        // so a sweep does not report every live run on the machine as skipped.
+        (None, Some(before)) => runstate::list_runs()
+            .into_iter()
+            .filter(|m| runstate::is_terminal_status(&m.status) && m.updated_at < before)
+            .map(|m| m.run_id)
+            .collect(),
+        (None, None) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "a bulk delete needs `before` or `ids`; refusing to delete every run".to_string(),
+            ));
+        }
+    };
+
+    let mut deleted = Vec::new();
+    let mut skipped = Vec::new();
+    for id in targets {
+        match deletable(&id).and_then(|()| remove_run(&id)) {
+            Ok(()) => deleted.push(id),
+            Err((_, reason)) => skipped.push(SkippedRun { id, reason }),
+        }
+    }
+    Ok(Json(DeleteRunsResp { deleted, skipped }))
+}

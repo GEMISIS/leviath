@@ -1212,3 +1212,257 @@ async fn a_bad_request_is_reported_rather_than_served() {
     })
     .await;
 }
+
+// ─── delete ─────────────────────────────────────────────────────────────────
+
+/// Build a `DeleteRunsQuery` through axum's extractor, for the same reason
+/// `query` above does: a struct shape the wire never produces is not a test.
+fn delete_query(pairs: &[(&str, &str)]) -> DeleteRunsQuery {
+    let encoded = pairs
+        .iter()
+        .map(|(k, v)| format!("{k}={}", urlencode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    let uri: axum::http::Uri = format!("http://test/api/runs?{encoded}")
+        .parse()
+        .expect("uri parses");
+    Query::<DeleteRunsQuery>::try_from_uri(&uri)
+        .expect("query parses")
+        .0
+}
+
+fn finished(id: &str, updated_at: i64) -> RunMeta {
+    let mut meta = meta_at(id, updated_at);
+    meta.status = RunStatus::Complete;
+    meta.updated_at = updated_at;
+    meta
+}
+
+#[tokio::test]
+async fn deleting_a_finished_run_removes_it_from_disk() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-one", |_d| async move {
+        create_run(&finished("run-done", 1)).unwrap();
+        assert!(crate::runstate::run_dir("run-done").exists());
+
+        let code = delete_run(AxumPath("run-done".to_string()))
+            .await
+            .expect("the delete succeeds");
+
+        assert_eq!(code, StatusCode::NO_CONTENT);
+        // The directory, not just the listing entry: a delete that left the
+        // transcript behind would be the "hides it locally" bug with extra
+        // steps.
+        assert!(!crate::runstate::run_dir("run-done").exists());
+        assert!(crate::runstate::list_runs().is_empty());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn deleting_a_live_run_is_refused_rather_than_done_behind_the_agent() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-live", |_d| async move {
+        create_run(&meta_at("run-live", 1)).unwrap();
+
+        let (code, body) = delete_run(AxumPath("run-live".to_string()))
+            .await
+            .expect_err("a live run is refused");
+
+        assert_eq!(code, StatusCode::CONFLICT);
+        // Says what to do about it, not just that it failed.
+        assert!(body.0.error.contains("cancel it"));
+        assert!(crate::runstate::run_dir("run-live").exists());
+    })
+    .await;
+}
+
+/// A repeat of a delete whose response was lost has to be readable as "already
+/// gone" rather than as a failure.
+#[tokio::test]
+async fn deleting_a_run_that_is_already_gone_is_a_404() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-missing", |_d| async move {
+        let (code, _) = delete_run(AxumPath("run-never".to_string()))
+            .await
+            .expect_err("a missing run is a 404");
+        assert_eq!(code, StatusCode::NOT_FOUND);
+    })
+    .await;
+}
+
+/// `run_dir` maps an unsafe id onto a path that cannot exist, so a traversal
+/// arrives as an ordinary miss. Asserted here because this is the one route
+/// where being wrong removes a directory.
+#[tokio::test]
+async fn a_traversing_run_id_deletes_nothing() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-traversal", |dir| async move {
+        let victim = dir.join("keep-me");
+        std::fs::create_dir_all(&victim).unwrap();
+
+        let (code, _) = delete_run(AxumPath("../keep-me".to_string()))
+            .await
+            .expect_err("a traversing id finds nothing");
+
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert!(victim.exists());
+    })
+    .await;
+}
+
+/// A run whose `meta.json` cannot be read is skipped by `list_runs`, so
+/// refusing to delete it would make it both invisible and permanent.
+#[tokio::test]
+async fn a_run_with_unreadable_metadata_can_still_be_deleted() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-corrupt", |_d| async move {
+        create_run(&finished("run-corrupt", 1)).unwrap();
+        std::fs::write(
+            crate::runstate::run_dir("run-corrupt").join("meta.json"),
+            "{ not json",
+        )
+        .unwrap();
+
+        let code = delete_run(AxumPath("run-corrupt".to_string()))
+            .await
+            .expect("a corrupt run is still deletable");
+
+        assert_eq!(code, StatusCode::NO_CONTENT);
+        assert!(!crate::runstate::run_dir("run-corrupt").exists());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_bulk_delete_by_age_takes_the_old_finished_runs_and_leaves_the_rest() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-before", |_d| async move {
+        create_run(&finished("run-ancient", 100)).unwrap();
+        create_run(&finished("run-recent", 300)).unwrap();
+        let mut live = meta_at("run-live", 100);
+        live.status = RunStatus::Running;
+        create_run(&live).unwrap();
+
+        let resp = delete_runs(Query(delete_query(&[("before", "200")])))
+            .await
+            .expect("the sweep runs");
+
+        assert_eq!(resp.deleted, vec!["run-ancient".to_string()]);
+        // The live run is old enough by the clock and is still not swept: it is
+        // filtered out at selection, so it is not reported as a skip either.
+        assert!(resp.skipped.is_empty());
+        assert!(crate::runstate::run_dir("run-live").exists());
+        assert!(crate::runstate::run_dir("run-recent").exists());
+    })
+    .await;
+}
+
+/// Partial success is the normal outcome, and the caller has to be able to tell
+/// the two kinds of non-deletion apart.
+#[tokio::test]
+async fn a_bulk_delete_by_id_reports_a_verdict_for_every_run_it_was_given() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-ids", |_d| async move {
+        create_run(&finished("run-done", 1)).unwrap();
+        create_run(&meta_at("run-live", 2)).unwrap();
+
+        let resp = delete_runs(Query(delete_query(&[(
+            "ids",
+            "run-done,run-live,run-gone",
+        )])))
+        .await
+        .expect("the sweep runs");
+
+        assert_eq!(resp.deleted, vec!["run-done".to_string()]);
+        let reasons: Vec<(&str, &str)> = resp
+            .skipped
+            .iter()
+            .map(|s| (s.id.as_str(), s.reason.as_str()))
+            .collect();
+        assert_eq!(reasons.len(), 2);
+        assert_eq!(reasons[0].0, "run-live");
+        assert!(reasons[0].1.contains("cancel it"));
+        assert_eq!(reasons[1].0, "run-gone");
+        assert!(reasons[1].1.contains("not found"));
+    })
+    .await;
+}
+
+/// Far likelier to be a client that failed to build its query than an operator
+/// asking to erase the machine's history.
+#[tokio::test]
+async fn a_bulk_delete_with_no_predicate_is_refused() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-nothing", |_d| async move {
+        create_run(&finished("run-done", 1)).unwrap();
+
+        let (code, body) = delete_runs(Query(delete_query(&[])))
+            .await
+            .expect_err("a predicate is required");
+
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(body.0.error.contains("before"));
+        assert!(crate::runstate::run_dir("run-done").exists());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_bulk_delete_naming_more_runs_than_the_cap_is_refused() {
+    let many = (0..MAX_IDS + 1)
+        .map(|i| format!("run-{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let (code, body) = delete_runs(Query(delete_query(&[("ids", &many)])))
+        .await
+        .expect_err("over the cap");
+
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    assert!(body.0.error.contains("at most"));
+}
+
+/// The failing arm of `remove_run`. Reached with a run directory that exists
+/// and is terminal but cannot be removed, which on unix means a parent that is
+/// read-only.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_run_that_cannot_be_removed_reports_the_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-locked", |_d| async move {
+        create_run(&finished("run-stuck", 1)).unwrap();
+        // The runs dir itself, not the temp root above it: removing a directory
+        // needs write permission on its own parent.
+        let dir = crate::runstate::runs_dir();
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o500);
+        std::fs::set_permissions(&dir, perms).unwrap();
+
+        let outcome = delete_run(AxumPath("run-stuck".to_string())).await;
+
+        // Restored before asserting, so a failed assert cannot leave an
+        // undeletable directory behind for the next run of the suite.
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&dir, perms).unwrap();
+
+        let (code, body) = outcome.expect_err("the removal fails");
+        assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.0.error.contains("Failed to delete"));
+    })
+    .await;
+}
+
+/// The Windows twin: no permission trick, so the unremovable directory is made
+/// by holding a file in it open, which Windows refuses to delete under.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_run_that_cannot_be_removed_reports_the_failure() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-locked", |_d| async move {
+        create_run(&finished("run-stuck", 1)).unwrap();
+        let held =
+            std::fs::File::open(crate::runstate::run_dir("run-stuck").join("meta.json")).unwrap();
+
+        let outcome = delete_run(AxumPath("run-stuck".to_string())).await;
+        drop(held);
+
+        let (code, body) = outcome.expect_err("the removal fails");
+        assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.0.error.contains("Failed to delete"));
+    })
+    .await;
+}

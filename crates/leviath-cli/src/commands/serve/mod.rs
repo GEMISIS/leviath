@@ -83,7 +83,8 @@ fn api_router() -> Router<AppState> {
         )
         // Runs - the paginated, searchable listing. Supersedes the GET half of
         // /api/agents, which stays as it is for existing clients.
-        .route("/api/runs", get(runs::list_runs))
+        .route("/api/runs", get(runs::list_runs).delete(runs::delete_runs))
+        .route("/api/runs/{id}", delete(runs::delete_run))
         // Agents
         .route(
             "/api/agents",
