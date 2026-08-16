@@ -606,6 +606,7 @@ mod tests {
             system: vec![SystemBlock {
                 text: "sys".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
+                breakpoint_eligible: true,
             }],
             messages: vec![leviath_providers::Message {
                 role: "user".to_string(),

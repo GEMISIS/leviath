@@ -668,10 +668,12 @@ mod tests {
             SystemBlock {
                 text: "[architecture]:\nhexagonal".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
+                breakpoint_eligible: true,
             },
             SystemBlock {
                 text: "[plan]:\nstep one".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
+                breakpoint_eligible: true,
             },
         ];
         let prompt = ClaudeCodeProvider::build_system_prompt(&req);
@@ -686,10 +688,12 @@ mod tests {
             SystemBlock {
                 text: String::new(),
                 cache_hint: leviath_core::CacheHint::Never,
+                breakpoint_eligible: true,
             },
             SystemBlock {
                 text: "kept".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
+                breakpoint_eligible: true,
             },
         ];
         assert_eq!(ClaudeCodeProvider::build_system_prompt(&req), "kept");

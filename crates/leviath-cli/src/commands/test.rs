@@ -412,6 +412,7 @@ async fn run_test_case(
         model: model_name.to_string(),
         // One assembly, so there is no previous request to compare against.
         previous_system_hash: None,
+        previous_block_hashes: Vec::new(),
     });
     let caps = provider.capabilities(model_name);
     let remaining = window.max_tokens.saturating_sub(window.current_tokens);

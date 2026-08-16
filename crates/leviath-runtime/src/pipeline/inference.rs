@@ -59,6 +59,7 @@ pub(crate) fn hint_blocks(
     let always = |text: &str| leviath_providers::SystemBlock {
         text: text.to_string(),
         cache_hint: leviath_core::CacheHint::Always,
+        breakpoint_eligible: true,
     };
     let mut blocks = Vec::new();
     if config.map(|c| c.batch_tool_hint).unwrap_or(false) {
@@ -71,6 +72,20 @@ pub(crate) fn hint_blocks(
         blocks.push(always(text));
     }
     blocks
+}
+
+/// What the previous request's system prefix looked like.
+///
+/// The whole-prefix digest and the per-block digests answer different
+/// questions ("did anything move", and "how far did it hold still"), and they
+/// are only ever read together, so they travel together rather than as two
+/// adjacent parameters of different shapes that a caller could transpose.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PriorPrefix {
+    /// Digest of the whole prefix, or `None` before the first request.
+    pub(crate) system_hash: Option<u64>,
+    /// Per-block digests, empty before the first request.
+    pub(crate) block_hashes: Vec<u64>,
 }
 
 /// Build the [`InferenceRequest`] for an agent from its context window + stage
@@ -87,15 +102,21 @@ pub(crate) fn build_request(
     provider: &Arc<dyn Provider>,
     stage_name: &str,
     stage_iterations: usize,
-    previous_system_hash: Option<u64>,
-) -> (InferenceRequest, u64) {
+    prior: PriorPrefix,
+) -> (InferenceRequest, u64, Vec<u64>) {
+    let PriorPrefix {
+        system_hash: previous_system_hash,
+        block_hashes: previous_block_hashes,
+    } = prior;
     let assembled = window.assemble_with_meta(&crate::custom_region::AssembleMeta {
         stage_name: stage_name.to_string(),
         stage_iterations,
         model: stage.model.clone(),
         previous_system_hash,
+        previous_block_hashes,
     });
     let system_hash = assembled.system_hash;
+    let block_hashes = assembled.block_hashes.clone();
     let remaining = window.max_tokens.saturating_sub(window.current_tokens);
     let caps = provider.capabilities(&stage.model);
     let output_cap = config
@@ -139,7 +160,7 @@ pub(crate) fn build_request(
         extra,
         request_timeout_secs: config.and_then(|c| c.request_timeout_secs),
     };
-    (request, system_hash)
+    (request, system_hash, block_hashes)
 }
 
 /// Build the [`RetryPolicy`] for a job from the operator's `[limits]` retry
@@ -228,6 +249,7 @@ type InferenceQuery = (
     Option<&'static StageProgress>,
     Option<&'static DispatchStall>,
     Option<&'static SystemPrefixHash>,
+    Option<&'static SystemBlockHashes>,
 );
 
 /// The system prefix the last request sent, as a digest.
@@ -237,6 +259,12 @@ type InferenceQuery = (
 /// which is exactly when there is nothing to invalidate.
 #[derive(bevy_ecs::component::Component, Debug, Clone, Copy)]
 pub struct SystemPrefixHash(pub u64);
+
+/// The previous request's per-block system digests, kept on the agent so the
+/// next assembly can tell which blocks held still and place cache breakpoints
+/// only where the entry is readable back (issue #474).
+#[derive(Component, Debug, Clone, Default)]
+pub struct SystemBlockHashes(pub Vec<u64>);
 
 /// Inference-dispatch system: for every `ReadyToInfer` agent, resolve its
 /// provider and, **if a per-model permit is free**, build the request, spawn the
@@ -272,7 +300,18 @@ pub fn dispatch_inference(
     let retry_tuning = retry.map(|r| *r).unwrap_or_default();
     let circuits = circuits.as_deref();
     agents.par_iter().for_each(
-        |(entity, state, window, config, si, in_flight, progress, stalled, prefix)| {
+        |(
+            entity,
+            state,
+            window,
+            config,
+            si,
+            in_flight,
+            progress,
+            stalled,
+            prefix,
+            block_prefix,
+        )| {
             crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
                 if state.status != AgentStatus::Active {
                     return; // paused / waiting / cancelled - don't start new work
@@ -320,14 +359,17 @@ pub fn dispatch_inference(
                     stall(StallReason::PoolFull);
                     return;
                 };
-                let (request, system_hash) = build_request(
+                let (request, system_hash, block_hashes) = build_request(
                     window,
                     config,
                     si,
                     &provider,
                     &state.current_stage,
                     progress.map(|p| p.iterations).unwrap_or(0),
-                    prefix.map(|p| p.0),
+                    PriorPrefix {
+                        system_hash: prefix.map(|p| p.0),
+                        block_hashes: block_prefix.map(|b| b.0.clone()).unwrap_or_default(),
+                    },
                 );
                 // Remembered for the next request, which is the only way the
                 // breakpoint decision can be made on evidence.
@@ -335,6 +377,9 @@ pub fn dispatch_inference(
                     commands
                         .entity(entity)
                         .insert(SystemPrefixHash(system_hash));
+                    commands
+                        .entity(entity)
+                        .insert(SystemBlockHashes(block_hashes.clone()));
                 });
                 let job = InferenceJob {
                     entity,

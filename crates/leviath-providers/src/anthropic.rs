@@ -40,19 +40,33 @@ fn maybe_dump_request(body: &serde_json::Value) {
 /// budget, the last `budget` are kept - the final run always ends on the last
 /// cacheable block, so its breakpoint spans the full cacheable prefix and
 /// nothing cacheable is left entirely uncached.
-fn system_cache_breakpoints(hints: &[leviath_core::CacheHint], budget: usize) -> Vec<usize> {
+fn system_cache_breakpoints(blocks: &[crate::provider::SystemBlock], budget: usize) -> Vec<usize> {
     if budget == 0 {
         return Vec::new();
     }
     let mut ends = Vec::new();
-    for (i, hint) in hints.iter().enumerate() {
-        if *hint == leviath_core::CacheHint::Never {
+    let mut run_end: Option<usize> = None;
+    for (i, block) in blocks.iter().enumerate() {
+        let hint = block.cache_hint;
+        if hint == leviath_core::CacheHint::Never {
+            run_end = None;
             continue;
+        }
+        // The furthest block in this run whose entry could actually be read
+        // back. A block the assembler marked ineligible has changed since the
+        // last request, so a breakpoint at or after it names a prefix that has
+        // already been invalidated - the 1.25x write is charged and nothing is
+        // ever read (issue #474). Keeping the last eligible one instead caches
+        // the part that did hold still.
+        if block.breakpoint_eligible {
+            run_end = Some(i);
         }
         // End of a contiguous same-hint run: the next block is absent or a
         // different hint (a `Never` block also breaks the run).
-        if hints.get(i + 1) != Some(hint) {
-            ends.push(i);
+        if blocks.get(i + 1).map(|b| b.cache_hint) != Some(hint)
+            && let Some(end) = run_end.take()
+        {
+            ends.push(end);
         }
     }
     if ends.len() > budget {
@@ -371,10 +385,8 @@ impl AnthropicProvider {
         // pinned/cached regions stays within the limit (issue #12): one
         // `cache_control` per contiguous run of same-hint cacheable blocks,
         // capped at the total budget.
-        let system_hints: Vec<leviath_core::CacheHint> =
-            request.system.iter().map(|b| b.cache_hint).collect();
         let system_breakpoints: std::collections::HashSet<usize> =
-            system_cache_breakpoints(&system_hints, MAX_BREAKPOINTS)
+            system_cache_breakpoints(&request.system, MAX_BREAKPOINTS)
                 .into_iter()
                 .collect();
 
@@ -1182,6 +1194,7 @@ mod tests {
             system: vec![crate::SystemBlock {
                 text: "You are helpful.".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
+                breakpoint_eligible: true,
             }],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
@@ -1428,6 +1441,7 @@ mod tests {
             system: vec![crate::SystemBlock {
                 text: "You are helpful.".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
+                breakpoint_eligible: true,
             }],
             messages: vec![
                 crate::provider::Message {
@@ -1516,12 +1530,89 @@ mod tests {
 
     // ── issue #12: system-block cache_control budget ──────────────────────────
 
+    /// Blocks carrying only the hints under test, all eligible - these tests
+    /// are about how runs are grouped, not about what held still.
+    fn blocks_of(hints: &[leviath_core::CacheHint]) -> Vec<crate::provider::SystemBlock> {
+        hints
+            .iter()
+            .map(|h| crate::provider::SystemBlock {
+                text: "x".to_string(),
+                cache_hint: *h,
+                breakpoint_eligible: true,
+            })
+            .collect()
+    }
+
+    /// A run ends its breakpoint at the last block that could actually be read
+    /// back, not at its last block. Placing it further would name a prefix the
+    /// assembler already said had changed - the 1.25x write charged for an
+    /// entry nothing will ever read (issue #474).
+    #[test]
+    fn a_run_places_its_breakpoint_at_the_last_eligible_block() {
+        let blocks = vec![
+            crate::provider::SystemBlock {
+                text: "frozen".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+                breakpoint_eligible: true,
+            },
+            crate::provider::SystemBlock {
+                text: "also frozen".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+                breakpoint_eligible: true,
+            },
+            crate::provider::SystemBlock {
+                text: "grew this turn".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+                breakpoint_eligible: false,
+            },
+        ];
+        assert_eq!(system_cache_breakpoints(&blocks, 4), vec![1]);
+    }
+
+    /// A run with nothing eligible gets no breakpoint at all rather than one
+    /// that cannot pay for itself.
+    #[test]
+    fn a_run_with_nothing_stable_gets_no_breakpoint() {
+        let blocks = vec![
+            crate::provider::SystemBlock {
+                text: "changed".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+                breakpoint_eligible: false,
+            },
+            crate::provider::SystemBlock {
+                text: "also changed".to_string(),
+                cache_hint: leviath_core::CacheHint::UntilChanged,
+                breakpoint_eligible: false,
+            },
+        ];
+        assert!(system_cache_breakpoints(&blocks, 4).is_empty());
+    }
+
+    /// Eligibility is per run: a stable tier keeps its breakpoint even when a
+    /// later, more volatile tier has moved.
+    #[test]
+    fn a_stable_tier_keeps_its_breakpoint_when_a_later_tier_moved() {
+        let blocks = vec![
+            crate::provider::SystemBlock {
+                text: "pinned".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+                breakpoint_eligible: true,
+            },
+            crate::provider::SystemBlock {
+                text: "history that grew".to_string(),
+                cache_hint: leviath_core::CacheHint::UntilChanged,
+                breakpoint_eligible: false,
+            },
+        ];
+        assert_eq!(system_cache_breakpoints(&blocks, 4), vec![0]);
+    }
+
     #[test]
     fn system_cache_breakpoints_collapses_same_hint_run_to_one() {
         use leviath_core::CacheHint;
         // 5 consecutive pinned (Always) blocks → a single breakpoint, on the last.
         assert_eq!(
-            system_cache_breakpoints(&[CacheHint::Always; 5], 4),
+            system_cache_breakpoints(&blocks_of(&[CacheHint::Always; 5]), 4),
             vec![4]
         );
     }
@@ -1533,7 +1624,7 @@ mod tests {
         // end of the Always run (idx 3) and end of the UntilChanged run (idx 4).
         let mut hints = vec![CacheHint::Always; 4];
         hints.push(CacheHint::UntilChanged);
-        assert_eq!(system_cache_breakpoints(&hints, 4), vec![3, 4]);
+        assert_eq!(system_cache_breakpoints(&blocks_of(&hints), 4), vec![3, 4]);
     }
 
     #[test]
@@ -1542,13 +1633,13 @@ mod tests {
         // A `Never` block is uncacheable AND breaks the contiguous run, so the
         // two `Always` blocks are separate runs → two breakpoints.
         let hints = [CacheHint::Always, CacheHint::Never, CacheHint::Always];
-        assert_eq!(system_cache_breakpoints(&hints, 4), vec![0, 2]);
+        assert_eq!(system_cache_breakpoints(&blocks_of(&hints), 4), vec![0, 2]);
     }
 
     #[test]
     fn system_cache_breakpoints_all_never_is_empty() {
         use leviath_core::CacheHint;
-        assert!(system_cache_breakpoints(&[CacheHint::Never; 3], 4).is_empty());
+        assert!(system_cache_breakpoints(&blocks_of(&[CacheHint::Never; 3]), 4).is_empty());
     }
 
     #[test]
@@ -1562,13 +1653,13 @@ mod tests {
             CacheHint::Always,
             CacheHint::UntilChanged,
         ];
-        assert_eq!(system_cache_breakpoints(&hints, 2), vec![2, 3]);
+        assert_eq!(system_cache_breakpoints(&blocks_of(&hints), 2), vec![2, 3]);
     }
 
     #[test]
     fn system_cache_breakpoints_zero_budget_is_empty() {
         use leviath_core::CacheHint;
-        assert!(system_cache_breakpoints(&[CacheHint::Always], 0).is_empty());
+        assert!(system_cache_breakpoints(&blocks_of(&[CacheHint::Always]), 0).is_empty());
     }
 
     /// Total `cache_control` annotations across system blocks + message content.
@@ -1608,22 +1699,27 @@ mod tests {
             crate::SystemBlock {
                 text: "architecture".into(),
                 cache_hint: CacheHint::Always,
+                breakpoint_eligible: true,
             },
             crate::SystemBlock {
                 text: "program_flows".into(),
                 cache_hint: CacheHint::Always,
+                breakpoint_eligible: true,
             },
             crate::SystemBlock {
                 text: "plan".into(),
                 cache_hint: CacheHint::Always,
+                breakpoint_eligible: true,
             },
             crate::SystemBlock {
                 text: "task".into(),
                 cache_hint: CacheHint::Always,
+                breakpoint_eligible: true,
             },
             crate::SystemBlock {
                 text: "files".into(),
                 cache_hint: CacheHint::UntilChanged,
+                breakpoint_eligible: true,
             },
         ];
         let request = InferenceRequest {
@@ -1671,14 +1767,17 @@ mod tests {
             crate::SystemBlock {
                 text: "a".into(),
                 cache_hint: CacheHint::Always,
+                breakpoint_eligible: true,
             },
             crate::SystemBlock {
                 text: "b".into(),
                 cache_hint: CacheHint::UntilChanged,
+                breakpoint_eligible: true,
             },
             crate::SystemBlock {
                 text: "c".into(),
                 cache_hint: CacheHint::Always,
+                breakpoint_eligible: true,
             },
         ];
         let messages: Vec<crate::provider::Message> = (0..3)
@@ -1736,6 +1835,7 @@ mod tests {
             system: vec![crate::SystemBlock {
                 text: "ephemeral".into(),
                 cache_hint: CacheHint::Never,
+                breakpoint_eligible: true,
             }],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
@@ -2281,10 +2381,12 @@ mod tests {
                 crate::SystemBlock {
                     text: "System part 1".to_string(),
                     cache_hint: leviath_core::CacheHint::Always,
+                    breakpoint_eligible: true,
                 },
                 crate::SystemBlock {
                     text: "System part 2".to_string(),
                     cache_hint: leviath_core::CacheHint::Always,
+                    breakpoint_eligible: true,
                 },
             ],
             messages: vec![crate::provider::Message {
@@ -2343,6 +2445,7 @@ mod tests {
             system: vec![crate::SystemBlock {
                 text: "No caching here.".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
+                breakpoint_eligible: true,
             }],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),

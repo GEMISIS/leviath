@@ -186,6 +186,7 @@ pub use leviath_core::run_meta::WaitReason;
 
 // The context window, which was two thirds of this file. Glob re-exported so
 // every existing `components::ContextWindow` path keeps working.
+mod block_cache;
 mod context_window;
 pub use context_window::*;
 
@@ -2007,6 +2008,7 @@ mod tests {
             stage_iterations: 7,
             model: "m".to_string(),
             previous_system_hash: None,
+            previous_block_hashes: Vec::new(),
         });
         assert_eq!(assembled.system_blocks[0].text, "<brain iter=7>");
     }
@@ -2939,19 +2941,22 @@ mod tests {
     fn cache_hint_sort_priority_orders_by_stability() {
         use leviath_core::CacheHint;
         // Most stable first (lowest priority), volatile last.
-        assert_eq!(cache_hint_sort_priority(CacheHint::Always), 0);
+        assert_eq!(block_cache::cache_hint_sort_priority(CacheHint::Always), 0);
         assert_eq!(
-            cache_hint_sort_priority(CacheHint::SlidingPrefix {
+            block_cache::cache_hint_sort_priority(CacheHint::SlidingPrefix {
                 stable_fraction: 0.75
             }),
             1
         );
-        assert_eq!(cache_hint_sort_priority(CacheHint::UntilChanged), 2);
-        assert_eq!(cache_hint_sort_priority(CacheHint::Never), 3);
+        assert_eq!(
+            block_cache::cache_hint_sort_priority(CacheHint::UntilChanged),
+            2
+        );
+        assert_eq!(block_cache::cache_hint_sort_priority(CacheHint::Never), 3);
         // The four priorities are strictly increasing by volatility.
         assert!(
-            cache_hint_sort_priority(CacheHint::Always)
-                < cache_hint_sort_priority(CacheHint::SlidingPrefix {
+            block_cache::cache_hint_sort_priority(CacheHint::Always)
+                < block_cache::cache_hint_sort_priority(CacheHint::SlidingPrefix {
                     stable_fraction: 0.5
                 })
         );

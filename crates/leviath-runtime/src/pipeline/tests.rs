@@ -109,7 +109,16 @@ fn build_request_threads_stage_meta_into_custom_region_render() {
         ),
     );
     let si = stage("model-x", vec![], None);
-    let req = build_request(&w, None, &si, &provider(true, 500), "implement", 4, None).0;
+    let req = build_request(
+        &w,
+        None,
+        &si,
+        &provider(true, 500),
+        "implement",
+        4,
+        crate::pipeline::inference::PriorPrefix::default(),
+    )
+    .0;
     assert!(
         req.system.iter().any(|b| b.text == "implement#4@model-x"),
         "system blocks: {:?}",
@@ -139,7 +148,7 @@ fn build_request_filters_tools_and_uses_config_overrides() {
         &provider(true, 9999),
         "test-stage",
         0,
-        None,
+        crate::pipeline::inference::PriorPrefix::default(),
     )
     .0;
     assert_eq!(req.tools.len(), 1); // filtered to "keep"
@@ -166,7 +175,7 @@ fn build_request_threads_per_stage_timeout() {
         &provider(true, 500),
         "test-stage",
         0,
-        None,
+        crate::pipeline::inference::PriorPrefix::default(),
     )
     .0;
     assert_eq!(req.request_timeout_secs, Some(120));
@@ -178,7 +187,7 @@ fn build_request_threads_per_stage_timeout() {
         &provider(true, 500),
         "test-stage",
         0,
-        None,
+        crate::pipeline::inference::PriorPrefix::default(),
     )
     .0;
     assert_eq!(req_none.request_timeout_secs, None);
@@ -204,7 +213,7 @@ fn build_request_passes_through_extra_params() {
         &provider(true, 500),
         "test-stage",
         0,
-        None,
+        crate::pipeline::inference::PriorPrefix::default(),
     )
     .0;
     assert_eq!(req.extra, serde_json::json!({ "top_p": 0.9 }));
@@ -238,7 +247,7 @@ fn build_request_prepends_batch_hint_when_enabled() {
         &provider(true, 500),
         "test-stage",
         0,
-        None,
+        crate::pipeline::inference::PriorPrefix::default(),
     )
     .0;
     // The hint is prepended ahead of the stage's own system block(s).
@@ -274,7 +283,7 @@ fn build_request_omits_batch_hint_when_disabled_or_absent() {
         &provider(true, 500),
         "test-stage",
         0,
-        None,
+        crate::pipeline::inference::PriorPrefix::default(),
     )
     .0;
     assert!(!req.system.is_empty());
@@ -287,7 +296,7 @@ fn build_request_omits_batch_hint_when_disabled_or_absent() {
         &provider(true, 500),
         "test-stage",
         0,
-        None,
+        crate::pipeline::inference::PriorPrefix::default(),
     )
     .0;
     assert!(!req_none.system.is_empty());
@@ -377,7 +386,7 @@ fn build_request_puts_the_hints_ahead_of_the_stage_context() {
         &provider(true, 500),
         "test-stage",
         0,
-        None,
+        crate::pipeline::inference::PriorPrefix::default(),
     )
     .0;
     let hints = hint_blocks(Some(&cfg), &si.tools, std::env::consts::OS);
@@ -402,7 +411,7 @@ fn build_request_all_tools_default_temperature_no_config() {
         &provider(true, 500),
         "test-stage",
         0,
-        None,
+        crate::pipeline::inference::PriorPrefix::default(),
     )
     .0;
     assert_eq!(req.tools.len(), 2);
@@ -420,7 +429,7 @@ fn build_request_empty_filter_is_all_and_no_temperature_when_unsupported() {
         &provider(false, 500),
         "test-stage",
         0,
-        None,
+        crate::pipeline::inference::PriorPrefix::default(),
     )
     .0;
     assert_eq!(req.tools.len(), 1);
@@ -14181,6 +14190,7 @@ fn assembled_with_prev(
         stage_iterations: 0,
         model: "m".to_string(),
         previous_system_hash: previous,
+        previous_block_hashes: Vec::new(),
     })
 }
 

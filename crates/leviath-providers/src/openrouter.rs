@@ -729,6 +729,7 @@ mod tests {
             system: vec![crate::provider::SystemBlock {
                 text: "You are a helpful assistant.".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
+                breakpoint_eligible: true,
             }],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),

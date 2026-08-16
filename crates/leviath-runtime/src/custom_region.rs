@@ -35,6 +35,10 @@ pub struct AssembleMeta {
     /// first request, or a caller with no state to keep), and the breakpoint is
     /// placed as it always was.
     pub previous_system_hash: Option<u64>,
+    /// Per-block digests of the previous request's system prefix, so assembly
+    /// can tell which blocks held still and place cache breakpoints only where
+    /// the entry could actually be read back. Empty on the first request.
+    pub previous_block_hashes: Vec<u64>,
 }
 
 /// What `on_write` decided about an incoming entry.
@@ -106,6 +110,7 @@ fn fallback_block(region: &Region) -> leviath_providers::SystemBlock {
     leviath_providers::SystemBlock {
         text: format!("[{}]:\n{}", region.name, text),
         cache_hint: leviath_core::CacheHint::Never,
+        breakpoint_eligible: true,
     }
 }
 
@@ -273,6 +278,7 @@ fn parse_render_output(
     let block = |text: &str| leviath_providers::SystemBlock {
         text: text.to_string(),
         cache_hint: hint,
+        breakpoint_eligible: true,
     };
 
     match value {
@@ -603,6 +609,7 @@ mod tests {
                         stage_iterations: 2,
                         model: "m1".to_string(),
                         previous_system_hash: None,
+                        previous_block_hashes: Vec::new(),
                     },
                     window_current: 50,
                     window_max: 2000,
