@@ -13,6 +13,14 @@ same list.
 
 ## Unreleased
 
+- Fixed: the cacheable prefix no longer stalls for several turns while a cache
+  chunk fills. The chunk size decides how soon a boundary appears that the next
+  request can match, and a budget larger than a typical entry meant the tail
+  kept absorbing entries and changing, so none appeared. Measured over a
+  24-turn run with small entries: the prefix sat pinned at the stable head for
+  six consecutive turns at a stretch, and now sits pinned for two - the first
+  request, and the one straight after a compaction, neither of which has
+  anything to match against yet.
 - Fixed: a compaction no longer destroys the cacheable prefix, and no longer
   does so differently depending on the order regions are declared in. A
   compact-history region gains an entry every time compaction fires, but it was

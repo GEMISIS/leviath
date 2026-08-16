@@ -1464,6 +1464,7 @@ mod tests {
 
     /// A compacting region large enough to span chunks says which region each
     /// continuation belongs to, and keeps every entry.
+
     #[test]
     fn a_compacting_region_labels_its_continuations() {
         let mut window = ContextWindow::new(2_000_000);
