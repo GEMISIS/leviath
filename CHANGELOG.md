@@ -13,6 +13,13 @@ same list.
 
 ## Unreleased
 
+- Fixed: an Ollama tool call gets an id unique to the conversation rather than
+  its index within one response. Every turn's first call was `ollama_0`, so a
+  window ten turns deep held ten distinct calls nothing could tell apart - and
+  the guard that removes a call or response left stranded by eviction pairs them
+  by id, so with every id equal it never removed anything for that provider. A
+  stranded response then survived at the head of the conversation, which is what
+  produced a request with no user query in it.
 - Fixed: every request to an OpenAI-dialect server carries a user turn. The task
   lives in a pinned region, so it assembles into the system prompt and a
   conversation can legitimately hold no user message: Ollama with a Qwen 3.x

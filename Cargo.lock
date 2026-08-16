@@ -2555,6 +2555,7 @@ dependencies = [
  "leviath-scripting",
  "leviath-sys",
  "leviath-testkit",
+ "rand 0.10.2",
  "reqwest",
  "rhai",
  "serde",
