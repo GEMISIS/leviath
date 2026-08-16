@@ -11,6 +11,15 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+- Fixed: every request to an OpenAI-dialect server carries a user turn. The task
+  lives in a pinned region, so it assembles into the system prompt and a
+  conversation can legitimately hold no user message: Ollama with a Qwen 3.x
+  template answers `HTTP 500 {"error":"no user query found in messages"}` for
+  any request without one. Most shapes were already covered, by the "Begin."
+  fallback and by the turn ordering fix; the guarantee now holds for the rest.
+
 ## 0.3.10 - 2026-08-14
 
 - Fixed: a run now reports what it was actually billed. A run makes four kinds
