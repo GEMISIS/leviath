@@ -13,6 +13,13 @@ same list.
 
 ## Unreleased
 
+- Fixed: a compaction no longer destroys the cacheable prefix, and no longer
+  does so differently depending on the order regions are declared in. A
+  compact-history region gains an entry every time compaction fires, but it was
+  tagged as the most stable kind of content, so it sorted ahead of genuinely
+  immutable pinned instructions and invalidated everything behind it. Declared
+  before the pinned region that cost the whole prefix; declared after, nothing.
+  Measured: 2,502 cacheable tokens against 0, from the same content.
 - Fixed: a growing context region is no longer rewritten into the prompt cache
   on every call. A region became a single system block, and a provider matches a
   cached prefix only at a block boundary - so the one boundary a region offered
