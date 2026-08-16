@@ -11,6 +11,89 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## 0.4.0 - 2026-08-16
+
+- Breaking: every MCP tool is named `<server>__<tool>`, whether or not anything
+  would have collided. A tool used to be advertised bare and prefixed only on a
+  clash, which made the name a function of registration order: registration
+  follows `config.toml`, so two servers both offering `search` gave the bare
+  name to whichever was listed first. `available_tools = ["search"]` therefore
+  meant a different server's tool depending on the order of a file the blueprint
+  does not control. A blueprint naming a bare MCP tool stops matching, though a
+  name that resolves to exactly one server is now rewritten for you rather than
+  silently dropped. No bundled agent is affected; none of the seven names an MCP
+  tool. The separator is `__` and not the `.` it reads better as, because the
+  advertised name goes to the model provider, which accepts only
+  `[A-Za-z0-9_-]` and rejects the whole request otherwise.
+- Breaking: the run archive's version number marks a change to its *framing* -
+  the preamble, the length prefix, the payload encoding - and an archive newer
+  than the build reading it is refused by name. It was read by every caller and
+  compared by none, so a future format change would have been parsed as the
+  current one and produced nonsense from whatever the length prefixes said.
+- Fixed: a reader steps over a record kind it does not know instead of stopping
+  at it. Records are length-prefixed and nothing used that, so a frame whose
+  contents a build could not parse was treated like a frame whose end it could
+  not find: the read stopped there and returned the prefix. That made adding a
+  record kind a breaking change, and it was already live - `InferenceUsage`
+  shipped in 0.3.10 and is written on every provider call, so an older
+  `leviath-core` read a 0.3.10 journal as "header, then nothing". Adding a
+  record kind no longer moves the version, because older builds can now read
+  past it.
+- Fixed: a provider gets one system message however many blocks were assembled.
+  Leviath models system content as blocks, one per pinned region, and the OpenAI
+  chat shape has no such concept - it has *a* system message. The shared builder
+  emitted one per block, which permissive servers tolerate and strict ones do
+  not: Ollama with a Qwen 3.x template answers `HTTP 500 {"error":"system
+  message must be at the beginning"}`, which is a misleading way to say "at most
+  one". Every multi-region blueprint, which is every real agent, failed on its
+  first inference against those models. Anthropic has its own builder, where
+  block structure earns its keep through per-block `cache_control`, and is
+  unchanged.
+- Fixed: a resumed run is not re-titled. `PendingTitle` was attached on every
+  build with no fresh-versus-reload check, so each pause and resume bought
+  another titling call.
+- Fixed: an unattended run parks rather than failing when the fix is somebody
+  else's. A benchmark round crossed an empty account mid-tier and lost 31 runs
+  across three terminal shapes, none resumable, all one cause. `paused` is
+  visible in `meta.json` and `lev ps --json`, so a harness that can top up an
+  account and `lev resume` gets the work back, and one that cannot cancels the
+  run for the cost of a second. A credits failure on an output stage also used
+  to route through the transition logic and report "never called
+  submit_output", naming the wrong cause to everything downstream.
+- New: a stage can grant a whole MCP server with
+  `available_connectors = ["github"]`, resolved at spawn against what that
+  server actually advertises and merged with `available_tools`. Naming tools one
+  by one meant knowing a list that is not the blueprint author's to know - it is
+  whatever the server advertises today - so a tool added later was never
+  offered, with nothing said.
+- New: `DELETE /api/runs/{id}` removes a finished run's record, and
+  `DELETE /api/runs?before=<unix>` or `?ids=` prunes many at once. Cancelling and
+  deleting are different verbs: `DELETE /api/agents/{id}` stops the work and
+  keeps the record. A console could list runs, read them, cancel them and never
+  get rid of one. A live run is refused with 409, an already-deleted one answers
+  404 so a repeat is readable, and a run whose record will not parse needs
+  `?force=true` - an unreadable record is what a live run looks like to a build
+  whose `RunMeta` has moved on. Announced as `runs.delete` and
+  `runs.delete.bulk`.
+- New: regions that assemble into the system prompt carry their own name above
+  their contents. An agent writes to a region *by name* and the prompt showed it
+  every region's contents with nothing saying which region they came from, so it
+  could read `sources_index`, write to `sources_index`, and have no way to know
+  they were the same place. Three tokens per region, however many entries it
+  holds.
+- New: a region takes a `description`, and `describe_in_prompt = true` shows it
+  to the model as well. On its own it is documentation and costs nothing:
+  `lev dash` prints it under the region, `GET /api/blueprints/{name}` returns it
+  with the region's kind and budget, and `context.json` carries it so no reader
+  has to re-parse the manifest to explain a region it is already showing.
+- New: an Ollama stage can turn off a reasoning model's thinking with
+  `think = false` under `[stages.<name>.model.parameters]`. Ollama puts `think`
+  at the top level of the request while everything in `parameters` is merged
+  into `options`, so setting it there was accepted and ignored. Thinking is
+  billed to the same output budget as the answer: asked for a run title in 64
+  tokens, qwen3.8 returns an empty string, having spent all 64 deciding what a
+  title is.
+
 ## 0.3.10 - 2026-08-14
 
 - Fixed: a run now reports what it was actually billed. A run makes four kinds
