@@ -6,6 +6,10 @@
 //! because "what an agent *is*" and "what an agent *remembers*" are different
 //! questions to arrive with.
 
+use super::block_cache::{
+    CACHE_CHUNK_TOKENS, append_only_chunks, cache_hint_sort_priority, mark_breakpoint_eligibility,
+    mark_recently_changed_run, push_chunked, system_prefix_hash,
+};
 use super::*;
 
 /// Result of an eviction attempt, including tokens freed and regions needing LLM compaction.
@@ -72,6 +76,13 @@ pub struct AssembledContext {
     pub system_blocks: Vec<leviath_providers::SystemBlock>,
     /// Conversation messages with proper role typing.
     pub messages: Vec<leviath_providers::Message>,
+    /// Per-block digests of the system prefix this assembly produced.
+    ///
+    /// Handed back so the caller can pass them as
+    /// [`crate::custom_region::AssembleMeta::previous_block_hashes`] next time,
+    /// which is what lets the breakpoint decision name only blocks that held
+    /// still.
+    pub block_hashes: Vec<u64>,
     /// Hash of the system prefix this assembly produced.
     ///
     /// Handed back so the caller can pass it as
@@ -79,110 +90,6 @@ pub struct AssembledContext {
     /// and let the breakpoint decision below be made on evidence rather than
     /// hope.
     pub system_hash: u64,
-}
-
-/// A stable digest of the assembled system prefix.
-///
-/// Over the block texts in final order, which is exactly the byte sequence
-/// Anthropic prefix-matches against. Hints are excluded deliberately: they
-/// decide ordering, and ordering is already reflected in the sequence.
-fn system_prefix_hash(blocks: &[leviath_providers::SystemBlock]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for block in blocks {
-        block.text.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-/// Sort priority for a system block's cache hint.
-///
-/// Anthropic caches system content by prefix matching, so the most stable
-/// blocks must sort first to form the cacheable prefix. Lower value = earlier.
-pub(super) fn cache_hint_sort_priority(hint: leviath_core::CacheHint) -> u8 {
-    use leviath_core::CacheHint;
-    match hint {
-        CacheHint::Always => 0,               // Pinned, CompactHistory - most stable
-        CacheHint::SlidingPrefix { .. } => 1, // Partially stable
-        CacheHint::UntilChanged => 2,         // Compacting - changes on compaction
-        // Same tier as UntilChanged on purpose: the hint marks where a cache
-        // breakpoint belongs, never where a block belongs in the prompt.
-        CacheHint::RecentlyChanged => 2,
-        CacheHint::Never => 3, // Temporary, Clearable - changes every iteration
-    }
-}
-
-/// The most cache breakpoints assembly will let the system blocks claim.
-///
-/// Anthropic allows four `cache_control` blocks across the whole request and
-/// the provider hands the system blocks first claim on that budget, so leaving
-/// one run unclaimed is what keeps a breakpoint available for the messages.
-const MAX_SYSTEM_CACHE_RUNS: usize = 3;
-
-/// Split the volatile tier of the system prompt at its most recently changed
-/// block, by retagging that block and every block after it as
-/// [`leviath_core::CacheHint::RecentlyChanged`].
-///
-/// Providers place one cache breakpoint per run of same-hint blocks, so with a
-/// single `UntilChanged` run the only breakpoint sits at the end of the tier.
-/// A block mutating in the middle of that run therefore invalidates the whole
-/// run, and every block after the mutation is re-sent as a cache write. Adding
-/// a boundary just before the changed block gives the unchanged head of the
-/// tier a cache entry of its own. Only the breakpoint metadata moves: block
-/// order and block text are both left exactly as the sort left them, and this
-/// runs after the sort so it cannot influence ordering at all. The effect on
-/// cache-write volume is not measurable inside this repository.
-///
-/// `recency` carries the newest entry timestamp of the region behind each
-/// `UntilChanged` block, in the order those blocks were assembled. The sort is
-/// stable and every block in the tier shares one sort priority, so that order
-/// is also the order the blocks appear in now.
-///
-/// Nothing is retagged when the newest block is already the first one (there is
-/// no stable head to protect), or when the blocks already fill the run budget.
-fn mark_recently_changed_run(blocks: &mut [leviath_providers::SystemBlock], recency: &[i64]) {
-    use leviath_core::CacheHint;
-
-    let mut volatile: Vec<usize> = Vec::new();
-    for (index, block) in blocks.iter().enumerate() {
-        if block.cache_hint == CacheHint::UntilChanged {
-            volatile.push(index);
-        }
-    }
-
-    // The first block carrying the newest timestamp. Ties resolve to the
-    // earliest block, which is the conservative choice: when two regions were
-    // written in the same second, both of them changed, and the boundary
-    // belongs ahead of the earlier one.
-    let mut boundary = 0usize;
-    let mut newest = i64::MIN;
-    for (position, &stamp) in recency.iter().enumerate() {
-        if stamp > newest {
-            newest = stamp;
-            boundary = position;
-        }
-    }
-    if boundary == 0 {
-        return;
-    }
-
-    // Count the breakpoints the provider would place today. Splitting the
-    // volatile tier adds exactly one, so refusing at the limit is what keeps
-    // the messages breakpoint from being squeezed out.
-    let mut runs = 0usize;
-    for index in 0..blocks.len() {
-        let hint = blocks[index].cache_hint;
-        if hint != CacheHint::Never && blocks.get(index + 1).map(|b| b.cache_hint) != Some(hint) {
-            runs += 1;
-        }
-    }
-    if runs >= MAX_SYSTEM_CACHE_RUNS {
-        return;
-    }
-
-    for &index in volatile.iter().skip(boundary) {
-        blocks[index].cache_hint = CacheHint::RecentlyChanged;
-    }
 }
 
 /// Context window component storing the agent's memory regions.
@@ -237,7 +144,7 @@ pub struct ContextWindow {
 /// well enough that a sentence would only cost tokens. It is for the ones whose
 /// contents do not explain themselves - a bibliography with a required format,
 /// a scratch area with a convention.
-fn labelled(region: &Region, body: &str) -> String {
+pub(super) fn labelled(region: &Region, body: &str) -> String {
     match region
         .description
         .as_deref()
@@ -723,13 +630,9 @@ impl ContextWindow {
                     let body = region
                         .content
                         .iter()
-                        .map(|e| e.content.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    system_blocks.push(leviath_providers::SystemBlock {
-                        text: labelled(region, &body),
-                        cache_hint: CacheHint::Always,
-                    });
+                        .map(|e| e.content.clone())
+                        .collect::<Vec<_>>();
+                    push_chunked(&mut system_blocks, region, &body, CacheHint::Always);
                 }
                 // A checklist renders as instruction rather than history: one
                 // stable block, open items first, so what is left to do is at
@@ -742,6 +645,7 @@ impl ContextWindow {
                         system_blocks.push(leviath_providers::SystemBlock {
                             text: labelled(region, &body),
                             cache_hint: CacheHint::UntilChanged,
+                            breakpoint_eligible: true,
                         });
                     }
                 }
@@ -749,13 +653,9 @@ impl ContextWindow {
                     let body = region
                         .content
                         .iter()
-                        .map(|e| e.content.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    system_blocks.push(leviath_providers::SystemBlock {
-                        text: labelled(region, &body),
-                        cache_hint: CacheHint::Always,
-                    });
+                        .map(|e| e.content.clone())
+                        .collect::<Vec<_>>();
+                    push_chunked(&mut system_blocks, region, &body, CacheHint::Always);
                 }
 
                 // Messages region → Vec<Message> with proper typed entries.
@@ -869,16 +769,23 @@ impl ContextWindow {
 
                 // Compacting / Temporary / Clearable → system blocks
                 leviath_core::RegionKind::Compacting { .. } => {
-                    let text = region
+                    let entries = region
                         .content
                         .iter()
-                        .map(|e| e.content.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    system_blocks.push(leviath_providers::SystemBlock {
-                        text: format!("[{}]:\n{}", region.name, text),
-                        cache_hint: CacheHint::UntilChanged,
-                    });
+                        .map(|e| e.content.clone())
+                        .collect::<Vec<_>>();
+                    let chunks = append_only_chunks(&entries, CACHE_CHUNK_TOKENS);
+                    for (index, chunk) in chunks.iter().enumerate() {
+                        let text = match index {
+                            0 => format!("[{}]:\n{}", region.name, chunk),
+                            _ => format!("[{} continued]:\n{}", region.name, chunk),
+                        };
+                        system_blocks.push(leviath_providers::SystemBlock {
+                            text,
+                            cache_hint: CacheHint::UntilChanged,
+                            breakpoint_eligible: true,
+                        });
+                    }
                 }
                 leviath_core::RegionKind::Temporary => {
                     let text = region
@@ -890,6 +797,7 @@ impl ContextWindow {
                     system_blocks.push(leviath_providers::SystemBlock {
                         text: format!("[{}]:\n{}", region.name, text),
                         cache_hint: CacheHint::Never,
+                        breakpoint_eligible: true,
                     });
                 }
                 leviath_core::RegionKind::Clearable => {
@@ -902,6 +810,7 @@ impl ContextWindow {
                     system_blocks.push(leviath_providers::SystemBlock {
                         text: format!("[{}]:\n{}", region.name, text),
                         cache_hint: CacheHint::Never,
+                        breakpoint_eligible: true,
                     });
                 }
 
@@ -943,6 +852,7 @@ impl ContextWindow {
                     system_blocks.push(leviath_providers::SystemBlock {
                         text: format!("[{}]:\n{}", region.name, text),
                         cache_hint: CacheHint::UntilChanged,
+                        breakpoint_eligible: true,
                     });
                 }
             }
@@ -973,6 +883,8 @@ impl ContextWindow {
         system_blocks.sort_by_key(|block| cache_hint_sort_priority(block.cache_hint));
         // After the sort, because the order is part of what Anthropic matches.
         let system_hash = system_prefix_hash(&system_blocks);
+        let block_hashes =
+            mark_breakpoint_eligibility(&mut system_blocks, &meta.previous_block_hashes);
 
         // ── Spend a cache breakpoint on the volatile boundary ────────────
         //
@@ -1112,6 +1024,7 @@ impl ContextWindow {
         }
 
         AssembledContext {
+            block_hashes,
             system_blocks,
             messages,
             system_hash,
@@ -1201,6 +1114,7 @@ mod tests {
         SystemBlock {
             text: "x".to_string(),
             cache_hint: hint,
+            breakpoint_eligible: true,
         }
     }
 
@@ -1459,15 +1373,53 @@ mod tests {
             .filter(|m| m.cache_breakpoint)
             .count();
 
-        assert!(system <= MAX_SYSTEM_CACHE_RUNS, "system runs: {system}");
+        assert!(
+            system <= super::block_cache::MAX_SYSTEM_CACHE_RUNS,
+            "system runs: {system}"
+        );
         assert_eq!(message, 1);
         let total = system + message;
         assert!(total <= 4, "total breakpoints: {total}");
     }
 
-    /// The name is the part that earns its tokens: an agent writes to a region
-    /// *by name*, and until this the prompt showed it every region's contents
-    /// with nothing saying which was which.
+    /// A compacting region large enough to span chunks says which region each
+    /// continuation belongs to, and keeps every entry.
+    #[test]
+    fn a_compacting_region_labels_its_continuations() {
+        let mut window = ContextWindow::new(2_000_000);
+        window.add_region(Region::new(
+            "history".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: usize::MAX,
+            },
+            1_000_000,
+        ));
+        for i in 0..20 {
+            window
+                .add_to_region("history", format!("{i}:{}", "word ".repeat(200)), 250)
+                .expect("fits");
+        }
+
+        let blocks = window.assemble().system_blocks;
+        assert!(blocks.len() > 1, "the fixture is meant to span chunks");
+        assert!(blocks[0].text.starts_with("[history]:"));
+        for block in &blocks[1..] {
+            assert!(
+                block.text.starts_with("[history continued]:"),
+                "{:.40}",
+                block.text
+            );
+        }
+        let whole = blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        for i in 0..20 {
+            assert!(whole.contains(&format!("{i}:")), "entry {i} went missing");
+        }
+    }
+
     #[test]
     fn a_pinned_region_is_labelled_with_its_own_name() {
         let mut window = ContextWindow::new(10_000);

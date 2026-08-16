@@ -92,6 +92,7 @@ fn title_request(task: &str, model: &str) -> InferenceRequest {
         system: vec![leviath_providers::SystemBlock {
             text: TITLE_SYSTEM_PROMPT.to_string(),
             cache_hint: leviath_core::CacheHint::Never,
+            breakpoint_eligible: true,
         }],
         messages: vec![leviath_providers::Message {
             role: "user".to_string(),

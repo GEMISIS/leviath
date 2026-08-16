@@ -13,6 +13,17 @@ same list.
 
 ## Unreleased
 
+- Fixed: a growing context region is no longer rewritten into the prompt cache
+  on every call. A region became a single system block, and a provider matches a
+  cached prefix only at a block boundary - so the one boundary a region offered
+  sat after its newest content, and the moment the region grew the entry named
+  there could never be read again. Measured against Sonnet on a twelve-call run:
+  456,860 cache-write tokens and zero reads. Regions whose entries append are
+  now split into chunks at boundaries that survive into the next request, and a
+  breakpoint is only placed where every byte ahead of it is unchanged, so the
+  settled history caches and only the tail is re-sent. The same run now writes
+  74,256 and reads 300,588, with the per-call write flat rather than ratcheting.
+  Runs whose history already lived in the messages are unaffected, to the token.
 - Fixed: an Ollama model's context window is read from the server rather than
   guessed from its name. The compiled table matches on a family substring, so
   `qwen3.8-32k` took the `qwen3` arm and was handed 131072 against the 32768 it

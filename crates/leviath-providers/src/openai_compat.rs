@@ -922,6 +922,7 @@ mod tests {
             system: vec![crate::provider::SystemBlock {
                 text: "## task\ncount the ERROR lines".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
+                breakpoint_eligible: true,
             }],
             messages: vec![],
             model: "qwen3.8".to_string(),
@@ -952,6 +953,7 @@ mod tests {
             system: vec![crate::provider::SystemBlock {
                 text: "instructions".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
+                breakpoint_eligible: true,
             }],
             messages: vec![crate::provider::Message {
                 role: "assistant".to_string(),
@@ -981,6 +983,7 @@ mod tests {
             system: vec![crate::provider::SystemBlock {
                 text: "instructions".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
+                breakpoint_eligible: true,
             }],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
@@ -1037,6 +1040,7 @@ mod tests {
             system: vec![crate::provider::SystemBlock {
                 text: "instructions".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
+                breakpoint_eligible: true,
             }],
             messages: vec![call.clone(), result.clone(), call, result],
             model: "qwen3.8".to_string(),
@@ -1131,6 +1135,7 @@ mod tests {
             system: vec![crate::provider::SystemBlock {
                 text: "## task\ncount the ERROR lines".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
+                breakpoint_eligible: true,
             }],
             messages: vec![stranded, call, answer],
             model: "qwen3.8-32k".to_string(),
@@ -2232,6 +2237,7 @@ mod tests {
             system: vec![SystemBlock {
                 text: "You are a coding agent. Task: add a doc comment.".into(),
                 cache_hint: leviath_core::CacheHint::Never,
+                breakpoint_eligible: true,
             }],
             messages: vec![Message {
                 role: "assistant".into(),
@@ -2450,10 +2456,12 @@ mod tests {
                 crate::provider::SystemBlock {
                     text: "You are helpful.".into(),
                     cache_hint: leviath_core::CacheHint::Always,
+                    breakpoint_eligible: true,
                 },
                 crate::provider::SystemBlock {
                     text: "Be concise.".into(),
                     cache_hint: leviath_core::CacheHint::Always,
+                    breakpoint_eligible: true,
                 },
             ],
             messages: vec![Message {
@@ -2493,6 +2501,7 @@ mod tests {
                 .map(|i| SystemBlock {
                     text: format!("block {i}"),
                     cache_hint: leviath_core::CacheHint::Always,
+                    breakpoint_eligible: true,
                 })
                 .collect(),
             messages: vec![Message {
@@ -2529,14 +2538,17 @@ mod tests {
                 SystemBlock {
                     text: "real".into(),
                     cache_hint: leviath_core::CacheHint::Always,
+                    breakpoint_eligible: true,
                 },
                 SystemBlock {
                     text: "   ".into(),
                     cache_hint: leviath_core::CacheHint::Always,
+                    breakpoint_eligible: true,
                 },
                 SystemBlock {
                     text: "also real".into(),
                     cache_hint: leviath_core::CacheHint::Always,
+                    breakpoint_eligible: true,
                 },
             ],
             messages: vec![Message {
