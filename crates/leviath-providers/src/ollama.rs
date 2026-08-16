@@ -200,13 +200,30 @@ impl OllamaProvider {
             body["tools"] = serde_json::Value::Array(tools);
         }
 
-        // Pass through extra model parameters (top_p, top_k, stop, seed, …).
-        // Ollama's sampling knobs live under `options`, so merge there.
+        // `think` is Ollama's own switch for a reasoning model, and it sits at
+        // the top level rather than under `options` - so it is lifted out
+        // before the rest of `extra` is merged, or it would arrive as a
+        // sampling knob Ollama ignores.
+        //
+        // Worth having as a knob at all because a thinking model spends real
+        // budget before it says anything: qwen3.8 asked for a run title in 64
+        // tokens returns an empty string, having used all of them reasoning
+        // about what a title is. `think = false` on that stage returns the
+        // title. Only sent when a blueprint asks for it, since a model with no
+        // thinking to switch off rejects the field.
+        let think = request.extra.get("think").cloned();
+        if let Some(think) = think {
+            body["think"] = think;
+        }
+        let mut sampling = request.extra.clone();
+        if let Some(params) = sampling.as_object_mut() {
+            params.remove("think");
+        }
         crate::openai_compat::merge_extra_params(
             body.get_mut("options")
                 .and_then(|v| v.as_object_mut())
                 .expect("ollama request body always has an `options` object"),
-            &request.extra,
+            &sampling,
         );
         body
     }
@@ -891,6 +908,24 @@ mod tests {
         let response = provider.parse_response(&body).unwrap();
         assert_eq!(response.tokens_used.prompt_tokens, 0);
         assert_eq!(response.tokens_used.completion_tokens, 0);
+    }
+
+    /// A minimal request for the body-shape tests.
+    fn base_request() -> InferenceRequest {
+        InferenceRequest {
+            system: vec![],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".into(),
+                cache_breakpoint: false,
+            }],
+            model: "qwen3.8".to_string(),
+            max_tokens: 64,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::json!({}),
+            request_timeout_secs: None,
+        }
     }
 
     #[test]
@@ -2236,5 +2271,41 @@ mod tests {
             assert_eq!(chunks.len(), 1);
             assert_eq!(chunks[0].as_ref().unwrap().delta, "ok");
         });
+    }
+
+    /// `think` is Ollama's top-level switch for a reasoning model, not a
+    /// sampling knob - buried under `options` it would be silently ignored,
+    /// and the model would keep spending its budget reasoning.
+    #[test]
+    fn think_is_lifted_out_of_extra_to_the_top_level() {
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
+        let mut request = base_request();
+        request.extra = serde_json::json!({ "think": false, "top_k": 20 });
+
+        let body = provider.build_request_body(&request);
+        assert_eq!(body["think"], serde_json::json!(false));
+        assert_eq!(
+            body["options"]["top_k"],
+            serde_json::json!(20),
+            "the rest of extra still lands as sampling"
+        );
+        assert!(
+            body["options"].get("think").is_none(),
+            "and think is not left behind in options"
+        );
+    }
+
+    /// Absent unless asked for. A model with no thinking to switch off rejects
+    /// the field, so sending it by default would break every non-reasoning
+    /// model to help the ones that reason.
+    #[test]
+    fn no_think_field_is_sent_when_the_blueprint_does_not_ask() {
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
+        let body = provider.build_request_body(&base_request());
+        assert!(body.get("think").is_none(), "{body}");
     }
 }
