@@ -23,6 +23,38 @@ pub struct OllamaProvider {
     capability_overrides: HashMap<String, ModelCapabilityOverride>,
 }
 
+/// A tool-call id unique for the life of a conversation.
+///
+/// Ollama sends no ids of its own, so these are minted here - and the mint used
+/// to be the call's index within one response, which restarts at 0 every turn.
+/// A window ten turns deep therefore held ten distinct calls all named
+/// `ollama_0`.
+///
+/// That is not cosmetic. `drop_unpaired_tool_turns` pairs a call with its
+/// response *by id*, to keep a window that has evicted half a pair from putting
+/// a malformed conversation on the wire. With every id equal, every call looked
+/// answered and every response looked called, so the guard never removed
+/// anything for this provider (issue #470) - and a response stranded by
+/// eviction survived at the head of the conversation, which is what suppressed
+/// the inserted user turn in #469.
+///
+/// The sequence is process-wide rather than per-response, and carries a prefix
+/// minted once per process, because a run outlives the daemon: a pause and
+/// resume restores a window full of ids from the previous process, and a bare
+/// counter would start again at zero and collide with them. The sequence is
+/// still monotonic within a process, so a transcript reads in call order.
+fn next_tool_call_id() -> String {
+    static PREFIX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let prefix = PREFIX.get_or_init(|| {
+        use rand::RngExt as _;
+        format!("{:08x}", rand::rng().random::<u32>())
+    });
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("ollama_{prefix}_{sequence}")
+}
+
 impl OllamaProvider {
     /// Create a new Ollama provider.
     pub fn new(client: reqwest::Client) -> Self {
@@ -242,7 +274,7 @@ impl OllamaProvider {
 
         let mut tool_calls = Vec::new();
         if let Some(tcs) = message.get("tool_calls").and_then(|tc| tc.as_array()) {
-            for (i, tc) in tcs.iter().enumerate() {
+            for tc in tcs {
                 let function = tc.get("function").unwrap_or(&serde_json::Value::Null);
                 let name = function
                     .get("name")
@@ -254,7 +286,7 @@ impl OllamaProvider {
                     .cloned()
                     .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                 tool_calls.push(crate::provider::ToolCall {
-                    id: format!("ollama_{}", i),
+                    id: next_tool_call_id(),
                     name,
                     arguments,
                     thought_signature: None,
@@ -504,7 +536,7 @@ impl Stream for OllamaNdjsonStream {
                                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                             tool_calls.push(crate::provider::ToolCallDelta {
                                 index: i,
-                                id: Some(format!("ollama_{}", i)),
+                                id: Some(next_tool_call_id()),
                                 name: Some(name),
                                 arguments_delta: arguments.to_string(),
                             });
@@ -875,7 +907,7 @@ mod tests {
         let response = provider.parse_response(&body).unwrap();
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].name, "search");
-        assert_eq!(response.tool_calls[0].id, "ollama_0");
+        assert!(response.tool_calls[0].id.starts_with("ollama_"));
         assert_eq!(response.finish_reason, FinishReason::ToolCall);
     }
 
@@ -1173,9 +1205,11 @@ mod tests {
         let response = provider.parse_response(&body).unwrap();
         assert_eq!(response.tool_calls.len(), 2);
         assert_eq!(response.tool_calls[0].name, "tool_a");
-        assert_eq!(response.tool_calls[0].id, "ollama_0");
         assert_eq!(response.tool_calls[1].name, "tool_b");
-        assert_eq!(response.tool_calls[1].id, "ollama_1");
+        assert_ne!(
+            response.tool_calls[0].id, response.tool_calls[1].id,
+            "two calls in one response are two calls"
+        );
         assert_eq!(response.finish_reason, FinishReason::ToolCall);
     }
 
@@ -1914,7 +1948,14 @@ mod tests {
             assert_eq!(chunk.finish_reason, Some(FinishReason::ToolCall));
             assert_eq!(chunk.tool_calls.len(), 1);
             assert_eq!(chunk.tool_calls[0].name, Some("search".to_string()));
-            assert_eq!(chunk.tool_calls[0].id, Some("ollama_0".to_string()));
+            // Minted, not indexed: the value is opaque, only its shape and its
+            // uniqueness across turns are contracts.
+            assert!(
+                chunk.tool_calls[0]
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("ollama_"))
+            );
             assert!(chunk.tool_calls[0].arguments_delta.contains("rust"));
         });
     }
@@ -2276,6 +2317,136 @@ mod tests {
     /// `think` is Ollama's top-level switch for a reasoning model, not a
     /// sampling knob - buried under `options` it would be silently ignored,
     /// and the model would keep spending its budget reasoning.
+    /// The bug in #470: two *different* turns each naming their first call
+    /// `ollama_0`, so a conversation held distinct calls that were
+    /// indistinguishable by id.
+    #[test]
+    fn ids_do_not_repeat_across_responses() {
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
+        let body = |tool: &str| {
+            serde_json::json!({
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        { "function": { "name": tool, "arguments": {} } }
+                    ]
+                },
+                "done": true
+            })
+        };
+
+        let first = provider.parse_response(&body("read_file")).unwrap();
+        let second = provider.parse_response(&body("list_dir")).unwrap();
+
+        assert_ne!(
+            first.tool_calls[0].id, second.tool_calls[0].id,
+            "a later turn's call must not reuse an earlier turn's id"
+        );
+    }
+
+    /// The id has to survive being written to `context.json` and replayed, so it
+    /// stays inside what a JSON string and a provider will carry.
+    #[test]
+    fn an_id_is_plain_ascii_and_short() {
+        let id = next_tool_call_id();
+        assert!(id.starts_with("ollama_"));
+        assert!(id.len() < 40, "{id}");
+        assert!(
+            id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "{id}"
+        );
+    }
+
+    /// What the unique ids buy downstream, and the reason #470 mattered rather
+    /// than merely being untidy: with the index-based mint, a response stranded
+    /// by eviction shared an id with an unrelated later call, so
+    /// `drop_unpaired_tool_turns` considered it answered and kept it. Keeping it
+    /// is what put a `tool` message at the head of the conversation in #469.
+    #[test]
+    fn a_stranded_response_is_dropped_now_that_ids_differ() {
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
+        let body = serde_json::json!({
+            "message": {
+                "content": "",
+                "tool_calls": [{ "function": { "name": "read_file", "arguments": {} } }]
+            },
+            "done": true
+        });
+        // Two turns, as a run makes them: the first call's response is what
+        // eviction later strands, and the second call is unrelated to it.
+        let evicted = provider.parse_response(&body).unwrap().tool_calls[0]
+            .id
+            .clone();
+        let live = provider.parse_response(&body).unwrap().tool_calls[0]
+            .id
+            .clone();
+        assert_ne!(evicted, live);
+
+        let request = crate::provider::InferenceRequest {
+            system: vec![crate::provider::SystemBlock {
+                text: "instructions".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+            }],
+            messages: vec![
+                // The stranded response, its own call long since evicted.
+                crate::provider::Message {
+                    role: "user".to_string(),
+                    content: crate::provider::MessageContent::Blocks(vec![
+                        crate::provider::ContentBlock::ToolResult {
+                            tool_use_id: evicted,
+                            content: "logs/a.log".to_string(),
+                            is_error: false,
+                        },
+                    ]),
+                    cache_breakpoint: false,
+                },
+                crate::provider::Message {
+                    role: "assistant".to_string(),
+                    content: crate::provider::MessageContent::Blocks(vec![
+                        crate::provider::ContentBlock::ToolUse {
+                            id: live.clone(),
+                            name: "read_file".to_string(),
+                            input: serde_json::json!({}),
+                            thought_signature: None,
+                        },
+                    ]),
+                    cache_breakpoint: false,
+                },
+                crate::provider::Message {
+                    role: "user".to_string(),
+                    content: crate::provider::MessageContent::Blocks(vec![
+                        crate::provider::ContentBlock::ToolResult {
+                            tool_use_id: live,
+                            content: "ERROR disk full".to_string(),
+                            is_error: false,
+                        },
+                    ]),
+                    cache_breakpoint: false,
+                },
+            ],
+            model: "qwen3.8-32k".to_string(),
+            max_tokens: 64,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let messages = crate::openai_compat::openai_messages_with(
+            &request,
+            crate::openai_compat::ToolArgsFormat::Object,
+        );
+        let roles: Vec<&str> = messages.iter().filter_map(|m| m["role"].as_str()).collect();
+        // The stranded response is gone, so the call turn leads and the user
+        // turn goes ahead of it where it belongs, rather than being suppressed
+        // by a `tool` message at the head.
+        assert_eq!(roles, vec!["system", "user", "assistant", "tool"]);
+    }
+
     #[test]
     fn think_is_lifted_out_of_extra_to_the_top_level() {
         let provider = OllamaProvider::new(
