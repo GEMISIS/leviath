@@ -655,7 +655,22 @@ impl ContextWindow {
                         .iter()
                         .map(|e| e.content.clone())
                         .collect::<Vec<_>>();
-                    push_chunked(&mut system_blocks, region, &body, CacheHint::Always);
+                    // Not `Always`, though nothing ever evicts from here.
+                    // `Always` is the most-stable tier and sorts ahead of
+                    // everything else, and this region gains an entry every
+                    // time compaction fires - so tagging it stable put a
+                    // *changing* block in front of genuinely immutable content
+                    // and invalidated the whole prefix behind it. Which content
+                    // survived depended on the order the regions happened to be
+                    // declared in: measured with the history region declared
+                    // first, one compaction took the cacheable prefix from
+                    // 2,502 tokens to zero, pinned instructions included, and
+                    // declared second it kept them (issue #474).
+                    //
+                    // `UntilChanged` says what is true of it - held still until
+                    // compaction moves it - and sorts it behind the pinned
+                    // content it must not poison.
+                    push_chunked(&mut system_blocks, region, &body, CacheHint::UntilChanged);
                 }
 
                 // Messages region → Vec<Message> with proper typed entries.
@@ -1380,6 +1395,71 @@ mod tests {
         assert_eq!(message, 1);
         let total = system + message;
         assert!(total <= 4, "total breakpoints: {total}");
+    }
+
+    /// Whether a compaction destroys the cacheable prefix must not depend on
+    /// the order regions happen to be declared in.
+    ///
+    /// A compact-history region gains an entry every time compaction fires. It
+    /// used to be tagged `Always` - the most-stable tier - so it sorted ahead of
+    /// genuinely immutable pinned content, and a compaction invalidated
+    /// everything behind it. Declared before the pinned region that cost the
+    /// whole prefix; declared after, it cost nothing. Same content, same run.
+    #[test]
+    fn a_compaction_does_not_depend_on_region_declaration_order() {
+        fn cacheable_after_a_compaction(history_first: bool) -> usize {
+            let mut window = ContextWindow::new(1_000_000);
+            let history = || {
+                Region::new(
+                    "notes_history".to_string(),
+                    RegionKind::CompactHistory {
+                        source_region: "notes".to_string(),
+                    },
+                    100_000,
+                )
+            };
+            if history_first {
+                window.add_region(history());
+            }
+            let mut task = Region::new("task".to_string(), RegionKind::Pinned, 40_000);
+            task.add_entry("stable instructions ".repeat(300), 1500)
+                .expect("fits");
+            window.add_region(task);
+            if !history_first {
+                window.add_region(history());
+            }
+
+            // One settled request, then a compaction: the history gains a
+            // summary, which is what moves the prefix.
+            let first = window.assemble();
+            window
+                .add_to_region("notes_history", "a summary".to_string(), 5)
+                .expect("fits");
+            let second = window.assemble_with_meta(&crate::custom_region::AssembleMeta {
+                stage_name: "work".to_string(),
+                stage_iterations: 1,
+                model: "m".to_string(),
+                previous_system_hash: Some(first.system_hash),
+                previous_block_hashes: first.block_hashes.clone(),
+            });
+            second
+                .system_blocks
+                .iter()
+                .filter(|b| b.breakpoint_eligible)
+                .map(|b| leviath_core::estimate_tokens(&b.text))
+                .sum()
+        }
+
+        let declared_first = cacheable_after_a_compaction(true);
+        let declared_second = cacheable_after_a_compaction(false);
+        assert_eq!(
+            declared_first, declared_second,
+            "declaration order changed what survives a compaction"
+        );
+        assert!(
+            declared_first > 1000,
+            "the pinned instructions should survive a compaction, got {declared_first}"
+        );
     }
 
     /// A compacting region large enough to span chunks says which region each
