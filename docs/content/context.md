@@ -160,7 +160,8 @@ and pass on the first attempt, which looks exactly like a stage that finished it
 | `seed` | unset | What the region starts with. See below |
 | `required` | `false` | The stage re-runs rather than moving on while this region is empty |
 | `summarizable` | `true` | Set false to keep an edge `transform = "compact"` from paraphrasing this region. See [transforms](/docs/stages#carrying-context-across-an-edge) |
-| `description` | unset | One line on what the region is for, shown to the model above its contents. See [what the model sees](#what-the-model-sees) |
+| `description` | unset | One line on what the region is for. Documentation by default: it reaches `lev dash` and the API, not the model |
+| `describe_in_prompt` | `false` | Also show the `description` to the model, above the region's contents. See [what the model sees](#what-the-model-sees) |
 | `admission` | `"evict"` | What happens when a write does not fit. `"reject"` refuses it instead of dropping something. See [letting the agent decide what to forget](#letting-the-agent-decide-what-to-forget) |
 | `required_message` | generated | What the model is told when a required region is empty. Supports `{region}` |
 
@@ -257,11 +258,15 @@ could read `sources_index` and write to `sources_index` and have no way to know
 they were the same place. A heading costs three tokens, once per region, however
 many entries the region holds.
 
-Add a `description` where the contents do not explain themselves:
+A `description` says what the region is for. On its own it is documentation:
+`lev dash` shows it under the region, `GET /api/blueprints/{name}` returns it,
+and the model never sees it. Add `describe_in_prompt` to spend the tokens and
+put it in front of the model too:
 
 ```toml
 [context.regions]
-sources_index = { kind = "pinned", budget = "4%", description = "One bibliography line per source actually used." }
+sources_index = { kind = "pinned", budget = "4%", describe_in_prompt = true,
+                  description = "One bibliography line per source actually used." }
 ```
 
 which renders as:
@@ -273,10 +278,11 @@ One bibliography line per source actually used.
 [1] RFC 9110 - …
 ```
 
-It is optional and usually worth leaving out. Most region names are already the
-explanation, and a sentence repeated on every turn is a real cost against a
-small window. Reach for it when the region has a convention the agent has to
-follow rather than a purpose it can infer.
+The split is deliberate. Describing every region for the people who maintain the
+blueprint should not quietly cost tokens on every turn, and most region names
+are already the explanation. Turn it on where the region has a convention the
+agent has to follow - a format, an ordering, a rule about what belongs - rather
+than a purpose it can infer from the name.
 
 Empty regions contribute nothing - no heading, no blank block - so a blueprint
 can declare the regions it might need without paying for the ones it has not

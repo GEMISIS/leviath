@@ -665,6 +665,14 @@ pub struct RegionSnapshot {
     /// Actual content entries stored in this region (empty for zero-token regions).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<RegionEntrySnapshot>,
+    /// What the blueprint says this region is for, when it says.
+    ///
+    /// Carried on the snapshot so every reader of `context.json` can show it -
+    /// the dashboard, the history API, a console - rather than each having to
+    /// find and re-parse the manifest to explain a region it is already
+    /// displaying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Snapshot of the full context window, written to `context.json` alongside `meta.json`.
@@ -1270,6 +1278,7 @@ mod tests {
                     key: Some("k".to_string()),
                     taint: Default::default(),
                 }],
+                description: None,
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -1289,6 +1298,7 @@ mod tests {
             current_tokens: 0,
             max_tokens: 0,
             entries: vec![],
+            description: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
         assert!(!json.contains("entries"));

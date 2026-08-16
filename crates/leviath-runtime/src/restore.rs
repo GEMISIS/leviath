@@ -422,6 +422,7 @@ mod tests {
                             taint: Default::default(),
                         },
                     ],
+                    description: None,
                 },
                 // A region that no longer exists in the window - skipped.
                 RegionSnapshot {
@@ -437,6 +438,7 @@ mod tests {
                         key: None,
                         taint: Default::default(),
                     }],
+                    description: None,
                 },
             ],
         }

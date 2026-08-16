@@ -139,6 +139,16 @@ pub(super) fn flatten(
             ),
         ]));
 
+        // What the blueprint says the region is for, under its header. Only
+        // when the region is open: a folded row is a summary, and a sentence
+        // of prose under it would defeat folding.
+        if !folded && let Some(description) = region.description.as_deref() {
+            lines.push(Line::from(Span::styled(
+                format!("    {description}"),
+                Style::default().fg(C_MUTED).add_modifier(Modifier::ITALIC),
+            )));
+        }
+
         if folded {
             if !region.entries.is_empty() {
                 lines.push(Line::from(Span::styled(
@@ -261,6 +271,7 @@ mod tests {
                     current_tokens: 10,
                     max_tokens: 50,
                     entries: vec![entry("first entry line\nmore"), entry("second")],
+                    description: None,
                 },
                 RegionSnapshot {
                     name: "conversation".to_string(),
@@ -268,6 +279,7 @@ mod tests {
                     current_tokens: 20,
                     max_tokens: 50,
                     entries: vec![],
+                    description: None,
                 },
             ],
         }
@@ -292,6 +304,41 @@ mod tests {
 
         // A live search overrides folds so matches stay reachable.
         assert_eq!(rows(&s, &tree, true).len(), 4);
+    }
+
+    /// A region's description belongs where the person is already looking at
+    /// the region, not in the manifest they would otherwise have to go and open.
+    #[test]
+    fn a_region_description_is_shown_under_its_header_while_the_region_is_open() {
+        let mut s = snap();
+        s.regions[0].description = Some("Format: one line per source.".to_string());
+        let mut tree = ContextTreeState::default();
+
+        let text_of = |flat: &FlatTree| -> String {
+            flat.lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|sp| sp.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let text = text_of(&flatten(&s, &tree, 0, false, 80));
+        assert!(text.contains("Format: one line per source."));
+
+        // Folded, it is gone: a folded row is a summary, and a sentence of
+        // prose under it would defeat the fold.
+        tree.collapsed_regions.insert("system".to_string());
+        let folded = text_of(&flatten(&s, &tree, 0, false, 80));
+        assert!(!folded.contains("Format: one line per source."));
+        assert!(
+            folded.contains("system"),
+            "the region itself is still listed"
+        );
     }
 
     #[test]

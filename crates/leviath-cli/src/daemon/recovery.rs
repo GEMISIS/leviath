@@ -956,6 +956,7 @@ mod tests {
                     key: None,
                     taint: Default::default(),
                 }],
+                description: None,
             }],
         };
         write_run(
@@ -1353,6 +1354,7 @@ mod tests {
                         taint: Default::default(),
                     },
                 ],
+                description: None,
             }],
         };
         write_run_archive(runs.path(), "run-applied", mpath, 0, 9, 99, &ctx);

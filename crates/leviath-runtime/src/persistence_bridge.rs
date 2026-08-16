@@ -801,6 +801,7 @@ mod tests {
                         taint: Default::default(),
                     })
                     .collect(),
+                description: None,
             }],
         };
         PersistJob {

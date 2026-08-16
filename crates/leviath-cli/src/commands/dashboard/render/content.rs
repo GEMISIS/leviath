@@ -830,6 +830,7 @@ mod tests {
                 current_tokens: total / 2,
                 max_tokens: max / 2,
                 entries: vec![],
+                description: None,
             }],
         }
     }
@@ -918,6 +919,7 @@ mod tests {
                     current_tokens: 1000,
                     max_tokens: 2000,
                     entries: vec![],
+                    description: None,
                 },
                 runstate::RegionSnapshot {
                     name: "history".to_string(),
@@ -925,6 +927,7 @@ mod tests {
                     current_tokens: 3000,
                     max_tokens: 4000,
                     entries: vec![],
+                    description: None,
                 },
                 runstate::RegionSnapshot {
                     name: "context".to_string(),
@@ -932,6 +935,7 @@ mod tests {
                     current_tokens: 1000,
                     max_tokens: 2000,
                     entries: vec![],
+                    description: None,
                 },
             ],
         }));
@@ -1790,6 +1794,7 @@ mod tests {
                     key: None,
                     taint: Default::default(),
                 }],
+                description: None,
             }],
         }));
         let (lines, _cursor) = dash.build_context_lines(&agent, 80);
@@ -1815,6 +1820,7 @@ mod tests {
                 current_tokens: 2000,
                 max_tokens: 4000,
                 entries: vec![],
+                description: None,
             }],
         }));
         let (lines, _cursor) = dash.build_context_lines(&agent, 80);
@@ -1964,6 +1970,7 @@ mod tests {
                     current_tokens: 1000,
                     max_tokens: 2000,
                     entries: vec![],
+                    description: None,
                 },
                 runstate::RegionSnapshot {
                     name: "conv".to_string(),
@@ -1971,6 +1978,7 @@ mod tests {
                     current_tokens: 1000,
                     max_tokens: 2000,
                     entries: vec![],
+                    description: None,
                 },
                 runstate::RegionSnapshot {
                     name: "hist".to_string(),
@@ -1978,6 +1986,7 @@ mod tests {
                     current_tokens: 1000,
                     max_tokens: 2000,
                     entries: vec![],
+                    description: None,
                 },
                 runstate::RegionSnapshot {
                     name: "temp".to_string(),
@@ -1985,6 +1994,7 @@ mod tests {
                     current_tokens: 1000,
                     max_tokens: 2000,
                     entries: vec![],
+                    description: None,
                 },
                 runstate::RegionSnapshot {
                     name: "cls".to_string(),
@@ -1992,6 +2002,7 @@ mod tests {
                     current_tokens: 1000,
                     max_tokens: 2000,
                     entries: vec![],
+                    description: None,
                 },
                 runstate::RegionSnapshot {
                     name: "brain".to_string(),
@@ -1999,6 +2010,7 @@ mod tests {
                     current_tokens: 1000,
                     max_tokens: 2000,
                     entries: vec![],
+                    description: None,
                 },
                 runstate::RegionSnapshot {
                     name: "other".to_string(),
@@ -2006,6 +2018,7 @@ mod tests {
                     current_tokens: 1000,
                     max_tokens: 2000,
                     entries: vec![],
+                    description: None,
                 },
             ],
         }));
@@ -2029,6 +2042,7 @@ mod tests {
                 current_tokens: 7500,
                 max_tokens: 8000,
                 entries: vec![],
+                description: None,
             }],
         }));
         let (lines, _cursor) = dash.build_context_lines(&agent, 80);
@@ -2051,6 +2065,7 @@ mod tests {
                 current_tokens: 5800,
                 max_tokens: 8000,
                 entries: vec![],
+                description: None,
             }],
         }));
         let (lines, _cursor) = dash.build_context_lines(&agent, 80);
@@ -2073,6 +2088,7 @@ mod tests {
                 current_tokens: 0,
                 max_tokens: 8000,
                 entries: vec![],
+                description: None,
             }],
         }));
         let (lines, _cursor) = dash.build_context_lines(&agent, 80);
@@ -2110,6 +2126,7 @@ mod tests {
                     key: None,
                     taint: Default::default(),
                 }],
+                description: None,
             }],
         }));
         terminal
@@ -2213,6 +2230,7 @@ mod tests {
                 current_tokens: 4000,
                 max_tokens: 8000,
                 entries,
+                description: None,
             }],
         }));
         terminal
@@ -2311,6 +2329,7 @@ mod tests {
                     current_tokens: 500,
                     max_tokens: 1000,
                     entries: vec![],
+                    description: None,
                 },
                 runstate::RegionSnapshot {
                     name: "s2".to_string(),
@@ -2318,6 +2337,7 @@ mod tests {
                     current_tokens: 500,
                     max_tokens: 1000,
                     entries: vec![],
+                    description: None,
                 },
                 runstate::RegionSnapshot {
                     name: "s3".to_string(),
@@ -2325,6 +2345,7 @@ mod tests {
                     current_tokens: 500,
                     max_tokens: 1000,
                     entries: vec![],
+                    description: None,
                 },
                 runstate::RegionSnapshot {
                     name: "s4".to_string(),
@@ -2332,6 +2353,7 @@ mod tests {
                     current_tokens: 500,
                     max_tokens: 1000,
                     entries: vec![],
+                    description: None,
                 },
                 runstate::RegionSnapshot {
                     name: "s5".to_string(),
@@ -2339,6 +2361,7 @@ mod tests {
                     current_tokens: 500,
                     max_tokens: 1000,
                     entries: vec![],
+                    description: None,
                 },
                 runstate::RegionSnapshot {
                     name: "s6".to_string(),
@@ -2346,6 +2369,7 @@ mod tests {
                     current_tokens: 500,
                     max_tokens: 1000,
                     entries: vec![],
+                    description: None,
                 },
                 runstate::RegionSnapshot {
                     name: "s7".to_string(),
@@ -2353,6 +2377,7 @@ mod tests {
                     current_tokens: 500,
                     max_tokens: 1000,
                     entries: vec![],
+                    description: None,
                 },
             ],
         }));
@@ -2531,6 +2556,7 @@ mod tests {
                     current_tokens: 42,
                     max_tokens: 100,
                     entries: vec![],
+                    description: None,
                 }],
             }),
         );

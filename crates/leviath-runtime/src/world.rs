@@ -2586,6 +2586,7 @@ mod tests {
                     key: None,
                     taint: Default::default(),
                 }],
+                description: None,
             }],
         };
         crate::restore::restore_agent(
