@@ -13,6 +13,16 @@ same list.
 
 ## Unreleased
 
+- Fixed: an Ollama model's context window is read from the server rather than
+  guessed from its name. The compiled table matches on a family substring, so
+  `qwen3.8-32k` took the `qwen3` arm and was handed 131072 against the 32768 it
+  is actually served at. Percentage region budgets resolved against the larger
+  number and never evicted, the request overflowed, and Ollama front-truncated
+  it and then answered `no user query found in messages` - naming neither the
+  size nor the truncation. The daemon now asks each installed model for its
+  `num_ctx` at start-up, and says so once per model when a window still had to
+  be guessed. Note that the window is the Modelfile's `num_ctx`, not the
+  architecture ceiling in `model_info`, which on that model is 262144.
 - Fixed: an Ollama tool call gets an id unique to the conversation rather than
   its index within one response. Every turn's first call was `ollama_0`, so a
   window ten turns deep held ten distinct calls nothing could tell apart - and

@@ -21,6 +21,14 @@ pub struct OllamaProvider {
 
     /// Per-model capability overrides
     capability_overrides: HashMap<String, ModelCapabilityOverride>,
+    /// Effective serving window per model, learned from the server at start-up
+    /// by [`Provider::prime_capabilities`]. Empty until then, and empty for good
+    /// if the server could not be reached - in which case the compiled table
+    /// stays in charge.
+    api_windows: std::sync::Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    /// Models already warned about, so a guessed window is announced once per
+    /// model rather than once per inference.
+    warned_guessed: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 /// A tool-call id unique for the life of a conversation.
@@ -55,6 +63,35 @@ fn next_tool_call_id() -> String {
     format!("ollama_{prefix}_{sequence}")
 }
 
+/// The effective serving window named in an `/api/show` response, if it names one.
+///
+/// Ollama reports two different numbers and the obvious one is wrong.
+/// `model_info["<arch>.context_length"]` is the architecture's ceiling - 262144 for
+/// qwen35 - while the window the server will actually serve is `num_ctx` in the
+/// Modelfile parameters, 32768 for a model built with that cap. Taking the ceiling
+/// would replace one overestimate with a larger one.
+///
+/// `parameters` is a text block, not JSON:
+///
+/// ```text
+/// temperature                    1
+/// num_ctx                        32768
+/// ```
+///
+/// A model that names no `num_ctx` is served at the server's own default, which
+/// Ollama does not report anywhere. `None` leaves the compiled table in charge
+/// rather than recording a guess that would outrank it - the same rule the
+/// OpenRouter provider follows for a model its `/models` says nothing about.
+fn effective_window(show: &serde_json::Value) -> Option<usize> {
+    let parameters = show.get("parameters")?.as_str()?;
+    parameters.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        (parts.next()? == "num_ctx")
+            .then(|| parts.next()?.parse::<usize>().ok())
+            .flatten()
+    })
+}
+
 impl OllamaProvider {
     /// Create a new Ollama provider.
     pub fn new(client: reqwest::Client) -> Self {
@@ -62,6 +99,8 @@ impl OllamaProvider {
             client,
             base_url: "http://localhost:11434".to_string(),
             capability_overrides: HashMap::new(),
+            api_windows: Default::default(),
+            warned_guessed: Default::default(),
         }
     }
 
@@ -74,6 +113,8 @@ impl OllamaProvider {
             client,
             base_url,
             capability_overrides: HashMap::new(),
+            api_windows: Default::default(),
+            warned_guessed: Default::default(),
         }
     }
 
@@ -90,7 +131,103 @@ impl OllamaProvider {
             client,
             base_url,
             capability_overrides: overrides,
+            api_windows: Default::default(),
+            warned_guessed: Default::default(),
         }
+    }
+
+    /// Replace the window with what the server actually serves, when start-up
+    /// managed to ask.
+    ///
+    /// Only the window. The rest of `ModelCapabilities` is about how a request
+    /// must be *shaped* - whether tools work, whether temperature is accepted -
+    /// and `/api/show` describes what a model is, not the quirks of talking to
+    /// it. Taking the size from the live answer and the shape from the compiled
+    /// table gives each the question it can answer.
+    fn api_corrected(&self, model: &str, base: ModelCapabilities) -> ModelCapabilities {
+        let windows = leviath_core::sync::lock(&self.api_windows);
+        match windows.get(model) {
+            Some(&max_context_tokens) => ModelCapabilities {
+                max_context_tokens,
+                ..base
+            },
+            None => base,
+        }
+    }
+
+    /// Say so, once per model, when the window did not come from the server.
+    ///
+    /// Unlike the OpenRouter equivalent, the test is not "did we land on the
+    /// conservative fallback". For Ollama *every* compiled answer is a guess
+    /// from a substring of the model's name, and the dangerous one is not the
+    /// small fallback but the confident large one: `qwen3.8-32k` matches
+    /// `qwen3` and is handed 131072 against a real 32768. So the question is
+    /// simply whether the server told us, and anything else is worth
+    /// announcing.
+    fn warn_if_guessed(&self, model: &str, resolved: &ModelCapabilities) {
+        if leviath_core::sync::lock(&self.api_windows).contains_key(model) {
+            return;
+        }
+        let mut warned = leviath_core::sync::lock(&self.warned_guessed);
+        if !warned.insert(model.to_string()) {
+            return;
+        }
+        tracing::warn!(
+            model = %model,
+            assumed_context_tokens = resolved.max_context_tokens,
+            "this Ollama model's context window was guessed from its name, not \
+             read from the server, so percentage region budgets resolve against \
+             a number that may be far too large. Ollama serves a model at its \
+             Modelfile `num_ctx`, or at the server default when it sets none. \
+             Set the real window with [model_capabilities.\"{model}\"] \
+             max_context_tokens = <n>",
+        );
+    }
+
+    /// Ask the server for every installed model's effective window.
+    async fn learn_model_windows(&self) -> Result<HashMap<String, usize>> {
+        let tags = self
+            .client
+            .get(format!("{}/api/tags", self.base_url))
+            .send()
+            .await
+            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        let tags = crate::provider::check_http_response(tags, None).await?;
+        let tags: serde_json::Value = tags
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+
+        let names: Vec<String> = tags
+            .get("models")
+            .and_then(|m| m.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|e| Some(e.get("name")?.as_str()?.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut windows = HashMap::with_capacity(names.len());
+        for name in names {
+            let show = self
+                .client
+                .post(format!("{}/api/show", self.base_url))
+                .json(&serde_json::json!({ "model": name }))
+                .send()
+                .await
+                .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            let show = crate::provider::check_http_response(show, None).await?;
+            let show: serde_json::Value = show
+                .json()
+                .await
+                .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+            if let Some(window) = effective_window(&show) {
+                windows.insert(name, window);
+            }
+        }
+        Ok(windows)
     }
 
     /// Return built-in capability defaults for a model based on its name pattern.
@@ -390,11 +527,38 @@ impl Provider for OllamaProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
-        // Merged, not swapped: an entry names only what it corrects.
+        // Three answers, narrowest first: what the user wrote, what the server
+        // says, what this build was compiled with.
+        let base = self.api_corrected(model, self.builtin_capabilities(model));
+        // Merged, not swapped: an entry names only what it corrects. An
+        // explicit override is an answer, so it silences the warning too.
         match self.capability_overrides.get(model) {
-            Some(o) => o.apply_to(self.builtin_capabilities(model)),
-            None => self.builtin_capabilities(model),
+            Some(o) => o.apply_to(base),
+            None => {
+                self.warn_if_guessed(model, &base);
+                base
+            }
         }
+    }
+
+    /// Learn every installed model's real window, so percentage region budgets
+    /// resolve against what the server will serve rather than what the model's
+    /// name suggests.
+    ///
+    /// `qwen3.8-32k` contains `qwen3`, so the compiled table hands it 131072 -
+    /// four times the 32768 it is actually served at. Budgets sized against the
+    /// larger number never evict, the request overflows, and Ollama front-
+    /// truncates it and then answers `no user query found in messages`, which
+    /// names neither the size nor the truncation (issue #475).
+    ///
+    /// Failure is a warning upstream, not an error: a daemon whose Ollama is not
+    /// running must still start, with the compiled table in charge.
+    async fn prime_capabilities(&self) -> Result<()> {
+        let windows = self.learn_model_windows().await?;
+        let count = windows.len();
+        *leviath_core::sync::lock(&self.api_windows) = windows;
+        tracing::debug!(models = count, "learned Ollama model windows");
+        Ok(())
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
@@ -2445,6 +2609,361 @@ mod tests {
         // turn goes ahead of it where it belongs, rather than being suppressed
         // by a `tool` message at the head.
         assert_eq!(roles, vec!["system", "user", "assistant", "tool"]);
+    }
+
+    /// A server that answers the model list with an error status.
+    #[tokio::test]
+    async fn priming_reports_a_tags_call_the_server_refuses() {
+        let url = leviath_testkit::spawn_mock_server(500, "Internal Server Error", b"boom").await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+        assert!(provider.prime_capabilities().await.is_err());
+    }
+
+    /// A model list that is not JSON at all.
+    #[tokio::test]
+    async fn priming_reports_a_tags_body_that_is_not_json() {
+        let url = leviath_testkit::spawn_mock_server(200, "OK", b"not json").await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+        let err = provider.prime_capabilities().await.unwrap_err();
+        assert!(err.to_string().contains("Invalid response"), "{err}");
+    }
+
+    /// The model list arrives, and the per-model call is the one that fails.
+    /// The sequence serves one response and then stops accepting, so the
+    /// `/api/show` that follows finds nothing listening.
+    #[tokio::test]
+    async fn priming_reports_a_show_call_that_never_connects() {
+        let (url, _bodies) =
+            leviath_testkit::spawn_mock_sequence(vec![(200, "OK", tags_body(&["qwen3.8:latest"]))])
+                .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+        assert!(provider.prime_capabilities().await.is_err());
+    }
+
+    /// A `/api/show` that answers with something that is not JSON.
+    #[tokio::test]
+    async fn priming_reports_a_show_body_that_is_not_json() {
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", tags_body(&["qwen3.8:latest"])),
+            (200, "OK", b"not json".to_vec()),
+        ])
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+        let err = provider.prime_capabilities().await.unwrap_err();
+        assert!(err.to_string().contains("Invalid response"), "{err}");
+    }
+
+    /// A `/api/show` the server refuses.
+    #[tokio::test]
+    async fn priming_reports_a_show_call_the_server_refuses() {
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", tags_body(&["qwen3.8:latest"])),
+            (500, "Internal Server Error", b"boom".to_vec()),
+        ])
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+        assert!(provider.prime_capabilities().await.is_err());
+    }
+
+    /// A model list whose entries are not shaped like models names nothing, and
+    /// a list with no `models` key at all is the same answer.
+    #[tokio::test]
+    async fn priming_skips_entries_that_name_no_model() {
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![(
+            200,
+            "OK",
+            serde_json::to_vec(&serde_json::json!({ "models": [{}, { "name": 7 }] }))
+                .expect("serializes"),
+        )])
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+        // No names means no `/api/show` calls, so the single queued response is
+        // enough and priming succeeds having learned nothing.
+        provider.prime_capabilities().await.expect("primes");
+        assert_eq!(
+            provider.capabilities("qwen3.8:latest").max_context_tokens,
+            131_072
+        );
+    }
+
+    /// A body with no `models` array at all.
+    #[tokio::test]
+    async fn priming_accepts_a_model_list_with_no_models_key() {
+        let url = leviath_testkit::spawn_mock_server(200, "OK", b"{}").await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+        provider.prime_capabilities().await.expect("primes");
+    }
+
+    /// The warning fires for a window that came from the name, once, and not at
+    /// all for one the server told us or the user set.
+    #[tokio::test]
+    async fn a_guessed_window_is_announced_once_per_model() {
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", tags_body(&["qwen3.8-32k:latest"])),
+            (200, "OK", show_body(Some(32768))),
+        ])
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+
+        // Before priming every answer is a guess, and it is announced once.
+        let _ = provider.capabilities("qwen3.8-32k:latest");
+        let _ = provider.capabilities("qwen3.8-32k:latest");
+        assert_eq!(
+            leviath_core::sync::lock(&provider.warned_guessed).len(),
+            1,
+            "warned once per model, not once per call"
+        );
+
+        provider.prime_capabilities().await.expect("primes");
+
+        // Primed, a second model is still a guess and gets its own warning.
+        let _ = provider.capabilities("mystery:latest");
+        let warned = leviath_core::sync::lock(&provider.warned_guessed);
+        assert!(warned.contains("mystery:latest"));
+        assert_eq!(warned.len(), 2);
+    }
+
+    /// A primed model is not a guess, so it is never announced.
+    #[tokio::test]
+    async fn a_window_read_from_the_server_is_not_announced() {
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", tags_body(&["qwen3.8-32k:latest"])),
+            (200, "OK", show_body(Some(32768))),
+        ])
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+        provider.prime_capabilities().await.expect("primes");
+
+        let _ = provider.capabilities("qwen3.8-32k:latest");
+        assert!(leviath_core::sync::lock(&provider.warned_guessed).is_empty());
+    }
+
+    /// An explicit override is an answer, so it silences the warning too.
+    #[test]
+    fn an_explicit_override_is_not_announced_as_a_guess() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "mystery:latest".to_string(),
+            ModelCapabilityOverride {
+                max_context_tokens: Some(16_384),
+                ..Default::default()
+            },
+        );
+        let provider = OllamaProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "http://127.0.0.1:1".to_string(),
+            overrides,
+        );
+        let _ = provider.capabilities("mystery:latest");
+        assert!(leviath_core::sync::lock(&provider.warned_guessed).is_empty());
+    }
+
+    // ─── effective window ───────────────────────────────────────────────────
+
+    /// `parameters` is a text block, and `num_ctx` is the line that matters.
+    #[test]
+    fn the_effective_window_comes_from_num_ctx() {
+        let show = serde_json::json!({
+            "parameters": "temperature                    1\nnum_ctx                        32768\ntop_k                          20",
+            "model_info": { "qwen35.context_length": 262144 }
+        });
+        assert_eq!(effective_window(&show), Some(32768));
+    }
+
+    /// The trap this exists to avoid. `model_info` names the architecture's
+    /// ceiling, which on the model that prompted #475 is 262144 against a real
+    /// window of 32768 - so reading the obvious field would replace one
+    /// overestimate with a bigger one.
+    #[test]
+    fn the_architecture_ceiling_is_not_mistaken_for_the_window() {
+        let show = serde_json::json!({
+            "parameters": "temperature                    1",
+            "model_info": { "qwen35.context_length": 262144 }
+        });
+        assert_eq!(
+            effective_window(&show),
+            None,
+            "no num_ctx means the server default, which is not 262144 and is not ours to guess"
+        );
+    }
+
+    #[test]
+    fn a_show_response_with_no_parameters_names_no_window() {
+        assert_eq!(effective_window(&serde_json::json!({})), None);
+        assert_eq!(
+            effective_window(&serde_json::json!({ "parameters": 7 })),
+            None
+        );
+    }
+
+    /// A `num_ctx` line that is not a number is not a window.
+    #[test]
+    fn an_unparseable_num_ctx_names_no_window() {
+        let show = serde_json::json!({ "parameters": "num_ctx  lots" });
+        assert_eq!(effective_window(&show), None);
+        // A blank line has no first token to compare at all.
+        let blank = serde_json::json!({ "parameters": "\n   \nnum_ctx  4096" });
+        assert_eq!(effective_window(&blank), Some(4096));
+        let bare = serde_json::json!({ "parameters": "num_ctx" });
+        assert_eq!(effective_window(&bare), None);
+    }
+
+    // ─── priming ────────────────────────────────────────────────────────────
+
+    fn show_body(num_ctx: Option<u32>) -> Vec<u8> {
+        let parameters = match num_ctx {
+            Some(n) => {
+                format!("temperature                    1\nnum_ctx                        {n}")
+            }
+            None => "temperature                    1".to_string(),
+        };
+        serde_json::to_vec(&serde_json::json!({
+            "parameters": parameters,
+            "model_info": { "qwen35.context_length": 262144 }
+        }))
+        .expect("serializes")
+    }
+
+    fn tags_body(names: &[&str]) -> Vec<u8> {
+        let models: Vec<serde_json::Value> = names
+            .iter()
+            .map(|n| serde_json::json!({ "name": n }))
+            .collect();
+        serde_json::to_vec(&serde_json::json!({ "models": models })).expect("serializes")
+    }
+
+    /// The whole point: a model whose name says one thing and whose server says
+    /// another is budgeted against the server.
+    #[tokio::test]
+    async fn priming_replaces_the_window_the_name_suggested() {
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", tags_body(&["qwen3.8-32k:latest"])),
+            (200, "OK", show_body(Some(32768))),
+        ])
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+
+        // The compiled table matches on `qwen3` and hands out four times too much.
+        assert_eq!(
+            provider
+                .capabilities("qwen3.8-32k:latest")
+                .max_context_tokens,
+            131_072
+        );
+
+        provider.prime_capabilities().await.expect("primes");
+
+        assert_eq!(
+            provider
+                .capabilities("qwen3.8-32k:latest")
+                .max_context_tokens,
+            32_768
+        );
+        // Only the size moves. Whether tools work is not something /api/show
+        // answers, so it still comes from the table.
+        assert!(provider.capabilities("qwen3.8-32k:latest").supports_tools);
+    }
+
+    /// A model that names no `num_ctx` is served at the server's own default,
+    /// which Ollama reports nowhere. Recording a guess would outrank the table
+    /// without being any better than it.
+    #[tokio::test]
+    async fn a_model_naming_no_window_leaves_the_table_in_charge() {
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", tags_body(&["qwen3.8:latest"])),
+            (200, "OK", show_body(None)),
+        ])
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+
+        provider.prime_capabilities().await.expect("primes");
+
+        assert_eq!(
+            provider.capabilities("qwen3.8:latest").max_context_tokens,
+            131_072
+        );
+    }
+
+    /// What the user wrote outranks what the server said, the same order the
+    /// OpenRouter provider uses.
+    #[tokio::test]
+    async fn an_explicit_override_still_wins_over_the_server() {
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", tags_body(&["qwen3.8-32k:latest"])),
+            (200, "OK", show_body(Some(32768))),
+        ])
+        .await;
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "qwen3.8-32k:latest".to_string(),
+            ModelCapabilityOverride {
+                max_context_tokens: Some(16_384),
+                ..Default::default()
+            },
+        );
+        let provider = OllamaProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+            overrides,
+        );
+
+        provider.prime_capabilities().await.expect("primes");
+
+        assert_eq!(
+            provider
+                .capabilities("qwen3.8-32k:latest")
+                .max_context_tokens,
+            16_384
+        );
+    }
+
+    /// A daemon whose Ollama is not running still starts, with the table in
+    /// charge - the failure is a warning upstream, not a refusal here.
+    #[tokio::test]
+    async fn priming_against_an_unreachable_server_is_an_error_not_a_panic() {
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "http://127.0.0.1:1".to_string(),
+        );
+        assert!(provider.prime_capabilities().await.is_err());
+        // And the table still answers.
+        assert_eq!(
+            provider.capabilities("qwen3.8:latest").max_context_tokens,
+            131_072
+        );
     }
 
     #[test]
