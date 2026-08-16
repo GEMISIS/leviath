@@ -200,8 +200,29 @@ pub fn openai_messages_with(
     tool_args: ToolArgsFormat,
 ) -> Vec<serde_json::Value> {
     let mut messages: Vec<serde_json::Value> = Vec::new();
-    for block in &request.system {
-        messages.push(serde_json::json!({ "role": "system", "content": block.text }));
+    // One system message, however many blocks the context assembled into.
+    //
+    // A block per pinned region is how Leviath thinks about system content, and
+    // Anthropic takes it that way natively. The OpenAI chat shape has no such
+    // concept: it has *a* system message, and emitting several is at best
+    // unusual. Some Ollama chat templates reject the second one outright -
+    // qwen3.8 answers `HTTP 500 {"error":"system message must be at the
+    // beginning"}`, which is a misleading way to say "at most one". An agent
+    // with several pinned regions could not take a single turn against it.
+    //
+    // Empty blocks are dropped rather than joined, or a region that happens to
+    // be empty this turn contributes a blank paragraph to the prompt.
+    let system: Vec<&str> = request
+        .system
+        .iter()
+        .map(|block| block.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect();
+    if !system.is_empty() {
+        messages.push(serde_json::json!({
+            "role": "system",
+            "content": system.join("\n\n"),
+        }));
     }
     for msg in &request.messages {
         messages.extend(message_to_openai_with(&msg.role, &msg.content, tool_args));
@@ -2145,14 +2166,114 @@ mod tests {
         };
         let body = build_openai_request_body(&req);
         let messages = body["messages"].as_array().unwrap();
-        // 2 system blocks + 1 user message
-        assert_eq!(messages.len(), 3);
+        // Both blocks, joined into the one system message the chat shape has.
+        assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[0]["content"], "You are helpful.");
-        assert_eq!(messages[1]["role"], "system");
-        assert_eq!(messages[1]["content"], "Be concise.");
-        assert_eq!(messages[2]["role"], "user");
-        assert_eq!(messages[2]["content"], "Hi");
+        assert_eq!(messages[0]["content"], "You are helpful.\n\nBe concise.");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "Hi");
+    }
+
+    /// However many blocks the context assembles into, exactly one system
+    /// message goes out.
+    ///
+    /// Some Ollama chat templates reject the second one - qwen3.8 answers
+    /// `HTTP 500 {"error":"system message must be at the beginning"}`, which is
+    /// a misleading way to say "at most one". An agent with several pinned
+    /// regions (deep-researcher has eight) could not take a single turn against
+    /// it, and every stage failed on its first call.
+    #[test]
+    fn many_system_blocks_become_exactly_one_system_message() {
+        let req = InferenceRequest {
+            system: (0..8)
+                .map(|i| SystemBlock {
+                    text: format!("block {i}"),
+                    cache_hint: leviath_core::CacheHint::Always,
+                })
+                .collect(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: "Hi".into(),
+                cache_breakpoint: false,
+            }],
+            model: "qwen3.8".into(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::json!({}),
+            request_timeout_secs: None,
+        };
+        let messages = openai_messages_with(&req, ToolArgsFormat::Object);
+        let systems = messages.iter().filter(|m| m["role"] == "system").count();
+        assert_eq!(systems, 1, "{messages:#?}");
+        let joined = (0..8)
+            .map(|i| format!("block {i}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(
+            messages[0]["content"], joined,
+            "every block survives the join"
+        );
+    }
+
+    /// A pinned region that happens to be empty this turn contributes nothing,
+    /// rather than a blank paragraph in the middle of the prompt.
+    #[test]
+    fn empty_system_blocks_are_dropped_rather_than_joined() {
+        let req = InferenceRequest {
+            system: vec![
+                SystemBlock {
+                    text: "real".into(),
+                    cache_hint: leviath_core::CacheHint::Always,
+                },
+                SystemBlock {
+                    text: "   ".into(),
+                    cache_hint: leviath_core::CacheHint::Always,
+                },
+                SystemBlock {
+                    text: "also real".into(),
+                    cache_hint: leviath_core::CacheHint::Always,
+                },
+            ],
+            messages: vec![Message {
+                role: "user".into(),
+                content: "Hi".into(),
+                cache_breakpoint: false,
+            }],
+            model: "m".into(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::json!({}),
+            request_timeout_secs: None,
+        };
+        let messages = openai_messages_with(&req, ToolArgsFormat::Object);
+        assert_eq!(messages[0]["content"], "real\n\nalso real");
+    }
+
+    /// A request with no system content at all sends no system message, rather
+    /// than an empty one.
+    #[test]
+    fn no_system_blocks_means_no_system_message() {
+        let req = InferenceRequest {
+            system: vec![],
+            messages: vec![Message {
+                role: "user".into(),
+                content: "Hi".into(),
+                cache_breakpoint: false,
+            }],
+            model: "m".into(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::json!({}),
+            request_timeout_secs: None,
+        };
+        let messages = openai_messages_with(&req, ToolArgsFormat::Object);
+        assert!(
+            messages.iter().all(|m| m["role"] != "system"),
+            "{messages:#?}"
+        );
     }
 
     #[test]

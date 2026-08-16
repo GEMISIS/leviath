@@ -218,6 +218,12 @@ struct RunRecordParts {
     output_validators:
         HashMap<String, std::sync::Arc<leviath_scripting::output_validator::OutputValidator>>,
     outcome_flags: leviath_runtime::persistence::RunOutcomeFlags,
+    /// Whether this run should be marked for one-shot title generation.
+    ///
+    /// Decided by the caller rather than here, because the answer turns on
+    /// whether this is a fresh spawn or a run being paged back in - which is
+    /// the caller's distinction, not a property of the record.
+    wants_title: bool,
     compaction: Option<leviath_core::CompactionConfig>,
     tool_sensitivities: Option<HashMap<String, leviath_core::TaintLevel>>,
     security: leviath_core::taint::SecurityConfig,
@@ -271,7 +277,8 @@ fn attach_run_record(
         // searches). Root runs only: sub-agents inherit their parent's context
         // in the run list, and titling every fan-out worker would multiply
         // cheap-but-nonzero LLM calls for no UX gain.
-        (deps.config.title.enabled && !args.task.is_empty() && args.parent_run_id.is_none())
+        parts
+            .wants_title
             .then_some(leviath_runtime::title::PendingTitle)
             .into_iter()
             .for_each(|marker| {
@@ -704,6 +711,15 @@ fn build_agent_inner(
             read_path_counts,
             output_validators,
             outcome_flags,
+            // `enforce_seeds` is false on the recovery path, which is also the
+            // resume path - and a run being paged back in has already had its
+            // one shot at a title. Without this, every pause/resume cycle buys
+            // another titling call for a run that either has a title or has
+            // already failed to get one.
+            wants_title: enforce_seeds
+                && deps.config.title.enabled
+                && !args.task.is_empty()
+                && args.parent_run_id.is_none(),
             compaction,
             tool_sensitivities,
             security: security.clone(),
