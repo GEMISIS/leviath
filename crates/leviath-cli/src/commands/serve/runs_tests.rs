@@ -1231,6 +1231,14 @@ fn delete_query(pairs: &[(&str, &str)]) -> DeleteRunsQuery {
         .0
 }
 
+/// The single-route query, through the extractor for the same reason as above.
+fn force(on: bool) -> Query<DeleteRunQuery> {
+    let uri: axum::http::Uri = format!("http://test/api/runs/x?force={on}")
+        .parse()
+        .expect("uri parses");
+    Query::<DeleteRunQuery>::try_from_uri(&uri).expect("query parses")
+}
+
 fn finished(id: &str, updated_at: i64) -> RunMeta {
     let mut meta = meta_at(id, updated_at);
     meta.status = RunStatus::Complete;
@@ -1244,7 +1252,7 @@ async fn deleting_a_finished_run_removes_it_from_disk() {
         create_run(&finished("run-done", 1)).unwrap();
         assert!(crate::runstate::run_dir("run-done").exists());
 
-        let code = delete_run(AxumPath("run-done".to_string()))
+        let code = delete_run(AxumPath("run-done".to_string()), force(false))
             .await
             .expect("the delete succeeds");
 
@@ -1263,7 +1271,7 @@ async fn deleting_a_live_run_is_refused_rather_than_done_behind_the_agent() {
     crate::runstate::with_isolated_runs_dir_async("runs-delete-live", |_d| async move {
         create_run(&meta_at("run-live", 1)).unwrap();
 
-        let (code, body) = delete_run(AxumPath("run-live".to_string()))
+        let (code, body) = delete_run(AxumPath("run-live".to_string()), force(false))
             .await
             .expect_err("a live run is refused");
 
@@ -1280,7 +1288,7 @@ async fn deleting_a_live_run_is_refused_rather_than_done_behind_the_agent() {
 #[tokio::test]
 async fn deleting_a_run_that_is_already_gone_is_a_404() {
     crate::runstate::with_isolated_runs_dir_async("runs-delete-missing", |_d| async move {
-        let (code, _) = delete_run(AxumPath("run-never".to_string()))
+        let (code, _) = delete_run(AxumPath("run-never".to_string()), force(false))
             .await
             .expect_err("a missing run is a 404");
         assert_eq!(code, StatusCode::NOT_FOUND);
@@ -1297,7 +1305,7 @@ async fn a_traversing_run_id_deletes_nothing() {
         let victim = dir.join("keep-me");
         std::fs::create_dir_all(&victim).unwrap();
 
-        let (code, _) = delete_run(AxumPath("../keep-me".to_string()))
+        let (code, _) = delete_run(AxumPath("../keep-me".to_string()), force(false))
             .await
             .expect_err("a traversing id finds nothing");
 
@@ -1307,10 +1315,15 @@ async fn a_traversing_run_id_deletes_nothing() {
     .await;
 }
 
-/// A run whose `meta.json` cannot be read is skipped by `list_runs`, so
-/// refusing to delete it would make it both invisible and permanent.
+/// A record that will not parse says nothing about whether the run is finished,
+/// and "cannot read it" must not quietly read as "finished" - that is what a
+/// *live* run looks like to a binary whose `RunMeta` has moved on, and deleting
+/// one is exactly what this route refuses to do for a run it can see is live.
+///
+/// It is still deletable on request, because `list_runs` skips it and refusing
+/// outright would leave it both invisible and permanent.
 #[tokio::test]
-async fn a_run_with_unreadable_metadata_can_still_be_deleted() {
+async fn a_run_with_unreadable_metadata_is_refused_until_the_caller_forces_it() {
     crate::runstate::with_isolated_runs_dir_async("runs-delete-corrupt", |_d| async move {
         create_run(&finished("run-corrupt", 1)).unwrap();
         std::fs::write(
@@ -1319,12 +1332,41 @@ async fn a_run_with_unreadable_metadata_can_still_be_deleted() {
         )
         .unwrap();
 
-        let code = delete_run(AxumPath("run-corrupt".to_string()))
+        let (code, body) = delete_run(AxumPath("run-corrupt".to_string()), force(false))
             .await
-            .expect("a corrupt run is still deletable");
+            .expect_err("an unreadable record is not proof the run finished");
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert!(body.0.error.contains("force=true"), "{}", body.0.error);
+        assert!(crate::runstate::run_dir("run-corrupt").exists());
 
+        let code = delete_run(AxumPath("run-corrupt".to_string()), force(true))
+            .await
+            .expect("forcing it works");
         assert_eq!(code, StatusCode::NO_CONTENT);
         assert!(!crate::runstate::run_dir("run-corrupt").exists());
+    })
+    .await;
+}
+
+/// `force` is not offered on the bulk route at all, and a sweep must not pick up
+/// an unreadable run as collateral.
+#[tokio::test]
+async fn a_bulk_sweep_never_forces_an_unreadable_run() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-bulk-corrupt", |_d| async move {
+        create_run(&finished("run-corrupt", 1)).unwrap();
+        std::fs::write(
+            crate::runstate::run_dir("run-corrupt").join("meta.json"),
+            "{ not json",
+        )
+        .unwrap();
+
+        let resp = delete_runs(Query(delete_query(&[("ids", "run-corrupt")])))
+            .await
+            .expect("the sweep runs");
+
+        assert!(resp.deleted.is_empty());
+        assert!(resp.skipped[0].reason.contains("force=true"));
+        assert!(crate::runstate::run_dir("run-corrupt").exists());
     })
     .await;
 }
@@ -1432,7 +1474,7 @@ async fn a_run_that_cannot_be_removed_reports_the_failure() {
         perms.set_mode(0o500);
         std::fs::set_permissions(&dir, perms).unwrap();
 
-        let outcome = delete_run(AxumPath("run-stuck".to_string())).await;
+        let outcome = delete_run(AxumPath("run-stuck".to_string()), force(false)).await;
 
         // Restored before asserting, so a failed assert cannot leave an
         // undeletable directory behind for the next run of the suite.
@@ -1457,7 +1499,7 @@ async fn a_run_that_cannot_be_removed_reports_the_failure() {
         let held =
             std::fs::File::open(crate::runstate::run_dir("run-stuck").join("meta.json")).unwrap();
 
-        let outcome = delete_run(AxumPath("run-stuck".to_string())).await;
+        let outcome = delete_run(AxumPath("run-stuck".to_string()), force(false)).await;
         drop(held);
 
         let (code, body) = outcome.expect_err("the removal fails");
