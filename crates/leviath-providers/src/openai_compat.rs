@@ -1076,6 +1076,98 @@ mod tests {
         assert_eq!(roles, vec!["user", "assistant"]);
     }
 
+    /// The shape issue #469 dies on, and the one the other two passes miss.
+    ///
+    /// A sliding window that has evicted a call turn but kept its response
+    /// leaves that response stranded at the head. It is normally dropped as an
+    /// orphan - except against Ollama, which restarts tool-call ids at
+    /// `ollama_0` every turn (#470), so a *later* turn's call puts that id in
+    /// `called` and the stranded response looks answered.
+    ///
+    /// The conversation then opens on a `tool` message, so when the first real
+    /// call turn arrives [`satisfy_call_turn_order`] sees `prev_role == "tool"`,
+    /// considers the ordering satisfied, and inserts nothing. Every remaining
+    /// role is assistant or tool, and the request reaches Qwen with no user
+    /// query at all.
+    #[test]
+    fn a_stranded_tool_response_at_the_head_does_not_suppress_the_user_turn() {
+        let stranded = crate::provider::Message {
+            role: "user".to_string(),
+            content: crate::provider::MessageContent::Blocks(vec![
+                crate::provider::ContentBlock::ToolResult {
+                    tool_use_id: "ollama_0".to_string(),
+                    content: "logs/a.log".to_string(),
+                    is_error: false,
+                },
+            ]),
+            cache_breakpoint: false,
+        };
+        let call = crate::provider::Message {
+            role: "assistant".to_string(),
+            content: crate::provider::MessageContent::Blocks(vec![
+                crate::provider::ContentBlock::ToolUse {
+                    // The same id the evicted turn used, which is exactly what
+                    // Ollama sends and why the stranded response survives.
+                    id: "ollama_0".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "logs/a.log"}),
+                    thought_signature: None,
+                },
+            ]),
+            cache_breakpoint: false,
+        };
+        let answer = crate::provider::Message {
+            role: "user".to_string(),
+            content: crate::provider::MessageContent::Blocks(vec![
+                crate::provider::ContentBlock::ToolResult {
+                    tool_use_id: "ollama_0".to_string(),
+                    content: "ERROR disk full".to_string(),
+                    is_error: false,
+                },
+            ]),
+            cache_breakpoint: false,
+        };
+        let request = InferenceRequest {
+            system: vec![crate::provider::SystemBlock {
+                text: "## task\ncount the ERROR lines".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+            }],
+            messages: vec![stranded, call, answer],
+            model: "qwen3.8-32k".to_string(),
+            max_tokens: 64,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        // What the two earlier passes leave behind on their own: the stranded
+        // response is kept, so the call turn reads as correctly ordered and no
+        // user turn is added anywhere.
+        let mut raw = vec![serde_json::json!({
+            "role": "system",
+            "content": request.system[0].text,
+        })];
+        for msg in &request.messages {
+            raw.extend(message_to_openai_with(
+                &msg.role,
+                &msg.content,
+                ToolArgsFormat::Object,
+            ));
+        }
+        let without = satisfy_call_turn_order(drop_unpaired_tool_turns(raw));
+        let roles: Vec<&str> = without.iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["system", "tool", "assistant", "tool"],
+            "the stranded response survives and suppresses the inserted turn"
+        );
+
+        let messages = openai_messages_with(&request, ToolArgsFormat::Object);
+        let roles: Vec<&str> = messages.iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(roles, vec!["system", "user", "tool", "assistant", "tool"]);
+    }
+
     // ─── merge_extra_params ─────────────────────────────────────────────────
 
     #[test]
