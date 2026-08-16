@@ -158,9 +158,10 @@ Base path `/api`; all JSON unless noted.
 
 | Method · Path | Purpose |
 |---|---|
-| `GET /api/runs` | List runs: paginated, sortable, searchable. See [below](#listing-and-searching-runs) |
+| `GET /api/runs` · `DELETE /api/runs` | List runs: paginated, sortable, searchable · prune many at once. See [below](#listing-and-searching-runs) |
+| `DELETE /api/runs/{id}` | Delete one finished run's record. Not the same as cancelling it. See [below](#deleting-runs) |
 | `GET /api/agents` · `POST /api/agents` | List runs *(deprecated, use `/api/runs`)* · spawn an agent. Reads the persisted records, so finished runs stay listed |
-| `GET /api/agents/{id}` · `DELETE …` | Get one · cancel |
+| `GET /api/agents/{id}` · `DELETE …` | Get one · cancel. Cancelling stops the work and **keeps** the record; see [deleting runs](#deleting-runs) for removing it |
 | `GET /api/agents/{id}/result` · `/context` | The run's answer and log tail · current context window |
 | `GET /api/agents/{id}/logs?stage=&stream=&tail=` | A run's logs. `stage`, `stream` and `tail` pick which stage, which stream, and how much |
 | `GET /api/agents/{id}/context/history` | How the context window changed over the run, paginated |
@@ -244,6 +245,56 @@ done in the browser, because The Lair never holds a run's transcript.
 
 One honest limit: the deep sources match the raw JSON on disk, so a query containing a quote,
 a backslash or a newline may not match text that does contain it.
+
+## Deleting runs
+
+Cancelling and deleting are different verbs on purpose. `DELETE /api/agents/{id}` stops the run and
+leaves everything it wrote; `DELETE /api/runs/{id}` removes the record. One stops the work, the
+other forgets it happened.
+
+Deletion is real and irreversible. The run's directory goes, transcript included. That is the point
+of the route: a "Delete" button that only hid the run in one browser would tell somebody clearing a
+sensitive transcript that it was gone when it was not.
+
+```
+DELETE /api/runs/deep-researcher-1786839472-d908ad2d9455
+→ 204
+```
+
+- **409** if the run is still going. Removing a directory out from under a running agent is a much
+  larger feature than this, so cancel it first and delete it after.
+- **404** if it is already gone, so a client that lost the response to its own delete can just send
+  it again instead of treating a missing run as a failure.
+
+A run whose `meta.json` is unreadable *can* be deleted. Such a run is skipped by the listing, so
+refusing would leave it both invisible and permanent.
+
+### Clearing out old runs
+
+One request per run is its own problem once there are a few hundred, so there is a bulk form. It
+takes either an age or an explicit list:
+
+```
+DELETE /api/runs?before=1785869070
+DELETE /api/runs?ids=run-a,run-b,run-c
+```
+
+`before` is a unix timestamp and matches `updated_at`; only finished runs are considered. `ids` is
+capped at `max_ids` from `GET /api/config`, the same cap as the batch fetch. Sending neither is a
+400 rather than "every run" -- a bulk delete with no predicate is far more likely to be a client
+that failed to build its query than somebody asking to erase the machine's history.
+
+Partial success is the normal outcome, not an error. A sweep that runs into one live run has still
+correctly deleted the rest, so the response is a 200 with a verdict per run:
+
+```json
+{ "deleted": ["run-a", "run-c"],
+  "skipped": [{ "id": "run-b", "reason": "Run 'run-b' is Running; cancel it before deleting it" }] }
+```
+
+Read `skipped` when the list does not empty. A run that is still going and a run that was already
+gone are both non-deletions, and only the reason tells them apart. Use the single-run route when you
+want a status code per outcome instead.
 
 ## Where a run's cost went
 
@@ -384,6 +435,10 @@ those instead of calling a route and treating a 404 as "unsupported": a 404 also
 run", and it costs a round trip per feature. The limits matter as much as the capability names: they
 are where the page cap, file cap and listing cap actually live, so a client never has to hardcode
 one.
+
+`runs.delete` and `runs.delete.bulk` are the ones worth checking before drawing a button rather than
+after clicking it. Finding out whether the other routes exist costs a wasted request; finding out
+this way costs a deleted run.
 
 ## Live updates over WebSocket
 

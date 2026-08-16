@@ -367,6 +367,78 @@
             "$ref": "#/components/responses/Error"
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Delete many runs at once",
+        "description": "Prunes finished runs. The realistic use is \"clear everything older than a month\", which one request per run over a few hundred runs does badly.\n\nNeeds `before` or `ids`. Neither is a 400 rather than \"every run\": a bulk delete with no predicate is far more likely to be a client that failed to build its query than an operator asking to erase the machine's history.\n\nPartial success is the normal outcome, not a failure. A sweep that meets a live run has still correctly deleted the rest, so this answers 200 with a verdict per run rather than failing the whole request. Read `skipped` to find out why the list did not empty. Use DELETE /api/runs/{id} when you want a status code per outcome.\n\nDeletion is real and irreversible: the run directory and its transcript go.",
+        "parameters": [
+          {
+            "name": "before",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Delete every finished run whose updated_at is strictly before this unix timestamp. Ignored when ids is given."
+          },
+          {
+            "name": "ids",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated run ids to delete. At most max_ids (see GET /api/config) per request."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The sweep ran. Every named run is in exactly one of the two lists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteRunsResp"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/runs/{id}": {
+      "delete": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Delete one run's record",
+        "description": "Removes a finished run's directory from disk. Distinct from DELETE /api/agents/{id}, which cancels the run and leaves the record: one stops the work, the other forgets it happened.\n\nDeletion is real and irreversible - the directory and everything in it, including the transcript. A console offering a \"Delete\" that only hid the run locally would tell somebody clearing a sensitive transcript that it was gone when it was not.\n\n409 on a live run: removing a directory out from under a running agent is a different and much larger feature, so cancel it first. 404 on a run that is already gone, so a client that lost the response to its own delete can repeat it rather than treat a missing run as a failure.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The run id."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted. No body."
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/api/agents": {
@@ -1698,6 +1770,46 @@
               "null"
             ],
             "description": "Unix seconds; null until the stage is left."
+          }
+        }
+      },
+      "SkippedRun": {
+        "type": "object",
+        "required": [
+          "id",
+          "reason"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The run that was not deleted."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why, as a sentence a console can show verbatim."
+          }
+        }
+      },
+      "DeleteRunsResp": {
+        "type": "object",
+        "required": [
+          "deleted",
+          "skipped"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ids whose directories are gone."
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkippedRun"
+            },
+            "description": "Ids that were left alone, each with a reason. A live run and a run that was already gone are both non-deletions, and a caller needs to tell them apart."
           }
         }
       }

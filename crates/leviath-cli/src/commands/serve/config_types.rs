@@ -62,6 +62,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "logs.stream",
     "context.history.page",
     "runs.waiting_on",
+    // `DELETE /api/runs/{id}` and the bulk `DELETE /api/runs`. Announced
+    // because a console that cannot tell whether the route exists has to find
+    // out by sending a real delete, and that probe is destructive when it
+    // works. `max_ids` bounds the bulk form.
+    "runs.delete",
+    "runs.delete.bulk",
     // The same vocabulary on the websocket, not just on the run. Worth
     // announcing separately: a client that has it can render a parked run's
     // reason straight from the event stream, and one that doesn't has to
