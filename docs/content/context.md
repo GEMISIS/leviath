@@ -160,6 +160,7 @@ and pass on the first attempt, which looks exactly like a stage that finished it
 | `seed` | unset | What the region starts with. See below |
 | `required` | `false` | The stage re-runs rather than moving on while this region is empty |
 | `summarizable` | `true` | Set false to keep an edge `transform = "compact"` from paraphrasing this region. See [transforms](/docs/stages#carrying-context-across-an-edge) |
+| `description` | unset | One line on what the region is for, shown to the model above its contents. See [what the model sees](#what-the-model-sees) |
 | `admission` | `"evict"` | What happens when a write does not fit. `"reject"` refuses it instead of dropping something. See [letting the agent decide what to forget](#letting-the-agent-decide-what-to-forget) |
 | `required_message` | generated | What the model is told when a required region is empty. Supports `{region}` |
 
@@ -236,6 +237,50 @@ be judged before it is expanded.
 Scripts are stricter and have no `[read_paths]` escape: a stage hook, a custom-region script and an
 output validator must all live inside the blueprint's own directory. A script is code the agent
 ships, and there is no such thing as loading your logic from somewhere else on purpose.
+
+## What the model sees
+
+Regions that assemble into the system prompt are labelled with their own name:
+
+```
+## task
+research what meta's most recent earnings call was about
+
+## sources_index
+[1] RFC 9110 - https://example - 2022 - credibility: high
+```
+
+The name is the part that earns its tokens. An agent writes to a region *by
+name* - `context_write { region: "sources_index", … }` - and without the heading
+it reads a region's contents with nothing saying which region they came from. It
+could read `sources_index` and write to `sources_index` and have no way to know
+they were the same place. A heading costs three tokens, once per region, however
+many entries the region holds.
+
+Add a `description` where the contents do not explain themselves:
+
+```toml
+[context.regions]
+sources_index = { kind = "pinned", budget = "4%", description = "One bibliography line per source actually used." }
+```
+
+which renders as:
+
+```
+## sources_index
+One bibliography line per source actually used.
+
+[1] RFC 9110 - …
+```
+
+It is optional and usually worth leaving out. Most region names are already the
+explanation, and a sentence repeated on every turn is a real cost against a
+small window. Reach for it when the region has a convention the agent has to
+follow rather than a purpose it can infer.
+
+Empty regions contribute nothing - no heading, no blank block - so a blueprint
+can declare the regions it might need without paying for the ones it has not
+filled yet.
 
 ## Where a stage's own instructions live
 

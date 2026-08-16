@@ -223,6 +223,27 @@ pub struct ContextWindow {
     pub hidden: std::collections::HashSet<String>,
 }
 
+/// Put a region's own name above its contents, and its description under that
+/// when it has one.
+///
+/// The name is the part that earns its tokens. An agent writes to a region *by
+/// name* - `context_write { region: "sources_index", .. }` - but until now the
+/// prompt showed it the contents of every region with nothing saying which was
+/// which. It could read `sources_index` and it could write to `sources_index`,
+/// and it had no way to know they were the same place. Three tokens of heading
+/// closes that.
+///
+/// The description is opt-in and usually absent, because most regions are named
+/// well enough that a sentence would only cost tokens. It is for the ones whose
+/// contents do not explain themselves - a bibliography with a required format,
+/// a scratch area with a convention.
+fn labelled(region: &Region, body: &str) -> String {
+    match &region.description {
+        Some(description) => format!("## {}\n{}\n\n{}", region.name, description, body),
+        None => format!("## {}\n{}", region.name, body),
+    }
+}
+
 impl ContextWindow {
     /// Create a new context window with the specified budget.
     pub fn new(max_tokens: usize) -> Self {
@@ -695,14 +716,14 @@ impl ContextWindow {
             match &region.kind {
                 // System-level content → system blocks
                 leviath_core::RegionKind::Pinned => {
-                    let text = region
+                    let body = region
                         .content
                         .iter()
                         .map(|e| e.content.as_str())
                         .collect::<Vec<_>>()
                         .join("\n\n");
                     system_blocks.push(leviath_providers::SystemBlock {
-                        text,
+                        text: labelled(region, &body),
                         cache_hint: CacheHint::Always,
                     });
                 }
@@ -712,23 +733,23 @@ impl ContextWindow {
                 // of the state being real is that this block is derived from
                 // it rather than from whatever prose the model last wrote.
                 leviath_core::RegionKind::Checklist => {
-                    let text = region.render_checklist();
-                    if !text.is_empty() {
+                    let body = region.render_checklist();
+                    if !body.is_empty() {
                         system_blocks.push(leviath_providers::SystemBlock {
-                            text,
+                            text: labelled(region, &body),
                             cache_hint: CacheHint::UntilChanged,
                         });
                     }
                 }
                 leviath_core::RegionKind::CompactHistory { .. } => {
-                    let text = region
+                    let body = region
                         .content
                         .iter()
                         .map(|e| e.content.as_str())
                         .collect::<Vec<_>>()
                         .join("\n\n");
                     system_blocks.push(leviath_providers::SystemBlock {
-                        text,
+                        text: labelled(region, &body),
                         cache_hint: CacheHint::Always,
                     });
                 }
@@ -1440,11 +1461,86 @@ mod tests {
         assert!(total <= 4, "total breakpoints: {total}");
     }
 
+    /// The name is the part that earns its tokens: an agent writes to a region
+    /// *by name*, and until this the prompt showed it every region's contents
+    /// with nothing saying which was which.
+    #[test]
+    fn a_pinned_region_is_labelled_with_its_own_name() {
+        let mut window = ContextWindow::new(10_000);
+        let mut region = Region::new("sources_index".to_string(), RegionKind::Pinned, 1000);
+        region
+            .add_entry("[1] RFC 9110 - https://example".to_string(), 10)
+            .expect("fits");
+        window.add_region(region);
+
+        let assembled = window.assemble();
+        assert_eq!(
+            assembled.system_blocks[0].text, "## sources_index\n[1] RFC 9110 - https://example",
+            "the name the agent would pass to context_write"
+        );
+    }
+
+    /// A description is opt-in, and absent costs nothing - which is the point.
+    /// Most regions are named well enough that a sentence would only spend
+    /// tokens.
+    #[test]
+    fn a_description_is_rendered_only_when_declared() {
+        let mut window = ContextWindow::new(10_000);
+        let mut described = Region::new("scratch".to_string(), RegionKind::Pinned, 1000);
+        described.description = Some("Working notes; cleared between stages.".to_string());
+        described.add_entry("half an idea".to_string(), 5).unwrap();
+        window.add_region(described);
+
+        let mut plain = Region::new("task".to_string(), RegionKind::Pinned, 1000);
+        plain.add_entry("do the thing".to_string(), 5).unwrap();
+        window.add_region(plain);
+
+        let assembled = window.assemble();
+        let texts: Vec<&str> = assembled
+            .system_blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "## scratch\nWorking notes; cleared between stages.\n\nhalf an idea",
+                "## task\ndo the thing",
+            ]
+        );
+    }
+
+    /// What the labelling actually costs, held to a number rather than a
+    /// feeling: a heading is a handful of tokens against a region's contents,
+    /// and it is charged once per region rather than per entry.
+    #[test]
+    fn labelling_costs_a_few_tokens_per_region_not_per_entry() {
+        let mut window = ContextWindow::new(100_000);
+        let mut region = Region::new("findings".to_string(), RegionKind::Pinned, 50_000);
+        for i in 0..20 {
+            region
+                .add_entry(format!("finding number {i}, with some substance to it"), 12)
+                .expect("fits");
+        }
+        window.add_region(region);
+
+        let assembled = window.assemble();
+        let text = &assembled.system_blocks[0].text;
+        let header = "## findings\n";
+        assert!(text.starts_with(header), "{text:.60}");
+        assert_eq!(
+            leviath_core::estimate_tokens(header),
+            3,
+            "one short heading for the whole region, however many entries it holds"
+        );
+    }
+
     /// A blueprint declares its pinned regions up front and most are empty for
     /// most of a run - deep-researcher has eight, of which four were empty at
     /// the point it failed against ollama. They contribute no system block,
     /// which is worth pinning: it bounds how many system messages a provider
-    /// that counts them actually receives.
+    /// that counts them actually receives, and how many headings the labelled
+    /// prompt carries.
     #[test]
     fn an_empty_pinned_region_assembles_into_no_system_block() {
         let mut window = ContextWindow::new(10_000);
@@ -1463,6 +1559,10 @@ mod tests {
             .iter()
             .map(|b| b.text.as_str())
             .collect();
-        assert_eq!(texts, vec!["do the thing"], "only the region with content");
+        assert_eq!(
+            texts,
+            vec!["## task\ndo the thing"],
+            "only the region with content, and it names itself"
+        );
     }
 }

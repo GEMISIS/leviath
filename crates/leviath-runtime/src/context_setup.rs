@@ -32,6 +32,7 @@ pub fn init_window_seeded(
         );
         region.summarizable = region_def.summarizable;
         region.admission = region_def.admission;
+        region.description = region_def.description.clone();
         window.add_region(region);
     }
 
@@ -164,6 +165,7 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
         );
         new_region.summarizable = region_def.summarizable;
         new_region.admission = region_def.admission;
+        new_region.description = region_def.description.clone();
 
         if let Some(existing) = window.get_region(&region_def.name) {
             // Carry entries verbatim - kind, metadata, key, timestamp survive
@@ -222,6 +224,7 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
         );
         carried.summarizable = existing.summarizable;
         carried.admission = existing.admission;
+        carried.description = existing.description.clone();
         // Verbatim, exactly as above: these are the regions whose typed turns
         // a rebuild would flatten.
         for entry in &existing.content {

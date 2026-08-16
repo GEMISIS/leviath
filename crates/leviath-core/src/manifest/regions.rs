@@ -223,6 +223,15 @@ pub(super) fn parse_region_layout(
             }
         };
 
+        // One line on what the region is for, shown to the model above its
+        // contents. Optional: most regions are named well enough that a
+        // sentence would only cost tokens.
+        let description = region_value
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         let seed = parse_region_seed(region_name, region_value.get("seed"));
 
         // Percentage regions contribute their (unknown) size at resolution, so
@@ -236,6 +245,7 @@ pub(super) fn parse_region_layout(
             .with_required(required, required_message);
         def.summarizable = summarizable;
         def.admission = admission;
+        def.description = description;
         if let Some(f) = compact_at_field {
             def = def.with_compact_at(f);
         }

@@ -460,6 +460,17 @@ pub struct Region {
     /// What this region does when a write does not fit. See [`Admission`].
     #[serde(default)]
     pub admission: Admission,
+
+    /// One line on what this region is for, shown to the model above its
+    /// contents.
+    ///
+    /// The name alone already tells an agent which region a `context_write`
+    /// should name. This is for the ones whose contents do not explain
+    /// themselves - a bibliography, a scratch area with a convention - where a
+    /// sentence buys more than it costs. Absent by default, so a region that
+    /// needs no explanation is charged nothing for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// What a region does when a write does not fit.
@@ -509,6 +520,7 @@ impl Region {
             needs_message_compaction: false,
             summarizable: true,
             admission: Admission::default(),
+            description: None,
         }
     }
 
