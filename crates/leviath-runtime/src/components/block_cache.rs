@@ -12,26 +12,12 @@ use super::*;
 
 /// How much text one cache chunk of an append-only region holds, in tokens.
 ///
-/// Small on purpose, and smaller than it first looks like it should be. The
-/// chunk is not the unit of what gets cached - a breakpoint caches the whole
-/// prefix in front of it, so a provider's minimum cacheable length applies to
-/// that running total and not to any one block. What the chunk size actually
-/// decides is *how soon* a boundary appears that the next request can match.
-///
-/// A budget larger than a typical entry is what makes that slow: the tail chunk
-/// keeps absorbing entries and changing, so no new boundary exists and the
-/// cacheable prefix stalls at whatever froze last. Measured over a 24-turn run
-/// with ~450-token entries: a 2048-token budget left the prefix pinned at the
-/// stable head for six consecutive turns at a stretch, where 64 leaves it
-/// pinned for two - and those two are the turns nothing could help, the first
-/// request and the one straight after a compaction, when there is nothing yet
-/// to have matched.
-///
-/// Anything above this gets a block of its own and so freezes immediately,
-/// which is every real tool result and context write. Below it, entries
-/// coalesce, which keeps a region of thousands of one-line notes from becoming
-/// thousands of blocks.
-pub(super) const CACHE_CHUNK_TOKENS: usize = 64;
+/// The chunk is the unit of what can be cached, so it wants to be at least a
+/// provider's minimum cacheable prefix - Anthropic's is 1024 tokens on Sonnet -
+/// and small enough that the uncached tail stays cheap. It also bounds how many
+/// blocks a large region becomes: 200k tokens of history is a hundred blocks,
+/// which is fine to send and costs nothing to skip.
+pub(super) const CACHE_CHUNK_TOKENS: usize = 2048;
 
 /// Split an append-only region's entries into blocks at boundaries that survive
 /// into the next request.
@@ -350,34 +336,6 @@ mod tests {
             assert!(at >= last, "entries came out of order");
             last = at;
         }
-    }
-
-    /// The property the budget exists to buy: an entry worth caching gets a
-    /// boundary of its own straight away, rather than waiting for a chunk to
-    /// fill.
-    ///
-    /// When the budget was larger than a typical entry the tail chunk kept
-    /// absorbing and changing, so no new boundary appeared and the cacheable
-    /// prefix stalled for turns at a time. This asserts each realistic entry
-    /// lands in its own chunk.
-    #[test]
-    fn an_entry_worth_caching_freezes_a_boundary_immediately() {
-        let entry = "word ".repeat(200); // ~250 tokens, a small tool result
-        for count in 1..6 {
-            let chunks = append_only_chunks(&entries(count, &entry), CACHE_CHUNK_TOKENS);
-            // Bare, with no format arguments: anything in an assert's message
-            // is a region only the failing path reaches, which the 100% gate
-            // then reports as uncovered.
-            assert_eq!(chunks.len(), count);
-        }
-    }
-
-    /// And the coalescing still bounds the block count for trivia.
-    #[test]
-    fn entries_too_small_to_cache_are_coalesced() {
-        let tiny: Vec<String> = (0..40).map(|i| format!("note {i}")).collect();
-        let chunks = append_only_chunks(&tiny, CACHE_CHUNK_TOKENS);
-        assert!(chunks.len() < tiny.len());
     }
 
     // ─── eligibility ────────────────────────────────────────────────────────

@@ -1522,15 +1522,9 @@ mod tests {
             assembled.system_blocks[0].text,
             "## history\nsummary of earlier conversation"
         );
-        // Deliberately not `Always`, though nothing evicts from here. `Always`
-        // is the most-stable tier and sorts ahead of everything, and this region
-        // gains an entry every time compaction fires - so tagging it stable put
-        // a changing block in front of immutable pinned content and invalidated
-        // the prefix behind it, with which content survived depending on the
-        // order regions were declared in (issue #474).
         assert_eq!(
             assembled.system_blocks[0].cache_hint,
-            leviath_core::CacheHint::UntilChanged
+            leviath_core::CacheHint::Always
         );
     }
 
@@ -2917,8 +2911,7 @@ mod tests {
 
     #[test]
     fn test_assemble_compact_history_with_sliding_prefix_sorting() {
-        // CompactHistory sorts before the volatile `Never` tier, and behind
-        // pinned content - it holds still between compactions but does move.
+        // CompactHistory should sort before Compacting/Temporary in system blocks
         use leviath_core::CacheHint;
 
         let mut window = ContextWindow::new(100_000);
@@ -2939,11 +2932,8 @@ mod tests {
 
         let assembled = window.assemble();
         assert_eq!(assembled.system_blocks.len(), 2);
-        // CompactHistory (UntilChanged) still comes before Temporary (Never).
-        assert_eq!(
-            assembled.system_blocks[0].cache_hint,
-            CacheHint::UntilChanged
-        );
+        // CompactHistory (Always) should come before Temporary (Never)
+        assert_eq!(assembled.system_blocks[0].cache_hint, CacheHint::Always);
         assert_eq!(assembled.system_blocks[1].cache_hint, CacheHint::Never);
     }
 

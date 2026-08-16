@@ -13,21 +13,6 @@ same list.
 
 ## Unreleased
 
-- Fixed: the cacheable prefix no longer stalls for several turns while a cache
-  chunk fills. The chunk size decides how soon a boundary appears that the next
-  request can match, and a budget larger than a typical entry meant the tail
-  kept absorbing entries and changing, so none appeared. Measured over a
-  24-turn run with small entries: the prefix sat pinned at the stable head for
-  six consecutive turns at a stretch, and now sits pinned for two - the first
-  request, and the one straight after a compaction, neither of which has
-  anything to match against yet.
-- Fixed: a compaction no longer destroys the cacheable prefix, and no longer
-  does so differently depending on the order regions are declared in. A
-  compact-history region gains an entry every time compaction fires, but it was
-  tagged as the most stable kind of content, so it sorted ahead of genuinely
-  immutable pinned instructions and invalidated everything behind it. Declared
-  before the pinned region that cost the whole prefix; declared after, nothing.
-  Measured: 2,502 cacheable tokens against 0, from the same content.
 - Fixed: a growing context region is no longer rewritten into the prompt cache
   on every call. A region became a single system block, and a provider matches a
   cached prefix only at a block boundary - so the one boundary a region offered
