@@ -474,6 +474,28 @@ pub(super) struct BlueprintInfo {
     pub(super) manifest: String,
 }
 
+/// One context region of a blueprint, as the API reports it.
+///
+/// The console showed a blueprint's stages and nothing about its memory, so a
+/// person editing an agent could see what it *does* and not what it *keeps* -
+/// which is the half that decides whether it can do the job on a small window.
+#[derive(Debug, Serialize)]
+pub(super) struct RegionInfo {
+    /// The region's name - the one an agent passes to `context_write`.
+    pub(super) name: String,
+    /// Its kind, as written in the manifest (`pinned`, `sliding_window`, …).
+    pub(super) kind: String,
+    /// What it is for, when the blueprint says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) description: Option<String>,
+    /// Whether the description is also shown to the model, rather than only
+    /// being documentation. A console offering an editor needs this to render
+    /// the toggle honestly.
+    pub(super) describe_in_prompt: bool,
+    /// Its token ceiling, resolved as far as the manifest alone allows.
+    pub(super) max_tokens: usize,
+}
+
 /// One blueprint, with the manifest text behind it.
 ///
 /// The detail route only. A listing that carried one of these per blueprint
@@ -487,6 +509,12 @@ pub(super) struct BlueprintInfo {
 pub(super) struct BlueprintDetail {
     #[serde(flatten)]
     pub(super) info: BlueprintInfo,
+    /// The blueprint's context regions.
+    ///
+    /// On the detail route rather than the listing, for the same reason the
+    /// manifest is: answering "what agents are there" should not cost every
+    /// region of every agent on the machine.
+    pub(super) regions: Vec<RegionInfo>,
     /// The manifest exactly as it is on disk.
     ///
     /// Without this a console has no way to read what it is editing: naming

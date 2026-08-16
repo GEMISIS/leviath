@@ -4765,9 +4765,8 @@ notes = { kind = "sliding_window", max_items = 20 }
 
 /// A region's `description` parses, and its absence stays absent.
 ///
-/// Optional on purpose: it is rendered above the region's contents on every
-/// turn, so a region that is named well enough to explain itself should not be
-/// charged for a sentence saying so.
+/// Documentation on its own: it reaches `lev dash` and the blueprint API, and
+/// only reaches the model when the region also sets `describe_in_prompt`.
 #[test]
 fn parse_manifest_reads_a_region_description() {
     let toml = r#"
@@ -4796,6 +4795,43 @@ blank = { kind = "pinned", max_tokens = 100, description = "   " }
         region("blank").description,
         None,
         "whitespace is not a description, and would render as a blank line"
+    );
+}
+
+/// `describe_in_prompt` decides whether the description is spent on the model.
+///
+/// Off by default, so describing every region for the people who maintain a
+/// blueprint cannot quietly add a sentence per region to every turn. A
+/// non-boolean value falls back to the default rather than failing the load:
+/// the cost of guessing wrong is a sentence, and refusing to load an agent over
+/// it would be the larger harm.
+#[test]
+fn parse_manifest_reads_the_describe_in_prompt_flag() {
+    let toml = r#"
+[agent]
+name = "curator"
+
+[context.regions]
+shown = { kind = "pinned", max_tokens = 100, description = "Format: one line per source.", describe_in_prompt = true }
+quiet = { kind = "pinned", max_tokens = 100, description = "For whoever edits this." }
+odd = { kind = "pinned", max_tokens = 100, describe_in_prompt = "yes" }
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    let region = |name: &str| {
+        bp.context_layout
+            .regions
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("{name} declared"))
+    };
+    assert!(region("shown").describe_in_prompt, "the flag is read");
+    assert!(
+        !region("quiet").describe_in_prompt,
+        "a description alone does not reach the model"
+    );
+    assert!(
+        !region("odd").describe_in_prompt,
+        "a non-boolean falls back to the default rather than failing the load"
     );
 }
 

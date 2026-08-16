@@ -1098,6 +1098,7 @@ mod tests {
             current_tokens: current,
             max_tokens: 1000,
             entries,
+            description: None,
         }
     }
 
@@ -2659,8 +2660,10 @@ mod tests {
                         taint: crate::taint::TaintLevel::Public,
                     })
                     .collect(),
+                description: None,
             }
         }
+
         fn snap(entries: &[(&str, usize)]) -> ContextSnapshot {
             let r = region("logs", entries);
             ContextSnapshot {

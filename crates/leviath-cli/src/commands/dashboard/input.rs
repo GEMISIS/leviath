@@ -2418,6 +2418,7 @@ mod tests {
                     current_tokens: 10,
                     max_tokens: 50,
                     entries: vec![entry("alpha"), entry("beta")],
+                    description: None,
                 },
                 crate::runstate::RegionSnapshot {
                     name: "conversation".to_string(),
@@ -2425,6 +2426,7 @@ mod tests {
                     current_tokens: 10,
                     max_tokens: 50,
                     entries: vec![entry("gamma")],
+                    description: None,
                 },
             ],
         }));

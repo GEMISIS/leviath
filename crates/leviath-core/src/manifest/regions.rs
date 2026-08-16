@@ -232,6 +232,13 @@ pub(super) fn parse_region_layout(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
+        // Spending the description on the model is opt-in: a person reading a
+        // blueprint wants a sentence per region, a model re-reads it every turn.
+        let describe_in_prompt = region_value
+            .get("describe_in_prompt")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let seed = parse_region_seed(region_name, region_value.get("seed"));
 
         // Percentage regions contribute their (unknown) size at resolution, so
@@ -246,6 +253,7 @@ pub(super) fn parse_region_layout(
         def.summarizable = summarizable;
         def.admission = admission;
         def.description = description;
+        def.describe_in_prompt = describe_in_prompt;
         if let Some(f) = compact_at_field {
             def = def.with_compact_at(f);
         }

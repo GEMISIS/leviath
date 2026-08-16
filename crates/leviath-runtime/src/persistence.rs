@@ -211,7 +211,11 @@ pub fn stage_status_from(status: &AgentStatus) -> StageRunStatus {
 }
 
 /// The stringified region kind used in snapshots (matches the dashboard reader).
-fn region_kind_str(kind: &RegionKind) -> &'static str {
+///
+/// Public because the blueprint API reports region kinds too, and two spellings
+/// of the same kind - `sliding` from a context snapshot, `sliding_window` from
+/// a blueprint - is a trap for any console reading both.
+pub fn region_kind_str(kind: &RegionKind) -> &'static str {
     match kind {
         RegionKind::Pinned => "pinned",
         RegionKind::Temporary => "temporary",
@@ -234,6 +238,7 @@ pub fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> Conte
         .map(|r| RegionSnapshot {
             name: r.name.clone(),
             kind: region_kind_str(&r.kind).to_string(),
+            description: r.description.clone(),
             current_tokens: r.current_tokens,
             max_tokens: r.max_tokens,
             entries: r
@@ -1043,6 +1048,12 @@ mod tests {
             100,
         ));
         w.add_region(Region::new("todos".to_string(), RegionKind::Checklist, 100));
+        // Carried onto the snapshot so every reader of context.json can explain
+        // a region it is already displaying, rather than each one having to
+        // find and re-parse the manifest.
+        let mut described = Region::new("sources".to_string(), RegionKind::Pinned, 100);
+        described.description = Some("One line per source.".to_string());
+        w.add_region(described);
         let _ = w.add_to_region("pin", "hello".to_string(), 3);
         w.current_tokens = w.calculate_tokens();
 
@@ -1061,9 +1072,17 @@ mod tests {
                 "history",
                 "hashmap",
                 "custom",
-                "checklist"
+                "checklist",
+                "pinned"
             ]
         );
+        let described = snap.regions.iter().find(|r| r.name == "sources").unwrap();
+        assert_eq!(
+            described.description.as_deref(),
+            Some("One line per source.")
+        );
+        let pin_desc = snap.regions.iter().find(|r| r.name == "pin").unwrap();
+        assert_eq!(pin_desc.description, None);
         // The pinned region's entry is captured.
         let pin = snap.regions.iter().find(|r| r.name == "pin").unwrap();
         assert_eq!(pin.entries.len(), 1);

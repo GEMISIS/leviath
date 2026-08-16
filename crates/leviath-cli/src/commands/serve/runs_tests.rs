@@ -686,6 +686,7 @@ fn plant_journal(run_id: &str, content: &str, secret: Option<&str>) {
                         key: None,
                         taint: leviath_core::taint::TaintLevel::default(),
                     }],
+                    description: None,
                 }],
             },
             at: 2,
@@ -770,6 +771,7 @@ fn plant_rich_journal(run_id: &str) {
             current_tokens: 1,
             max_tokens: 100,
             entries: vec![entry(content)],
+            description: None,
         }
     }
     fn snapshot(regions: Vec<RegionSnapshot>) -> ContextSnapshot {
@@ -990,6 +992,7 @@ async fn a_context_search_names_the_region_that_matched() {
                         key: None,
                         taint: leviath_core::taint::TaintLevel::default(),
                     }],
+                    description: None,
                 }],
             },
         )
@@ -1159,6 +1162,7 @@ async fn deep_sources_that_read_files_and_find_nothing_are_quiet() {
                         key: None,
                         taint: leviath_core::taint::TaintLevel::default(),
                     }],
+                    description: None,
                 }],
             },
         )

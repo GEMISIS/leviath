@@ -238,7 +238,11 @@ pub struct ContextWindow {
 /// contents do not explain themselves - a bibliography with a required format,
 /// a scratch area with a convention.
 fn labelled(region: &Region, body: &str) -> String {
-    match &region.description {
+    match region
+        .description
+        .as_deref()
+        .filter(|_| region.describe_in_prompt)
+    {
         Some(description) => format!("## {}\n{}\n\n{}", region.name, description, body),
         None => format!("## {}\n{}", region.name, body),
     }
@@ -1484,12 +1488,22 @@ mod tests {
     /// Most regions are named well enough that a sentence would only spend
     /// tokens.
     #[test]
-    fn a_description_is_rendered_only_when_declared() {
+    fn a_description_reaches_the_model_only_when_the_blueprint_opts_in() {
         let mut window = ContextWindow::new(10_000);
-        let mut described = Region::new("scratch".to_string(), RegionKind::Pinned, 1000);
-        described.description = Some("Working notes; cleared between stages.".to_string());
-        described.add_entry("half an idea".to_string(), 5).unwrap();
-        window.add_region(described);
+
+        let mut shown = Region::new("scratch".to_string(), RegionKind::Pinned, 1000);
+        shown.description = Some("Working notes; cleared between stages.".to_string());
+        shown.describe_in_prompt = true;
+        shown.add_entry("half an idea".to_string(), 5).unwrap();
+        window.add_region(shown);
+
+        // Described for whoever maintains the blueprint, not for the model. The
+        // sentence is still on the region - `lev dash` and the blueprint API
+        // read it - and it costs nothing per turn.
+        let mut documented = Region::new("sources".to_string(), RegionKind::Pinned, 1000);
+        documented.description = Some("One line per source actually used.".to_string());
+        documented.add_entry("[1] RFC 9110".to_string(), 5).unwrap();
+        window.add_region(documented);
 
         let mut plain = Region::new("task".to_string(), RegionKind::Pinned, 1000);
         plain.add_entry("do the thing".to_string(), 5).unwrap();
@@ -1505,8 +1519,26 @@ mod tests {
             texts,
             vec![
                 "## scratch\nWorking notes; cleared between stages.\n\nhalf an idea",
+                "## sources\n[1] RFC 9110",
                 "## task\ndo the thing",
             ]
+        );
+    }
+
+    /// The opt-in with nothing to show is the same as no opt-in: a region that
+    /// asks for its description in the prompt and has none must not render a
+    /// blank line where the sentence would go.
+    #[test]
+    fn opting_in_with_no_description_changes_nothing() {
+        let mut window = ContextWindow::new(10_000);
+        let mut region = Region::new("task".to_string(), RegionKind::Pinned, 1000);
+        region.describe_in_prompt = true;
+        region.add_entry("do the thing".to_string(), 5).unwrap();
+        window.add_region(region);
+
+        assert_eq!(
+            window.assemble().system_blocks[0].text,
+            "## task\ndo the thing"
         );
     }
 

@@ -461,16 +461,26 @@ pub struct Region {
     #[serde(default)]
     pub admission: Admission,
 
-    /// One line on what this region is for, shown to the model above its
-    /// contents.
+    /// One line on what this region is for.
     ///
-    /// The name alone already tells an agent which region a `context_write`
-    /// should name. This is for the ones whose contents do not explain
-    /// themselves - a bibliography, a scratch area with a convention - where a
-    /// sentence buys more than it costs. Absent by default, so a region that
-    /// needs no explanation is charged nothing for one.
+    /// Documentation first: it is what `GET /api/blueprints/{name}` reports and
+    /// what the dashboard shows beside the region, and in that role it costs
+    /// nothing at inference time. Set [`describe_in_prompt`](Self::describe_in_prompt)
+    /// to also spend it on the model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Whether [`description`](Self::description) is also shown to the model,
+    /// under the region's name.
+    ///
+    /// Off by default, because the two audiences want different things. A
+    /// person reading a blueprint benefits from a sentence on every region; a
+    /// model re-reads that sentence on every turn, and most region names are
+    /// already the explanation. Turn it on for the ones with a convention the
+    /// agent has to follow rather than a purpose it can infer - a bibliography
+    /// with a required citation format, a scratch area with a protocol.
+    #[serde(default)]
+    pub describe_in_prompt: bool,
 }
 
 /// What a region does when a write does not fit.
@@ -521,6 +531,7 @@ impl Region {
             summarizable: true,
             admission: Admission::default(),
             description: None,
+            describe_in_prompt: false,
         }
     }
 

@@ -135,6 +135,7 @@ mod tests {
                             taint: Default::default(),
                         })
                         .collect(),
+                    description: None,
                 }],
             },
             at: 0,

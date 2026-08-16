@@ -1433,6 +1433,7 @@ mod tests {
                 key: None,
                 taint: Default::default(),
             }],
+            description: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let back: RegionSnapshot = serde_json::from_str(&json).unwrap();
@@ -1449,6 +1450,7 @@ mod tests {
             current_tokens: 0,
             max_tokens: 100,
             entries: vec![],
+            description: None,
         };
         let json = serde_json::to_value(&snap).unwrap();
         assert!(json.get("entries").is_none());
@@ -1466,6 +1468,7 @@ mod tests {
                 current_tokens: 300,
                 max_tokens: 2000,
                 entries: vec![],
+                description: None,
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -2586,6 +2589,7 @@ mod tests {
                             taint: Default::default(),
                         },
                     ],
+                    description: None,
                 },
                 RegionSnapshot {
                     name: "conversation".into(),
@@ -2593,6 +2597,7 @@ mod tests {
                     current_tokens: 900,
                     max_tokens: 6000,
                     entries: vec![],
+                    description: None,
                 },
             ],
         };

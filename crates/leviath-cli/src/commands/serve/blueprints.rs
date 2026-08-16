@@ -299,7 +299,28 @@ pub(super) async fn get_blueprint(
     // Taken out of the info rather than read again: discovery already read
     // this file to build everything else in the response.
     let manifest = std::mem::take(&mut info.manifest);
-    Ok(Json(BlueprintDetail { info, manifest }))
+    // Parsed from the text already in hand rather than re-read: the same
+    // reason the manifest itself is carried through from discovery.
+    let regions = parse_manifest(&manifest)
+        .map(|bp| {
+            bp.context_layout
+                .regions
+                .iter()
+                .map(|r| RegionInfo {
+                    name: r.name.clone(),
+                    kind: leviath_runtime::persistence::region_kind_str(&r.kind).to_string(),
+                    description: r.description.clone(),
+                    describe_in_prompt: r.describe_in_prompt,
+                    max_tokens: r.max_tokens,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Json(BlueprintDetail {
+        info,
+        regions,
+        manifest,
+    }))
 }
 
 pub(super) async fn create_blueprint(
@@ -887,6 +908,66 @@ system_prompt = "Plan the work"
         // local draft or a copy bundled at build time - neither of which is
         // the file the daemon runs.
         assert_eq!(bp["manifest"].as_str().unwrap(), test_manifest());
+    }
+
+    /// A console showed a blueprint's stages and nothing about its memory, so a
+    /// person editing an agent could see what it *does* and not what it
+    /// *keeps* - which is the half that decides whether it can do the job on a
+    /// small window.
+    #[tokio::test]
+    async fn the_detail_route_reports_the_blueprints_context_regions() {
+        let manifest = r#"
+[agent]
+name = "curator"
+
+[context.regions]
+sources = { kind = "pinned", max_tokens = 400, describe_in_prompt = true, description = "One line per source." }
+chat = { kind = "sliding_window", max_tokens = 900 }
+
+[stages.plan]
+system_prompt = "Plan the work"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("curator");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("agent.leviath"), manifest).unwrap();
+
+        let state = test_state_with_path(dir.path().to_path_buf());
+        let app = Router::new()
+            .route("/api/blueprints/{name}", get(get_blueprint))
+            .with_state(state);
+        let req = Request::builder()
+            .uri("/api/blueprints/curator")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let bp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Compared whole, so a field that stops being serialized fails here
+        // rather than passing a check that only looks at the fields it knows.
+        assert_eq!(
+            bp["regions"],
+            serde_json::json!([
+                {
+                    "name": "sources",
+                    "kind": "pinned",
+                    "description": "One line per source.",
+                    "describe_in_prompt": true,
+                    "max_tokens": 400,
+                },
+                {
+                    "name": "chat",
+                    // The same spelling a context snapshot uses. Two spellings
+                    // of one kind is a trap for a console reading both.
+                    "kind": "sliding",
+                    "describe_in_prompt": false,
+                    "max_tokens": 900,
+                },
+            ])
+        );
     }
 
     /// The listing must not carry manifests: it answers "what agents are

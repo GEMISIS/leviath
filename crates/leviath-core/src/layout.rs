@@ -499,6 +499,11 @@ pub struct RegionDefinition {
     /// Human-readable description of this region's purpose
     pub description: Option<String>,
 
+    /// Whether `description` is also shown to the model, under the region's
+    /// name. Off by default - see [`crate::region::Region::describe_in_prompt`].
+    #[serde(default)]
+    pub describe_in_prompt: bool,
+
     /// When true, this region must be non-empty before a stage that can write
     /// to it is allowed to complete. Guards against an agent skipping a
     /// context-population step (e.g. never writing the `plan` region). Enforced
@@ -557,6 +562,7 @@ impl RegionDefinition {
             compact_at: None,
             schema: None,
             description: None,
+            describe_in_prompt: false,
             required: false,
             required_message: None,
             summarizable: true,
