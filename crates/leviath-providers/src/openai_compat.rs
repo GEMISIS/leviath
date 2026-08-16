@@ -227,7 +227,50 @@ pub fn openai_messages_with(
     for msg in &request.messages {
         messages.extend(message_to_openai_with(&msg.role, &msg.content, tool_args));
     }
-    satisfy_call_turn_order(drop_unpaired_tool_turns(messages))
+    ensure_user_turn(satisfy_call_turn_order(drop_unpaired_tool_turns(messages)))
+}
+
+/// The minimal user turn this layer inserts when a wire format demands one that
+/// the conversation does not have.
+///
+/// Names where the real instruction is, so the addition cannot read as a new
+/// request from the person, and is a fixed string at a fixed position so it
+/// costs nothing in prompt-cache stability.
+fn stand_in_user_turn() -> serde_json::Value {
+    serde_json::json!({
+        "role": "user",
+        "content": "Proceed with the task described in the system instructions.",
+    })
+}
+
+/// Ensure the conversation contains at least one user turn.
+///
+/// Leviath's task lives in a pinned context region, so it assembles into the
+/// system prompt and a request can legitimately carry no user-role message at
+/// all: on the very first inference, when the window holds nothing but assistant
+/// prose, or when the only entries were tool responses whose calls have aged out
+/// and been dropped above.
+///
+/// Anthropic and OpenAI accept that. Ollama with a Qwen 3.x template does not -
+/// it answers `HTTP 500 {"error":"no user query found in messages"}` and the run
+/// dies on a wire-format detail no agent author can see. Measured against
+/// `qwen3.8-32k`: every shape carrying a user turn anywhere is accepted, and
+/// every shape without one is refused, including `[system, assistant]`.
+///
+/// [`satisfy_call_turn_order`] already covers the histories that contain a tool
+/// call, since it puts a user turn ahead of the first one. This covers the rest,
+/// so the guarantee holds for every shape rather than for the common one.
+///
+/// The turn goes directly after the system message, where an opening request
+/// belongs, rather than at the end where it would read as a fresh instruction
+/// arriving after the assistant's last word.
+fn ensure_user_turn(mut messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    if messages.iter().any(|m| m["role"] == "user") {
+        return messages;
+    }
+    let after_system = usize::from(messages.first().is_some_and(|m| m["role"] == "system"));
+    messages.insert(after_system, stand_in_user_turn());
+    messages
 }
 
 /// Ensure every function-call turn follows a user turn or a function response
@@ -251,10 +294,7 @@ fn satisfy_call_turn_order(messages: Vec<serde_json::Value>) -> Vec<serde_json::
         if is_call_turn {
             let prev_role = out.last().and_then(|m| m["role"].as_str());
             if !matches!(prev_role, Some("user") | Some("tool")) {
-                out.push(serde_json::json!({
-                    "role": "user",
-                    "content": "Proceed with the task described in the system instructions.",
-                }));
+                out.push(stand_in_user_turn());
             }
         }
         out.push(msg);
@@ -871,6 +911,171 @@ mod tests {
         }
     }
 
+    // ─── ensure_user_turn ───────────────────────────────────────────────────
+
+    /// A request with a system prompt and nothing else, which is exactly the
+    /// first inference of any run: the task lives in a pinned region, so there
+    /// is no user message until the assistant has said something to answer.
+    #[test]
+    fn a_conversation_with_no_messages_still_carries_a_user_turn() {
+        let request = InferenceRequest {
+            system: vec![crate::provider::SystemBlock {
+                text: "## task\ncount the ERROR lines".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+            }],
+            messages: vec![],
+            model: "qwen3.8".to_string(),
+            max_tokens: 64,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let messages = openai_messages(&request);
+        let roles: Vec<&str> = messages.iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(roles, vec!["system", "user"]);
+        // The stand-in points at where the real task is, so it cannot read as
+        // a fresh request from the person.
+        assert_eq!(
+            messages[1]["content"],
+            serde_json::json!("Proceed with the task described in the system instructions.")
+        );
+    }
+
+    /// The window holding nothing but the assistant's own prose. No tool call,
+    /// so `satisfy_call_turn_order` does not fire and this is the shape that
+    /// reached Ollama without a user turn (issue #469).
+    #[test]
+    fn a_conversation_of_only_assistant_prose_gains_a_user_turn() {
+        let request = InferenceRequest {
+            system: vec![crate::provider::SystemBlock {
+                text: "instructions".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+            }],
+            messages: vec![crate::provider::Message {
+                role: "assistant".to_string(),
+                content: crate::provider::MessageContent::Text("still working".to_string()),
+                cache_breakpoint: false,
+            }],
+            model: "qwen3.8".to_string(),
+            max_tokens: 64,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let messages = openai_messages(&request);
+        let roles: Vec<&str> = messages.iter().filter_map(|m| m["role"].as_str()).collect();
+        // Ahead of the assistant, where an opening request belongs, rather than
+        // after its last word where it would read as a new instruction.
+        assert_eq!(roles, vec!["system", "user", "assistant"]);
+    }
+
+    /// Tool responses whose calls have aged out are dropped, which can empty a
+    /// conversation that looked non-empty on the way in.
+    #[test]
+    fn a_conversation_emptied_by_dropping_orphans_gains_a_user_turn() {
+        let request = InferenceRequest {
+            system: vec![crate::provider::SystemBlock {
+                text: "instructions".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+            }],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: crate::provider::MessageContent::Blocks(vec![
+                    crate::provider::ContentBlock::ToolResult {
+                        tool_use_id: "gone".to_string(),
+                        content: "a.log".to_string(),
+                        is_error: false,
+                    },
+                ]),
+                cache_breakpoint: false,
+            }],
+            model: "qwen3.8".to_string(),
+            max_tokens: 64,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let messages = openai_messages(&request);
+        let roles: Vec<&str> = messages.iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(roles, vec!["system", "user"]);
+    }
+
+    /// The histories `satisfy_call_turn_order` already covers must not gain a
+    /// second stand-in: one user turn is the requirement, not one per request.
+    #[test]
+    fn a_conversation_that_already_has_a_user_turn_is_left_alone() {
+        let call = crate::provider::Message {
+            role: "assistant".to_string(),
+            content: crate::provider::MessageContent::Blocks(vec![
+                crate::provider::ContentBlock::ToolUse {
+                    id: "c1".to_string(),
+                    name: "list_dir".to_string(),
+                    input: serde_json::json!({"path": "logs/"}),
+                    thought_signature: None,
+                },
+            ]),
+            cache_breakpoint: false,
+        };
+        let result = crate::provider::Message {
+            role: "user".to_string(),
+            content: crate::provider::MessageContent::Blocks(vec![
+                crate::provider::ContentBlock::ToolResult {
+                    tool_use_id: "c1".to_string(),
+                    content: "a.log".to_string(),
+                    is_error: false,
+                },
+            ]),
+            cache_breakpoint: false,
+        };
+        let request = InferenceRequest {
+            system: vec![crate::provider::SystemBlock {
+                text: "instructions".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+            }],
+            messages: vec![call.clone(), result.clone(), call, result],
+            model: "qwen3.8".to_string(),
+            max_tokens: 64,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let messages = openai_messages(&request);
+        let users = messages.iter().filter(|m| m["role"] == "user").count();
+        assert_eq!(users, 1, "the turn-order pass already supplied one");
+    }
+
+    /// With no system message there is nothing to insert after, and index 0 has
+    /// to stay in range.
+    #[test]
+    fn a_conversation_with_no_system_message_gains_a_leading_user_turn() {
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![crate::provider::Message {
+                role: "assistant".to_string(),
+                content: crate::provider::MessageContent::Text("still working".to_string()),
+                cache_breakpoint: false,
+            }],
+            model: "qwen3.8".to_string(),
+            max_tokens: 64,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let messages = openai_messages(&request);
+        let roles: Vec<&str> = messages.iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant"]);
+    }
+
     // ─── merge_extra_params ─────────────────────────────────────────────────
 
     #[test]
@@ -1400,6 +1605,11 @@ mod tests {
 
     // ── Additional coverage tests ──────────────────────────────────────────
 
+    /// A request carrying nothing at all still goes out with a user turn.
+    ///
+    /// Every chat API rejects an empty message list, so there is no shape this
+    /// makes worse, and guaranteeing the turn unconditionally keeps one rule
+    /// rather than one rule and an exception nobody would think to test.
     #[test]
     fn build_request_body_empty_messages() {
         let req = InferenceRequest {
@@ -1413,7 +1623,9 @@ mod tests {
             request_timeout_secs: None,
         };
         let body = build_openai_request_body(&req);
-        assert_eq!(body["messages"].as_array().unwrap().len(), 0);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
     }
 
     #[test]
