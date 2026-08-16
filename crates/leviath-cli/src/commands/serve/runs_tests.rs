@@ -1489,15 +1489,36 @@ async fn a_run_that_cannot_be_removed_reports_the_failure() {
     .await;
 }
 
-/// The Windows twin: no permission trick, so the unremovable directory is made
-/// by holding a file in it open, which Windows refuses to delete under.
+/// The Windows twin.
+///
+/// Windows has no equivalent of the Unix "write permission on the parent
+/// directory governs unlinking", and marking a file inside read-only does not
+/// help either: `remove_dir_all` clears that attribute and deletes anyway. A
+/// *sharing violation* does block it - but only from a handle opened with no
+/// share mode. A plain `File::open` shares delete access, so holding one lets
+/// the removal succeed, which is how the first version of this test passed
+/// locally and answered 204 on CI.
+///
+/// The file is also created through that exclusive handle rather than written
+/// and reopened. Reopening leaves a window in which Defender or the indexer has
+/// the just-written file open, and then it is *our* exclusive open that takes
+/// the sharing violation - a known flake here, documented on
+/// `delete_blueprint_removal_failure_returns_500_windows`.
 #[cfg(windows)]
 #[tokio::test]
 async fn a_run_that_cannot_be_removed_reports_the_failure() {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+
     crate::runstate::with_isolated_runs_dir_async("runs-delete-locked", |_d| async move {
         create_run(&finished("run-stuck", 1)).unwrap();
-        let held =
-            std::fs::File::open(crate::runstate::run_dir("run-stuck").join("meta.json")).unwrap();
+        let held = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .share_mode(0)
+            .open(crate::runstate::run_dir("run-stuck").join("held.bin"))
+            .unwrap();
 
         let outcome = delete_run(AxumPath("run-stuck".to_string()), force(false)).await;
         drop(held);
