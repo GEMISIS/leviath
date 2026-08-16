@@ -207,6 +207,30 @@ model = { models = [
 > `http://localhost:11434`. The run moves on to its next candidate rather than dying there, but
 > it still spends four attempts finding out.
 
+### Turning off an Ollama model's thinking
+
+Reasoning models served by Ollama think by default, and the thinking is billed to the same output
+budget as the answer. On a local model that mostly shows up as latency: a stage that wanted two
+sentences waits through several hundred tokens of deliberation first.
+
+`think` is a top-level field on Ollama's API rather than a sampling parameter, and Leviath lifts it
+out of the stage's parameters for you:
+
+```toml
+[stages.classify.model.parameters]
+think = false
+```
+
+Left unset, nothing is sent and the model does whatever it does by default. Set it per stage, not
+globally: the stage that picks a label off a list has nothing to think about, and the one that
+plans the work does.
+
+> [!NOTE]
+> Ollama also accepts at most one system message, so Leviath merges a blueprint's context regions
+> into a single system block for every OpenAI-compatible provider, Ollama included. The region
+> headings survive the merge, which is what keeps a multi-region agent coherent there. See
+> [what the model sees](/docs/context#what-the-model-sees).
+
 ## Where credentials live
 
 Keys live in `~/.leviath/config.toml` by default, or (to keep them out of a plaintext file) in
