@@ -4763,6 +4763,42 @@ notes = { kind = "sliding_window", max_items = 20 }
     assert!(region("notes").summarizable, "and defaults to on");
 }
 
+/// A region's `description` parses, and its absence stays absent.
+///
+/// Optional on purpose: it is rendered above the region's contents on every
+/// turn, so a region that is named well enough to explain itself should not be
+/// charged for a sentence saying so.
+#[test]
+fn parse_manifest_reads_a_region_description() {
+    let toml = r#"
+[agent]
+name = "curator"
+
+[context.regions]
+sources_index = { kind = "pinned", max_tokens = 100, description = "One bibliography line per source actually used." }
+task = { kind = "pinned", max_tokens = 100 }
+blank = { kind = "pinned", max_tokens = 100, description = "   " }
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    let region = |name: &str| {
+        bp.context_layout
+            .regions
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("{name} declared"))
+    };
+    assert_eq!(
+        region("sources_index").description.as_deref(),
+        Some("One bibliography line per source actually used.")
+    );
+    assert_eq!(region("task").description, None);
+    assert_eq!(
+        region("blank").description,
+        None,
+        "whitespace is not a description, and would render as a blank line"
+    );
+}
+
 /// `admission` parses, defaults to evicting, and refuses a value it does not
 /// know rather than falling back.
 ///

@@ -1515,9 +1515,11 @@ mod tests {
         let assembled = window.assemble();
 
         assert_eq!(assembled.system_blocks.len(), 1);
+        // Named, so the model can tell a wall of summary prose from the region
+        // it summarizes.
         assert_eq!(
             assembled.system_blocks[0].text,
-            "summary of earlier conversation"
+            "## history\nsummary of earlier conversation"
         );
         assert_eq!(
             assembled.system_blocks[0].cache_hint,
