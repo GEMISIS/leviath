@@ -49,6 +49,12 @@ same list.
   first inference against those models. Anthropic has its own builder, where
   block structure earns its keep through per-block `cache_control`, and is
   unchanged.
+- Fixed: every request to an OpenAI-dialect server carries a user turn. The task
+  lives in a pinned region, so it assembles into the system prompt and a
+  conversation can legitimately hold no user message: Ollama with a Qwen 3.x
+  template answers `HTTP 500 {"error":"no user query found in messages"}` for
+  any request without one. Most shapes were already covered, by the "Begin."
+  fallback and by the turn ordering fix; the guarantee now holds for the rest.
 - Fixed: a resumed run is not re-titled. `PendingTitle` was attached on every
   build with no fresh-versus-reload check, so each pause and resume bought
   another titling call.
