@@ -266,8 +266,17 @@ DELETE /api/runs/deep-researcher-1786839472-d908ad2d9455
 - **404** if it is already gone, so a client that lost the response to its own delete can just send
   it again instead of treating a missing run as a failure.
 
-A run whose `meta.json` is unreadable *can* be deleted. Such a run is skipped by the listing, so
-refusing would leave it both invisible and permanent.
+A run whose `meta.json` will not parse is a **409** too, overridden with `?force=true`:
+
+```
+DELETE /api/runs/{id}?force=true
+```
+
+A record that cannot be read says nothing about whether the run finished, and "cannot read it" must
+not quietly read as "finished" -- that is exactly what a live run looks like to a binary whose
+`RunMeta` has moved on. Such a run is also skipped by the listing, which would leave it both
+invisible and permanent, so the escape hatch stays; it is just something you type rather than
+something that happens to you. The bulk route never forces.
 
 ### Clearing out old runs
 

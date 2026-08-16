@@ -816,6 +816,13 @@ pub(super) struct DeleteRunsResp {
     pub(super) skipped: Vec<SkippedRun>,
 }
 
+/// Query for `DELETE /api/runs/{id}`.
+#[derive(Debug, Deserialize)]
+pub(super) struct DeleteRunQuery {
+    /// Delete a run whose record cannot be read, which is otherwise a 409.
+    pub(super) force: Option<bool>,
+}
+
 /// Query for `DELETE /api/runs`.
 #[derive(Debug, Deserialize)]
 pub(super) struct DeleteRunsQuery {
@@ -829,25 +836,43 @@ pub(super) struct DeleteRunsQuery {
 ///
 /// One definition for the single and bulk routes, so a run that 409s on its own
 /// cannot be silently deleted as part of a sweep.
-fn deletable(id: &str) -> Result<(), (StatusCode, String)> {
+///
+/// `force` covers only the last case below, and only the single-run route ever
+/// passes it.
+fn deletable(id: &str, force: bool) -> Result<(), (StatusCode, String)> {
     let dir = runstate::run_dir(id);
     if !dir.exists() {
         return Err((StatusCode::NOT_FOUND, format!("Run '{id}' not found")));
     }
     // Judged from the run's own record, not by asking the daemon: a daemon that
-    // is down must not make every run undeletable. A directory whose `meta.json`
-    // is unreadable is deletable - such a run is skipped by `list_runs`, so
-    // refusing here would make the unreadable ones permanent, which is exactly
-    // the corner an operator most wants to clear.
+    // is down must not make every run undeletable.
     match runstate::read_meta(id) {
-        Ok(meta) if !runstate::is_terminal_status(&meta.status) => Err((
+        Ok(meta) if runstate::is_terminal_status(&meta.status) => Ok(()),
+        Ok(meta) => Err((
             StatusCode::CONFLICT,
             format!(
                 "Run '{id}' is {}; cancel it before deleting it",
                 meta.status
             ),
         )),
-        _ => Ok(()),
+        // A run whose `meta.json` will not parse says nothing about whether it
+        // is finished, and "cannot read it" must not quietly read as "finished".
+        // An unparseable record is what a *live* run looks like to a binary
+        // whose `RunMeta` has moved on, and the failure mode there is deleting a
+        // running agent's directory and answering 204 - which is precisely what
+        // this route refuses to do for a run it *can* see is live.
+        //
+        // Such a run is still skipped by `list_runs`, which would leave it both
+        // invisible and permanent, so the escape hatch stays - as something the
+        // caller types rather than something that happens to them.
+        Err(_) if force => Ok(()),
+        Err(e) => Err((
+            StatusCode::CONFLICT,
+            format!(
+                "Run '{id}' has no readable record ({e}), so it cannot be shown \
+                 to be finished; pass force=true to delete it anyway"
+            ),
+        )),
     }
 }
 
@@ -877,12 +902,15 @@ fn remove_run(id: &str) -> Result<(), (StatusCode, String)> {
 /// is a different and much larger feature, and refusing is the honest answer.
 /// **404** on a run that is already gone, so a client that lost the response to
 /// its own delete can repeat it rather than treat a missing run as a failure.
+/// **409** too on a run whose record will not parse, which `force=true`
+/// overrides; see [`deletable`] for why that one is not automatic.
 pub(super) async fn delete_run(
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<DeleteRunQuery>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // `run_dir` maps an unsafe id to a path that cannot exist, so a traversal
     // attempt arrives here as an ordinary miss rather than a removed directory.
-    deletable(&id).map_err(|(code, msg)| err(code, msg))?;
+    deletable(&id, query.force.unwrap_or(false)).map_err(|(code, msg)| err(code, msg))?;
     remove_run(&id).map_err(|(code, msg)| err(code, msg))?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -935,7 +963,10 @@ pub(super) async fn delete_runs(
     let mut deleted = Vec::new();
     let mut skipped = Vec::new();
     for id in targets {
-        match deletable(&id).and_then(|()| remove_run(&id)) {
+        // Never forced. A sweep names runs by a predicate rather than one at a
+        // time, so an unreadable record inside it is far likelier to be
+        // collateral than the thing the operator meant to clear.
+        match deletable(&id, false).and_then(|()| remove_run(&id)) {
             Ok(()) => deleted.push(id),
             Err((_, reason)) => skipped.push(SkippedRun { id, reason }),
         }

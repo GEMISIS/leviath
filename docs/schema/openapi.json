@@ -416,7 +416,7 @@
           "runs"
         ],
         "summary": "Delete one run's record",
-        "description": "Removes a finished run's directory from disk. Distinct from DELETE /api/agents/{id}, which cancels the run and leaves the record: one stops the work, the other forgets it happened.\n\nDeletion is real and irreversible - the directory and everything in it, including the transcript. A console offering a \"Delete\" that only hid the run locally would tell somebody clearing a sensitive transcript that it was gone when it was not.\n\n409 on a live run: removing a directory out from under a running agent is a different and much larger feature, so cancel it first. 404 on a run that is already gone, so a client that lost the response to its own delete can repeat it rather than treat a missing run as a failure.",
+        "description": "Removes a finished run's directory from disk. Distinct from DELETE /api/agents/{id}, which cancels the run and leaves the record: one stops the work, the other forgets it happened.\n\nDeletion is real and irreversible - the directory and everything in it, including the transcript. A console offering a \"Delete\" that only hid the run locally would tell somebody clearing a sensitive transcript that it was gone when it was not.\n\n409 on a live run: removing a directory out from under a running agent is a different and much larger feature, so cancel it first. 404 on a run that is already gone, so a client that lost the response to its own delete can repeat it rather than treat a missing run as a failure. 409 as well on a run whose record will not parse, which force=true overrides.",
         "parameters": [
           {
             "name": "id",
@@ -426,6 +426,15 @@
               "type": "string"
             },
             "description": "The run id."
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Delete a run whose meta.json will not parse, which is otherwise a 409. A record that cannot be read is not proof the run finished - that is what a live run looks like to a binary whose RunMeta has moved on - so this is something the caller types rather than the default. The bulk route never forces."
           }
         ],
         "responses": {
