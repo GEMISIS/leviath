@@ -1439,4 +1439,30 @@ mod tests {
         let total = system + message;
         assert!(total <= 4, "total breakpoints: {total}");
     }
+
+    /// A blueprint declares its pinned regions up front and most are empty for
+    /// most of a run - deep-researcher has eight, of which four were empty at
+    /// the point it failed against ollama. They contribute no system block,
+    /// which is worth pinning: it bounds how many system messages a provider
+    /// that counts them actually receives.
+    #[test]
+    fn an_empty_pinned_region_assembles_into_no_system_block() {
+        let mut window = ContextWindow::new(10_000);
+        let mut filled = Region::new("task".to_string(), RegionKind::Pinned, 1000);
+        filled
+            .add_entry("do the thing".to_string(), 5)
+            .expect("fits");
+        window.add_region(filled);
+        // Declared, never written to - the common case mid-run.
+        window.add_region(Region::new("scope".to_string(), RegionKind::Pinned, 1000));
+        window.add_region(Region::new("notes".to_string(), RegionKind::Pinned, 1000));
+
+        let assembled = window.assemble();
+        let texts: Vec<&str> = assembled
+            .system_blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["do the thing"], "only the region with content");
+    }
 }
