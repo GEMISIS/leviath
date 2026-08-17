@@ -7,8 +7,8 @@
 //! questions to arrive with.
 
 use super::block_cache::{
-    CACHE_CHUNK_TOKENS, append_only_chunks, block_hash, block_sort_priority,
-    mark_recently_changed_run, push_chunked, system_prefix_hash, warn_on_unstable_declaration,
+    block_hash, block_sort_priority, lifecycle_cache_hint, mark_recently_changed_run,
+    push_bracketed, push_chunked, system_prefix_hash, warn_on_unstable_declaration,
 };
 use super::*;
 
@@ -781,59 +781,14 @@ impl ContextWindow {
 
                 // Compacting / Temporary / Clearable → system blocks
                 leviath_core::RegionKind::Compacting { .. } => {
-                    let entries = region
-                        .content
-                        .iter()
-                        .map(|e| e.content.clone())
-                        .collect::<Vec<_>>();
-                    // Split only when the region declared that it grows; see
-                    // `push_chunked` for why the kind cannot answer that.
-                    let chunks = match region.volatility {
-                        leviath_core::Volatility::Grows => {
-                            append_only_chunks(&entries, CACHE_CHUNK_TOKENS)
-                        }
-                        _ => vec![entries.join("\n\n")],
-                    };
-                    for (index, chunk) in chunks.iter().enumerate() {
-                        let text = match index {
-                            0 => format!("[{}]:\n{}", region.name, chunk),
-                            _ => format!("[{} continued]:\n{}", region.name, chunk),
-                        };
-                        system_blocks.push(leviath_providers::SystemBlock {
-                            text,
-                            cache_hint: CacheHint::UntilChanged,
-                            volatility: region.volatility,
-                            region: region.name.clone(),
-                        });
-                    }
+                    push_bracketed(&mut system_blocks, region, CacheHint::UntilChanged);
                 }
-                leviath_core::RegionKind::Temporary => {
-                    let text = region
-                        .content
-                        .iter()
-                        .map(|e| e.content.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    system_blocks.push(leviath_providers::SystemBlock {
-                        text: format!("[{}]:\n{}", region.name, text),
-                        cache_hint: CacheHint::Never,
-                        volatility: region.volatility,
-                        region: region.name.clone(),
-                    });
-                }
-                leviath_core::RegionKind::Clearable => {
-                    let text = region
-                        .content
-                        .iter()
-                        .map(|e| e.content.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    system_blocks.push(leviath_providers::SystemBlock {
-                        text: format!("[{}]:\n{}", region.name, text),
-                        cache_hint: CacheHint::Never,
-                        volatility: region.volatility,
-                        region: region.name.clone(),
-                    });
+                // Both say when the region is thrown away, not how it moves
+                // in between, so the hint comes from the declaration - see
+                // `lifecycle_cache_hint` (issue #490).
+                leviath_core::RegionKind::Temporary | leviath_core::RegionKind::Clearable => {
+                    let hint = lifecycle_cache_hint(region.volatility);
+                    push_bracketed(&mut system_blocks, region, hint);
                 }
 
                 // Custom (script-backed) regions render through their Rhai

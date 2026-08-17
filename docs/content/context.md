@@ -321,6 +321,15 @@ is what makes it faster.
 > is an ordinary move, and [tool routing](#routing-tool-output) sends read results straight
 > into one. Only the blueprint knows which of yours is which.
 
+`temporary` and `clearable` are worth declaring for the same reason, and the payoff is larger.
+Both names describe when the region is *thrown away* - one at stage exit, the other on demand -
+and say nothing about whether the contents hold still in between. Undeclared they are treated as
+uncacheable, which is right at the boundary and wrong everywhere else: a stage that reads a corpus
+into a `temporary` region and then works through it for forty calls re-sends the whole corpus at
+full rate on every one of them. Measured on one such stage: 5.36M tokens across 46 calls, the
+largest single cost line in the run. Declaring it `grows` splits it the same way any other growing
+region is split, so the part already read caches and only the newest excerpt is re-sent.
+
 If a region declares `stable` and then keeps changing, Leviath says so in the log rather than
 silently paying for it: the declaration is a hint it checks, not a promise it trusts.
 

@@ -13,6 +13,18 @@ same list.
 
 ## Unreleased
 
+- Changed: a `temporary` or `clearable` region declared `volatility = "grows"`
+  is now split and cached like any other growing region. Both kinds say when the
+  region is thrown away - one at stage exit, the other on demand - and nothing
+  about whether the contents hold still in between, but both were tagged
+  uncacheable on the strength of that name. Right at the boundary, wrong
+  everywhere else: a stage that reads a corpus into a `temporary` region and
+  then works through it for forty calls re-sent the whole corpus at full rate on
+  every one of them, which measured as 5.36M tokens across 46 calls and the
+  largest single cost line in that run. A region that declares nothing keeps
+  exactly the behaviour it had, so this only reaches a blueprint that asked for
+  it.
+
 - Fixed: the live conversation always ends the request. A custom region is the
   only kind whose `render` hook can emit conversation messages, and it emitted
   them at whatever position its author declared the region - so one declared
