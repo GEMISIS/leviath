@@ -609,6 +609,9 @@ impl ContextWindow {
 
         let mut system_blocks = Vec::new();
         let mut messages: Vec<leviath_providers::Message> = Vec::new();
+        // Messages a custom region rendered. Held apart from the conversation
+        // and spliced in front of it after the loop (issue #486).
+        let mut preamble: Vec<leviath_providers::Message> = Vec::new();
         // One entry per `UntilChanged` system block, in assembly order, holding
         // the newest entry timestamp of the region that produced it. Feeds the
         // cache-breakpoint split after the sort.
@@ -849,7 +852,10 @@ impl ContextWindow {
                         },
                         crate::custom_region::RenderSink {
                             system_blocks: &mut system_blocks,
-                            messages: &mut messages,
+                            // Not into the conversation directly: wherever this
+                            // region sits in the manifest, what it renders comes
+                            // before the dialogue. See the splice below.
+                            messages: &mut preamble,
                         },
                     );
                 }
@@ -892,6 +898,29 @@ impl ContextWindow {
                     volatile_recency.push(newest);
                 }
             }
+        }
+
+        // ── The conversation ends the request ────────────────────────────
+        //
+        // A model treats the end of its input as "now", and for an agent the
+        // thing that is now is the dialogue it is having. Every other region is
+        // reference material, however recently it was written.
+        //
+        // Only a custom region can render into the conversation at all, and it
+        // rendered wherever its author happened to declare it - so a region
+        // declared after the conversation put its contents *behind* the last
+        // user turn. On a small region that is untidy; on one holding a document
+        // corpus it replaces the dialogue in the position the model weighs most
+        // heavily, and the agent stops behaving like it is in a conversation
+        // (issue #486).
+        //
+        // Splicing rather than sorting: a region declared before the
+        // conversation already rendered in front of it and stays exactly where
+        // it was, so this changes nothing for a blueprint that was already
+        // ordered sensibly.
+        if !preamble.is_empty() {
+            let conversation = std::mem::replace(&mut messages, preamble);
+            messages.extend(conversation);
         }
 
         // ── Sort system blocks for optimal prefix caching ────────────────
