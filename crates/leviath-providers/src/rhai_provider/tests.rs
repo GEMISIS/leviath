@@ -739,3 +739,78 @@ fn tokio_block_helper_used() {
     let out = tokio_block(p.infer(&request("m"))).unwrap();
     assert_eq!(out.content, "z");
 }
+
+/// A script provider sees what each system block is and how much it moves, so it
+/// can build its own cache scheme rather than being handed Anthropic's.
+///
+/// This is the whole reason the ordering policy lives in the Anthropic provider
+/// and the *facts* live on the block: a script talking to some other API has a
+/// different cache shape - different marker count, different minimum, maybe
+/// none at all - and needs the same inputs to make its own decision.
+#[test]
+fn a_script_sees_each_system_block_region_and_volatility() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.rhai");
+    // Echo back what the script can see, so a change to the wire shape fails
+    // here rather than silently removing a capability script authors rely on.
+    std::fs::write(
+        &path,
+        format!(
+            "{NOOP_INIT}fn inference(s, r) {{ \
+                let seen = \"\"; \
+                for b in r.system {{ \
+                    if seen != \"\" {{ seen += \",\"; }} \
+                    seen += b.region + \":\" + b.volatility; \
+                }} \
+                #{{ content: seen }} \
+            }}"
+        ),
+    )
+    .unwrap();
+    let p = RhaiProvider::from_script(
+        &path,
+        std::sync::Arc::new(crate::rhai_provider::host::ReqwestExecutor::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        )),
+        crate::rhai_provider::ScriptProviderSettings {
+            name: "test".to_string(),
+            init_config: serde_json::json!({}),
+            caps: HashMap::new(),
+            rate_limit: None,
+            request_timeout_secs: None,
+            env_allowlist: no_env_allowlist(),
+        },
+    )
+    .unwrap();
+
+    let request = InferenceRequest {
+        system: vec![
+            crate::provider::SystemBlock {
+                text: "the task".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+                volatility: leviath_core::Volatility::Stable,
+                region: "task".to_string(),
+            },
+            crate::provider::SystemBlock {
+                text: "findings so far".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+                volatility: leviath_core::Volatility::Grows,
+                region: "findings".to_string(),
+            },
+        ],
+        messages: vec![crate::provider::Message {
+            role: "user".to_string(),
+            content: "hello".into(),
+            cache_breakpoint: false,
+        }],
+        model: "m".to_string(),
+        max_tokens: 16,
+        temperature: 0.0,
+        tools: vec![],
+        extra: serde_json::Value::Null,
+        request_timeout_secs: None,
+    };
+
+    let response = tokio_block(p.infer(&request)).expect("the script runs");
+    assert_eq!(response.content, "task:stable,findings:grows");
+}

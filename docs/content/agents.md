@@ -185,6 +185,35 @@ fill at once. With a percentage, `max_tokens` caps and `min_tokens` floors the r
 without one, `max_tokens` is the fixed budget. Compacting regions also take
 `threshold_tokens`, the fill level that triggers compaction.
 
+### Say how much a region moves
+
+```toml
+[context.regions.task]
+kind = "pinned"
+volatility = "stable"      # seeded once, never written again
+
+[context.regions.findings]
+kind = "pinned"
+volatility = "grows"       # the agent appends to it
+
+[context.regions.plan]
+kind = "pinned"
+volatility = "rewritten"   # revised in place each time - the default
+```
+
+Providers cache the prompt by prefix, so a region that changes invalidates the cache for every
+region assembled behind it. `volatility` is what orders them: `stable` first, `grows` next and
+split so its settled part still caches, `rewritten` last where it invalidates only itself.
+
+The kind cannot answer this, which is why the setting exists. Every region above is `pinned` -
+that means "never evicted", not "never written", and `context_write` into a findings region is an
+ordinary move. Only the blueprint knows which is which.
+
+Leaving it out is safe: an unclassified region is assumed to change and placed last, so declaring
+can only improve matters. A region that claims `stable` and then keeps changing is named in the
+log, because a wrong declaration is worse than none - it puts churn at the front of the prompt,
+where it costs the most. See [what caching costs](/docs/context#what-caching-costs).
+
 A stage can override the whole layout for just itself with `[stages.<name>.context.regions]`. The
 per-stage layout applies when the stage is entered, and uses the same syntax:
 

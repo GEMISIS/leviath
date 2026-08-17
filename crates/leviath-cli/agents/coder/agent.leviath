@@ -681,18 +681,18 @@ why you did it this way.
 
 [context.regions]
 # ── Inputs (pinned, stable, cacheable) ──
-task         = { kind = "pinned", budget = "2%", max_tokens = 4000, required = true, required_message = "Describe the task via --task (or the API/ACP task field)." }
+task         = { kind = "pinned", budget = "2%", max_tokens = 4000, required = true, required_message = "Describe the task via --task (or the API/ACP task field).", volatility = "stable" }
 # Optional caller limits: --constraints "must stay on Node 18, no new deps".
-constraints  = { kind = "pinned", budget = "1%", max_tokens = 2000, seed = "constraints" }
+constraints  = { kind = "pinned", budget = "1%", max_tokens = 2000, seed = "constraints", volatility = "stable" }
 # Pre-loaded on startup: architecture / design docs (missing files skipped).
 # Pre-loaded on startup: coding style, lint rules, contribution guide (missing files skipped).
-conventions  = { kind = "pinned", budget = "2%", max_tokens = 3000, seed = { files = ["CONVENTIONS.md", "CONTRIBUTING.md", "STYLEGUIDE.md", "STYLE.md", ".editorconfig", "rustfmt.toml", ".rustfmt.toml", ".prettierrc", ".eslintrc.json", "ruff.toml", "pyproject.toml"] } }
-architecture = { kind = "pinned", budget = "3%", max_tokens = 6000, seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "docs/architecture.md", "README.md"] } }
+conventions  = { kind = "pinned", budget = "2%", max_tokens = 3000, seed = { files = ["CONVENTIONS.md", "CONTRIBUTING.md", "STYLEGUIDE.md", "STYLE.md", ".editorconfig", "rustfmt.toml", ".rustfmt.toml", ".prettierrc", ".eslintrc.json", "ruff.toml", "pyproject.toml"] }, volatility = "stable" }
+architecture = { kind = "pinned", budget = "3%", max_tokens = 6000, seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "docs/architecture.md", "README.md"] }, volatility = "stable" }
 plan         = { kind = "pinned", budget = "5%", max_tokens = 6000 }
 # Verified findings from a `prototype` spike: the assumption, the verdict, and
 # the command that settled it - including what was RULED OUT. Pinned so neither
 # implement nor reassess redoes the spike.
-prototypes   = { kind = "pinned", budget = "4%", max_tokens = 6000 }
+prototypes   = { kind = "pinned", budget = "4%", max_tokens = 6000, volatility = "grows" }
 # Written by the RUNTIME when a `stuck` edge fires (issue #106): which threshold
 # tripped and why. Pinned so it survives the edge transform into `reassess`.
 stuck_report = { kind = "pinned", budget = "1%", max_tokens = 2000 }
@@ -705,24 +705,24 @@ error_report = { kind = "pinned", budget = "1%", max_tokens = 2000 }
 # on POSIX and Windows shells; outside a git repo it fails and this is simply
 # left empty (non-fatal), and oversized output is trimmed to the budget.
 # Refuse it with `--no-seed-commands` or `[security] allow_seed_commands = false`.
-repo_files   = { kind = "pinned", budget = "3%", max_tokens = 4000, seed = { command = "git ls-files" } }
+repo_files   = { kind = "pinned", budget = "3%", max_tokens = 4000, seed = { command = "git ls-files" }, volatility = "stable" }
 
 # ── Discovery (issue #108): written by the discover stage, read by every later
 # stage. Pinned, so no edge transform can clear or compact them. `required` puts
 # the runtime's own gate behind them (`require_context_regions`): the discover
 # stage is re-run with a nudge until it actually fills them, so the synthesized
 # workflow is a commitment the review stage can hold the run to, not a suggestion.
-discovery    = { kind = "pinned", budget = "4%", max_tokens = 6000, required = true, required_message = "Populate `discovery` (context_write) with this project's build system, test runner, layout and conventions before leaving the discover stage." }
-workflow     = { kind = "pinned", budget = "2%", max_tokens = 3000, required = true, required_message = "Populate `workflow` (context_write) with the tier and the literal BASELINE / VERIFY / DONE WHEN lines before leaving the discover stage." }
+discovery    = { kind = "pinned", budget = "4%", max_tokens = 6000, required = true, required_message = "Populate `discovery` (context_write) with this project's build system, test runner, layout and conventions before leaving the discover stage.", volatility = "grows" }
+workflow     = { kind = "pinned", budget = "2%", max_tokens = 3000, required = true, required_message = "Populate `workflow` (context_write) with the tier and the literal BASELINE / VERIFY / DONE WHEN lines before leaving the discover stage.", volatility = "grows" }
 # Pre-change test state, captured by implement before its first edit. Without it
 # a regression is indistinguishable from a pre-existing failure.
 baseline     = { kind = "pinned", budget = "3%", max_tokens = 4000 }
 
 # ── Knowledge (non-volatile; compacts to *_history) ──
-codebase         = { kind = "compacting",      budget = "25%", compact_at = "80%", threshold_tokens = 25000, max_tokens = 40000 }
-codebase_history = { kind = "compact_history", source_region = "codebase",      budget = "2%", max_tokens = 8000 }
+codebase         = { kind = "compacting",      budget = "25%", compact_at = "80%", threshold_tokens = 25000, max_tokens = 40000, volatility = "grows" }
+codebase_history = { kind = "compact_history", source_region = "codebase",      budget = "2%", max_tokens = 8000, volatility = "grows" }
 implementation   = { kind = "compacting",      budget = "35%", compact_at = "80%", threshold_tokens = 32000, max_tokens = 40000 }
-impl_history     = { kind = "compact_history", source_region = "implementation", budget = "2%", max_tokens = 8000 }
+impl_history     = { kind = "compact_history", source_region = "implementation", budget = "2%", max_tokens = 8000, volatility = "grows" }
 
 # ── Working records (sliding windows) + test feedback ──
 # decisions: WHY choices were made. changelog: which files changed.

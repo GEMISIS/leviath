@@ -189,13 +189,13 @@ reads instead of the report, not a second copy of it.
 # absolute `max_tokens`/`threshold_tokens` guard-rail. Percentages are ceilings.
 [context.regions]
 # The research question - required. Supplied via --task (or the API/ACP task field).
-query          = { kind = "pinned", budget = "1%", max_tokens = 1000, required = true, seed = "task", required_message = "State the research question via --task." }
+query          = { kind = "pinned", budget = "1%", max_tokens = 1000, required = true, seed = "task", required_message = "State the research question via --task.", volatility = "stable" }
 # Optional caller bounds: --scope "peer-reviewed sources since 2020 only".
-scope          = { kind = "pinned", budget = "1%", max_tokens = 1000, seed = "scope" }
+scope          = { kind = "pinned", budget = "1%", max_tokens = 1000, seed = "scope", volatility = "stable" }
 # Growing bibliography with credibility notes (curated by the agent).
-sources_index  = { kind = "pinned", budget = "3%", max_tokens = 3000 }
+sources_index  = { kind = "pinned", budget = "3%", max_tokens = 3000, volatility = "grows" }
 # Citation/confidence rules (seeded with a sensible default the agent follows).
-format         = { kind = "pinned", budget = "1%", max_tokens = 500, seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Mark each finding's confidence as high / medium / low based on source count and credibility." } }
+format         = { kind = "pinned", budget = "1%", max_tokens = 500, seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Mark each finding's confidence as high / medium / low based on source count and credibility." }, volatility = "stable" }
 
 # Raw source material (bulk, evictable).
 raw_findings   = { kind = "temporary", budget = "30%", max_tokens = 40000 }
@@ -205,7 +205,7 @@ contradictions = { kind = "clearable",      budget = "3%", max_tokens = 3000 }
 
 # Synthesis workspace (compacts to a running history when it grows).
 synthesis         = { kind = "compacting",      budget = "40%", compact_at = "80%", threshold_tokens = 30000, max_tokens = 50000 }
-synthesis_history = { kind = "compact_history", source_region = "synthesis", budget = "3%", max_tokens = 10000 }
+synthesis_history = { kind = "compact_history", source_region = "synthesis", budget = "3%", max_tokens = 10000, volatility = "grows" }
 
 # The message stream. An explicit sliding_window `conversation` region is required -
 # the per-stage layout is rebuilt from this table on each transition, so an

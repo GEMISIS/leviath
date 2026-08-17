@@ -13,6 +13,15 @@ same list.
 
 ## Unreleased
 
+- Changed: the bundled agents declare how much each of their regions moves, so
+  the prompt-cache ordering applies to them rather than shipping switched off.
+  43 regions across the seven: a task, a query or a seeded convention file is
+  `stable`; a bibliography, a routed tool result or a compaction history is
+  `grows`. Anything revised in place, like the coder's plan, keeps the
+  pessimistic default. Measured on `log-analyzer`, the manifest the only
+  difference: the cache hit rate went from 20.5% to 30.7% and the cost per
+  iteration fell about 7% - prompt caching compounds with run length and region
+  size, so a short run shows a fraction of what a long one does.
 - Fixed: Anthropic cache markers are placed in front of a region that changes,
   rather than after it, and more than one of the four is used. They were grouped
   by a hint derived from the region's kind, so a prompt of several pinned

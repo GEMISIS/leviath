@@ -332,24 +332,24 @@ If nothing blocking turned up, say so plainly - a clean review is a result.
 [context.regions]
 # The code/diff to review - required. Supply via `--diff <text|@file>` (CLI),
 # a ---region:diff--- block (ACP), or the API `regions` field.
-diff            = { kind = "pinned", budget = "20%", max_tokens = 20000, required = true, seed = "diff", required_message = "Provide the code or diff to review via --diff <text|@file>." }
+diff            = { kind = "pinned", budget = "20%", max_tokens = 20000, required = true, seed = "diff", required_message = "Provide the code or diff to review via --diff <text|@file>.", volatility = "stable" }
 # Optional caller focus, e.g. --criteria "focus on security / backwards-compat".
-review_criteria = { kind = "pinned", budget = "2%",  max_tokens = 3000, seed = "criteria" }
+review_criteria = { kind = "pinned", budget = "2%",  max_tokens = 3000, seed = "criteria", volatility = "stable" }
 # Pre-loaded on startup: architecture / conventions (missing files skipped).
-project_context = { kind = "pinned", budget = "4%",  max_tokens = 5000, seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "CONVENTIONS.md", "CONTRIBUTING.md", "README.md"] } }
+project_context = { kind = "pinned", budget = "4%",  max_tokens = 5000, seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "CONVENTIONS.md", "CONTRIBUTING.md", "README.md"] }, volatility = "stable" }
 # Deterministic repo scan, run once at spawn (issue #108) - the discover stage
 # starts from facts instead of burning iterations on `ls`. `git ls-files` behaves
 # identically on POSIX and Windows shells; outside a git repo it fails and this is
 # simply left empty (non-fatal), and oversized output is trimmed to the budget.
 # Refuse it with `--no-seed-commands` or `[security] allow_seed_commands = false`.
-repo_files      = { kind = "pinned", budget = "3%",  max_tokens = 4000, seed = { command = "git ls-files" } }
+repo_files      = { kind = "pinned", budget = "3%",  max_tokens = 4000, seed = { command = "git ls-files" }, volatility = "stable" }
 
 # ── Discovery (issue #108): written by the discover stage, read by every later
 # stage. Pinned, so no edge transform can clear or compact them. `required` puts
 # the runtime's own gate behind them (`require_context_regions`): the discover
 # stage is re-run with a nudge until it actually fills them.
-discovery       = { kind = "pinned", budget = "4%",  max_tokens = 5000, required = true, required_message = "Populate `discovery` (context_write) with this project's build system, test runner, layout and conventions before leaving the discover stage." }
-workflow        = { kind = "pinned", budget = "2%",  max_tokens = 2000, required = true, required_message = "Populate `workflow` (context_write) with the literal VERIFY / DONE WHEN lines before leaving the discover stage." }
+discovery       = { kind = "pinned", budget = "4%",  max_tokens = 5000, required = true, required_message = "Populate `discovery` (context_write) with this project's build system, test runner, layout and conventions before leaving the discover stage.", volatility = "grows" }
+workflow        = { kind = "pinned", budget = "2%",  max_tokens = 2000, required = true, required_message = "Populate `workflow` (context_write) with the literal VERIFY / DONE WHEN lines before leaving the discover stage.", volatility = "grows" }
 
 # The area workers' submitted findings, on the way into the deep review. Its
 # budget is what each worker's share is divided from, so it gets a slice the size

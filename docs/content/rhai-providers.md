@@ -84,7 +84,8 @@ functions are available here. Return a state map that is persisted and passed to
 
 ```jsonc
 {
-  "system":   [ { "text": "...", "cache_hint": "..." } ],
+  "system":   [ { "text": "...", "cache_hint": "...",
+                  "region": "findings", "volatility": "grows" } ],
   "messages": [ { "role": "user", "content": "...", "cache_breakpoint": false } ],
   "tools":    [ { "name": "...", "description": "...", "parameters": { /* JSON schema */ } } ],
   "model": "...", "max_tokens": 1024, "temperature": 0.7,
@@ -96,6 +97,44 @@ Two field subtleties. A message's `content` is a string on plain turns, but an *
 blocks** (`tool_use`, `tool_result`) whenever the agent is mid tool work, so forward it untouched
 unless your API needs a transform. And `cache_breakpoint` is present only when `true`; a normal
 message carries no such key.
+
+### Building your own prompt cache
+
+Each system block says which region it came from and how much that region moves, so a provider
+can arrange the prompt for whatever cache its API has:
+
+| field | meaning |
+|---|---|
+| `region` | the region it was rendered from, or `""` for a block that is not one (a hint, a preamble) |
+| `volatility` | `"stable"`, `"grows"` or `"rewritten"` - what the blueprint declared. See [context regions](/docs/context#what-caching-costs) |
+
+These are facts about the content, deliberately not instructions. Leviath does **not** decide your
+cache policy for you, because every API's differs: Anthropic caches by prefix with four markers
+and a minimum length, and yours may have a different count, a different floor, or no cache at all.
+The built-in Anthropic provider turns these same fields into its own policy and is worth reading as
+one worked example.
+
+The rule that makes them useful is prefix matching, if your API works that way: a marker caches
+everything *before* it, so one placed after content that changes can never be read back. That makes
+the arrangement worth having stable content first and churn last, and a marker belongs in front of
+the first `"rewritten"` block rather than behind it.
+
+```rhai
+// Send the settled part of the prompt in a form your API can cache, and the
+// churn after it.
+fn inference(state, request) {
+    let stable = "";
+    let volatile = "";
+    for b in request.system {
+        if b.volatility == "rewritten" { volatile += b.text + "\n\n"; }
+        else { stable += b.text + "\n\n"; }
+    }
+    // ... send `stable` as your API's cacheable prefix, `volatile` after it
+}
+```
+
+A block whose region declared nothing arrives as `"rewritten"`, the pessimistic value, so a script
+that trusts these fields is never told something holds still when it does not.
 
 and must return:
 
