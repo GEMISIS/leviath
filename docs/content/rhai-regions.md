@@ -93,6 +93,11 @@ Providers reject a request where a tool call has no matching result, or the othe
 strips any unpaired tool block before sending, so a script with a bug in it cannot produce a request
 the provider will refuse.
 
+Emitted messages render **in front of the live conversation**, wherever the region is declared. A
+model reads the end of its input as "now", and for an agent that is the dialogue it is having, so
+the conversation always ends the request. Declaring a region after the conversation to append a
+trailing reminder does not work; use a [nudge](/docs/stages) for that.
+
 `on_write(ctx)` is **optional**. It sees each entry headed into the region, with
 `ctx = { region, entry: { content, kind, tokens } }`. Return a string to replace the content (tokens
 re-estimated, kind preserved), `true` or `()` to accept unchanged, or `false` to drop the entry.

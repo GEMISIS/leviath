@@ -2493,6 +2493,135 @@ mod tests {
         assert_eq!(assembled.messages[3].content.as_text(), "Now fix the bug");
     }
 
+    // ─── the conversation ends the request (issue #486) ──────────────────
+
+    /// A custom region is the only kind that can render into the conversation,
+    /// and it used to render at whatever position its author declared it - so
+    /// one declared after the conversation put its contents behind the last
+    /// user turn. With a document corpus in that region, the thing sitting in
+    /// the position the model weighs most heavily stopped being the dialogue.
+    #[test]
+    fn a_custom_region_declared_after_the_conversation_still_renders_before_it() {
+        let mut window = ContextWindow::new(100_000);
+
+        let mut conversation = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: Default::default(),
+            },
+            50_000,
+        );
+        conversation
+            .add_typed_entry(
+                "find the conflicts".to_string(),
+                10,
+                leviath_core::EntryKind::UserMessage,
+            )
+            .unwrap();
+        conversation
+            .add_typed_entry(
+                "keep going".to_string(),
+                10,
+                leviath_core::EntryKind::UserMessage,
+            )
+            .unwrap();
+        window.add_region(conversation);
+
+        let mut corpus = Region::new(
+            "corpus".to_string(),
+            RegionKind::Custom {
+                script: "s.rhai".to_string(),
+                persistent: false,
+            },
+            10_000,
+        );
+        corpus.add_entry("x".to_string(), 1).unwrap();
+        window.add_region(corpus);
+        window.region_scripts.insert(
+            "s.rhai".to_string(),
+            std::sync::Arc::new(
+                leviath_scripting::region_hook::compile(
+                    "s.rhai",
+                    r#"fn render(ctx) {
+                        #{ messages: [ #{ role: "user", content: "REFERENCE" } ] }
+                    }"#,
+                )
+                .unwrap(),
+            ),
+        );
+
+        let assembled = window.assemble();
+
+        let texts: Vec<String> = assembled
+            .messages
+            .iter()
+            .map(|m| m.content.as_text())
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["REFERENCE", "find the conflicts", "keep going"],
+            "reference material renders in front of the dialogue, never behind it"
+        );
+    }
+
+    /// The same splice must not disturb a blueprint that was already ordered
+    /// sensibly - a custom region declared *before* the conversation was
+    /// already rendering in front of it and stays exactly where it was.
+    #[test]
+    fn a_custom_region_declared_before_the_conversation_does_not_move() {
+        let mut window = ContextWindow::new(100_000);
+
+        let mut corpus = Region::new(
+            "corpus".to_string(),
+            RegionKind::Custom {
+                script: "s.rhai".to_string(),
+                persistent: false,
+            },
+            10_000,
+        );
+        corpus.add_entry("x".to_string(), 1).unwrap();
+        window.add_region(corpus);
+        window.region_scripts.insert(
+            "s.rhai".to_string(),
+            std::sync::Arc::new(
+                leviath_scripting::region_hook::compile(
+                    "s.rhai",
+                    r#"fn render(ctx) {
+                        #{ messages: [ #{ role: "user", content: "REFERENCE" } ] }
+                    }"#,
+                )
+                .unwrap(),
+            ),
+        );
+
+        let mut conversation = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: Default::default(),
+            },
+            50_000,
+        );
+        conversation
+            .add_typed_entry(
+                "find the conflicts".to_string(),
+                10,
+                leviath_core::EntryKind::UserMessage,
+            )
+            .unwrap();
+        window.add_region(conversation);
+
+        let assembled = window.assemble();
+
+        let texts: Vec<String> = assembled
+            .messages
+            .iter()
+            .map(|m| m.content.as_text())
+            .collect();
+        assert_eq!(texts, vec!["REFERENCE", "find the conflicts"]);
+    }
+
     // ─── assemble() "Begin." fallback ─────────────────────────────────────
 
     #[test]

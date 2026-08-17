@@ -13,6 +13,17 @@ same list.
 
 ## Unreleased
 
+- Fixed: the live conversation always ends the request. A custom region is the
+  only kind whose `render` hook can emit conversation messages, and it emitted
+  them at whatever position its author declared the region - so one declared
+  after the conversation put its contents *behind* the last user turn. A model
+  reads the end of its input as "now", and for an agent that is the dialogue it
+  is having; with a document corpus in that region, what sat in the position the
+  model weighs most heavily was a wall of reference material and the agent
+  stopped behaving like it was in a conversation. Emitted messages now render in
+  front of the conversation wherever the region sits, which leaves a blueprint
+  that already declared it earlier completely unchanged.
+
 - Fixed: the context window corrects its own token estimate against what the
   provider reports charging, so a run on a hard context window evicts in time
   instead of overflowing it. Everything is sized with bytes-over-four, which on
