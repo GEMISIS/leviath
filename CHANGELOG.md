@@ -13,6 +13,27 @@ same list.
 
 ## Unreleased
 
+- Fixed: the context window corrects its own token estimate against what the
+  provider reports charging, so a run on a hard context window evicts in time
+  instead of overflowing it. Everything is sized with bytes-over-four, which on
+  dense ASCII - code, mostly - reads about 10% light. A 27B model pinned to
+  `num_ctx 32768` therefore assembled 32,497 real tokens while believing it was
+  inside its budgets: the 0.9 eviction trigger was meant to leave 3,277 tokens
+  of margin and was really leaving 269, less than one tool result, so the next
+  read overflowed the window. Every response already reports `prompt_tokens`
+  from the server's own tokenizer, and the runtime now compares that against
+  what it believed the same request would cost. The correction only ever
+  tightens and only on measured evidence: a provider that charges less than
+  estimated, which is every provider on text with any non-ASCII in it, changes
+  nothing, and nothing is held back from a workload not seen drifting.
+- Fixed: Ollama's `no user query found in messages` is reported as the size
+  error it is, when the request that provoked it did carry a user turn. Ollama
+  does not refuse an oversized request, it truncates from the front, and when
+  the last user turn is what falls off it then reports the conversation's shape
+  rather than its size - which sent two separate investigations after
+  message-shape bugs. Since a `500` reads as transient it was also retried on
+  backoff, and every attempt sent the same oversized conversation.
+
 - Breaking: every MCP tool is named `<server>__<tool>`, whether or not anything
   would have collided. A tool used to be advertised bare and prefixed only on a
   clash, which made the name a function of registration order: registration

@@ -82,6 +82,54 @@ fn next_tool_call_id() -> String {
 /// Ollama does not report anywhere. `None` leaves the compiled table in charge
 /// rather than recording a guess that would outrank it - the same rule the
 /// OpenRouter provider follows for a model its `/models` says nothing about.
+/// Whether an error is Ollama saying the conversation reached it with no user
+/// turn in it.
+///
+/// Matched on the fragment rather than the whole sentence: the surrounding text
+/// is an HTTP status and a JSON envelope that the shared send path formats, and
+/// the phrase itself is what Ollama writes.
+fn mentions_dropped_user_turn(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("no user query found")
+}
+
+/// Roughly what the request would have cost, for the size error's sake.
+///
+/// The same byte estimate the rest of the runtime budgets with, which is the
+/// point: this number is meant to be compared against the window the operator
+/// configured, and against what the run's own accounting reported. An exact
+/// count would need the server's tokenizer, and the server has just refused to
+/// talk to us.
+fn estimated_request_tokens(request: &InferenceRequest) -> usize {
+    let blocks = request
+        .system
+        .iter()
+        .map(|b| leviath_core::estimate_tokens(&b.text));
+    let messages = request.messages.iter().map(|m| match &m.content {
+        crate::MessageContent::Text(text) => leviath_core::estimate_tokens(text),
+        crate::MessageContent::Blocks(blocks) => blocks.iter().map(estimated_block_tokens).sum(),
+    });
+    // Tool schemas travel with every request and are charged for every time,
+    // which is easy to forget precisely because nothing in the window holds
+    // them.
+    let tools = request.tools.iter().map(|t| {
+        leviath_core::estimate_tokens(&t.name)
+            + leviath_core::estimate_tokens(&t.description)
+            + leviath_core::estimate_tokens(&t.parameters.to_string())
+    });
+    blocks.chain(messages).chain(tools).sum()
+}
+
+/// One content block's share of [`estimated_request_tokens`].
+fn estimated_block_tokens(block: &crate::ContentBlock) -> usize {
+    match block {
+        crate::ContentBlock::Text { text } => leviath_core::estimate_tokens(text),
+        crate::ContentBlock::ToolUse { name, input, .. } => {
+            leviath_core::estimate_tokens(name) + leviath_core::estimate_tokens(&input.to_string())
+        }
+        crate::ContentBlock::ToolResult { content, .. } => leviath_core::estimate_tokens(content),
+    }
+}
+
 fn effective_window(show: &serde_json::Value) -> Option<usize> {
     let parameters = show.get("parameters")?.as_str()?;
     parameters.lines().find_map(|line| {
@@ -182,6 +230,40 @@ impl OllamaProvider {
              Set the real window with [model_capabilities.\"{model}\"] \
              max_context_tokens = <n>",
         );
+    }
+
+    /// Rewrite Ollama's answer to an overflowed request as the size error it is.
+    ///
+    /// A request past `num_ctx` is not refused. The server truncates it from the
+    /// front until it fits, and when what falls off the front is the last user
+    /// turn it then reports `no user query found in messages` - a message about
+    /// the shape of the conversation, describing a failure of its size. That
+    /// sent two separate investigations after message-shape bugs before a wire
+    /// capture settled it (issues #469, #475, #485).
+    ///
+    /// The test is exact rather than a threshold: if this request carried a user
+    /// message and the server says it received none, the server dropped it, and
+    /// front-truncation is the only thing that drops it. A request that really
+    /// carries no user turn keeps the original error, because then the message
+    /// is telling the truth.
+    ///
+    /// Rewriting also stops the retry loop. `500` reads as transient, so the
+    /// unrewritten error is retried on backoff - and every attempt sends the
+    /// same oversized conversation and is truncated the same way.
+    fn explain_truncation(
+        &self,
+        error: ProviderError,
+        request: &InferenceRequest,
+    ) -> ProviderError {
+        if !mentions_dropped_user_turn(&error.to_string())
+            || !request.messages.iter().any(|m| m.role == "user")
+        {
+            return error;
+        }
+        ProviderError::TokenLimitExceeded {
+            used: estimated_request_tokens(request),
+            max: self.max_context_tokens(&request.model),
+        }
     }
 
     /// Ask the server for every installed model's effective window.
@@ -476,7 +558,8 @@ impl Provider for OllamaProvider {
             None,
             request.request_timeout_secs,
         )
-        .await?;
+        .await
+        .map_err(|e| self.explain_truncation(e, request))?;
 
         let response_body: serde_json::Value = response
             .json()
@@ -505,7 +588,8 @@ impl Provider for OllamaProvider {
             None,
             request.request_timeout_secs,
         )
-        .await?;
+        .await
+        .map_err(|e| self.explain_truncation(e, request))?;
 
         let byte_stream = response.bytes_stream();
         let stream = OllamaNdjsonStream::new(byte_stream);
@@ -2229,6 +2313,154 @@ mod tests {
             extra: serde_json::Value::Null,
             request_timeout_secs: None,
         }
+    }
+
+    // ─── the overflow that reports itself as a message-shape problem ───────
+
+    /// The whole point of the rewrite: a request that carried a user turn, and
+    /// a server that says it received none, is a request that was truncated.
+    #[tokio::test]
+    async fn an_overflowed_request_is_reported_as_a_size_error() {
+        let url = spawn_mock_server(
+            500,
+            "Internal Server Error",
+            br#"{"error":"no user query found in messages"}"#,
+        )
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+
+        let shown = provider
+            .infer(&mock_request())
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            shown.starts_with("Token limit exceeded:"),
+            "the size is what the operator can act on, not the shape: {shown}"
+        );
+        assert!(
+            !shown.contains("no user query"),
+            "and Ollama's own wording is what sent two investigations wrong: {shown}"
+        );
+    }
+
+    /// Retrying an oversized conversation sends the same oversized conversation.
+    /// The unrewritten `500` reads as transient and would be retried on backoff.
+    #[test]
+    fn a_size_error_is_not_retried() {
+        assert!(
+            !ProviderError::TokenLimitExceeded {
+                used: 33_000,
+                max: 32_768
+            }
+            .is_transient(),
+            "no backoff makes an oversized request fit"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_overflowed_stream_request_is_reported_as_a_size_error() {
+        let url = spawn_mock_server(
+            500,
+            "Internal Server Error",
+            br#"{"error":"no user query found in messages"}"#,
+        )
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+
+        let shown = provider
+            .infer_stream(&mock_request())
+            .await
+            .err()
+            .map_or(String::new(), |e| e.to_string());
+
+        assert!(
+            shown.starts_with("Token limit exceeded:"),
+            "streaming overflows the same way and should report it the same: {shown}"
+        );
+    }
+
+    /// When the conversation really carries no user turn, Ollama is describing
+    /// what it received and there is nothing to reinterpret.
+    #[test]
+    fn a_conversation_with_no_user_turn_keeps_ollamas_own_words() {
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
+        let mut request = mock_request();
+        request.messages[0].role = "assistant".to_string();
+        let original = ProviderError::ApiError("HTTP 500: no user query found in messages".into());
+
+        let kept = provider.explain_truncation(original, &request).to_string();
+
+        assert!(
+            kept.contains("no user query found"),
+            "the message is accurate here, so it survives: {kept}"
+        );
+    }
+
+    /// Every part of the request is charged for, including the two that no
+    /// region holds: the tool schemas and the tool results.
+    #[test]
+    fn the_size_estimate_counts_everything_the_request_carries() {
+        let mut request = mock_request();
+        request.system = vec![crate::provider::SystemBlock {
+            text: "s".repeat(400),
+            cache_hint: leviath_core::CacheHint::Never,
+            region: String::new(),
+            volatility: leviath_core::Volatility::default(),
+        }];
+        request.messages = vec![crate::provider::Message {
+            role: "user".to_string(),
+            content: crate::MessageContent::Blocks(vec![
+                crate::ContentBlock::Text {
+                    text: "t".repeat(400),
+                },
+                crate::ContentBlock::ToolUse {
+                    id: "1".to_string(),
+                    name: "read_files".to_string(),
+                    input: serde_json::json!({"path": "x"}),
+                    thought_signature: None,
+                },
+                crate::ContentBlock::ToolResult {
+                    tool_use_id: "1".to_string(),
+                    content: "r".repeat(400),
+                    is_error: false,
+                },
+            ]),
+            cache_breakpoint: false,
+        }];
+        request.tools = vec![crate::provider::Tool {
+            name: "read_files".to_string(),
+            description: "d".repeat(400),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+
+        let counted = estimated_request_tokens(&request);
+
+        // 400 bytes at four bytes a token is 100 each, from four separate parts
+        // of the request; the ids and schemas add the rest.
+        assert!(
+            counted > 400,
+            "the system block, the text, the result and the schema all count: {counted}"
+        );
+    }
+
+    /// A plain-text message is the other content shape, and it is what every
+    /// short conversation is made of.
+    #[test]
+    fn the_size_estimate_reads_plain_text_messages_too() {
+        let mut request = mock_request();
+        request.messages[0].content = crate::MessageContent::Text("x".repeat(400));
+
+        assert!(estimated_request_tokens(&request) >= 100);
     }
 
     #[tokio::test]

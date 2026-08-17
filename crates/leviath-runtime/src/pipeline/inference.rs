@@ -75,18 +75,24 @@ pub(crate) fn hint_blocks(
     blocks
 }
 
-/// What the previous request's system prefix looked like.
+/// What earlier calls in this run taught us, carried into the next request.
 ///
-/// The whole-prefix digest and the per-block digests answer different
-/// questions ("did anything move", and "how far did it hold still"), and they
-/// are only ever read together, so they travel together rather than as two
-/// adjacent parameters of different shapes that a caller could transpose.
+/// Three pieces of evidence with one thing in common: none of them can be
+/// derived from the window as it stands, they exist only because a previous
+/// request was sent and answered. The whole-prefix digest and the per-block
+/// digests answer different questions ("did anything move", and "how far did it
+/// hold still"); the calibration answers a third ("what did the last one really
+/// cost"). They are only ever read together, so they travel together rather
+/// than as adjacent parameters of similar shapes a caller could transpose.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct PriorPrefix {
+pub(crate) struct PriorCalls {
     /// Digest of the whole prefix, or `None` before the first request.
     pub(crate) system_hash: Option<u64>,
     /// Per-block digests, empty before the first request.
     pub(crate) block_hashes: Vec<u64>,
+    /// How far the estimate ran under what the provider charged, or `None`
+    /// before anything was measured (issue #485).
+    pub(crate) calibration: Option<crate::pipeline::PromptCalibration>,
 }
 
 /// Build the [`InferenceRequest`] for an agent from its context window + stage
@@ -103,11 +109,12 @@ pub(crate) fn build_request(
     provider: &Arc<dyn Provider>,
     stage_name: &str,
     stage_iterations: usize,
-    prior: PriorPrefix,
+    prior: PriorCalls,
 ) -> (InferenceRequest, u64, Vec<u64>) {
-    let PriorPrefix {
+    let PriorCalls {
         system_hash: previous_system_hash,
         block_hashes: previous_block_hashes,
+        calibration,
     } = prior;
     let assembled = window.assemble_with_meta(&crate::custom_region::AssembleMeta {
         stage_name: stage_name.to_string(),
@@ -118,7 +125,12 @@ pub(crate) fn build_request(
     });
     let system_hash = assembled.system_hash;
     let block_hashes = assembled.block_hashes.clone();
-    let remaining = window.max_tokens.saturating_sub(window.current_tokens);
+    // What the input really costs, not what the byte estimate said it would.
+    // On a provider whose window is a hard ceiling the two share it, so an
+    // output cap sized against an optimistic input is how a request that fit
+    // when it was assembled stops fitting halfway through the answer.
+    let spent = crate::pipeline::calibrated_tokens(window.current_tokens, calibration.as_ref());
+    let remaining = window.max_tokens.saturating_sub(spent);
     let caps = provider.capabilities(&stage.model);
     let output_cap = config
         .and_then(|c| c.max_output_tokens)
@@ -251,6 +263,7 @@ type InferenceQuery = (
     Option<&'static DispatchStall>,
     Option<&'static SystemPrefixHash>,
     Option<&'static SystemBlockHashes>,
+    Option<&'static crate::pipeline::PromptCalibration>,
 );
 
 /// The system prefix the last request sent, as a digest.
@@ -312,6 +325,7 @@ pub fn dispatch_inference(
             stalled,
             prefix,
             block_prefix,
+            calibration,
         )| {
             crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
                 if state.status != AgentStatus::Active {
@@ -367,9 +381,10 @@ pub fn dispatch_inference(
                     &provider,
                     &state.current_stage,
                     progress.map(|p| p.iterations).unwrap_or(0),
-                    PriorPrefix {
+                    PriorCalls {
                         system_hash: prefix.map(|p| p.0),
                         block_hashes: block_prefix.map(|b| b.0.clone()).unwrap_or_default(),
+                        calibration: calibration.copied(),
                     },
                 );
                 // Remembered for the next request, which is the only way the
@@ -381,6 +396,13 @@ pub fn dispatch_inference(
                     commands
                         .entity(entity)
                         .insert(SystemBlockHashes(block_hashes.clone()));
+                    // What the window believes this call will cost. The response
+                    // says what it really cost, and the two together are the
+                    // only measurement of the estimator's drift the runtime
+                    // gets (issue #485).
+                    commands
+                        .entity(entity)
+                        .insert(crate::pipeline::PromptEstimate(window.current_tokens));
                 });
                 let job = InferenceJob {
                     entity,
