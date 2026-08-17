@@ -240,6 +240,11 @@ jobs:
   docs:
     name: Docs
     runs-on: ubuntu-latest
+    # Lifted to `env` because the `secrets` context is not available in a step's
+    # `if` - naming it there is a workflow validation error, which fails the run
+    # before a single job starts. `env` is available, and holds the same value.
+    env:
+      DOCS_SSG_TOKEN: ${{ secrets.DOCS_SSG_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -264,20 +269,20 @@ jobs:
       # site's repo is unreachable from those runs either way, and the push to main after
       # the merge runs this with the secret present.
       - name: Checkout leviath.dev (changelog contract)
-        if: ${{ secrets.DOCS_SSG_TOKEN != '' }}
+        if: env.DOCS_SSG_TOKEN != ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: GEMISIS/leviath.dev
           token: ${{ secrets.DOCS_SSG_TOKEN }}
           path: site
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: ${{ secrets.DOCS_SSG_TOKEN != '' }}
+        if: env.DOCS_SSG_TOKEN != ''
         with:
           node-version: 22
       # No npm ci: the checker and its parser import nothing but node:fs, so tsx on its
       # own is the whole dependency.
       - name: Check the changelog the site publishes from
-        if: ${{ secrets.DOCS_SSG_TOKEN != '' }}
+        if: env.DOCS_SSG_TOKEN != ''
         run: npx --yes tsx site/tools/check-changelog.ts CHANGELOG.md
 
   # Coverage runs on all three OSes and enforces a hard 100% on regions, lines,
