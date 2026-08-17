@@ -154,13 +154,7 @@ async fn a_batch_waiting_on_a_prompt_does_not_hold_the_tool_lane() {
 /// awaiting, but on a multi-threaded runtime the batch task may not have been
 /// polled yet, so yielding a fixed number of times is not enough.
 async fn wait_for_prompt(hub: &InteractionHub) {
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        while hub.pending().is_empty() {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the prompt was raised");
+    leviath_testkit::wait_until("the prompt was raised", || !hub.pending().is_empty()).await;
 }
 
 #[tokio::test]

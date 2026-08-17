@@ -203,3 +203,41 @@ pub async fn spawn_mock_server_truncated_body(status: u16, reason: &str) -> Stri
     );
     spawn_mock_raw(response.into_bytes()).await
 }
+
+/// Poll `ready` until it answers true, or fail `context` after 30 seconds.
+///
+/// The shape this replaces was open-coded at four call sites, and it kept
+/// costing the 100% coverage gate a rerun. The loop
+///
+/// ```ignore
+/// while !ready() {
+///     tokio::time::sleep(Duration::from_millis(5)).await;
+/// }
+/// ```
+///
+/// never executes its body when the thing being waited for is already done by
+/// the first poll - which, on a multi-threaded runtime, is a coin flip. The
+/// sleep line then reports as uncovered with every test passing, and the fix
+/// was always "run the job again". Reordering the loop was tried and measured:
+/// it moves the hole rather than closing it, because whichever line the body
+/// starts with inherits the same race.
+///
+/// Living here is what settles it. `leviath-testkit` is dev-dependency-only
+/// scaffolding and is excluded from the gate for exactly this reason - its
+/// lines execute inside the suites that use it, and self-gating it would force
+/// tests of test helpers with no defect-finding power. One copy here means one
+/// racy line, in the one crate where a racy line is not a gate failure.
+///
+/// The timeout is the other half. Two of the four sites had one and two did
+/// not, so a condition that never came true hung the suite until CI killed the
+/// job with no indication of which wait was stuck. `context` is what that
+/// failure says.
+pub async fn wait_until(context: &str, mut ready: impl FnMut() -> bool) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !ready() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect(context);
+}

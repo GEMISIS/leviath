@@ -802,13 +802,7 @@ task = { kind = "pinned", max_tokens = 1000 }
             }),
         );
         // The waiter gives the lane back rather than sitting on it.
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            while stats.parked() == 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("the wait stepped off the lane");
+        leviath_testkit::wait_until("the wait stepped off the lane", || stats.parked() != 0).await;
 
         // Which is what lets anything else run - a child's tool batch, here.
         submit(
