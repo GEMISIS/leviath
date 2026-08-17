@@ -93,6 +93,17 @@ same list.
   billed to the same output budget as the answer: asked for a run title in 64
   tokens, qwen3.8 returns an empty string, having spent all 64 deciding what a
   title is.
+- Fixed: Anthropic cache markers are anchored to a fixed stride counted from the
+  start of the conversation, so a marker stays where the previous request left
+  its entry. They used to be placed relative to the newest message, which moves
+  every turn by however much that turn appended. Anthropic's lookup only scans a
+  bounded run of content blocks back from a marker, so a workload appending a
+  dozen blocks a turn - a stage doing parallel reads, say - stepped past that
+  window within a few turns and then never got back inside it, rewriting the
+  whole conversation at the premium rate from there on. The reads climbed while
+  the step stayed under about 20 blocks and stopped at 25, which is what
+  identified the bound. The system blocks now claim at most two of the four
+  markers, leaving two for the conversation.
 - Changed: the bundled agents declare how much each of their regions moves, so
   the prompt-cache ordering applies to them rather than shipping switched off.
   43 regions across the seven: a task, a query or a seeded convention file is

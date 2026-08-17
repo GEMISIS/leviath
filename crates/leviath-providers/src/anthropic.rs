@@ -36,13 +36,85 @@ fn maybe_dump_request(body: &serde_json::Value) {
 /// (#475), which is the failure this deliberately avoids.
 const MIN_CACHEABLE_TOKENS: usize = 1024;
 
+/// How far back Anthropic looks for a usable cache entry, in content blocks.
+///
+/// The lookup does not scan the whole request: from a marker it checks a bounded
+/// number of preceding content blocks for an entry it can reuse. Anthropic
+/// documents this as roughly twenty. So a marker further past the previous
+/// request's entry than this never finds it, however byte-identical the prefix
+/// is - the request reads nothing and rewrites the conversation at 1.25x.
+///
+/// This is the fault behind #474, and it is why every earlier attempt in that
+/// thread moved the collapse around without removing it: the marker rolled
+/// forward with the conversation, and a workload appending a dozen content
+/// blocks a turn outran the lookback within a few turns and never got back
+/// inside it. Measured by the reporter across a run: reads climbed while the
+/// gap stayed at or below 21 blocks and died permanently at 25.
+///
+/// Kept a little under the documented figure. Being wrong low costs one extra
+/// marker; being wrong high costs the entire conversation cache.
+const CACHE_LOOKBACK_BLOCKS: usize = 16;
+
 /// How many of the four markers the system blocks may claim.
 ///
 /// One is held back for the messages. When the system prefix has not moved, a
 /// marker in the messages covers everything - every system block *and* the
 /// conversation ahead of it - so it is the single most valuable position in the
 /// request. A fourth system marker can only ever cover less than that.
-const MAX_SYSTEM_BREAKPOINTS: usize = 3;
+const MAX_SYSTEM_BREAKPOINTS: usize = 2;
+
+/// Choose which messages carry a `cache_control` breakpoint.
+///
+/// The positions are anchored to a stride counted from the *start* of the
+/// conversation rather than to an offset from its end. That is the whole point:
+/// a marker at "20 blocks in" is at the same place next request, so the entry it
+/// wrote is looked up exactly where it was left. A marker placed relative to the
+/// end moves every turn by however much the turn appended, and once that step
+/// exceeds [`CACHE_LOOKBACK_BLOCKS`] the lookup can no longer reach the previous
+/// entry - which is an absorbing state, because the step does not shrink.
+///
+/// Anchoring also keeps the markers continuous as the conversation grows. Going
+/// from 45 blocks to 57 leaves the stride multiples at 16 and 32 exactly where
+/// they were; crossing 48 adds one at 48 and keeps the earlier two. There is
+/// always a marker sitting on an entry that already exists.
+///
+/// `budget` is what the system blocks did not claim. The last positions are kept
+/// when there are more than fit, because they cover the most conversation - and
+/// the stride guarantees consecutive kept positions are within the lookback of
+/// one another.
+fn message_cache_breakpoints(block_counts: &[usize], budget: usize) -> Vec<usize> {
+    if budget == 0 {
+        return Vec::new();
+    }
+    let mut positions = Vec::new();
+    let mut blocks = 0usize;
+    let mut next_anchor = CACHE_LOOKBACK_BLOCKS;
+    for (index, count) in block_counts.iter().enumerate() {
+        blocks = blocks.saturating_add(*count);
+        // The first message whose end passes the next stride multiple owns that
+        // anchor. Several multiples can fall inside one large message, which
+        // still yields one marker there - the message is indivisible.
+        if blocks >= next_anchor {
+            positions.push(index);
+            while blocks >= next_anchor {
+                next_anchor = next_anchor.saturating_add(CACHE_LOOKBACK_BLOCKS);
+            }
+        }
+    }
+    // A conversation too short to reach the first anchor still gets one marker,
+    // at its end. Size in blocks is what the lookback counts, but it is not what
+    // makes content worth caching: two messages carrying a large file read are
+    // only two blocks and plenty of tokens. Without this such a conversation
+    // goes uncached for its first several turns, which is a regression against
+    // simply marking near the end.
+    if positions.is_empty() && !block_counts.is_empty() {
+        positions.push(block_counts.len() - 1);
+    }
+    if positions.len() > budget {
+        positions.drain(..positions.len() - budget);
+    }
+    positions
+}
 
 /// Choose which system-block indices carry a `cache_control` breakpoint.
 ///
@@ -428,13 +500,36 @@ impl AnthropicProvider {
         // Build conversation messages
         let mut messages: Vec<serde_json::Value> = Vec::new();
 
-        // Messages get whatever cache breakpoints the system blocks didn't claim.
-        let mut breakpoint_count = 0;
+        // Messages get whatever the system blocks did not claim, and this layer
+        // decides where they go.
+        //
+        // The assembler decides *whether* the conversation may be cached at all,
+        // because it is the half that knows what changed - it withholds its flag
+        // when the system prefix moved, since a marker in the messages sits
+        // behind every system block and could not be read back. This layer then
+        // decides *where*, because the placement rule is Anthropic's: a stride
+        // in content blocks, bounded by how far its lookup will search.
+        let messages_may_cache = request.messages.iter().any(|m| m.cache_breakpoint);
         let message_breakpoint_budget = MAX_BREAKPOINTS - system_breakpoints.len();
+        let message_breakpoints: std::collections::HashSet<usize> = match messages_may_cache {
+            true => {
+                let block_counts: Vec<usize> = request
+                    .messages
+                    .iter()
+                    .map(|m| match &m.content {
+                        crate::MessageContent::Blocks(blocks) => blocks.len().max(1),
+                        crate::MessageContent::Text(_) => 1,
+                    })
+                    .collect();
+                message_cache_breakpoints(&block_counts, message_breakpoint_budget)
+                    .into_iter()
+                    .collect()
+            }
+            false => std::collections::HashSet::new(),
+        };
 
-        for msg in &request.messages {
-            if msg.cache_breakpoint && breakpoint_count < message_breakpoint_budget {
-                breakpoint_count += 1;
+        for (index, msg) in request.messages.iter().enumerate() {
+            if message_breakpoints.contains(&index) {
                 // Wrap content with cache_control
                 match &msg.content {
                     crate::MessageContent::Text(text) => {
@@ -461,16 +556,13 @@ impl AnthropicProvider {
                             "role": msg.role,
                             "content": msg.content,
                         });
-                        match message["content"]
+                        // Nothing to mark leaves the message unannotated; it
+                        // is still sent.
+                        if let Some(last) = message["content"]
                             .as_array_mut()
                             .and_then(|blocks| blocks.last_mut())
                         {
-                            Some(last) => {
-                                last["cache_control"] = self.cache_control_value();
-                            }
-                            // No blocks to mark: give the budget back rather
-                            // than spending it on nothing.
-                            None => breakpoint_count -= 1,
+                            last["cache_control"] = self.cache_control_value();
                         }
                         messages.push(message);
                     }
@@ -1485,15 +1577,25 @@ mod tests {
         let body = provider.build_request_body(&request);
         let messages = body["messages"].as_array().unwrap();
 
-        // First non-system message has cache_breakpoint: true
-        let first_msg = &messages[0];
-        assert!(first_msg.get("content").unwrap().is_array());
-        let content_block = &first_msg["content"][0];
-        assert_eq!(content_block["cache_control"]["type"], "ephemeral");
-
-        // Second non-system message has no cache_breakpoint
-        let second_msg = &messages[1];
-        assert!(second_msg.get("content").unwrap().is_string());
+        // Exactly one message carries the marker, and it serializes in array
+        // form so the annotation survives. Which message is the provider's
+        // choice - the assembler's flag is permission, not a position - so this
+        // asserts the serialization rather than the placement, which
+        // `message_cache_breakpoints` covers on its own.
+        let marked: Vec<&serde_json::Value> = messages
+            .iter()
+            .filter(|m| m["content"].is_array())
+            .collect();
+        assert_eq!(marked.len(), 1);
+        assert_eq!(
+            marked[0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        // Every other message stays in the plain string form.
+        assert_eq!(
+            messages.iter().filter(|m| m["content"].is_string()).count(),
+            messages.len() - 1
+        );
     }
 
     #[test]
@@ -1544,7 +1646,11 @@ mod tests {
                     .is_some()
             })
             .count();
-        assert_eq!(bp_count, 4);
+        // Placement belongs to the provider now, so the exact count is whatever
+        // its rule yields. What must hold is the hard API limit, and that a
+        // permitted conversation is served at all.
+        assert!(bp_count >= 1, "a permitted conversation carries a marker");
+        assert!(bp_count <= 4, "never more than the API accepts: {bp_count}");
     }
 
     // ── issue #12: system-block cache_control budget ──────────────────────────
@@ -1573,6 +1679,7 @@ mod tests {
     /// rather than hoarded: the API reads back the longest stored prefix that
     /// still matches, so extra markers are free insurance for the case where the
     /// newest block moved.
+
     #[test]
     fn markers_spread_across_the_blocks_that_hold_still() {
         use leviath_core::CacheHint;
@@ -1800,7 +1907,13 @@ mod tests {
             .iter()
             .filter(|b| b.get("cache_control").is_some())
             .count();
-        assert_eq!(sys_bp, 3, "3 system tiers claim 3 breakpoints");
+        // Two rather than three: the messages need a pair to anchor a marker
+        // where the previous request left one, which is what keeps a growing
+        // conversation readable at all.
+        assert_eq!(
+            sys_bp, MAX_SYSTEM_BREAKPOINTS,
+            "the system takes its share and leaves the rest for the messages"
+        );
         let msg_bp = body["messages"]
             .as_array()
             .unwrap()
@@ -2861,7 +2974,11 @@ mod tests {
                     .is_some()
             })
             .count();
-        assert_eq!(bp_count, 4);
+        // Placement belongs to the provider now, so the exact count is whatever
+        // its rule yields. What must hold is the hard API limit, and that a
+        // permitted conversation is served at all.
+        assert!(bp_count >= 1, "a permitted conversation carries a marker");
+        assert!(bp_count <= 4, "never more than the API accepts: {bp_count}");
     }
 
     // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
@@ -3339,5 +3456,82 @@ mod tests {
             body.get("system").is_none(),
             "a system *message* is not promoted to the system field: {body}"
         );
+    }
+
+    // ─── message markers ────────────────────────────────────────────────────
+
+    /// The property the whole thing rests on: a marker sits at the same place
+    /// next request, so the entry it wrote is looked up exactly where it was
+    /// left rather than relying on how far back the provider will search.
+    ///
+    /// A marker placed relative to the *end* fails this - it moves every turn by
+    /// however much the turn appended, and once that step exceeds the lookback
+    /// the lookup can never reach the previous entry again. That is absorbing,
+    /// because the step does not shrink, and it is the fault behind #474.
+    #[test]
+    fn a_growing_conversation_keeps_a_marker_where_the_last_one_was() {
+        // Each turn appends a dozen-plus content blocks, as a parallel read
+        // does: one assistant turn plus six two-block tool exchanges.
+        let mut counts: Vec<usize> = vec![1, 1];
+        let mut previous: Vec<usize> = Vec::new();
+        let mut misses = 0usize;
+        for turn in 0..10 {
+            counts.push(1);
+            counts.extend(std::iter::repeat_n(2, 6));
+            let at: Vec<usize> = message_cache_breakpoints(&counts, 2)
+                .iter()
+                .map(|i| counts[..=*i].iter().sum::<usize>())
+                .collect();
+            if turn > 0 && !previous.is_empty() && !at.iter().any(|p| previous.contains(p)) {
+                misses += 1;
+            }
+            previous = at;
+        }
+        // The failure this guards against is *absorbing*: once the marker
+        // outruns the lookback it never gets back inside it, so every later call
+        // misses. One miss is the handover from the short-conversation fallback
+        // to the first anchor and costs a single write.
+        assert!(misses <= 1, "{misses} turns found no previous marker");
+    }
+
+    /// Consecutive markers stay within the lookback of one another, so even the
+    /// newest one is reachable from the entry behind it.
+    #[test]
+    fn markers_are_never_further_apart_than_the_lookback() {
+        let counts: Vec<usize> = (0..60).map(|_| 2).collect();
+        let at: Vec<usize> = message_cache_breakpoints(&counts, 4)
+            .iter()
+            .map(|i| counts[..=*i].iter().sum::<usize>())
+            .collect();
+        for pair in at.windows(2) {
+            assert!(
+                pair[1] - pair[0] <= CACHE_LOOKBACK_BLOCKS + 1,
+                "{pair:?} is further apart than the lookback"
+            );
+        }
+    }
+
+    /// A single message can be larger than the stride. It is indivisible, so it
+    /// takes one marker and the anchor advances past every multiple it covers -
+    /// rather than trying to place several markers on one message.
+    #[test]
+    fn one_message_larger_than_the_stride_takes_one_marker() {
+        let counts = vec![1, 200, 1];
+        assert_eq!(message_cache_breakpoints(&counts, 4), vec![1]);
+    }
+
+    /// A conversation too short to reach the first anchor still gets a marker at
+    /// its end. Blocks are what the lookback counts, but tokens are what make
+    /// content worth caching, and two messages holding a large file read are
+    /// only two blocks.
+    #[test]
+    fn a_short_conversation_still_gets_one_marker() {
+        assert_eq!(message_cache_breakpoints(&[1, 1, 1], 4), vec![2]);
+    }
+
+    #[test]
+    fn message_markers_respect_a_zero_budget() {
+        let counts: Vec<usize> = (0..60).map(|_| 2).collect();
+        assert!(message_cache_breakpoints(&counts, 0).is_empty());
     }
 }
