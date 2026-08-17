@@ -110,7 +110,6 @@ fn fallback_block(region: &Region) -> leviath_providers::SystemBlock {
     leviath_providers::SystemBlock {
         text: format!("[{}]:\n{}", region.name, text),
         cache_hint: leviath_core::CacheHint::Never,
-        breakpoint_eligible: true,
         volatility: region.volatility,
         region: region.name.clone(),
     }
@@ -280,7 +279,6 @@ fn parse_render_output(
     let block = |text: &str| leviath_providers::SystemBlock {
         text: text.to_string(),
         cache_hint: hint,
-        breakpoint_eligible: true,
         volatility: leviath_core::Volatility::default(),
         region: String::new(),
     };

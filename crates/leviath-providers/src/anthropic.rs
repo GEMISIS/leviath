@@ -57,28 +57,15 @@ fn system_cache_breakpoints(blocks: &[crate::provider::SystemBlock], budget: usi
         return Vec::new();
     }
     let mut ends = Vec::new();
-    let mut run_end: Option<usize> = None;
     for (i, block) in blocks.iter().enumerate() {
         let hint = block.cache_hint;
         if hint == leviath_core::CacheHint::Never {
-            run_end = None;
             continue;
-        }
-        // The furthest block in this run whose entry could actually be read
-        // back. A block the assembler marked ineligible has changed since the
-        // last request, so a breakpoint at or after it names a prefix that has
-        // already been invalidated - the 1.25x write is charged and nothing is
-        // ever read (issue #474). Keeping the last eligible one instead caches
-        // the part that did hold still.
-        if block.breakpoint_eligible {
-            run_end = Some(i);
         }
         // End of a contiguous same-hint run: the next block is absent or a
         // different hint (a `Never` block also breaks the run).
-        if blocks.get(i + 1).map(|b| b.cache_hint) != Some(hint)
-            && let Some(end) = run_end.take()
-        {
-            ends.push(end);
+        if blocks.get(i + 1).map(|b| b.cache_hint) != Some(hint) {
+            ends.push(i);
         }
     }
     // Drop any breakpoint whose prefix is too short for the provider to cache.
@@ -1226,7 +1213,6 @@ mod tests {
             system: vec![crate::SystemBlock {
                 text: "You are helpful. ".repeat(400),
                 cache_hint: leviath_core::CacheHint::Always,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             }],
@@ -1475,7 +1461,6 @@ mod tests {
             system: vec![crate::SystemBlock {
                 text: "You are helpful. ".repeat(400),
                 cache_hint: leviath_core::CacheHint::Always,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             }],
@@ -1577,89 +1562,10 @@ mod tests {
                 // rule that refuses a breakpoint on an uncacheably short prefix.
                 text: "word ".repeat(1200),
                 cache_hint: *h,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             })
             .collect()
-    }
-
-    /// A run ends its breakpoint at the last block that could actually be read
-    /// back, not at its last block. Placing it further would name a prefix the
-    /// assembler already said had changed - the 1.25x write charged for an
-    /// entry nothing will ever read (issue #474).
-    #[test]
-    fn a_run_places_its_breakpoint_at_the_last_eligible_block() {
-        let blocks = vec![
-            crate::provider::SystemBlock {
-                text: format!("{} {}", "frozen", "word ".repeat(1200)),
-                cache_hint: leviath_core::CacheHint::Always,
-                breakpoint_eligible: true,
-                volatility: leviath_core::Volatility::default(),
-                region: String::new(),
-            },
-            crate::provider::SystemBlock {
-                text: format!("{} {}", "also frozen", "word ".repeat(1200)),
-                cache_hint: leviath_core::CacheHint::Always,
-                breakpoint_eligible: true,
-                volatility: leviath_core::Volatility::default(),
-                region: String::new(),
-            },
-            crate::provider::SystemBlock {
-                text: format!("{} {}", "grew this turn", "word ".repeat(1200)),
-                cache_hint: leviath_core::CacheHint::Always,
-                breakpoint_eligible: false,
-                volatility: leviath_core::Volatility::default(),
-                region: String::new(),
-            },
-        ];
-        assert_eq!(system_cache_breakpoints(&blocks, 4), vec![1]);
-    }
-
-    /// A run with nothing eligible gets no breakpoint at all rather than one
-    /// that cannot pay for itself.
-    #[test]
-    fn a_run_with_nothing_stable_gets_no_breakpoint() {
-        let blocks = vec![
-            crate::provider::SystemBlock {
-                text: format!("{} {}", "changed", "word ".repeat(1200)),
-                cache_hint: leviath_core::CacheHint::Always,
-                breakpoint_eligible: false,
-                volatility: leviath_core::Volatility::default(),
-                region: String::new(),
-            },
-            crate::provider::SystemBlock {
-                text: format!("{} {}", "also changed", "word ".repeat(1200)),
-                cache_hint: leviath_core::CacheHint::UntilChanged,
-                breakpoint_eligible: false,
-                volatility: leviath_core::Volatility::default(),
-                region: String::new(),
-            },
-        ];
-        assert!(system_cache_breakpoints(&blocks, 4).is_empty());
-    }
-
-    /// Eligibility is per run: a stable tier keeps its breakpoint even when a
-    /// later, more volatile tier has moved.
-    #[test]
-    fn a_stable_tier_keeps_its_breakpoint_when_a_later_tier_moved() {
-        let blocks = vec![
-            crate::provider::SystemBlock {
-                text: format!("{} {}", "pinned", "word ".repeat(1200)),
-                cache_hint: leviath_core::CacheHint::Always,
-                breakpoint_eligible: true,
-                volatility: leviath_core::Volatility::default(),
-                region: String::new(),
-            },
-            crate::provider::SystemBlock {
-                text: format!("{} {}", "history that grew", "word ".repeat(1200)),
-                cache_hint: leviath_core::CacheHint::UntilChanged,
-                breakpoint_eligible: false,
-                volatility: leviath_core::Volatility::default(),
-                region: String::new(),
-            },
-        ];
-        assert_eq!(system_cache_breakpoints(&blocks, 4), vec![0]);
     }
 
     #[test]
@@ -1754,35 +1660,30 @@ mod tests {
             crate::SystemBlock {
                 text: "architecture ".repeat(400),
                 cache_hint: CacheHint::Always,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             },
             crate::SystemBlock {
                 text: "program_flows ".repeat(400),
                 cache_hint: CacheHint::Always,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             },
             crate::SystemBlock {
                 text: "plan ".repeat(400),
                 cache_hint: CacheHint::Always,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             },
             crate::SystemBlock {
                 text: "task ".repeat(400),
                 cache_hint: CacheHint::Always,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             },
             crate::SystemBlock {
                 text: "files ".repeat(400),
                 cache_hint: CacheHint::UntilChanged,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             },
@@ -1832,21 +1733,18 @@ mod tests {
             crate::SystemBlock {
                 text: "alpha ".repeat(900),
                 cache_hint: CacheHint::Always,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             },
             crate::SystemBlock {
                 text: "bravo ".repeat(900),
                 cache_hint: CacheHint::UntilChanged,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             },
             crate::SystemBlock {
                 text: "charlie ".repeat(900),
                 cache_hint: CacheHint::Always,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             },
@@ -1906,7 +1804,6 @@ mod tests {
             system: vec![crate::SystemBlock {
                 text: "ephemeral".into(),
                 cache_hint: CacheHint::Never,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             }],
@@ -2454,14 +2351,12 @@ mod tests {
                 crate::SystemBlock {
                     text: "System part 1".to_string(),
                     cache_hint: leviath_core::CacheHint::Always,
-                    breakpoint_eligible: true,
                     volatility: leviath_core::Volatility::default(),
                     region: String::new(),
                 },
                 crate::SystemBlock {
                     text: "System part 2".to_string(),
                     cache_hint: leviath_core::CacheHint::Always,
-                    breakpoint_eligible: true,
                     volatility: leviath_core::Volatility::default(),
                     region: String::new(),
                 },
@@ -2522,7 +2417,6 @@ mod tests {
             system: vec![crate::SystemBlock {
                 text: "No caching here.".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             }],
