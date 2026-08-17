@@ -95,7 +95,6 @@ pub(super) fn push_chunked(
         blocks.push(leviath_providers::SystemBlock {
             text,
             cache_hint: hint,
-            breakpoint_eligible: true,
             volatility: region.volatility,
             region: region.name.clone(),
         });
@@ -158,43 +157,6 @@ pub(super) fn block_hash(text: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut hasher);
     hasher.finish()
-}
-
-/// Mark every block a cache breakpoint could actually be read back at.
-///
-/// A provider caches by prefix, so the entry a breakpoint names is readable
-/// next time only if every byte before it is unchanged. That makes the rule
-/// exact rather than a heuristic: a block is eligible when it, and every block
-/// ahead of it, is byte-identical to the previous request. The eligible set is
-/// therefore the longest common prefix of this request's block hashes and the
-/// last one's.
-///
-/// Before the first request there is nothing to compare against, so everything
-/// is eligible - the first call is a write whatever we do, and marking it
-/// ineligible would forfeit the entry the second call wants to read.
-///
-/// This is what stops a growing region being paid for over and over. A region
-/// that gained content is not in the common prefix, so no breakpoint lands at
-/// or after it, and the stable head in front of it keeps the entry it always
-/// had (issue #474: 456,860 cache-write tokens across twelve calls, zero reads,
-/// because the only breakpoint sat after content that changed every call).
-pub(super) fn mark_breakpoint_eligibility(
-    blocks: &mut [leviath_providers::SystemBlock],
-    previous: &[u64],
-) -> Vec<u64> {
-    let hashes: Vec<u64> = blocks.iter().map(|b| block_hash(&b.text)).collect();
-    if previous.is_empty() {
-        return hashes;
-    }
-    let stable = hashes
-        .iter()
-        .zip(previous)
-        .take_while(|(now, before)| now == before)
-        .count();
-    for (index, block) in blocks.iter_mut().enumerate() {
-        block.breakpoint_eligible = index < stable;
-    }
-    hashes
 }
 
 /// A stable digest of the assembled system prefix.
@@ -333,16 +295,6 @@ mod tests {
         (0..n).map(|i| format!("{i}:{each}")).collect()
     }
 
-    fn block(text: &str, hint: CacheHint, eligible: bool) -> leviath_providers::SystemBlock {
-        leviath_providers::SystemBlock {
-            text: text.to_string(),
-            cache_hint: hint,
-            breakpoint_eligible: eligible,
-            volatility: leviath_core::Volatility::default(),
-            region: String::new(),
-        }
-    }
-
     // ─── chunking ───────────────────────────────────────────────────────────
 
     /// The property the whole fix rests on: a boundary that existed last turn
@@ -435,7 +387,6 @@ mod tests {
         leviath_providers::SystemBlock {
             text: text.to_string(),
             cache_hint: CacheHint::Always,
-            breakpoint_eligible: true,
             volatility: leviath_core::Volatility::Stable,
             region: region.to_string(),
         }
@@ -495,69 +446,5 @@ mod tests {
         // One previous hash, two blocks now: the second is new, not changed.
         warn_on_unstable_declaration(&blocks, &[block_hash("a")], &mut seen);
         assert!(seen.is_empty());
-    }
-
-    // ─── eligibility ────────────────────────────────────────────────────────
-
-    /// Nothing to compare against, so nothing is held back: the first request
-    /// is a write whatever we do, and refusing it would forfeit the entry the
-    /// second request wants to read.
-    #[test]
-    fn the_first_request_leaves_every_block_eligible() {
-        let mut blocks = vec![
-            block("a", CacheHint::Always, true),
-            block("b", CacheHint::Always, true),
-        ];
-        let hashes = mark_breakpoint_eligibility(&mut blocks, &[]);
-        assert_eq!(hashes.len(), 2);
-        assert!(blocks.iter().all(|b| b.breakpoint_eligible));
-    }
-
-    /// The rule, stated as the provider needs it: a block is eligible only if it
-    /// and everything ahead of it is byte-identical to last time.
-    #[test]
-    fn eligibility_stops_at_the_first_block_that_changed() {
-        let mut first = vec![
-            block("head", CacheHint::Always, true),
-            block("middle", CacheHint::Always, true),
-            block("tail", CacheHint::Always, true),
-        ];
-        let previous = mark_breakpoint_eligibility(&mut first, &[]);
-
-        let mut second = vec![
-            block("head", CacheHint::Always, true),
-            block("middle grew", CacheHint::Always, true),
-            block("tail", CacheHint::Always, true),
-        ];
-        mark_breakpoint_eligibility(&mut second, &previous);
-
-        assert!(second[0].breakpoint_eligible, "the head held still");
-        assert!(!second[1].breakpoint_eligible, "this is what changed");
-        assert!(
-            !second[2].breakpoint_eligible,
-            "and everything after it is behind changed bytes, however stable its own text"
-        );
-    }
-
-    /// A prefix that held still entirely stays entirely eligible.
-    #[test]
-    fn an_unchanged_prefix_stays_eligible() {
-        let mut first = vec![
-            block("head", CacheHint::Always, true),
-            block("body", CacheHint::Always, true),
-        ];
-        let previous = mark_breakpoint_eligibility(&mut first, &[]);
-        let mut second = vec![
-            block("head", CacheHint::Always, true),
-            block("body", CacheHint::Always, true),
-            block("new tail", CacheHint::Always, true),
-        ];
-        mark_breakpoint_eligibility(&mut second, &previous);
-        assert!(second[0].breakpoint_eligible);
-        assert!(second[1].breakpoint_eligible);
-        assert!(
-            !second[2].breakpoint_eligible,
-            "the new block is not proven yet"
-        );
     }
 }

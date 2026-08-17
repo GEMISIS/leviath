@@ -922,7 +922,6 @@ mod tests {
             system: vec![crate::provider::SystemBlock {
                 text: "## task\ncount the ERROR lines".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             }],
@@ -955,7 +954,6 @@ mod tests {
             system: vec![crate::provider::SystemBlock {
                 text: "instructions".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             }],
@@ -987,7 +985,6 @@ mod tests {
             system: vec![crate::provider::SystemBlock {
                 text: "instructions".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             }],
@@ -1046,7 +1043,6 @@ mod tests {
             system: vec![crate::provider::SystemBlock {
                 text: "instructions".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             }],
@@ -1143,7 +1139,6 @@ mod tests {
             system: vec![crate::provider::SystemBlock {
                 text: "## task\ncount the ERROR lines".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             }],
@@ -2247,7 +2242,6 @@ mod tests {
             system: vec![SystemBlock {
                 text: "You are a coding agent. Task: add a doc comment.".into(),
                 cache_hint: leviath_core::CacheHint::Never,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             }],
@@ -2468,14 +2462,12 @@ mod tests {
                 crate::provider::SystemBlock {
                     text: "You are helpful.".into(),
                     cache_hint: leviath_core::CacheHint::Always,
-                    breakpoint_eligible: true,
                     volatility: leviath_core::Volatility::default(),
                     region: String::new(),
                 },
                 crate::provider::SystemBlock {
                     text: "Be concise.".into(),
                     cache_hint: leviath_core::CacheHint::Always,
-                    breakpoint_eligible: true,
                     volatility: leviath_core::Volatility::default(),
                     region: String::new(),
                 },
@@ -2517,7 +2509,6 @@ mod tests {
                 .map(|i| SystemBlock {
                     text: format!("block {i}"),
                     cache_hint: leviath_core::CacheHint::Always,
-                    breakpoint_eligible: true,
                     volatility: leviath_core::Volatility::default(),
                     region: String::new(),
                 })
@@ -2556,21 +2547,18 @@ mod tests {
                 SystemBlock {
                     text: "real".into(),
                     cache_hint: leviath_core::CacheHint::Always,
-                    breakpoint_eligible: true,
                     volatility: leviath_core::Volatility::default(),
                     region: String::new(),
                 },
                 SystemBlock {
                     text: "   ".into(),
                     cache_hint: leviath_core::CacheHint::Always,
-                    breakpoint_eligible: true,
                     volatility: leviath_core::Volatility::default(),
                     region: String::new(),
                 },
                 SystemBlock {
                     text: "also real".into(),
                     cache_hint: leviath_core::CacheHint::Always,
-                    breakpoint_eligible: true,
                     volatility: leviath_core::Volatility::default(),
                     region: String::new(),
                 },

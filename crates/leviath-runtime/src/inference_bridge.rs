@@ -606,7 +606,6 @@ mod tests {
             system: vec![SystemBlock {
                 text: "sys".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             }],

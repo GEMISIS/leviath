@@ -539,18 +539,6 @@ pub struct SystemBlock {
     /// region's *kind* cannot answer this - a pinned region is written
     /// constantly - so the blueprint says and this carries the answer.
     pub volatility: leviath_core::Volatility,
-    /// Whether a cache breakpoint may be placed at the end of this block.
-    ///
-    /// A provider caches by prefix, so an entry named by a breakpoint is
-    /// readable next time only if every byte before it is unchanged. The
-    /// assembler knows which blocks those are - it compares this request's
-    /// blocks against the last one - and says so here, rather than leaving each
-    /// provider to guess and pay the write premium for an entry that can never
-    /// be read (issue #474).
-    ///
-    /// `true` when nothing upstream said otherwise, which keeps a provider that
-    /// ignores this field behaving exactly as before.
-    pub breakpoint_eligible: bool,
 }
 
 /// Request for LLM inference.

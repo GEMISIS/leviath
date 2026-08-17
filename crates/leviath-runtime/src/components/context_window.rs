@@ -7,7 +7,7 @@
 //! questions to arrive with.
 
 use super::block_cache::{
-    CACHE_CHUNK_TOKENS, append_only_chunks, block_sort_priority, mark_breakpoint_eligibility,
+    CACHE_CHUNK_TOKENS, append_only_chunks, block_hash, block_sort_priority,
     mark_recently_changed_run, push_chunked, system_prefix_hash, warn_on_unstable_declaration,
 };
 use super::*;
@@ -653,7 +653,6 @@ impl ContextWindow {
                         system_blocks.push(leviath_providers::SystemBlock {
                             text: labelled(region, &body),
                             cache_hint: CacheHint::UntilChanged,
-                            breakpoint_eligible: true,
                             volatility: region.volatility,
                             region: region.name.clone(),
                         });
@@ -800,7 +799,6 @@ impl ContextWindow {
                         system_blocks.push(leviath_providers::SystemBlock {
                             text,
                             cache_hint: CacheHint::UntilChanged,
-                            breakpoint_eligible: true,
                             volatility: region.volatility,
                             region: region.name.clone(),
                         });
@@ -816,7 +814,6 @@ impl ContextWindow {
                     system_blocks.push(leviath_providers::SystemBlock {
                         text: format!("[{}]:\n{}", region.name, text),
                         cache_hint: CacheHint::Never,
-                        breakpoint_eligible: true,
                         volatility: region.volatility,
                         region: region.name.clone(),
                     });
@@ -831,7 +828,6 @@ impl ContextWindow {
                     system_blocks.push(leviath_providers::SystemBlock {
                         text: format!("[{}]:\n{}", region.name, text),
                         cache_hint: CacheHint::Never,
-                        breakpoint_eligible: true,
                         volatility: region.volatility,
                         region: region.name.clone(),
                     });
@@ -875,7 +871,6 @@ impl ContextWindow {
                     system_blocks.push(leviath_providers::SystemBlock {
                         text: format!("[{}]:\n{}", region.name, text),
                         cache_hint: CacheHint::UntilChanged,
-                        breakpoint_eligible: true,
                         volatility: region.volatility,
                         region: region.name.clone(),
                     });
@@ -908,8 +903,7 @@ impl ContextWindow {
         system_blocks.sort_by_key(block_sort_priority);
         // After the sort, because the order is part of what Anthropic matches.
         let system_hash = system_prefix_hash(&system_blocks);
-        let block_hashes =
-            mark_breakpoint_eligibility(&mut system_blocks, &meta.previous_block_hashes);
+        let block_hashes: Vec<u64> = system_blocks.iter().map(|b| block_hash(&b.text)).collect();
         // A declaration is a hint we can falsify, not a promise: `stable` sorts a
         // region to the front, so one that is really churning does the most
         // damage possible and does it because we believed the label.
@@ -1147,7 +1141,6 @@ mod tests {
         SystemBlock {
             text: "x".to_string(),
             cache_hint: hint,
-            breakpoint_eligible: true,
             volatility: leviath_core::Volatility::default(),
             region: String::new(),
         }
@@ -1466,6 +1459,11 @@ mod tests {
         window.add_region(task);
         let mut scratch = Region::new("scratch".to_string(), RegionKind::Pinned, 100_000);
         scratch.volatility = leviath_core::Volatility::Rewritten;
+        // Seeded, because an empty region contributes no block at all and the
+        // comparison below is between two requests that both have one.
+        scratch
+            .add_entry("first state".to_string(), 5)
+            .expect("fits");
         window.add_region(scratch);
 
         let first = window.assemble();
@@ -1487,14 +1485,15 @@ mod tests {
             previous_system_hash: Some(first.system_hash),
             previous_block_hashes: first.block_hashes.clone(),
         });
-        let task_block = second
-            .system_blocks
-            .iter()
-            .find(|b| b.region == "task")
-            .expect("the task block is present");
-        assert!(
-            task_block.breakpoint_eligible,
-            "the stable content held still and must stay cacheable"
+        // The property that matters to a prefix cache: the stable content is
+        // still first and still byte-identical, so everything a provider stores
+        // up to and including it can be read back. The churn is behind it, where
+        // it invalidates only itself.
+        assert_eq!(second.system_blocks[0].region, "task");
+        assert_eq!(second.block_hashes[0], first.block_hashes[0]);
+        assert_ne!(
+            second.block_hashes[1], first.block_hashes[1],
+            "the fixture is meant to churn the second region"
         );
     }
 

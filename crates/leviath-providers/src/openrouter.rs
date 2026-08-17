@@ -729,7 +729,6 @@ mod tests {
             system: vec![crate::provider::SystemBlock {
                 text: "You are a helpful assistant.".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             }],

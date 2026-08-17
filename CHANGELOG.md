@@ -31,6 +31,13 @@ same list.
   to store. Anthropic caches nothing below about 1,024 tokens, and a dumped
   request showed one of the four breakpoints sitting on a 269-byte block, where
   it could never be read back.
+- Changed: a cache breakpoint is placed at the end of its tier again, rather
+  than being withheld when the content in front of it changed. Withholding it
+  also prevents the *read* that would have paid for it, since nothing gets
+  stored to match against once the content settles, and it judged staleness
+  against the previous request alone while a provider's cache lives for minutes.
+  Region ordering now keeps churn out of the prefix at its source, which is the
+  part that was measured to help.
 - Fixed: a growing context region is no longer rewritten into the prompt cache
   on every call. A region became a single system block, and a provider matches a
   cached prefix only at a block boundary - so the one boundary a region offered

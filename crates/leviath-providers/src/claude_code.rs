@@ -668,14 +668,12 @@ mod tests {
             SystemBlock {
                 text: "[architecture]:\nhexagonal".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             },
             SystemBlock {
                 text: "[plan]:\nstep one".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             },
@@ -692,14 +690,12 @@ mod tests {
             SystemBlock {
                 text: String::new(),
                 cache_hint: leviath_core::CacheHint::Never,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             },
             SystemBlock {
                 text: "kept".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
-                breakpoint_eligible: true,
                 volatility: leviath_core::Volatility::default(),
                 region: String::new(),
             },
