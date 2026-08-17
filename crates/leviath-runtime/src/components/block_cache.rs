@@ -101,6 +101,63 @@ pub(super) fn push_chunked(
     }
 }
 
+/// Push a region's entries as `[name]:` system blocks, split when the region
+/// declared that it grows.
+///
+/// The bracket label rather than [`super::context_window::labelled`]'s heading,
+/// because that is the shape these regions have always rendered with and the
+/// prompt is not the place to make a cosmetic change.
+pub(super) fn push_bracketed(
+    blocks: &mut Vec<leviath_providers::SystemBlock>,
+    region: &Region,
+    hint: leviath_core::CacheHint,
+) {
+    let entries: Vec<String> = region.content.iter().map(|e| e.content.clone()).collect();
+    let chunks = match region.volatility {
+        leviath_core::Volatility::Grows => append_only_chunks(&entries, CACHE_CHUNK_TOKENS),
+        _ => vec![entries.join("\n\n")],
+    };
+    for (index, chunk) in chunks.iter().enumerate() {
+        let text = match index {
+            0 => format!("[{}]:\n{}", region.name, chunk),
+            _ => format!("[{} continued]:\n{}", region.name, chunk),
+        };
+        blocks.push(leviath_providers::SystemBlock {
+            text,
+            cache_hint: hint,
+            volatility: region.volatility,
+            region: region.name.clone(),
+        });
+    }
+}
+
+/// The cache hint for a region whose kind describes when it is *thrown away*
+/// rather than how it changes.
+///
+/// `temporary` and `clearable` are lifecycle kinds: one is dropped at stage
+/// exit, the other on demand. Both used to be tagged `Never`, which reads that
+/// lifecycle as "this content never holds still" - and for the boundary it is
+/// right, since caching across a wholesale drop would buy nothing. Between
+/// those boundaries it is wrong. A stage that reads a corpus into a `temporary`
+/// region and then works through it for forty calls has an append-mostly region
+/// that changes at the tail, which is the shape chunking exists for; tagging it
+/// `Never` re-sent the whole corpus at full rate on every one of those calls
+/// (issue #490: 5.36M tokens across 46 calls, the largest cost line in the run).
+///
+/// The kind cannot answer this and the author can, so it is read from the
+/// declaration. `Rewritten` is the default, so a region that says nothing keeps
+/// exactly the behaviour it had.
+pub(super) fn lifecycle_cache_hint(
+    volatility: leviath_core::Volatility,
+) -> leviath_core::CacheHint {
+    match volatility {
+        leviath_core::Volatility::Rewritten => leviath_core::CacheHint::Never,
+        leviath_core::Volatility::Stable | leviath_core::Volatility::Grows => {
+            leviath_core::CacheHint::UntilChanged
+        }
+    }
+}
+
 /// A digest of one system block's text, for deciding what held still.
 /// Warn about a region that declared itself `stable` and then moved.
 ///
@@ -293,6 +350,119 @@ mod tests {
 
     fn entries(n: usize, each: &str) -> Vec<String> {
         (0..n).map(|i| format!("{i}:{each}")).collect()
+    }
+
+    // ─── lifecycle kinds (issue #490) ───────────────────────────────────────
+
+    fn lifecycle_region(
+        kind: RegionKind,
+        volatility: leviath_core::Volatility,
+        entry_count: usize,
+    ) -> Region {
+        let mut region = Region::new("corpus".to_string(), kind, 1_000_000);
+        region.volatility = volatility;
+        for i in 0..entry_count {
+            let body = format!("excerpt {i} {}", "word ".repeat(600));
+            region.add_entry(body, 750).unwrap();
+        }
+        region
+    }
+
+    /// A region that says nothing about how it moves keeps exactly the
+    /// behaviour it had: one block, uncacheable. This is what makes the change
+    /// safe to ship on by default - nobody who has not opted in is affected.
+    #[test]
+    fn an_undeclared_lifecycle_region_is_unchanged() {
+        for kind in [RegionKind::Temporary, RegionKind::Clearable] {
+            let region = lifecycle_region(kind, leviath_core::Volatility::Rewritten, 8);
+            let mut blocks = Vec::new();
+            push_bracketed(
+                &mut blocks,
+                &region,
+                lifecycle_cache_hint(region.volatility),
+            );
+
+            assert_eq!(blocks.len(), 1, "one block, as before");
+            assert_eq!(blocks[0].cache_hint, CacheHint::Never);
+            assert!(blocks[0].text.starts_with("[corpus]:\n"));
+        }
+    }
+
+    /// The fix. A corpus the author says accumulates gets interior boundaries
+    /// and a hint a marker can land on, so the settled head caches and only the
+    /// tail is re-sent.
+    #[test]
+    fn a_lifecycle_region_declared_grows_is_chunk_cacheable() {
+        let region = lifecycle_region(RegionKind::Temporary, leviath_core::Volatility::Grows, 12);
+        let mut blocks = Vec::new();
+        push_bracketed(
+            &mut blocks,
+            &region,
+            lifecycle_cache_hint(region.volatility),
+        );
+
+        let count = blocks.len();
+        assert!(
+            count > 1,
+            "a 12-entry corpus past the chunk budget splits: {count} blocks"
+        );
+        assert!(
+            blocks
+                .iter()
+                .all(|b| b.cache_hint == CacheHint::UntilChanged)
+        );
+        assert!(blocks[0].text.starts_with("[corpus]:\n"));
+        assert!(
+            blocks[1].text.starts_with("[corpus continued]:\n"),
+            "a split region still says which region it is"
+        );
+    }
+
+    /// Chunking must not change a single byte of what the model reads, headings
+    /// aside - the whole point is a cheaper way to send the same corpus.
+    #[test]
+    fn chunking_a_lifecycle_region_preserves_its_content() {
+        let grows = lifecycle_region(RegionKind::Temporary, leviath_core::Volatility::Grows, 9);
+        let whole = lifecycle_region(
+            RegionKind::Temporary,
+            leviath_core::Volatility::Rewritten,
+            9,
+        );
+        let mut split = Vec::new();
+        push_bracketed(&mut split, &grows, CacheHint::UntilChanged);
+        let mut one = Vec::new();
+        push_bracketed(&mut one, &whole, CacheHint::Never);
+
+        let strip = |text: &str| {
+            text.replace("[corpus continued]:\n", "")
+                .replace("[corpus]:\n", "")
+        };
+        let rejoined: String = split
+            .iter()
+            .map(|b| strip(&b.text))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(rejoined, strip(&one[0].text));
+    }
+
+    /// The declaration is what decides, because the kind cannot: `temporary`
+    /// says when the region is thrown away, not whether it holds still between
+    /// those moments.
+    #[test]
+    fn the_hint_follows_the_declaration_not_the_kind() {
+        use leviath_core::Volatility;
+        assert_eq!(
+            lifecycle_cache_hint(Volatility::Rewritten),
+            CacheHint::Never
+        );
+        assert_eq!(
+            lifecycle_cache_hint(Volatility::Grows),
+            CacheHint::UntilChanged
+        );
+        assert_eq!(
+            lifecycle_cache_hint(Volatility::Stable),
+            CacheHint::UntilChanged
+        );
     }
 
     // ─── chunking ───────────────────────────────────────────────────────────
