@@ -246,15 +246,15 @@ model = "claude-sonnet-5"
 # ─── Context layout ───────────────────────────────────────────────────────────
 [context.regions]
 # The subject - required. Supplied via --task (or the API/ACP task field).
-subject       = { kind = "pinned", budget = "1%", max_tokens = 1000, required = true, seed = "task", required_message = "Say what to gather data on via --task." }
+subject       = { kind = "pinned", budget = "1%", max_tokens = 1000, required = true, seed = "task", required_message = "Say what to gather data on via --task.", volatility = "stable" }
 # Optional caller bounds: --constraints "US only, since 2015".
-constraints   = { kind = "pinned", budget = "1%", max_tokens = 1000, seed = "constraints" }
+constraints   = { kind = "pinned", budget = "1%", max_tokens = 1000, seed = "constraints", volatility = "stable" }
 # The table's columns, decided in scope and followed by every later stage.
-schema        = { kind = "pinned", budget = "2%", max_tokens = 2000, required = true, required_message = "Write the table's columns to `schema` (context_write) before gathering: one line per column, as name | type | meaning | unit." }
+schema        = { kind = "pinned", budget = "2%", max_tokens = 2000, required = true, required_message = "Write the table's columns to `schema` (context_write) before gathering: one line per column, as name | type | meaning | unit.", volatility = "grows" }
 # Bibliography, one line per source actually used.
-sources_index = { kind = "pinned", budget = "3%", max_tokens = 3000 }
+sources_index = { kind = "pinned", budget = "3%", max_tokens = 3000, volatility = "grows" }
 # What to distrust in the result. Read by the present stage.
-caveats       = { kind = "pinned", budget = "2%", max_tokens = 2000 }
+caveats       = { kind = "pinned", budget = "2%", max_tokens = 2000, volatility = "grows" }
 
 # Raw pages and search results (bulk, evictable).
 raw_sources   = { kind = "temporary", budget = "25%", max_tokens = 30000 }

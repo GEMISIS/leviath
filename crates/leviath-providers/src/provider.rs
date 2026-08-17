@@ -530,6 +530,11 @@ pub struct SystemBlock {
     ///
     /// Empty for a block that is not a region - a hint, a tool preamble - which
     /// is exactly the set of blocks no volatility warning could be about.
+    ///
+    /// Defaulted on the wire so a request serialized before these fields
+    /// existed still deserializes - a script provider that round-trips one, or
+    /// a dumped body replayed later, must not fail on a field it predates.
+    #[serde(default)]
     pub region: String,
     /// How much the region this block came from moves between requests.
     ///
@@ -538,6 +543,7 @@ pub struct SystemBlock {
     /// arrangement that pays is stable content first and churn last. The
     /// region's *kind* cannot answer this - a pinned region is written
     /// constantly - so the blueprint says and this carries the answer.
+    #[serde(default)]
     pub volatility: leviath_core::Volatility,
 }
 
