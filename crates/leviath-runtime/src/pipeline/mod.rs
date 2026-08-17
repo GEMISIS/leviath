@@ -70,6 +70,8 @@ mod wedge;
 pub use wedge::*;
 mod circuit;
 pub use circuit::*;
+mod calibration;
+pub use calibration::*;
 
 // ─── Phase marker components (an agent is in exactly one) ────────────────────
 //

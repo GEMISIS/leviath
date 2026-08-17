@@ -48,6 +48,8 @@ type InferenceQuery = (
     Option<&'static mut StageIoBuffer>,
     Option<&'static mut StageInference>,
     Option<&'static mut crate::telemetry::StageActivity>,
+    Option<&'static crate::pipeline::PromptEstimate>,
+    Option<&'static mut crate::pipeline::PromptCalibration>,
 );
 
 /// Inference-collect system: drain completed inferences and apply them. A
@@ -77,6 +79,8 @@ pub fn collect_inference(
             buffer,
             mut inference,
             activity,
+            estimate,
+            mut calibration,
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -184,6 +188,18 @@ pub fn collect_inference(
                     }
                     warn_if_context_is_running_away(rec, response.tokens_used.prompt_tokens);
                 }
+                // The provider just said what this request really cost. Against
+                // what the window believed it would cost, that is the only
+                // measurement of the estimator's drift there is - and on a
+                // provider whose window is a hard ceiling, drift is what
+                // decides whether the run finishes (issue #485).
+                calibrate(
+                    &mut commands,
+                    outcome.entity,
+                    calibration.as_deref_mut(),
+                    estimate,
+                    response.tokens_used.prompt_tokens,
+                );
                 // Buffer the readable output + a token line for the stage's logs.
                 if let Some(mut buffer) = buffer {
                     if !response.content.trim().is_empty() {
@@ -368,6 +384,34 @@ pub(crate) fn warn_if_context_is_running_away(
          re-sent on every call; check whether a region is accumulating without a cap \
          (`lev stages <run-id>` shows the per-region sizes)"
     );
+}
+
+/// Fold one call's real cost into the agent's estimator correction, creating
+/// the correction if this is its first measured call.
+///
+/// Split out because the insert-if-absent has to reach `Commands` while the
+/// update does not, and the collect loop is long enough already. An agent with
+/// no [`PromptEstimate`] never dispatched through the inference lane - a
+/// compaction reply, or a test driving the outcome channel directly - and there
+/// is nothing to compare, so it is left alone.
+pub(crate) fn calibrate(
+    commands: &mut Commands,
+    entity: Entity,
+    calibration: Option<&mut crate::pipeline::PromptCalibration>,
+    estimate: Option<&crate::pipeline::PromptEstimate>,
+    reported: usize,
+) {
+    let Some(estimate) = estimate else {
+        return;
+    };
+    match calibration {
+        Some(calibration) => calibration.observe(estimate.0, reported),
+        None => {
+            let mut fresh = crate::pipeline::PromptCalibration::default();
+            fresh.observe(estimate.0, reported);
+            commands.entity(entity).insert(fresh);
+        }
+    }
 }
 
 /// Per-stage progress counters, reset when an agent enters a stage.

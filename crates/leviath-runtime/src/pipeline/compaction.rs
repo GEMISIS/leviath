@@ -68,6 +68,7 @@ type CompactionQuery = (
     &'static AgentState,
     &'static mut ContextWindow,
     &'static CompactionSettings,
+    Option<&'static crate::pipeline::PromptCalibration>,
 );
 
 /// Compaction-dispatch system: for each `ReadyToInfer` agent with
@@ -86,12 +87,17 @@ pub fn dispatch_compaction(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, mut window, settings) in agents.iter_mut() {
+    for (entity, state, mut window, settings, calibration) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled - don't start new work
         }
-        if !window.needs_eviction(EVICTION_THRESHOLD) {
+        // Against the corrected estimate, not the raw one. The threshold is
+        // there to leave room between "nearly full" and "over the window", and
+        // an estimate measured running light spends that room without ever
+        // reporting it (issue #485).
+        let threshold = crate::pipeline::calibrated_threshold(EVICTION_THRESHOLD, calibration);
+        if !window.needs_eviction(threshold) {
             continue; // under threshold - nothing to do
         }
         let target_free = window.max_tokens / 10;
