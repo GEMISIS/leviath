@@ -713,13 +713,7 @@ async fn await_lane(
     context: &str,
     done: fn(&crate::world::LaneSnapshot) -> bool,
 ) {
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        while !done(&host.world_mut().lane_snapshot()) {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect(context);
+    leviath_testkit::wait_until(context, || done(&host.world_mut().lane_snapshot())).await;
 }
 
 /// Let every wedged batch finish and wait for the lane to empty, so the

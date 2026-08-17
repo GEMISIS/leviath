@@ -1325,9 +1325,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             .send(ControlOp::Shutdown { reply })
             .expect("world is up");
         // Wait until the serve loop is really gone (its rx dropped).
-        while !world.control.is_closed() {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        leviath_testkit::wait_until("the serve loop shut down", || world.control.is_closed()).await;
         let ghost = RunId("ghost".to_string());
         assert_eq!(world.status(&ghost).await, None);
         assert!(!world.pause(&ghost).await);
