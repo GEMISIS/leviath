@@ -381,6 +381,26 @@ A blueprint that declares no such region keeps the old behaviour exactly, so thi
 ignore. The region is never hidden by a stage that omits it from its own `[context.regions]`: it
 holds the instructions of the stage being entered, so hiding it would drop that stage's prompt.
 
+### What a stage change still costs
+
+The declaration keeps the system prompt's *head* cacheable across a transition. It cannot keep the
+**conversation** cacheable, and on a long run the conversation is most of the prompt.
+
+A provider matches one prefix running from the start of the request. The system prompt comes first
+and the conversation second, so a stage's new instructions sit in front of every message. Change
+them and nothing behind them matches, however byte-identical the transcript is. Measured on a run
+whose closing stage rewrote its prompt: the final call read 2,376 tokens of stable system head and
+paid full price for 246,812 tokens of conversation, which was about 40% of what the whole run cost
+after caching.
+
+The remedy is to not change the system prompt on the last hop. A closing instruction delivered as a
+[nudge](/docs/stages) goes into the conversation instead, which leaves the prefix in front of it
+untouched, so the transcript still matches and only the nudge itself is new.
+
+Worth the trouble only where the conversation is large and the stage is short - a wind-down stage
+that makes one expensive call is exactly that shape. A stage that makes twenty calls amortizes its
+transition over all of them and this is not worth restructuring for.
+
 ## Eviction is deterministic
 
 When a region crosses its threshold, the runtime acts by the region's *kind*, never by pushing out
