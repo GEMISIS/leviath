@@ -324,6 +324,23 @@ is what makes it faster.
 If a region declares `stable` and then keeps changing, Leviath says so in the log rather than
 silently paying for it: the declaration is a hint it checks, not a promise it trusts.
 
+### A region that stops growing caches itself
+
+Declare a region by what it does across the whole run, not per stage. A `grows` region is split
+into chunks that freeze once full, so when the appending stops - a gathering stage ends and a
+planning stage only reads what it collected - every chunk is already frozen and the whole region
+caches. Measured on that shape: 99% of the prompt cacheable in the planning stage, with only the
+plan itself, rewritten each turn, outside it.
+
+Re-declaring such a region `stable` for the later stage buys nothing and costs a little.
+`stable` content is one block rather than several, so the region goes from two cache markers to
+one: the same total cached, with fewer fallbacks if something does change. `grows` is the
+better answer for anything ever appended to, and it optimises itself when the appending stops.
+
+A stage can still override the layout, volatility included, with
+`[stages.<name>.context.regions]` - see [per-stage layouts](/docs/agents#context-regions). That is
+for a stage whose memory is genuinely shaped differently, not for this.
+
 ## Where a stage's own instructions live
 
 A stage's `system_prompt` is pinned context, which is why it reads as instruction rather than
