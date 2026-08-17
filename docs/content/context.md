@@ -332,10 +332,15 @@ planning stage only reads what it collected - every chunk is already frozen and 
 caches. Measured on that shape: 99% of the prompt cacheable in the planning stage, with only the
 plan itself, rewritten each turn, outside it.
 
-Re-declaring such a region `stable` for the later stage buys nothing and costs a little.
-`stable` content is one block rather than several, so the region goes from two cache markers to
-one: the same total cached, with fewer fallbacks if something does change. `grows` is the
-better answer for anything ever appended to, and it optimises itself when the appending stops.
+Re-declaring such a region `stable` for the later stage changes nothing worth having. The same
+bytes are cached either way; `stable` renders as one block where `grows` renders as several, so
+there are fewer places to put a marker and one fewer *fallback* - and a fallback only pays if the
+region turns out to change, which in that stage it does not. Declare a region by what it does
+across the run and leave it alone.
+
+Caching is also per model, so a stage that switches model starts cold whatever the blocks look
+like. The benefit concentrates inside a stage rather than across a model change, and no layout
+avoids that.
 
 A stage can still override the layout, volatility included, with
 `[stages.<name>.context.regions]` - see [per-stage layouts](/docs/agents#context-regions). That is
