@@ -40,6 +40,18 @@ fn maybe_dump_request(body: &serde_json::Value) {
 /// budget, the last `budget` are kept - the final run always ends on the last
 /// cacheable block, so its breakpoint spans the full cacheable prefix and
 /// nothing cacheable is left entirely uncached.
+/// The shortest prefix Anthropic will cache, in tokens.
+///
+/// Below this the API declines to create an entry, so a breakpoint there buys
+/// nothing and costs one of the four. Measured in a dumped request: a
+/// breakpoint sat on a 269-byte block, a quarter of the budget spent on a
+/// prefix that could never be read back.
+///
+/// 1024 is the documented Sonnet/Opus floor. Haiku's is higher, so this is the
+/// permissive bound - a breakpoint that clears this may still be declined
+/// there, which costs what it costs today rather than anything new.
+const MIN_CACHEABLE_TOKENS: usize = 1024;
+
 fn system_cache_breakpoints(blocks: &[crate::provider::SystemBlock], budget: usize) -> Vec<usize> {
     if budget == 0 {
         return Vec::new();
@@ -69,6 +81,26 @@ fn system_cache_breakpoints(blocks: &[crate::provider::SystemBlock], budget: usi
             ends.push(end);
         }
     }
+    // Drop any breakpoint whose prefix is too short for the provider to cache.
+    // The prefix is everything in front of it, so this is a running total rather
+    // than the block's own size: a breakpoint after several small blocks is
+    // fine, and one after a single small block is not.
+    let mut running = 0usize;
+    let mut first_cacheable = None;
+    for (index, block) in blocks.iter().enumerate() {
+        running = running.saturating_add(leviath_core::estimate_tokens(&block.text));
+        if running >= MIN_CACHEABLE_TOKENS {
+            first_cacheable = Some(index);
+            break;
+        }
+    }
+    match first_cacheable {
+        Some(first) => ends.retain(|end| *end >= first),
+        // Nothing in the whole prefix reaches the floor, so no breakpoint in it
+        // could ever be read back.
+        None => ends.clear(),
+    }
+
     if ends.len() > budget {
         ends.drain(..ends.len() - budget);
     }
@@ -1192,9 +1224,11 @@ mod tests {
         );
         let request = InferenceRequest {
             system: vec![crate::SystemBlock {
-                text: "You are helpful.".to_string(),
+                text: "You are helpful. ".repeat(400),
                 cache_hint: leviath_core::CacheHint::Always,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             }],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
@@ -1218,7 +1252,7 @@ mod tests {
             .as_array()
             .expect("cached system → array form");
         assert_eq!(system.len(), 1);
-        assert_eq!(system[0]["text"], "You are helpful.");
+        assert_eq!(system[0]["text"], "You are helpful. ".repeat(400));
         assert!(system[0].get("cache_control").is_some());
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
     }
@@ -1439,9 +1473,11 @@ mod tests {
         );
         let request = InferenceRequest {
             system: vec![crate::SystemBlock {
-                text: "You are helpful.".to_string(),
+                text: "You are helpful. ".repeat(400),
                 cache_hint: leviath_core::CacheHint::Always,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             }],
             messages: vec![
                 crate::provider::Message {
@@ -1536,9 +1572,14 @@ mod tests {
         hints
             .iter()
             .map(|h| crate::provider::SystemBlock {
-                text: "x".to_string(),
+                // Each block clears `MIN_CACHEABLE_TOKENS` on its own, so these
+                // tests exercise how runs are grouped rather than the separate
+                // rule that refuses a breakpoint on an uncacheably short prefix.
+                text: "word ".repeat(1200),
                 cache_hint: *h,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             })
             .collect()
     }
@@ -1551,19 +1592,25 @@ mod tests {
     fn a_run_places_its_breakpoint_at_the_last_eligible_block() {
         let blocks = vec![
             crate::provider::SystemBlock {
-                text: "frozen".to_string(),
+                text: format!("{} {}", "frozen", "word ".repeat(1200)),
                 cache_hint: leviath_core::CacheHint::Always,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
             crate::provider::SystemBlock {
-                text: "also frozen".to_string(),
+                text: format!("{} {}", "also frozen", "word ".repeat(1200)),
                 cache_hint: leviath_core::CacheHint::Always,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
             crate::provider::SystemBlock {
-                text: "grew this turn".to_string(),
+                text: format!("{} {}", "grew this turn", "word ".repeat(1200)),
                 cache_hint: leviath_core::CacheHint::Always,
                 breakpoint_eligible: false,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
         ];
         assert_eq!(system_cache_breakpoints(&blocks, 4), vec![1]);
@@ -1575,14 +1622,18 @@ mod tests {
     fn a_run_with_nothing_stable_gets_no_breakpoint() {
         let blocks = vec![
             crate::provider::SystemBlock {
-                text: "changed".to_string(),
+                text: format!("{} {}", "changed", "word ".repeat(1200)),
                 cache_hint: leviath_core::CacheHint::Always,
                 breakpoint_eligible: false,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
             crate::provider::SystemBlock {
-                text: "also changed".to_string(),
+                text: format!("{} {}", "also changed", "word ".repeat(1200)),
                 cache_hint: leviath_core::CacheHint::UntilChanged,
                 breakpoint_eligible: false,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
         ];
         assert!(system_cache_breakpoints(&blocks, 4).is_empty());
@@ -1594,14 +1645,18 @@ mod tests {
     fn a_stable_tier_keeps_its_breakpoint_when_a_later_tier_moved() {
         let blocks = vec![
             crate::provider::SystemBlock {
-                text: "pinned".to_string(),
+                text: format!("{} {}", "pinned", "word ".repeat(1200)),
                 cache_hint: leviath_core::CacheHint::Always,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
             crate::provider::SystemBlock {
-                text: "history that grew".to_string(),
+                text: format!("{} {}", "history that grew", "word ".repeat(1200)),
                 cache_hint: leviath_core::CacheHint::UntilChanged,
                 breakpoint_eligible: false,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
         ];
         assert_eq!(system_cache_breakpoints(&blocks, 4), vec![0]);
@@ -1697,29 +1752,39 @@ mod tests {
         );
         let system = vec![
             crate::SystemBlock {
-                text: "architecture".into(),
+                text: "architecture ".repeat(400),
                 cache_hint: CacheHint::Always,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
             crate::SystemBlock {
-                text: "program_flows".into(),
+                text: "program_flows ".repeat(400),
                 cache_hint: CacheHint::Always,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
             crate::SystemBlock {
-                text: "plan".into(),
+                text: "plan ".repeat(400),
                 cache_hint: CacheHint::Always,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
             crate::SystemBlock {
-                text: "task".into(),
+                text: "task ".repeat(400),
                 cache_hint: CacheHint::Always,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
             crate::SystemBlock {
-                text: "files".into(),
+                text: "files ".repeat(400),
                 cache_hint: CacheHint::UntilChanged,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
         ];
         let request = InferenceRequest {
@@ -1765,19 +1830,25 @@ mod tests {
         );
         let system = vec![
             crate::SystemBlock {
-                text: "a".into(),
+                text: "alpha ".repeat(900),
                 cache_hint: CacheHint::Always,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
             crate::SystemBlock {
-                text: "b".into(),
+                text: "bravo ".repeat(900),
                 cache_hint: CacheHint::UntilChanged,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
             crate::SystemBlock {
-                text: "c".into(),
+                text: "charlie ".repeat(900),
                 cache_hint: CacheHint::Always,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
         ];
         let messages: Vec<crate::provider::Message> = (0..3)
@@ -1836,6 +1907,8 @@ mod tests {
                 text: "ephemeral".into(),
                 cache_hint: CacheHint::Never,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             }],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
@@ -2382,11 +2455,15 @@ mod tests {
                     text: "System part 1".to_string(),
                     cache_hint: leviath_core::CacheHint::Always,
                     breakpoint_eligible: true,
+                    volatility: leviath_core::Volatility::default(),
+                    region: String::new(),
                 },
                 crate::SystemBlock {
                     text: "System part 2".to_string(),
                     cache_hint: leviath_core::CacheHint::Always,
                     breakpoint_eligible: true,
+                    volatility: leviath_core::Volatility::default(),
+                    region: String::new(),
                 },
             ],
             messages: vec![crate::provider::Message {
@@ -2446,6 +2523,8 @@ mod tests {
                 text: "No caching here.".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             }],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),

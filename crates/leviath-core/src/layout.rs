@@ -534,6 +534,14 @@ pub struct RegionDefinition {
     /// change depending on which stage is writing to it.
     #[serde(default)]
     pub admission: crate::region::Admission,
+    /// How much this region's contents move between requests. See
+    /// [`crate::region::Volatility`].
+    ///
+    /// Defaulted on the wire so a definition written before this existed still
+    /// loads, and loads as the pessimistic value - which is what an unclassified
+    /// region should be.
+    #[serde(default)]
+    pub volatility: crate::region::Volatility,
 
     /// Optional custom message shown to the agent when this region is required
     /// but empty. Falls back to a generated default when `None`.
@@ -567,6 +575,7 @@ impl RegionDefinition {
             required_message: None,
             summarizable: true,
             admission: crate::region::Admission::default(),
+            volatility: crate::region::Volatility::default(),
             seed: None,
         }
     }

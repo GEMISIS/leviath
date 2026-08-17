@@ -60,6 +60,8 @@ pub(crate) fn hint_blocks(
         text: text.to_string(),
         cache_hint: leviath_core::CacheHint::Always,
         breakpoint_eligible: true,
+        volatility: leviath_core::Volatility::default(),
+        region: String::new(),
     };
     let mut blocks = Vec::new();
     if config.map(|c| c.batch_tool_hint).unwrap_or(false) {

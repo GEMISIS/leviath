@@ -62,7 +62,7 @@ pub use read_paths::{
 };
 pub use region::{
     ContentFormat, EntryKind, EvictionStrategy, Region, RegionEntry, RegionKind, RegionSchema,
-    SerializedToolCall,
+    SerializedToolCall, Volatility,
 };
 pub use sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig, resolve_sandbox};
 pub use secrets::{

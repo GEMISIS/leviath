@@ -669,11 +669,15 @@ mod tests {
                 text: "[architecture]:\nhexagonal".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
             SystemBlock {
                 text: "[plan]:\nstep one".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
         ];
         let prompt = ClaudeCodeProvider::build_system_prompt(&req);
@@ -689,11 +693,15 @@ mod tests {
                 text: String::new(),
                 cache_hint: leviath_core::CacheHint::Never,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
             SystemBlock {
                 text: "kept".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             },
         ];
         assert_eq!(ClaudeCodeProvider::build_system_prompt(&req), "kept");

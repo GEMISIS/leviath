@@ -526,6 +526,19 @@ pub struct SystemBlock {
     pub text: String,
     /// Cache hint for this system block.
     pub cache_hint: leviath_core::CacheHint,
+    /// The region this block was rendered from, for diagnostics.
+    ///
+    /// Empty for a block that is not a region - a hint, a tool preamble - which
+    /// is exactly the set of blocks no volatility warning could be about.
+    pub region: String,
+    /// How much the region this block came from moves between requests.
+    ///
+    /// Carried so assembly can order blocks by it: a provider caches by prefix,
+    /// so a block that moves invalidates everything behind it, and the
+    /// arrangement that pays is stable content first and churn last. The
+    /// region's *kind* cannot answer this - a pinned region is written
+    /// constantly - so the blueprint says and this carries the answer.
+    pub volatility: leviath_core::Volatility,
     /// Whether a cache breakpoint may be placed at the end of this block.
     ///
     /// A provider caches by prefix, so an entry named by a breakpoint is
