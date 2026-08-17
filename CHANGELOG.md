@@ -32,11 +32,14 @@ same list.
   inside its budgets: the 0.9 eviction trigger was meant to leave 3,277 tokens
   of margin and was really leaving 269, less than one tool result, so the next
   read overflowed the window. Every response already reports `prompt_tokens`
-  from the server's own tokenizer, and the runtime now compares that against
-  what it believed the same request would cost. The correction only ever
-  tightens and only on measured evidence: a provider that charges less than
-  estimated, which is every provider on text with any non-ASCII in it, changes
-  nothing, and nothing is held back from a workload not seen drifting.
+  from the server's own tokenizer, and the runtime now records what it believed
+  each request would cost and adds the measured difference to its accounting.
+  The correction is additive rather than a ratio, because most of what separates
+  the two figures is overhead the window never sees - tool schemas, hint blocks,
+  provider framing - and that costs the same whether a region holds ten tokens
+  or ten thousand. It only ever tightens and only on measured evidence: a
+  provider charging less than estimated, which is every provider on text with
+  any non-ASCII in it, changes nothing.
 - Fixed: Ollama's `no user query found in messages` is reported as the size
   error it is, when the request that provoked it did carry a user turn. Ollama
   does not refuse an oversized request, it truncates from the front, and when

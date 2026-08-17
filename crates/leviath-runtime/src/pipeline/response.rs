@@ -404,13 +404,30 @@ pub(crate) fn calibrate(
     let Some(estimate) = estimate else {
         return;
     };
-    match calibration {
-        Some(calibration) => calibration.observe(estimate.0, reported),
+    let (moved, shortfall) = match calibration {
+        Some(calibration) => (
+            calibration.observe(estimate.0, reported),
+            calibration.shortfall(),
+        ),
         None => {
             let mut fresh = crate::pipeline::PromptCalibration::default();
-            fresh.observe(estimate.0, reported);
+            let moved = fresh.observe(estimate.0, reported);
+            let shortfall = fresh.shortfall();
             commands.entity(entity).insert(fresh);
+            (moved, shortfall)
         }
+    };
+    // Said on the crossing only, so a steady run stays quiet. Without this the
+    // correction is invisible: it changes when eviction fires, and an operator
+    // watching a run get tighter with its context has no other way to see why.
+    if moved {
+        tracing::debug!(
+            estimated = estimate.0,
+            reported,
+            shortfall,
+            "the provider charged more than the context window accounted for; \
+             budgeting against the measured figure from here"
+        );
     }
 }
 

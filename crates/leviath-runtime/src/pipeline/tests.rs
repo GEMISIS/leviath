@@ -1497,12 +1497,12 @@ fn collect_learns_the_drift_between_what_was_believed_and_what_was_charged() {
 
     run_collect(&mut world);
 
-    let factor = world
+    let shortfall = world
         .get::<PromptCalibration>(e)
-        .map_or(0.0, PromptCalibration::factor);
-    assert!(
-        (factor - 1.2).abs() < 1e-9,
-        "20% under, measured off the wire rather than guessed: {factor}"
+        .map_or(0, PromptCalibration::shortfall);
+    assert_eq!(
+        shortfall, 200,
+        "200 tokens under, measured off the wire rather than guessed"
     );
 }
 
@@ -1530,12 +1530,12 @@ fn collect_folds_a_worse_call_into_an_existing_calibration() {
 
     run_collect(&mut world);
 
-    let factor = world
+    let shortfall = world
         .get::<PromptCalibration>(e)
-        .map_or(0.0, PromptCalibration::factor);
-    assert!(
-        (factor - 1.4).abs() < 1e-9,
-        "the agent keeps one factor rather than a fresh one per call: {factor}"
+        .map_or(0, PromptCalibration::shortfall);
+    assert_eq!(
+        shortfall, 400,
+        "the agent keeps one correction rather than a fresh one per call"
     );
 }
 
