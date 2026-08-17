@@ -20,78 +20,76 @@ fn maybe_dump_request(body: &serde_json::Value) {
     );
 }
 
-/// Choose which system-block indices carry a `cache_control` breakpoint.
-///
-/// Anthropic allows at most 4 `cache_control` blocks per request, counted
-/// across BOTH system blocks and message content. Emitting one per
-/// cacheable region overruns that the moment a blueprint has 5+ pinned/cached
-/// regions - a hard `400 "A maximum of 4 blocks with cache_control may be
-/// provided"`.
-///
-/// Because a breakpoint caches the entire prefix up to and including its block,
-/// we don't need one per block: a single `cache_control` on the LAST block of a
-/// contiguous run of same-hint cacheable blocks caches every block in that run.
-/// System blocks are assembled most-stable-first (see [`leviath_core::CacheHint`]),
-/// so keeping a boundary between tiers (e.g. `Always` pinned content vs.
-/// `UntilChanged` hashmap content that changes as files are read) preserves the
-/// stable prefix's cache when a later, more-volatile tier changes.
-///
-/// `budget` caps the number returned. If there are more tier-runs than the
-/// budget, the last `budget` are kept - the final run always ends on the last
-/// cacheable block, so its breakpoint spans the full cacheable prefix and
-/// nothing cacheable is left entirely uncached.
 /// The shortest prefix Anthropic will cache, in tokens.
 ///
-/// Below this the API declines to create an entry, so a breakpoint there buys
-/// nothing and costs one of the four. Measured in a dumped request: a
-/// breakpoint sat on a 269-byte block, a quarter of the budget spent on a
-/// prefix that could never be read back.
+/// Below this the API declines to create an entry, so a marker there buys
+/// nothing and spends one of the four. Measured in a dumped request: a marker
+/// sat on a 269-byte block, a quarter of the budget on a prefix that could
+/// never be read back.
 ///
-/// 1024 is the documented Sonnet/Opus floor. Haiku's is higher, so this is the
-/// permissive bound - a breakpoint that clears this may still be declined
-/// there, which costs what it costs today rather than anything new.
+/// One number for every Anthropic model rather than a per-model table.
+/// 1024 is the documented Sonnet and Opus floor and Haiku's is higher, so this
+/// is the permissive bound: on Haiku a marker that clears it may still be
+/// declined, which costs nothing beyond the slot. A name-keyed table would be
+/// the alternative and is the shape of thing that goes stale silently - the
+/// Ollama context window was guessed from model names and was wrong by 4x
+/// (#475), which is the failure this deliberately avoids.
 const MIN_CACHEABLE_TOKENS: usize = 1024;
 
+/// How many of the four markers the system blocks may claim.
+///
+/// One is held back for the messages. When the system prefix has not moved, a
+/// marker in the messages covers everything - every system block *and* the
+/// conversation ahead of it - so it is the single most valuable position in the
+/// request. A fourth system marker can only ever cover less than that.
+const MAX_SYSTEM_BREAKPOINTS: usize = 3;
+
+/// Choose which system-block indices carry a `cache_control` breakpoint.
+///
+/// Anthropic caches by *prefix*: a marker stores everything from the start of
+/// the request up to and including its block, and a later request reads it back
+/// only if every one of those bytes is identical. Two consequences drive
+/// everything here.
+///
+/// **A marker on content that changes is waste.** The entry it creates can never
+/// match, and creating it is charged at the 1.25x write rate. So a block whose
+/// region declared itself `rewritten`, or that the runtime clears every
+/// iteration, is not a candidate - a prefix ending there is invalid by
+/// construction. This is the fix for a measured case where the sole marker sat
+/// on a six-token status line at the end of the system array, making the whole
+/// prompt uncacheable (#474).
+///
+/// **Several markers cost nothing extra and find the longest match.** The API
+/// takes up to four and reads back the longest stored prefix that still
+/// matches, so spreading them is free insurance: if the newest block changed,
+/// an earlier marker still hits. Spending one marker of four, which is what this
+/// did before, threw that away. The *last* candidates are kept rather than an
+/// even spread, because the longest prefix is the most valuable and the ones
+/// just behind it are the fallbacks that matter - a region of twenty chunks
+/// whose tail moves wants markers near the tail, not near the head.
+///
+/// Volatility comes from the blueprint and the hint from the region's kind, and
+/// a candidate needs both to agree: the blueprint knows whether an author
+/// rewrites a region, and the runtime knows that it clears a `Temporary` one
+/// whatever the blueprint says.
 fn system_cache_breakpoints(blocks: &[crate::provider::SystemBlock], budget: usize) -> Vec<usize> {
     if budget == 0 {
         return Vec::new();
     }
-    let mut ends = Vec::new();
-    for (i, block) in blocks.iter().enumerate() {
-        let hint = block.cache_hint;
-        if hint == leviath_core::CacheHint::Never {
-            continue;
-        }
-        // End of a contiguous same-hint run: the next block is absent or a
-        // different hint (a `Never` block also breaks the run).
-        if blocks.get(i + 1).map(|b| b.cache_hint) != Some(hint) {
-            ends.push(i);
-        }
-    }
-    // Drop any breakpoint whose prefix is too short for the provider to cache.
-    // The prefix is everything in front of it, so this is a running total rather
-    // than the block's own size: a breakpoint after several small blocks is
-    // fine, and one after a single small block is not.
-    let mut running = 0usize;
-    let mut first_cacheable = None;
+    let mut candidates = Vec::new();
+    let mut prefix_tokens = 0usize;
     for (index, block) in blocks.iter().enumerate() {
-        running = running.saturating_add(leviath_core::estimate_tokens(&block.text));
-        if running >= MIN_CACHEABLE_TOKENS {
-            first_cacheable = Some(index);
-            break;
+        prefix_tokens = prefix_tokens.saturating_add(leviath_core::estimate_tokens(&block.text));
+        let holds_still = block.volatility != leviath_core::Volatility::Rewritten
+            && block.cache_hint != leviath_core::CacheHint::Never;
+        if holds_still && prefix_tokens >= MIN_CACHEABLE_TOKENS {
+            candidates.push(index);
         }
     }
-    match first_cacheable {
-        Some(first) => ends.retain(|end| *end >= first),
-        // Nothing in the whole prefix reaches the floor, so no breakpoint in it
-        // could ever be read back.
-        None => ends.clear(),
+    if candidates.len() > budget {
+        candidates.drain(..candidates.len() - budget);
     }
-
-    if ends.len() > budget {
-        ends.drain(..ends.len() - budget);
-    }
-    ends
+    candidates
 }
 
 /// Always log the serialized request size at debug, and - when `dir` is
@@ -405,7 +403,7 @@ impl AnthropicProvider {
         // `cache_control` per contiguous run of same-hint cacheable blocks,
         // capped at the total budget.
         let system_breakpoints: std::collections::HashSet<usize> =
-            system_cache_breakpoints(&request.system, MAX_BREAKPOINTS)
+            system_cache_breakpoints(&request.system, MAX_SYSTEM_BREAKPOINTS)
                 .into_iter()
                 .collect();
 
@@ -1213,7 +1211,7 @@ mod tests {
             system: vec![crate::SystemBlock {
                 text: "You are helpful. ".repeat(400),
                 cache_hint: leviath_core::CacheHint::Always,
-                volatility: leviath_core::Volatility::default(),
+                volatility: leviath_core::Volatility::Stable,
                 region: String::new(),
             }],
             messages: vec![crate::provider::Message {
@@ -1461,7 +1459,7 @@ mod tests {
             system: vec![crate::SystemBlock {
                 text: "You are helpful. ".repeat(400),
                 cache_hint: leviath_core::CacheHint::Always,
-                volatility: leviath_core::Volatility::default(),
+                volatility: leviath_core::Volatility::Stable,
                 region: String::new(),
             }],
             messages: vec![
@@ -1553,6 +1551,9 @@ mod tests {
 
     /// Blocks carrying only the hints under test, all eligible - these tests
     /// are about how runs are grouped, not about what held still.
+    /// Blocks that hold still, carrying only the hints under test. Volatility
+    /// defaults to `Rewritten`, which is never a marker candidate, so a fixture
+    /// about *placement* has to say otherwise.
     fn blocks_of(hints: &[leviath_core::CacheHint]) -> Vec<crate::provider::SystemBlock> {
         hints
             .iter()
@@ -1562,59 +1563,81 @@ mod tests {
                 // rule that refuses a breakpoint on an uncacheably short prefix.
                 text: "word ".repeat(1200),
                 cache_hint: *h,
-                volatility: leviath_core::Volatility::default(),
+                volatility: leviath_core::Volatility::Stable,
                 region: String::new(),
             })
             .collect()
     }
 
+    /// Every block that holds still is a candidate, and the budget is spent
+    /// rather than hoarded: the API reads back the longest stored prefix that
+    /// still matches, so extra markers are free insurance for the case where the
+    /// newest block moved.
     #[test]
-    fn system_cache_breakpoints_collapses_same_hint_run_to_one() {
+    fn markers_spread_across_the_blocks_that_hold_still() {
         use leviath_core::CacheHint;
-        // 5 consecutive pinned (Always) blocks → a single breakpoint, on the last.
         assert_eq!(
-            system_cache_breakpoints(&blocks_of(&[CacheHint::Always; 5]), 4),
-            vec![4]
+            system_cache_breakpoints(&blocks_of(&[CacheHint::Always; 5]), 3),
+            vec![2, 3, 4],
+            "the last three, so the longest prefix is covered and two fall back"
         );
     }
 
+    /// The last candidates, not an even spread. A region of many chunks whose
+    /// tail moves wants its markers near the tail: an early marker matches a
+    /// prefix so short it saves almost nothing.
     #[test]
-    fn system_cache_breakpoints_keeps_one_per_tier_boundary() {
+    fn the_budget_keeps_the_longest_prefixes() {
         use leviath_core::CacheHint;
-        // 4 pinned + 1 hashmap (the structured-coder v5 layout) → 2 breakpoints:
-        // end of the Always run (idx 3) and end of the UntilChanged run (idx 4).
-        let mut hints = vec![CacheHint::Always; 4];
-        hints.push(CacheHint::UntilChanged);
-        assert_eq!(system_cache_breakpoints(&blocks_of(&hints), 4), vec![3, 4]);
+        assert_eq!(
+            system_cache_breakpoints(&blocks_of(&[CacheHint::Always; 8]), 2),
+            vec![6, 7]
+        );
     }
 
+    /// A block that changes every turn can never be the end of a readable
+    /// prefix, so a marker there is a 1.25x write for an entry nothing reads.
+    /// This is the measured case from #474: the sole marker sat past the churn.
     #[test]
-    fn system_cache_breakpoints_skips_never_and_splits_runs() {
+    fn a_rewritten_block_is_never_a_candidate() {
+        let mut blocks = blocks_of(&[leviath_core::CacheHint::Always; 3]);
+        blocks[2].volatility = leviath_core::Volatility::Rewritten;
+        assert_eq!(
+            system_cache_breakpoints(&blocks, 3),
+            vec![0, 1],
+            "the markers stop in front of the churn"
+        );
+    }
+
+    /// The runtime's knowledge wins where it has some: it clears a `Temporary`
+    /// region every iteration whatever the blueprint declared.
+    #[test]
+    fn a_never_hinted_block_is_never_a_candidate() {
         use leviath_core::CacheHint;
-        // A `Never` block is uncacheable AND breaks the contiguous run, so the
-        // two `Always` blocks are separate runs → two breakpoints.
         let hints = [CacheHint::Always, CacheHint::Never, CacheHint::Always];
-        assert_eq!(system_cache_breakpoints(&blocks_of(&hints), 4), vec![0, 2]);
+        assert_eq!(
+            system_cache_breakpoints(&blocks_of(&hints), 3),
+            vec![0, 2],
+            "the uncacheable block is skipped, the ones around it are not"
+        );
     }
 
+    /// Nothing holds still, so there is nothing worth marking.
     #[test]
     fn system_cache_breakpoints_all_never_is_empty() {
         use leviath_core::CacheHint;
-        assert!(system_cache_breakpoints(&blocks_of(&[CacheHint::Never; 3]), 4).is_empty());
+        assert!(system_cache_breakpoints(&blocks_of(&[CacheHint::Never; 3]), 3).is_empty());
     }
 
+    /// A prefix below the provider's floor cannot be stored, so a marker on it
+    /// would spend a slot on nothing.
     #[test]
-    fn system_cache_breakpoints_respects_budget_keeping_last_runs() {
-        use leviath_core::CacheHint;
-        // Alternating tiers → 4 runs; budget 2 keeps the last two (which still
-        // include the final, full-prefix breakpoint at idx 3).
-        let hints = [
-            CacheHint::Always,
-            CacheHint::UntilChanged,
-            CacheHint::Always,
-            CacheHint::UntilChanged,
-        ];
-        assert_eq!(system_cache_breakpoints(&blocks_of(&hints), 2), vec![2, 3]);
+    fn a_prefix_below_the_cacheable_floor_gets_no_marker() {
+        let mut blocks = blocks_of(&[leviath_core::CacheHint::Always; 3]);
+        for block in &mut blocks {
+            block.text = "tiny".to_string();
+        }
+        assert!(system_cache_breakpoints(&blocks, 3).is_empty());
     }
 
     #[test]
@@ -1660,31 +1683,31 @@ mod tests {
             crate::SystemBlock {
                 text: "architecture ".repeat(400),
                 cache_hint: CacheHint::Always,
-                volatility: leviath_core::Volatility::default(),
+                volatility: leviath_core::Volatility::Stable,
                 region: String::new(),
             },
             crate::SystemBlock {
                 text: "program_flows ".repeat(400),
                 cache_hint: CacheHint::Always,
-                volatility: leviath_core::Volatility::default(),
+                volatility: leviath_core::Volatility::Stable,
                 region: String::new(),
             },
             crate::SystemBlock {
                 text: "plan ".repeat(400),
                 cache_hint: CacheHint::Always,
-                volatility: leviath_core::Volatility::default(),
+                volatility: leviath_core::Volatility::Stable,
                 region: String::new(),
             },
             crate::SystemBlock {
                 text: "task ".repeat(400),
                 cache_hint: CacheHint::Always,
-                volatility: leviath_core::Volatility::default(),
+                volatility: leviath_core::Volatility::Stable,
                 region: String::new(),
             },
             crate::SystemBlock {
                 text: "files ".repeat(400),
                 cache_hint: CacheHint::UntilChanged,
-                volatility: leviath_core::Volatility::default(),
+                volatility: leviath_core::Volatility::Stable,
                 region: String::new(),
             },
         ];
@@ -1709,15 +1732,17 @@ mod tests {
             total <= 4,
             "must stay within Anthropic's 4-block cache_control limit; got {total}"
         );
-        // The 4 pinned blocks collapse to one breakpoint (on `task`), the hashmap
-        // to another (on `files`) → 2 system breakpoints.
+        // The system claims its share and no more, leaving one of the four for
+        // the messages - where, when the system prefix has not moved, a marker
+        // covers everything ahead of it and is worth more than a fourth system
+        // marker could be.
         let sys_bp = body["system"]
             .as_array()
             .expect("system must be array form")
             .iter()
             .filter(|b| b.get("cache_control").is_some())
             .count();
-        assert_eq!(sys_bp, 2);
+        assert_eq!(sys_bp, MAX_SYSTEM_BREAKPOINTS);
     }
 
     #[test]
@@ -1733,19 +1758,19 @@ mod tests {
             crate::SystemBlock {
                 text: "alpha ".repeat(900),
                 cache_hint: CacheHint::Always,
-                volatility: leviath_core::Volatility::default(),
+                volatility: leviath_core::Volatility::Stable,
                 region: String::new(),
             },
             crate::SystemBlock {
                 text: "bravo ".repeat(900),
                 cache_hint: CacheHint::UntilChanged,
-                volatility: leviath_core::Volatility::default(),
+                volatility: leviath_core::Volatility::Stable,
                 region: String::new(),
             },
             crate::SystemBlock {
                 text: "charlie ".repeat(900),
                 cache_hint: CacheHint::Always,
-                volatility: leviath_core::Volatility::default(),
+                volatility: leviath_core::Volatility::Stable,
                 region: String::new(),
             },
         ];
@@ -1804,7 +1829,7 @@ mod tests {
             system: vec![crate::SystemBlock {
                 text: "ephemeral".into(),
                 cache_hint: CacheHint::Never,
-                volatility: leviath_core::Volatility::default(),
+                volatility: leviath_core::Volatility::Stable,
                 region: String::new(),
             }],
             messages: vec![crate::provider::Message {
@@ -2351,13 +2376,13 @@ mod tests {
                 crate::SystemBlock {
                     text: "System part 1".to_string(),
                     cache_hint: leviath_core::CacheHint::Always,
-                    volatility: leviath_core::Volatility::default(),
+                    volatility: leviath_core::Volatility::Stable,
                     region: String::new(),
                 },
                 crate::SystemBlock {
                     text: "System part 2".to_string(),
                     cache_hint: leviath_core::CacheHint::Always,
-                    volatility: leviath_core::Volatility::default(),
+                    volatility: leviath_core::Volatility::Stable,
                     region: String::new(),
                 },
             ],
@@ -2417,7 +2442,7 @@ mod tests {
             system: vec![crate::SystemBlock {
                 text: "No caching here.".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
-                volatility: leviath_core::Volatility::default(),
+                volatility: leviath_core::Volatility::Stable,
                 region: String::new(),
             }],
             messages: vec![crate::provider::Message {

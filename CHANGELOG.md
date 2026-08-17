@@ -13,6 +13,16 @@ same list.
 
 ## Unreleased
 
+- Fixed: Anthropic cache markers are placed in front of a region that changes,
+  rather than after it, and more than one of the four is used. They were grouped
+  by a hint derived from the region's kind, so a prompt of several pinned
+  regions was one group and got a single marker at its end - past whatever
+  churned. Since the marker caches everything before it, that entry could never
+  be read and the whole prompt was written at the premium rate every call. The
+  API stores up to four prefixes and reads back the longest that still matches,
+  so spreading them costs nothing and catches the case where the newest content
+  moved. Measured on a 24-iteration run: the cache hit rate rose from 66.5% to
+  84.3% and the cost per iteration fell a further 37%.
 - New: a region declares how much its contents move, with
   `volatility = "stable" | "grows" | "rewritten"`, and the prompt is ordered by
   it - stable content first, churn last. A provider caches by prefix, so one
