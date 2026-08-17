@@ -256,18 +256,28 @@ jobs:
       # version it cannot verify. Without this that failure lands on the website, after
       # merging, for somebody who was not editing the website. The checker is the same
       # parser the site uses, so there is one definition of the format rather than two.
+      #
+      # Skipped where the secret is not handed out. A PR opened by Dependabot, or from a
+      # fork, runs without repository secrets, so `token` arrives empty and the checkout
+      # fails the whole Docs job with `Input required and not supplied: token` - after the
+      # actual docs checks above have already passed. Nothing is lost by skipping: the
+      # site's repo is unreachable from those runs either way, and the push to main after
+      # the merge runs this with the secret present.
       - name: Checkout leviath.dev (changelog contract)
+        if: ${{ secrets.DOCS_SSG_TOKEN != '' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: GEMISIS/leviath.dev
           token: ${{ secrets.DOCS_SSG_TOKEN }}
           path: site
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: ${{ secrets.DOCS_SSG_TOKEN != '' }}
         with:
           node-version: 22
       # No npm ci: the checker and its parser import nothing but node:fs, so tsx on its
       # own is the whole dependency.
       - name: Check the changelog the site publishes from
+        if: ${{ secrets.DOCS_SSG_TOKEN != '' }}
         run: npx --yes tsx site/tools/check-changelog.ts CHANGELOG.md
 
   # Coverage runs on all three OSes and enforces a hard 100% on regions, lines,
@@ -443,15 +453,6 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          # Asked over the API rather than read from
-          # `github.event.pull_request.labels`, because a rerun replays the
-          # event payload it was given the first time. A maintainer who labels
-          # a PR after CI started would rerun this job, watch it report no
-          # labels at all, and have no way to clear the failure short of
-          # pushing a commit. The API answers for the PR as it is right now.
-          LABELS=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '[.[].name] | join(",")')
-          echo "Labels on this PR right now: ${LABELS:-(none)}"
-
           # Three dots, so this asks "what did the PR change" rather than "how
           # do these two trees differ". With two dots the diff also contains
           # everything main gained since the branch point, so any PR would fail
@@ -464,17 +465,33 @@ jobs:
           # added - and naming one path here would have let it through both the
           # measurement and this review gate at once.
           CHANGED=$(git diff --name-only "$BASE...$HEAD" | grep -E '(^|/)main\.rs$' || true)
-          if [ -n "$CHANGED" ]; then
-            case ",$LABELS," in
-              *,allow-main-rs-change,*)
-                echo "main.rs change approved via 'allow-main-rs-change' label: $CHANGED" ;;
-              *)
-                echo "::error::main.rs is the coverage-excluded bin entrypoint; changing it needs maintainer approval. Apply the 'allow-main-rs-change' label to override. Changed: $CHANGED"
-                exit 1 ;;
-            esac
-          else
+          if [ -z "$CHANGED" ]; then
             echo "main.rs unchanged."
+            exit 0
           fi
+
+          # Only asked once the answer can change the outcome. Reading labels
+          # needs a scope the token does not always have - a PR opened by
+          # Dependabot gets a restricted one and the call fails 422 - and a PR
+          # that never touched main.rs has no business failing on a permission
+          # it needed only to confirm it was already passing.
+          #
+          # Asked over the API rather than read from
+          # `github.event.pull_request.labels`, because a rerun replays the
+          # event payload it was given the first time. A maintainer who labels
+          # a PR after CI started would rerun this job, watch it report no
+          # labels at all, and have no way to clear the failure short of
+          # pushing a commit. The API answers for the PR as it is right now.
+          LABELS=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '[.[].name] | join(",")')
+          echo "Labels on this PR right now: ${LABELS:-(none)}"
+
+          case ",$LABELS," in
+            *,allow-main-rs-change,*)
+              echo "main.rs change approved via 'allow-main-rs-change' label: $CHANGED" ;;
+            *)
+              echo "::error::main.rs is the coverage-excluded bin entrypoint; changing it needs maintainer approval. Apply the 'allow-main-rs-change' label to override. Changed: $CHANGED"
+              exit 1 ;;
+          esac
 
   # Merging a version bump to main publishes an alpha within seconds, and a week
   # later that same commit is a permanent `vX.Y.Z` tag and an immutable set of
@@ -504,12 +521,6 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          # Read live rather than from the event payload, for the reason spelled
-          # out in `guard-main-rs`: a rerun replays the payload the run started
-          # with, so a label applied afterwards would be invisible.
-          LABELS=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '[.[].name] | join(",")')
-          echo "Labels on this PR right now: ${LABELS:-(none)}"
-
           # The merge base, not the base branch tip: comparing against the tip
           # would report a bump for every PR opened after someone else's release
           # landed on main.
@@ -524,6 +535,14 @@ jobs:
             echo "Workspace version unchanged at $after."
             exit 0
           fi
+
+          # Only asked once the answer can change the outcome; see
+          # `guard-main-rs` for why that ordering matters to a PR opened by
+          # Dependabot. Read live rather than from the event payload, because a
+          # rerun replays the payload the run started with, so a label applied
+          # afterwards would be invisible.
+          LABELS=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '[.[].name] | join(",")')
+          echo "Labels on this PR right now: ${LABELS:-(none)}"
 
           case ",$LABELS," in
             *,allow-version-bump,*)
