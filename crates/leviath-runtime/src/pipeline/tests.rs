@@ -1447,6 +1447,119 @@ fn collect_inference_buffers_output_token_line_and_stage_tokens() {
     assert_eq!(led.0[1].cached_tokens, 2);
 }
 
+// ─── estimator calibration (issue #485) ───
+//
+// The arithmetic is unit-tested in `pipeline::calibration`. What these cover is
+// the wiring, which is the half that can silently do nothing: whether dispatch
+// really records what it believed, whether collect really compares it against
+// what came back, and whether the compaction gate really reads the result.
+
+#[tokio::test]
+async fn dispatch_records_what_it_believed_the_request_would_cost() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    let e = world
+        .spawn((
+            agent_state(),
+            window(),
+            stage("m", vec![], None),
+            ReadyToInfer,
+        ))
+        .id();
+    let believed = world
+        .get::<ContextWindow>(e)
+        .expect("a window")
+        .current_tokens;
+
+    run(&mut world);
+
+    let recorded = world.get::<PromptEstimate>(e).map(|p| p.0);
+    assert_eq!(
+        recorded,
+        Some(believed),
+        "without this the response has nothing to be compared against"
+    );
+}
+
+#[test]
+fn collect_learns_the_drift_between_what_was_believed_and_what_was_charged() {
+    let (mut world, tx) = world_with_results();
+    let e = world
+        .spawn((agent_state(), AwaitingInference, PromptEstimate(1_000)))
+        .id();
+    let mut response = resp("done");
+    response.tokens_used.prompt_tokens = 1_200;
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Ok(response),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    let factor = world
+        .get::<PromptCalibration>(e)
+        .map_or(0.0, PromptCalibration::factor);
+    assert!(
+        (factor - 1.2).abs() < 1e-9,
+        "20% under, measured off the wire rather than guessed: {factor}"
+    );
+}
+
+#[test]
+fn collect_folds_a_worse_call_into_an_existing_calibration() {
+    let (mut world, tx) = world_with_results();
+    let mut existing = PromptCalibration::default();
+    existing.observe(1_000, 1_100);
+    let e = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            PromptEstimate(1_000),
+            existing,
+        ))
+        .id();
+    let mut response = resp("done");
+    response.tokens_used.prompt_tokens = 1_400;
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Ok(response),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    let factor = world
+        .get::<PromptCalibration>(e)
+        .map_or(0.0, PromptCalibration::factor);
+    assert!(
+        (factor - 1.4).abs() < 1e-9,
+        "the agent keeps one factor rather than a fresh one per call: {factor}"
+    );
+}
+
+/// An agent that never dispatched through the inference lane - a test driving
+/// the outcome channel directly, or a run predating this - has nothing to
+/// compare and must be left exactly as it was.
+#[test]
+fn collect_calibrates_nothing_when_there_was_no_estimate() {
+    let (mut world, tx) = world_with_results();
+    let e = world.spawn((agent_state(), AwaitingInference)).id();
+    let mut response = resp("done");
+    response.tokens_used.prompt_tokens = 9_999;
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Ok(response),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    assert!(world.get::<PromptCalibration>(e).is_none());
+}
+
 // ─── abort_terminal_work ───
 
 fn run_abort(world: &mut World) {
