@@ -96,8 +96,12 @@ pub fn dispatch_compaction(
         // there to leave room between "nearly full" and "over the window", and
         // an estimate measured running light spends that room without ever
         // reporting it (issue #485).
-        let threshold = crate::pipeline::calibrated_threshold(EVICTION_THRESHOLD, calibration);
-        if !window.needs_eviction(threshold) {
+        if !crate::pipeline::needs_eviction_calibrated(
+            window.current_tokens,
+            window.max_tokens,
+            EVICTION_THRESHOLD,
+            calibration,
+        ) {
             continue; // under threshold - nothing to do
         }
         let target_free = window.max_tokens / 10;

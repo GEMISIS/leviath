@@ -14,23 +14,23 @@
 //! believed the same request would cost gives the drift directly, so the
 //! runtime does not have to guess better - it only has to listen.
 //!
-//! What is measured here is deliberately end-to-end rather than a pure
-//! tokenizer ratio: the reported figure covers the tool schemas and the hint
-//! blocks as well as the regions, and those are just as real. One number that
-//! maps "what the window thinks it holds" onto "what the provider will charge"
-//! is what the eviction trigger needs, and it is what this produces.
+//! What is measured is end-to-end rather than a pure tokenizer ratio: the
+//! reported figure covers the tool schemas and the hint blocks as well as the
+//! regions, and those cost just as much. What the eviction trigger needs is one
+//! number carrying "what the window thinks it holds" over to "what the provider
+//! will charge", and that is what this keeps.
 //!
 //! Two properties keep this from being a trade:
 //!
 //! * It only ever tightens. A provider that charges less than the estimate -
 //!   which is the common case, since `len()` counts bytes and any non-ASCII
-//!   text inflates the estimate - leaves the factor at one and changes nothing
-//!   at all. Nobody's usable context shrinks unless their provider was measured
-//!   charging more than the runtime believed.
+//!   text inflates the estimate - leaves the correction at zero and changes
+//!   nothing at all. Nobody's usable context shrinks unless their provider was
+//!   measured charging more than the runtime believed.
 //! * It only engages on measured evidence. There is no margin here, no
 //!   guessed percentage held back from every workload on the chance that some
-//!   of them drift. Until a call is observed drifting, the arithmetic is exactly
-//!   what it was.
+//!   of them drift. Until a call is observed costing more, the arithmetic is
+//!   exactly what it was.
 //!
 //! Issue #485: a 27B model pinned to `num_ctx 32768` assembled 32,497 real
 //! tokens on a Python-heavy corpus while the estimator believed it was inside
@@ -41,16 +41,6 @@
 
 use bevy_ecs::prelude::Component;
 
-/// The largest correction that will be applied, as a multiple of the estimate.
-///
-/// A tokenizer that disagrees with bytes-over-four by more than this is not
-/// drifting, it is measuring something else - an image part, or a schema the
-/// request carries but the window never saw - and shrinking the usable window
-/// to a quarter on the strength of one such call would be its own outage. The
-/// cap keeps a single anomalous response from collapsing a run that is
-/// otherwise fine.
-const MAX_CALIBRATION: f64 = 4.0;
-
 /// What the window believed the request just dispatched would cost.
 ///
 /// Written at dispatch and read when the response lands, which is the only
@@ -60,29 +50,43 @@ const MAX_CALIBRATION: f64 = 4.0;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PromptEstimate(pub usize);
 
-/// How far this agent's estimate falls short of what its provider charges.
+/// How many tokens a request costs beyond what the window accounted for.
 ///
-/// One factor per agent rather than per model: an agent's stages can name
+/// Additive rather than a ratio, and that distinction is the whole design.
+/// What separates the reported figure from the window's estimate is two
+/// different things added together:
+///
+/// * **Overhead the window never sees** - the tool schemas, the framework hint
+///   blocks, the provider's own message framing. It is roughly constant for a
+///   stage and does not grow when a region does.
+/// * **Tokenizer drift** - the real error in bytes-over-four, which *is*
+///   proportional to content.
+///
+/// A ratio models the second and mangles the first. Measured live on a small
+/// window: a 26-token context against a 466-token request is a ratio of 18,
+/// which as a multiplier would pull the eviction trigger down to a fifth of the
+/// window and evict continuously - when the honest reading is "this stage
+/// carries 440 tokens of schema". Because the correction is a high-water mark,
+/// an agent that measured that while nearly empty would never recover from it.
+///
+/// Adding instead gets the overhead exactly right and tracks drift one call
+/// behind, which the eviction threshold's own margin absorbs.
+///
+/// One figure per agent rather than per model: an agent's stages can name
 /// different models, but they share a window, and it is the window's arithmetic
-/// being corrected. A stage that moves to a model with a friendlier tokenizer
-/// keeps the tighter factor, which costs it some headroom and cannot cost it a
-/// run.
-#[derive(Component, Debug, Clone, Copy)]
+/// being corrected.
+#[derive(Component, Debug, Clone, Copy, Default)]
 pub struct PromptCalibration {
-    /// Reported over estimated, at the highest yet observed, never below one.
-    factor: f64,
-}
-
-impl Default for PromptCalibration {
-    fn default() -> Self {
-        Self { factor: 1.0 }
-    }
+    /// The largest gap yet seen between what a request was charged and what the
+    /// window believed it held.
+    shortfall: usize,
 }
 
 impl PromptCalibration {
-    /// The correction to apply to an estimate, as a multiplier of at least one.
-    pub fn factor(&self) -> f64 {
-        self.factor
+    /// Tokens to add to the window's estimate to get what will really be
+    /// charged.
+    pub fn shortfall(&self) -> usize {
+        self.shortfall
     }
 
     /// Fold in one call's reported cost against what was estimated for it.
@@ -94,58 +98,61 @@ impl PromptCalibration {
     /// eviction fires earlier than it strictly had to, which is a mechanism
     /// that already runs on every long run and drops the regions marked
     /// droppable first. Those are not the same size of mistake.
-    pub fn observe(&mut self, estimated: usize, reported: usize) {
-        // A call with nothing to compare says nothing. Zero estimated would
-        // divide by zero; zero reported is a provider that did not report usage
-        // at all, and reading that as "this request was free" would drive the
-        // factor down - except that it cannot, because the factor only rises.
-        if estimated == 0 || reported == 0 {
-            return;
+    ///
+    /// Returns whether the correction moved, so the caller can say so once
+    /// rather than on every call.
+    pub fn observe(&mut self, estimated: usize, reported: usize) -> bool {
+        // A provider that reported no usage at all is not evidence that the
+        // request was free.
+        if reported == 0 {
+            return false;
         }
-        let observed = reported as f64 / estimated as f64;
-        if observed > self.factor {
-            self.factor = observed.min(MAX_CALIBRATION);
+        // Charged less than estimated is the ordinary case on any text with
+        // non-ASCII in it, since the estimator counts bytes. Nothing to correct.
+        let Some(gap) = reported.checked_sub(estimated) else {
+            return false;
+        };
+        if gap <= self.shortfall {
+            return false;
         }
+        self.shortfall = gap;
+        true
     }
 }
 
-/// The factor to apply, for an agent that may not have been calibrated yet.
+/// The correction for an agent that may not have been calibrated yet.
 ///
 /// Absent means an agent spawned before this existed, or one in a test that
 /// builds its components by hand. Both should behave exactly as they did.
-pub(crate) fn factor_of(calibration: Option<&PromptCalibration>) -> f64 {
-    calibration.map_or(1.0, PromptCalibration::factor)
+pub(crate) fn shortfall_of(calibration: Option<&PromptCalibration>) -> usize {
+    calibration.map_or(0, PromptCalibration::shortfall)
 }
 
 /// What `estimated` tokens are really expected to cost.
-///
-/// Rounded up, so the correction is never rounded away on a small region.
 pub(crate) fn calibrated_tokens(
     estimated: usize,
     calibration: Option<&PromptCalibration>,
 ) -> usize {
-    let factor = factor_of(calibration);
-    if factor <= 1.0 {
-        return estimated;
-    }
-    // f64 carries every usize a context window can hold without loss, and the
-    // factor is bounded by MAX_CALIBRATION, so the product cannot leave range.
-    (estimated as f64 * factor).ceil() as usize
+    estimated.saturating_add(shortfall_of(calibration))
 }
 
-/// The fill threshold that means the same thing in real tokens as `base` did in
-/// estimated ones.
+/// Whether the window has reached `threshold` of its budget, measured in what
+/// the provider will charge rather than in what the estimator believed.
 ///
-/// Scaling the trigger rather than the window's `max_tokens`: the region
+/// Correcting the reading rather than the window's `max_tokens`: the region
 /// budgets were resolved against `max_tokens` at spawn, and moving it under a
-/// live window would leave regions retroactively over budget. The threshold is
-/// read fresh on every tick and belongs to nothing else.
-pub(crate) fn calibrated_threshold(base: f32, calibration: Option<&PromptCalibration>) -> f32 {
-    let factor = factor_of(calibration);
-    if factor <= 1.0 {
-        return base;
+/// live window would leave regions retroactively over budget.
+pub(crate) fn needs_eviction_calibrated(
+    current_tokens: usize,
+    max_tokens: usize,
+    threshold: f32,
+    calibration: Option<&PromptCalibration>,
+) -> bool {
+    if max_tokens == 0 {
+        return false;
     }
-    base / factor as f32
+    let corrected = calibrated_tokens(current_tokens, calibration);
+    corrected as f32 / max_tokens as f32 >= threshold
 }
 
 #[cfg(test)]
@@ -154,17 +161,18 @@ mod tests {
 
     #[test]
     fn an_uncalibrated_agent_changes_nothing() {
-        assert_eq!(factor_of(None), 1.0);
+        assert_eq!(shortfall_of(None), 0);
         assert_eq!(calibrated_tokens(1000, None), 1000);
-        assert_eq!(calibrated_threshold(0.9, None), 0.9);
+        assert!(!needs_eviction_calibrated(8_000, 10_000, 0.9, None));
+        assert!(needs_eviction_calibrated(9_000, 10_000, 0.9, None));
     }
 
     #[test]
     fn a_fresh_calibration_changes_nothing_either() {
         let cal = PromptCalibration::default();
-        assert_eq!(cal.factor(), 1.0);
+        assert_eq!(cal.shortfall(), 0);
         assert_eq!(calibrated_tokens(1000, Some(&cal)), 1000);
-        assert_eq!(calibrated_threshold(0.9, Some(&cal)), 0.9);
+        assert!(!needs_eviction_calibrated(8_000, 10_000, 0.9, Some(&cal)));
     }
 
     /// The reporter's numbers: a window that believed it held 29,491 and was
@@ -174,13 +182,8 @@ mod tests {
         let mut cal = PromptCalibration::default();
         cal.observe(29_491, 32_497);
 
-        assert!(cal.factor() > 1.10, "measured drift is about 10%");
-        assert!(cal.factor() < 1.11);
-        // Eviction has to start early enough that the freed space arrives
-        // before the real window does.
-        let threshold = calibrated_threshold(0.9, Some(&cal));
-        assert!(threshold < 0.82, "0.9 of a window 10% larger than believed");
-        assert_eq!(calibrated_tokens(10_000, Some(&cal)), 11_020);
+        assert_eq!(cal.shortfall(), 3_006);
+        assert_eq!(calibrated_tokens(10_000, Some(&cal)), 13_006);
     }
 
     /// The common case. `estimate_tokens` counts bytes, so any non-ASCII text
@@ -188,11 +191,30 @@ mod tests {
     #[test]
     fn a_provider_that_charges_less_than_estimated_is_left_alone() {
         let mut cal = PromptCalibration::default();
-        cal.observe(10_000, 6_000);
+        assert!(!cal.observe(10_000, 6_000));
 
-        assert_eq!(cal.factor(), 1.0);
+        assert_eq!(cal.shortfall(), 0);
         assert_eq!(calibrated_tokens(10_000, Some(&cal)), 10_000);
-        assert_eq!(calibrated_threshold(0.9, Some(&cal)), 0.9);
+    }
+
+    /// The bug live testing found. A stage carrying big tool schemas against a
+    /// nearly empty window reports a ratio of eighteen; as a multiplier that
+    /// pulled the eviction trigger down to a fifth of the window and, being a
+    /// high-water mark, never let go of it. The honest reading is 440 tokens of
+    /// schema, which costs 440 tokens at every size.
+    #[test]
+    fn fixed_overhead_does_not_scale_with_the_window() {
+        let mut cal = PromptCalibration::default();
+        cal.observe(26, 466);
+
+        assert_eq!(cal.shortfall(), 440);
+        // The correction it implies once the window is actually holding
+        // something: still 440, not eighteen times everything.
+        assert_eq!(calibrated_tokens(20_000, Some(&cal)), 20_440);
+        assert!(
+            !needs_eviction_calibrated(20_000, 100_000, 0.9, Some(&cal)),
+            "a fifth-full window is not evicting"
+        );
     }
 
     #[test]
@@ -201,28 +223,67 @@ mod tests {
         cal.observe(1_000, 1_300);
         cal.observe(1_000, 1_050);
 
-        let factor = cal.factor();
+        assert_eq!(
+            cal.shortfall(),
+            300,
+            "a friendlier call does not forget the drift"
+        );
+    }
+
+    /// The crossing is reported so the runtime can say so once. A steady run
+    /// that never drifts further must stay quiet.
+    #[test]
+    fn only_a_correction_that_moved_reports_itself() {
+        let mut cal = PromptCalibration::default();
+
+        assert!(cal.observe(1_000, 1_200), "the first shortfall is news");
+        assert!(!cal.observe(1_000, 1_100), "a friendlier call is not");
+        assert!(cal.observe(1_000, 1_500), "a worse one is news again");
+        assert!(!cal.observe(1_000, 0), "no reported usage is not evidence");
+    }
+
+    /// The end the whole thing exists for, on the reporter's own numbers: a
+    /// 32,768 window and an estimator running about 3,000 tokens light.
+    ///
+    /// The eviction threshold exists to leave a margin between "nearly full"
+    /// and "over the window", and 0.9 of 32,768 is meant to be 3,277 tokens of
+    /// it. Measured against the real tokenizer that margin was 269 - less than
+    /// a single tool result, so the very next append crossed the window
+    /// whatever eviction did. The threshold had not stopped working; it was
+    /// being applied to a number that was not the one that mattered.
+    #[test]
+    fn eviction_leaves_room_to_evict_into_rather_than_a_sliver() {
+        const WINDOW: usize = 32_768;
+        const SHORTFALL: usize = 3_006;
+
+        let mut cal = PromptCalibration::default();
+        cal.observe(29_491, 29_491 + SHORTFALL);
+
+        // Uncalibrated, the trigger fires with almost nothing left in front of
+        // it: 269 real tokens, less than a single tool result, so the next
+        // append crosses the window whatever eviction does.
+        let raw_trip = (WINDOW as f32 * 0.9) as usize;
+        let raw_margin = WINDOW - (raw_trip + SHORTFALL);
         assert!(
-            (factor - 1.3).abs() < 1e-9,
-            "a friendlier call does not forget the drift: {factor}"
+            raw_margin < 1_000,
+            "the bug: only {raw_margin} real tokens of margin at the trigger"
+        );
+
+        // Calibrated, the same threshold fires while there is still room.
+        assert!(
+            needs_eviction_calibrated(raw_trip, WINDOW, 0.9, Some(&cal)),
+            "the fix: the trigger reads the corrected figure"
+        );
+        let margin = WINDOW - calibrated_tokens(WINDOW * 8 / 10, Some(&cal));
+        assert!(
+            margin > 3_000,
+            "an eight-tenths window still has {margin} real tokens in front of it"
         );
     }
 
     #[test]
-    fn one_anomalous_call_cannot_collapse_the_window() {
-        let mut cal = PromptCalibration::default();
-        cal.observe(1_000, 100_000);
-
-        assert_eq!(cal.factor(), MAX_CALIBRATION);
-    }
-
-    #[test]
-    fn a_call_with_nothing_to_compare_is_ignored() {
-        let mut cal = PromptCalibration::default();
-        cal.observe(0, 5_000);
-        cal.observe(5_000, 0);
-
-        assert_eq!(cal.factor(), 1.0);
+    fn a_window_with_no_budget_never_evicts() {
+        assert!(!needs_eviction_calibrated(100, 0, 0.9, None));
     }
 
     #[test]
@@ -232,55 +293,12 @@ mod tests {
         assert_eq!(format!("{estimate:?}"), "PromptEstimate(4096)");
     }
 
-    /// The end the whole thing exists for, on the reporter's own numbers: a
-    /// 32,768 window and an estimator running about 10% light.
-    ///
-    /// The eviction threshold exists to leave a margin between "nearly full"
-    /// and "over the window", and 0.9 of 32,768 is meant to be 3,277 tokens of
-    /// it. Measured against the real tokenizer that margin is 269 - less than a
-    /// single tool result, so the very next append crosses the window whatever
-    /// eviction does. The threshold had not stopped working; it was being
-    /// applied to a number that was not the one that mattered.
-    ///
-    /// The 32,499 this computes is the same figure the reporter's journal
-    /// recorded for the last call that succeeded, which is the corroboration
-    /// that the drift is what it looks like.
-    #[test]
-    fn eviction_leaves_room_to_evict_into_rather_than_a_sliver() {
-        const WINDOW: usize = 32_768;
-        const DRIFT: f64 = 1.102;
-        /// A read result landing in the window, which is what the run appended
-        /// next.
-        const ONE_TOOL_RESULT: usize = 1_000;
-
-        let real = |estimated: usize| (estimated as f64 * DRIFT) as usize;
-        let headroom_at = |threshold: f32| {
-            let trip = (WINDOW as f32 * threshold) as usize;
-            WINDOW.saturating_sub(real(trip))
-        };
-
-        let uncalibrated = headroom_at(0.9);
-        assert!(
-            uncalibrated < ONE_TOOL_RESULT,
-            "the bug: {uncalibrated} real tokens of margin, and the next append is larger"
-        );
-
-        let mut cal = PromptCalibration::default();
-        let believed = WINDOW / 2;
-        cal.observe(believed, real(believed));
-        let calibrated = headroom_at(calibrated_threshold(0.9, Some(&cal)));
-        assert!(
-            calibrated > ONE_TOOL_RESULT * 3,
-            "the fix: {calibrated} real tokens of margin, which eviction can work with"
-        );
-    }
-
     #[test]
     fn a_calibration_is_inspectable() {
         let mut cal = PromptCalibration::default();
         cal.observe(1_000, 1_500);
         let shown = format!("{cal:?}");
-        assert!(shown.contains("1.5"), "the factor is legible: {shown}");
-        assert_eq!(cal.factor(), PromptCalibration::clone(&cal).factor());
+        assert!(shown.contains("500"), "the shortfall is legible: {shown}");
+        assert_eq!(cal.shortfall(), PromptCalibration::clone(&cal).shortfall());
     }
 }
