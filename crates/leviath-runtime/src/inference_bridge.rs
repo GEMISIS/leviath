@@ -607,6 +607,8 @@ mod tests {
                 text: "sys".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             }],
             messages: vec![leviath_providers::Message {
                 role: "user".to_string(),

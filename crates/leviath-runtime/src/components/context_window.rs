@@ -7,8 +7,8 @@
 //! questions to arrive with.
 
 use super::block_cache::{
-    CACHE_CHUNK_TOKENS, append_only_chunks, cache_hint_sort_priority, mark_breakpoint_eligibility,
-    mark_recently_changed_run, push_chunked, system_prefix_hash,
+    CACHE_CHUNK_TOKENS, append_only_chunks, block_sort_priority, mark_breakpoint_eligibility,
+    mark_recently_changed_run, push_chunked, system_prefix_hash, warn_on_unstable_declaration,
 };
 use super::*;
 
@@ -116,6 +116,13 @@ pub struct ContextWindow {
         std::sync::Arc<leviath_scripting::region_hook::RegionScript>,
     >,
 
+    /// How many times each region declared `stable` has been seen to change,
+    /// so the warning about a wrong declaration is said once rather than every
+    /// turn. Shared across clones because a cloned window is the same logical
+    /// window and should not start warning again.
+    pub unstable_declarations:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+
     /// Regions the current stage does not attend to.
     ///
     /// Held, not deleted. A stage layout that omits a region used to have it
@@ -164,6 +171,7 @@ impl ContextWindow {
             current_tokens: 0,
             max_tokens,
             region_scripts: std::collections::HashMap::new(),
+            unstable_declarations: Default::default(),
         }
     }
 
@@ -646,6 +654,8 @@ impl ContextWindow {
                             text: labelled(region, &body),
                             cache_hint: CacheHint::UntilChanged,
                             breakpoint_eligible: true,
+                            volatility: region.volatility,
+                            region: region.name.clone(),
                         });
                     }
                 }
@@ -774,7 +784,14 @@ impl ContextWindow {
                         .iter()
                         .map(|e| e.content.clone())
                         .collect::<Vec<_>>();
-                    let chunks = append_only_chunks(&entries, CACHE_CHUNK_TOKENS);
+                    // Split only when the region declared that it grows; see
+                    // `push_chunked` for why the kind cannot answer that.
+                    let chunks = match region.volatility {
+                        leviath_core::Volatility::Grows => {
+                            append_only_chunks(&entries, CACHE_CHUNK_TOKENS)
+                        }
+                        _ => vec![entries.join("\n\n")],
+                    };
                     for (index, chunk) in chunks.iter().enumerate() {
                         let text = match index {
                             0 => format!("[{}]:\n{}", region.name, chunk),
@@ -784,6 +801,8 @@ impl ContextWindow {
                             text,
                             cache_hint: CacheHint::UntilChanged,
                             breakpoint_eligible: true,
+                            volatility: region.volatility,
+                            region: region.name.clone(),
                         });
                     }
                 }
@@ -798,6 +817,8 @@ impl ContextWindow {
                         text: format!("[{}]:\n{}", region.name, text),
                         cache_hint: CacheHint::Never,
                         breakpoint_eligible: true,
+                        volatility: region.volatility,
+                        region: region.name.clone(),
                     });
                 }
                 leviath_core::RegionKind::Clearable => {
@@ -811,6 +832,8 @@ impl ContextWindow {
                         text: format!("[{}]:\n{}", region.name, text),
                         cache_hint: CacheHint::Never,
                         breakpoint_eligible: true,
+                        volatility: region.volatility,
+                        region: region.name.clone(),
                     });
                 }
 
@@ -853,6 +876,8 @@ impl ContextWindow {
                         text: format!("[{}]:\n{}", region.name, text),
                         cache_hint: CacheHint::UntilChanged,
                         breakpoint_eligible: true,
+                        volatility: region.volatility,
+                        region: region.name.clone(),
                     });
                 }
             }
@@ -876,15 +901,23 @@ impl ContextWindow {
 
         // ── Sort system blocks for optimal prefix caching ────────────────
         //
-        // Anthropic caches system content based on prefix matching.
-        // Stable blocks (Pinned, CompactHistory) should come first so
-        // they form the cacheable prefix, with volatile blocks
-        // (Compacting, Temporary, Clearable) after.
-        system_blocks.sort_by_key(|block| cache_hint_sort_priority(block.cache_hint));
+        // A provider caches by prefix, so a block that changes invalidates
+        // every block behind it: the arrangement that pays is stable content
+        // first and churn last. That is what the region declared, not what its
+        // kind implies - see [`leviath_core::Volatility`].
+        system_blocks.sort_by_key(block_sort_priority);
         // After the sort, because the order is part of what Anthropic matches.
         let system_hash = system_prefix_hash(&system_blocks);
         let block_hashes =
             mark_breakpoint_eligibility(&mut system_blocks, &meta.previous_block_hashes);
+        // A declaration is a hint we can falsify, not a promise: `stable` sorts a
+        // region to the front, so one that is really churning does the most
+        // damage possible and does it because we believed the label.
+        warn_on_unstable_declaration(
+            &system_blocks,
+            &meta.previous_block_hashes,
+            &mut leviath_core::sync::lock(&self.unstable_declarations),
+        );
 
         // ── Spend a cache breakpoint on the volatile boundary ────────────
         //
@@ -1115,6 +1148,8 @@ mod tests {
             text: "x".to_string(),
             cache_hint: hint,
             breakpoint_eligible: true,
+            volatility: leviath_core::Volatility::default(),
+            region: String::new(),
         }
     }
 
@@ -1155,10 +1190,13 @@ mod tests {
     #[test]
     fn recently_changed_sorts_with_until_changed() {
         assert_eq!(
-            cache_hint_sort_priority(CacheHint::RecentlyChanged),
-            cache_hint_sort_priority(CacheHint::UntilChanged)
+            super::block_cache::cache_hint_sort_priority(CacheHint::RecentlyChanged),
+            super::block_cache::cache_hint_sort_priority(CacheHint::UntilChanged)
         );
-        assert_eq!(cache_hint_sort_priority(CacheHint::RecentlyChanged), 2);
+        assert_eq!(
+            super::block_cache::cache_hint_sort_priority(CacheHint::RecentlyChanged),
+            2
+        );
     }
 
     #[test]
@@ -1382,18 +1420,125 @@ mod tests {
         assert!(total <= 4, "total breakpoints: {total}");
     }
 
+    /// The property the whole mechanism exists for: churn must not sit in front
+    /// of stable content, whatever order the regions were declared in.
+    ///
+    /// A provider caches by prefix, so a block that changes invalidates every
+    /// block behind it. Declared worst-first - a rewritten region, then a
+    /// growing one, then the immutable task - the prompt must still come out
+    /// stable-first. Measured before this existed: 0 cacheable tokens of 3,021.
+    #[test]
+    fn a_declared_prompt_orders_itself_stable_first() {
+        let mut window = ContextWindow::new(1_000_000);
+
+        let mut scratch = Region::new("scratch".to_string(), RegionKind::Pinned, 100_000);
+        scratch.volatility = leviath_core::Volatility::Rewritten;
+        scratch.add_entry("state".to_string(), 5).expect("fits");
+        window.add_region(scratch);
+
+        let mut history = Region::new("history".to_string(), RegionKind::Pinned, 100_000);
+        history.volatility = leviath_core::Volatility::Grows;
+        history.add_entry("a finding".to_string(), 5).expect("fits");
+        window.add_region(history);
+
+        let mut task = Region::new("task".to_string(), RegionKind::Pinned, 100_000);
+        task.volatility = leviath_core::Volatility::Stable;
+        task.add_entry("do the thing".to_string(), 5).expect("fits");
+        window.add_region(task);
+
+        let order: Vec<String> = window
+            .assemble()
+            .system_blocks
+            .iter()
+            .map(|b| b.region.clone())
+            .collect();
+        assert_eq!(order, vec!["task", "history", "scratch"]);
+    }
+
+    /// A region that changes must not cost the stable content in front of it.
+    #[test]
+    fn churn_behind_stable_content_leaves_it_cacheable() {
+        let mut window = ContextWindow::new(1_000_000);
+        let mut task = Region::new("task".to_string(), RegionKind::Pinned, 100_000);
+        task.volatility = leviath_core::Volatility::Stable;
+        task.add_entry("instructions ".repeat(200), 700)
+            .expect("fits");
+        window.add_region(task);
+        let mut scratch = Region::new("scratch".to_string(), RegionKind::Pinned, 100_000);
+        scratch.volatility = leviath_core::Volatility::Rewritten;
+        window.add_region(scratch);
+
+        let first = window.assemble();
+        // The scratch region is rebuilt, as such a region is every turn.
+        window
+            .regions
+            .iter_mut()
+            .find(|r| r.name == "scratch")
+            .expect("declared above")
+            .clear();
+        window
+            .add_to_region("scratch", "new state".to_string(), 5)
+            .expect("fits");
+
+        let second = window.assemble_with_meta(&crate::custom_region::AssembleMeta {
+            stage_name: "work".to_string(),
+            stage_iterations: 1,
+            model: "m".to_string(),
+            previous_system_hash: Some(first.system_hash),
+            previous_block_hashes: first.block_hashes.clone(),
+        });
+        let task_block = second
+            .system_blocks
+            .iter()
+            .find(|b| b.region == "task")
+            .expect("the task block is present");
+        assert!(
+            task_block.breakpoint_eligible,
+            "the stable content held still and must stay cacheable"
+        );
+    }
+
+    /// Chunking is what a growing region gets. A stable one is already a single
+    /// boundary, and splitting a rewritten one buys nothing because no boundary
+    /// inside it survives.
+    #[test]
+    fn only_a_growing_region_is_split_into_chunks() {
+        let entries = || {
+            (0..20)
+                .map(|i| format!("{i}: {}", "word ".repeat(200)))
+                .collect::<Vec<_>>()
+        };
+        let blocks_for = |volatility| {
+            let mut window = ContextWindow::new(2_000_000);
+            let mut region = Region::new("notes".to_string(), RegionKind::Pinned, 1_000_000);
+            region.volatility = volatility;
+            for entry in entries() {
+                region.add_entry(entry, 250).expect("fits");
+            }
+            window.add_region(region);
+            window.assemble().system_blocks.len()
+        };
+
+        assert!(blocks_for(leviath_core::Volatility::Grows) > 1);
+        assert_eq!(blocks_for(leviath_core::Volatility::Stable), 1);
+        assert_eq!(blocks_for(leviath_core::Volatility::Rewritten), 1);
+    }
+
     /// A compacting region large enough to span chunks says which region each
     /// continuation belongs to, and keeps every entry.
     #[test]
     fn a_compacting_region_labels_its_continuations() {
         let mut window = ContextWindow::new(2_000_000);
-        window.add_region(Region::new(
+        let mut history = Region::new(
             "history".to_string(),
             RegionKind::Compacting {
                 threshold_tokens: usize::MAX,
             },
             1_000_000,
-        ));
+        );
+        // Only a region that says it grows is split into chunks.
+        history.volatility = leviath_core::Volatility::Grows;
+        window.add_region(history);
         for i in 0..20 {
             window
                 .add_to_region("history", format!("{i}:{}", "word ".repeat(200)), 250)

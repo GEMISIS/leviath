@@ -162,6 +162,7 @@ and pass on the first attempt, which looks exactly like a stage that finished it
 | `summarizable` | `true` | Set false to keep an edge `transform = "compact"` from paraphrasing this region. See [transforms](/docs/stages#carrying-context-across-an-edge) |
 | `description` | unset | One line on what the region is for. Documentation by default: it reaches `lev dash` and the API, not the model |
 | `describe_in_prompt` | `false` | Also show the `description` to the model, above the region's contents. See [what the model sees](#what-the-model-sees) |
+| `volatility` | `"rewritten"` | How much the region's contents move between requests, which decides where it sits in the prompt. See [what caching costs](#what-caching-costs) |
 | `admission` | `"evict"` | What happens when a write does not fit. `"reject"` refuses it instead of dropping something. See [letting the agent decide what to forget](#letting-the-agent-decide-what-to-forget) |
 | `required_message` | generated | What the model is told when a required region is empty. Supports `{region}` |
 
@@ -287,6 +288,41 @@ than a purpose it can infer from the name.
 Empty regions contribute nothing - no heading, no blank block - so a blueprint
 can declare the regions it might need without paying for the ones it has not
 filled yet.
+
+## What caching costs
+
+A provider caches the prompt by **prefix**: it stores everything up to a marker, and next
+request it reuses that only if every byte in front of the marker is identical. So one region
+that changes invalidates the cache for every region behind it, however still those are.
+
+That makes the ordering of the prompt worth money, and the ordering is decided by what each
+region declares:
+
+```toml
+[context.regions]
+task    = { kind = "pinned", volatility = "stable" }      # set once at spawn
+sources = { kind = "pinned", volatility = "grows" }       # appended to as the run goes
+scratch = { kind = "hashmap", volatility = "rewritten" }  # rebuilt each turn
+```
+
+| value | means | gets |
+|---|---|---|
+| `stable` | written rarely or never after setup | sorted first, forming the prefix everything else caches behind |
+| `grows` | appended to, existing entries untouched | sorted next, and split so its settled part caches while only the newest is re-sent |
+| `rewritten` | existing content changes in place | sorted last, where it invalidates nothing but itself |
+
+The default is `rewritten`, which is the pessimistic one. A region nobody has classified is
+assumed to move, so leaving this out never makes a blueprint slower than it was; declaring it
+is what makes it faster.
+
+> [!NOTE]
+> The region's **kind** does not answer this, which is why the setting exists. A `pinned`
+> region sounds immutable and is written constantly - `context_write` into a findings region
+> is an ordinary move, and [tool routing](#routing-tool-output) sends read results straight
+> into one. Only the blueprint knows which of yours is which.
+
+If a region declares `stable` and then keeps changing, Leviath says so in the log rather than
+silently paying for it: the declaration is a hint it checks, not a promise it trusts.
 
 ## Where a stage's own instructions live
 

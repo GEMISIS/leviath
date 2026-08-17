@@ -461,6 +461,12 @@ pub struct Region {
     #[serde(default)]
     pub admission: Admission,
 
+    /// How much this region's contents move between requests, which decides
+    /// where it sits in the prompt and whether it is chunked. See
+    /// [`Volatility`].
+    #[serde(default)]
+    pub volatility: Volatility,
+
     /// One line on what this region is for.
     ///
     /// Documentation first: it is what `GET /api/blueprints/{name}` reports and
@@ -507,6 +513,46 @@ pub enum Admission {
     Reject,
 }
 
+/// How much a region's contents move between requests.
+///
+/// This exists because a provider caches by *prefix*: an entry is readable next
+/// time only when every byte in front of it is unchanged, so a block that moves
+/// invalidates everything behind it however stable that later content is. The
+/// arrangement that pays is stable content first and churn last.
+///
+/// A region's [`RegionKind`] cannot answer this. A pinned region sounds
+/// immutable and is written constantly - `context_write` into a findings region
+/// is an ordinary move, and tool routing sends read results straight into one.
+/// A compact-history region sounds settled and gains an entry every time
+/// compaction fires. Inferring stability from the kind put churn at the front of
+/// the prefix and cost a measured 456,860 cache-write tokens against zero reads
+/// (issue #474).
+///
+/// So the blueprint says. The author knows whether a region is set once at spawn
+/// or written every turn, and nothing else does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Volatility {
+    /// Written rarely or never after setup: a task, a system prompt, a
+    /// convention the run does not revise. Sorted to the front, where it forms
+    /// the prefix everything else caches behind.
+    Stable,
+    /// Appended to, with existing entries left alone: a findings list, a
+    /// bibliography, a transcript of what has been read. Sorted after the stable
+    /// content, and split into chunks so the settled head of it can be cached
+    /// while only the tail is re-sent.
+    Grows,
+    /// Existing content changes in place: a scratchpad, a key-value store whose
+    /// keys are overwritten, anything rebuilt each turn. Sorted last, where it
+    /// invalidates nothing but itself.
+    ///
+    /// The default, and deliberately the pessimistic one: a blueprint that
+    /// declares nothing must never be made *worse* by this, and an optimistic
+    /// default is exactly how inferring stability from the kind went wrong.
+    #[default]
+    Rewritten,
+}
+
 mod schema;
 
 pub use schema::{ContentFormat, RegionSchema, Validator};
@@ -530,6 +576,7 @@ impl Region {
             needs_message_compaction: false,
             summarizable: true,
             admission: Admission::default(),
+            volatility: Volatility::default(),
             description: None,
             describe_in_prompt: false,
         }

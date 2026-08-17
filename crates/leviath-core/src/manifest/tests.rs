@@ -4946,3 +4946,60 @@ fn a_region_definition_without_the_field_deserializes_as_summarizable() {
         serde_json::from_value(json).expect("an older definition still loads");
     assert!(def.summarizable);
 }
+
+/// `volatility` parses, and an unclassified region gets the pessimistic value.
+///
+/// Pessimistic because a provider caches by prefix: a block that moves
+/// invalidates everything behind it, so a region nobody has classified must be
+/// assumed to move and sorted late. An optimistic default is how inferring
+/// stability from the region's kind went wrong (issue #474).
+#[test]
+fn parse_manifest_reads_region_volatility() {
+    let toml = r#"
+[agent]
+name = "curator"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 100, volatility = "stable" }
+notes = { kind = "pinned", max_tokens = 100, volatility = "grows" }
+scratch = { kind = "pinned", max_tokens = 100, volatility = "rewritten" }
+unsaid = { kind = "pinned", max_tokens = 100 }
+"#;
+    let bp = parse_manifest(toml).expect("parses");
+    let region = |name: &str| {
+        bp.context_layout
+            .regions
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("{name} declared"))
+    };
+    assert_eq!(region("task").volatility, crate::region::Volatility::Stable);
+    assert_eq!(region("notes").volatility, crate::region::Volatility::Grows);
+    assert_eq!(
+        region("scratch").volatility,
+        crate::region::Volatility::Rewritten
+    );
+    assert_eq!(
+        region("unsaid").volatility,
+        crate::region::Volatility::Rewritten
+    );
+}
+
+/// A misspelling is refused rather than quietly taking the default.
+///
+/// The default is the *worst* placement, so falling back to it would cost the
+/// author exactly the caching they were asking for, silently.
+#[test]
+fn parse_manifest_refuses_an_unknown_volatility() {
+    let toml = r#"
+[agent]
+name = "curator"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 100, volatility = "immutable" }
+"#;
+    let err = parse_manifest(toml).expect_err("an unknown value is refused");
+    let message = err.to_string();
+    assert!(message.contains("immutable"), "{message}");
+    assert!(message.contains("stable"), "{message}");
+}

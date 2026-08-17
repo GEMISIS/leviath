@@ -13,6 +13,24 @@ same list.
 
 ## Unreleased
 
+- New: a region declares how much its contents move, with
+  `volatility = "stable" | "grows" | "rewritten"`, and the prompt is ordered by
+  it - stable content first, churn last. A provider caches by prefix, so one
+  region that changes invalidates the cache for every region behind it, which
+  makes the ordering worth money. It could not be inferred: a `pinned` region
+  sounds immutable and is written constantly, since `context_write` into a
+  findings region is an ordinary move and tool routing sends read results
+  straight into one. Measured on a run whose churn was declared first, 24
+  iterations either way: the cache hit rate went from 0% to 66.5% and the cost
+  per iteration fell 58%. A region that grows is also split so its settled part
+  caches while only the newest entries are re-sent. The default is `rewritten`,
+  the pessimistic value, so an undeclared blueprint is never made worse -
+  declaring is what makes it faster. A region that claims to be `stable` and
+  then keeps changing is reported in the log rather than silently paid for.
+- Fixed: a cache breakpoint is not placed on a prefix too short for the provider
+  to store. Anthropic caches nothing below about 1,024 tokens, and a dumped
+  request showed one of the four breakpoints sitting on a 269-byte block, where
+  it could never be read back.
 - Fixed: a growing context region is no longer rewritten into the prompt cache
   on every call. A region became a single system block, and a provider matches a
   cached prefix only at a block boundary - so the one boundary a region offered

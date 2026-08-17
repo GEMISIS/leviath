@@ -223,6 +223,26 @@ pub(super) fn parse_region_layout(
             }
         };
 
+        // Default `rewritten`, the pessimistic one: a provider caches by prefix,
+        // so a block that moves invalidates everything behind it, and a region
+        // nobody has classified must be assumed to move. An optimistic default
+        // is how inferring stability from the region's kind went wrong.
+        //
+        // A misspelling is an error rather than a silent fall back to the
+        // default: the default is the *worst* placement, so a typo would quietly
+        // cost the author exactly the caching they were asking for.
+        let volatility = match region_value.get("volatility").and_then(|v| v.as_str()) {
+            Some("stable") => crate::region::Volatility::Stable,
+            Some("grows") => crate::region::Volatility::Grows,
+            Some("rewritten") | None => crate::region::Volatility::Rewritten,
+            Some(other) => {
+                return Err(crate::error::Error::ValidationFailed(format!(
+                    "region '{region_name}' has volatility = \"{other}\"; \
+                     expected \"stable\", \"grows\" or \"rewritten\""
+                )));
+            }
+        };
+
         // One line on what the region is for, shown to the model above its
         // contents. Optional: most regions are named well enough that a
         // sentence would only cost tokens.
@@ -254,6 +274,7 @@ pub(super) fn parse_region_layout(
         def.admission = admission;
         def.description = description;
         def.describe_in_prompt = describe_in_prompt;
+        def.volatility = volatility;
         if let Some(f) = compact_at_field {
             def = def.with_compact_at(f);
         }

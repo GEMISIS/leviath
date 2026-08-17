@@ -1195,6 +1195,8 @@ mod tests {
                 text: "You are a local assistant.".to_string(),
                 cache_hint: leviath_core::CacheHint::Never,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             }],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
@@ -2556,6 +2558,8 @@ mod tests {
                 text: "instructions".to_string(),
                 cache_hint: leviath_core::CacheHint::Always,
                 breakpoint_eligible: true,
+                volatility: leviath_core::Volatility::default(),
+                region: String::new(),
             }],
             messages: vec![
                 // The stranded response, its own call long since evicted.
