@@ -6,7 +6,7 @@ use ratatui_textarea::TextArea;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
-use super::graph::load_graph_info;
+use super::graph::load_stage_graph;
 use super::helpers::truncate;
 use super::types::*;
 use crate::runstate::{self, RunStatus};
@@ -45,6 +45,9 @@ pub(crate) struct Dashboard {
     /// Wheel-scroll hit-testing rects, re-registered by each pane's renderer
     /// every frame so the wheel always moves the pane under the cursor.
     pub(super) pane_rects: Vec<(PaneId, ratatui::layout::Rect)>,
+    /// The graph pane holding the mouse between a left press and its
+    /// release, so a pan that leaves the canvas keeps panning.
+    pub(super) mouse_capture: Option<PaneId>,
     /// The log panel's viewport height as of the last draw, so key scrolling
     /// pages by what is actually visible.
     pub(super) log_viewport: usize,
@@ -830,7 +833,7 @@ impl Dashboard {
                         None
                     },
                     waiting_secs: 0,
-                    graph_info: load_graph_info(&run.agent_path),
+                    graph: load_stage_graph(&run.agent_path),
                     accepts_messages: true,
                     taint_summary: vec![], // default; stage-level control via agent state
                 });
@@ -1173,7 +1176,7 @@ mod tests {
             last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
-            graph_info: None,
+            graph: None,
             accepts_messages: true,
             taint_summary: vec![],
         }

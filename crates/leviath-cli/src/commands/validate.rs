@@ -20,6 +20,15 @@ pub struct ValidateArgs {
     /// exit status is unchanged, so a caller can branch on either.
     #[arg(long)]
     pub(crate) json: bool,
+
+    /// Draw the stage graph after the report: the same picture the
+    /// dashboard's stage explorer shows, as plain text. Ignored with --json.
+    #[arg(long)]
+    pub(crate) graph: bool,
+
+    /// How many columns the graph may use; a wider one is shrunk to fit.
+    #[arg(long, default_value_t = 120, requires = "graph")]
+    pub(crate) width: u16,
 }
 
 /// The blueprint itself, for a caller that wants to know what it just validated.
@@ -400,6 +409,10 @@ fn execute_reporting_outcome(
     if !args.json {
         print_success(&checked.blueprint);
         print_script_tool_report(&path);
+        if args.graph {
+            println!();
+            println!("{}", graph_text(&checked.blueprint, args.width));
+        }
     }
 
     let mut env = LintEnv::offline(&checked.agent_dir);
@@ -426,6 +439,13 @@ fn execute_reporting_outcome(
         return Ok(ValidateOutcome::LintFailed { errors, warnings });
     }
     Ok(ValidateOutcome::Success)
+}
+
+/// The stage graph as text, the way the dashboard's stage explorer draws it
+/// (escape edges included, since there is no key to reveal them here).
+fn graph_text(blueprint: &leviath_core::Blueprint, width: u16) -> String {
+    let graph = crate::tui::flowgraph::StageGraph::from_blueprint(blueprint);
+    crate::tui::flowgraph::text::render_to_text(&graph, width)
 }
 
 /// The failure line for a lint that came back fatal. Split out so its
@@ -552,7 +572,46 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
             path: dir.to_str().unwrap().to_string(),
             deny_warnings: false,
             json: false,
+            graph: false,
+            width: 120,
         }
+    }
+
+    #[test]
+    fn graph_text_draws_every_stage_and_the_flag_prints_it() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.plan]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+[stages.plan.transitions.implement]
+[stages.implement]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+[stages.implement.transitions.plan]
+condition = "error"
+[stages.implement.transitions.done]
+[stages.done]
+mode = "output"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+[stages.done.transitions]
+"#,
+        );
+        let text = graph_text(&parse(&toml), 200);
+        for stage in ["plan", "implement", "done"] {
+            assert!(text.contains(stage), "{stage}: {text}");
+        }
+        assert!(text.contains("[error]"), "escape edges are drawn: {text}");
+        // Through the command: the flag prints after the report and the
+        // outcome is unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), CLEAN_MANIFEST);
+        let args = ValidateArgs {
+            graph: true,
+            width: 80,
+            ..args_for(dir.path())
+        };
+        assert!(execute_reporting_outcome(&args, None).unwrap().is_success());
     }
 
     // ─── print_success ───────────────────────────────────────────────────
@@ -912,6 +971,8 @@ system = { kind = "pinned", max_tokens = 1000 }
                 path: manifest_path.to_str().unwrap().to_string(),
                 deny_warnings: false,
                 json: false,
+                graph: false,
+                width: 120,
             };
             assert!(execute(args).await.is_ok());
         })
@@ -1213,6 +1274,8 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
             path: dir.path().to_str().unwrap().to_string(),
             deny_warnings: true,
             json: false,
+            graph: false,
+            width: 120,
         };
         assert!(execute_reporting_outcome(&args, None).unwrap().is_success());
     }

@@ -630,6 +630,8 @@ mod tests {
                     .to_string(),
                 deny_warnings: false,
                 json: false,
+                graph: false,
+                width: 120,
             };
             let result = dispatch(Commands::Validate(args), &MockRisky).await;
             assert!(result.is_err());

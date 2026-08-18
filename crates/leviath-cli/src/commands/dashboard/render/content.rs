@@ -495,17 +495,15 @@ impl Dashboard {
             let mut lines: Vec<Line> = Vec::new();
 
             // ── Graph transition details ──
-            if let Some(ref graph) = agent.graph_info {
+            // A linear blueprint's chain is a graph too, but "Transitions:
+            // -> next" on every stage would be noise; this block is for the
+            // ones that branch.
+            if let Some(graph) = agent.graph.as_ref().filter(|g| g.is_branching) {
                 let sel_name = agent
                     .stages
                     .get(self.selected_stage)
                     .map(|s| s.name.as_str())
-                    .or_else(|| {
-                        graph
-                            .stage_names
-                            .get(self.selected_stage)
-                            .map(|s| s.as_str())
-                    })
+                    .or_else(|| graph.ids().nth(self.selected_stage))
                     .unwrap_or(&agent.stage);
 
                 lines.push(Line::from(vec![
@@ -528,65 +526,54 @@ impl Dashboard {
                 }
 
                 // Outgoing transitions
-                if let Some(edges) = graph.edges.get(sel_name) {
-                    if edges.is_empty() {
-                        lines.push(Line::from(Span::styled(
-                            "  Transitions: (terminal - no outgoing edges)",
-                            Style::default().fg(C_DIM),
-                        )));
-                    } else {
-                        lines.push(Line::from(Span::styled(
-                            "  Transitions:",
-                            Style::default().fg(C_MUTED),
-                        )));
-                        for edge in edges {
-                            let cond_part = if edge.condition != "always" {
-                                format!(" [{}]", edge.condition)
-                            } else {
-                                String::new()
-                            };
-                            let hint_part = edge
-                                .hint
-                                .as_deref()
-                                .map(|h| format!(" - {}", h))
-                                .unwrap_or_default();
-                            lines.push(Line::from(vec![
-                                Span::styled(
-                                    format!("    → {}", edge.target),
-                                    Style::default().fg(C_ACCENT),
-                                ),
-                                Span::styled(cond_part, Style::default().fg(C_WARN)),
-                                Span::styled(hint_part, Style::default().fg(C_DIM)),
-                            ]));
-                        }
-                    }
-                } else {
+                let edges: Vec<_> = graph.outgoing(sel_name).collect();
+                if edges.is_empty() {
                     lines.push(Line::from(Span::styled(
-                        "  Transitions: (linear - no graph edges)",
+                        "  Transitions: (terminal - no outgoing edges)",
                         Style::default().fg(C_DIM),
                     )));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        "  Transitions:",
+                        Style::default().fg(C_MUTED),
+                    )));
+                    for edge in edges {
+                        let label = edge.condition_label();
+                        let cond_part = if label.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" [{label}]")
+                        };
+                        let hint_part = edge
+                            .hint
+                            .as_deref()
+                            .map(|h| format!(" - {}", h))
+                            .unwrap_or_default();
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("    → {}", edge.to),
+                                Style::default().fg(C_ACCENT),
+                            ),
+                            Span::styled(cond_part, Style::default().fg(C_WARN)),
+                            Span::styled(hint_part, Style::default().fg(C_DIM)),
+                        ]));
+                    }
                 }
 
                 // Incoming transitions
-                let incoming: Vec<(&str, &crate::commands::dashboard::graph::GraphEdge)> = graph
-                    .edges
-                    .iter()
-                    .flat_map(|(src, edges)| {
-                        edges
-                            .iter()
-                            .filter(|e| e.target == sel_name)
-                            .map(move |e| (src.as_str(), e))
-                    })
-                    .collect();
+                let incoming: Vec<_> = graph.edges.iter().filter(|e| e.to == sel_name).collect();
                 if !incoming.is_empty() {
                     lines.push(Line::from(Span::styled(
                         "  Incoming from:",
                         Style::default().fg(C_MUTED),
                     )));
-                    for (src, edge) in &incoming {
+                    for edge in &incoming {
                         let transform_part = format!(" [transform: {}]", edge.transform);
                         lines.push(Line::from(vec![
-                            Span::styled(format!("    ← {}", src), Style::default().fg(C_SUCCESS)),
+                            Span::styled(
+                                format!("    ← {}", edge.from),
+                                Style::default().fg(C_SUCCESS),
+                            ),
                             Span::styled(transform_part, Style::default().fg(C_DIM)),
                         ]));
                     }
@@ -813,7 +800,7 @@ mod tests {
             last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
-            graph_info: None,
+            graph: None,
             accepts_messages: true,
             taint_summary: vec![],
         }
@@ -1616,26 +1603,30 @@ mod tests {
         assert!(!lines.is_empty()); // should show "no context snapshot" message
     }
 
+    /// A parsed blueprint's stage graph, the way `sync_from_run_state` loads it.
+    fn graph_from(toml: &str) -> Option<std::sync::Arc<crate::tui::flowgraph::StageGraph>> {
+        Some(std::sync::Arc::new(
+            crate::tui::flowgraph::StageGraph::from_blueprint(
+                &leviath_core::manifest::parse_manifest(toml).expect("fixture parses"),
+            ),
+        ))
+    }
+
     #[test]
     fn build_context_lines_with_graph_info() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-graph", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
-        let mut edges = std::collections::HashMap::new();
-        edges.insert(
-            "main".to_string(),
-            vec![crate::commands::dashboard::graph::GraphEdge {
-                target: "implement".to_string(),
-                hint: Some("after plan".to_string()),
-                condition: "always".to_string(),
-                transform: "replace".to_string(),
-            }],
+        agent.graph = graph_from(
+            r#"
+[agent]
+name = "g"
+[stages.main]
+[stages.main.transitions.implement]
+hint = "after plan"
+[stages.implement]
+"#,
         );
-        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
-            edges,
-            entry_stage: "main".to_string(),
-            stage_names: vec!["main".to_string(), "implement".to_string()],
-        });
         agent.stages = vec![crate::runstate::StageRecord {
             name: "main".to_string(),
             index: 0,
@@ -1666,12 +1657,15 @@ mod tests {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-graph-fallback", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
-        let edges = std::collections::HashMap::new();
-        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
-            edges,
-            entry_stage: "main".to_string(),
-            stage_names: vec!["main".to_string(), "implement".to_string()],
-        });
+        agent.graph = graph_from(
+            r#"
+[agent]
+name = "g"
+[stages.main]
+[stages.main.transitions.implement]
+[stages.implement]
+"#,
+        );
         agent.stages = vec![]; // no stage records at all -> .get(0) is None
 
         let (lines, _cursor) = dash.build_context_lines(&agent, 80);
@@ -1687,11 +1681,8 @@ mod tests {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-graph-visited", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
-        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
-            edges: std::collections::HashMap::new(),
-            entry_stage: "main".to_string(),
-            stage_names: vec!["main".to_string()],
-        });
+        agent.graph =
+            graph_from("[agent]\nname = \"g\"\n[stages.main]\n[stages.main.transitions]\n");
         // Two records named "main" -> visited count 2, exercising the plural "s".
         let rec = crate::runstate::StageRecord {
             name: "main".to_string(),
@@ -1723,21 +1714,16 @@ mod tests {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-graph-cond", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
-        let mut edges = std::collections::HashMap::new();
-        edges.insert(
-            "main".to_string(),
-            vec![crate::commands::dashboard::graph::GraphEdge {
-                target: "error_recovery".to_string(),
-                hint: None,
-                condition: "error".to_string(),
-                transform: "direct".to_string(),
-            }],
+        agent.graph = graph_from(
+            r#"
+[agent]
+name = "g"
+[stages.main]
+[stages.main.transitions.error_recovery]
+condition = "error"
+[stages.error_recovery]
+"#,
         );
-        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
-            edges,
-            entry_stage: "main".to_string(),
-            stage_names: vec!["main".to_string(), "error_recovery".to_string()],
-        });
         agent.stages = vec![crate::runstate::StageRecord {
             name: "main".to_string(),
             index: 0,
@@ -1838,23 +1824,17 @@ mod tests {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-incoming", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
-        let mut edges = std::collections::HashMap::new();
-        // "plan" has edge to "implement"
-        edges.insert(
-            "plan".to_string(),
-            vec![crate::commands::dashboard::graph::GraphEdge {
-                target: "implement".to_string(),
-                hint: None,
-                condition: "always".to_string(),
-                transform: "replace".to_string(),
-            }],
+        // "plan" has an edge to "implement", which is the selected stage.
+        agent.graph = graph_from(
+            r#"
+[agent]
+name = "g"
+[stages.plan]
+[stages.plan.transitions.implement]
+transform = "clear"
+[stages.implement]
+"#,
         );
-        // "implement" is selected stage - it has an incoming edge from "plan"
-        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
-            edges,
-            entry_stage: "plan".to_string(),
-            stage_names: vec!["plan".to_string(), "implement".to_string()],
-        });
         agent.stages = vec![crate::runstate::StageRecord {
             name: "implement".to_string(),
             index: 1,
@@ -1878,8 +1858,9 @@ mod tests {
             .collect();
         // Should show stage info
         assert!(!lines.is_empty());
-        // The incoming edge from "plan" should be listed
+        // The incoming edge from "plan" should be listed, with its transform.
         assert!(text.contains("← plan"));
+        assert!(text.contains("[transform: clear]"));
     }
 
     #[test]
@@ -1887,14 +1868,9 @@ mod tests {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-terminal", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
-        let mut edges = std::collections::HashMap::new();
-        // "implement" has no outgoing edges (terminal)
-        edges.insert("plan".to_string(), vec![]);
-        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
-            edges,
-            entry_stage: "plan".to_string(),
-            stage_names: vec!["plan".to_string()],
-        });
+        // "plan" has no outgoing edges (terminal)
+        agent.graph =
+            graph_from("[agent]\nname = \"g\"\n[stages.plan]\n[stages.plan.transitions]\n");
         agent.stages = vec![crate::runstate::StageRecord {
             name: "plan".to_string(),
             index: 0,
@@ -1919,17 +1895,13 @@ mod tests {
     }
 
     #[test]
-    fn build_context_lines_with_no_edges_for_stage() {
-        // Stage has no entry in edges map at all → shows "linear - no graph edges"
+    fn build_context_lines_skips_the_transition_block_for_a_linear_blueprint() {
+        // A linear blueprint's chain is a graph too, but the block is for
+        // ones that branch: no "Stage:" header here.
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-noedge", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
-        let edges = std::collections::HashMap::new(); // empty
-        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
-            edges,
-            entry_stage: "main".to_string(),
-            stage_names: vec!["main".to_string()],
-        });
+        agent.graph = graph_from("[agent]\nname = \"g\"\n[stages.main]\n[stages.next]\n");
         agent.stages = vec![crate::runstate::StageRecord {
             name: "main".to_string(),
             index: 0,
@@ -1950,7 +1922,8 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(text.contains("linear"));
+        assert!(!text.contains("Stage:"), "{text}");
+        assert!(!text.contains("Transitions"), "{text}");
     }
 
     // ─── build_context_lines: multiple region kinds ───────────────────────

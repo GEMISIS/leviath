@@ -72,6 +72,7 @@ async-trait = { workspace = true }
 libc = { workspace = true }
 pulldown-cmark = { workspace = true }
 ratatui-textarea = { workspace = true }
+rataflow = { workspace = true }
 axum = { workspace = true }
 axum-server = { workspace = true }
 tower-http = { workspace = true }

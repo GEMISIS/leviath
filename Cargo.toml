@@ -206,6 +206,13 @@ pulldown-cmark = "0.13"
 # since 2024-10 and unable to follow ratatui past 0.29). Same widget lineage,
 # maintained alongside the framework itself.
 ratatui-textarea = { version = "0.9", features = ["crossterm"] }
+# Node-graph canvas for the dashboard's stage explorer, detail band and
+# blueprint preview. `default-features = false` drops its Sugiyama layout
+# (and rust-sugiyama/petgraph): positions come from the deterministic layered
+# layout in `tui::flowgraph::layout`, because the built-in one lays out over
+# hidden edges too, overlaps disconnected components and asserts acyclicity.
+# `crossterm` = `ratatui/crossterm`, so its event conversions accept our events.
+rataflow = { version = "0.1", default-features = false, features = ["crossterm"] }
 axum = { version = "0.8", features = ["ws"] }
 # HTTPS for `lev serve` (issue #300). Its `tls-rustls` feature resolves to
 # `rustls/aws-lc-rs` - the same provider the outbound reqwest stack already

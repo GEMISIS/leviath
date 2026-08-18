@@ -200,7 +200,7 @@ mod tests {
             last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
-            graph_info: None,
+            graph: None,
             accepts_messages: true,
             taint_summary: vec![],
         }

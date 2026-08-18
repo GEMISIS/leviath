@@ -2,8 +2,8 @@
 
 mod construct;
 mod context_tree;
+mod explorer;
 mod graph;
-mod graph_layout;
 mod helpers;
 mod history;
 mod input;
@@ -183,6 +183,9 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
 
         // Report what the daemon did with this tick's commands.
         dashboard.drain_daemon_outcomes();
+
+        // Advance the stage graph's edge animation.
+        dashboard.tick_graphs(tick_rate);
 
         // Draw
         terminal
@@ -671,7 +674,7 @@ mod tests {
             last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
-            graph_info: None,
+            graph: None,
             accepts_messages: false,
             taint_summary: vec![],
         };

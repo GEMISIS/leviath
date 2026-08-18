@@ -115,6 +115,7 @@ impl Dashboard {
             main_focus: MainPane::RunList,
             log_scroll: crate::tui::widgets::scroll::ScrollState::default(),
             pane_rects: Vec::new(),
+            mouse_capture: None,
             log_viewport: 0,
             stage_explorer: None,
             context_tree: ContextTreeState::default(),
