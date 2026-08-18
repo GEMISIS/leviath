@@ -293,15 +293,22 @@ impl Dashboard {
                     Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" scroll log  "),
-                Span::styled("[End]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("[PgUp/PgDn]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" screen  "),
+                Span::styled("[End/G]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" newest  "),
-                Span::styled("[Home]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("[Home/g]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" oldest  "),
                 Span::styled(
                     "[Tab/Esc]",
                     Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" back to list  "),
+                Span::styled(
+                    "[?]",
+                    Style::default().fg(C_DIM).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" help  "),
                 Span::styled(
                     "[q]",
                     Style::default().fg(C_DIM).add_modifier(Modifier::BOLD),
@@ -320,6 +327,8 @@ impl Dashboard {
                         Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(" send  "),
+                    Span::styled("[PgUp/PgDn]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" scroll document  "),
                     Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" cancel"),
                 ]),
@@ -334,6 +343,8 @@ impl Dashboard {
                         Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(" confirm  "),
+                    Span::styled("[PgUp/PgDn]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" scroll document  "),
                     Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" cancel"),
                 ]),
@@ -444,6 +455,13 @@ impl Dashboard {
                 Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
             ),
             Span::raw(" stage  "),
+            Span::styled("[1-9]", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" jump  "),
+            Span::styled(
+                "[g]",
+                Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" graph  "),
             Span::styled("[↑/↓]", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" scroll  "),
             Span::styled("[/]", Style::default().add_modifier(Modifier::BOLD)),
@@ -551,6 +569,8 @@ impl Dashboard {
             Span::raw(" delete  "),
             Span::styled("[space]", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" mark  "),
+            Span::styled("[m]", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" mcp  "),
         ];
         if can_kill {
             spans.push(Span::styled(
@@ -857,6 +877,11 @@ mod tests {
         let text = rendered_buffer(&terminal);
         assert!(text.contains("scroll log"), "{text}");
         assert!(text.contains("back to list"), "{text}");
+        // Every key the panel takes is on the bar, aliases included.
+        assert!(text.contains("[PgUp/PgDn] screen"), "{text}");
+        assert!(text.contains("[Home/g] oldest"), "{text}");
+        assert!(text.contains("[End/G] newest"), "{text}");
+        assert!(text.contains("[?] help"), "{text}");
     }
 
     #[test]
@@ -967,6 +992,7 @@ mod tests {
         let buf = rendered_buffer(&terminal);
         assert!(!buf.contains("back to list"), "{buf}");
         assert!(!buf.contains("Search: /"), "{buf}");
+        assert!(buf.contains("[m] mcp"), "the MCP screen has a key: {buf}");
     }
 
     #[test]
@@ -983,6 +1009,8 @@ mod tests {
             .unwrap();
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("[Esc] back"), "{buf}");
+        assert!(buf.contains("[g] graph"), "the graph has a key: {buf}");
+        assert!(buf.contains("[1-9] jump"), "{buf}");
     }
 
     #[test]
@@ -1001,6 +1029,7 @@ mod tests {
             .unwrap();
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("send"), "{buf}");
+        assert!(buf.contains("[PgUp/PgDn] scroll document"), "{buf}");
     }
 
     #[test]

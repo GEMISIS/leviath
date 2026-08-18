@@ -449,14 +449,16 @@ impl FlowView {
             .map(|(f, t)| (f.as_str(), t.as_str()));
         for meta in &self.edges {
             let key = (meta.edge.from.as_str(), meta.edge.to.as_str());
-            if let Some(content) = self.flow.edge_content_mut(&meta.id) {
-                *content = styled_edge(
-                    meta.edge.class,
-                    meta.loops_back,
-                    taken.contains(&key),
-                    meta.stem,
-                );
-            }
+            let content = self
+                .flow
+                .edge_content_mut(&meta.id)
+                .expect("every remembered edge is on the canvas");
+            *content = styled_edge(
+                meta.edge.class,
+                meta.loops_back,
+                taken.contains(&key),
+                meta.stem,
+            );
             self.flow.set_edge_animated(&meta.id, last == Some(key));
         }
 
@@ -669,7 +671,8 @@ mode = "output"
         assert!(v.zoom() <= 1.0, "zoom is capped at 1.0");
         assert!(v.handle_key(KeyCode::Char('-')));
         assert!(v.handle_key(KeyCode::Char('0')));
-        assert!((v.zoom() - 1.0).abs() < 1e-9, "{}", v.zoom());
+        let reset = v.zoom();
+        assert!((reset - 1.0).abs() < 1e-9, "{reset}");
         assert!(v.handle_key(KeyCode::Char('e')));
         assert!(v.show_escape());
         assert!(!v.edge_hidden("implement", "recover"));

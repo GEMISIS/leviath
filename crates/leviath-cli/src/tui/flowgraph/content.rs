@@ -52,16 +52,18 @@ impl RunPhase {
         }
     }
 
-    fn word(self) -> &'static str {
+    /// The word the node shows for the phase; the spinner says "running"
+    /// on its own, so `Active` has none.
+    fn word(self) -> Option<&'static str> {
         match self {
-            RunPhase::Active => "running",
-            RunPhase::Waiting => "waiting",
-            RunPhase::Paused => "paused",
-            RunPhase::Idle => "idle",
-            RunPhase::Stale => "stale",
-            RunPhase::Complete => "complete",
-            RunPhase::Error => "error",
-            RunPhase::Cancelled => "cancelled",
+            RunPhase::Active => None,
+            RunPhase::Waiting => Some("waiting"),
+            RunPhase::Paused => Some("paused"),
+            RunPhase::Idle => Some("idle"),
+            RunPhase::Stale => Some("stale"),
+            RunPhase::Complete => Some("complete"),
+            RunPhase::Error => Some("error"),
+            RunPhase::Cancelled => Some("cancelled"),
         }
     }
 }
@@ -221,9 +223,9 @@ impl StageNodeContent {
             }
         }
         if let NodeStatus::Current { run, .. } = self.status
-            && run != RunPhase::Active
+            && let Some(word) = run.word()
         {
-            parts.push(run.word().to_string());
+            parts.push(word.to_string());
         }
         parts.join(" · ")
     }

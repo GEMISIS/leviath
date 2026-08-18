@@ -231,6 +231,8 @@ a stage keeps in `required_tools`. Both are deliberate wherever they appear. It 
 |---|---|
 | `--deny-warnings` | Exit non-zero on warnings too. Notes still never fail. |
 | `--json` | Print the report as one JSON object with `valid`, `blueprint`, `error`, and `findings` |
+| `--graph` | Draw the stage graph after the report, as plain text: the same picture the dashboard's stage explorer shows, escape edges included. Ignored with `--json` |
+| `--width <COLS>` | How many columns `--graph` may use (default 120); a wider graph is shrunk to fit |
 
 The same findings are written to `daemon.log` when a run spawns, so a blueprint that was never
 validated still says what is wrong with it. Nothing there refuses a spawn.

@@ -94,7 +94,7 @@ fn run_list_sections() -> Vec<HelpSection> {
             ("home / end (g / G)", "first / last run"),
             ("enter", "open the detail view"),
             ("n", "start a new run"),
-            ("tab", "focus the log panel"),
+            ("tab / shift-tab", "focus the log panel"),
             ("/", "filter runs; enter keeps it, esc clears it"),
             ("s", "cycle sort: started / activity / status"),
             ("p / r", "pause / resume the selected run"),
@@ -102,7 +102,7 @@ fn run_list_sections() -> Vec<HelpSection> {
             ("d", "delete the run and its files (asks first)"),
             (
                 "space",
-                "mark/unmark the run (marked runs are killed/deleted together)",
+                "mark/unmark the run, then move down (marked runs are killed/deleted together)",
             ),
             ("m", "manage MCP servers"),
             ("esc", "clear the filter, then the marks"),
@@ -120,7 +120,7 @@ fn log_pane_sections() -> Vec<HelpSection> {
             ("pgup / pgdn", "scroll a screen"),
             ("home / g", "oldest line"),
             ("end / G", "newest line, and follow again"),
-            ("tab / esc", "back to the run list"),
+            ("tab / shift-tab / esc", "back to the run list"),
             ("q", "quit"),
         ],
     }]
@@ -134,14 +134,14 @@ fn detail_sections() -> Vec<HelpSection> {
             entries: vec![
                 ("← →", "switch stage tab"),
                 ("1-9", "jump to a stage by number"),
-                ("o / l / c", "output / logs / context"),
+                ("l / o / c", "logs / output / context"),
                 ("↑ ↓ / k j", "scroll a line"),
                 ("pgup / pgdn", "scroll ten lines"),
                 ("home / end (b / e)", "top / bottom"),
                 ("/", "search; n / N step through matches"),
                 ("y", "copy this pane to the clipboard"),
                 ("i", "respond, or send a message to a running agent run"),
-                ("g", "stage explorer (branching agent runs only)"),
+                ("g", "the stage graph explorer"),
                 (", / .", "older / newer context point; opens Context"),
                 ("x", "kill the run (asks first)"),
                 ("p / r", "pause / resume"),
@@ -160,11 +160,27 @@ fn detail_sections() -> Vec<HelpSection> {
         HelpSection {
             title: "Stage explorer (g)",
             entries: vec![
-                ("tab", "graph / timeline"),
-                ("↑ ↓ / k j", "scroll the graph, or step through visits"),
-                ("u", "show or hide unvisited stages"),
-                ("enter", "timeline: open the context at that visit"),
+                ("tab / shift-tab", "graph / timeline"),
+                (
+                    "← → ↑ ↓ / h j k l",
+                    "graph: select a stage in that direction",
+                ),
+                ("[ / ]", "graph: previous / next stage in blueprint order"),
+                (
+                    "enter",
+                    "graph: open the stage's tab; timeline: open the visit's context",
+                ),
+                ("+ / - / 0", "zoom in / out / back to 100%"),
+                ("f", "fit the whole graph on screen"),
+                ("e", "show or hide the escape edges (error, dead_end, ...)"),
+                ("u", "show or hide stages the run never entered"),
+                ("↑ ↓ / k j", "timeline: step through visits"),
+                ("drag / wheel / click", "pan / zoom / select on the canvas"),
                 ("esc / g", "close the explorer"),
+                (
+                    "",
+                    "the detail view's keys are off while it is open (e, c, l, o, b included)",
+                ),
             ],
         },
         HelpSection {
@@ -200,6 +216,7 @@ fn new_run_sections() -> Vec<HelpSection> {
                 ("backspace", "shorten the filter"),
                 ("tab / enter", "move to the task"),
                 ("esc", "clear the filter, then close"),
+                ("F1", "this help (? types a question mark here)"),
             ],
         },
         HelpSection {
@@ -260,6 +277,7 @@ fn mcp_sections() -> Vec<HelpSection> {
                 ("enter", "add it"),
                 ("backspace", "delete a character"),
                 ("esc", "cancel"),
+                ("F1", "this help (? types a question mark here)"),
             ],
         },
     ]
@@ -291,7 +309,7 @@ fn shared_sections() -> Vec<HelpSection> {
             title: "Everywhere",
             entries: vec![
                 ("ctrl-c", "quit, from any screen including dialogs"),
-                ("? or F1", "this help"),
+                ("? or F1", "this help (F1 where ? types text)"),
             ],
         },
     ]
@@ -496,6 +514,11 @@ mod tests {
         let rendered = rendered_buffer(&terminal);
         assert!(rendered.contains("Detail view"));
         assert!(rendered.contains("switch stage tab"));
+        assert!(rendered.contains("the stage graph explorer"), "{rendered}");
+        assert!(rendered.contains("Stage explorer (g)"), "{rendered}");
+        assert!(rendered.contains("tab / shift-tab"), "{rendered}");
+        assert!(rendered.contains("escape edges"), "{rendered}");
+        assert!(rendered.contains("logs / output / context"), "{rendered}");
         // The response editor's keys are listed here rather than in a mode of
         // their own: `?` is unbound once you are typing, so the only place to
         // read them is before you press `i`.

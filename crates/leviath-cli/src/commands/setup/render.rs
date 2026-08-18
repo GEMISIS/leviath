@@ -175,7 +175,7 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
 }
 
 /// The help overlay's content, matching the bindings in `input.rs`.
-fn help_sections() -> [HelpSection; 3] {
+fn help_sections() -> [HelpSection; 5] {
     [
         HelpSection {
             title: "Navigate",
@@ -189,13 +189,31 @@ fn help_sections() -> [HelpSection; 3] {
                 ("enter", "on a default, opens a searchable list"),
                 ("tab", "next screen"),
                 ("shift-tab / esc", "previous screen"),
+                ("? / F1", "this help, on every screen"),
             ],
         },
         HelpSection {
-            title: "Providers",
+            title: "Choosing from a list",
             entries: vec![
-                ("v", "re-check a credential"),
-                ("o", "open a signup page"),
+                ("type", "search the list"),
+                ("↑ ↓ / pgup / pgdn / home / end", "move"),
+                ("enter", "choose the highlighted entry"),
+                ("esc", "keep what it was"),
+            ],
+        },
+        HelpSection {
+            title: "Editing a value",
+            entries: vec![
+                ("← →", "move the cursor"),
+                ("enter", "save"),
+                ("esc", "cancel"),
+            ],
+        },
+        HelpSection {
+            title: "Anywhere",
+            entries: vec![
+                ("v", "re-check a credential against the provider"),
+                ("o", "open the provider's signup page"),
                 ("ctrl-r", "show or hide credentials"),
             ],
         },
@@ -1058,45 +1076,66 @@ fn footer_hints(wizard: &Wizard) -> Vec<Hint> {
             hint("←→", "move cursor"),
         ];
     }
+    // Every step ends the same way: help, save-from-anywhere, quit. Ctrl-R
+    // joins where credentials are on screen.
+    let tail = |mut hints: Vec<Hint>, credentials: bool| {
+        if credentials {
+            hints.push(hint("^R", "reveal"));
+        }
+        hints.push(hint("?", "help"));
+        hints.push(hint("^S", "save"));
+        hints.push(hint("q", "quit"));
+        hints
+    };
     match wizard.step {
-        Step::Welcome => vec![hint("enter", "begin"), hint("?", "help"), hint("q", "quit")],
-        Step::Providers => vec![
-            hint("↑↓", "move"),
-            hint("space/enter", "select"),
-            hint("o", "signup"),
-            hint("v", "check"),
-            hint("tab", "next"),
-            hint("q", "quit"),
-        ],
-        Step::ProviderDetail => vec![
-            hint("enter", "edit"),
-            hint("v", "check"),
-            hint("o", "signup"),
-            hint("tab", "next"),
-            hint("esc", "back"),
-            hint("q", "quit"),
-        ],
-        Step::Defaults | Step::Limits => vec![
-            hint("↑↓", "move"),
-            hint("enter", "change"),
-            hint("←→", "cycle"),
-            hint("tab", "next"),
-            hint("esc", "back"),
-            hint("q", "quit"),
-        ],
-        Step::Agents | Step::Mcp => vec![
-            hint("↑↓", "move"),
-            hint("space/enter", "select"),
-            hint("tab", "next"),
-            hint("esc", "back"),
-            hint("q", "quit"),
-        ],
-        Step::Review => vec![
-            hint("enter", "apply"),
-            hint("v", "re-check"),
-            hint("esc", "back"),
-            hint("q", "quit"),
-        ],
+        Step::Welcome => tail(vec![hint("enter", "begin")], false),
+        Step::Providers => tail(
+            vec![
+                hint("↑↓", "move"),
+                hint("space/enter", "select"),
+                hint("o", "signup"),
+                hint("v", "check"),
+                hint("tab", "next"),
+            ],
+            true,
+        ),
+        Step::ProviderDetail => tail(
+            vec![
+                hint("enter", "edit"),
+                hint("v", "check"),
+                hint("o", "signup"),
+                hint("tab", "next"),
+                hint("esc", "back"),
+            ],
+            true,
+        ),
+        Step::Defaults | Step::Limits => tail(
+            vec![
+                hint("↑↓", "move"),
+                hint("enter", "change"),
+                hint("←→", "cycle"),
+                hint("tab", "next"),
+                hint("esc", "back"),
+            ],
+            false,
+        ),
+        Step::Agents | Step::Mcp => tail(
+            vec![
+                hint("↑↓", "move"),
+                hint("space/enter", "select"),
+                hint("tab", "next"),
+                hint("esc", "back"),
+            ],
+            false,
+        ),
+        Step::Review => tail(
+            vec![
+                hint("enter", "apply"),
+                hint("v", "re-check"),
+                hint("esc", "back"),
+            ],
+            true,
+        ),
     }
 }
 
@@ -1869,21 +1908,34 @@ mod tests {
         assert!(rendered(&w).contains("Credentials shown."));
 
         w.message = None;
-        for (step, expected) in [
-            (Step::Welcome, "enter begin"),
-            (Step::Providers, "space/enter select"),
-            (Step::ProviderDetail, "enter edit"),
-            (Step::Defaults, "enter change"),
-            (Step::Limits, "enter change"),
-            (Step::Agents, "space/enter select"),
-            (Step::Mcp, "space/enter select"),
-            (Step::Review, "enter apply"),
+        for (step, expected, credentials) in [
+            (Step::Welcome, "enter begin", false),
+            (Step::Providers, "space/enter select", true),
+            (Step::ProviderDetail, "enter edit", true),
+            (Step::Defaults, "enter change", false),
+            (Step::Limits, "enter change", false),
+            (Step::Agents, "space/enter select", false),
+            (Step::Mcp, "space/enter select", false),
+            (Step::Review, "enter apply", true),
         ] {
             w.enter(step);
             let screen = rendered(&w);
             assert!(
                 screen.contains(expected),
                 "{step:?} footer missing {expected:?}:\n{screen}"
+            );
+            // Help, save-from-anywhere and quit are on every step; reveal
+            // where credentials are on screen.
+            for global in ["? help", "^S save", "q quit"] {
+                assert!(
+                    screen.contains(global),
+                    "{step:?} footer missing {global:?}:\n{screen}"
+                );
+            }
+            assert_eq!(
+                screen.contains("^R reveal"),
+                credentials,
+                "{step:?}:\n{screen}"
             );
         }
 
