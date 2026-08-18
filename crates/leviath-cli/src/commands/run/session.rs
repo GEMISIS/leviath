@@ -34,13 +34,32 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
     let timeout = config.request_timeout_secs;
     let mut creds = Vec::new();
 
+    // The third column is the host this provider is reached on, when it is not
+    // the vendor's own. Per provider, because a gateway usually fronts one
+    // family and pointing the others at it would break them.
     let keyed = [
-        ("anthropic", config.providers.anthropic_api_key.as_deref()),
-        ("openai", config.providers.openai_api_key.as_deref()),
-        ("google", config.providers.google_api_key.as_deref()),
-        ("openrouter", config.openrouter_api_key.as_deref()),
+        (
+            "anthropic",
+            config.providers.anthropic_api_key.as_deref(),
+            config.providers.anthropic_base_url.as_deref(),
+        ),
+        (
+            "openai",
+            config.providers.openai_api_key.as_deref(),
+            config.providers.openai_base_url.as_deref(),
+        ),
+        (
+            "google",
+            config.providers.google_api_key.as_deref(),
+            config.providers.google_base_url.as_deref(),
+        ),
+        (
+            "openrouter",
+            config.openrouter_api_key.as_deref(),
+            config.providers.openrouter_base_url.as_deref(),
+        ),
     ];
-    for (name, key) in keyed {
+    for (name, key, base_url) in keyed {
         // A blank key is not a key: `lev setup` writes empty strings for
         // providers the user skipped, and registering one produces a provider
         // that authenticates as nobody and fails at the first call.
@@ -57,7 +76,12 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
             creds.push(ProviderCreds {
                 name: name.to_string(),
                 api_key: Some(key.to_string()),
-                base_url: None,
+                // Blank is not a URL, for the same reason blank is not a key:
+                // `lev setup` writes empty strings for what the user skipped.
+                base_url: base_url
+                    .map(str::trim)
+                    .filter(|u| !u.is_empty())
+                    .map(str::to_string),
                 model_capabilities: caps.clone(),
                 request_timeout_secs: timeout,
                 rate_limit: config.rate_limits.get(name).cloned(),
@@ -223,6 +247,64 @@ mod tests {
         assert!(!registry.has("google"));
     }
 
+    /// One gateway fronts one family, so the URL has to arrive on the provider
+    /// it was set for and nowhere else.
+    #[test]
+    fn a_gateway_url_reaches_only_the_provider_it_was_set_for() {
+        let config = Config {
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("sk-ant-test".to_string()),
+                openai_api_key: Some("sk-openai-test".to_string()),
+                anthropic_base_url: Some("https://gateway.internal/v1".to_string()),
+                ..Config::default().providers
+            },
+            ..Config::default()
+        };
+
+        let creds = provider_creds_from_config(&config);
+
+        let of = |name: &str| {
+            creds
+                .iter()
+                .find(|c| c.name == name)
+                .map(|c| c.base_url.clone())
+        };
+        assert_eq!(
+            of("anthropic"),
+            Some(Some("https://gateway.internal/v1".to_string()))
+        );
+        assert_eq!(
+            of("openai"),
+            Some(None),
+            "a provider with no gateway keeps its vendor default"
+        );
+    }
+
+    /// `lev setup` writes an empty string for what the user skipped, and an
+    /// empty string is not a URL - registering one would point a provider at
+    /// nothing. Same rule the API keys already follow.
+    #[test]
+    fn a_blank_gateway_url_is_not_a_gateway() {
+        let config = Config {
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("sk-ant-test".to_string()),
+                anthropic_base_url: Some("   ".to_string()),
+                ..Config::default().providers
+            },
+            ..Config::default()
+        };
+
+        let creds = provider_creds_from_config(&config);
+
+        assert_eq!(
+            creds
+                .iter()
+                .find(|c| c.name == "anthropic")
+                .map(|c| c.base_url.clone()),
+            Some(None)
+        );
+    }
+
     #[test]
     fn build_provider_registry_with_anthropic_key() {
         let config = Config {
@@ -256,6 +338,10 @@ mod tests {
         let config = Config {
             providers: crate::config::ProviderConfig {
                 google_api_key: Some("AIzatest12345".to_string()),
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
@@ -358,6 +444,10 @@ mod tests {
                 anthropic_api_key: Some("sk-ant-test".to_string()),
                 openai_api_key: Some("sk-test".to_string()),
                 google_api_key: Some("AIza-test".to_string()),
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
@@ -529,6 +619,10 @@ mod tests {
     fn enabling_claude_code_registers_it_with_its_options() {
         let config = Config {
             providers: crate::config::ProviderConfig {
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: true,
                 claude_code_binary: Some("/opt/bin/claude".to_string()),
                 claude_code_effort: Some("low".to_string()),
@@ -558,6 +652,10 @@ mod tests {
     fn enabling_claude_code_without_options_carries_none() {
         let config = Config {
             providers: crate::config::ProviderConfig {
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: true,
                 ..Config::default().providers
             },
@@ -594,6 +692,10 @@ mod tests {
                 anthropic_api_key: Some("sk-ant-test".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,

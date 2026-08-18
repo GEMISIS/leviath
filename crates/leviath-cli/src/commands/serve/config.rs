@@ -291,6 +291,10 @@ mod tests {
                     anthropic_api_key: Some("sk-ant-test".to_string()),
                     openai_api_key: Some("sk-openai-test".to_string()),
                     google_api_key: None,
+                    anthropic_base_url: None,
+                    openai_base_url: None,
+                    google_base_url: None,
+                    openrouter_base_url: None,
                     claude_code_enabled: false,
                     claude_code_binary: None,
                     claude_code_effort: None,
@@ -451,6 +455,10 @@ mod tests {
         AppState {
             config: Arc::new(Config {
                 providers: crate::config::ProviderConfig {
+                    anthropic_base_url: None,
+                    openai_base_url: None,
+                    google_base_url: None,
+                    openrouter_base_url: None,
                     claude_code_enabled: true,
                     ..Config::default().providers
                 },
@@ -637,6 +645,10 @@ mod tests {
                 anthropic_api_key: Some("sk-ant-keep".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,

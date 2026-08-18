@@ -13,6 +13,18 @@ same list.
 
 ## Unreleased
 
+- New: a provider can be reached through a gateway, with
+  `[providers] <provider>_base_url` for `anthropic`, `openai`, `google` and
+  `openrouter` (env fallbacks `ANTHROPIC_BASE_URL` and friends, so a machine
+  behind one needs no config file). For an enterprise gateway or a self-hosted
+  proxy that speaks the same API on another origin. One setting per provider
+  rather than one covering all of them, because a gateway usually fronts one
+  family and pointing the rest at it would break them. Unset means the vendor's
+  own endpoint, so nothing changes for a config that says nothing. A gateway
+  serving model IDs the vendor never published describes them in
+  `[model_capabilities.<id>]`, which already worked; what was missing was any
+  way for configuration to reach the host.
+
 - Fixed: two provider 400s the runtime built for itself at a tight context
   window. A prompt that reached the window left a completion budget of zero, and
   the request went out with it - which OpenAI rejects as

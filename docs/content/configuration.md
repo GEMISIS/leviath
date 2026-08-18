@@ -83,6 +83,10 @@ the file empty in CI.
 anthropic_api_key   = "sk-ant-..."   # env fallback: ANTHROPIC_API_KEY
 openai_api_key      = "sk-..."       # env fallback: OPENAI_API_KEY
 google_api_key      = "..."          # env fallback: GOOGLE_API_KEY
+anthropic_base_url  = "https://gw.corp/v1"   # env fallback: ANTHROPIC_BASE_URL
+openai_base_url     = "https://gw.corp/v1"   # env fallback: OPENAI_BASE_URL
+google_base_url     = "https://gw.corp/v1"   # env fallback: GOOGLE_BASE_URL
+openrouter_base_url = "https://gw.corp/v1"   # env fallback: OPENROUTER_BASE_URL
 claude_code_enabled = false          # opt in to the Claude Code CLI transport
 claude_code_binary  = "/usr/local/bin/claude"   # unset resolves `claude` on PATH
 claude_code_effort  = "medium"       # low | medium | high | xhigh | max
@@ -94,6 +98,27 @@ fallback_order      = ["anthropic/claude-sonnet-5", "openai/gpt-5.6-mini"]
 costs more to write and sends the beta header it needs. It is worth the write cost for a staged
 agent. Stages routinely take longer than five minutes, especially when one is running scripts. A
 prefix cached at the start of a run is then cold by the time a later stage could have reused it.
+
+### Reaching a provider through a gateway
+
+`<provider>_base_url` points one provider at a different host: an enterprise gateway, or a
+self-hosted proxy that speaks the same API on another origin. Unset means the vendor's own
+endpoint, which is what a config that says nothing has always meant.
+
+One setting per provider rather than one for all of them, because a gateway usually fronts one
+family. Setting `anthropic_base_url` alone sends Anthropic traffic through the gateway and leaves
+OpenAI going straight out, which is the arrangement most of these deployments actually have.
+
+Each falls back to an environment variable, so a machine behind a gateway needs no config file at
+all - the gateway is a property of the host rather than of the checkout.
+
+A gateway serving model IDs the vendor never published (`internal-model-1`, say) also needs those
+IDs described, or nothing knows their context window. That is
+`[model_capabilities.<model_id>]` below, which works the same way for a gateway as for anything
+else.
+
+`HTTP_PROXY` and `HTTPS_PROXY` are honoured independently of this, so a gateway that is itself
+behind a proxy needs nothing extra here.
 
 `claude_code_enabled` is off unless you turn it on. See
 [Providers](/docs/providers#claude-code-transport) for the terms note that goes with it.
@@ -694,6 +719,7 @@ Export those yourself if you meant them.
 | `LEVIATH_DUMP_REQUEST_DIR` | Writes each outgoing provider request to this directory, for debugging |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY` | Provider key fallbacks for `[providers]` |
 | `OLLAMA_HOST` | Fallback for `ollama_base_url` |
+| `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `GOOGLE_BASE_URL`, `OPENROUTER_BASE_URL` | Gateway host fallbacks for `[providers]` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` | Fallbacks for `[observability]` |
 | `EDITOR`, `VISUAL` | Editor used when a prompt opens one |
 | `XDG_CONFIG_HOME` | Where `policy.toml` and scripted rules are looked up. Linux only |

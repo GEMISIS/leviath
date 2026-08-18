@@ -149,6 +149,7 @@ pub fn build_provider_registry_with(
                                 caps,
                                 c.rate_limit.as_ref(),
                             )
+                            .with_base_url(c.base_url.clone())
                             // An unrecognised value keeps the default rather
                             // than failing the daemon's boot over a cache
                             // setting; the config layer is what validates it.
@@ -168,12 +169,15 @@ pub fn build_provider_registry_with(
                 if let Some(ref key) = c.api_key {
                     registry.register(
                         "openai".to_string(),
-                        Arc::new(leviath_providers::OpenAIProvider::with_overrides(
-                            clients.get_or_build(timeout, build_client)?,
-                            key.clone(),
-                            caps,
-                            c.rate_limit.as_ref(),
-                        )),
+                        Arc::new(
+                            leviath_providers::OpenAIProvider::with_overrides(
+                                clients.get_or_build(timeout, build_client)?,
+                                key.clone(),
+                                caps,
+                                c.rate_limit.as_ref(),
+                            )
+                            .with_base_url(c.base_url.clone()),
+                        ),
                     );
                 }
             }
@@ -181,12 +185,15 @@ pub fn build_provider_registry_with(
                 if let Some(ref key) = c.api_key {
                     registry.register(
                         "google".to_string(),
-                        Arc::new(leviath_providers::GeminiProvider::with_overrides(
-                            clients.get_or_build(timeout, build_client)?,
-                            key.clone(),
-                            caps,
-                            c.rate_limit.as_ref(),
-                        )),
+                        Arc::new(
+                            leviath_providers::GeminiProvider::with_overrides(
+                                clients.get_or_build(timeout, build_client)?,
+                                key.clone(),
+                                caps,
+                                c.rate_limit.as_ref(),
+                            )
+                            .with_base_url(c.base_url.clone()),
+                        ),
                     );
                 }
             }
@@ -194,12 +201,15 @@ pub fn build_provider_registry_with(
                 if let Some(ref key) = c.api_key {
                     registry.register(
                         "openrouter".to_string(),
-                        Arc::new(leviath_providers::OpenRouterProvider::with_overrides(
-                            clients.get_or_build(timeout, build_client)?,
-                            key.clone(),
-                            caps,
-                            c.rate_limit.as_ref(),
-                        )),
+                        Arc::new(
+                            leviath_providers::OpenRouterProvider::with_overrides(
+                                clients.get_or_build(timeout, build_client)?,
+                                key.clone(),
+                                caps,
+                                c.rate_limit.as_ref(),
+                            )
+                            .with_base_url(c.base_url.clone()),
+                        ),
                     );
                 }
             }

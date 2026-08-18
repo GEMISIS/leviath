@@ -285,6 +285,10 @@ impl Default for Config {
                 anthropic_api_key: None,
                 openai_api_key: None,
                 google_api_key: None,
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
@@ -579,6 +583,21 @@ impl Config {
         // OLLAMA_HOST is the standard env var for Ollama
         if config.ollama_base_url.is_none() {
             config.ollama_base_url = std::env::var("OLLAMA_HOST").ok();
+        }
+        // The same override without a config file, which is how a machine
+        // behind an enterprise gateway is usually set up: the gateway is a
+        // property of the host, not of the checkout.
+        if config.providers.anthropic_base_url.is_none() {
+            config.providers.anthropic_base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
+        }
+        if config.providers.openai_base_url.is_none() {
+            config.providers.openai_base_url = std::env::var("OPENAI_BASE_URL").ok();
+        }
+        if config.providers.google_base_url.is_none() {
+            config.providers.google_base_url = std::env::var("GOOGLE_BASE_URL").ok();
+        }
+        if config.providers.openrouter_base_url.is_none() {
+            config.providers.openrouter_base_url = std::env::var("OPENROUTER_BASE_URL").ok();
         }
 
         config.fill_from_credential_store();
@@ -2011,6 +2030,93 @@ some_custom_thing = \"forwarded to the script\"
         assert_eq!(config.limits.default_max_iterations, Some(50));
     }
 
+    /// The env half of the gateway setting: a machine behind one is configured
+    /// by its environment, not by the checkout, so this is the path most such
+    /// deployments actually take.
+    #[test]
+    fn a_gateway_url_can_come_from_the_environment() {
+        temp_env::with_vars(
+            [
+                ("ANTHROPIC_BASE_URL", Some("https://gw/anthropic")),
+                ("OPENAI_BASE_URL", Some("https://gw/openai")),
+                ("GOOGLE_BASE_URL", Some("https://gw/google")),
+                ("OPENROUTER_BASE_URL", Some("https://gw/openrouter")),
+            ],
+            || {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("config.toml");
+                std::fs::write(
+                    &path,
+                    "default_provider = \"anthropic\"\nagent_paths = []\n",
+                )
+                .unwrap();
+
+                let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
+
+                assert_eq!(
+                    config.providers.anthropic_base_url.as_deref(),
+                    Some("https://gw/anthropic")
+                );
+                assert_eq!(
+                    config.providers.openai_base_url.as_deref(),
+                    Some("https://gw/openai")
+                );
+                assert_eq!(
+                    config.providers.google_base_url.as_deref(),
+                    Some("https://gw/google")
+                );
+                assert_eq!(
+                    config.providers.openrouter_base_url.as_deref(),
+                    Some("https://gw/openrouter")
+                );
+            },
+        );
+    }
+
+    /// And the file wins over the environment, the same way the keys do - a
+    /// checkout that names its gateway is not overruled by whatever the host
+    /// happens to export.
+    #[test]
+    fn a_gateway_url_in_the_file_beats_the_environment() {
+        temp_env::with_vars(
+            [
+                ("ANTHROPIC_BASE_URL", Some("https://gw/from-env")),
+                ("OPENAI_BASE_URL", Some("https://gw/from-env")),
+                ("GOOGLE_BASE_URL", Some("https://gw/from-env")),
+                ("OPENROUTER_BASE_URL", Some("https://gw/from-env")),
+            ],
+            || {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("config.toml");
+                std::fs::write(
+                    &path,
+                    r#"
+default_provider = "anthropic"
+agent_paths = []
+
+[providers]
+anthropic_base_url = "https://gw/from-file"
+openai_base_url = "https://gw/from-file"
+google_base_url = "https://gw/from-file"
+openrouter_base_url = "https://gw/from-file"
+"#,
+                )
+                .unwrap();
+
+                let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
+
+                for got in [
+                    config.providers.anthropic_base_url.as_deref(),
+                    config.providers.openai_base_url.as_deref(),
+                    config.providers.google_base_url.as_deref(),
+                    config.providers.openrouter_base_url.as_deref(),
+                ] {
+                    assert_eq!(got, Some("https://gw/from-file"));
+                }
+            },
+        );
+    }
+
     #[test]
     fn load_from_path_existing_provider_keys_skip_env_fallback() {
         // Every one of the 5 "env var fallback" `if field.is_none()` checks
@@ -2409,6 +2515,10 @@ google_api_key = "AIza-existing"
             anthropic_api_key: Some("sk-ant-SECRET-VALUE".to_string()),
             openai_api_key: Some("sk-openai-SECRET-VALUE".to_string()),
             google_api_key: Some("AIza-SECRET-VALUE".to_string()),
+            anthropic_base_url: None,
+            openai_base_url: None,
+            google_base_url: None,
+            openrouter_base_url: None,
             claude_code_enabled: true,
             claude_code_binary: None,
             claude_code_effort: None,
@@ -2427,6 +2537,10 @@ google_api_key = "AIza-existing"
                 anthropic_api_key: None,
                 openai_api_key: None,
                 google_api_key: None,
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
@@ -2476,6 +2590,10 @@ google_api_key = "AIza-existing"
                 anthropic_api_key: Some("sk-ant-test123".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
@@ -2494,6 +2612,10 @@ google_api_key = "AIza-existing"
                 anthropic_api_key: Some("bad-key".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
@@ -2514,6 +2636,10 @@ google_api_key = "AIza-existing"
                 anthropic_api_key: None,
                 openai_api_key: Some("sk-test123".to_string()),
                 google_api_key: None,
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
@@ -2532,6 +2658,10 @@ google_api_key = "AIza-existing"
                 anthropic_api_key: None,
                 openai_api_key: Some("bad-key".to_string()),
                 google_api_key: None,
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
@@ -2849,6 +2979,10 @@ max_contxt_tokens = 1048576
                 anthropic_api_key: Some("bad".to_string()),
                 openai_api_key: Some("bad".to_string()),
                 google_api_key: None,
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
@@ -2886,6 +3020,10 @@ max_contxt_tokens = 1048576
                 anthropic_api_key: Some("sk-ant-key".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
@@ -2922,6 +3060,10 @@ max_contxt_tokens = 1048576
                 anthropic_api_key: Some("sk-ant-good-key".to_string()),
                 openai_api_key: Some("sk-good-key".to_string()),
                 google_api_key: None,
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
@@ -2942,6 +3084,10 @@ max_contxt_tokens = 1048576
                 anthropic_api_key: None,
                 openai_api_key: None,
                 google_api_key: Some("anything-goes".to_string()),
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
@@ -3144,6 +3290,10 @@ enabled = false
                 anthropic_api_key: Some("sk-ant-test".to_string()),
                 openai_api_key: Some("sk-test".to_string()),
                 google_api_key: None,
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
@@ -3207,6 +3357,10 @@ enabled = false
                 anthropic_api_key: Some("sk-ant-key".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
+                anthropic_base_url: None,
+                openai_base_url: None,
+                google_base_url: None,
+                openrouter_base_url: None,
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,

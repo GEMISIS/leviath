@@ -24,6 +24,30 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub google_api_key: Option<String>,
 
+    /// Host to reach Anthropic on, when it is not Anthropic's own.
+    ///
+    /// For an enterprise gateway or a self-hosted proxy that speaks the same
+    /// API on a different origin. `None` uses the public endpoint, which is
+    /// what every existing config means.
+    ///
+    /// Per provider rather than one setting covering all of them, because a
+    /// gateway usually fronts one family: pointing every provider at it would
+    /// break the ones it does not serve.
+    #[serde(default)]
+    pub anthropic_base_url: Option<String>,
+
+    /// Host to reach OpenAI on. See [`Self::anthropic_base_url`].
+    #[serde(default)]
+    pub openai_base_url: Option<String>,
+
+    /// Host to reach Google AI on. See [`Self::anthropic_base_url`].
+    #[serde(default)]
+    pub google_base_url: Option<String>,
+
+    /// Host to reach OpenRouter on. See [`Self::anthropic_base_url`].
+    #[serde(default)]
+    pub openrouter_base_url: Option<String>,
+
     /// Whether the Claude Code CLI transport is enabled.
     ///
     /// **Opt-in, and never selected for the user.** The CLI injects its own
