@@ -723,6 +723,7 @@ mod tests {
         dash.update_display_indices();
         dash.detail_view = true;
         dash.stage_explorer = Some(crate::commands::dashboard::types::ExplorerState::new(
+            "run-exp".to_string(),
             crate::tui::flowgraph::FlowView::new(
                 graph,
                 crate::tui::flowgraph::NodeStyle::Full,

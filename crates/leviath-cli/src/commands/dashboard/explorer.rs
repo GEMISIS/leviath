@@ -36,7 +36,7 @@ impl Dashboard {
                     Some((cached_run, view)) if cached_run == run_id => view,
                     _ => FlowView::new(graph, NodeStyle::Full, false),
                 };
-                self.stage_explorer = Some(ExplorerState::new(view));
+                self.stage_explorer = Some(ExplorerState::new(run_id, view));
             }
             None => self.toast(
                 "This run's blueprint could not be read, so there is no stage graph to show",
@@ -48,10 +48,8 @@ impl Dashboard {
     /// Close the explorer, keeping its canvas for the next `g` on the same
     /// run.
     pub(super) fn close_stage_explorer(&mut self) {
-        if let Some(explorer) = self.stage_explorer.take()
-            && let Some(run_id) = self.selected_agent().map(|a| a.id.clone())
-        {
-            self.explorer_cache = Some((run_id, explorer.view));
+        if let Some(explorer) = self.stage_explorer.take() {
+            self.explorer_cache = Some((explorer.run_id, explorer.view));
         }
     }
 
@@ -510,6 +508,16 @@ condition = "llm_choice"
         assert!(!dash.stage_explorer.as_ref().unwrap().view.show_unvisited());
         dash.handle_key(key(KeyCode::Char('e')));
         assert!(dash.stage_explorer.as_ref().unwrap().view.show_escape());
+        dash.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(
+            dash.stage_explorer.as_ref().unwrap().view.direction(),
+            crate::tui::flowgraph::Direction::TopToBottom
+        );
+        let terminal = draw(&mut dash);
+        assert!(
+            crate::commands::dashboard::test_support::rendered_buffer(&terminal)
+                .contains("top to bottom (r)")
+        );
         dash.handle_key(key(KeyCode::Char('?')));
         assert!(dash.show_help);
         dash.handle_key(key(KeyCode::Esc)); // closes help
