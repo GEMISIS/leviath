@@ -34,6 +34,15 @@ same list.
 - New: the new-run screen previews the selected blueprint's stage graph
   above the task, bundled blueprints included before they are installed,
   and says so when a manifest cannot be read.
+- Changed: the stage graph never shrinks its boxes to fit. The layers run
+  left to right when that fits and top to bottom when only that does (`r`
+  turns it by hand); when neither fits the canvas starts at the entry stage
+  and pans, with a minimap once there is more graph than screen. Boxes keep
+  their frame at every size and cut the name before anything else, the
+  selected one gets a thick bright frame rather than reversed text, edge
+  animation runs at a walking pace, a dotted grid sits under the graph, and
+  boxes can be dragged into an arrangement of your own, which the explorer
+  keeps for the run.
 - Fixed: shortcuts that worked but were never hinted or documented. The
   detail view's hint bar names `g` (the graph) and `1-9`; the main list's
   names `m` (MCP servers); the log panel's names PgUp/PgDn, `?` and the

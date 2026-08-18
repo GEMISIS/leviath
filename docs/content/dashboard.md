@@ -173,13 +173,17 @@ are on, in which stage, recorded when.
 `g` in the detail view opens the full-screen stage explorer for any run (a linear blueprint is a
 chain; a graph blueprint is a graph):
 
-- **Graph** draws the blueprint on a canvas: stages are boxes laid out left to right on layers,
-  transitions are routed edges. The stage the run is in spins in the run's colour, stages it has
-  been through show a visit count (`×2`) and the time of their last visit, the last transition it
-  took is animated, and revisit loops run along a lane below the boxes. The escape edges
-  (`error`, `dead_end`, `stuck`, `max_iterations`) are hidden until you ask for them, because
-  nearly every stage has one to the same hub. A fan-out stage that is running shows its worker
-  counts. Selecting a stage or an edge describes it on the line under the canvas.
+- **Graph** draws the blueprint on a canvas: stages are boxes on layers, transitions are routed
+  edges. The layers run left to right when that fits the terminal and top to bottom when only that
+  does (`r` turns it by hand); boxes are never shrunk to make a graph fit, the canvas pans instead,
+  with a minimap in the corner when there is more graph than screen. The stage the run is in
+  spins in the run's colour, stages it has been through show a visit count (`×2`) and the time of
+  their last visit, the last transition it took is animated, and revisit loops run along a lane
+  beside the boxes. The escape edges (`error`, `dead_end`, `stuck`, `max_iterations`) are hidden
+  until you ask for them, because nearly every stage has one to the same hub. A fan-out stage that
+  is running shows its worker counts. Selecting a stage or an edge describes it on the line under
+  the canvas. Boxes can be dragged into an arrangement you prefer; the explorer remembers it, and
+  the view, for as long as the dashboard is open.
 - **Timeline** lists each actual visit in order, with when it started, how long it lasted, and how
   many iterations it ran. `Enter` on a visit opens the context window exactly as it was at that
   point.
@@ -191,14 +195,15 @@ chain; a graph blueprint is a graph):
 | `Enter` | Graph: open the selected stage's tab. Timeline: open the visit's context |
 | `+` / `-` , `0` | Zoom in / out, back to 100% |
 | `f` | Fit the whole graph on screen |
+| `r` | Turn the graph: left to right or top to bottom |
 | `e` | Show or hide the escape edges |
 | `u` | Show or hide stages the run has never entered |
 | `Tab` / `Shift-Tab` | Switch between Graph and Timeline |
 | `?` / `F1` | Help |
 | `Esc` / `g` | Close the explorer |
 
-The mouse works on the canvas: drag to pan, wheel to zoom at the cursor, click a stage to select
-it. While the explorer is open the detail view's keys are off, so `e`, `c`, `l`, `o` and `b` mean
+The mouse works on the canvas: drag a box to move it, drag empty canvas to pan, wheel to zoom at
+the cursor, click a stage to select it. While the explorer is open the detail view's keys are off, so `e`, `c`, `l`, `o` and `b` mean
 what the table above says rather than what they mean underneath.
 
 `lev validate --graph <agent>` prints the same picture as plain text.

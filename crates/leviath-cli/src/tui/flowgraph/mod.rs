@@ -21,5 +21,6 @@ pub(crate) mod text;
 pub(crate) mod view;
 
 pub(crate) use content::{NodeStyle, RunPhase, WorkerCounts};
+pub(crate) use layout::Direction;
 pub(crate) use model::StageGraph;
 pub(crate) use view::{FlowView, LiveOverlay, Selection, StageLive};
