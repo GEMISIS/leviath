@@ -14,15 +14,21 @@ use crate::runstate::StageRunStatus;
 
 impl Dashboard {
     pub(in crate::commands::dashboard) fn render_stage_tabs(
-        &self,
+        &mut self,
         frame: &mut Frame,
         tabs_area: Rect,
         agent: &DashboardAgent,
     ) {
-        // Both agent shapes use the same compact tab strip; a graph agent's
-        // real DAG (with revisit counts and the visit timeline) lives in the
-        // full-screen explorer on `g`, instead of a 7-row strip that could
-        // only draw arrows between list-neighbors.
+        // Given the rows for it (`stage_row_height`), the stage row is the
+        // graph band: the same "N of M" and selection, plus where the run
+        // has been and how the stages connect. The flat strip is the
+        // fallback for short terminals and runs without a readable
+        // blueprint; the full-screen explorer stays on `g`.
+        if tabs_area.height >= super::super::detail_band::BAND_HEIGHT
+            && self.draw_stage_band(frame, tabs_area, agent)
+        {
+            return;
+        }
         self.draw_linear_tabs(frame, tabs_area, agent);
     }
 
@@ -293,7 +299,7 @@ mod tests {
     fn render_stage_tabs_linear_empty_stages() {
         let backend = TestBackend::new(120, 10);
         let mut terminal = Terminal::new(backend).unwrap();
-        let dash = make_test_dashboard();
+        let mut dash = make_test_dashboard();
         let agent = make_test_agent("run-s", AgentDisplayStatus::Active);
         terminal
             .draw(|f| {
@@ -309,7 +315,7 @@ mod tests {
     fn render_stage_tabs_linear_with_records() {
         let backend = TestBackend::new(120, 10);
         let mut terminal = Terminal::new(backend).unwrap();
-        let dash = make_test_dashboard();
+        let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-sr", AgentDisplayStatus::Active);
         agent.stages = vec![
             make_stage_record("plan", StageRunStatus::Complete),
@@ -363,7 +369,7 @@ mod tests {
     fn render_stage_tabs_graph_mode() {
         let backend = TestBackend::new(120, 10);
         let mut terminal = Terminal::new(backend).unwrap();
-        let dash = make_test_dashboard();
+        let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-g", AgentDisplayStatus::Active);
         agent.stages = vec![
             make_stage_record("plan", StageRunStatus::Complete),
@@ -396,7 +402,7 @@ mod tests {
         // branch for the earlier, already-passed stages.
         let backend = TestBackend::new(120, 10);
         let mut terminal = Terminal::new(backend).unwrap();
-        let dash = make_test_dashboard();
+        let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-fallback-idx", AgentDisplayStatus::Active);
         agent.stages = vec![];
         agent.num_stages = 3;

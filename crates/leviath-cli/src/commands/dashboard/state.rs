@@ -48,6 +48,9 @@ pub(crate) struct Dashboard {
     /// The graph pane holding the mouse between a left press and its
     /// release, so a pan that leaves the canvas keeps panning.
     pub(super) mouse_capture: Option<PaneId>,
+    /// The detail view's graph band, kept between frames; rebuilt when the
+    /// selected run changes.
+    pub(super) detail_band: Option<super::detail_band::DetailBand>,
     /// The log panel's viewport height as of the last draw, so key scrolling
     /// pages by what is actually visible.
     pub(super) log_viewport: usize,

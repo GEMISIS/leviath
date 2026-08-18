@@ -383,6 +383,15 @@ impl StageGraph {
         self.nodes.iter().find(|n| n.id == id)
     }
 
+    /// How many stages the blueprint has (external worker blueprints are
+    /// nodes, not stages).
+    pub(crate) fn stage_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .filter(|n| n.kind != NodeKind::ExternalBlueprint)
+            .count()
+    }
+
     /// Position of the stage `id` in the blueprint's stage list: `None` for
     /// an external worker blueprint, which is a node but not a stage.
     pub(crate) fn stage_index(&self, id: &str) -> Option<usize> {
@@ -451,6 +460,7 @@ allow_complete = true
         assert!(c.is_terminal && c.allow_complete);
         assert_eq!(g.stage_index("c"), Some(2));
         assert_eq!(g.stage_index("nope"), None);
+        assert_eq!(g.stage_count(), 3);
         assert_eq!(g.ids().collect::<Vec<_>>(), vec!["a", "b", "c"]);
     }
 
@@ -722,6 +732,7 @@ worker_query = "anything that reads logs"
         // External nodes come after every stage, and are not stages.
         assert_eq!(g.ids().last(), Some("ext:researcher"));
         assert_eq!(g.stage_index("ext:researcher"), None);
+        assert_eq!(g.stage_count(), 3, "the external node is not a stage");
         assert_eq!(g.node("ext:researcher").unwrap().kind_label(), "blueprint");
     }
 

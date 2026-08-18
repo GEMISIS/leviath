@@ -2,6 +2,7 @@
 
 mod construct;
 mod context_tree;
+mod detail_band;
 mod explorer;
 mod graph;
 mod helpers;

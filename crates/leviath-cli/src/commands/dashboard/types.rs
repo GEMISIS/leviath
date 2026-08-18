@@ -73,13 +73,15 @@ pub(super) enum PaneId {
     LogPanel,
     /// The stage explorer's graph canvas: the wheel zooms, a drag pans.
     ExplorerGraph,
+    /// The detail view's graph band: a drag pans.
+    DetailBand,
 }
 
 impl PaneId {
     /// Whether the pane is a graph canvas, which takes the mouse before the
     /// text-selection machinery sees it.
     pub(super) fn is_graph(self) -> bool {
-        matches!(self, PaneId::ExplorerGraph)
+        matches!(self, PaneId::ExplorerGraph | PaneId::DetailBand)
     }
 }
 
