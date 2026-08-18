@@ -10,6 +10,7 @@ mod history;
 mod input;
 mod mcp;
 mod new_run;
+mod new_run_preview;
 mod render;
 mod selection;
 mod state;

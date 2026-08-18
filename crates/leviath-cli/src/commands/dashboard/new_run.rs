@@ -64,6 +64,7 @@ impl Dashboard {
     /// Close the screen, discarding whatever was typed.
     pub(super) fn close_new_run_screen(&mut self) {
         self.new_run_screen = false;
+        self.new_run_preview = None;
         self.close_file_ref();
     }
 

@@ -75,13 +75,18 @@ pub(super) enum PaneId {
     ExplorerGraph,
     /// The detail view's graph band: a drag pans.
     DetailBand,
+    /// The new-run screen's blueprint preview: a drag pans.
+    NewRunPreview,
 }
 
 impl PaneId {
     /// Whether the pane is a graph canvas, which takes the mouse before the
     /// text-selection machinery sees it.
     pub(super) fn is_graph(self) -> bool {
-        matches!(self, PaneId::ExplorerGraph | PaneId::DetailBand)
+        matches!(
+            self,
+            PaneId::ExplorerGraph | PaneId::DetailBand | PaneId::NewRunPreview
+        )
     }
 }
 

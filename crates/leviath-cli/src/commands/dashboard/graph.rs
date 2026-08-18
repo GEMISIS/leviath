@@ -20,6 +20,25 @@ pub(super) fn load_stage_graph(agent_path: &str) -> Option<Arc<StageGraph>> {
     Some(Arc::new(StageGraph::from_blueprint(&blueprint)))
 }
 
+/// The stage graph of a blueprint shipped inside the binary, by name, so
+/// the new-run screen can preview one that `lev setup` has not installed.
+pub(super) fn bundled_stage_graph(name: &str) -> Option<Arc<StageGraph>> {
+    let agent = crate::bundled::BUNDLED_AGENTS
+        .iter()
+        .find(|a| a.name == name)?;
+    // Every bundled agent has a manifest and it parses (the bundle tests
+    // say so), hence no fallible arms of our own past this point.
+    let content = agent
+        .files
+        .iter()
+        .find(|(path, _)| *path == "agent.leviath")
+        .map(|(_, content)| *content)
+        .unwrap_or_default();
+    leviath_core::manifest::parse_manifest(content)
+        .ok()
+        .map(|blueprint| Arc::new(StageGraph::from_blueprint(&blueprint)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,5 +70,16 @@ name = "linear"
         assert!(!via_dir.is_branching, "a linear agent is a graph too");
         assert_eq!(via_dir.entry, "first");
         assert_eq!(via_dir.edges.len(), 1);
+    }
+
+    #[test]
+    fn a_bundled_blueprint_loads_by_name_and_an_unknown_name_does_not() {
+        let name = crate::bundled::BUNDLED_AGENTS
+            .first()
+            .expect("the binary bundles agents")
+            .name;
+        let graph = bundled_stage_graph(name).expect("bundled parses");
+        assert!(graph.nodes.len() > 1);
+        assert!(bundled_stage_graph("no-such-blueprint").is_none());
     }
 }

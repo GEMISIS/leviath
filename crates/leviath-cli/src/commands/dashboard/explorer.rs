@@ -48,6 +48,9 @@ impl Dashboard {
         if let Some(band) = self.detail_band.as_mut() {
             band.view.tick(elapsed);
         }
+        if let Some(Ok(view)) = self.new_run_preview.as_mut().map(|p| p.view.as_mut()) {
+            view.tick(elapsed);
+        }
     }
 
     /// Keys while the full-screen stage explorer is open. The explorer owns
@@ -254,7 +257,7 @@ impl Dashboard {
     }
 
     /// The canvas behind a graph pane, if it is showing.
-    fn graph_view_mut(&mut self, id: PaneId) -> Option<&mut FlowView> {
+    pub(super) fn graph_view_mut(&mut self, id: PaneId) -> Option<&mut FlowView> {
         match id {
             PaneId::ExplorerGraph => self
                 .stage_explorer
@@ -262,6 +265,13 @@ impl Dashboard {
                 .filter(|e| e.tab == ExplorerTab::Graph)
                 .map(|e| &mut e.view),
             PaneId::DetailBand => self.detail_band.as_mut().map(|b| &mut b.view),
+            PaneId::NewRunPreview => {
+                let open = self.new_run_screen;
+                self.new_run_preview
+                    .as_mut()
+                    .filter(|_| open)
+                    .and_then(|p| p.view.as_mut().ok())
+            }
             PaneId::RunTable | PaneId::LogPanel => None,
         }
     }

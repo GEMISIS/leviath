@@ -27,6 +27,13 @@ same list.
   layered layout the explorer already had places the boxes.
 - New: `lev validate --graph` prints the same stage graph as plain text
   (`--width` caps how wide).
+- New: the detail view's stage row is the blueprint's graph on a terminal
+  at least 32 rows tall: one box per stage, edges between them, the stage
+  the run is in lit up, `←`/`→` and `1`-`9` moving through it as they did
+  through the tabs. The flat strip stays on shorter terminals.
+- New: the new-run screen previews the selected blueprint's stage graph
+  above the task, bundled blueprints included before they are installed,
+  and says so when a manifest cannot be read.
 - Fixed: shortcuts that worked but were never hinted or documented. The
   detail view's hint bar names `g` (the graph) and `1-9`; the main list's
   names `m` (MCP servers); the log panel's names PgUp/PgDn, `?` and the
