@@ -565,10 +565,13 @@ mode = "output"
         let text = rendered(&mut dash);
         assert!(text.contains("escapes on (e)"), "{text}");
         assert!(text.contains("[error]"), "{text}");
-        // A narrow pane gets the short title.
+        // A narrow pane gets the short title, and the graph turns to fit it
+        // (the title says so from the frame after the turn: the dashboard
+        // redraws ten times a second).
+        rendered_at(&mut dash, 90, 40);
         let (_, text) = rendered_at(&mut dash, 90, 40);
         assert!(
-            text.contains("Graph · → · t:off e:on u:on · 100%"),
+            text.contains("Graph · ↓ · t:off e:on u:on · 100%"),
             "{text}"
         );
         // An edge: pick one directly on the canvas. The first carries a hint
