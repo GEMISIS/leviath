@@ -173,6 +173,10 @@ fn detail_sections() -> Vec<HelpSection> {
                 ("+ / - / 0", "zoom in / out / back to 100%"),
                 ("f", "fit the whole graph on screen"),
                 ("r", "turn the graph: left to right / top to bottom"),
+                (
+                    "t",
+                    "show every edge, or only the path taken and what comes next",
+                ),
                 ("e", "show or hide the escape edges (error, dead_end, ...)"),
                 ("u", "show or hide stages the run never entered"),
                 ("↑ ↓ / k j", "timeline: step through visits"),

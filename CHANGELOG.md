@@ -43,6 +43,12 @@ same list.
   animation runs at a walking pace, a dotted grid sits under the graph, and
   boxes can be dragged into an arrangement of your own, which the explorer
   keeps for the run.
+- Changed: while a run is on the canvas the graph draws only the
+  transitions it took and the ones it can take from where it is; `t` shows
+  them all. Hint bars fit the terminal: what does not fit gives way from
+  the end (the explorer's) or the middle (the dashboard's, keeping help and
+  back), with an ellipsis where it went, and the graph pane's title
+  shortens on a narrow pane.
 - Fixed: shortcuts that worked but were never hinted or documented. The
   detail view's hint bar names `g` (the graph) and `1-9`; the main list's
   names `m` (MCP servers); the log panel's names PgUp/PgDn, `?` and the

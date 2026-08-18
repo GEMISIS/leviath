@@ -433,6 +433,9 @@ impl Dashboard {
             self.build_main_list_help_bar()
         };
 
+        // On a narrow terminal the middle of the bar gives way; the first
+        // keys and the last two (help and back/quit) stay.
+        let help = crate::tui::widgets::footer::fit_help_line(help, area.width as usize, 2);
         let help_widget = Paragraph::new(help).style(Style::default().bg(Color::Rgb(20, 20, 30)));
         frame.render_widget(help_widget, area);
     }
@@ -992,7 +995,20 @@ mod tests {
         let buf = rendered_buffer(&terminal);
         assert!(!buf.contains("back to list"), "{buf}");
         assert!(!buf.contains("Search: /"), "{buf}");
+        // 120 columns is not enough for the whole bar: the middle gives way,
+        // help and quit stay at the end.
+        assert!(buf.contains("…  [?] help  [q] quit"), "{buf}");
+        let backend = TestBackend::new(200, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 200, 1);
+                dash.draw_help_bar(f, area);
+            })
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
         assert!(buf.contains("[m] mcp"), "the MCP screen has a key: {buf}");
+        assert!(!buf.contains('…'), "{buf}");
     }
 
     #[test]
