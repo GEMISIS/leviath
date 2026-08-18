@@ -11,7 +11,7 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
-## Unreleased
+## 0.4.0 - 2026-08-18
 
 - New: a provider can be reached through a gateway, with
   `[providers] <provider>_base_url` for `anthropic`, `openai`, `google` and
