@@ -97,6 +97,14 @@ pub(crate) struct FlowView {
     auto_direction: bool,
     show_escape: bool,
     show_unvisited: bool,
+    /// Edges the run has not followed and cannot follow next: hidden by
+    /// default once a run is on the canvas, so the picture is the path
+    /// taken plus what can happen from here. `t` shows the whole graph.
+    show_untaken: bool,
+    /// Transitions the run followed, from the last overlay.
+    taken: HashSet<(String, String)>,
+    /// The stage the run is in, from the last overlay.
+    current: Option<String>,
     /// A stage to bring on screen at the next draw.
     reveal: Option<String>,
     last_current: Option<String>,
@@ -333,6 +341,9 @@ impl FlowView {
             auto_direction: true,
             show_escape: false,
             show_unvisited: true,
+            show_untaken: false,
+            taken: HashSet::new(),
+            current: None,
             reveal: None,
             last_current: None,
             last_live: None,
@@ -403,6 +414,17 @@ impl FlowView {
     /// Unvisited stages shown or hidden.
     pub(crate) fn show_unvisited(&self) -> bool {
         self.show_unvisited
+    }
+
+    /// Untaken edges shown or hidden.
+    pub(crate) fn show_untaken(&self) -> bool {
+        self.show_untaken
+    }
+
+    /// Show or hide the edges the run has not followed.
+    pub(crate) fn toggle_untaken(&mut self) {
+        self.show_untaken = !self.show_untaken;
+        self.sync_visibility();
     }
 
     /// The zoom level, for hint text and tests.
@@ -552,6 +574,7 @@ impl FlowView {
             KeyCode::Char('r') => self.rotate(),
             KeyCode::Char('e') => self.toggle_escape(),
             KeyCode::Char('u') => self.toggle_unvisited(),
+            KeyCode::Char('t') => self.toggle_untaken(),
             _ => return false,
         }
         true
@@ -610,6 +633,8 @@ impl FlowView {
             .iter()
             .map(|(f, t)| (f.as_str(), t.as_str()))
             .collect();
+        self.taken = live.taken.iter().cloned().collect();
+        self.current = live.current.clone();
         let last = live
             .last_transition
             .as_ref()
@@ -638,8 +663,10 @@ impl FlowView {
 
     /// Hidden nodes and edges follow the toggles: a node hides when it is
     /// unvisited and unvisited stages are off; an edge hides when it is an
-    /// escape with escapes off, or when either end is hidden (the canvas
-    /// would otherwise draw an arrow into nothing).
+    /// escape with escapes off, when a run is on the canvas and it is neither
+    /// a transition the run took nor one it can take from where it is (with
+    /// untaken edges off), or when either end is hidden (the canvas would
+    /// otherwise draw an arrow into nothing).
     fn sync_visibility(&mut self) {
         let hidden_nodes: Vec<String> = self
             .flow
@@ -652,7 +679,14 @@ impl FlowView {
             self.flow.set_node_hidden(id, hidden.contains(id));
         }
         for meta in &self.edges {
+            let untaken = self.current.is_some()
+                && !self.show_untaken
+                && !self
+                    .taken
+                    .contains(&(meta.edge.from.clone(), meta.edge.to.clone()))
+                && self.current.as_deref() != Some(meta.edge.from.as_str());
             let hide = (meta.edge.class == EdgeClass::Escape && !self.show_escape)
+                || untaken
                 || hidden.contains(meta.edge.from.as_str())
                 || hidden.contains(meta.edge.to.as_str());
             self.flow.set_edge_hidden(&meta.id, hide);
@@ -663,11 +697,13 @@ impl FlowView {
     /// (the block's inside), which is what mouse routing hit-tests.
     pub(crate) fn render(&mut self, frame: &mut Frame, area: Rect, block: Block<'static>) -> Rect {
         let inner = block.inner(area);
-        self.flow.set_block(Some(block));
         if (area.width, area.height) != (self.last_area.width, self.last_area.height) {
             self.last_area = area;
             self.settle(area);
         }
+        // After settling: a settle may rebuild the canvas, and the block
+        // belongs on the one that draws.
+        self.flow.set_block(Some(block));
         if let Some(id) = self.reveal.take() {
             self.flow.ensure_node_visible(&id);
         }
@@ -958,6 +994,23 @@ mode = "output"
         assert_eq!(v.node_status("recover"), Some(NodeStatus::Pending));
         assert!(v.edge_animated("implement", "review"));
         assert!(!v.edge_animated("plan", "implement"));
+        // Untaken edges hide once a run is on the canvas: the path taken and
+        // the current stage's own options stay, the rest goes until `t`.
+        assert!(!v.edge_hidden("plan", "implement"), "taken");
+        assert!(
+            !v.edge_hidden("review", "done"),
+            "an option from the current stage"
+        );
+        assert!(
+            v.edge_hidden("recover", "plan"),
+            "neither taken nor available"
+        );
+        assert!(!v.show_untaken());
+        assert!(v.handle_key(KeyCode::Char('t')));
+        assert!(v.show_untaken());
+        assert!(!v.edge_hidden("recover", "plan"));
+        v.toggle_untaken();
+        assert!(v.edge_hidden("recover", "plan"));
         // A non-fan-out current stage never shows worker counts.
         let (_, text) = draw(&mut v, 220, 50);
         assert!(!text.contains(" run ·"), "{text}");

@@ -21,6 +21,43 @@ use crate::commands::dashboard::types::*;
 use crate::tui::flowgraph::{Direction as FlowDirection, Selection};
 use crate::tui::widgets::footer::{draw_hint_bar, hint};
 
+/// The graph pane's title: what is shown and how, in as many words as the
+/// width allows.
+fn graph_title(
+    width: u16,
+    direction: FlowDirection,
+    show_untaken: bool,
+    show_escape: bool,
+    show_unvisited: bool,
+    zoom: f64,
+) -> String {
+    let on_off = |on: bool| if on { "on" } else { "off" };
+    if width < 110 {
+        return format!(
+            " Graph · {} · t:{} e:{} u:{} · {:.0}% ",
+            match direction {
+                FlowDirection::LeftToRight => "→",
+                FlowDirection::TopToBottom => "↓",
+            },
+            on_off(show_untaken),
+            on_off(show_escape),
+            on_off(show_unvisited),
+            zoom * 100.0,
+        );
+    }
+    format!(
+        " Graph · {} (r) · untaken edges {} (t) · escapes {} (e) · unvisited {} (u) · zoom {:.0}% ",
+        match direction {
+            FlowDirection::LeftToRight => "left to right",
+            FlowDirection::TopToBottom => "top to bottom",
+        },
+        on_off(show_untaken),
+        on_off(show_escape),
+        on_off(show_unvisited),
+        zoom * 100.0,
+    )
+}
+
 fn duration_label(visit: &StageVisit) -> String {
     match visit.left_at {
         Some(left) => {
@@ -101,25 +138,27 @@ impl Dashboard {
 
         // ── Hint bar ──
         let hints = match tab {
+            // Priority order: on a narrow terminal the tail falls off.
             ExplorerTab::Graph => vec![
-                hint("←→↑↓", "select a stage"),
-                hint("enter", "open its tab"),
-                hint("+ -", "zoom"),
-                hint("f", "fit"),
-                hint("r", "rotate"),
-                hint("e", "escape edges"),
-                hint("u", "unvisited"),
-                hint("drag", "move a box or pan"),
+                hint("esc/g", "close"),
+                hint("←→↑↓", "select"),
+                hint("enter", "open tab"),
                 hint("tab", "timeline"),
                 hint("?", "help"),
-                hint("esc/g", "close"),
+                hint("t", "all edges"),
+                hint("e", "escapes"),
+                hint("u", "unvisited"),
+                hint("r", "rotate"),
+                hint("f", "fit"),
+                hint("+ -", "zoom"),
+                hint("drag", "move / pan"),
             ],
             ExplorerTab::Timeline => vec![
-                hint("tab", "graph"),
+                hint("esc/g", "close"),
                 hint("↑↓", "select a visit"),
                 hint("enter", "open its context"),
+                hint("tab", "graph"),
                 hint("?", "help"),
-                hint("esc/g", "close"),
             ],
         };
         draw_hint_bar(frame, chunks[2], None, &hints, false);
@@ -137,23 +176,13 @@ impl Dashboard {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(3), Constraint::Length(1)])
             .split(area);
-        let title = format!(
-            " Graph · {} (r) · {} · zoom {:.0}%{} ",
-            match explorer.view.direction() {
-                FlowDirection::LeftToRight => "left to right",
-                FlowDirection::TopToBottom => "top to bottom",
-            },
-            if explorer.view.show_escape() {
-                "escape edges shown"
-            } else {
-                "escape edges hidden (e)"
-            },
-            explorer.view.zoom() * 100.0,
-            if explorer.view.show_unvisited() {
-                ""
-            } else {
-                " · unvisited hidden (u)"
-            },
+        let title = graph_title(
+            area.width,
+            explorer.view.direction(),
+            explorer.view.show_untaken(),
+            explorer.view.show_escape(),
+            explorer.view.show_unvisited(),
+            explorer.view.zoom(),
         );
         let block = Block::default()
             .borders(Borders::ALL)
@@ -462,8 +491,16 @@ mode = "output"
         }
         assert!(text.contains("implement ×2"), "revisit count: {text}");
         assert!(text.contains("[llm_choice]"), "condition label: {text}");
-        assert!(text.contains("escape edges hidden (e)"), "{text}");
-        assert!(text.contains("select a stage"), "hint bar: {text}");
+        assert!(text.contains("escapes off (e)"), "{text}");
+        assert!(text.contains("untaken edges off (t)"), "{text}");
+        assert!(text.contains("←→↑↓ select"), "hint bar: {text}");
+        // Untaken edges are hidden by default: review's edge to island (never
+        // taken, and review is not the current stage) is not drawn; the path
+        // taken and the current stage's options are.
+        assert!(
+            !text.contains("[llm_choice]") || text.contains("implement ×2"),
+            "{text}"
+        );
         assert!(text.contains("Select a stage with the arrows"), "{text}");
         // The current stage is drawn in the active colour, a pending one dim.
         assert_eq!(style_at_text(&terminal, "implement ×2").fg, Some(C_ACTIVE));
@@ -526,8 +563,14 @@ mode = "output"
             .view
             .handle_key(KeyCode::Char('e'));
         let text = rendered(&mut dash);
-        assert!(text.contains("escape edges shown"), "{text}");
+        assert!(text.contains("escapes on (e)"), "{text}");
         assert!(text.contains("[error]"), "{text}");
+        // A narrow pane gets the short title.
+        let (_, text) = rendered_at(&mut dash, 90, 40);
+        assert!(
+            text.contains("Graph · → · t:off e:on u:on · 100%"),
+            "{text}"
+        );
         // An edge: pick one directly on the canvas. The first carries a hint
         // and no condition; the loop back from review carries the reverse.
         let mut hinted = explorer();
@@ -569,7 +612,7 @@ mode = "output"
             text.contains("review"),
             "the current stage never hides: {text}"
         );
-        assert!(text.contains("unvisited hidden (u)"), "{text}");
+        assert!(text.contains("unvisited off (u)"), "{text}");
     }
 
     #[test]

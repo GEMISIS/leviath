@@ -179,8 +179,10 @@ chain; a graph blueprint is a graph):
   with a minimap in the corner when there is more graph than screen. The stage the run is in
   spins in the run's colour, stages it has been through show a visit count (`×2`) and the time of
   their last visit, the last transition it took is animated, and revisit loops run along a lane
-  beside the boxes. The escape edges (`error`, `dead_end`, `stuck`, `max_iterations`) are hidden
-  until you ask for them, because nearly every stage has one to the same hub. A fan-out stage that
+  beside the boxes. While a run is on the canvas only the transitions it took and the ones it can
+  take from where it is are drawn (`t` shows them all), and the escape edges (`error`, `dead_end`,
+  `stuck`, `max_iterations`) are hidden until you ask for them, because nearly every stage has one
+  to the same hub. A fan-out stage that
   is running shows its worker counts. Selecting a stage or an edge describes it on the line under
   the canvas. Boxes can be dragged into an arrangement you prefer; the explorer remembers it, and
   the view, for as long as the dashboard is open.
@@ -196,6 +198,7 @@ chain; a graph blueprint is a graph):
 | `+` / `-` , `0` | Zoom in / out, back to 100% |
 | `f` | Fit the whole graph on screen |
 | `r` | Turn the graph: left to right or top to bottom |
+| `t` | Show every edge, or only the path taken and what comes next |
 | `e` | Show or hide the escape edges |
 | `u` | Show or hide stages the run has never entered |
 | `Tab` / `Shift-Tab` | Switch between Graph and Timeline |
