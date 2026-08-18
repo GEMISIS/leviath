@@ -19,6 +19,13 @@ shell_hint = true
 anthropic_api_key = "sk-ant-example"
 openai_api_key = "sk-example"
 google_api_key = "AIza-example"
+# Reach a provider through an enterprise gateway instead of the vendor's host.
+# Unset means the vendor's own endpoint. One per provider, because a gateway
+# usually fronts one family.
+anthropic_base_url = "https://gateway.example.internal/v1"
+openai_base_url = "https://gateway.example.internal/v1"
+google_base_url = "https://gateway.example.internal/v1"
+openrouter_base_url = "https://gateway.example.internal/v1"
 claude_code_enabled = false
 # How long a cached prompt prefix survives: "5m" (free, default) or "1h".
 anthropic_cache_ttl = "5m"

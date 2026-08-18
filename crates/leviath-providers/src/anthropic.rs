@@ -382,6 +382,29 @@ impl AnthropicProvider {
         ModelCapabilities::default()
     }
 
+    /// Point this provider at a different host.
+    ///
+    /// An enterprise gateway or self-hosted proxy speaks the same API on a
+    /// different origin, and every part of that was already here - the struct
+    /// holds a `base_url`, and `with_config` honours one - except a way for
+    /// configuration to reach the constructor the registry actually calls.
+    /// `with_config` sets the URL and drops the capability overrides;
+    /// `with_overrides` does the reverse, and the registry needs the overrides,
+    /// so the URL was the half that got lost.
+    ///
+    /// A builder rather than a fifth constructor parameter, following
+    /// `with_cache_ttl`: one field that four providers each gained does not
+    /// need to widen three constructors apiece.
+    ///
+    /// `None` keeps the built-in default, so a config that says nothing is
+    /// byte-for-byte the request it was before.
+    pub fn with_base_url(mut self, base_url: Option<String>) -> Self {
+        if let Some(url) = base_url {
+            self.base_url = url;
+        }
+        self
+    }
+
     /// Return the `cache_control` JSON value for the configured TTL.
     /// Select the prompt-cache TTL.
     ///

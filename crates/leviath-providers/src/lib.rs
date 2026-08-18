@@ -41,3 +41,6 @@ pub use provider::{
     SystemBlock, TokenUsage, Tool, ToolCall, UnavailableReason, build_http_client,
 };
 pub use rhai_provider::RhaiProvider;
+
+#[cfg(test)]
+mod gateway_tests;
