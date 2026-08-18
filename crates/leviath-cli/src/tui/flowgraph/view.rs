@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
 use rataflow::{
-    Edge, FitViewOptions, Flow, FlowAction, Handle, HandlePosition, Node, StepEdge, Theme,
+    Edge, FitViewOptions, Flow, FlowAction, Handle, HandlePosition, Node, StepEdge, Theme, Viewport,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -99,6 +99,8 @@ pub(crate) struct FlowView {
     /// counted: they are hidden until asked for, and a long one would cost
     /// every fit its width.
     max_stem: f64,
+    /// One-row boxes: the canvas cannot zoom out, so it pans instead.
+    compact: bool,
 }
 
 impl std::fmt::Debug for FlowView {
@@ -237,7 +239,9 @@ impl FlowView {
             .with_deselect_on_pane_click(false)
             .with_locked(locked);
         flow.set_node_positions(layout.positions(node_w, node_h, gap_x, gap_y));
-        flow.request_fit_view_with_options(fit_options(max_stem));
+        // No fit here: the first `render` settles the viewport for the area it
+        // gets (a fit, or the top-left corner for a compact canvas that
+        // overflows). A fit requested now would land after that and undo it.
 
         Self {
             flow,
@@ -250,6 +254,7 @@ impl FlowView {
             last_area: Rect::default(),
             canvas: Rect::default(),
             max_stem,
+            compact: style == NodeStyle::Compact,
         }
     }
 
@@ -343,6 +348,29 @@ impl FlowView {
     /// way, and it works on a locked canvas.
     pub(crate) fn select_stage(&mut self, id: &str) {
         self.flow.select_node(id);
+    }
+
+    /// First look at a canvas of this size: fit the graph when it fits, and
+    /// otherwise, on a canvas that cannot zoom out (compact boxes), start at
+    /// the top-left corner so the entry stage is on screen rather than the
+    /// middle of the picture. A full canvas zooms out to fit instead.
+    fn settle(&mut self, area: Rect, bordered: bool) {
+        let border = if bordered { 2.0 } else { 0.0 };
+        let (inner_w, inner_h) = (
+            f64::from(area.width) - border,
+            f64::from(area.height) - border,
+        );
+        let (world_w, world_h) = self.world_extent();
+        let overflows = world_w + 2.0 > inner_w || world_h + 2.0 > inner_h;
+        if self.compact && overflows {
+            self.flow.viewport = Viewport {
+                x: 1.0,
+                y: 1.0,
+                zoom: 1.0,
+            };
+        } else {
+            self.fit();
+        }
     }
 
     /// Bring the whole graph on screen at the next draw.
@@ -504,10 +532,11 @@ impl FlowView {
         area: Rect,
         block: Option<Block<'static>>,
     ) -> Rect {
+        let bordered = block.is_some();
         self.flow.set_block(block);
         if (area.width, area.height) != (self.last_area.width, self.last_area.height) {
             self.last_area = area;
-            self.fit();
+            self.settle(area, bordered);
         }
         if let Some(id) = self.reveal.take() {
             self.flow.ensure_node_visible(&id);
@@ -525,9 +554,17 @@ impl FlowView {
         self.flow.select_edge(&format!("e{index}"));
     }
 
-    /// The canvas itself, for the text render.
-    pub(super) fn flow(&self) -> &Flow<StageNodeContent, StepEdge> {
-        &self.flow
+    /// The far corner of the laid-out graph in world units.
+    pub(crate) fn world_extent(&self) -> (f64, f64) {
+        self.flow
+            .nodes()
+            .map(|n| n.bounds())
+            .fold((0.0_f64, 0.0_f64), |(w, h), b| {
+                (
+                    w.max(b.position.x + b.dimensions.width),
+                    h.max(b.position.y + b.dimensions.height),
+                )
+            })
     }
 
     /// The canvas itself, mutably, for the text render.
@@ -899,12 +936,14 @@ merge_stage = "merge"
             draw(&mut v, 60, 12);
             v.select_stage("plan");
             let pan = v.pan();
-            // Press on empty canvas (far corner), drag, release.
+            // Press on empty canvas (the top-right corner: a compact canvas
+            // starts at its top-left, so the boxes run along row 2 and the
+            // loop lanes below them), drag, release.
             let c = v.canvas();
-            let (x, y) = (c.x + c.width - 2, c.y + c.height - 2);
+            let (x, y) = (c.x + c.width - 2, c.y);
             v.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
-            v.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), x - 5, y - 2));
-            v.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), x - 5, y - 2));
+            v.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), x - 5, y + 2));
+            v.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), x - 5, y + 2));
             assert_ne!(v.pan(), pan, "locked={locked}");
             assert_eq!(
                 v.selection(),
@@ -926,6 +965,23 @@ merge_stage = "merge"
         assert!(v.zoom() < zoom);
         v.handle_mouse(mouse(MouseEventKind::ScrollUp, x, y));
         assert!(v.zoom() > zoom * 0.9);
+    }
+
+    #[test]
+    fn a_compact_canvas_starts_top_left_when_the_graph_overflows_and_fits_otherwise() {
+        let mut v = FlowView::new(graph(), NodeStyle::Compact, true);
+        draw(&mut v, 60, 12);
+        assert_eq!(v.pan(), (1.0, 1.0), "the entry stage is on screen");
+        assert_eq!(v.node_rect("plan").map(|r| r.0), Some(2));
+        // Wide enough: centred like any other fit.
+        let mut v = FlowView::new(graph(), NodeStyle::Compact, true);
+        draw(&mut v, 200, 20);
+        assert_ne!(v.pan(), (1.0, 1.0));
+        assert_eq!(v.zoom(), 1.0);
+        // A full canvas that overflows zooms out instead.
+        let mut v = FlowView::new(graph(), NodeStyle::Full, false);
+        draw(&mut v, 60, 20);
+        assert!(v.zoom() < 1.0);
     }
 
     #[test]
