@@ -354,12 +354,9 @@ impl FlowView {
     /// otherwise, on a canvas that cannot zoom out (compact boxes), start at
     /// the top-left corner so the entry stage is on screen rather than the
     /// middle of the picture. A full canvas zooms out to fit instead.
-    fn settle(&mut self, area: Rect, bordered: bool) {
-        let border = if bordered { 2.0 } else { 0.0 };
-        let (inner_w, inner_h) = (
-            f64::from(area.width) - border,
-            f64::from(area.height) - border,
-        );
+    fn settle(&mut self, area: Rect) {
+        // Inside the block's border.
+        let (inner_w, inner_h) = (f64::from(area.width) - 2.0, f64::from(area.height) - 2.0);
         let (world_w, world_h) = self.world_extent();
         let overflows = world_w + 2.0 > inner_w || world_h + 2.0 > inner_h;
         if self.compact && overflows {
@@ -524,19 +521,13 @@ impl FlowView {
         }
     }
 
-    /// Draw the canvas into `area`, inside `block` when given. Returns the
-    /// canvas rect (the block's inside), which is what mouse routing hit-tests.
-    pub(crate) fn render(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        block: Option<Block<'static>>,
-    ) -> Rect {
-        let bordered = block.is_some();
-        self.flow.set_block(block);
+    /// Draw the canvas into `area`, inside `block`. Returns the canvas rect
+    /// (the block's inside), which is what mouse routing hit-tests.
+    pub(crate) fn render(&mut self, frame: &mut Frame, area: Rect, block: Block<'static>) -> Rect {
+        self.flow.set_block(Some(block));
         if (area.width, area.height) != (self.last_area.width, self.last_area.height) {
             self.last_area = area;
-            self.settle(area, bordered);
+            self.settle(area);
         }
         if let Some(id) = self.reveal.take() {
             self.flow.ensure_node_visible(&id);
@@ -633,7 +624,7 @@ mode = "output"
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
             .draw(|f| {
-                view.render(f, f.area(), Some(Block::bordered()));
+                view.render(f, f.area(), Block::bordered());
             })
             .unwrap();
         let text: String = terminal

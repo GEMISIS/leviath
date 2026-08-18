@@ -73,6 +73,8 @@ impl Dashboard {
             .max(agent.graph.as_ref().map(|g| g.stage_count()).unwrap_or(0))
             .max(1);
         let selected = self.selected_stage.min(stage_count - 1);
+        // The ledger names the stage when it has one; the blueprint's own
+        // order otherwise (a run that has not written its ledger yet).
         let selected_name = agent
             .stages
             .get(selected)
@@ -82,16 +84,15 @@ impl Dashboard {
                     .graph
                     .as_ref()
                     .and_then(|g| g.ids().nth(selected).map(str::to_string))
-            });
+            })
+            .unwrap_or_default();
 
         let band = self
             .detail_band
             .as_mut()
             .expect("built above when missing or stale");
         band.view.apply_live(&live);
-        if let Some(name) = selected_name {
-            band.view.select_stage(&name);
-        }
+        band.view.select_stage(&selected_name);
         let title = format!(
             " Stages ←/→ to switch  stage {}/{}  ·  [g] graph  ·  drag to pan ",
             selected + 1,
@@ -102,7 +103,7 @@ impl Dashboard {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(C_BORDER_FOCUS))
             .title(Span::styled(title, Style::default().fg(C_DIM)));
-        let canvas = band.view.render(frame, area, Some(block));
+        let canvas = band.view.render(frame, area, block);
         self.pane_rects.push((PaneId::DetailBand, canvas));
         true
     }
@@ -282,10 +283,26 @@ condition = "llm_choice"
     #[test]
     fn the_band_takes_the_mouse_and_ticks() {
         let mut dash = make_test_dashboard();
-        dash.agents.push(agent("run-1"));
+        let mut run = agent("run-1");
+        // A ledger names the stages: the selection follows it rather than
+        // the blueprint's order.
+        run.stages = vec![
+            leviath_core::run_meta::StageRecord::new("plan".to_string(), 0),
+            leviath_core::run_meta::StageRecord::new("implement".to_string(), 1),
+        ];
+        dash.agents.push(run);
         dash.update_display_indices();
         dash.detail_view = true;
+        dash.selected_stage = 1;
         draw(&mut dash, 160, 40);
+        // A second draw of the same run keeps the canvas it built.
+        let terminal = draw(&mut dash, 160, 40);
+        assert!(
+            style_at_text(&terminal, "implement")
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED),
+            "the ledger's second stage is the selected one"
+        );
         let canvas = dash
             .pane_rects
             .iter()
