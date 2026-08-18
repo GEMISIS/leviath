@@ -225,6 +225,23 @@ pub fn collect_compaction(
         }
         if let Ok(summaries) = outcome.result {
             for (region_name, summary) in summaries {
+                // A summary with nothing in it is a compaction that failed, not
+                // one that found nothing worth keeping - and writing it would
+                // trade the region's real contents for a blank. Measured on a
+                // 32k window, where the transcript being summarized was small
+                // enough that the model returned an empty string; the blank was
+                // stored and later reached a provider as a zero-length turn,
+                // which is a 400 (issue #495). Leave the region as written and
+                // say so: eviction has other phases, and losing the content is
+                // worse than staying over budget for another tick.
+                if summary.trim().is_empty() {
+                    tracing::warn!(
+                        region = %region_name,
+                        "compaction returned an empty summary; keeping the region \
+                         as written rather than replacing it with nothing"
+                    );
+                    continue;
+                }
                 let summary_tokens = leviath_core::estimate_tokens(&summary);
                 let history = window
                     .regions

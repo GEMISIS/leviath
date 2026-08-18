@@ -2493,6 +2493,82 @@ mod tests {
         assert_eq!(assembled.messages[3].content.as_text(), "Now fix the bug");
     }
 
+    // ─── no zero-length turn reaches the wire (issue #495) ───────────────
+
+    /// Every provider rejects an empty turn (`messages.0: user messages must
+    /// have non-empty content`), and a 400 does not retry away - so a blank
+    /// entry that reached the request killed the run. One writer produced it
+    /// (an empty compaction summary), but the guard belongs at the request,
+    /// because there are many writers and one wire.
+    #[test]
+    fn an_empty_entry_never_becomes_a_message() {
+        let mut window = ContextWindow::new(100_000);
+        let mut conversation = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: Default::default(),
+            },
+            50_000,
+        );
+        conversation
+            .add_typed_entry(
+                "find the conflicts".to_string(),
+                10,
+                leviath_core::EntryKind::UserMessage,
+            )
+            .unwrap();
+        conversation
+            .add_typed_entry(String::new(), 0, leviath_core::EntryKind::UserMessage)
+            .unwrap();
+        conversation
+            .add_typed_entry(
+                "   \n  ".to_string(),
+                0,
+                leviath_core::EntryKind::UserMessage,
+            )
+            .unwrap();
+        window.add_region(conversation);
+
+        let assembled = window.assemble();
+
+        let texts: Vec<String> = assembled
+            .messages
+            .iter()
+            .map(|m| m.content.as_text())
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["find the conflicts".to_string()],
+            "the real turn survives and no empty one is sent"
+        );
+    }
+
+    /// Dropping the blanks must not strand the conversation without a user
+    /// turn - the fallback that guarantees one runs after the drop.
+    #[test]
+    fn a_conversation_of_nothing_but_blanks_still_gets_a_user_turn() {
+        let mut window = ContextWindow::new(100_000);
+        let mut conversation = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: Default::default(),
+            },
+            50_000,
+        );
+        conversation
+            .add_typed_entry(String::new(), 0, leviath_core::EntryKind::UserMessage)
+            .unwrap();
+        window.add_region(conversation);
+
+        let assembled = window.assemble();
+
+        assert_eq!(assembled.messages.len(), 1);
+        assert_eq!(assembled.messages[0].role, "user");
+        assert_eq!(assembled.messages[0].content.as_text(), "Begin.");
+    }
+
     // ─── the conversation ends the request (issue #486) ──────────────────
 
     /// A custom region is the only kind that can render into the conversation,
