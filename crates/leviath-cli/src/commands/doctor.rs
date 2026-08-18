@@ -33,7 +33,7 @@ use leviath_core::blueprint::ModelConfig;
 use leviath_providers::{InferenceRequest, Message, Provider};
 use leviath_runtime::ProviderRegistry;
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
-use leviath_runtime::pipeline::{providers_tried, resolve_stage_model};
+use leviath_runtime::pipeline::{bare_default_model, providers_tried, resolve_stage_model};
 
 use crate::commands::run::session::build_provider_registry_from_config;
 use crate::config::Config;
@@ -314,8 +314,9 @@ fn resolve_check(
             Check::ok(
                 "resolve",
                 format!(
-                    "{provider_name} / {model}{}",
-                    default_provider_note(config, &provider_name, model_override, registry)
+                    "{provider_name} / {model}{}{}",
+                    default_provider_note(config, &provider_name, model_override, registry),
+                    qualified_default_model_note(config, model_override),
                 ),
             ),
             Some(Resolved {
@@ -373,6 +374,34 @@ fn default_provider_note(
     format!(
         "  (note: default_provider is '{named}' but no default_model is set, \
          so it is never chosen - add `default_model` to config.toml)"
+    )
+}
+
+/// The note appended when `default_model` is written as `provider/model`.
+///
+/// `default_model` is a bare model id that pairs with `default_provider`, but
+/// `--model` and `fallback_order` take the qualified form and an OpenRouter id
+/// already contains a slash, so `default_model = "ollama/qwen3.8:latest"` is
+/// an easy thing to write. The resolver drops the redundant prefix, so the run
+/// works; this says what it was read as, so the config can be tidied and so
+/// the line above is not a mystery. Silent under `--model`, when the default
+/// is not in play at all.
+fn qualified_default_model_note(config: &Config, model_override: Option<&str>) -> String {
+    if model_override.is_some() {
+        return String::new();
+    }
+    let Some(written) = config.default_model.as_deref() else {
+        return String::new();
+    };
+    let bare = bare_default_model(&config.default_provider, written);
+    if bare == written {
+        return String::new();
+    }
+    let provider = &config.default_provider;
+    format!(
+        "  (note: default_model is written as '{written}', but it takes a bare model id \
+         and pairs with default_provider - it is read as '{bare}'; drop the '{provider}/' \
+         in config.toml)"
     )
 }
 

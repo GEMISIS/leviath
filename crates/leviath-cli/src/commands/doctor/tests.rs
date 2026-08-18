@@ -372,6 +372,37 @@ fn resolve_check_is_quiet_when_the_configured_default_does_win() {
 }
 
 #[test]
+fn resolve_check_reads_a_qualified_default_model_bare_and_says_so() {
+    // `default_model = "ollama/qwen3.8:latest"` next to `default_provider =
+    // "ollama"`: the run goes to `qwen3.8:latest`, and the note says how the
+    // setting was read so the config can be tidied.
+    let config = Config {
+        default_provider: "stub".to_string(),
+        default_model: Some("stub/m-1".to_string()),
+        ..Config::default()
+    };
+    let registry = registry_with("stub", StubProvider::replying("hi"));
+    let (check, resolved) = resolve_check(&config, None, &registry);
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(
+        check.detail.starts_with("stub / m-1  (note:"),
+        "{}",
+        check.detail
+    );
+    assert!(check.detail.contains("'stub/m-1'"), "{}", check.detail);
+    assert!(
+        check.detail.contains("drop the 'stub/'"),
+        "{}",
+        check.detail
+    );
+    assert_eq!(resolved.expect("resolves").model, "m-1");
+
+    // `--model` sidelines the default entirely, note included.
+    let (check, _) = resolve_check(&config, Some("stub/m-2"), &registry);
+    assert_eq!(check.detail, "stub / m-2");
+}
+
+#[test]
 fn resolve_check_does_not_second_guess_an_unregistered_default_provider() {
     // Landing somewhere other than a default provider that has no key is not
     // news - the `config` line already lists what is registered, and this

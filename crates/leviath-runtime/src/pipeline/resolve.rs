@@ -114,10 +114,9 @@ pub fn resolve_stage_candidates(
         }
     }
 
-    if let Some((provider, model)) =
-        user_default_model(model_cfg, override_model.as_deref(), defaults, registry)
-    {
-        push(provider, model);
+    let user_default = user_default_model(model_cfg, override_model.as_deref(), defaults, registry);
+    if let Some((provider, model)) = &user_default {
+        push(provider.clone(), model.clone());
     }
 
     // The host-wide chain last: it is the safety net for a blueprint that names
@@ -136,13 +135,20 @@ pub fn resolve_stage_candidates(
     // dispatched every stage at a localhost server that was not running.
     //
     // Registered candidates on the user's default provider therefore move to
-    // the front, keeping their relative order. A blueprint that must pin its
-    // own provider already has the way to say so - `allow_user_default =
-    // false` - and that suppresses this too.
+    // the front, the user's own `default_model` first among them and the rest
+    // in blueprint order. The default model leads because it is the one the
+    // user named: every bundled blueprint lists Ollama as `qwen3.5:9b`, and
+    // someone who set `default_model = "qwen3.8:latest"` was still sent to the
+    // blueprint's model, which they may never have pulled. A blueprint that
+    // must pin its own provider already has the way to say so -
+    // `allow_user_default = false` - and that suppresses this too.
     if model_cfg.allow_user_default && registry.has(&defaults.provider) {
-        let (preferred, rest): (Vec<ModelEntry>, Vec<ModelEntry>) = candidates
+        let (mut preferred, rest): (Vec<ModelEntry>, Vec<ModelEntry>) = candidates
             .into_iter()
             .partition(|c| c.provider == defaults.provider);
+        // Stable, so the blueprint's order survives behind the default.
+        let default_model = user_default.as_ref().map(|(_, m)| m.as_str());
+        preferred.sort_by_key(|c| Some(c.model.as_str()) != default_model);
         candidates = preferred.into_iter().chain(rest).collect();
     }
 
@@ -189,9 +195,43 @@ fn user_default_model(
     if let Some(default_model) = &defaults.model
         && registry.has(&defaults.provider)
     {
-        return Some((defaults.provider.clone(), default_model.clone()));
+        let model = bare_default_model(&defaults.provider, default_model);
+        return Some((defaults.provider.clone(), model.to_string()));
     }
     None
+}
+
+/// The model id a `default_model` setting actually names, with a leading
+/// `<default_provider>/` taken off.
+///
+/// `default_model` is a bare model id that pairs with `default_provider`, but
+/// it is easy to write qualified: `--model` and `[providers] fallback_order`
+/// both take `provider/model`, an OpenRouter id such as
+/// `deepseek/deepseek-v4-flash` already looks qualified, and a console that
+/// lists models as `provider/id` hands the pair back in one string. Sent
+/// verbatim, `default_provider = "ollama"` with `default_model =
+/// "ollama/qwen3.8:latest"` reached Ollama as a request for a model called
+/// `ollama/qwen3.8:latest`, which it does not have. The prefix names the
+/// provider the setting already names, so dropping it loses nothing.
+///
+/// The one catalog that can legitimately start an id with its own name is
+/// OpenRouter's (`openrouter/auto` is its router). Those ids have no further
+/// `/`, while a mistakenly qualified OpenRouter model always does
+/// (`openrouter/deepseek/deepseek-v4-flash`), which is how the two are told
+/// apart. Anything that does not begin with the provider's name is returned as
+/// written.
+pub fn bare_default_model<'a>(provider: &str, model: &'a str) -> &'a str {
+    let Some(rest) = model
+        .strip_prefix(provider)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .filter(|rest| !rest.is_empty())
+    else {
+        return model;
+    };
+    if provider == "openrouter" && !rest.contains('/') {
+        return model;
+    }
+    rest
 }
 
 /// Which MCP server advertises each tool: advertised name -> server name.
@@ -642,6 +682,69 @@ mod tests {
         assert_eq!((p.as_str(), m.as_str()), ("anthropic", "claude-default"));
     }
 
+    /// The case that reached Ollama as a request for `ollama/qwen3.8:latest`: a
+    /// `default_model` written as `provider/model` next to the provider it
+    /// names. The prefix is dropped on the way to the resolver.
+    #[test]
+    fn a_default_model_qualified_with_its_own_provider_is_sent_bare() {
+        let defaults = ModelDefaults {
+            provider: "ollama".to_string(),
+            model: Some("ollama/qwen3.8:latest".to_string()),
+            fallback_order: Vec::new(),
+        };
+        let (p, m) = resolve_stage_model(
+            &model_cfg(vec![("ghost", "g")]),
+            None,
+            &defaults,
+            &registry_with(&["ollama"]),
+        );
+        assert_eq!((p.as_str(), m.as_str()), ("ollama", "qwen3.8:latest"));
+    }
+
+    #[test]
+    fn bare_default_model_strips_only_the_named_providers_prefix() {
+        // The provider's own name, and nothing else, comes off.
+        assert_eq!(
+            bare_default_model("ollama", "ollama/qwen3.8:latest"),
+            "qwen3.8:latest"
+        );
+        assert_eq!(
+            bare_default_model("anthropic", "anthropic/claude-sonnet-5"),
+            "claude-sonnet-5"
+        );
+        // Another provider's name is part of the model id, as far as this
+        // provider is concerned.
+        assert_eq!(bare_default_model("ollama", "openai/gpt-5"), "openai/gpt-5");
+        // A bare id is untouched, as is one that merely starts with the same
+        // letters or has nothing after the slash.
+        assert_eq!(
+            bare_default_model("ollama", "qwen3.8:latest"),
+            "qwen3.8:latest"
+        );
+        assert_eq!(bare_default_model("ollama", "ollamafoo/x"), "ollamafoo/x");
+        assert_eq!(bare_default_model("ollama", "ollama/"), "ollama/");
+        assert_eq!(bare_default_model("ollama", "ollama"), "ollama");
+    }
+
+    #[test]
+    fn bare_default_model_keeps_openrouters_own_catalog_ids() {
+        // `openrouter/auto` is a real OpenRouter model, not a qualified one.
+        assert_eq!(
+            bare_default_model("openrouter", "openrouter/auto"),
+            "openrouter/auto"
+        );
+        // A qualified OpenRouter model still carries the vendor segment, so
+        // there is a second slash and the prefix comes off.
+        assert_eq!(
+            bare_default_model("openrouter", "openrouter/deepseek/deepseek-v4-flash"),
+            "deepseek/deepseek-v4-flash"
+        );
+        assert_eq!(
+            bare_default_model("openrouter", "deepseek/deepseek-v4-flash"),
+            "deepseek/deepseek-v4-flash"
+        );
+    }
+
     #[test]
     fn resolve_user_default_with_model_override() {
         let defaults = ModelDefaults {
@@ -959,6 +1062,54 @@ mod tests {
                 ("openrouter", "deepseek"),
                 ("openai", "gpt"),
             ]
+        );
+    }
+
+    /// Every bundled blueprint lists Ollama as `qwen3.5:9b`. A user who set
+    /// `default_model = "qwen3.8:latest"` next to `default_provider = "ollama"`
+    /// was still sent to the blueprint's model, because the preference only
+    /// moved the *provider* forward and left the blueprint's entry ahead of
+    /// the user's. The named default leads; the blueprint's entry stays behind
+    /// it as the fallback.
+    #[test]
+    fn the_users_default_model_leads_the_blueprints_entry_on_the_same_provider() {
+        let cfg = model_cfg(vec![
+            ("anthropic", "claude-sonnet-5"),
+            ("ollama", "qwen3.5:9b"),
+            ("ollama", "qwen3.6:27b"),
+        ]);
+        let defaults = ModelDefaults {
+            provider: "ollama".to_string(),
+            model: Some("qwen3.8:latest".to_string()),
+            ..Default::default()
+        };
+        let registry = registry_with(&["anthropic", "ollama"]);
+        let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
+        assert_eq!(
+            pairs(&got),
+            vec![
+                ("ollama", "qwen3.8:latest"),
+                ("ollama", "qwen3.5:9b"),
+                ("ollama", "qwen3.6:27b"),
+                ("anthropic", "claude-sonnet-5"),
+            ],
+        );
+
+        // A default that repeats the blueprint's own entry changes nothing but
+        // the head, and is listed once.
+        let repeated = ModelDefaults {
+            provider: "ollama".to_string(),
+            model: Some("qwen3.6:27b".to_string()),
+            ..Default::default()
+        };
+        let got = resolve_stage_candidates(&cfg, None, &repeated, &registry);
+        assert_eq!(
+            pairs(&got),
+            vec![
+                ("ollama", "qwen3.6:27b"),
+                ("ollama", "qwen3.5:9b"),
+                ("anthropic", "claude-sonnet-5"),
+            ],
         );
     }
 

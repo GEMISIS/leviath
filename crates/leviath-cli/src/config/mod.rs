@@ -470,6 +470,36 @@ impl Config {
         }
     }
 
+    /// Say so when `default_model` is written as `provider/model`.
+    ///
+    /// The setting is a bare model id that pairs with `default_provider`, but
+    /// `--model` and `[providers] fallback_order` take the qualified form and an
+    /// OpenRouter id already has a slash in it, so `default_model =
+    /// "ollama/qwen3.8:latest"` gets written. The resolver reads it bare, so
+    /// nothing breaks; this names the reading, at the same place the unread-key
+    /// warning appears, so the file can be tidied.
+    fn warn_qualified_default_model(&self) {
+        if let Some((written, bare)) = self.qualified_default_model() {
+            let provider = &self.default_provider;
+            tracing::warn!(
+                default_model = %written,
+                read_as = %bare,
+                "config.toml default_model is written as provider/model; it takes a \
+                 bare model id and pairs with default_provider, so the '{provider}/' \
+                 prefix is dropped. `lev doctor` reports it too, if this scrolls past."
+            );
+        }
+    }
+
+    /// `default_model` when it is written qualified with the default provider's
+    /// own name: the value as written and the bare id it is read as. `None`
+    /// when unset or already bare.
+    pub fn qualified_default_model(&self) -> Option<(&str, &str)> {
+        let written = self.default_model.as_deref()?;
+        let bare = leviath_runtime::pipeline::bare_default_model(&self.default_provider, written);
+        (bare != written).then_some((written, bare))
+    }
+
     /// Keys in the config file at `path` that nothing reads.
     ///
     /// The same answer the start-up warning gives, available to anyone who
@@ -554,6 +584,7 @@ impl Config {
                 .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
 
             Self::warn_unknown_config_keys(&content);
+            c.warn_qualified_default_model();
 
             // Catch a malformed MCP server entry here, at load, rather than at
             // the first tool call: a typo that drops a server's tools should
@@ -1874,6 +1905,39 @@ some_custom_thing = \"forwarded to the script\"
         std::fs::write(&path, toml::to_string_pretty(&original).unwrap()).unwrap();
         let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
         assert_eq!(config.default_provider, "openai");
+    }
+
+    /// `default_model = "ollama/qwen3.8:latest"` next to `default_provider =
+    /// "ollama"` is read as `qwen3.8:latest`; the load names the reading, and
+    /// the value in the struct stays as written so `save` does not rewrite a
+    /// file behind the user's back.
+    #[test]
+    fn load_from_path_names_a_default_model_qualified_with_its_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "default_provider = \"ollama\"\ndefault_model = \"ollama/qwen3.8:latest\"\n",
+        )
+        .unwrap();
+        let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
+        assert_eq!(
+            config.default_model.as_deref(),
+            Some("ollama/qwen3.8:latest")
+        );
+        assert_eq!(
+            config.qualified_default_model(),
+            Some(("ollama/qwen3.8:latest", "qwen3.8:latest"))
+        );
+
+        // A bare id, or no default at all, has nothing to say.
+        let bare = Config {
+            default_provider: "ollama".to_string(),
+            default_model: Some("qwen3.8:latest".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(bare.qualified_default_model(), None);
+        assert_eq!(Config::default().qualified_default_model(), None);
     }
 
     #[test]

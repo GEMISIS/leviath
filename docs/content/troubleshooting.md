@@ -166,6 +166,13 @@ Model strings are passed to the provider exactly as written and are never checke
 typo, a missing OpenRouter `vendor/` prefix, or an identifier the provider has retired all show up
 the same way: an API error on the first call, not a `lev validate` failure.
 
+If the name in the error carries a provider prefix, as in Ollama's
+`model 'ollama/qwen3.8:latest' not found`, the model was written as `provider/model` where a bare
+id was expected. `default_model` in `config.toml` and a `model` in a blueprint's `models` list
+pair with a provider that is named separately, so they take `qwen3.8:latest`; only `--model` and
+`[providers] fallback_order` take `ollama/qwen3.8:latest`. A `default_model` prefixed with its own
+`default_provider` is read bare and `lev doctor` says so; a blueprint entry is sent as written.
+
 Check the spelling against `lev models list --provider <name> --remote`, which asks the provider
 rather than Leviath's built-in table. Note that a valid dated identifier such as
 `deepseek/deepseek-v4-flash-0731` may be absent from the offline table while still working, so
