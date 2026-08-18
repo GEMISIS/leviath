@@ -107,7 +107,7 @@ impl Dashboard {
                     if graph.stage_count() == 1 { "" } else { "s" },
                     graph.entry
                 );
-                let canvas = view.render(frame, area, Some(preview_block(title)));
+                let canvas = view.render(frame, area, preview_block(title));
                 self.pane_rects.push((PaneId::NewRunPreview, canvas));
             }
             Err(why) => {

@@ -155,7 +155,7 @@ impl Dashboard {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(C_BORDER_FOCUS))
             .title(Span::styled(title, Style::default().fg(C_ACCENT)));
-        let canvas = explorer.view.render(frame, rows[0], Some(block));
+        let canvas = explorer.view.render(frame, rows[0], block);
         self.pane_rects.push((PaneId::ExplorerGraph, canvas));
 
         let line = match explorer.view.selection() {
