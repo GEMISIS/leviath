@@ -587,8 +587,12 @@ condition = "llm_choice"
                 ("implement", 40),
             ],
         );
+        // An older ledger without the `entered` flag still reads a
+        // completed stage as entered.
+        let mut legacy = record("plan", StageRunStatus::Complete);
+        legacy.entered = false;
         dash.agents[0].stages = vec![
-            record("plan", StageRunStatus::Complete),
+            legacy,
             record("implement", StageRunStatus::Active),
             record("review", StageRunStatus::Error),
             record("done", StageRunStatus::Skipped),
@@ -639,6 +643,7 @@ condition = "llm_choice"
             !stage("done").entered && stage("done").last_seen.is_none(),
             "a skipped stage was never entered"
         );
+        assert!(stage("plan").entered, "status stands in for a missing flag");
         // External nodes are in the overlay too, untouched.
         assert!(!stage("ext:researcher").entered);
 
