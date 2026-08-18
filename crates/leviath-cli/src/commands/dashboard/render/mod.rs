@@ -156,10 +156,9 @@ impl Dashboard {
 
         let header_h: u16 = 1; // compact breadcrumb line
         let info_h: u16 = 4; // task + workdir/stats strip (2 content + 2 border lines)
-        // Graph agents get the same 3-row tab strip as linear ones; the real
-        // graph lives in the full-screen explorer (`g`), which no longer
-        // costs every other pane four rows.
-        let tabs_h: u16 = 3;
+        // The stage row: the graph band on a tall terminal, the three-row
+        // strip otherwise (the band would cost every other pane its rows).
+        let tabs_h: u16 = Self::stage_row_height(area.height, &agent);
         let context_h: u16 = if agent.context_snapshot.is_some() || !agent.stages.is_empty() {
             5
         } else {

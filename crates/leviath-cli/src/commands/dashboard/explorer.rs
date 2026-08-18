@@ -45,6 +45,9 @@ impl Dashboard {
         if let Some(explorer) = self.stage_explorer.as_mut() {
             explorer.view.tick(elapsed);
         }
+        if let Some(band) = self.detail_band.as_mut() {
+            band.view.tick(elapsed);
+        }
     }
 
     /// Keys while the full-screen stage explorer is open. The explorer owns
@@ -258,6 +261,7 @@ impl Dashboard {
                 .as_mut()
                 .filter(|e| e.tab == ExplorerTab::Graph)
                 .map(|e| &mut e.view),
+            PaneId::DetailBand => self.detail_band.as_mut().map(|b| &mut b.view),
             PaneId::RunTable | PaneId::LogPanel => None,
         }
     }

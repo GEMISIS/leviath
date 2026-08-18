@@ -155,9 +155,11 @@ impl FlowView {
             .unwrap_or(0);
         let node_w = style.width(longest);
         let node_h = style.height();
-        let (gap_x, gap_y) = match style {
-            NodeStyle::Full => (8.0, 1.0),
-            NodeStyle::Compact => (6.0, 1.0),
+        // A one-row box has no room to shrink: below zoom 1 it is zero rows
+        // tall and gone. Compact canvases stay at 1.0 and pan instead.
+        let (gap_x, gap_y, min_zoom) = match style {
+            NodeStyle::Full => (8.0, 1.0, 0.4),
+            NodeStyle::Compact => (6.0, 1.0, 1.0),
         };
 
         let nodes: Vec<Node<StageNodeContent>> = graph
@@ -228,7 +230,7 @@ impl FlowView {
         let mut flow = Flow::with_graph(nodes, edges)
             .expect("a StageGraph has unique ids, no self-loops and no dangling edges")
             .with_theme(Theme::Custom(palette()))
-            .with_min_zoom(0.4)
+            .with_min_zoom(min_zoom)
             .with_max_zoom(1.0)
             // A press on empty canvas is how a pan starts; it must not throw
             // the selection away, or Enter after a pan opens nothing.
@@ -337,9 +339,8 @@ impl FlowView {
         Selection::Nothing
     }
 
-    /// Select a stage by name (the detail band will follow the stage tabs
-    /// this way; the tests use it to pick a node without a mouse).
-    #[cfg(test)]
+    /// Select a stage by name: the detail band follows the stage tabs this
+    /// way, and it works on a locked canvas.
     pub(crate) fn select_stage(&mut self, id: &str) {
         self.flow.select_node(id);
     }
@@ -910,13 +911,21 @@ merge_stage = "merge"
                 Selection::Node("plan".into()),
                 "a pan keeps the selection (locked={locked})"
             );
-            let zoom = v.zoom();
+            // A compact canvas cannot zoom out: its boxes are one row tall.
             v.handle_mouse(mouse(MouseEventKind::ScrollDown, x, y));
-            assert!(v.zoom() < zoom, "locked={locked}");
-            v.handle_mouse(mouse(MouseEventKind::ScrollUp, x, y));
-            assert!(v.zoom() > zoom * 0.9, "locked={locked}");
+            assert_eq!(v.zoom(), 1.0, "locked={locked}");
             v.tick(Duration::from_millis(100));
         }
+        // A full canvas zooms at the wheel.
+        let mut v = view();
+        draw(&mut v, 220, 50);
+        let c = v.canvas();
+        let (x, y) = (c.x + c.width - 2, c.y + c.height - 2);
+        let zoom = v.zoom();
+        v.handle_mouse(mouse(MouseEventKind::ScrollDown, x, y));
+        assert!(v.zoom() < zoom);
+        v.handle_mouse(mouse(MouseEventKind::ScrollUp, x, y));
+        assert!(v.zoom() > zoom * 0.9);
     }
 
     #[test]
