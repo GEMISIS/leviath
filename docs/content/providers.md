@@ -156,7 +156,10 @@ In order:
 1. `lev run --model <provider>/<model>`, which overrides everything and skips the check entirely. A
    bare `--model <model>` replaces only the model name and keeps the provider resolved below.
 2. Your `default_provider` / `default_model` from `config.toml`, when `default_model` is set, the
-   provider is configured, and the stage did not set `allow_user_default = false`.
+   provider is configured, and the stage did not set `allow_user_default = false`. It leads even
+   when the blueprint lists that same provider with a different model: `default_provider = "ollama"`
+   with `default_model = "qwen3.8:latest"` runs on `qwen3.8:latest`, and the blueprint's own
+   `qwen3.5:9b` becomes the failover.
 3. The first entry in `models` whose provider is configured.
 4. The host-wide `fallback_order`, for the stages that got past everything above with nothing left.
 5. The first entry in the list, whether or not its provider exists. If it does not, the run fails at
@@ -169,6 +172,13 @@ your default still has the blueprint's own entries to fall back to.
 > `default_provider` on its own buys nothing. The resolver needs a model to send and has none, so it
 > falls through to whatever the blueprint listed. Set `default_model` alongside it. `lev doctor`
 > says so when you have not.
+
+`default_model` is a bare model id: `qwen3.8:latest`, not `ollama/qwen3.8:latest`. The provider is
+`default_provider`. That differs from `--model` and `[providers] fallback_order`, which take
+`provider/model` in one string, so a leading `<default_provider>/` is dropped rather than sent
+(`lev doctor` names the reading when it happens). The slash in an OpenRouter id such as
+`deepseek/deepseek-v4-flash` is part of the model id itself, and OpenRouter's own
+`openrouter/auto`-style ids are left as written.
 
 ### Running the bundled agents on your provider
 

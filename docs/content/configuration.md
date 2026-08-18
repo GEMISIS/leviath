@@ -25,7 +25,7 @@ where you look up the exact name, type, and default. The same contract ships mac
 
 ```toml
 default_provider     = "anthropic"   # provider used when a blueprint names none
-default_model        = "claude-sonnet-4-5"   # optional model override
+default_model        = "claude-sonnet-4-5"   # bare model id on default_provider, no "anthropic/" prefix
 agent_paths          = ["~/projects/my-agents"]   # extra directories scanned for blueprints
 openrouter_api_key   = "sk-or-..."   # env fallback: OPENROUTER_API_KEY
 ollama_base_url      = "http://localhost:11434"   # env fallback: OLLAMA_HOST
@@ -38,7 +38,7 @@ shell_hint           = true          # global master switch, see below
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `default_provider` | string | `"anthropic"` | |
-| `default_model` | string | unset | |
+| `default_model` | string | unset | A bare model id on `default_provider`, not `provider/model`. A leading `<default_provider>/` is dropped and named at load, so `"ollama/qwen3.8:latest"` under `default_provider = "ollama"` still works. See [which entry a stage starts on](/docs/providers#which-entry-a-stage-starts-on) |
 | `agent_paths` | array of paths | `[]` | Searched in addition to `~/.leviath/agents` |
 | `openrouter_api_key` | string | unset | Falls back to `OPENROUTER_API_KEY` |
 | `ollama_base_url` | string | unset | Falls back to `OLLAMA_HOST`, then `http://localhost:11434` |

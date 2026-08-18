@@ -58,6 +58,22 @@ same list.
   the way in. The dashboard docs gained the log panel and MCP screen key
   tables and the keys the detail view, new-run screen and response pane
   were missing.
+- Fixed: `default_model` written as `provider/model` next to the provider it
+  names, such as `default_model = "ollama/qwen3.8:latest"` under
+  `default_provider = "ollama"`, was sent to the provider verbatim, and Ollama
+  answered `model 'ollama/qwen3.8:latest' not found`. The setting is a bare
+  model id, but `--model` and `fallback_order` take the qualified form and an
+  OpenRouter id already has a slash in it, so the qualified form kept getting
+  written. The resolver now drops a leading `<default_provider>/`, config load
+  and `lev doctor` say what the setting was read as, and the docs say which
+  form each setting takes. OpenRouter's own `openrouter/auto`-style ids are
+  left alone.
+- Fixed: `default_model` lost to the blueprint's own entry on the same
+  provider. Every bundled agent lists Ollama as `qwen3.5:9b`, so
+  `default_provider = "ollama"` with `default_model = "qwen3.8:latest"` still
+  ran on `qwen3.5:9b`, a model the user may never have pulled. The user's
+  default now leads on its provider, with the blueprint's entries behind it as
+  the failover, which is the order the docs already described.
 
 ## 0.4.0 - 2026-08-18
 
