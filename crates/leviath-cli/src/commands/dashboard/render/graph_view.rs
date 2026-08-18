@@ -379,7 +379,10 @@ mode = "output"
     }
 
     fn explorer() -> ExplorerState {
-        ExplorerState::new(FlowView::new(stage_graph(), NodeStyle::Full, false))
+        ExplorerState::new(
+            "run-1".to_string(),
+            FlowView::new(stage_graph(), NodeStyle::Full, false),
+        )
     }
 
     fn seed(dash: &mut crate::commands::dashboard::state::Dashboard, stages: &[(&str, i64)]) {

@@ -1195,11 +1195,14 @@ merge_stage = "merge"
         // A minimap appears when the graph is bigger than the canvas.
         let mut v = FlowView::new(graph(), NodeStyle::Full, false);
         let (_, text) = draw(&mut v, 90, 24);
-        assert!(text.contains('▄') || text.contains('▀'), "{text}");
+        assert!(text.contains('▄'), "{text}");
         // And not when everything is on screen already.
         let mut v = FlowView::new(graph(), NodeStyle::Full, false);
         let (_, text) = draw(&mut v, 220, 50);
-        assert!(!text.contains('▄') && !text.contains('▀'), "{text}");
+        assert!(!text.contains('▄'), "{text}");
+        // Turning a canvas with nothing selected selects nothing after.
+        v.rotate();
+        assert_eq!(v.selection(), Selection::Nothing);
     }
 
     #[test]

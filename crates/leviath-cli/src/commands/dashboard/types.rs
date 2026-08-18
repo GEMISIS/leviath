@@ -102,17 +102,21 @@ pub(super) enum ExplorerTab {
 /// timeline.
 #[derive(Debug)]
 pub(super) struct ExplorerState {
+    /// The run the canvas was built for; the canvas is kept for it after
+    /// the explorer closes.
+    pub(super) run_id: String,
     pub(super) tab: ExplorerTab,
     /// Selected row on the timeline tab.
     pub(super) timeline_selected: usize,
     /// The graph canvas. Owns the toggles (`u` unvisited, `e` escape edges),
-    /// the selection and the viewport.
+    /// the selection, the direction and the viewport.
     pub(super) view: FlowView,
 }
 
 impl ExplorerState {
-    pub(super) fn new(view: FlowView) -> Self {
+    pub(super) fn new(run_id: String, view: FlowView) -> Self {
         Self {
+            run_id,
             tab: ExplorerTab::Graph,
             timeline_selected: 0,
             view,
