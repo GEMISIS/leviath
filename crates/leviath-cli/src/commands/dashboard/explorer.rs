@@ -48,9 +48,13 @@ impl Dashboard {
     /// Close the explorer, keeping its canvas for the next `g` on the same
     /// run.
     pub(super) fn close_stage_explorer(&mut self) {
-        if let Some(explorer) = self.stage_explorer.take() {
-            self.explorer_cache = Some((explorer.run_id, explorer.view));
-        }
+        // Nothing open (never the case for the callers here) keeps whatever
+        // was cached.
+        self.explorer_cache = self
+            .stage_explorer
+            .take()
+            .map(|explorer| (explorer.run_id, explorer.view))
+            .or(self.explorer_cache.take());
     }
 
     /// Advance the edge animation on every open canvas, once per tick.
