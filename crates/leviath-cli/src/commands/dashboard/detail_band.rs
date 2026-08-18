@@ -209,13 +209,9 @@ condition = "llm_choice"
             assert!(text.contains(&format!(" {stage} ")), "{stage}: {text}");
         }
         // The stage the run is in is drawn in the active colour; the selected
-        // tab is the reversed one; a pending stage is dim.
+        // tab has the bright brackets; a pending stage is dim.
         assert_eq!(style_at_text(&terminal, "implement").fg, Some(C_ACTIVE));
-        assert!(
-            style_at_text(&terminal, "plan")
-                .add_modifier
-                .contains(ratatui::style::Modifier::REVERSED)
-        );
+        assert_eq!(style_at_text(&terminal, "[ ▶").fg, Some(C_BORDER_FOCUS));
         assert_eq!(style_at_text(&terminal, "done").fg, Some(C_DIM));
         assert!(
             dash.pane_rects
@@ -297,11 +293,15 @@ condition = "llm_choice"
         draw(&mut dash, 160, 40);
         // A second draw of the same run keeps the canvas it built.
         let terminal = draw(&mut dash, 160, 40);
-        assert!(
-            style_at_text(&terminal, "implement")
-                .add_modifier
-                .contains(ratatui::style::Modifier::REVERSED),
-            "the ledger's second stage is the selected one"
+        assert_eq!(
+            style_at_text(&terminal, "[ ▶").fg,
+            Some(C_DIM),
+            "plan is pending, not selected"
+        );
+        assert_eq!(
+            style_at_text(&terminal, "implement ]").fg,
+            Some(C_ACTIVE),
+            "the ledger's second stage is the selected one and the current one"
         );
         let canvas = dash
             .pane_rects

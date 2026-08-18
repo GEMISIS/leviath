@@ -51,6 +51,9 @@ pub(crate) struct Dashboard {
     /// The detail view's graph band, kept between frames; rebuilt when the
     /// selected run changes.
     pub(super) detail_band: Option<super::detail_band::DetailBand>,
+    /// The explorer's canvas from its last visit to a run, so reopening
+    /// finds the boxes where they were dragged and the view where it was.
+    pub(super) explorer_cache: Option<(String, crate::tui::flowgraph::FlowView)>,
     /// The new-run screen's blueprint preview, for the selected catalog row.
     pub(super) new_run_preview: Option<super::new_run_preview::BlueprintPreview>,
     /// The log panel's viewport height as of the last draw, so key scrolling

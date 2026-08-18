@@ -185,27 +185,33 @@ impl StageNodeContent {
         self.workers = None;
     }
 
-    fn title(&self, selected: bool) -> Line<'static> {
+    /// The title: entry marker, status glyph, name, visit count. `budget` is
+    /// how many cells it may take (padding included); the name gives way
+    /// first, with an ellipsis, so the count and the closing bracket or
+    /// border stay in view.
+    fn title(&self, selected: bool, budget: usize) -> Line<'static> {
         let (glyph, colour) = self.status.look(self.tick);
         let mut style = Style::default().fg(colour);
-        if matches!(self.status, NodeStatus::Current { .. }) {
+        if selected || matches!(self.status, NodeStatus::Current { .. }) {
             style = style.add_modifier(Modifier::BOLD);
         }
-        if selected {
-            style = style.add_modifier(Modifier::REVERSED);
-        }
-        let mut text = String::new();
+        let mut prefix = String::new();
         if self.is_entry {
-            text.push_str("▶ ");
+            prefix.push_str("▶ ");
         }
-        text.push_str(glyph);
-        text.push(' ');
-        text.push_str(&self.name);
+        prefix.push_str(glyph);
+        prefix.push(' ');
         let times = self.status.times();
-        if times > 1 {
-            text.push_str(&format!(" ×{times}"));
-        }
-        Line::from(Span::styled(format!(" {text} "), style))
+        let suffix = if times > 1 {
+            format!(" ×{times}")
+        } else {
+            String::new()
+        };
+        // Two cells of padding around the text.
+        let fixed = 2 + prefix.chars().count() + suffix.chars().count();
+        let room = budget.saturating_sub(fixed);
+        let name = fit(&self.name, room);
+        Line::from(Span::styled(format!(" {prefix}{name}{suffix} "), style))
     }
 
     /// The first detail row: what the stage is, and how far the current
@@ -244,33 +250,52 @@ impl StageNodeContent {
     }
 }
 
+/// `text`, cut to `room` cells with an ellipsis when it does not fit.
+fn fit(text: &str, room: usize) -> String {
+    if text.chars().count() <= room {
+        return text.to_string();
+    }
+    let keep = room.saturating_sub(1);
+    let mut cut: String = text.chars().take(keep).collect();
+    if room > 0 {
+        cut.push('…');
+    }
+    cut
+}
+
 impl NodeContent for StageNodeContent {
     fn render(&self, ctx: &NodeRenderContext, buf: &mut Buffer) {
         let area = ctx.area;
         let (_, colour) = self.status.look(self.tick);
-        let border_colour = if ctx.selected { C_BORDER_FOCUS } else { colour };
-        // Zoomed out, or compact: the box would swallow the label, so draw
-        // just the title.
-        if self.style == NodeStyle::Compact || area.height < 3 || area.width < 6 {
-            let mut line = self.title(ctx.selected);
-            if area.width >= 6 {
-                line.spans
-                    .insert(0, Span::styled("[", Style::default().fg(border_colour)));
-                line.spans
-                    .push(Span::styled("]", Style::default().fg(border_colour)));
-            }
+        // Selection is the border's job: a thick focus-coloured frame (or
+        // bright brackets), so the title itself keeps its status colour and
+        // nothing on it flips to reversed video.
+        let border_style = if ctx.selected {
+            Style::default()
+                .fg(C_BORDER_FOCUS)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(colour)
+        };
+        let width = area.width as usize;
+        // Compact, or a box zoomed down to a row: brackets are the bounds.
+        if self.style == NodeStyle::Compact || area.height < 2 {
+            let mut line = self.title(ctx.selected, width.saturating_sub(2));
+            line.spans.insert(0, Span::styled("[", border_style));
+            line.spans.push(Span::styled("]", border_style));
             Paragraph::new(line).render(area, buf);
             return;
         }
+        let border_type = match (ctx.selected, self.is_external) {
+            (true, _) => BorderType::Thick,
+            (false, true) => BorderType::Double,
+            (false, false) => BorderType::Rounded,
+        };
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_type(if self.is_external {
-                BorderType::Double
-            } else {
-                BorderType::Rounded
-            })
-            .border_style(Style::default().fg(border_colour))
-            .title(self.title(ctx.selected));
+            .border_type(border_type)
+            .border_style(border_style)
+            .title(self.title(ctx.selected, width.saturating_sub(2)));
         let inner = block.inner(area);
         block.render(area, buf);
         let rows = [
@@ -494,18 +519,44 @@ mod tests {
     }
 
     #[test]
-    fn a_tiny_area_degrades_to_the_bare_label_and_compact_is_one_row() {
+    fn a_short_area_keeps_its_bounds_and_the_name_gives_way_first() {
         let c = content(NodeStyle::Full);
+        // One row: brackets, always closed.
         let (_, text) = draw(&c, Rect::new(0, 0, 12, 1), false);
         assert!(
             text.contains(&format!("[ {GLYPH_PENDING} plan ]")),
             "{text}"
         );
         assert!(!text.contains('╭'), "{text}");
-        // Narrower than the brackets: just the words.
-        let (_, text) = draw(&c, Rect::new(0, 0, 5, 1), false);
-        assert!(text.starts_with(&format!(" {GLYPH_PENDING} pl")), "{text}");
-        assert!(!text.contains('['), "{text}");
+        // Too narrow for the name: it is cut with an ellipsis, the closing
+        // bracket stays.
+        let (_, text) = draw(&c, Rect::new(0, 0, 9, 1), false);
+        assert_eq!(
+            text.trim_end(),
+            format!("[ {GLYPH_PENDING} pl… ]"),
+            "{text}"
+        );
+        // Two rows: a box with the title in its top border and no body.
+        let (_, text) = draw(&c, Rect::new(0, 0, 14, 2), false);
+        assert!(text.contains(&format!("╭ {GLYPH_PENDING} plan ")), "{text}");
+        assert!(text.contains("╰"), "{text}");
+        assert!(!text.contains("autonomous"), "{text}");
+        // A visit count survives the cut before the name does.
+        let mut counted = content(NodeStyle::Compact);
+        counted.status = NodeStatus::Visited {
+            times: 12,
+            errored: false,
+        };
+        let (_, text) = draw(&counted, Rect::new(0, 0, 13, 1), false);
+        assert_eq!(
+            text.trim_end(),
+            format!("[ {GLYPH_COMPLETE} pl… ×12 ]"),
+            "{text}"
+        );
+        assert_eq!(fit("plan", 4), "plan");
+        assert_eq!(fit("plan", 3), "pl…");
+        assert_eq!(fit("plan", 1), "…");
+        assert_eq!(fit("plan", 0), "");
 
         let compact = content(NodeStyle::Compact);
         let (buf, text) = draw(&compact, Rect::new(0, 0, 14, 1), true);
@@ -513,15 +564,12 @@ mod tests {
             text.contains(&format!("[ {GLYPH_PENDING} plan ]")),
             "{text}"
         );
-        assert!(
-            style_at(&buf, "[").fg == Some(C_BORDER_FOCUS),
-            "selected brackets"
-        );
-        assert!(
-            style_at(&buf, "plan")
-                .add_modifier
-                .contains(Modifier::REVERSED)
-        );
+        let bracket = style_at(&buf, "[");
+        assert_eq!(bracket.fg, Some(C_BORDER_FOCUS), "selected brackets");
+        assert!(bracket.add_modifier.contains(Modifier::BOLD));
+        let title = style_at(&buf, "plan");
+        assert!(title.add_modifier.contains(Modifier::BOLD));
+        assert!(!title.add_modifier.contains(Modifier::REVERSED));
         assert_eq!(NodeStyle::Compact.height(), 1.0);
         assert_eq!(NodeStyle::Full.height(), 4.0);
         assert_eq!(NodeStyle::Compact.width(3), 14.0);
@@ -531,20 +579,25 @@ mod tests {
     }
 
     #[test]
-    fn a_selected_full_node_gets_the_focus_border_and_reversed_title() {
+    fn a_selected_full_node_gets_a_thick_focus_border_and_a_plain_bold_title() {
         let mut c = content(NodeStyle::Full);
         c.status = NodeStatus::Current {
             run: RunPhase::Active,
             times: 1,
         };
-        let (buf, _) = draw(&c, Rect::new(0, 0, 24, 4), true);
-        assert_eq!(style_at(&buf, "╭").fg, Some(C_BORDER_FOCUS));
-        assert!(
-            style_at(&buf, "plan")
-                .add_modifier
-                .contains(Modifier::REVERSED)
+        let (buf, text) = draw(&c, Rect::new(0, 0, 24, 4), true);
+        assert!(text.contains('┏'), "thick frame when selected: {text}");
+        assert_eq!(style_at(&buf, "┏").fg, Some(C_BORDER_FOCUS));
+        let title = style_at(&buf, "plan");
+        assert!(title.add_modifier.contains(Modifier::BOLD));
+        assert!(!title.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(
+            title.fg,
+            Some(C_ACTIVE),
+            "the title keeps its status colour"
         );
-        let (buf, _) = draw(&c, Rect::new(0, 0, 24, 4), false);
+        let (buf, text) = draw(&c, Rect::new(0, 0, 24, 4), false);
+        assert!(text.contains('╭'), "rounded when not: {text}");
         assert_eq!(style_at(&buf, "╭").fg, Some(C_ACTIVE));
         // A 3-row box has room for one detail row and clips the second.
         let (_, text) = draw(&c, Rect::new(0, 0, 24, 3), false);

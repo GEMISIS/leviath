@@ -62,30 +62,72 @@ impl GraphLayout {
         nodes
     }
 
-    /// Canvas positions: layers advance along x by `node_w + gap_x`, slots
-    /// along y by `node_h + gap_y`. Layers with fewer nodes are centred on the
-    /// tallest one so a diamond reads as a diamond.
+    /// Canvas positions. Layers advance along the flow axis (x when the graph
+    /// runs left to right, y when it runs top to bottom), slots along the
+    /// other one, each by the box size plus its gap. Layers with fewer nodes
+    /// are centred on the widest one so a diamond reads as a diamond.
     pub(crate) fn positions(
         &self,
+        direction: Direction,
         node_w: f64,
         node_h: f64,
         gap_x: f64,
         gap_y: f64,
     ) -> Vec<(String, (f64, f64))> {
-        let tallest = (0..=self.max_layer)
+        let widest = (0..=self.max_layer)
             .map(|l| self.layer_nodes(l).len())
             .fold(0, usize::max);
         let mut out = Vec::with_capacity(self.nodes.len());
         for l in 0..=self.max_layer {
             let column = self.layer_nodes(l);
-            let offset = (tallest.saturating_sub(column.len())) as f64 / 2.0;
+            let offset = (widest.saturating_sub(column.len())) as f64 / 2.0;
             for node in column {
-                let x = l as f64 * (node_w + gap_x);
-                let y = (node.slot as f64 + offset) * (node_h + gap_y);
+                let along = l as f64;
+                let across = node.slot as f64 + offset;
+                let (x, y) = match direction {
+                    Direction::LeftToRight => (along * (node_w + gap_x), across * (node_h + gap_y)),
+                    Direction::TopToBottom => (across * (node_w + gap_x), along * (node_h + gap_y)),
+                };
                 out.push((node.name.clone(), (x, y)));
             }
         }
         out
+    }
+
+    /// The far corner of the laid-out graph in world units.
+    pub(crate) fn extent(
+        &self,
+        direction: Direction,
+        node_w: f64,
+        node_h: f64,
+        gap_x: f64,
+        gap_y: f64,
+    ) -> (f64, f64) {
+        self.positions(direction, node_w, node_h, gap_x, gap_y)
+            .iter()
+            .fold((0.0_f64, 0.0_f64), |(w, h), (_, (x, y))| {
+                (w.max(x + node_w), h.max(y + node_h))
+            })
+    }
+}
+
+/// Which way the layers run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Direction {
+    /// Layers are columns, left to right: the natural fit for a wide
+    /// terminal.
+    LeftToRight,
+    /// Layers are rows, top to bottom: for a tall one, or a long chain.
+    TopToBottom,
+}
+
+impl Direction {
+    /// The other way round.
+    pub(crate) fn rotated(self) -> Self {
+        match self {
+            Direction::LeftToRight => Direction::TopToBottom,
+            Direction::TopToBottom => Direction::LeftToRight,
+        }
     }
 }
 
@@ -376,7 +418,7 @@ mod tests {
             ],
         );
         let l = layout(&g);
-        let pos = l.positions(10.0, 3.0, 4.0, 1.0);
+        let pos = l.positions(Direction::LeftToRight, 10.0, 3.0, 4.0, 1.0);
         assert_eq!(pos.len(), 4);
         let at = |n: &str| pos.iter().find(|(id, _)| id == n).unwrap().1;
         // Layers step along x by node_w + gap_x.
@@ -396,9 +438,26 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), 4, "no two nodes share a cell");
+        assert_eq!(
+            l.extent(Direction::LeftToRight, 10.0, 3.0, 4.0, 1.0),
+            (38.0, 7.0)
+        );
+        // Top to bottom swaps the axes: layers are rows.
+        let pos = l.positions(Direction::TopToBottom, 10.0, 3.0, 4.0, 1.0);
+        let at = |n: &str| pos.iter().find(|(id, _)| id == n).unwrap().1;
+        assert_eq!(at("a"), (7.0, 0.0));
+        assert_eq!(at("b"), (0.0, 4.0));
+        assert_eq!(at("c"), (14.0, 4.0));
+        assert_eq!(at("d"), (7.0, 8.0));
+        assert_eq!(
+            l.extent(Direction::TopToBottom, 10.0, 3.0, 4.0, 1.0),
+            (24.0, 11.0)
+        );
+        assert_eq!(Direction::LeftToRight.rotated(), Direction::TopToBottom);
+        assert_eq!(Direction::TopToBottom.rotated(), Direction::LeftToRight);
         assert!(
             GraphLayout::default()
-                .positions(1.0, 1.0, 1.0, 1.0)
+                .positions(Direction::LeftToRight, 1.0, 1.0, 1.0, 1.0)
                 .is_empty()
         );
     }

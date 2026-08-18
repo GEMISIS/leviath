@@ -18,7 +18,7 @@ use crate::commands::dashboard::history::{StageVisit, clock};
 use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::*;
-use crate::tui::flowgraph::Selection;
+use crate::tui::flowgraph::{Direction as FlowDirection, Selection};
 use crate::tui::widgets::footer::{draw_hint_bar, hint};
 
 fn duration_label(visit: &StageVisit) -> String {
@@ -106,9 +106,10 @@ impl Dashboard {
                 hint("enter", "open its tab"),
                 hint("+ -", "zoom"),
                 hint("f", "fit"),
+                hint("r", "rotate"),
                 hint("e", "escape edges"),
                 hint("u", "unvisited"),
-                hint("drag/wheel", "pan/zoom"),
+                hint("drag", "move a box or pan"),
                 hint("tab", "timeline"),
                 hint("?", "help"),
                 hint("esc/g", "close"),
@@ -137,7 +138,11 @@ impl Dashboard {
             .constraints([Constraint::Min(3), Constraint::Length(1)])
             .split(area);
         let title = format!(
-            " Graph · {} · zoom {:.0}%{} ",
+            " Graph · {} (r) · {} · zoom {:.0}%{} ",
+            match explorer.view.direction() {
+                FlowDirection::LeftToRight => "left to right",
+                FlowDirection::TopToBottom => "top to bottom",
+            },
             if explorer.view.show_escape() {
                 "escape edges shown"
             } else {

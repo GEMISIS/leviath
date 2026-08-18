@@ -30,13 +30,28 @@ impl Dashboard {
         match agent.graph.clone() {
             Some(graph) => {
                 self.ensure_history(&run_id);
-                let view = FlowView::new(graph, NodeStyle::Full, false);
+                // The canvas a previous visit left behind for this run comes
+                // back as it was: viewport, dragged boxes, direction, toggles.
+                let view = match self.explorer_cache.take() {
+                    Some((cached_run, view)) if cached_run == run_id => view,
+                    _ => FlowView::new(graph, NodeStyle::Full, false),
+                };
                 self.stage_explorer = Some(ExplorerState::new(view));
             }
             None => self.toast(
                 "This run's blueprint could not be read, so there is no stage graph to show",
                 ToastLevel::Warning,
             ),
+        }
+    }
+
+    /// Close the explorer, keeping its canvas for the next `g` on the same
+    /// run.
+    pub(super) fn close_stage_explorer(&mut self) {
+        if let Some(explorer) = self.stage_explorer.take()
+            && let Some(run_id) = self.selected_agent().map(|a| a.id.clone())
+        {
+            self.explorer_cache = Some((run_id, explorer.view));
         }
     }
 
@@ -62,7 +77,7 @@ impl Dashboard {
             return;
         };
         match key_code {
-            KeyCode::Esc | KeyCode::Char('g') => self.stage_explorer = None,
+            KeyCode::Esc | KeyCode::Char('g') => self.close_stage_explorer(),
             KeyCode::Tab | KeyCode::BackTab => {
                 explorer.tab = match explorer.tab {
                     ExplorerTab::Graph => ExplorerTab::Timeline,
@@ -97,7 +112,7 @@ impl Dashboard {
                             .and_then(|h| h.visits.get(selected))
                             .map(|v| v.first_point);
                         if let Some(point) = point {
-                            self.stage_explorer = None;
+                            self.close_stage_explorer();
                             self.jump_to_history_point(point);
                         }
                     }
@@ -124,7 +139,7 @@ impl Dashboard {
             self.search_mode = false;
             self.search_query.clear();
             self.search_match_idx = 0;
-            self.stage_explorer = None;
+            self.close_stage_explorer();
         }
     }
 
@@ -508,8 +523,19 @@ condition = "llm_choice"
         assert_eq!(dash.selected_stage, 0);
         assert_eq!(dash.detail_scroll, 0);
 
+        // Reopening the same run brings its canvas back, selection and
+        // toggles included, so Enter opens plan's tab again.
+        dash.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(
+            dash.stage_explorer.as_ref().unwrap().view.selection(),
+            Selection::Node("plan".into())
+        );
+        assert!(!dash.stage_explorer.as_ref().unwrap().view.show_unvisited());
+        dash.handle_key(key(KeyCode::Enter));
+        assert!(dash.stage_explorer.is_none());
         // Enter with nothing selected keeps the explorer open; Enter on an
         // external worker node has no tab to open.
+        dash.explorer_cache = None;
         dash.handle_key(key(KeyCode::Char('g')));
         dash.handle_key(key(KeyCode::Enter));
         assert!(dash.stage_explorer.is_some());

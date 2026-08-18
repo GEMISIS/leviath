@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
 use rataflow::{
-    Edge, FitViewOptions, Flow, FlowAction, Handle, HandlePosition, Node, StepEdge, Theme, Viewport,
+    Background, BackgroundVariant, Edge, FitViewOptions, Flow, FlowAction, Handle, HandlePosition,
+    MiniMap, MiniMapPosition, Node, StepEdge, Theme, Viewport,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -24,7 +25,7 @@ use crate::tui::theme::C_ACCENT;
 use super::content::{
     NodeStatus, NodeStyle, RunPhase, StageNodeContent, WorkerCounts, edge_style, palette,
 };
-use super::layout;
+use super::layout::{self, Direction, GraphLayout};
 use super::model::{EdgeClass, StageEdge, StageGraph};
 
 /// What a run has done to one stage, for the overlay.
@@ -86,21 +87,80 @@ struct EdgeMeta {
 pub(crate) struct FlowView {
     flow: Flow<StageNodeContent, StepEdge>,
     graph: Arc<StageGraph>,
+    layout: GraphLayout,
     edges: Vec<EdgeMeta>,
+    style: NodeStyle,
+    locked: bool,
+    direction: Direction,
+    /// Until the user turns the graph by hand, the first draw picks the
+    /// direction that fits.
+    auto_direction: bool,
     show_escape: bool,
     show_unvisited: bool,
     /// A stage to bring on screen at the next draw.
     reveal: Option<String>,
     last_current: Option<String>,
+    /// The overlay last applied, re-applied after a rebuild.
+    last_live: Option<LiveOverlay>,
     last_area: Rect,
     canvas: Rect,
-    /// The longest lane a visible-by-default edge needs above or below the
-    /// nodes, so fitting the view leaves room for it. Escape lanes are not
-    /// counted: they are hidden until asked for, and a long one would cost
-    /// every fit its width.
+    /// The longest lane a visible-by-default edge needs beside the nodes, so
+    /// fitting the view leaves room for it. Escape lanes are not counted:
+    /// they are hidden until asked for, and a long one would cost every fit
+    /// its width.
     max_stem: f64,
-    /// One-row boxes: the canvas cannot zoom out, so it pans instead.
-    compact: bool,
+}
+
+/// Box size and gaps for a node style: `(node_w, node_h, gap_x, gap_y)`.
+fn metrics(style: NodeStyle, longest_id: usize) -> (f64, f64, f64, f64) {
+    let (gap_x, gap_y) = match style {
+        NodeStyle::Full => (8.0, 1.0),
+        NodeStyle::Compact => (6.0, 1.0),
+    };
+    (style.width(longest_id), style.height(), gap_x, gap_y)
+}
+
+/// Which sides an edge leaves and enters on, and how far it travels before
+/// turning, for a graph flowing in `direction`.
+///
+/// The main flow runs along the layer axis. Edges that go against it (a
+/// loop back to an earlier layer, or out of a stage that only escapes reach)
+/// leave and re-enter on the same side and run along a lane beside the
+/// nodes: below them (right of them, top-to-bottom) for the flow's own
+/// loops, above (left) for the escapes. A lane per layer of distance keeps a
+/// long loop from overwriting a short one's label.
+fn route(
+    direction: Direction,
+    class: EdgeClass,
+    from_layer: usize,
+    to_layer: usize,
+) -> (HandlePosition, HandlePosition, bool, f64) {
+    let loops_back = to_layer <= from_layer;
+    let (forward_out, forward_in, loop_side, escape_side) = match direction {
+        Direction::LeftToRight => (
+            HandlePosition::Right,
+            HandlePosition::Left,
+            HandlePosition::Bottom,
+            HandlePosition::Top,
+        ),
+        Direction::TopToBottom => (
+            HandlePosition::Bottom,
+            HandlePosition::Top,
+            HandlePosition::Right,
+            HandlePosition::Left,
+        ),
+    };
+    let (src, tgt) = match class {
+        EdgeClass::Escape => (escape_side, escape_side),
+        _ if loops_back => (loop_side, loop_side),
+        _ => (forward_out, forward_in),
+    };
+    let stem = if src == tgt {
+        1.0 + from_layer.abs_diff(to_layer) as f64
+    } else {
+        1.0
+    };
+    (src, tgt, loops_back, stem)
 }
 
 impl std::fmt::Debug for FlowView {
@@ -108,6 +168,7 @@ impl std::fmt::Debug for FlowView {
         f.debug_struct("FlowView")
             .field("entry", &self.graph.entry)
             .field("nodes", &self.graph.nodes.len())
+            .field("direction", &self.direction)
             .field("show_escape", &self.show_escape)
             .field("show_unvisited", &self.show_unvisited)
             .finish()
@@ -115,147 +176,207 @@ impl std::fmt::Debug for FlowView {
 }
 
 /// Handles on every side, named by side so an edge can pick where it
-/// attaches. Hidden: the canvas is not an editor, and handle glyphs read as
-/// ports.
-fn handles() -> Vec<Handle> {
+/// attaches. The forward sides (out along the flow, in against it) sit at
+/// the middle of their edge; the lane sides carry the source a little past
+/// the middle and the target a little before it, so a loop leaves and
+/// re-enters at different cells. Hidden: the canvas is not an editor, and
+/// handle glyphs read as ports.
+fn handles(direction: Direction) -> Vec<Handle> {
+    let (out, back, lane_a, lane_b) = match direction {
+        Direction::LeftToRight => (
+            HandlePosition::Right,
+            HandlePosition::Left,
+            HandlePosition::Bottom,
+            HandlePosition::Top,
+        ),
+        Direction::TopToBottom => (
+            HandlePosition::Bottom,
+            HandlePosition::Top,
+            HandlePosition::Right,
+            HandlePosition::Left,
+        ),
+    };
     vec![
-        Handle::source(HandlePosition::Right)
-            .with_id("right")
+        Handle::source(out)
+            .with_id(out.side_name())
             .with_hidden(true),
-        Handle::source(HandlePosition::Bottom)
-            .with_id("bottom")
+        Handle::source(lane_a)
+            .with_id(lane_a.side_name())
             .with_offset(0.7)
             .with_hidden(true),
-        Handle::source(HandlePosition::Top)
-            .with_id("top")
+        Handle::source(lane_b)
+            .with_id(lane_b.side_name())
             .with_offset(0.7)
             .with_hidden(true),
-        Handle::target(HandlePosition::Left)
-            .with_id("left")
+        Handle::target(back)
+            .with_id(back.side_name())
             .with_hidden(true),
-        Handle::target(HandlePosition::Bottom)
-            .with_id("bottom")
+        Handle::target(lane_a)
+            .with_id(lane_a.side_name())
             .with_offset(0.3)
             .with_hidden(true),
-        Handle::target(HandlePosition::Top)
-            .with_id("top")
+        Handle::target(lane_b)
+            .with_id(lane_b.side_name())
             .with_offset(0.3)
             .with_hidden(true),
     ]
 }
 
+/// The canvas for `graph` laid out in `direction`: the nodes, the edges
+/// remembered for live restyling, and the longest lane a visible edge needs.
+fn build(
+    graph: &StageGraph,
+    layout: &GraphLayout,
+    style: NodeStyle,
+    locked: bool,
+    direction: Direction,
+) -> (Flow<StageNodeContent, StepEdge>, Vec<EdgeMeta>, f64) {
+    let longest = graph
+        .nodes
+        .iter()
+        .map(|n| n.id.trim_start_matches("ext:").chars().count())
+        .max()
+        .unwrap_or(0);
+    let (node_w, node_h, gap_x, gap_y) = metrics(style, longest);
+    // A one-row box has no room to shrink: below zoom 1 it is zero rows
+    // tall and gone. Compact canvases stay at 1.0 and pan instead.
+    let min_zoom = match style {
+        NodeStyle::Full => 0.5,
+        NodeStyle::Compact => 1.0,
+    };
+
+    let nodes: Vec<Node<StageNodeContent>> = graph
+        .nodes
+        .iter()
+        .map(|n| {
+            Node::new(
+                n.id.clone(),
+                (0.0, 0.0),
+                (node_w, node_h),
+                StageNodeContent::from_node(n, style),
+            )
+            .with_handles(handles(direction))
+            .with_connectable(false)
+            .with_deletable(false)
+            .with_resizable(false)
+            .with_draggable(!locked)
+        })
+        .collect();
+
+    let mut metas: Vec<EdgeMeta> = Vec::with_capacity(graph.edges.len());
+    let mut max_stem: f64 = 1.0;
+    let edges: Vec<Edge<StepEdge>> = graph
+        .edges
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let from_layer = layout.layer_of(&e.from).unwrap_or(0);
+            let to_layer = layout.layer_of(&e.to).unwrap_or(0);
+            let (src, tgt, loops_back, stem) = route(direction, e.class, from_layer, to_layer);
+            if e.class != EdgeClass::Escape {
+                max_stem = max_stem.max(stem);
+            }
+            let id = format!("e{i}");
+            metas.push(EdgeMeta {
+                id: id.clone(),
+                edge: e.clone(),
+                loops_back,
+                stem,
+            });
+            let mut edge = Edge::new(id, e.from.clone(), e.to.clone())
+                .with_content(styled_edge(e.class, loops_back, false, stem))
+                .with_source_side(src)
+                .with_target_side(tgt)
+                .with_deletable(false)
+                .with_hidden(e.class == EdgeClass::Escape);
+            let label = e.condition_label();
+            if !label.is_empty() {
+                edge = edge.with_label(format!("[{label}]"));
+            }
+            edge
+        })
+        .collect();
+
+    let mut flow = Flow::with_graph(nodes, edges)
+        .expect("a StageGraph has unique ids, no self-loops and no dangling edges")
+        .with_theme(Theme::Custom(palette()))
+        .with_min_zoom(min_zoom)
+        .with_max_zoom(1.0)
+        // Marching ants at a walking pace; the default is a sprint.
+        .with_animation_speed(220)
+        // A press on empty canvas is how a pan starts; it must not throw
+        // the selection away, or Enter after a pan opens nothing.
+        .with_deselect_on_pane_click(false)
+        .with_locked(locked);
+    flow.set_node_positions(layout.positions(direction, node_w, node_h, gap_x, gap_y));
+    // No fit here: the first `render` settles the viewport for the area it
+    // gets. A fit requested now would land after that and undo it.
+    (flow, metas, max_stem)
+}
+
 impl FlowView {
     /// Build the canvas for `graph`. `locked` makes it a viewer: left-drag
-    /// pans and nothing selects, for the band and the preview.
+    /// pans and nothing selects or moves, for the band and the preview; the
+    /// explorer is unlocked, so boxes can be dragged into a better
+    /// arrangement and clicked to select.
     pub(crate) fn new(graph: Arc<StageGraph>, style: NodeStyle, locked: bool) -> Self {
         let layout = layout::layout(&graph);
-        let longest = graph
-            .nodes
-            .iter()
-            .map(|n| n.id.trim_start_matches("ext:").chars().count())
-            .max()
-            .unwrap_or(0);
-        let node_w = style.width(longest);
-        let node_h = style.height();
-        // A one-row box has no room to shrink: below zoom 1 it is zero rows
-        // tall and gone. Compact canvases stay at 1.0 and pan instead.
-        let (gap_x, gap_y, min_zoom) = match style {
-            NodeStyle::Full => (8.0, 1.0, 0.4),
-            NodeStyle::Compact => (6.0, 1.0, 1.0),
-        };
-
-        let nodes: Vec<Node<StageNodeContent>> = graph
-            .nodes
-            .iter()
-            .map(|n| {
-                Node::new(
-                    n.id.clone(),
-                    (0.0, 0.0),
-                    (node_w, node_h),
-                    StageNodeContent::from_node(n, style),
-                )
-                .with_handles(handles())
-                .with_connectable(false)
-                .with_deletable(false)
-                .with_resizable(false)
-                .with_draggable(false)
-            })
-            .collect();
-
-        let mut metas: Vec<EdgeMeta> = Vec::with_capacity(graph.edges.len());
-        let mut max_stem: f64 = 1.0;
-        let edges: Vec<Edge<StepEdge>> = graph
-            .edges
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                let from_layer = layout.layer_of(&e.from).unwrap_or(0);
-                let to_layer = layout.layer_of(&e.to).unwrap_or(0);
-                let loops_back = to_layer <= from_layer;
-                let (src, tgt) = match e.class {
-                    EdgeClass::Escape => (HandlePosition::Top, HandlePosition::Top),
-                    _ if loops_back => (HandlePosition::Bottom, HandlePosition::Bottom),
-                    _ => (HandlePosition::Right, HandlePosition::Left),
-                };
-                // Edges that leave and re-enter on the same side run along a
-                // lane above or below the nodes; a lane per layer of distance
-                // keeps a long loop from overwriting a short one's label.
-                let stem = if src == tgt {
-                    1.0 + from_layer.abs_diff(to_layer) as f64
-                } else {
-                    1.0
-                };
-                if e.class != EdgeClass::Escape {
-                    max_stem = max_stem.max(stem);
-                }
-                let id = format!("e{i}");
-                metas.push(EdgeMeta {
-                    id: id.clone(),
-                    edge: e.clone(),
-                    loops_back,
-                    stem,
-                });
-                let mut edge = Edge::new(id, e.from.clone(), e.to.clone())
-                    .with_content(styled_edge(e.class, loops_back, false, stem))
-                    .with_source_side(src)
-                    .with_target_side(tgt)
-                    .with_deletable(false)
-                    .with_hidden(e.class == EdgeClass::Escape);
-                let label = e.condition_label();
-                if !label.is_empty() {
-                    edge = edge.with_label(format!("[{label}]"));
-                }
-                edge
-            })
-            .collect();
-
-        let mut flow = Flow::with_graph(nodes, edges)
-            .expect("a StageGraph has unique ids, no self-loops and no dangling edges")
-            .with_theme(Theme::Custom(palette()))
-            .with_min_zoom(min_zoom)
-            .with_max_zoom(1.0)
-            // A press on empty canvas is how a pan starts; it must not throw
-            // the selection away, or Enter after a pan opens nothing.
-            .with_deselect_on_pane_click(false)
-            .with_locked(locked);
-        flow.set_node_positions(layout.positions(node_w, node_h, gap_x, gap_y));
-        // No fit here: the first `render` settles the viewport for the area it
-        // gets (a fit, or the top-left corner for a compact canvas that
-        // overflows). A fit requested now would land after that and undo it.
-
+        let (flow, edges, max_stem) = build(&graph, &layout, style, locked, Direction::LeftToRight);
         Self {
             flow,
             graph,
-            edges: metas,
+            layout,
+            edges,
+            style,
+            locked,
+            direction: Direction::LeftToRight,
+            auto_direction: true,
             show_escape: false,
             show_unvisited: true,
             reveal: None,
             last_current: None,
+            last_live: None,
             last_area: Rect::default(),
             canvas: Rect::default(),
             max_stem,
-            compact: style == NodeStyle::Compact,
         }
+    }
+
+    /// Lay the graph out the other way round. Dragged boxes go back to
+    /// their computed places; the selection, the toggles and the run's
+    /// overlay carry over.
+    pub(crate) fn rotate(&mut self) {
+        self.auto_direction = false;
+        self.rebuild(self.direction.rotated());
+    }
+
+    /// Which way the layers run.
+    pub(crate) fn direction(&self) -> Direction {
+        self.direction
+    }
+
+    fn rebuild(&mut self, direction: Direction) {
+        let selected = self.flow.first_selected_node_id();
+        let (flow, edges, max_stem) = build(
+            &self.graph,
+            &self.layout,
+            self.style,
+            self.locked,
+            direction,
+        );
+        self.flow = flow;
+        self.edges = edges;
+        self.max_stem = max_stem;
+        self.direction = direction;
+        if let Some(live) = self.last_live.take() {
+            self.apply_live(&live);
+        }
+        self.sync_visibility();
+        if let Some(id) = selected {
+            self.flow.select_node(&id);
+        }
+        // Settle again for the current area at the next draw.
+        self.last_area = Rect::default();
     }
 
     /// The longest edge lane, in rows above or below the nodes.
@@ -350,23 +471,38 @@ impl FlowView {
         self.flow.select_node(id);
     }
 
-    /// First look at a canvas of this size: fit the graph when it fits, and
-    /// otherwise, on a canvas that cannot zoom out (compact boxes), start at
-    /// the top-left corner so the entry stage is on screen rather than the
-    /// middle of the picture. A full canvas zooms out to fit instead.
+    /// First look at a canvas of this size. Boxes are never shrunk to make
+    /// the graph fit: a box zoomed down is an unreadable one. Instead the
+    /// layers run the way that fits (left to right first, top to bottom when
+    /// that overflows and the other does not); when neither fits the canvas
+    /// starts at its top-left corner, entry stage on screen, and pans.
     fn settle(&mut self, area: Rect) {
-        // Inside the block's border.
-        let (inner_w, inner_h) = (f64::from(area.width) - 2.0, f64::from(area.height) - 2.0);
-        let (world_w, world_h) = self.world_extent();
-        let overflows = world_w + 2.0 > inner_w || world_h + 2.0 > inner_h;
-        if self.compact && overflows {
+        // Inside the block's border, less a cell of margin each side.
+        let (inner_w, inner_h) = (f64::from(area.width) - 4.0, f64::from(area.height) - 4.0);
+        let fits = |(w, h): (f64, f64)| w <= inner_w && h <= inner_h;
+        let extent = |dir: Direction| {
+            let longest = self
+                .graph
+                .nodes
+                .iter()
+                .map(|n| n.id.trim_start_matches("ext:").chars().count())
+                .max()
+                .unwrap_or(0);
+            let (node_w, node_h, gap_x, gap_y) = metrics(self.style, longest);
+            self.layout.extent(dir, node_w, node_h, gap_x, gap_y)
+        };
+        let other = self.direction.rotated();
+        if self.auto_direction && !fits(extent(self.direction)) && fits(extent(other)) {
+            self.rebuild(other);
+        }
+        if fits(self.world_extent()) {
+            self.fit();
+        } else {
             self.flow.viewport = Viewport {
                 x: 1.0,
                 y: 1.0,
                 zoom: 1.0,
             };
-        } else {
-            self.fit();
         }
     }
 
@@ -413,6 +549,7 @@ impl FlowView {
             KeyCode::Char('-') => self.flow.zoom_out(),
             KeyCode::Char('0') => self.flow.reset_zoom(),
             KeyCode::Char('f') => self.fit(),
+            KeyCode::Char('r') => self.rotate(),
             KeyCode::Char('e') => self.toggle_escape(),
             KeyCode::Char('u') => self.toggle_unvisited(),
             _ => return false,
@@ -441,6 +578,7 @@ impl FlowView {
     /// Paint the run onto the blueprint. Cheap enough to call every draw:
     /// it mutates node content in place and never rebuilds the canvas.
     pub(crate) fn apply_live(&mut self, live: &LiveOverlay) {
+        self.last_live = Some(live.clone());
         let current = live.current.as_deref();
         for (id, content) in self.flow.nodes_content_mut() {
             content.clear_live();
@@ -524,6 +662,7 @@ impl FlowView {
     /// Draw the canvas into `area`, inside `block`. Returns the canvas rect
     /// (the block's inside), which is what mouse routing hit-tests.
     pub(crate) fn render(&mut self, frame: &mut Frame, area: Rect, block: Block<'static>) -> Rect {
+        let inner = block.inner(area);
         self.flow.set_block(Some(block));
         if (area.width, area.height) != (self.last_area.width, self.last_area.height) {
             self.last_area = area;
@@ -532,8 +671,29 @@ impl FlowView {
         if let Some(id) = self.reveal.take() {
             self.flow.ensure_node_visible(&id);
         }
+        // A dotted grid under the graph says "canvas" and moves with a pan,
+        // which is what makes a pan legible.
+        frame.render_widget(
+            Background::new(&self.flow)
+                .variant(BackgroundVariant::Dots)
+                .gap(8, 4),
+            inner,
+        );
         frame.render_widget(&mut self.flow, area);
         self.canvas = self.flow.canvas_area();
+        // A minimap once the graph is bigger than the canvas and the canvas
+        // has room for one.
+        let (world_w, world_h) = self.world_extent();
+        let overflows =
+            world_w > f64::from(self.canvas.width) || world_h > f64::from(self.canvas.height);
+        if overflows && self.canvas.width >= 60 && self.canvas.height >= 16 {
+            frame.render_widget(
+                MiniMap::new(&self.flow)
+                    .position(MiniMapPosition::BottomRight)
+                    .size(20, 6),
+                self.canvas,
+            );
+        }
         self.canvas
     }
 
@@ -578,7 +738,7 @@ fn styled_edge(class: EdgeClass, loops_back: bool, taken: bool, stem: f64) -> St
 fn fit_options(max_stem: f64) -> FitViewOptions {
     FitViewOptions::default()
         .with_padding((max_stem + 1.0).min(5.0))
-        .with_max_zoom(1.0)
+        .with_zoom_range(1.0, 1.0)
 }
 
 #[cfg(test)]
@@ -959,20 +1119,87 @@ merge_stage = "merge"
     }
 
     #[test]
-    fn a_compact_canvas_starts_top_left_when_the_graph_overflows_and_fits_otherwise() {
+    fn a_canvas_the_graph_overflows_starts_top_left_and_boxes_are_never_shrunk() {
         let mut v = FlowView::new(graph(), NodeStyle::Compact, true);
         draw(&mut v, 60, 12);
         assert_eq!(v.pan(), (1.0, 1.0), "the entry stage is on screen");
         assert_eq!(v.node_rect("plan").map(|r| r.0), Some(2));
+        assert_eq!(v.direction(), Direction::LeftToRight);
         // Wide enough: centred like any other fit.
         let mut v = FlowView::new(graph(), NodeStyle::Compact, true);
         draw(&mut v, 200, 20);
         assert_ne!(v.pan(), (1.0, 1.0));
         assert_eq!(v.zoom(), 1.0);
-        // A full canvas that overflows zooms out instead.
+        // A full canvas that overflows both ways keeps its boxes whole and
+        // starts at the corner too, rather than shrinking them to fit.
         let mut v = FlowView::new(graph(), NodeStyle::Full, false);
         draw(&mut v, 60, 20);
-        assert!(v.zoom() < 1.0);
+        assert_eq!(v.zoom(), 1.0);
+        assert_eq!(v.pan(), (1.0, 1.0));
+        assert!(format!("{v:?}").contains("LeftToRight"));
+    }
+
+    #[test]
+    fn a_tall_narrow_canvas_turns_the_graph_top_to_bottom_and_r_turns_it_back() {
+        // Five stages of full boxes: 172 cells wide left to right, 24 rows
+        // top to bottom. A 70x40 canvas fits only the second.
+        let mut v = FlowView::new(graph(), NodeStyle::Full, false);
+        v.select_stage("review");
+        v.toggle_escape();
+        draw(&mut v, 70, 40);
+        assert_eq!(v.direction(), Direction::TopToBottom);
+        assert_eq!(v.zoom(), 1.0);
+        // The turn kept the selection and the toggles.
+        assert_eq!(v.selection(), Selection::Node("review".into()));
+        assert!(v.show_escape());
+        assert!(!v.edge_hidden("implement", "recover"));
+        // Layers are rows now: implement sits under plan, not beside it.
+        let plan = v.node_rect("plan").unwrap();
+        let implement = v.node_rect("implement").unwrap();
+        assert_eq!(plan.0, implement.0);
+        assert!(implement.1 > plan.3);
+        // `r` turns it back by hand, and again.
+        assert!(v.handle_key(KeyCode::Char('r')));
+        assert_eq!(v.direction(), Direction::LeftToRight);
+        draw(&mut v, 70, 40);
+        let plan = v.node_rect("plan").unwrap();
+        let implement = v.node_rect("implement").unwrap();
+        assert_eq!(plan.1, implement.1);
+        assert!(v.handle_key(KeyCode::Char('r')));
+        assert_eq!(v.direction(), Direction::TopToBottom);
+        // The live overlay survives a turn.
+        v.apply_live(&LiveOverlay {
+            current: Some("plan".into()),
+            run: Some(RunPhase::Active),
+            ..LiveOverlay::default()
+        });
+        v.rotate();
+        assert_eq!(
+            v.node_status("plan"),
+            Some(NodeStatus::Current {
+                run: RunPhase::Active,
+                times: 1
+            })
+        );
+        // Boxes can be dragged on an unlocked canvas: press on one, drag,
+        // and it has moved.
+        draw(&mut v, 200, 50);
+        let (x, y, _, _) = v.node_rect("plan").unwrap();
+        let (x, y) = (x as u16 + 2, y as u16 + 1);
+        v.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+        v.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), x + 6, y + 3));
+        v.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), x + 6, y + 3));
+        draw(&mut v, 200, 50);
+        let moved = v.node_rect("plan").unwrap();
+        assert!(moved.0 > x as i32 - 2 + 3, "{moved:?}");
+        // A minimap appears when the graph is bigger than the canvas.
+        let mut v = FlowView::new(graph(), NodeStyle::Full, false);
+        let (_, text) = draw(&mut v, 90, 24);
+        assert!(text.contains('▄') || text.contains('▀'), "{text}");
+        // And not when everything is on screen already.
+        let mut v = FlowView::new(graph(), NodeStyle::Full, false);
+        let (_, text) = draw(&mut v, 220, 50);
+        assert!(!text.contains('▄') && !text.contains('▀'), "{text}");
     }
 
     #[test]

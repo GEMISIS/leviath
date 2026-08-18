@@ -172,10 +172,12 @@ fn detail_sections() -> Vec<HelpSection> {
                 ),
                 ("+ / - / 0", "zoom in / out / back to 100%"),
                 ("f", "fit the whole graph on screen"),
+                ("r", "turn the graph: left to right / top to bottom"),
                 ("e", "show or hide the escape edges (error, dead_end, ...)"),
                 ("u", "show or hide stages the run never entered"),
                 ("↑ ↓ / k j", "timeline: step through visits"),
-                ("drag / wheel / click", "pan / zoom / select on the canvas"),
+                ("drag", "move a box; on empty canvas, pan"),
+                ("wheel / click", "zoom / select on the canvas"),
                 ("esc / g", "close the explorer"),
                 (
                     "",
@@ -501,7 +503,7 @@ mod tests {
 
     #[test]
     fn draw_help_overlay_detail_view_omits_main_list_section() {
-        let backend = TestBackend::new(120, 50);
+        let backend = TestBackend::new(120, 70);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         dash.detail_view = true;
