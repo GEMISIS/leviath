@@ -664,6 +664,21 @@ allow_as_worker = true
             })
         );
         assert_eq!(g.node("split").unwrap().kind_label(), "fan-out");
+
+        // A fan-out naming itself as its worker (the validator rejects it,
+        // the parser does not) draws no self-referential hand-off.
+        let g = graph(
+            r#"
+[agent]
+name = "selfish"
+[stages.split]
+mode = "fan_out"
+worker_stage = "split"
+[stages.split.transitions]
+"#,
+        );
+        assert!(g.edges.is_empty());
+        assert!(!g.node("split").unwrap().self_loop);
     }
 
     #[test]

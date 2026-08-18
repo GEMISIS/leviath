@@ -11,6 +11,32 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+- New: `lev dash` draws a run's blueprint as a stage graph. The stage
+  explorer (`g` in the detail view) is a canvas now: stages are boxes on
+  layers, transitions are routed edges, the stage the run is in spins in
+  the run's colour, the last transition it took is animated, revisit loops
+  run along a lane below the boxes, and the escape edges (`error`,
+  `dead_end`, `stuck`, `max_iterations`) hide behind `e` because nearly
+  every stage has one to the same hub. Arrows select a stage, `Enter` opens
+  its tab, `+`/`-` zoom, `f` fits, and the mouse pans, zooms and clicks.
+  Every run has a graph (a linear blueprint is a chain); before, a linear
+  run got a toast saying there was nothing to explore. The picture comes
+  from the new `rataflow` canvas crate, built without its own layout: the
+  layered layout the explorer already had places the boxes.
+- New: `lev validate --graph` prints the same stage graph as plain text
+  (`--width` caps how wide).
+- Fixed: shortcuts that worked but were never hinted or documented. The
+  detail view's hint bar names `g` (the graph) and `1-9`; the main list's
+  names `m` (MCP servers); the log panel's names PgUp/PgDn, `?` and the
+  `g`/`G` aliases; the response pane's names PgUp/PgDn; the setup wizard's
+  footer names `?`, Ctrl-S and Ctrl-R on every step. The help overlays
+  mention Shift-Tab where it works, and say where `?` types text and F1 is
+  the way in. The dashboard docs gained the log panel and MCP screen key
+  tables and the keys the detail view, new-run screen and response pane
+  were missing.
+
 ## 0.4.0 - 2026-08-18
 
 - New: a provider can be reached through a gateway, with

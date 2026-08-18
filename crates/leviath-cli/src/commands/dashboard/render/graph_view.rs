@@ -520,15 +520,25 @@ mode = "output"
         let text = rendered(&mut dash);
         assert!(text.contains("escape edges shown"), "{text}");
         assert!(text.contains("[error]"), "{text}");
-        // An edge: pick the first one directly on the canvas.
-        let mut explorer = explorer();
-        explorer.view.select_edge_for_test(0);
-        dash.stage_explorer = Some(explorer);
+        // An edge: pick one directly on the canvas. The first carries a hint
+        // and no condition; the loop back from review carries the reverse.
+        let mut hinted = explorer();
+        hinted.view.select_edge_for_test(0);
+        dash.stage_explorer = Some(hinted);
         let text = rendered(&mut dash);
         assert!(
             text.contains("plan → implement · transform direct · ready"),
             "{text}"
         );
+        let mut looped = explorer();
+        looped.view.select_edge_for_test(3);
+        dash.stage_explorer = Some(looped);
+        let text = rendered(&mut dash);
+        assert!(
+            text.contains("review → implement [llm_choice] · transform direct"),
+            "{text}"
+        );
+        assert!(!text.contains("transform direct · "), "no hint: {text}");
     }
 
     #[test]
