@@ -1447,6 +1447,77 @@ fn collect_inference_buffers_output_token_line_and_stage_tokens() {
     assert_eq!(led.0[1].cached_tokens, 2);
 }
 
+// ─── requests the runtime must never build (issue #495) ──────────────
+
+/// A prompt that reaches the window leaves nothing to answer with, and the
+/// derived completion budget went to zero. Providers reject that outright
+/// (`Invalid 'max_completion_tokens': integer below minimum value`), and a 400
+/// is not transient, so the retry loop resent the same doomed request until the
+/// run died.
+#[tokio::test]
+async fn a_full_window_still_asks_for_at_least_one_output_token() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    // A window whose regions have consumed every token it has.
+    let mut w = window();
+    w.current_tokens = w.max_tokens;
+    let e = world
+        .spawn((agent_state(), w, stage("m", vec![], None), ReadyToInfer))
+        .id();
+
+    run(&mut world);
+
+    // The request reached the lane rather than being rejected by the provider.
+    assert!(world.get::<AwaitingInference>(e).is_some());
+}
+
+/// The same arithmetic, read straight off the built request so the number the
+/// provider would see is the one under test.
+#[test]
+fn the_completion_budget_never_falls_below_the_provider_minimum() {
+    let mut w = window();
+    w.current_tokens = w.max_tokens; // nothing left over
+    let si = stage("model-x", vec![], None);
+
+    let req = build_request(
+        &w,
+        None,
+        &si,
+        &provider(true, 500),
+        "implement",
+        1,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+
+    assert!(
+        req.max_tokens >= 1,
+        "a zero budget is a 400 every provider rejects: {}",
+        req.max_tokens
+    );
+}
+
+/// And the clamp must not overshoot: a provider rejects `prompt + completion`
+/// past the window just as readily, so the budget stays inside what is left.
+#[test]
+fn the_completion_budget_stays_inside_what_the_window_has_left() {
+    let mut w = window();
+    w.current_tokens = w.max_tokens - 10;
+    let si = stage("model-x", vec![], None);
+
+    let req = build_request(
+        &w,
+        None,
+        &si,
+        &provider(true, 500),
+        "implement",
+        1,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+
+    assert_eq!(req.max_tokens, 10, "10 left means 10 asked for");
+}
+
 // ─── estimator calibration (issue #485) ───
 //
 // The arithmetic is unit-tested in `pipeline::calibration`. What these cover is
@@ -9930,6 +10001,48 @@ fn collect_compaction_stores_summary_and_clears_source() {
     assert!(w.get_region("history").unwrap().current_tokens > 0); // summary stored
     assert!(world.get::<ReadyToInfer>(e).is_some());
     assert!(world.get::<AwaitingCompaction>(e).is_none());
+}
+
+/// A summary with nothing in it is a compaction that failed, not one that found
+/// nothing worth keeping. Storing it traded the region's real contents for a
+/// blank, and the blank later reached a provider as a zero-length turn - which
+/// is a 400 no retry clears (issue #495).
+#[test]
+fn collect_compaction_keeps_the_region_when_the_summary_is_empty() {
+    for summary in ["", "   \n\t "] {
+        let (mut world, tx) = world_with_compaction_results();
+        let e = world.spawn((compacting_window(), AwaitingCompaction)).id();
+        let before = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("conv")
+            .unwrap()
+            .current_tokens;
+        tx.send(CompactionOutcome {
+            entity: e,
+            usage: Vec::new(),
+            provider_name: "p".to_string(),
+            model: "m".to_string(),
+            result: Ok(vec![("conv".to_string(), summary.to_string())]),
+        })
+        .unwrap();
+
+        run_collect_compaction(&mut world);
+
+        let w = world.get::<ContextWindow>(e).unwrap();
+        assert_eq!(
+            w.get_region("conv").unwrap().current_tokens,
+            before,
+            "the source keeps what the summary failed to capture"
+        );
+        assert_eq!(
+            w.get_region("history").unwrap().current_tokens,
+            0,
+            "and nothing blank is stored in its place"
+        );
+        // Still handed back to inference: compaction is best-effort.
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+    }
 }
 
 /// Compaction is the largest uncounted cost a run had: a summarize call sees

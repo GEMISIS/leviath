@@ -13,6 +13,20 @@ same list.
 
 ## Unreleased
 
+- Fixed: two provider 400s the runtime built for itself at a tight context
+  window. A prompt that reached the window left a completion budget of zero, and
+  the request went out with it - which OpenAI rejects as
+  `Invalid 'max_completion_tokens': integer below minimum value` and Anthropic
+  likewise. The budget now has a floor of one, and stays capped at what the
+  window has left, because a provider rejects prompt-plus-completion past the
+  window just as readily; a prompt that leaves no room to answer says so in the
+  log rather than only in a 400. Separately, a compaction that returned an empty
+  summary had that blank stored in place of the region it summarized, and it
+  later reached a provider as a zero-length turn, which is
+  `user messages must have non-empty content`. An empty summary now leaves the
+  region as written, and no message with nothing in it is sent at all. Neither
+  400 reads as transient, so both were retried until the run died.
+
 - Changed: a `temporary` or `clearable` region declared `volatility = "grows"`
   is now split and cached like any other growing region. Both kinds say when the
   region is thrown away - one at stage exit, the other on demand - and nothing

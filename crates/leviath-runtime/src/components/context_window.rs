@@ -1011,6 +1011,22 @@ impl ContextWindow {
             messages[0].cache_breakpoint = true;
         }
 
+        // ── Drop any message with nothing in it ─────────────────────────
+        //
+        // Every provider rejects a zero-length turn (`messages.0: user messages
+        // must have non-empty content`), so one reaching the wire is a 400 the
+        // runtime built for itself - and a 400 does not retry away.
+        //
+        // Here rather than at each writer because there are many writers and
+        // one request. A block-shaped message that emptied out is already
+        // dropped by the tool-pair sanitizer above; this catches the text-shaped
+        // ones, and it runs before the two guards below so that a conversation
+        // left empty by the drop still gets its fallback turn (issue #495).
+        messages.retain(|m| match &m.content {
+            leviath_providers::MessageContent::Text(text) => !text.trim().is_empty(),
+            leviath_providers::MessageContent::Blocks(blocks) => !blocks.is_empty(),
+        });
+
         // Ensure there's at least one user message
         if !messages.iter().any(|m| m.role == "user") {
             messages.push(leviath_providers::Message {

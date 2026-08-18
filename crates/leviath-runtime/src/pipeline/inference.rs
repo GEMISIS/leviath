@@ -75,6 +75,25 @@ pub(crate) fn hint_blocks(
     blocks
 }
 
+/// The smallest completion budget a request may carry.
+///
+/// Providers reject a request whose completion budget is below one - OpenAI
+/// with `Invalid 'max_completion_tokens': integer below minimum value`,
+/// Anthropic likewise - and the runtime derived that budget by subtracting the
+/// prompt from the window with no floor under it. On a tight pinned window a
+/// prompt that reached the ceiling drove it to zero and the request went out
+/// anyway. A 400 does not read as transient, so the retry loop resent the same
+/// doomed request until the run died (issue #495).
+///
+/// Deliberately one, and not something roomier. The budget is also capped at
+/// what the window has left, because a provider rejects `prompt + completion`
+/// past the context window just as readily - so clamping *up* to a comfortable
+/// figure would trade one 400 for another. One token is the smallest request
+/// the API accepts, which is the only property this constant exists to
+/// guarantee; whether the reply is *useful* at that size is a budget problem,
+/// and the warning beside it says so.
+const MIN_OUTPUT_TOKENS: usize = 1;
+
 /// What earlier calls in this run taught us, carried into the next request.
 ///
 /// Three pieces of evidence with one thing in common: none of them can be
@@ -135,7 +154,19 @@ pub(crate) fn build_request(
     let output_cap = config
         .and_then(|c| c.max_output_tokens)
         .unwrap_or(caps.max_output_tokens);
-    let max_tokens = remaining.min(output_cap);
+    let max_tokens = remaining.min(output_cap).max(MIN_OUTPUT_TOKENS);
+    if remaining < MIN_OUTPUT_TOKENS {
+        // The prompt has filled the window and left nothing to answer with.
+        // Said out loud because the request still goes out, and a reply capped
+        // this short is going to be empty or truncated - which reads as a model
+        // problem rather than a budget one unless somebody says so here.
+        tracing::warn!(
+            window_tokens = window.max_tokens,
+            prompt_tokens = spent,
+            "the assembled prompt leaves no room for a reply; raise the stage's \
+             window or lower the region budgets that fill it"
+        );
+    }
 
     let filtered_tools = match stage.tool_filter.as_deref() {
         Some(filter) if !filter.is_empty() => stage
