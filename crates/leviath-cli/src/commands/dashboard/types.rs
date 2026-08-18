@@ -2,9 +2,9 @@
 
 use clap::Args;
 
-use super::graph::GraphTransitionInfo;
 use super::theme::{C_ACTIVE, C_DIM, C_ERROR, C_SUCCESS, C_WARN};
 use super::theme::{GLYPH_ACTIVE, GLYPH_COMPLETE, GLYPH_ERROR, GLYPH_PENDING, GLYPH_WAITING};
+use crate::tui::flowgraph::FlowView;
 
 use crate::runstate::{self, StageRecord};
 use leviath_core::interaction;
@@ -71,6 +71,16 @@ pub(super) enum MainPane {
 pub(super) enum PaneId {
     RunTable,
     LogPanel,
+    /// The stage explorer's graph canvas: the wheel zooms, a drag pans.
+    ExplorerGraph,
+}
+
+impl PaneId {
+    /// Whether the pane is a graph canvas, which takes the mouse before the
+    /// text-selection machinery sees it.
+    pub(super) fn is_graph(self) -> bool {
+        matches!(self, PaneId::ExplorerGraph)
+    }
 }
 
 /// Which tab of the full-screen stage explorer is showing.
@@ -80,27 +90,25 @@ pub(super) enum ExplorerTab {
     Timeline,
 }
 
-/// The full-screen stage explorer (`g` in the detail view of a graph agent):
-/// a real layered rendering of the stage DAG, and the visit timeline the old
-/// one-row strip could not show.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The full-screen stage explorer (`g` in the detail view): the blueprint's
+/// stage graph on a canvas with the run painted onto it, and the visit
+/// timeline.
+#[derive(Debug)]
 pub(super) struct ExplorerState {
     pub(super) tab: ExplorerTab,
-    /// Show stages never visited (dimmed); `u` toggles them off.
-    pub(super) show_unvisited: bool,
-    /// Vertical scroll of the graph canvas, in rows.
-    pub(super) scroll: usize,
     /// Selected row on the timeline tab.
     pub(super) timeline_selected: usize,
+    /// The graph canvas. Owns the toggles (`u` unvisited, `e` escape edges),
+    /// the selection and the viewport.
+    pub(super) view: FlowView,
 }
 
 impl ExplorerState {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(view: FlowView) -> Self {
         Self {
             tab: ExplorerTab::Graph,
-            show_unvisited: true,
-            scroll: 0,
             timeline_selected: 0,
+            view,
         }
     }
 }
@@ -282,8 +290,11 @@ pub struct DashboardAgent {
     /// Total seconds spent waiting for user input across all completed waits.
     /// Subtracted from elapsed to show only actual running time.
     pub waiting_secs: u64,
-    /// Cached graph transition info (None = linear mode or not yet loaded)
-    pub(super) graph_info: Option<GraphTransitionInfo>,
+    /// The blueprint's stage graph, loaded once when the run first appears.
+    /// `None` when the manifest could not be read: the run still shows, the
+    /// graph surfaces say why they are empty. Shared, not owned: the detail
+    /// view clones the whole agent every frame.
+    pub(super) graph: Option<std::sync::Arc<crate::tui::flowgraph::StageGraph>>,
     /// Whether the current stage accepts mid-run user messages
     pub accepts_messages: bool,
     /// Per-region taint levels (region_name, taint_level_string).
@@ -578,7 +589,7 @@ mod tests {
             last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
-            graph_info: None,
+            graph: None,
             accepts_messages: true,
             taint_summary: vec![],
         };

@@ -24,6 +24,7 @@
 //! single instantiation. Both doubles therefore carry an injectable-failure
 //! switch rather than having an always-failing sibling type.
 
+pub(crate) mod flowgraph;
 pub(crate) mod keymap;
 pub mod theme;
 pub(crate) mod widgets;

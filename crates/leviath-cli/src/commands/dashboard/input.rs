@@ -341,53 +341,6 @@ impl Dashboard {
         }
     }
 
-    /// Keys while the full-screen stage explorer is open.
-    fn handle_explorer_key(&mut self, key_code: KeyCode) {
-        let visits = self.selected_history().map(|h| h.visits.len()).unwrap_or(0);
-        let Some(explorer) = self.stage_explorer.as_mut() else {
-            return;
-        };
-        match key_code {
-            KeyCode::Esc | KeyCode::Char('g') => self.stage_explorer = None,
-            KeyCode::Tab | KeyCode::BackTab => {
-                explorer.tab = match explorer.tab {
-                    ExplorerTab::Graph => ExplorerTab::Timeline,
-                    ExplorerTab::Timeline => ExplorerTab::Graph,
-                };
-            }
-            KeyCode::Char('u') => explorer.show_unvisited = !explorer.show_unvisited,
-            KeyCode::Up | KeyCode::Char('k') => match explorer.tab {
-                ExplorerTab::Graph => explorer.scroll = explorer.scroll.saturating_sub(1),
-                ExplorerTab::Timeline => {
-                    explorer.timeline_selected = explorer.timeline_selected.saturating_sub(1);
-                }
-            },
-            KeyCode::Down | KeyCode::Char('j') => match explorer.tab {
-                ExplorerTab::Graph => explorer.scroll = explorer.scroll.saturating_add(1),
-                ExplorerTab::Timeline => {
-                    if visits > 0 && explorer.timeline_selected + 1 < visits {
-                        explorer.timeline_selected += 1;
-                    }
-                }
-            },
-            KeyCode::Enter => {
-                if explorer.tab == ExplorerTab::Timeline {
-                    let selected = explorer.timeline_selected;
-                    let point = self
-                        .selected_history()
-                        .and_then(|h| h.visits.get(selected))
-                        .map(|v| v.first_point);
-                    if let Some(point) = point {
-                        self.stage_explorer = None;
-                        self.jump_to_history_point(point);
-                    }
-                }
-            }
-            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
-            _ => {}
-        }
-    }
-
     /// Enter/Space in the Context view: fold or unfold the row under the
     /// tree cursor.
     fn toggle_context_row(&mut self) {
@@ -548,22 +501,9 @@ impl Dashboard {
             // Jump between region headers.
             KeyCode::Char('[') if in_context => self.jump_context_region(false),
             KeyCode::Char(']') if in_context => self.jump_context_region(true),
-            // The full-screen stage explorer, for graph agents.
+            // The full-screen stage explorer.
             KeyCode::Char('g') => {
-                let target = self
-                    .selected_agent()
-                    .filter(|a| a.graph_info.is_some())
-                    .map(|a| a.id.clone());
-                match target {
-                    Some(run_id) => {
-                        self.ensure_history(&run_id);
-                        self.stage_explorer = Some(ExplorerState::new());
-                    }
-                    None => self.toast(
-                        "This agent is linear; there is no stage graph to explore",
-                        ToastLevel::Info,
-                    ),
-                }
+                self.open_stage_explorer();
             }
             // Home/End are the documented jumps; b/e stay as the historical
             // aliases. (`detail_scroll` counts up from the bottom, so "top of
@@ -1035,7 +975,7 @@ mod tests {
             last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
-            graph_info: None,
+            graph: None,
             accepts_messages: true,
             taint_summary: vec![],
         }
@@ -2186,215 +2126,6 @@ mod tests {
         dash.mcp_screen = true;
         dash.handle_key(key(KeyCode::Char('?')));
         assert!(dash.show_help);
-    }
-
-    fn graph_agent(id: &str) -> DashboardAgent {
-        use crate::commands::dashboard::graph::{GraphEdge, GraphTransitionInfo};
-        let mut agent = make_test_agent(id, AgentDisplayStatus::Active);
-        let mut edges = std::collections::HashMap::new();
-        edges.insert(
-            "plan".to_string(),
-            vec![GraphEdge {
-                target: "implement".to_string(),
-                hint: Some("ready".to_string()),
-                condition: "always".to_string(),
-                transform: "direct".to_string(),
-            }],
-        );
-        edges.insert(
-            "review".to_string(),
-            vec![GraphEdge {
-                target: "implement".to_string(),
-                hint: None,
-                condition: "llm_choice".to_string(),
-                transform: "direct".to_string(),
-            }],
-        );
-        edges.insert(
-            "implement".to_string(),
-            vec![GraphEdge {
-                target: "review".to_string(),
-                hint: None,
-                condition: "always".to_string(),
-                transform: "direct".to_string(),
-            }],
-        );
-        agent.graph_info = Some(GraphTransitionInfo {
-            edges,
-            entry_stage: "plan".to_string(),
-            stage_names: vec![
-                "plan".to_string(),
-                "implement".to_string(),
-                "review".to_string(),
-            ],
-        });
-        agent.stage = "implement".to_string();
-        agent
-    }
-
-    fn seeded_points(stages: &[(&str, i64)]) -> Vec<leviath_core::run_archive::RunPoint> {
-        stages
-            .iter()
-            .map(|(stage, at)| {
-                let mut meta = leviath_core::run_meta::RunMeta::new(
-                    "run-1".to_string(),
-                    "a".to_string(),
-                    "/p".to_string(),
-                    "t".to_string(),
-                    None,
-                    "/w".to_string(),
-                    3,
-                );
-                meta.current_stage = stage.to_string();
-                meta.iteration = 1;
-                leviath_core::run_archive::RunPoint {
-                    meta,
-                    context: leviath_core::run_meta::ContextSnapshot {
-                        stage_name: stage.to_string(),
-                        total_tokens: 0,
-                        max_tokens: 100,
-                        regions: vec![],
-                    },
-                    at: *at,
-                }
-            })
-            .collect()
-    }
-
-    fn seed_cache(dash: &mut Dashboard, points: Vec<leviath_core::run_archive::RunPoint>) {
-        dash.history = Some(crate::commands::dashboard::history::RunHistoryCache {
-            run_id: "run-1".to_string(),
-            visits: crate::commands::dashboard::history::derive_visits(&points),
-            points,
-            loaded_at_tick: u64::MAX,
-        });
-    }
-
-    #[test]
-    fn g_opens_the_explorer_for_graph_agents_and_toasts_for_linear() {
-        let mut dash = make_test_dashboard();
-        dash.agents
-            .push(make_test_agent("run-linear", AgentDisplayStatus::Active));
-        dash.update_display_indices();
-        dash.detail_view = true;
-        dash.handle_key(key(KeyCode::Char('g')));
-        assert!(dash.stage_explorer.is_none());
-        assert!(dash.toasts.iter().any(|t| t.message.contains("linear")));
-
-        let mut dash = make_test_dashboard();
-        dash.agents.push(graph_agent("run-1"));
-        dash.update_display_indices();
-        dash.detail_view = true;
-        dash.handle_key(key(KeyCode::Char('g')));
-        assert!(dash.stage_explorer.is_some());
-        // g again closes it.
-        dash.handle_key(key(KeyCode::Char('g')));
-        assert!(dash.stage_explorer.is_none());
-    }
-
-    #[test]
-    fn the_explorer_tabs_scrolls_toggles_and_jumps_to_a_visit() {
-        let mut dash = make_test_dashboard();
-        dash.agents.push(graph_agent("run-1"));
-        dash.update_display_indices();
-        dash.detail_view = true;
-        seed_cache(
-            &mut dash,
-            seeded_points(&[
-                ("plan", 10),
-                ("implement", 20),
-                ("review", 30),
-                ("implement", 40),
-            ]),
-        );
-        dash.handle_key(key(KeyCode::Char('g')));
-        assert!(dash.stage_explorer.is_some());
-
-        // Graph tab: scroll down/up, toggle unvisited, help opens.
-        dash.handle_key(key(KeyCode::Down));
-        dash.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(dash.stage_explorer.as_ref().unwrap().scroll, 2);
-        dash.handle_key(key(KeyCode::Up));
-        dash.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(dash.stage_explorer.as_ref().unwrap().scroll, 0);
-        dash.handle_key(key(KeyCode::Char('u')));
-        assert!(!dash.stage_explorer.as_ref().unwrap().show_unvisited);
-        dash.handle_key(key(KeyCode::Char('?')));
-        assert!(dash.show_help);
-        dash.handle_key(key(KeyCode::Esc));
-
-        // Enter on the graph tab does nothing; on the timeline it jumps.
-        dash.handle_key(key(KeyCode::Enter));
-        assert!(dash.stage_explorer.is_some());
-        dash.handle_key(key(KeyCode::Tab));
-        assert_eq!(
-            dash.stage_explorer.as_ref().unwrap().tab,
-            ExplorerTab::Timeline
-        );
-        // Move to the last visit (the implement revisit) and jump.
-        dash.handle_key(key(KeyCode::Down));
-        dash.handle_key(key(KeyCode::Down));
-        dash.handle_key(key(KeyCode::Down));
-        dash.handle_key(key(KeyCode::Down)); // clamped at the last visit
-        assert_eq!(dash.stage_explorer.as_ref().unwrap().timeline_selected, 3);
-        dash.handle_key(key(KeyCode::Enter));
-        assert!(
-            dash.stage_explorer.is_none(),
-            "the jump closes the explorer"
-        );
-        assert_eq!(
-            dash.context_history_idx,
-            Some(3),
-            "jumped to the revisit's first point"
-        );
-        assert_eq!(dash.stage_content_mode, StageContentMode::Context);
-
-        // Esc closes from either tab; Tab cycles back to the graph; the
-        // timeline's Up key and `?` work; unmapped keys are ignored.
-        dash.handle_key(key(KeyCode::Char('g')));
-        dash.handle_key(key(KeyCode::Tab));
-        dash.handle_key(key(KeyCode::Down));
-        dash.handle_key(key(KeyCode::Up));
-        dash.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(dash.stage_explorer.as_ref().unwrap().timeline_selected, 0);
-        dash.handle_key(key(KeyCode::Char('?')));
-        assert!(dash.show_help);
-        dash.handle_key(key(KeyCode::Esc)); // closes help
-        dash.handle_key(key(KeyCode::Char('z'))); // ignored
-        dash.handle_key(key(KeyCode::Tab));
-        assert_eq!(
-            dash.stage_explorer.as_ref().unwrap().tab,
-            ExplorerTab::Graph
-        );
-        dash.handle_key(key(KeyCode::Esc));
-        assert!(dash.stage_explorer.is_none());
-    }
-
-    #[test]
-    fn explorer_guards_hold_when_driven_directly_or_without_visits() {
-        let mut dash = make_test_dashboard();
-        // No explorer open: the handler declines to act.
-        dash.handle_explorer_key(KeyCode::Enter);
-        assert!(dash.stage_explorer.is_none());
-
-        // Timeline Enter with no archived visits is a no-op.
-        dash.agents.push(graph_agent("run-1"));
-        dash.update_display_indices();
-        dash.detail_view = true;
-        dash.handle_key(key(KeyCode::Char('g')));
-        dash.handle_key(key(KeyCode::Tab));
-        dash.handle_key(key(KeyCode::Enter));
-        assert!(dash.stage_explorer.is_some(), "nothing to jump to");
-        assert_eq!(dash.context_history_idx, None);
-    }
-
-    #[test]
-    fn g_with_no_agent_selected_toasts_instead_of_opening() {
-        let mut dash = make_test_dashboard();
-        dash.detail_view = true;
-        dash.handle_key(key(KeyCode::Char('g')));
-        assert!(dash.stage_explorer.is_none());
-        assert!(dash.toasts.iter().any(|t| t.message.contains("linear")));
     }
 
     fn context_agent(id: &str) -> DashboardAgent {

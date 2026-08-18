@@ -36,3 +36,25 @@ pub(crate) fn rendered_buffer(
         .map(|c| c.symbol())
         .collect()
 }
+
+/// The style of the cell where `needle` first appears in a rendered frame,
+/// so a test can say "the current stage is drawn in the active colour"
+/// rather than only "the current stage is drawn". Panics when the text is
+/// not on screen: that is the assertion failing, said plainly.
+pub(crate) fn style_at_text(
+    terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+    needle: &str,
+) -> ratatui::style::Style {
+    let buf = terminal.backend().buffer();
+    let width = buf.area.width as usize;
+    let chars: Vec<char> = rendered_buffer(terminal).chars().collect();
+    let needle: Vec<char> = needle.chars().collect();
+    let missing = format!("{:?} is not on screen", needle.iter().collect::<String>());
+    let idx = (0..chars.len())
+        .find(|&i| chars[i..].starts_with(&needle))
+        .expect(&missing);
+    let (x, y) = ((idx % width) as u16, (idx / width) as u16);
+    buf.cell((buf.area.x + x, buf.area.y + y))
+        .expect("the index came from this buffer")
+        .style()
+}

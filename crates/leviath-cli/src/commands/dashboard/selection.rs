@@ -136,6 +136,11 @@ impl Dashboard {
     /// cursor, hit-tested against the rects each renderer registered this
     /// frame - not whichever pane the keyboard last touched.
     pub(super) fn handle_mouse(&mut self, event: MouseEvent) {
+        // A graph canvas takes the mouse before the selection machinery: a
+        // pan is not a copy highlight.
+        if self.route_mouse_to_graph(event) {
+            return;
+        }
         match event.kind {
             MouseEventKind::ScrollUp => self.wheel_scroll(event.column, event.row, 3),
             MouseEventKind::ScrollDown => self.wheel_scroll(event.column, event.row, -3),
@@ -326,7 +331,7 @@ mod tests {
             last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
-            graph_info: None,
+            graph: None,
             accepts_messages: true,
             taint_summary: vec![],
         }

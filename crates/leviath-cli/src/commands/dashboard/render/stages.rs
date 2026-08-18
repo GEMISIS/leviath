@@ -105,7 +105,7 @@ impl Dashboard {
         } else {
             " stage 1/1".to_string()
         };
-        if agent.graph_info.is_some() {
+        if agent.graph.is_some() {
             tab_nav.push_str("  ·  [g] graph");
         }
 
@@ -227,13 +227,11 @@ impl Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::dashboard::graph::{GraphEdge, GraphTransitionInfo};
     use crate::commands::dashboard::test_support::{make_test_dashboard, rendered_buffer};
     use crate::runstate::{StageRecord, StageRunStatus};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
-    use std::collections::HashMap;
 
     fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
         DashboardAgent {
@@ -263,7 +261,7 @@ mod tests {
             last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
-            graph_info: None,
+            graph: None,
             accepts_messages: true,
             taint_summary: vec![],
         }
@@ -372,21 +370,14 @@ mod tests {
             make_stage_record("implement", StageRunStatus::Active),
         ];
         agent.num_stages = 2;
-        let mut edges = HashMap::new();
-        edges.insert(
-            "plan".to_string(),
-            vec![GraphEdge {
-                target: "implement".to_string(),
-                hint: None,
-                condition: "always".to_string(),
-                transform: "replace".to_string(),
-            }],
-        );
-        agent.graph_info = Some(GraphTransitionInfo {
-            edges,
-            entry_stage: "plan".to_string(),
-            stage_names: vec!["plan".to_string(), "implement".to_string()],
-        });
+        agent.graph = Some(std::sync::Arc::new(
+            crate::tui::flowgraph::StageGraph::from_blueprint(
+                &leviath_core::manifest::parse_manifest(
+                    "[agent]\nname = \"g\"\n[stages.plan]\n[stages.plan.transitions.implement]\n[stages.implement]\n",
+                )
+                .unwrap(),
+            ),
+        ));
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 120, 7);

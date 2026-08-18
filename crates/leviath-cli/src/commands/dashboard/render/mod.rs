@@ -323,7 +323,7 @@ mod tests {
             last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
-            graph_info: None,
+            graph: None,
             accepts_messages: true,
             taint_summary: vec![],
         }
@@ -560,25 +560,17 @@ mod tests {
     }
 
     #[test]
-    fn draw_detail_view_graph_agent_uses_taller_stage_tabs_area() {
-        // `tabs_h` is `7` when `agent.graph_info.is_some()` and `3` otherwise -
-        // every other detail-view test above leaves `graph_info: None`, so
-        // the `7` branch was never exercised. Build a minimal
-        // `GraphTransitionInfo` (same shape used by `render/stages.rs`'s own
-        // graph tests) purely to flip `is_graph_view` to `true`; the graph
-        // rendering itself is already exhaustively covered there.
-        use crate::commands::dashboard::graph::GraphTransitionInfo;
-        use std::collections::HashMap;
-
+    fn draw_detail_view_graph_agent_shows_the_graph_hint() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-graph-tabs", AgentDisplayStatus::Active);
-        agent.graph_info = Some(GraphTransitionInfo {
-            edges: HashMap::new(),
-            entry_stage: "main".to_string(),
-            stage_names: vec!["main".to_string()],
-        });
+        agent.graph = Some(std::sync::Arc::new(
+            crate::tui::flowgraph::StageGraph::from_blueprint(
+                &leviath_core::manifest::parse_manifest("[agent]\nname = \"g\"\n[stages.main]\n")
+                    .unwrap(),
+            ),
+        ));
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.detail_view = true;
@@ -586,6 +578,7 @@ mod tests {
         terminal.draw(|f| dash.draw(f)).unwrap();
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("ACTIVE"), "{buf}");
+        assert!(buf.contains("[g] graph"), "{buf}");
     }
 
     #[test]
@@ -720,25 +713,23 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-exp", AgentDisplayStatus::Active);
-        let mut edges = std::collections::HashMap::new();
-        edges.insert(
-            "a".to_string(),
-            vec![crate::commands::dashboard::graph::GraphEdge {
-                target: "b".to_string(),
-                hint: None,
-                condition: "always".to_string(),
-                transform: "direct".to_string(),
-            }],
-        );
-        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
-            edges,
-            entry_stage: "a".to_string(),
-            stage_names: vec!["a".to_string(), "b".to_string()],
-        });
+        let graph = std::sync::Arc::new(crate::tui::flowgraph::StageGraph::from_blueprint(
+            &leviath_core::manifest::parse_manifest(
+                "[agent]\nname = \"g\"\n[stages.a]\n[stages.a.transitions.b]\n[stages.b]\n",
+            )
+            .unwrap(),
+        ));
+        agent.graph = Some(graph.clone());
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.detail_view = true;
-        dash.stage_explorer = Some(crate::commands::dashboard::types::ExplorerState::new());
+        dash.stage_explorer = Some(crate::commands::dashboard::types::ExplorerState::new(
+            crate::tui::flowgraph::FlowView::new(
+                graph,
+                crate::tui::flowgraph::NodeStyle::Full,
+                false,
+            ),
+        ));
         terminal.draw(|f| dash.draw(f)).unwrap();
         let text: String = terminal
             .backend()

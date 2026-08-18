@@ -1,35 +1,25 @@
-//! The full-screen stage explorer: a layered rendering of the stage graph,
-//! and the visit timeline.
+//! The full-screen stage explorer: the blueprint's stage graph on a canvas
+//! with the run painted onto it, and the visit timeline.
 //!
-//! The old inline strip drew stages on one row and could only draw arrows
-//! between list-neighbors, so any real graph read as a line with missing
-//! edges. Here stages are laid out on layers (parallel branches share a
-//! layer), every edge is shown under its source - back-edges (revisit loops)
-//! distinctly - and the timeline tab lists each actual visit with its time,
-//! duration, and iterations, derived from the run archive.
+//! The graph tab draws a `crate::tui::flowgraph::FlowView`: stages are
+//! boxes, transitions are routed edges, the current stage spins, the last
+//! transition taken is animated, revisit loops run along a lane below the
+//! nodes and the escape edges (`error`, `dead_end`, ...) hide behind `e`.
+//! The timeline tab lists each actual visit with its time, duration and
+//! iterations, derived from the run archive.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
-use crate::commands::dashboard::graph_layout;
-use crate::commands::dashboard::history::{StageVisit, last_visit, visit_count};
+use crate::commands::dashboard::history::{StageVisit, clock};
 use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::*;
-
-/// `HH:MM:SS` in local time.
-fn clock(at: i64) -> String {
-    chrono::DateTime::from_timestamp(at, 0)
-        .map(|t| {
-            t.with_timezone(&chrono::Local)
-                .format("%H:%M:%S")
-                .to_string()
-        })
-        .unwrap_or_default()
-}
+use crate::tui::flowgraph::Selection;
+use crate::tui::widgets::footer::{draw_hint_bar, hint};
 
 fn duration_label(visit: &StageVisit) -> String {
     match visit.left_at {
@@ -53,9 +43,16 @@ impl Dashboard {
         area: Rect,
         agent: &DashboardAgent,
     ) {
-        let Some(explorer) = self.stage_explorer.clone() else {
+        let Some((tab, timeline_selected)) = self
+            .stage_explorer
+            .as_ref()
+            .map(|e| (e.tab, e.timeline_selected))
+        else {
             return;
         };
+        // Visit counts and the timeline stay live while the explorer is open
+        // (TTL-gated, so this is one archive read a second at most).
+        self.ensure_history(&agent.id);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -66,7 +63,7 @@ impl Dashboard {
             .split(area);
 
         // ── Tab strip ──
-        let tab = |label: &str, active: bool| {
+        let tab_span = |label: &str, active: bool| {
             Span::styled(
                 format!(" {label} "),
                 if active {
@@ -84,8 +81,8 @@ impl Dashboard {
                     format!(" Stage explorer · {} ", agent.blueprint_name),
                     Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
                 ),
-                tab("Graph", explorer.tab == ExplorerTab::Graph),
-                tab("Timeline", explorer.tab == ExplorerTab::Timeline),
+                tab_span("Graph", tab == ExplorerTab::Graph),
+                tab_span("Timeline", tab == ExplorerTab::Timeline),
             ])),
             chunks[0],
         );
@@ -95,172 +92,141 @@ impl Dashboard {
             .selected_history()
             .map(|h| h.visits.clone())
             .unwrap_or_default();
-        match explorer.tab {
-            ExplorerTab::Graph => self.draw_explorer_graph(frame, chunks[1], agent, &visits),
+        match tab {
+            ExplorerTab::Graph => self.draw_explorer_graph(frame, chunks[1], agent),
             ExplorerTab::Timeline => {
-                self.draw_explorer_timeline(frame, chunks[1], &visits, explorer.timeline_selected)
+                self.draw_explorer_timeline(frame, chunks[1], &visits, timeline_selected)
             }
         }
 
         // ── Hint bar ──
-        use crate::tui::widgets::footer::{draw_hint_bar, hint};
-        let hints = match explorer.tab {
+        let hints = match tab {
             ExplorerTab::Graph => vec![
+                hint("←→↑↓", "select a stage"),
+                hint("enter", "open its tab"),
+                hint("+ -", "zoom"),
+                hint("f", "fit"),
+                hint("e", "escape edges"),
+                hint("u", "unvisited"),
+                hint("drag/wheel", "pan/zoom"),
                 hint("tab", "timeline"),
-                hint("↑↓", "scroll"),
-                hint("u", "toggle unvisited"),
+                hint("?", "help"),
                 hint("esc/g", "close"),
             ],
             ExplorerTab::Timeline => vec![
                 hint("tab", "graph"),
                 hint("↑↓", "select a visit"),
                 hint("enter", "open its context"),
+                hint("?", "help"),
                 hint("esc/g", "close"),
             ],
         };
         draw_hint_bar(frame, chunks[2], None, &hints, false);
     }
 
-    fn draw_explorer_graph(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        agent: &DashboardAgent,
-        visits: &[StageVisit],
-    ) {
-        let Some(explorer) = self.stage_explorer.as_ref() else {
+    /// The graph tab: paint the run onto the canvas, draw it, and describe
+    /// whatever is selected on the line beneath.
+    fn draw_explorer_graph(&mut self, frame: &mut Frame, area: Rect, agent: &DashboardAgent) {
+        let live = self.live_overlay_for(agent);
+        let Some(explorer) = self.stage_explorer.as_mut() else {
             return;
         };
-        let Some(graph) = agent.graph_info.as_ref() else {
-            return;
-        };
-        let layout = graph_layout::layout(graph);
-
-        // With unvisited stages hidden, their edges hide too: an arrow into
-        // a node that is not on screen only confuses.
-        let hidden = |name: &str| -> bool {
-            !explorer.show_unvisited
-                && visit_count(visits, name) == 0
-                && !(name == agent.stage
-                    && !matches!(
-                        agent.status,
-                        AgentDisplayStatus::Complete
-                            | AgentDisplayStatus::CompleteInteractive
-                            | AgentDisplayStatus::Cancelled
-                    ))
-        };
-
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        for l in 0..=layout.max_layer {
-            let nodes = layout.layer_nodes(l);
-            if nodes.is_empty() {
-                continue;
-            }
-            // The layer's node boxes, side by side. Parallel branches share
-            // the row - the thing the one-row strip could not show.
-            let mut spans: Vec<Span<'static>> = vec![Span::styled(
-                format!("{l:>2}  "),
-                Style::default().fg(C_DIM),
-            )];
-            let mut drew_any = false;
-            for node in &nodes {
-                let visited = visit_count(visits, &node.name);
-                let is_current = node.name == agent.stage
-                    && !matches!(
-                        agent.status,
-                        AgentDisplayStatus::Complete
-                            | AgentDisplayStatus::CompleteInteractive
-                            | AgentDisplayStatus::Cancelled
-                    );
-                if hidden(&node.name) {
-                    continue;
-                }
-                drew_any = true;
-                let (glyph, style) = if is_current {
-                    (
-                        GLYPH_ACTIVE,
-                        Style::default()
-                            .fg(C_ACCENT)
-                            .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-                    )
-                } else if visited > 0 {
-                    (GLYPH_COMPLETE, Style::default().fg(C_WHITE))
-                } else {
-                    (GLYPH_PENDING, Style::default().fg(C_DIM))
-                };
-                let mut label = format!("[ {glyph} {}", node.name);
-                if visited > 1 {
-                    label.push_str(&format!(" ×{visited}"));
-                }
-                if let Some(v) = last_visit(visits, &node.name) {
-                    label.push_str(&format!(" · {}", clock(v.entered_at)));
-                }
-                label.push_str(" ]");
-                spans.push(Span::styled(label, style));
-                spans.push(Span::raw("   "));
-            }
-            if !drew_any {
-                continue;
-            }
-            lines.push(Line::from(spans));
-
-            // Every edge leaving this layer, under its source. Forward edges
-            // point down; back-edges (revisit loops) are marked distinctly.
-            for node in &nodes {
-                let edges = layout
-                    .edges
-                    .iter()
-                    .filter(|e| e.from == node.name && !hidden(&e.from) && !hidden(&e.to));
-                for edge in edges {
-                    let cond = if edge.condition == "always" {
-                        String::new()
-                    } else {
-                        format!(" [{}]", edge.condition)
-                    };
-                    let hint_part = edge
-                        .hint
-                        .as_deref()
-                        .map(|h| format!(" - {h}"))
-                        .unwrap_or_default();
-                    if edge.back_edge {
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("      ↺ {} ╌╌▶ {}", edge.from, edge.to),
-                                Style::default().fg(C_WARN),
-                            ),
-                            Span::styled(cond, Style::default().fg(C_WARN)),
-                            Span::styled(hint_part, Style::default().fg(C_DIM)),
-                        ]));
-                    } else {
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("      {} ──▶ {}", edge.from, edge.to),
-                                Style::default().fg(C_MUTED),
-                            ),
-                            Span::styled(cond, Style::default().fg(C_ACCENT)),
-                            Span::styled(hint_part, Style::default().fg(C_DIM)),
-                        ]));
-                    }
-                }
-            }
-            lines.push(Line::from(""));
-        }
-
+        explorer.view.apply_live(&live);
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .split(area);
+        let title = format!(
+            " Graph · {} · zoom {:.0}%{} ",
+            if explorer.view.show_escape() {
+                "escape edges shown"
+            } else {
+                "escape edges hidden (e)"
+            },
+            explorer.view.zoom() * 100.0,
+            if explorer.view.show_unvisited() {
+                ""
+            } else {
+                " · unvisited hidden (u)"
+            },
+        );
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(C_BORDER_FOCUS))
-            .title(Span::styled(
-                " Graph  (layers run top to bottom; ↺ = revisit loop) ",
-                Style::default().fg(C_ACCENT),
-            ));
-        frame.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .scroll((explorer.scroll.min(u16::MAX as usize) as u16, 0))
-                .block(block),
-            area,
-        );
+            .title(Span::styled(title, Style::default().fg(C_ACCENT)));
+        let canvas = explorer.view.render(frame, rows[0], Some(block));
+        self.pane_rects.push((PaneId::ExplorerGraph, canvas));
+
+        let line = match explorer.view.selection() {
+            Selection::Node(id) => {
+                let graph = explorer.view.graph();
+                let mut spans = vec![Span::styled(
+                    format!(" {id} "),
+                    Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
+                )];
+                // A selected id always names a node of this graph; the map
+                // is for the type, not a case.
+                let facts: Vec<String> = graph
+                    .node(&id)
+                    .map(|node| {
+                        let mut facts: Vec<String> = vec![node.kind_label().to_string()];
+                        if let Some(max) = node.max_iterations {
+                            facts.push(format!("max {max} iterations"));
+                        }
+                        if let Some(max) = node.max_revisits {
+                            facts.push(format!("max {max} revisits"));
+                        }
+                        if node.self_loop {
+                            facts.push("may repeat itself".to_string());
+                        }
+                        if let Some(description) = &node.description {
+                            facts.push(description.clone());
+                        }
+                        facts
+                    })
+                    .unwrap_or_default();
+                spans.push(Span::styled(
+                    facts.join(" · "),
+                    Style::default().fg(C_MUTED),
+                ));
+                let targets: Vec<String> = graph
+                    .outgoing(&id)
+                    .map(|e| {
+                        let label = e.condition_label();
+                        if label.is_empty() {
+                            format!("→ {}", e.to)
+                        } else {
+                            format!("→ {} [{label}]", e.to)
+                        }
+                    })
+                    .collect();
+                if !targets.is_empty() {
+                    spans.push(Span::styled(
+                        format!("  {}", targets.join("  ")),
+                        Style::default().fg(C_ACCENT),
+                    ));
+                }
+                Line::from(spans)
+            }
+            Selection::Edge(edge) => {
+                let label = edge.condition_label();
+                let mut text = format!(" {} → {}", edge.from, edge.to);
+                if !label.is_empty() {
+                    text.push_str(&format!(" [{label}]"));
+                }
+                text.push_str(&format!(" · transform {}", edge.transform));
+                if let Some(hint) = &edge.hint {
+                    text.push_str(&format!(" · {hint}"));
+                }
+                Line::from(Span::styled(text, Style::default().fg(C_MUTED)))
+            }
+            Selection::Nothing => Line::from(Span::styled(
+                " Select a stage with the arrows or a click; enter opens its tab.",
+                Style::default().fg(C_DIM),
+            )),
+        };
+        frame.render_widget(Paragraph::new(line), rows[1]);
     }
 
     fn draw_explorer_timeline(
@@ -327,20 +293,59 @@ impl Dashboard {
 
 #[cfg(test)]
 mod tests {
-    use crate::commands::dashboard::graph::{GraphEdge, GraphTransitionInfo};
+    use std::sync::Arc;
+
     use crate::commands::dashboard::history::{RunHistoryCache, derive_visits};
-    use crate::commands::dashboard::test_support::{make_test_dashboard, rendered_buffer};
+    use crate::commands::dashboard::test_support::{
+        make_test_dashboard, rendered_buffer, style_at_text,
+    };
     use crate::commands::dashboard::types::*;
+    use crate::tui::flowgraph::{FlowView, NodeStyle, StageGraph};
+    use crate::tui::theme::*;
+    use crossterm::event::KeyCode;
+    use leviath_core::manifest::parse_manifest;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    fn stage_graph() -> Arc<StageGraph> {
+        Arc::new(StageGraph::from_blueprint(
+            &parse_manifest(
+                r#"
+[agent]
+name = "grapher"
+[stages.plan]
+description = "decide what to build"
+max_iterations = 5
+[stages.plan.transitions.implement]
+hint = "ready"
+[stages.implement]
+[stages.implement.transitions.review]
+[stages.implement.transitions.recover]
+condition = "error"
+[stages.review]
+max_revisits = 2
+[stages.review.transitions.implement]
+condition = "llm_choice"
+[stages.review.transitions.review]
+[stages.review.transitions.island]
+[stages.recover]
+[stages.recover.transitions.implement]
+[stages.island]
+mode = "output"
+[stages.island.transitions]
+"#,
+            )
+            .unwrap(),
+        ))
+    }
+
     fn graph_agent() -> DashboardAgent {
-        let mut agent = DashboardAgent {
+        DashboardAgent {
             id: "run-1".to_string(),
             blueprint_name: "grapher".to_string(),
             stage: "implement".to_string(),
             stage_index: 1,
-            num_stages: 3,
+            num_stages: 5,
             status: AgentDisplayStatus::Active,
             tokens_in: 0,
             tokens_out: 0,
@@ -362,49 +367,14 @@ mod tests {
             last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
-            graph_info: None,
+            graph: Some(stage_graph()),
             accepts_messages: true,
             taint_summary: vec![],
-        };
-        let mut edges = std::collections::HashMap::new();
-        edges.insert(
-            "plan".to_string(),
-            vec![GraphEdge {
-                target: "implement".to_string(),
-                hint: Some("ready".to_string()),
-                condition: "always".to_string(),
-                transform: "direct".to_string(),
-            }],
-        );
-        edges.insert(
-            "implement".to_string(),
-            vec![GraphEdge {
-                target: "review".to_string(),
-                hint: None,
-                condition: "always".to_string(),
-                transform: "direct".to_string(),
-            }],
-        );
-        edges.insert(
-            "review".to_string(),
-            vec![GraphEdge {
-                target: "implement".to_string(),
-                hint: None,
-                condition: "llm_choice".to_string(),
-                transform: "direct".to_string(),
-            }],
-        );
-        agent.graph_info = Some(GraphTransitionInfo {
-            edges,
-            entry_stage: "plan".to_string(),
-            stage_names: vec![
-                "plan".to_string(),
-                "implement".to_string(),
-                "review".to_string(),
-                "island".to_string(),
-            ],
-        });
-        agent
+        }
+    }
+
+    fn explorer() -> ExplorerState {
+        ExplorerState::new(FlowView::new(stage_graph(), NodeStyle::Full, false))
     }
 
     fn seed(dash: &mut crate::commands::dashboard::state::Dashboard, stages: &[(&str, i64)]) {
@@ -442,24 +412,27 @@ mod tests {
         });
     }
 
-    fn rendered(dash: &mut crate::commands::dashboard::state::Dashboard) -> String {
-        let backend = TestBackend::new(140, 40);
+    fn rendered_at(
+        dash: &mut crate::commands::dashboard::state::Dashboard,
+        w: u16,
+        h: u16,
+    ) -> (Terminal<TestBackend>, String) {
+        let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
         let agent = dash.agents[0].clone();
         terminal
             .draw(|f| dash.draw_stage_explorer(f, f.area(), &agent))
             .unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect()
+        let text = rendered_buffer(&terminal);
+        (terminal, text)
+    }
+
+    fn rendered(dash: &mut crate::commands::dashboard::state::Dashboard) -> String {
+        rendered_at(dash, 200, 50).1
     }
 
     #[test]
-    fn the_graph_tab_shows_layers_edges_revisits_and_back_edges() {
+    fn the_graph_tab_draws_every_stage_marks_the_current_one_and_counts_revisits() {
         let mut dash = make_test_dashboard();
         dash.agents.push(graph_agent());
         dash.update_display_indices();
@@ -472,39 +445,113 @@ mod tests {
                 ("implement", 200),
             ],
         );
-        dash.stage_explorer = Some(ExplorerState::new());
+        dash.stage_explorer = Some(explorer());
 
-        let text = rendered(&mut dash);
+        let (terminal, text) = rendered_at(&mut dash, 200, 50);
         assert!(text.contains("Stage explorer"), "{text}");
+        for stage in ["plan", "implement", "review", "recover", "island"] {
+            assert!(text.contains(stage), "{stage}: {text}");
+        }
         assert!(text.contains("implement ×2"), "revisit count: {text}");
-        assert!(text.contains("plan ──▶ implement"), "forward edge: {text}");
-        assert!(
-            text.contains("↺ review ╌╌▶ implement"),
-            "back edge marked: {text}"
-        );
         assert!(text.contains("[llm_choice]"), "condition label: {text}");
-        assert!(text.contains("- ready"), "edge hint: {text}");
+        assert!(text.contains("escape edges hidden (e)"), "{text}");
+        assert!(text.contains("select a stage"), "hint bar: {text}");
+        assert!(text.contains("Select a stage with the arrows"), "{text}");
+        // The current stage is drawn in the active colour, a pending one dim.
+        assert_eq!(style_at_text(&terminal, "implement ×2").fg, Some(C_ACTIVE));
+        assert_eq!(style_at_text(&terminal, "island").fg, Some(C_DIM));
+        // The graph pane registered its canvas for the mouse.
         assert!(
-            text.contains("island"),
-            "unreachable stage still shown: {text}"
+            dash.pane_rects
+                .iter()
+                .any(|(id, rect)| *id == PaneId::ExplorerGraph && rect.width > 10),
+            "{:?}",
+            dash.pane_rects
         );
-        assert!(text.contains("toggle unvisited"), "hint bar: {text}");
     }
 
     #[test]
-    fn u_hides_unvisited_stages_from_the_graph() {
+    fn selecting_a_stage_or_an_edge_describes_it_under_the_canvas() {
         let mut dash = make_test_dashboard();
         dash.agents.push(graph_agent());
         dash.update_display_indices();
+        dash.stage_explorer = Some(explorer());
+        rendered(&mut dash);
+        dash.stage_explorer
+            .as_mut()
+            .unwrap()
+            .view
+            .handle_key(KeyCode::Char(']'));
+        let text = rendered(&mut dash);
+        assert!(
+            text.contains("plan autonomous · max 5 iterations · decide what to build"),
+            "{text}"
+        );
+        assert!(text.contains("→ implement"), "{text}");
+        // A stage with a revisit budget and a self-loop says so; a terminal
+        // one lists no targets.
+        dash.stage_explorer
+            .as_mut()
+            .unwrap()
+            .view
+            .select_stage("review");
+        let text = rendered(&mut dash);
+        assert!(
+            text.contains("review autonomous · max 2 revisits · may repeat itself"),
+            "{text}"
+        );
+        assert!(
+            text.contains("→ implement [llm_choice]  → island"),
+            "{text}"
+        );
+        dash.stage_explorer
+            .as_mut()
+            .unwrap()
+            .view
+            .select_stage("island");
+        let text = rendered(&mut dash);
+        assert!(text.contains("island output"), "{text}");
+        assert!(!text.contains("island output  →"), "{text}");
+        dash.stage_explorer
+            .as_mut()
+            .unwrap()
+            .view
+            .handle_key(KeyCode::Char('e'));
+        let text = rendered(&mut dash);
+        assert!(text.contains("escape edges shown"), "{text}");
+        assert!(text.contains("[error]"), "{text}");
+        // An edge: pick the first one directly on the canvas.
+        let mut explorer = explorer();
+        explorer.view.select_edge_for_test(0);
+        dash.stage_explorer = Some(explorer);
+        let text = rendered(&mut dash);
+        assert!(
+            text.contains("plan → implement · transform direct · ready"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn u_hides_unvisited_stages_from_the_graph_but_never_the_current_one() {
+        let mut dash = make_test_dashboard();
+        let mut agent = graph_agent();
+        agent.stage = "review".to_string(); // current but never archived
+        dash.agents.push(agent);
+        dash.update_display_indices();
         seed(&mut dash, &[("plan", 10), ("implement", 70)]);
-        let mut explorer = ExplorerState::new();
-        explorer.show_unvisited = false;
+        let mut explorer = explorer();
+        explorer.view.toggle_unvisited();
         dash.stage_explorer = Some(explorer);
 
         let text = rendered(&mut dash);
         assert!(!text.contains("island"), "{text}");
-        assert!(!text.contains("review"), "unvisited stage hidden: {text}");
+        assert!(!text.contains("recover"), "{text}");
         assert!(text.contains("plan"), "{text}");
+        assert!(
+            text.contains("review"),
+            "the current stage never hides: {text}"
+        );
+        assert!(text.contains("unvisited hidden (u)"), "{text}");
     }
 
     #[test]
@@ -517,7 +564,7 @@ mod tests {
             &[("plan", 10), ("implement", 70), ("implement", 100)],
         );
         dash.context_history_idx = Some(1);
-        let mut explorer = ExplorerState::new();
+        let mut explorer = explorer();
         explorer.tab = ExplorerTab::Timeline;
         explorer.timeline_selected = 1;
         dash.stage_explorer = Some(explorer);
@@ -531,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn guards_hold_when_the_explorer_or_graph_is_missing() {
+    fn guards_hold_when_the_explorer_is_missing() {
         // No explorer state: drawing is a no-op.
         let mut dash = make_test_dashboard();
         dash.agents.push(graph_agent());
@@ -539,76 +586,20 @@ mod tests {
         let text = rendered(&mut dash);
         assert!(!text.contains("Stage explorer"));
 
-        // Explorer open on a linear agent: the graph body declines.
-        let mut dash = make_test_dashboard();
-        let mut linear = graph_agent();
-        linear.graph_info = None;
-        dash.agents.push(linear);
-        dash.update_display_indices();
-        dash.stage_explorer = Some(ExplorerState::new());
-        let text = rendered(&mut dash);
-        assert!(text.contains("Stage explorer"), "chrome still draws");
-    }
-
-    #[test]
-    fn the_graph_body_guard_holds_when_called_without_an_explorer() {
-        let mut dash = make_test_dashboard();
-        dash.agents.push(graph_agent());
-        dash.update_display_indices();
+        // The graph body called without an explorer declines too.
         let agent = dash.agents[0].clone();
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| dash.draw_explorer_graph(f, f.area(), &agent, &[]))
+            .draw(|f| dash.draw_explorer_graph(f, f.area(), &agent))
             .unwrap();
-        // The guard is the point: with no explorer state there is nothing to
-        // lay out, so it must return before drawing rather than draw an empty
-        // graph frame.
         let buf = rendered_buffer(&terminal);
         assert!(buf.trim().is_empty(), "{buf}");
     }
 
     #[test]
-    fn the_current_stage_stays_visible_even_unvisited_and_hidden_mode() {
-        let mut dash = make_test_dashboard();
-        let mut agent = graph_agent();
-        agent.stage = "review".to_string(); // current but never archived
-        dash.agents.clear();
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        let mut explorer = ExplorerState::new();
-        explorer.show_unvisited = false;
-        dash.stage_explorer = Some(explorer);
-        let text = rendered(&mut dash);
-        assert!(
-            text.contains("review"),
-            "the current stage never hides: {text}"
-        );
-        assert!(!text.contains("island"), "{text}");
-    }
-
-    #[test]
-    fn a_graph_whose_entry_is_missing_still_draws_its_stages() {
-        // The layout gives such a graph an empty layer 0; the renderer skips
-        // it rather than drawing a blank band.
-        let mut dash = make_test_dashboard();
-        let mut agent = graph_agent();
-        agent
-            .graph_info
-            .as_mut()
-            .expect("graph_agent always carries graph info")
-            .entry_stage = "ghost".to_string();
-        dash.agents.clear();
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.stage_explorer = Some(ExplorerState::new());
-        let text = rendered(&mut dash);
-        assert!(text.contains("plan"), "{text}");
-    }
-
-    #[test]
     fn duration_and_clock_formatting() {
-        use crate::commands::dashboard::history::StageVisit;
+        use crate::commands::dashboard::history::{StageVisit, clock};
         let closed = StageVisit {
             stage: "s".to_string(),
             entered_at: 10,
@@ -627,7 +618,7 @@ mod tests {
             ..closed
         };
         assert_eq!(super::duration_label(&open), "…");
-        assert_eq!(super::clock(i64::MIN), "", "unrepresentable time is blank");
+        assert_eq!(clock(i64::MIN), "", "unrepresentable time is blank");
     }
 
     #[test]
@@ -635,7 +626,7 @@ mod tests {
         let mut dash = make_test_dashboard();
         dash.agents.push(graph_agent());
         dash.update_display_indices();
-        let mut explorer = ExplorerState::new();
+        let mut explorer = explorer();
         explorer.tab = ExplorerTab::Timeline;
         dash.stage_explorer = Some(explorer);
 

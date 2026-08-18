@@ -67,6 +67,17 @@ pub(super) fn derive_visits(points: &[RunPoint]) -> Vec<StageVisit> {
     visits
 }
 
+/// `HH:MM:SS` in local time.
+pub(super) fn clock(at: i64) -> String {
+    chrono::DateTime::from_timestamp(at, 0)
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
 /// How many times each stage name appears in the visit timeline.
 pub(super) fn visit_count(visits: &[StageVisit], stage: &str) -> usize {
     visits.iter().filter(|v| v.stage == stage).count()
