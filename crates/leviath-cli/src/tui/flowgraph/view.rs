@@ -230,6 +230,9 @@ impl FlowView {
             .with_theme(Theme::Custom(palette()))
             .with_min_zoom(0.4)
             .with_max_zoom(1.0)
+            // A press on empty canvas is how a pan starts; it must not throw
+            // the selection away, or Enter after a pan opens nothing.
+            .with_deselect_on_pane_click(false)
             .with_locked(locked);
         flow.set_node_positions(layout.positions(node_w, node_h, gap_x, gap_y));
         flow.request_fit_view_with_options(fit_options(max_stem));
@@ -893,6 +896,7 @@ merge_stage = "merge"
         for locked in [false, true] {
             let mut v = FlowView::new(graph(), NodeStyle::Compact, locked);
             draw(&mut v, 60, 12);
+            v.select_stage("plan");
             let pan = v.pan();
             // Press on empty canvas (far corner), drag, release.
             let c = v.canvas();
@@ -901,6 +905,11 @@ merge_stage = "merge"
             v.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), x - 5, y - 2));
             v.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), x - 5, y - 2));
             assert_ne!(v.pan(), pan, "locked={locked}");
+            assert_eq!(
+                v.selection(),
+                Selection::Node("plan".into()),
+                "a pan keeps the selection (locked={locked})"
+            );
             let zoom = v.zoom();
             v.handle_mouse(mouse(MouseEventKind::ScrollDown, x, y));
             assert!(v.zoom() < zoom, "locked={locked}");

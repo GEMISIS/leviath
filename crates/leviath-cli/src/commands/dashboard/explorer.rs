@@ -142,8 +142,16 @@ impl Dashboard {
             .map(|name| {
                 let record = agent.stages.iter().find(|s| s.name == name);
                 StageLive {
-                    entered: record
-                        .is_some_and(|r| r.entered || r.status != StageRunStatus::Pending),
+                    // `entered` is the ledger's word; the status is a fallback
+                    // for a ledger written before the flag existed. Pending and
+                    // Skipped both mean the run never got there.
+                    entered: record.is_some_and(|r| {
+                        r.entered
+                            || !matches!(
+                                r.status,
+                                StageRunStatus::Pending | StageRunStatus::Skipped
+                            )
+                    }),
                     errored: record.is_some_and(|r| r.status == StageRunStatus::Error),
                     visits: visit_count(visits, &name),
                     last_seen: last_visit(visits, &name).map(|v| clock(v.entered_at)),
@@ -583,7 +591,7 @@ condition = "llm_choice"
             record("plan", StageRunStatus::Complete),
             record("implement", StageRunStatus::Active),
             record("review", StageRunStatus::Error),
-            record("done", StageRunStatus::Pending),
+            record("done", StageRunStatus::Skipped),
         ];
         // Two workers of this run, one finished, one failed; and a stranger.
         let mut done = agent("w-1", AgentDisplayStatus::Complete);
@@ -627,7 +635,10 @@ condition = "llm_choice"
         assert!(stage("plan").last_seen.is_some());
         assert_eq!(stage("implement").visits, 2);
         assert!(stage("review").errored);
-        assert!(!stage("done").entered && stage("done").last_seen.is_none());
+        assert!(
+            !stage("done").entered && stage("done").last_seen.is_none(),
+            "a skipped stage was never entered"
+        );
         // External nodes are in the overlay too, untouched.
         assert!(!stage("ext:researcher").entered);
 

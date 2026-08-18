@@ -145,11 +145,11 @@ pub(crate) struct StageNodeContent {
     pub(crate) is_entry: bool,
     pub(crate) is_terminal: bool,
     pub(crate) self_loop: bool,
-    pub(crate) max_iterations: Option<usize>,
     pub(crate) style: NodeStyle,
     // ── live ──
     pub(crate) status: NodeStatus,
-    /// Iterations taken in the current visit, when this is the current stage.
+    /// The run's iteration count, when this is the current stage. It counts
+    /// the whole run, so it is not shown against the stage's own ceiling.
     pub(crate) iteration: Option<usize>,
     /// When the stage was last entered, as `HH:MM:SS`.
     pub(crate) last_seen: Option<String>,
@@ -168,7 +168,6 @@ impl StageNodeContent {
             is_entry: node.is_entry,
             is_terminal: node.is_terminal || node.allow_complete,
             self_loop: node.self_loop,
-            max_iterations: node.max_iterations,
             style,
             status: NodeStatus::Pending,
             iteration: None,
@@ -215,17 +214,16 @@ impl StageNodeContent {
         if let Some(w) = self.workers {
             return format!("⑂ {} run · {} done · {} fail", w.running, w.done, w.failed);
         }
-        let mut parts: Vec<String> = vec![self.kind_label.to_string()];
+        // The run's phase takes the kind label's place on the stage the run
+        // is in: "waiting" or "complete" is what matters there, and the row
+        // is not wide enough for both.
+        let phase = match self.status {
+            NodeStatus::Current { run, .. } => run.word(),
+            NodeStatus::Pending | NodeStatus::Visited { .. } => None,
+        };
+        let mut parts: Vec<String> = vec![phase.unwrap_or(self.kind_label).to_string()];
         if let Some(iteration) = self.iteration {
-            match self.max_iterations {
-                Some(max) => parts.push(format!("iter {iteration}/{max}")),
-                None => parts.push(format!("iter {iteration}")),
-            }
-        }
-        if let NodeStatus::Current { run, .. } = self.status
-            && let Some(word) = run.word()
-        {
-            parts.push(word.to_string());
+            parts.push(format!("iter {iteration}"));
         }
         parts.join(" · ")
     }
@@ -418,9 +416,9 @@ mod tests {
                 RunPhase::Active,
                 SPINNER[3],
                 C_ACTIVE,
-                "autonomous · iter 3/9",
+                "autonomous · iter 3",
             ),
-            (RunPhase::Waiting, GLYPH_WAITING, C_WARN, "waiting"),
+            (RunPhase::Waiting, GLYPH_WAITING, C_WARN, "waiting · iter 3"),
             (RunPhase::Paused, GLYPH_PENDING, C_WARN, "paused"),
             (RunPhase::Idle, GLYPH_PENDING, C_DIM, "idle"),
             (RunPhase::Stale, GLYPH_ERROR, C_WARN, "stale"),
@@ -430,7 +428,6 @@ mod tests {
         ];
         c.tick = 3;
         c.iteration = Some(3);
-        c.max_iterations = Some(9);
         for (run, glyph, colour, word) in phases {
             c.status = NodeStatus::Current { run, times: 1 };
             let (buf, text) = draw(&c, area, false);
@@ -440,14 +437,16 @@ mod tests {
             assert_eq!(style.fg, Some(colour), "{run:?}");
             assert!(style.add_modifier.contains(Modifier::BOLD), "{run:?}");
         }
-        // Without a ceiling the iteration stands alone.
-        c.max_iterations = None;
         c.status = NodeStatus::Current {
             run: RunPhase::Active,
             times: 3,
         };
         let (_, text) = draw(&c, area, false);
         assert!(text.contains("iter 3"), "{text}");
+        assert!(
+            !text.contains("iter 3/"),
+            "the ceiling is per stage, the count per run: {text}"
+        );
         assert!(text.contains("×3"), "{text}");
     }
 
