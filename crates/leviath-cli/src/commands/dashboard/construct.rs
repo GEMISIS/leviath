@@ -117,6 +117,7 @@ impl Dashboard {
             pane_rects: Vec::new(),
             mouse_capture: None,
             detail_band: None,
+            new_run_preview: None,
             log_viewport: 0,
             stage_explorer: None,
             context_tree: ContextTreeState::default(),

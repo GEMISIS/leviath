@@ -51,6 +51,8 @@ pub(crate) struct Dashboard {
     /// The detail view's graph band, kept between frames; rebuilt when the
     /// selected run changes.
     pub(super) detail_band: Option<super::detail_band::DetailBand>,
+    /// The new-run screen's blueprint preview, for the selected catalog row.
+    pub(super) new_run_preview: Option<super::new_run_preview::BlueprintPreview>,
     /// The log panel's viewport height as of the last draw, so key scrolling
     /// pages by what is actually visible.
     pub(super) log_viewport: usize,

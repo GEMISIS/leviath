@@ -29,9 +29,22 @@ impl Dashboard {
             .split(rows[0]);
 
         self.draw_new_run_agents(frame, panes[0]);
-        self.draw_new_run_task(frame, panes[1]);
+        // The selected blueprint's stage graph sits above the task editor,
+        // when the pane has the rows for both; the editor keeps its minimum.
+        let preview_h = super::super::new_run_preview::preview_height(panes[1].height);
+        let task_area = if preview_h > 0 {
+            let right = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(preview_h), Constraint::Min(1)])
+                .split(panes[1]);
+            self.draw_new_run_preview(frame, right[0]);
+            right[1]
+        } else {
+            panes[1]
+        };
+        self.draw_new_run_task(frame, task_area);
         // The completion floats over the task pane, so it is drawn after it.
-        self.draw_file_ref_popup(frame, panes[1]);
+        self.draw_file_ref_popup(frame, task_area);
         self.draw_new_run_help_bar(frame, rows[1]);
     }
 

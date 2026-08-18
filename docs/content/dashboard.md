@@ -36,9 +36,9 @@ panel and answer. `lev respond` does the same from the shell.
 - **Agent run table**: title and run id, blueprint, stage, status, tokens, and start time, with
   sub-agents nested under their parent. Titles are auto-generated per run. The model, iteration,
   and context-window occupancy live in the detail view.
-- **Detail view**: per-stage tabs, a context-window visualization, and content panes for
-  **Output**, **Logs**, and **Context** (JSON). Markdown is rendered. `g` opens the stage graph:
-  the blueprint drawn as boxes and routed edges, with the stage the run is in lit up.
+- **Detail view**: the blueprint's stage graph as a band under the header (the flat stage tabs
+  on a short terminal), a context-window visualization, and content panes for **Output**,
+  **Logs**, and **Context** (JSON). Markdown is rendered. `g` opens the graph full screen.
 - **Interactions**: answer an agent's question (free-text, edit, multiple-choice, tool-approval, or
   confirm) or send it a mid-run message.
 - **Mouse support**: wheel scroll, click-drag select with copy-on-release, OSC52 copy over SSH,
@@ -98,8 +98,13 @@ skips marked runs that have already finished.
 
 ### Starting a run (`n`)
 
-Agent blueprints on the left, the task on the right. Once it starts, the dashboard opens that run's page, and
-`Esc` from there goes back to the list rather than back into the form.
+Agent blueprints on the left, the task on the right, and above the task the selected blueprint's
+stage graph, so you can see what an agent will do before you give it a task: how many stages, in
+what order, where it loops back. It follows the selection, previews bundled blueprints that are not
+installed yet from the copy inside the binary, and says so when a manifest cannot be read. Drag to
+pan it; on a screen too short to fit both, the task keeps its rows and the preview is skipped. Once
+the run starts, the dashboard opens that run's page, and `Esc` from there goes back to the list
+rather than back into the form.
 
 | Key | Action |
 |---|---|
@@ -119,6 +124,12 @@ the blueprint asks a person for. Those still stop, and one nobody answers ends t
 interaction timeout expires. The setting is off again every time the screen opens.
 
 ### Detail view
+
+On a terminal at least 32 rows tall the stage row is the blueprint's graph: one box per stage,
+transitions as edges, the stage the run is in in the run's colour, visited stages with their
+visit count, the selected stage reversed. `←` / `→` and `1`-`9` move through it exactly as they
+did through the tabs, and dragging pans it. On a shorter terminal, and for a run whose blueprint
+could not be read, the flat tab strip stays.
 
 | Key | Action |
 |---|---|
