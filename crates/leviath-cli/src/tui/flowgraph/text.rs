@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use rataflow::Position;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
@@ -18,6 +17,7 @@ use super::view::FlowView;
 pub(crate) fn render_to_text(graph: &StageGraph, width: u16) -> String {
     let mut view = FlowView::new(Arc::new(graph.clone()), NodeStyle::Full, true);
     view.toggle_escape();
+    view.fit();
     let (world_w, world_h) = view.world_extent();
     // Room for the edge lanes above and below the nodes and a cell of margin
     // each side; the fit-view keeps zoom at 1.0 when everything fits and
@@ -43,20 +43,6 @@ pub(crate) fn render_to_text(graph: &StageGraph, width: u16) -> String {
 }
 
 impl FlowView {
-    /// The far corner of the laid-out graph in world units.
-    pub(crate) fn world_extent(&self) -> (f64, f64) {
-        self.flow()
-            .nodes()
-            .map(|n| n.bounds())
-            .fold((0.0_f64, 0.0_f64), |(w, h), b| {
-                let Position { x, y } = b.position;
-                (
-                    w.max(x + b.dimensions.width),
-                    h.max(y + b.dimensions.height),
-                )
-            })
-    }
-
     /// Draw straight into a buffer, for the text render.
     pub(crate) fn render_into(&mut self, area: Rect, buf: &mut Buffer) {
         self.flow_mut().render(area, buf);
