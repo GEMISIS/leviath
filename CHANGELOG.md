@@ -13,6 +13,31 @@ same list.
 
 ## Unreleased
 
+- Fixed: `lev serve`, `lev dash`, and `lev agent-client` ride out a daemon
+  restart instead of breaking. A request that lands while the daemon is down
+  (a `lev daemon restart`, a supervisor relaunch, or the restart that follows
+  `lev update`) waits up to ten seconds for it to come back and is served by
+  the new daemon, where before `lev serve` answered 503 and the ACP bridge
+  refused the turn, for a daemon that was back a second later. The wait is per
+  outage, not per request: a daemon that is really gone costs one caller the
+  ten seconds and every caller after that fails fast until it returns. Only
+  requests that cannot double an effect are retried after they were sent; a
+  spawn or a message that got no reply is reported rather than sent twice. The
+  ACP bridge follows a run onto the new daemon mid-turn instead of ending the
+  turn with a truncated reply. One-shot commands (`lev ps`, `lev cancel`) are
+  unchanged: a daemon that is not running is still reported at once.
+- New: the daemon says who it is (version, build, pid) in the control
+  handshake, and each front-end uses that to tell a restart from an update.
+  `lev serve` logs the reconnect, tells WebSocket subscribers with a
+  `daemon_link` event (connected or not, which daemon, whether it restarted),
+  and when the daemon came back on a different build than the server, says so
+  in the log, in the event, and in a `daemon_link` greeting to every new
+  WebSocket subscriber, with the remedy: restart `lev serve`. Requests keep
+  working while the two still understand each other; one that fails because
+  they no longer do answers 502 with the same text instead of a 503 that a
+  daemon restart cannot fix. `lev dash` says the same in its log and a toast,
+  and wears a chip on the run list while the daemon is unreachable or
+  updated. The ACP bridge tells the editor in the conversation.
 - New: `lev dash` draws a run's blueprint as a stage graph. The stage
   explorer (`g` in the detail view) is a canvas now: stages are boxes on
   layers, transitions are routed edges, the stage the run is in spins in

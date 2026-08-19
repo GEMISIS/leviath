@@ -34,8 +34,9 @@ pub(super) async fn ws_global(
     // channel becomes Closed and rx.recv() returns Err(Closed) immediately,
     // making that match arm reachable in tests.
     let rx = state.event_tx.subscribe();
+    let greeting = link_greeting(&state);
     ws.max_write_buffer_size(WS_MAX_WRITE_BUFFER)
-        .on_upgrade(move |socket| handle_ws(socket, rx, None))
+        .on_upgrade(move |socket| handle_ws(socket, rx, None, greeting))
 }
 
 pub(super) async fn ws_agent(
@@ -44,16 +45,47 @@ pub(super) async fn ws_agent(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     let rx = state.event_tx.subscribe();
+    let greeting = link_greeting(&state);
     ws.max_write_buffer_size(WS_MAX_WRITE_BUFFER)
-        .on_upgrade(move |socket| handle_ws(socket, rx, Some(id)))
+        .on_upgrade(move |socket| handle_ws(socket, rx, Some(id), greeting))
+}
+
+/// What a subscriber that connects right now is told first about the daemon:
+/// a [`ServerEvent::DaemonLink`] when there is news - the daemon is not
+/// answering, or it runs different code from this server - and nothing when
+/// all is well, so a healthy stream looks exactly as it always has.
+///
+/// The event loop's re-subscribe attempts keep the client's view of
+/// reachability current while the daemon is down (see `polling::event_loop`),
+/// which is what makes it safe to read here rather than only at a transition.
+fn link_greeting(state: &AppState) -> Option<ServerEvent> {
+    let link = state.control.link();
+    let greeting = ServerEvent::daemon_link(&state.control, link.reachable, false);
+    match &greeting {
+        ServerEvent::DaemonLink {
+            connected: true,
+            restart_advised: None,
+            ..
+        } => None,
+        _ => Some(greeting),
+    }
 }
 
 async fn handle_ws(
     socket: WebSocket,
     rx: broadcast::Receiver<ServerEvent>,
     filter_run_id: Option<String>,
+    greeting: Option<ServerEvent>,
 ) {
-    handle_ws_with(socket, rx, filter_run_id, WS_PING_INTERVAL, WS_SEND_TIMEOUT).await
+    handle_ws_with(
+        socket,
+        rx,
+        filter_run_id,
+        WS_PING_INTERVAL,
+        WS_SEND_TIMEOUT,
+        greeting,
+    )
+    .await
 }
 
 /// Core of the WS relay, with the ping cadence and send deadline injected so
@@ -69,7 +101,16 @@ async fn handle_ws_with(
     filter_run_id: Option<String>,
     ping_every: std::time::Duration,
     send_timeout: std::time::Duration,
+    greeting: Option<ServerEvent>,
 ) {
+    // Something worth saying about the daemon before any run event: said
+    // first. A peer that cannot take even that is a dead peer, and the ping
+    // cadence below catches it the same as any other; nothing to do here.
+    if let Some(greeting) = greeting {
+        let json =
+            serde_json::to_string(&greeting).expect("ServerEvent serialization must not fail");
+        let _ = send_within(&mut socket, send_timeout, Message::Text(json.into())).await;
+    }
     // First ping only after a full interval - a fresh connection is known
     // live, and pinging in the handshake's shadow confuses simple clients.
     let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + ping_every, ping_every);
@@ -89,8 +130,9 @@ async fn handle_ws_with(
                 match event {
                     Ok(ev) => {
                         // If filtering by run_id, skip non-matching events
+                        // (a `DaemonLink` is for every subscriber).
                         if let Some(ref filter) = filter_run_id
-                            && ev.run_id() != filter
+                            && !ev.is_for_run(filter)
                         {
                             continue;
                         }
@@ -362,8 +404,9 @@ mod tests {
                 get(
                     move |State(state): State<AppState>, ws: WebSocketUpgrade| async move {
                         let rx = state.event_tx.subscribe();
+                        let greeting = link_greeting(&state);
                         ws.on_upgrade(move |socket| {
-                            handle_ws_with(socket, rx, None, ping_every, send_timeout)
+                            handle_ws_with(socket, rx, None, ping_every, send_timeout, greeting)
                         })
                     },
                 ),
@@ -613,6 +656,73 @@ mod tests {
         // Close so the server-side handle_ws task terminates instead of
         // idling forever on rx.recv() for the rest of the process lifetime.
         client.send_close().await;
+    }
+
+    /// A subscriber that connects while the daemon is down is told so first,
+    /// on a per-run subscription as much as on the global one: its run's
+    /// events have stopped, and this is what says why. The link event is
+    /// about no run, so the run filter lets it through.
+    #[tokio::test]
+    async fn a_subscriber_arriving_mid_outage_is_greeted_with_the_link_state() {
+        let state = test_state();
+        // The event loop's re-subscribe attempts are what mark an outage; one
+        // failed request stands in for them here.
+        assert!(state.control.list().await.is_err());
+        assert!(!state.control.link().reachable);
+        let addr = spawn_test_server(state).await;
+
+        let mut client = WsTestClient::connect(addr, "/ws/agents/run-match").await;
+        let (opcode, payload) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_frame())
+                .await
+                .expect("timed out waiting for the greeting");
+        assert_text_frame(opcode);
+        let greeting: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(greeting["type"], "daemon_link");
+        assert_eq!(greeting["connected"], false);
+        assert_eq!(greeting["restarted"], false);
+        client.send_close().await;
+    }
+
+    /// A healthy link says nothing on connect (the stream looks exactly as it
+    /// always has), and a link to a daemon on other code says so.
+    #[test]
+    fn the_greeting_speaks_only_when_there_is_news() {
+        let state = test_state();
+        assert!(
+            link_greeting(&state).is_none(),
+            "nothing to say about a healthy link"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_greeting_advises_a_restart_when_the_daemon_is_on_other_code() {
+        let mut updated = crate::test_support::same_code_daemon(77);
+        updated.build = "newer-build".to_string();
+        let daemon = crate::test_support::identified_daemon(updated, 1, |_| {
+            leviath_runtime::control_socket::ControlResponse::Ok { ok: true }
+        });
+        daemon.client.list().await.expect("served, and introduced");
+        let (tx, _) = broadcast::channel(64);
+        let state = AppState {
+            config: Arc::new(Config::default()),
+            event_tx: tx,
+            control: daemon.client.clone(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
+        };
+        let greeting = serde_json::to_value(link_greeting(&state).expect("news")).unwrap();
+        assert_eq!(greeting["type"], "daemon_link");
+        assert_eq!(greeting["connected"], true);
+        assert_eq!(greeting["daemon"]["build"], "newer-build");
+        assert!(
+            greeting["restart_advised"]
+                .as_str()
+                .unwrap()
+                .contains("restart this process"),
+            "{greeting}"
+        );
+        daemon.server.await.unwrap();
     }
 
     #[tokio::test]

@@ -170,7 +170,7 @@ impl Dashboard {
         // Register for wheel hit-testing and show which pane holds focus.
         self.pane_rects.push((PaneId::RunTable, area));
         let focused = self.main_focus == MainPane::RunList;
-        let block = Block::default()
+        let mut block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(if focused { C_BORDER_FOCUS } else { C_BORDER }))
@@ -185,6 +185,17 @@ impl Dashboard {
                 ))
                 .right_aligned(),
             );
+        // The daemon link's chip, while there is something to say about it:
+        // beside the sort chip, in the colour of how wrong things are.
+        if let Some((chip, colour)) = self.daemon_link.chip() {
+            block = block.title_top(
+                Line::from(Span::styled(
+                    chip,
+                    Style::default().fg(colour).add_modifier(Modifier::BOLD),
+                ))
+                .right_aligned(),
+            );
+        }
 
         if let Some(msg) = empty_state_msg {
             let widget = Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(C_DIM))))
@@ -600,7 +611,7 @@ impl Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::dashboard::test_support::make_test_dashboard;
+    use crate::commands::dashboard::test_support::{make_test_dashboard, style_at_text};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -636,6 +647,37 @@ mod tests {
             accepts_messages: true,
             taint_summary: vec![],
         }
+    }
+
+    /// While the daemon is unreachable the run list says so beside the sort
+    /// chip, in the warning colour; a healthy link draws no chip at all.
+    #[test]
+    fn the_run_list_wears_the_daemon_chip_while_something_is_wrong() {
+        let backend = TestBackend::new(140, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        terminal
+            .draw(|f| dash.draw_agent_table(f, f.area()))
+            .unwrap();
+        assert!(
+            !rendered_buffer(&terminal).contains("daemon"),
+            "healthy: no chip"
+        );
+
+        dash.daemon_link.unreachable = true;
+        terminal
+            .draw(|f| dash.draw_agent_table(f, f.area()))
+            .unwrap();
+        let text = rendered_buffer(&terminal);
+        assert!(text.contains("daemon unreachable, reconnecting"), "{text}");
+        assert!(
+            text.contains("sort:"),
+            "the sort chip is still there: {text}"
+        );
+        assert_eq!(
+            style_at_text(&terminal, "daemon unreachable").fg,
+            Some(crate::tui::theme::C_WARN)
+        );
     }
 
     #[test]

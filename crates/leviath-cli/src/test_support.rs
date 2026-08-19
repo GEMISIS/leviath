@@ -140,6 +140,138 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
     .to_string()
 }
 
+/// A fake daemon that speaks the real control handshake - a token, and the
+/// identity it introduces itself with - and answers every request `respond`
+/// gives it, for as long as `connections` says. Subscribers get the events
+/// sent through the returned broadcast sender, until it is dropped.
+///
+/// The token is created in `dir` (where `ControlClient::for_home` reads it),
+/// so `for_home(id, dir)` reaches it. Tests that need the daemon to *say who
+/// it is* - the reconnect and update surfaces in `serve`, `dash`, and the ACP
+/// bridge - use this; tests that only need answers use the tokenless
+/// hand-rolled fakes beside them, which never handshake.
+///
+/// Deliberately trusting: the first line on every connection is taken to be
+/// the handshake and answered with `Welcome` unread, and every later line is
+/// taken to be a well-formed request. Only clients this crate builds talk to
+/// it, and the runtime's own tests cover a daemon that refuses.
+pub(crate) struct IdentifiedDaemon {
+    /// A client that reaches it (with the token, and this process's build).
+    pub(crate) client: leviath_runtime::control_socket::ControlClient,
+    /// The accept loop, done once `connections` have been served.
+    pub(crate) server: tokio::task::JoinHandle<()>,
+    /// The socket's directory, kept alive as long as the daemon. Tests that
+    /// need to feed subscribers events, or restart the daemon in the same
+    /// directory, use [`identified_daemon_in`] directly.
+    _dir: tempfile::TempDir,
+}
+
+/// The build a test daemon on "the same code" as the test's clients reports.
+pub(crate) const TEST_BUILD: &str = "test-build";
+
+/// Start an [`IdentifiedDaemon`] introducing itself as `identity`, in a fresh
+/// temp dir. See [`identified_daemon_in`] to reuse a dir across restarts.
+pub(crate) fn identified_daemon(
+    identity: leviath_runtime::control_socket::DaemonIdentity,
+    connections: usize,
+    respond: impl Fn(
+        leviath_runtime::control_socket::ControlRequest,
+    ) -> leviath_runtime::control_socket::ControlResponse
+    + Send
+    + Sync
+    + 'static,
+) -> IdentifiedDaemon {
+    let dir = tempfile::tempdir().unwrap();
+    let (client, _events, server) =
+        identified_daemon_in(dir.path(), identity, connections, respond);
+    IdentifiedDaemon {
+        client,
+        server,
+        _dir: dir,
+    }
+}
+
+/// Start an identity-speaking fake daemon on the socket under `dir`, minting a
+/// fresh token there (as a real daemon does on every start). Returns a client
+/// pointed at it, the event sender, and the accept task.
+pub(crate) fn identified_daemon_in(
+    dir: &std::path::Path,
+    identity: leviath_runtime::control_socket::DaemonIdentity,
+    connections: usize,
+    respond: impl Fn(
+        leviath_runtime::control_socket::ControlRequest,
+    ) -> leviath_runtime::control_socket::ControlResponse
+    + Send
+    + Sync
+    + 'static,
+) -> (
+    leviath_runtime::control_socket::ControlClient,
+    tokio::sync::broadcast::Sender<leviath_runtime::host::WorldEvent>,
+    tokio::task::JoinHandle<()>,
+) {
+    use leviath_runtime::control_socket::{
+        ControlClient, ControlRequest, ControlResponse, ControlToken, bind_control_listener,
+        control_id,
+    };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let id = control_id(dir);
+    let mut listener = bind_control_listener(&id).unwrap();
+    let _token = ControlToken::create(dir).unwrap();
+    let (events, _keep) = tokio::sync::broadcast::channel(64);
+    let respond = std::sync::Arc::new(respond);
+    let server_events = events.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..connections {
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
+            let identity = identity.clone();
+            let respond = respond.clone();
+            let mut rx = server_events.subscribe();
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = tokio::io::split(stream);
+                let mut lines = BufReader::new(read_half).lines();
+                let _hello = lines.next_line().await.unwrap().unwrap();
+                let mut out =
+                    serde_json::to_string(&ControlResponse::Welcome { daemon: identity }).unwrap();
+                out.push('\n');
+                let _ = write_half.write_all(out.as_bytes()).await;
+                // Then requests, until the client hangs up.
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let req = serde_json::from_str::<ControlRequest>(&line).unwrap();
+                    if let ControlRequest::Subscribe = req {
+                        // Until the sender is dropped, which is how a test
+                        // "stops" this daemon.
+                        while let Ok(event) = rx.recv().await {
+                            let mut out = serde_json::to_string(&event).unwrap();
+                            out.push('\n');
+                            let _ = write_half.write_all(out.as_bytes()).await;
+                        }
+                        return;
+                    }
+                    let mut out = serde_json::to_string(&respond(req)).unwrap();
+                    out.push('\n');
+                    let _ = write_half.write_all(out.as_bytes()).await;
+                }
+            });
+        }
+    });
+    let client = ControlClient::for_home(id, dir).with_build(TEST_BUILD);
+    (client, events, server)
+}
+
+/// The identity of a fake daemon on the same code as the test's clients, at
+/// `pid`. Change `build` or `version` to make it "an update".
+pub(crate) fn same_code_daemon(pid: u32) -> leviath_runtime::control_socket::DaemonIdentity {
+    leviath_runtime::control_socket::DaemonIdentity {
+        pid,
+        ..leviath_runtime::control_socket::DaemonIdentity::this_process(TEST_BUILD)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

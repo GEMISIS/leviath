@@ -129,10 +129,7 @@ pub(super) async fn spawn_agent(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Unexpected daemon response: {other:?}"),
         )),
-        Err(e) => Err(err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("Daemon not reachable: {e}"),
-        )),
+        Err(e) => Err(daemon_error(e)),
     }
 }
 
@@ -769,10 +766,7 @@ pub(super) async fn kill_agent(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Unexpected daemon response: {other:?}"),
         )),
-        Err(e) => Err(err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("Daemon not reachable: {e}"),
-        )),
+        Err(e) => Err(daemon_error(e)),
     }
 }
 
@@ -797,10 +791,7 @@ pub(super) async fn pause_agent(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Unexpected daemon response: {other:?}"),
         )),
-        Err(e) => Err(err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("Daemon not reachable: {e}"),
-        )),
+        Err(e) => Err(daemon_error(e)),
     }
 }
 
@@ -823,10 +814,7 @@ pub(super) async fn resume_agent(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Unexpected daemon response: {other:?}"),
         )),
-        Err(e) => Err(err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("Daemon not reachable: {e}"),
-        )),
+        Err(e) => Err(daemon_error(e)),
     }
 }
 

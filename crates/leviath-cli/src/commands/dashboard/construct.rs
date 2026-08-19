@@ -174,6 +174,7 @@ impl Dashboard {
             daemon_outcome_rx,
             daemon_outcome_tx: Some(daemon_outcome_tx),
             daemon_run_ids: None,
+            daemon_link: Default::default(),
             clock: system_now_secs,
         }
     }

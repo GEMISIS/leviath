@@ -507,6 +507,32 @@ sequenceDiagram
   Serve-->>Browser: {done}
 ```
 
+### When the daemon restarts
+
+The stream stays open across a [daemon](/docs/daemon) restart. `lev serve` reconnects to the daemon
+on its own, so your socket never has to. What you see is one `daemon_link` frame when the daemon's
+events stop, and one when they resume:
+
+```json
+{"type":"daemon_link","connected":false,"daemon":{"version":"0.4.0","build":"3ba95219","pid":4242},"restarted":false}
+{"type":"daemon_link","connected":true,"daemon":{"version":"0.4.0","build":"3ba95219","pid":4301},"restarted":true}
+```
+
+`restarted` says whether the daemon that came back is a different process from the one before.
+`daemon` is absent until the daemon has introduced itself, which every current daemon does on
+connect.
+
+If the daemon came back on a different build than the running `lev serve` (the usual cause is a
+`lev update` with the server left running), the frame also carries `restart_advised`, a sentence
+that names both builds and says to restart `lev serve`. Every subscriber that connects while that
+is true, or while the daemon is unreachable, gets a `daemon_link` frame first thing. A healthy
+stream sends none, so a client that ignores the type sees exactly what it always saw.
+
+Requests keep working across a version gap as long as the two ends still understand each other. A
+request that fails because they no longer do answers **502** with the same sentence, where a
+daemon that is simply not answering is a **503**. Retrying helps the second; only restarting
+`lev serve` helps the first.
+
 ## Asking for a shape
 
 Add `output_format` to ask for the answer in a particular shape. Any label works, because nothing

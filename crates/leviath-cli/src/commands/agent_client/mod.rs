@@ -44,7 +44,9 @@ use leviath_agent_client::{
 };
 use leviath_core::interaction::{ApprovalScope, InteractionRequest, InteractionResponse};
 use leviath_core::run_meta::RunStatus;
-use leviath_runtime::control_socket::{ControlClient, ControlRequest, ControlResponse};
+use leviath_runtime::control_socket::{
+    ControlClient, ControlRequest, ControlResponse, WorldEventStream,
+};
 use leviath_runtime::host::WorldEvent;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -54,6 +56,17 @@ use self::translate::{StageTail, split_chunks};
 
 /// How often, absent a daemon event, the loop flushes newly-written run output.
 const OUTPUT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How many times in a row the daemon may drop the event stream without
+/// delivering an event before the turn gives up following the run. Every
+/// event resets the count, so a run that lives through several restarts is
+/// followed through all of them; only a daemon that comes back and drops the
+/// stream again at once, repeatedly, ends the turn.
+const MAX_SILENT_DROPS: u32 = 3;
+
+/// The pause before re-subscribing after a drop, so a daemon that keeps
+/// dropping the stream is not hammered in a tight loop.
+const RESUBSCRIBE_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Arguments for `lev agent-client`.
 #[derive(Args, Debug, Clone, Default)]
@@ -415,16 +428,42 @@ impl Server {
         };
 
         let mut tail = StageTail::new();
+        // Consecutive stream drops with no event in between - see the `None`
+        // arm below.
+        let mut silent_drops = 0u32;
         while self.io_alive {
             tokio::select! {
                 biased;
                 event = stream.next() => {
                     let Some(event) = event else {
-                        // The daemon closed the stream (restart); end the turn
-                        // with whatever output we have.
+                        // The daemon closed the stream: it is restarting, or it
+                        // is gone. Flush what the run wrote so far, then follow
+                        // the run onto the new daemon - which reloads it - by
+                        // subscribing again; the control client waits a restart
+                        // out. This used to end the turn on the spot, so a
+                        // `lev daemon restart` mid-answer handed the editor a
+                        // truncated reply while the run finished unwatched.
+                        // The turn ends only when no daemon comes back, or when
+                        // one keeps coming back and dropping the stream without
+                        // a single event - a daemon in that state is not going
+                        // to deliver the run, and following it forever would
+                        // hold the editor's turn open forever.
                         self.flush_output(&session_id, &mut tail, &run_id).await;
-                        return StopReason::EndTurn;
+                        silent_drops += 1;
+                        if silent_drops > MAX_SILENT_DROPS {
+                            return StopReason::EndTurn;
+                        }
+                        match self.resubscribe(&session_id).await {
+                            Some(fresh) => stream = fresh,
+                            None => return StopReason::EndTurn,
+                        }
+                        // The run may have finished while the stream was down.
+                        if let Some(reason) = self.run_finished(&run_id) {
+                            return reason;
+                        }
+                        continue;
                     };
+                    silent_drops = 0;
                     if event.run_id() != run_id {
                         continue; // another run in the shared world
                     }
@@ -477,6 +516,24 @@ impl Server {
         }
         // The output stream broke mid-turn; the client is gone.
         StopReason::EndTurn
+    }
+
+    /// Reopen the daemon's event stream after it dropped mid-turn.
+    ///
+    /// `None` when no daemon came back within the control client's grace, and
+    /// the turn has to end. When one did, and it runs different code than
+    /// this bridge - the daemon was updated under a running editor session -
+    /// the editor is told so in the conversation, since a bridge that stays
+    /// on the older code will eventually stop understanding the daemon and
+    /// the fix (restart the session) is on the editor's side.
+    async fn resubscribe(&mut self, session_id: &str) -> Option<WorldEventStream> {
+        tokio::time::sleep(RESUBSCRIBE_PAUSE).await;
+        let stream = self.control.subscribe().await.ok()?;
+        if let Some(mismatch) = self.control.code_mismatch() {
+            let notice = format!("\n[leviath: {mismatch}]\n");
+            self.emit_chunk(session_id, &notice).await;
+        }
+        Some(stream)
     }
 
     /// Whether the run has reached a state that should end the current turn,
