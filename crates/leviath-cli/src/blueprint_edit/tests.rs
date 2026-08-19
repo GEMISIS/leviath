@@ -138,12 +138,25 @@ fn parse_refuses_what_the_editor_cannot_stand_on() {
     assert!(err.starts_with("not valid TOML: "), "{err}");
 }
 
+/// The version the bundled table records for `name`, so a test can assert the
+/// view reports it without pinning the number.
+fn bundled_version(name: &str) -> &'static str {
+    crate::bundled::BUNDLED_AGENTS
+        .iter()
+        .find(|a| a.name == name)
+        .expect("a bundled agent by that name")
+        .version
+}
+
 #[test]
 fn the_views_read_the_coder_the_way_the_lair_does() {
     let doc = coder();
     let agent = doc.agent();
     assert_eq!(agent.name, "coder");
-    assert_eq!(agent.version, "0.1.0");
+    // Read from the bundled table rather than pinned here: the version moves
+    // whenever the blueprint's contents do, and a literal turns every such
+    // change into a test edit.
+    assert_eq!(agent.version, bundled_version("coder"));
     assert_eq!(agent.entry_stage.as_deref(), Some("discover"));
     assert!(agent.description.starts_with("Coding agent"));
     assert_eq!(

@@ -1,6 +1,6 @@
 [agent]
 name = "coder"
-version = "0.1.0"
+version = "0.1.1"
 description = "Coding agent: discover the repo, plan with your sign-off, optionally spike, implement, and review, with stuck detection and graph-based recovery"
 entry_stage = "discover"
 

@@ -98,7 +98,18 @@ fn a_opens_the_catalog_with_every_source_and_esc_closes_it() {
     assert!(screen.contains("installed"), "{screen}");
     assert!(screen.contains("bundled"), "{screen}");
     // The first entry (coder, sorted) previews its graph and its about box.
-    assert!(screen.contains("coder · v0.1.0 · 8 stages"), "{screen}");
+    // The version comes from the bundled table: it moves whenever the
+    // blueprint's contents do, and a literal would make every such change a
+    // test edit.
+    let coder_version = crate::bundled::BUNDLED_AGENTS
+        .iter()
+        .find(|a| a.name == "coder")
+        .expect("coder is bundled")
+        .version;
+    assert!(
+        screen.contains(&format!("coder · v{coder_version} · 8 stages")),
+        "{screen}"
+    );
     assert!(screen.contains("discover"), "{screen}");
     assert!(screen.contains("stages discover"), "{screen}");
     assert!(
