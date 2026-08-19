@@ -245,24 +245,27 @@ impl Dashboard {
     pub(super) fn route_mouse_to_graph(&mut self, event: MouseEvent) -> bool {
         let target = match event.kind {
             MouseEventKind::Down(MouseButton::Left)
+            | MouseEventKind::Down(MouseButton::Right)
             | MouseEventKind::ScrollUp
             | MouseEventKind::ScrollDown => self
                 .mouse_capture
                 .or_else(|| self.graph_pane_at(event.column, event.row)),
-            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
-                self.mouse_capture
-            }
+            MouseEventKind::Drag(MouseButton::Left)
+            | MouseEventKind::Up(MouseButton::Left)
+            | MouseEventKind::Up(MouseButton::Right) => self.mouse_capture,
             _ => None,
         };
         let Some(id) = target else {
             return false;
         };
         match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Down(MouseButton::Right) => {
                 self.mouse_capture = Some(id);
                 self.selection = None;
             }
-            MouseEventKind::Up(MouseButton::Left) => self.mouse_capture = None,
+            MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Up(MouseButton::Right) => {
+                self.mouse_capture = None;
+            }
             _ => {}
         }
         // The pane may have closed between frames; the event is still ours
@@ -821,9 +824,17 @@ condition = "llm_choice"
         dash.handle_mouse(mouse(MouseEventKind::ScrollDown, inside.0, inside.1));
         assert!(dash.stage_explorer.as_ref().unwrap().view.zoom() < zoom);
 
-        // The right button and plain motion are not routed.
+        // The right button is the canvas's too (an editor opens a menu on
+        // it; the explorer ignores it), held until its release; plain
+        // motion is not routed.
         dash.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Right),
+            inside.0,
+            inside.1,
+        ));
+        assert_ne!(dash.mouse_capture, None);
+        dash.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Right),
             inside.0,
             inside.1,
         ));

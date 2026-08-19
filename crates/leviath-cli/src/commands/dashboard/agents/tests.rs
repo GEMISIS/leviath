@@ -617,7 +617,7 @@ fn the_canvas_adds_connects_selects_and_deletes_with_undo_behind_it() {
             .edge("review", "finish")
             .is_none()
     );
-    dash.handle_key(key(KeyCode::Char('u')));
+    dash.handle_key(ctrl('z'));
     assert!(
         dash.agents()
             .editor
@@ -627,7 +627,7 @@ fn the_canvas_adds_connects_selects_and_deletes_with_undo_behind_it() {
             .edge("review", "finish")
             .is_some()
     );
-    dash.handle_key(ctrl('r'));
+    dash.handle_key(ctrl('y'));
     assert!(
         dash.agents()
             .editor
@@ -637,7 +637,18 @@ fn the_canvas_adds_connects_selects_and_deletes_with_undo_behind_it() {
             .edge("review", "finish")
             .is_none()
     );
-    dash.handle_key(ctrl('r'));
+    // Ctrl-Shift-Z redoes too, however the terminal spells it.
+    dash.handle_key(KeyEvent::new(
+        KeyCode::Char('Z'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert!(text(&mut dash).contains("Nothing to redo"));
+    dash.handle_key(KeyEvent::new(
+        KeyCode::Char('z'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert!(text(&mut dash).contains("Nothing to redo"));
+    dash.handle_key(ctrl('y'));
     assert!(text(&mut dash).contains("Nothing to redo"));
     // Delete a stage: asks; No keeps it, Yes removes it and its paths.
     dash.agents()
@@ -672,8 +683,11 @@ fn the_canvas_adds_connects_selects_and_deletes_with_undo_behind_it() {
         dash.agents().editor.as_ref().unwrap().doc.stage_names(),
         ["work", "finish"]
     );
-    dash.handle_key(key(KeyCode::Char('u')));
+    dash.handle_key(ctrl('z'));
     assert!(text(&mut dash).contains("Nothing to undo"));
+    // `u` is no longer a key: it is left for the canvas, which ignores it.
+    dash.handle_key(key(KeyCode::Char('u')));
+    assert!(!text(&mut dash).contains("Nothing to undo"));
     // The rest of the canvas keys: rotate, fit, zoom, and a key nobody has.
     for code in [
         KeyCode::Char('r'),

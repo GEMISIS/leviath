@@ -106,6 +106,11 @@ pub(in crate::commands::dashboard) struct Editor {
     /// to itself) was opened from: the panel stays while it holds.
     pub(in crate::commands::dashboard) panel_anchor: Option<Selection>,
     pub(in crate::commands::dashboard) overlay: Option<Overlay>,
+    /// The right-click menu, while one is open.
+    pub(in crate::commands::dashboard) menu: Option<super::context_menu::ContextMenu>,
+    /// Where the next added stage goes on the canvas (a right click on empty
+    /// canvas); `None` places it after the rightmost box.
+    pub(in crate::commands::dashboard) place_next: Option<(f64, f64)>,
     pub(in crate::commands::dashboard) problems: Problems,
     /// The problems list expanded under the canvas.
     pub(in crate::commands::dashboard) problems_open: bool,
@@ -392,6 +397,8 @@ impl Dashboard {
             add_region: None,
             panel_anchor: None,
             overlay: None,
+            menu: None,
+            place_next: None,
             problems,
             problems_open: false,
             layout,

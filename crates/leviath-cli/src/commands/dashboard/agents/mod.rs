@@ -11,10 +11,13 @@
 
 mod catalog;
 mod chooser;
+mod context_menu;
 mod editor;
 mod editor_keys;
 mod editor_panels;
 mod inspector;
+#[cfg(test)]
+mod menu_tests;
 #[cfg(test)]
 mod panel_tests;
 mod prompts;
@@ -46,6 +49,8 @@ pub(in crate::commands::dashboard) struct AgentsScreen {
     pub(in crate::commands::dashboard) editor: Option<Editor>,
     /// The whole terminal at the last draw, for overlays that take the mouse.
     pub(in crate::commands::dashboard) last_area: Rect,
+    /// Where the last frame drew the catalog list, for the wheel.
+    pub(in crate::commands::dashboard) list_area: Rect,
     /// `provider/model` ids the providers reported, once the background
     /// listing comes back; empty until then.
     pub(in crate::commands::dashboard) model_catalog: Vec<String>,
@@ -66,6 +71,7 @@ impl Dashboard {
             chooser: None,
             editor: None,
             last_area: Rect::default(),
+            list_area: Rect::default(),
             model_catalog: Vec::new(),
             models_rx: Some(rx),
         }));
@@ -153,7 +159,13 @@ impl Dashboard {
         event: crossterm::event::MouseEvent,
     ) -> bool {
         let area = self.agents().last_area;
+        if self.editor_menu_mouse(event) {
+            return true;
+        }
         if self.editor_picker_mouse(event, area) {
+            return true;
+        }
+        if self.catalog_wheel(event) {
             return true;
         }
         if self.editor_inspector_mouse(event) {

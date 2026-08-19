@@ -73,12 +73,25 @@ pub(crate) enum Selection {
 }
 
 /// What the canvas did with the mouse that the editor has to act on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CanvasEvent {
     /// A handle was dragged onto another box: a path to add.
     Connected { from: String, to: String },
     /// A box was dropped somewhere new: positions to remember.
     Moved,
+    /// A right click: what was under it, and where on screen it was.
+    ContextMenu { target: MenuTarget, at: (u16, u16) },
+}
+
+/// What a right click landed on.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum MenuTarget {
+    /// A stage box (an `ext:` worker box is reported as it is).
+    Node(String),
+    /// A path.
+    Edge(StageEdge),
+    /// Empty canvas, in world units (where a new box would go).
+    Pane { x: f64, y: f64 },
 }
 
 /// One drawn edge, remembered so live restyling can find it.
@@ -108,6 +121,11 @@ pub(crate) struct FlowView {
     /// layout places every box.
     positions: Positions,
     events: Vec<CanvasEvent>,
+    /// A left press on empty canvas that has not moved yet: its release
+    /// without a drag is a click off everything, which clears the selection.
+    /// (rataflow treats the press as the start of a pan, and a pan must keep
+    /// the selection, so the click is told apart here.)
+    pane_press: Option<(u16, u16)>,
     direction: Direction,
     /// Until the user turns the graph by hand, the first draw picks the
     /// direction that fits.
@@ -429,6 +447,7 @@ impl FlowView {
             edit,
             positions,
             events: Vec::new(),
+            pane_press: None,
             direction: Direction::LeftToRight,
             auto_direction: true,
             show_escape: false,
@@ -734,8 +753,8 @@ impl FlowView {
     }
 
     /// Mouse on the canvas: left button pans or selects, the wheel zooms at
-    /// the cursor. Anything else is left alone. Returns whether the event
-    /// was forwarded.
+    /// the cursor; in an editor the right button asks for a menu. Anything
+    /// else is left alone. Returns whether the event was forwarded.
     pub(crate) fn handle_mouse(&mut self, event: MouseEvent) -> bool {
         let forward = matches!(
             event.kind,
@@ -744,27 +763,68 @@ impl FlowView {
                 | MouseEventKind::Up(MouseButton::Left)
                 | MouseEventKind::ScrollUp
                 | MouseEventKind::ScrollDown
-        );
-        if forward {
-            let response = self.flow.handle_mouse_event(event);
-            if self.edit {
-                for ev in response.events() {
-                    match ev {
-                        rataflow::FlowEvent::ConnectionCompleted(c) => {
-                            self.events.push(CanvasEvent::Connected {
-                                from: c.source.clone(),
-                                to: c.target.clone(),
-                            });
-                        }
-                        rataflow::FlowEvent::NodeDragEnded { .. } => {
-                            self.events.push(CanvasEvent::Moved);
-                        }
-                        _ => {}
-                    }
+        ) || (self.edit
+            && matches!(
+                event.kind,
+                // The drag is left out on purpose: rataflow turns a right
+                // drag into a selection box, and the editor has no use for
+                // several boxes selected at once.
+                MouseEventKind::Down(MouseButton::Right) | MouseEventKind::Up(MouseButton::Right)
+            ));
+        if !forward {
+            return false;
+        }
+        let response = self.flow.handle_mouse_event(event);
+        if !self.edit {
+            return true;
+        }
+        let at = (event.column, event.row);
+        match event.kind {
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.pane_press.is_some_and(|p| p != at) {
+                    self.pane_press = None;
                 }
             }
+            MouseEventKind::Up(MouseButton::Left) if self.pane_press.take().is_some() => {
+                self.flow.clear_selection();
+            }
+            _ => {}
         }
-        forward
+        for ev in response.events() {
+            match ev {
+                rataflow::FlowEvent::ConnectionCompleted(c) => {
+                    self.events.push(CanvasEvent::Connected {
+                        from: c.source.clone(),
+                        to: c.target.clone(),
+                    });
+                }
+                rataflow::FlowEvent::NodeDragEnded { .. } => {
+                    self.events.push(CanvasEvent::Moved);
+                }
+                rataflow::FlowEvent::PaneClicked { .. } => self.pane_press = Some(at),
+                rataflow::FlowEvent::NodeContextMenu { node_id } => {
+                    self.events.push(CanvasEvent::ContextMenu {
+                        target: MenuTarget::Node(node_id.clone()),
+                        at,
+                    });
+                }
+                rataflow::FlowEvent::EdgeContextMenu { edge_id } => {
+                    let hit = self.edges.iter().find(|m| m.id == *edge_id);
+                    self.events.extend(hit.map(|meta| CanvasEvent::ContextMenu {
+                        target: MenuTarget::Edge(meta.edge.clone()),
+                        at,
+                    }));
+                }
+                rataflow::FlowEvent::PaneContextMenu { x, y } => {
+                    self.events.push(CanvasEvent::ContextMenu {
+                        target: MenuTarget::Pane { x: *x, y: *y },
+                        at,
+                    });
+                }
+                _ => {}
+            }
+        }
+        true
     }
 
     /// Paint the run onto the blueprint. Cheap enough to call every draw:

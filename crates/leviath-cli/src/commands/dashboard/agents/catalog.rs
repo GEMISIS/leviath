@@ -175,6 +175,34 @@ impl Dashboard {
         );
     }
 
+    /// The wheel over the catalog list moves the cursor, as it does over the
+    /// run list. Returns whether the event was the wheel over the list.
+    pub(in crate::commands::dashboard) fn catalog_wheel(
+        &mut self,
+        event: crossterm::event::MouseEvent,
+    ) -> bool {
+        use crossterm::event::MouseEventKind;
+        let screen = self.agents();
+        if screen.editor.is_some() || screen.chooser.is_some() {
+            return false;
+        }
+        let delta = match event.kind {
+            MouseEventKind::ScrollUp => -1,
+            MouseEventKind::ScrollDown => 1,
+            _ => return false,
+        };
+        let area = screen.list_area;
+        let inside = event.column >= area.x
+            && event.column < area.x + area.width
+            && event.row >= area.y
+            && event.row < area.y + area.height;
+        if !inside {
+            return false;
+        }
+        screen.catalog.move_by(delta);
+        true
+    }
+
     /// `d`: confirm deleting the selected agent, when it can be deleted from
     /// here.
     fn request_agent_delete(&mut self) {
