@@ -377,6 +377,67 @@ mod tests {
         }
     }
 
+    /// A bundled stage that routes tool output into a region must be able to
+    /// read one.
+    ///
+    /// Routing leaves a pointer in the conversation saying where the output
+    /// went. If the stage also grants a file-reading tool and no
+    /// `context_read`, the only read verb the model has points at the
+    /// filesystem, and it aims it at the region name: 90 of 168 failed
+    /// `read_file` calls across 152 local runs were exactly that, one of them
+    /// spending five turns on five spellings of `raw_findings`.
+    ///
+    /// Asserted over whatever is bundled rather than a fixed list of stages, so
+    /// a new routed stage is held to it the day it lands.
+    #[test]
+    fn every_bundled_stage_that_routes_can_also_read_a_region() {
+        let mut routed = 0;
+        for agent in BUNDLED_AGENTS {
+            let manifest = agent
+                .files
+                .iter()
+                .find(|(rel, _)| *rel == "agent.leviath")
+                .map(|(_, c)| *c)
+                .expect("every bundled agent ships a manifest");
+            let parsed = leviath_core::manifest::parse_manifest(manifest);
+            assert!(
+                parsed.is_ok(),
+                "bundled agent {} does not parse",
+                agent.name
+            );
+            let blueprint = parsed.expect("asserted Ok just above");
+
+            for stage in &blueprint.stages {
+                let routes = stage.tool_result_routing.as_ref().is_some_and(|r| {
+                    r.default_region != "conversation"
+                        || r.tool_overrides.values().any(|v| v != "conversation")
+                });
+                let reads_files = stage
+                    .available_tools
+                    .iter()
+                    .any(|t| t == "read_file" || t == "read_files");
+                if !routes || !reads_files {
+                    continue;
+                }
+                routed += 1;
+                assert!(
+                    stage.available_tools.iter().any(|t| t == "context_read"),
+                    "{}'s stage '{}' routes tool output into a region and grants a \
+                     file-reading tool, but not 'context_read' - the only way the \
+                     model can act on the pointer is to aim read_file at the region \
+                     name",
+                    agent.name,
+                    stage.name
+                );
+            }
+        }
+        // A vacuous pass would be a bundled set that routes nowhere.
+        assert!(
+            routed > 0,
+            "no bundled stage routes tool output to a region"
+        );
+    }
+
     /// A bundled layout must actually grow with the model's context window.
     ///
     /// Every region was written as `budget = "N%"` *and* an absolute

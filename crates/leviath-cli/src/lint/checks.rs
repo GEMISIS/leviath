@@ -123,6 +123,36 @@ pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lint
         );
     }
 
+    // A stage that routes tool output into a knowledge region tells the model,
+    // in the pointer left behind, that the output lives in that region. If it
+    // also hands the model a file-reading tool and no `context_read`, the only
+    // read verb in reach points at the filesystem - and models take it, aiming
+    // `read_file` at the region name. Measured over 152 local runs: 90 of 168
+    // failed `read_file` calls were a region name where a path belongs.
+    //
+    // A Warning rather than an Error: the runtime now names the region's
+    // heading in the pointer and corrects the mistake on the error, so this is
+    // an ergonomics gap and not a broken blueprint - and an Error would fail
+    // every user manifest written before it existed.
+    let routes_to_region = stage.tool_result_routing.as_ref().is_some_and(|r| {
+        r.default_region != "conversation" || r.tool_overrides.values().any(|v| v != "conversation")
+    });
+    let reads_files = granted.contains("read_file") || granted.contains("read_files");
+    if routes_to_region && reads_files && !granted.contains("context_read") {
+        findings.push(
+            LintFinding::new(
+                LintSeverity::Warning,
+                "routing-without-region-read",
+                "routes tool output into a context region and grants a file-reading \
+                 tool but not 'context_read', so the only way the model can act on \
+                 \"go and read that region\" is to aim read_file at the region name"
+                    .to_string(),
+            )
+            .in_stage(&stage.name)
+            .with_fix("add 'context_read' to available_tools".to_string()),
+        );
+    }
+
     findings
 }
 

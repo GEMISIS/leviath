@@ -13,6 +13,48 @@ same list.
 
 ## Unreleased
 
+- Fixed: agents no longer waste turns calling `read_file` on a context region.
+  A stage that routes tool output into a region left a pointer in the
+  conversation ending "read that region for the full result" - an instruction
+  with no tool behind it, since the region is rendered into the system prompt
+  already and most stages that route did not grant `context_read`. Models did
+  the only thing left and aimed `read_file` at the region name. Across 152 local
+  runs, 168 of 299 `read_file` calls failed and 90 of those were a region name
+  where a path belongs, spread over 32 of the 46 runs that used the tool; one
+  run spent five turns on five spellings of `raw_findings` across three stages
+  and finished reporting that it had found nothing. The pointer now names the
+  heading the region is rendered under and says no tool call is needed, a path
+  tool aimed at a region says so in its error (as does one handed a directory
+  instead of a file), every bundled stage that routes and reads files grants
+  `context_read`, and `lev validate` warns
+  (`routing-without-region-read`) when a blueprint has the shape that caused it.
+- Fixed: a routed tool result that does not fit its region is no longer
+  described as though it did. The pointer promised the full result whatever the
+  region had actually kept, so a full region silently turned a fetched source
+  into `[result omitted]` while the model went on reasoning as if it were there
+  - three of thirty-five entries in one run, two of them dropped outright.
+- Fixed: `admission = "evict"` evicts. It is the default and has always been
+  documented as "make room for the write - roll off the oldest entry", but a
+  write that did not fit was refused exactly as under `admission = "reject"`;
+  only a sliding window's *count* limit ever dropped anything. A working region
+  now rolls its oldest entries off to admit a new write, which is what stops the
+  newest material being the thing that gets lost. Regions that own their own
+  retention are untouched: `pinned` and persistent custom regions are meant to
+  survive the run, a `hashmap` already evicts by LRU, and a custom region's
+  `on_overflow` script is the author's policy and is not overridden. An entry
+  larger than the whole region still fails without emptying it, since evicting
+  for it would destroy what is held and fail anyway.
+- Fixed: region budgets scale with the model again. Every bundled region paired
+  `budget = "N%"` with an absolute `max_tokens`, and the cap is the smaller of
+  the two above roughly a 167k window - `researcher` ran on a 1,048,576-token
+  model with `raw_findings` asking for 30%, or 314,573 tokens, and getting
+  40,000. Resolving each bundled layout at 200k and at 1M produced almost
+  identical numbers, a growth of 1.03x across a 5.24x difference in window. The
+  guard-rails are gone, along with the `threshold_tokens` that independently
+  capped compaction triggers, so the percentage decides. `lev create`'s
+  templates and the blueprint editor's new-region defaults lose their caps too,
+  and the editor can now see and set `min_tokens`, which it never modelled.
+
 - New: the scripts API manages Rhai model providers. `provider` joins `tool`,
   `region_hook`, `stage_hook` and `output_validator` as a `kind` on
   `GET /api/scripts`, `GET/PUT/DELETE /api/scripts/{kind}/{name}` and

@@ -2070,3 +2070,86 @@ raw_findings = { kind = "temporary", budget = "38%" }
         .count();
     assert_eq!(hits, 1);
 }
+
+/// A stage that routes tool output into a region and can read files, but has no
+/// `context_read`, leaves the model one read verb and it is the wrong one.
+///
+/// This is the authoring shape behind 90 of 168 failed `read_file` calls across
+/// 152 local runs: the pointer says the output is in `raw_findings`, the only
+/// tool that could act on that is not granted, and `read_file("raw_findings")`
+/// is what the model reaches for.
+#[test]
+fn routing_into_a_region_without_context_read_is_flagged() {
+    let manifest = r#"
+[agent]
+name = "router"
+version = "0.1.0"
+entry_stage = "gather"
+
+[stages.gather]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-5" }
+max_iterations = 5
+available_tools = ["read_file", "web_fetch"]
+system_prompt = "gather"
+
+[stages.gather.tool_routing]
+default_region = "raw_findings"
+
+[context.regions]
+raw_findings = { kind = "temporary", budget = "30%" }
+conversation = { kind = "sliding_window", max_items = 20, budget = "12%" }
+"#;
+    let findings = lint(manifest, &LintEnv::default());
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.code == "routing-without-region-read"),
+        "expected the routing warning, got: {findings:?}"
+    );
+}
+
+/// Granting `context_read` settles it, and so does routing to `conversation`,
+/// where no pointer is written and there is nothing to go and read.
+#[test]
+fn routing_with_context_read_or_to_conversation_is_not_flagged() {
+    let with_grant = r#"
+[agent]
+name = "router"
+version = "0.1.0"
+entry_stage = "gather"
+
+[stages.gather]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-5" }
+max_iterations = 5
+available_tools = ["read_file", "context_read"]
+system_prompt = "gather"
+
+[stages.gather.tool_routing]
+default_region = "raw_findings"
+
+[context.regions]
+raw_findings = { kind = "temporary", budget = "30%" }
+conversation = { kind = "sliding_window", max_items = 20, budget = "12%" }
+"#;
+    let to_conversation = with_grant
+        .replace("\"read_file\", \"context_read\"", "\"read_file\"")
+        .replace(
+            "default_region = \"raw_findings\"",
+            "default_region = \"conversation\"",
+        );
+
+    for (label, manifest) in [
+        ("granted", with_grant),
+        ("conversation", to_conversation.as_str()),
+    ] {
+        let findings = lint(manifest, &LintEnv::default());
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.code == "routing-without-region-read"),
+            "{label}: unexpected warning in {findings:?}"
+        );
+    }
+}

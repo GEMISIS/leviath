@@ -18,7 +18,7 @@ bash       = "ask"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Survey the landscape across multiple sub-topics"
-available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time"]
+available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time", "context_read"]
 max_iterations = 25
 max_revisits = 2
 system_prompt = """
@@ -181,7 +181,7 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Focused deep read on one interesting thread flagged during comparison"
-available_tools = ["web_search", "web_fetch", "read_file", "context_append", "current_time"]
+available_tools = ["web_search", "web_fetch", "read_file", "context_append", "current_time", "context_read"]
 max_iterations = 12
 max_revisits = 2
 system_prompt = """
