@@ -1,6 +1,6 @@
 [agent]
 name = "data-analyst"
-version = "0.0.4"
+version = "0.0.5"
 description = "Data analyst - searches the web for data on a subject, builds a clean CSV of it, and hands back a ready-to-use summary of what the numbers say"
 entry_stage = "scope"
 
@@ -43,6 +43,17 @@ Rules that save the dataset later:
   not `revenue`.
 - One fact per column. Never `population_and_area`.
 - Include a `source_ref` column. Every row must be traceable.
+
+Record what those searches turned up in `sources_index` (context_append), one
+line per publisher you would actually draw numbers from:
+`[n] <publisher/dataset> - <url> - <what it covers> - <how current>`. This is
+the schema's provenance: it is the evidence that the columns you chose are ones
+somebody publishes, rather than ones that sound right.
+
+If web_search hands back a diagnostic instead of results - no engine configured,
+an engine error, or an encyclopedia fallback - say exactly that in
+`sources_index` and design the narrowest schema you can defend. Do not invent a
+schema from memory and leave the workers to discover nothing fills it.
 
 Keep it to the columns the question needs. A table nobody can fill is worse
 than a narrow one.
@@ -105,6 +116,13 @@ markdown fences. Each item:
 Every item MUST carry the schema: workers do not share this agent's context, so
 the work item is all they get. A worker with no schema cannot produce rows that
 line up with anyone else's.
+
+Slice by dimensions the subject actually has - a country, a year range, a
+category - not by entities you are assuming exist. If you name specific
+companies, products, or datasets, they must have turned up in `sources_index`
+or the `subject` itself. A worker starts from a clean context and cannot
+question your premise: it will spend its whole budget hunting rows for a thing
+you remembered, and hand back empty.
 
 Prefer a handful of substantial slices over many thin ones. One slice is fine
 for a narrow subject.
@@ -178,6 +196,13 @@ slice. Write them to `data/dataset.csv` as a single table.
 A worker that failed or returned nothing is a gap, not a reason to stop: write
 what you have and record the gap in `caveats` with context_write.
 
+You are the only stage that sees every worker's `source_ref` at once, so you are
+the only one that can say where the table actually came from. Fold the distinct
+ones into `sources_index` (context_append), one line per publisher, and record
+in `caveats` any rows whose `source_ref` says the worker could not reach the web
+- those are unsourced, and a reader who cannot tell them from sourced rows will
+trust the whole table equally.
+
 Then read the file back and check the header and a few rows survived the write.
 """
 
@@ -204,9 +229,13 @@ Say what this dataset shows, for whoever asked.
 
 Lead with the answer to their question in two or three sentences. Then:
 - The three or four things the numbers actually say, each with the figure.
-- How many rows, over what range, from how many sources.
+- How many rows, over what range, and which publishers they came from - name
+  them from `sources_index` rather than counting them. "From 4 sources" tells a
+  reader nothing they can check.
 - What is missing or shaky, from `caveats`. Say this plainly rather than
-  burying it.
+  burying it. If `sources_index` records that the searches could not run, lead
+  with that: a table assembled without reaching the web is a draft, and saying
+  so is more useful than any figure in it.
 
 Name `data/dataset.csv` in `artifacts` so they can open it.
 
@@ -266,7 +295,12 @@ environment   = { kind = "pinned", budget = "1%", seed = { tools = ["current_tim
 # The table's columns, decided in scope and followed by every later stage.
 schema        = { kind = "pinned", budget = "2%", required = true, required_message = "Write the table's columns to `schema` (context_write) before gathering: one line per column, as name | type | meaning | unit.", volatility = "grows" }
 # Bibliography, one line per source actually used.
-sources_index = { kind = "pinned", budget = "3%", volatility = "grows" }
+# `required`: this region was declared and then never mentioned by any prompt, so
+# nothing wrote it and nothing read it - a dataset with a `source_ref` column per
+# row and no account anywhere of which publishers it drew on. `scope` opens it
+# with what its searches found and `build` folds in the distinct refs the workers
+# returned; both grant context tools, so the gate has somewhere to bind.
+sources_index = { kind = "pinned", budget = "3%", volatility = "grows", required = true, required_message = "You have not recorded a single source in `sources_index`. Append one line per publisher you would draw numbers from (context_append, region=\"sources_index\"): `[n] <publisher/dataset> - <url> - <what it covers> - <how current>`. If the searches came back empty or unavailable, record THAT - a table nobody can trace is worse than a smaller one that is sourced." }
 # What to distrust in the result. Read by the present stage.
 caveats       = { kind = "pinned", budget = "2%", volatility = "grows" }
 
