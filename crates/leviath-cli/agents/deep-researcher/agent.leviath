@@ -1,6 +1,6 @@
 [agent]
 name = "deep-researcher"
-version = "0.1.1"
+version = "0.2.0"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 entry_stage = "gather"
 
@@ -10,6 +10,7 @@ read_file  = "allow"
 list_dir   = "allow"
 web_search = "allow"
 web_fetch  = "allow"
+current_time = "allow"
 write_file = "ask"
 bash       = "ask"
 
@@ -19,7 +20,7 @@ mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Gather primary sources and key references on the topic"
 # web_search / web_fetch are provided by this agent's tools/ (issue #97).
-available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append"]
+available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time"]
 max_iterations = 25
 max_revisits = 3
 system_prompt = """
@@ -31,6 +32,10 @@ authoritative references, not a broad skim.
   question, then web_fetch the most authoritative results for detail. Prefer
   primary sources (papers, standards, official docs) over summaries. read_file for
   local documents. Raw content lands in `sources`.
+- Today's date is in the `environment` region. Treat it as authoritative over
+  anything you remember: your training has a cutoff and this run does not. Judge
+  "recent", "current" and "latest" against it, and say how old a source is when
+  its age bears on the claim. Call current_time if you need the clock again.
 - For every source you actually use, append one bibliography line to
   `sources_index` (context_append): `[n] <title> - <url/path> - <date> -
   credibility: <high/med/low + why>`.
@@ -135,7 +140,7 @@ transform = "compact"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Analyze findings, cross-reference claims, and decide the next move"
-available_tools = ["read_file", "web_fetch", "context_write", "context_append"]
+available_tools = ["read_file", "web_fetch", "context_write", "context_append", "current_time"]
 max_iterations = 20
 max_revisits = 3
 transition_prompt = """
@@ -186,7 +191,7 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Pull and read specific cited sources flagged during analysis"
-available_tools = ["web_fetch", "web_search", "read_file", "context_append"]
+available_tools = ["web_fetch", "web_search", "read_file", "context_append", "current_time"]
 max_iterations = 12
 max_revisits = 3
 system_prompt = """
@@ -302,6 +307,7 @@ is worse than no summary.
 [context.regions]
 query          = { kind = "pinned", budget = "1%", max_tokens = 1500, required = true, seed = "task", required_message = "State the research topic via --task.", volatility = "stable" }
 scope          = { kind = "pinned", budget = "1%", max_tokens = 1500, seed = "scope", volatility = "stable" }
+environment    = { kind = "pinned", budget = "1%", max_tokens = 600, seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
 sources_index  = { kind = "pinned", budget = "4%", max_tokens = 4000, volatility = "grows" }
 format         = { kind = "pinned", budget = "1%", max_tokens = 500, seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the References bibliography (title + URL/path). Mark each key finding's confidence as high / medium / low based on source count and credibility." }, volatility = "stable" }
 

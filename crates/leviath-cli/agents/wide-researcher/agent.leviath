@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.1.1"
+version = "0.2.0"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 entry_stage = "survey"
 
@@ -9,6 +9,7 @@ read_file  = "allow"
 list_dir   = "allow"
 web_search = "allow"
 web_fetch  = "allow"
+current_time = "allow"
 write_file = "ask"
 bash       = "ask"
 
@@ -17,7 +18,7 @@ bash       = "ask"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Survey the landscape across multiple sub-topics"
-available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append"]
+available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time"]
 max_iterations = 25
 max_revisits = 2
 system_prompt = """
@@ -32,6 +33,11 @@ For each source you use, append a bibliography line to `sources_index`
 (context_append): `[n] <title> - <url/path> - credibility: <high/med/low>`.
 Note interesting threads worth pulling on later. If sent back, focus on the named
 coverage gap.
+
+Today's date is in the `environment` region. Treat it as authoritative over
+anything you remember: your training has a cutoff and this run does not. Judge
+"recent", "current", "active" and "state of the art" against it, and note how
+old a source is when its age bears on the claim. Call current_time for the clock.
 """
 
 [stages.survey.tool_routing]
@@ -128,7 +134,7 @@ transform = "compact"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Compare and contrast approaches across the landscape"
-available_tools = ["read_file", "web_fetch", "context_write", "context_append"]
+available_tools = ["read_file", "web_fetch", "context_write", "context_append", "current_time"]
 max_iterations = 15
 max_revisits = 2
 transition_prompt = """
@@ -175,7 +181,7 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Focused deep read on one interesting thread flagged during comparison"
-available_tools = ["web_search", "web_fetch", "read_file", "context_append"]
+available_tools = ["web_search", "web_fetch", "read_file", "context_append", "current_time"]
 max_iterations = 12
 max_revisits = 2
 system_prompt = """
@@ -288,6 +294,7 @@ file you wrote.
 [context.regions]
 query              = { kind = "pinned", budget = "1%", max_tokens = 1000, required = true, seed = "task", required_message = "State the survey topic/area via --task.", volatility = "stable" }
 scope              = { kind = "pinned", budget = "1%", max_tokens = 1500, seed = "scope", volatility = "stable" }
+environment        = { kind = "pinned", budget = "1%", max_tokens = 600, seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
 sources_index      = { kind = "pinned", budget = "3%", max_tokens = 4000, volatility = "grows" }
 format             = { kind = "pinned", budget = "1%", max_tokens = 500, seed = { literal = "Cite non-obvious claims as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Prefer comparison tables where they clarify tradeoffs." }, volatility = "stable" }
 
