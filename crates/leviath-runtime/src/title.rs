@@ -8,10 +8,18 @@
 //! dashboard header, run search) already reads the field.
 //!
 //! Best-effort by design: any failure - no usable provider or model, a full
-//! pool that never frees, a provider error, an empty reply - leaves the title
-//! `None` and the run displays its blueprint name exactly as before. The
+//! pool that never frees, a provider error, an empty reply, a reply cut off at
+//! the token limit, or one holding no line short enough to be a title - leaves
+//! the title `None`, and the run shows the task the user typed instead. The
 //! title lands on disk with the next persistence write (the run-level
 //! heartbeat guarantees one within a few seconds).
+//!
+//! That last pair of refusals matters more than it sounds. A reasoning model
+//! spends output tokens working up to its answer, so a starved budget returns
+//! nothing but working-out - and the OpenAI-shaped parsers promote that into
+//! `content` when the answer itself is empty. The title call asks the provider
+//! not to think, gives it room in case it does anyway, and stores nothing at
+//! all rather than the model's thoughts about what a title should be.
 
 use bevy_ecs::prelude::{Commands, Component, Entity, Query, Res, ResMut, Resource, With, Without};
 use leviath_providers::InferenceRequest;
@@ -44,12 +52,19 @@ pub struct TitleResults(pub UnboundedReceiver<TitleOutcome>);
 #[derive(Resource)]
 pub struct TitleSink(pub UnboundedSender<TitleOutcome>);
 
-/// Kept small: a title is one short line, and a runaway reply is cut anyway.
-const TITLE_MAX_TOKENS: usize = 64;
+/// Enough for a model that thinks before it answers to get past the thinking.
+///
+/// This was 64 on the reasoning that a title is one short line. It is, but a
+/// reasoning model spends output tokens working up to it, and 64 of them are
+/// gone before it writes a word of title - which is how the *reasoning* came
+/// to be stored as the title. The call happens once per run, so the extra
+/// headroom costs nothing worth counting, and `sanitize_title` still refuses
+/// anything longer than a title.
+const TITLE_MAX_TOKENS: usize = 512;
 /// How much of the task prompt the model sees. Titles come from the opening
 /// framing of a task, not its appendix.
 const TITLE_TASK_BUDGET: usize = 2_000;
-/// Display cap, in bytes, cut on a char boundary.
+/// Display cap, in bytes. A reply with no line this short has no title in it.
 const TITLE_MAX_LEN: usize = 80;
 
 const TITLE_SYSTEM_PROMPT: &str = "Reply with only a short title for the given task, \
@@ -78,8 +93,35 @@ fn resolve_title_model(
     Some((provider, model))
 }
 
+/// The provider's own "do not think about this one" switch.
+///
+/// A title does not need a reasoning pass, and a model that takes one spends
+/// its output budget before it writes any title at all. Worse, a reasoning
+/// model that answers with an empty `content` has its working-out promoted
+/// into `content` by the OpenAI-shaped parsers, so what comes back is prose
+/// about generating a title rather than a title.
+///
+/// Keyed on the resolved provider because each API spells the switch
+/// differently and rejects the others' spelling outright. The providers not
+/// listed need nothing: Anthropic only thinks when a request asks it to, and
+/// OpenAI never returns reasoning text, so `reasoning_effort` would buy
+/// nothing here while risking a 400 on a model with no reasoning to configure.
+fn no_thinking_extra(provider: &str) -> serde_json::Value {
+    match provider {
+        // Ollama's own switch, which its provider lifts to the top level of
+        // the body. Only sent when asked, because a model with no thinking to
+        // turn off rejects the field.
+        "ollama" => serde_json::json!({ "think": false }),
+        // OpenRouter's unified reasoning control, merged into the body at the
+        // top level. This is the provider that hands reasoning back as the
+        // reply when the answer is empty, so it is the one that leaked.
+        "openrouter" => serde_json::json!({ "reasoning": { "enabled": false } }),
+        _ => serde_json::Value::Null,
+    }
+}
+
 /// Build the one-shot titling request over the task prompt.
-fn title_request(task: &str, model: &str) -> InferenceRequest {
+fn title_request(task: &str, provider: &str, model: &str) -> InferenceRequest {
     InferenceRequest {
         // A system *block*, not a message with `role: "system"`. That is the
         // portable shape: each provider maps blocks to whatever its API wants,
@@ -106,57 +148,73 @@ fn title_request(task: &str, model: &str) -> InferenceRequest {
         max_tokens: TITLE_MAX_TOKENS,
         temperature: 0.2,
         tools: Vec::new(),
-        extra: serde_json::Value::Null,
+        extra: no_thinking_extra(provider),
         request_timeout_secs: None,
     }
 }
 
 /// Reduce a raw model reply to a displayable one-line title: the first
-/// non-empty line, unquoted, capped at [`TITLE_MAX_LEN`]. Empty means "no
-/// title" and the metadata stays untouched.
+/// non-empty line that is short enough to *be* a title, unquoted. Empty means
+/// "this reply holds no title" and the metadata stays untouched.
 fn sanitize_title(raw: &str) -> String {
     // Reasoning models answer the instruction *after* thinking about it out
-    // loud, so the first line is prose about the task rather than a title. A
-    // real one read "We need to generate a short title for the task. The task:
-    // …", which is what the dashboard then displayed.
-    //
+    // loud, so the leading text is prose about the task rather than a title.
     // The rule that separates them without guessing at content: a title fits
-    // the display cap, and reasoning does not. So the first line short enough
-    // to *be* a title wins, and a reply with no such line falls back to the
-    // first line truncated - which is exactly what this did before.
+    // the display cap, and reasoning does not.
+    //
+    // A reply with no line that fits has no title in it, so this returns
+    // nothing and the run keeps showing its task text. It used to fall back to
+    // the first line *truncated*, which is how a run came to be titled "We
+    // need to generate a short title for the user's request. The user wants to
+    // buil" - one unbroken paragraph of reasoning, cut at exactly the display
+    // cap. Truncating prose does not make it a title; it only hides that this
+    // failed.
     let stripped = strip_reasoning(raw);
-    let lines: Vec<&str> = stripped
+    // Compared in bytes, which is what the cap is in. Counting chars here and
+    // cutting bytes afterwards meant a title of 80 CJK characters passed the
+    // check and was then sliced mid-title.
+    stripped
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
-        .collect();
-    let unquote = |l: &str| l.trim_matches(['"', '\'', '`']).trim().to_string();
-    let chosen = lines
-        .iter()
-        .map(|l| unquote(l))
-        .find(|l| l.chars().count() <= TITLE_MAX_LEN)
-        .unwrap_or_else(|| lines.first().map(|l| unquote(l)).unwrap_or_default());
-    leviath_core::truncate_at_boundary(&chosen, TITLE_MAX_LEN)
-        .trim_end()
-        .to_string()
+        .map(|l| l.trim_matches(['"', '\'', '`']).trim().to_string())
+        .find(|l| l.len() <= TITLE_MAX_LEN)
+        .unwrap_or_default()
 }
 
-/// Drop a `<think>…</think>` block, which several models emit around their
-/// reasoning. An unclosed tag drops the rest, which is the safe reading: what
-/// follows an opening tag is reasoning until something says otherwise.
+/// Opening tags a model may wrap its reasoning in, with the closer that ends
+/// each. Ollama returns thinking in its own field and Anthropic in its own
+/// block, but a local GGUF writes the tags inline in the reply text and no
+/// provider strips them.
+const REASONING_TAGS: [(&str, &str); 3] = [
+    ("<think>", "</think>"),
+    ("<thinking>", "</thinking>"),
+    ("<reasoning>", "</reasoning>"),
+];
+
+/// Drop the reasoning blocks a model emits around its working-out. An unclosed
+/// tag drops the rest, which is the safe reading: what follows an opening tag
+/// is reasoning until something says otherwise.
 fn strip_reasoning(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut rest = raw;
-    // `split_once` rather than `find` plus a slice: the crate forbids string
-    // indexing, and this needs no indices anyway.
-    while let Some((before, after)) = rest.split_once("<think>") {
-        out.push_str(before);
-        match after.split_once("</think>") {
-            Some((_, tail)) => rest = tail,
-            None => return out,
+    let mut out = raw.to_string();
+    for (open, close) in REASONING_TAGS {
+        let mut stripped = String::with_capacity(out.len());
+        let mut rest = out.as_str();
+        // `split_once` rather than `find` plus a slice: the crate forbids
+        // string indexing, and this needs no indices anyway.
+        while let Some((before, after)) = rest.split_once(open) {
+            stripped.push_str(before);
+            match after.split_once(close) {
+                Some((_, tail)) => rest = tail,
+                None => {
+                    rest = "";
+                    break;
+                }
+            }
         }
+        stripped.push_str(rest);
+        out = stripped;
     }
-    out.push_str(rest);
     out
 }
 
@@ -210,7 +268,7 @@ pub fn dispatch_title(
                 provider,
                 provider_name: provider_name.clone(),
                 model: model.clone(),
-                request: title_request(&meta.task, &model),
+                request: title_request(&meta.task, &provider_name, &model),
                 permit,
             },
             std::time::Duration::from_secs(leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS),
@@ -270,7 +328,16 @@ pub fn collect_title(
                 },
             );
         }
-        if let Ok(raw) = outcome.result {
+        // A reply that stopped at the token limit was cut off mid-sentence, so
+        // whatever it holds is not a finished title however short it looks.
+        // That is the shape a reasoning model returns here: it spends the
+        // budget working up to an answer and the call ends before the answer.
+        if outcome.finish_reason == Some(leviath_providers::FinishReason::TokenLimit) {
+            tracing::debug!(
+                run_id = %meta.run_id,
+                "title reply hit the token limit; leaving the run untitled"
+            );
+        } else if let Ok(raw) = outcome.result {
             let title = sanitize_title(&raw);
             if !title.is_empty() {
                 meta.title = Some(title);
@@ -291,8 +358,12 @@ mod tests {
     use tokio::sync::Notify;
     use tokio::sync::mpsc;
 
-    /// A provider whose single call yields a fixed reply or a fixed error.
-    struct Scripted(Result<&'static str, &'static str>);
+    /// A provider whose single call yields a fixed reply or a fixed error,
+    /// ending for a fixed reason.
+    struct Scripted {
+        reply: Result<&'static str, &'static str>,
+        finish_reason: leviath_providers::FinishReason,
+    }
 
     #[async_trait::async_trait]
     impl Provider for Scripted {
@@ -300,7 +371,7 @@ mod tests {
             &self,
             _r: &InferenceRequest,
         ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
-            match self.0 {
+            match self.reply {
                 Ok(reply) => Ok(leviath_providers::InferenceResponse {
                     content: reply.to_string(),
                     tool_calls: vec![],
@@ -311,7 +382,7 @@ mod tests {
                         cached_tokens: 0,
                         cache_write_tokens: 0,
                     },
-                    finish_reason: leviath_providers::FinishReason::Complete,
+                    finish_reason: self.finish_reason.clone(),
                 }),
                 Err(msg) => Err(ProviderError::Other(msg.to_string())),
             }
@@ -358,8 +429,23 @@ mod tests {
         reply: Result<&'static str, &'static str>,
         pools: crate::inference_pool::InferencePools,
     ) -> (World, mpsc::UnboundedReceiver<TitleOutcome>) {
+        build_world_finishing(reply, leviath_providers::FinishReason::Complete, pools)
+    }
+
+    /// The same, for the tests that care how the reply ended.
+    fn build_world_finishing(
+        reply: Result<&'static str, &'static str>,
+        finish_reason: leviath_providers::FinishReason,
+        pools: crate::inference_pool::InferencePools,
+    ) -> (World, mpsc::UnboundedReceiver<TitleOutcome>) {
         let mut registry = crate::ProviderRegistry::new();
-        registry.register("mock".to_string(), Arc::new(Scripted(reply)));
+        registry.register(
+            "mock".to_string(),
+            Arc::new(Scripted {
+                reply,
+                finish_reason,
+            }),
+        );
         let (title_tx, title_rx) = mpsc::unbounded_channel();
         let (inf_tx, _inf_rx) = mpsc::unbounded_channel();
         let (ttx, _trx) = mpsc::unbounded_channel();
@@ -439,7 +525,7 @@ mod tests {
                 provider: Arc::new(Hang),
                 provider_name: "mock".to_string(),
                 model: "m".to_string(),
-                request: title_request("task", "m"),
+                request: title_request("task", "mock", "m"),
                 permit: pools.try_acquire("m").expect("free"),
             },
             std::time::Duration::from_millis(5),
@@ -513,6 +599,59 @@ mod tests {
         assert_eq!(world.get::<RunMetadata>(e).unwrap().title, None);
     }
 
+    /// A reply that ran out of tokens is refused however title-shaped the text
+    /// looks. The model was cut off mid-sentence, so what came back is the
+    /// start of something rather than a finished title - and that is precisely
+    /// what a reasoning model returns when it spends the budget thinking.
+    #[tokio::test]
+    async fn a_reply_cut_off_at_the_token_limit_leaves_the_title_unset() {
+        let (mut world, mut title_rx) = build_world_finishing(
+            Ok("Release notes dig"),
+            leviath_providers::FinishReason::TokenLimit,
+            default_pools(),
+        );
+        world.insert_resource(TitleSettings(config(None, None)));
+        let e = world.spawn((metadata(Some("mock/m")), PendingTitle)).id();
+
+        run_dispatch(&mut world);
+        let outcome = title_rx.recv().await.expect("job reported");
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(outcome).unwrap();
+        world.insert_resource(TitleResults(rx));
+
+        run_collect(&mut world);
+        assert_eq!(
+            world.get::<RunMetadata>(e).unwrap().title,
+            None,
+            "a truncated reply is not a title, however short it is"
+        );
+        assert!(world.get::<AwaitingTitle>(e).is_none());
+    }
+
+    /// The switch the title call sends is the one its provider understands.
+    /// Sending them all would 400: each API rejects the others' spelling.
+    #[test]
+    fn the_title_request_turns_off_thinking_the_way_each_provider_spells_it() {
+        assert_eq!(
+            title_request("t", "ollama", "qwen3.8").extra,
+            serde_json::json!({ "think": false })
+        );
+        assert_eq!(
+            title_request("t", "openrouter", "deepseek/deepseek-r1").extra,
+            serde_json::json!({ "reasoning": { "enabled": false } })
+        );
+        // Anthropic only thinks when asked, and OpenAI never returns reasoning
+        // text, so neither needs a switch and neither is sent one.
+        assert_eq!(
+            title_request("t", "anthropic", "claude-sonnet-4-6").extra,
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            title_request("t", "openai", "gpt-5-mini").extra,
+            serde_json::Value::Null
+        );
+    }
+
     #[tokio::test]
     async fn collect_skips_a_despawned_agent() {
         let (mut world, _title_rx) = build_world(Ok("t"), default_pools());
@@ -523,6 +662,7 @@ mod tests {
         tx.send(TitleOutcome {
             entity: ghost,
             result: Ok("t".to_string()),
+            finish_reason: Some(leviath_providers::FinishReason::Complete),
             usage: None,
             provider_name: "mock".to_string(),
             model: "m".to_string(),
@@ -636,7 +776,7 @@ mod tests {
     #[test]
     fn title_request_truncates_the_task_and_carries_the_model() {
         let long_task = "x".repeat(5_000);
-        let req = title_request(&long_task, "gpt-5-mini");
+        let req = title_request(&long_task, "openai", "gpt-5-mini");
         assert_eq!(req.model, "gpt-5-mini");
         assert_eq!(req.max_tokens, TITLE_MAX_TOKENS);
         // One message, the task. This used to assert two, pinning the shape
@@ -653,7 +793,10 @@ mod tests {
     #[tokio::test]
     async fn scripted_provider_metadata_is_exercised() {
         // Keep the mock's non-`infer` trait methods measured.
-        let p = Scripted(Ok("t"));
+        let p = Scripted {
+            reply: Ok("t"),
+            finish_reason: leviath_providers::FinishReason::Complete,
+        };
         assert_eq!(p.name(), "mock");
         assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 100_000);
@@ -675,8 +818,9 @@ mod tests {
             "Tidy: workspace"
         );
         assert_eq!(sanitize_title("   \n\t\n"), "");
+        // One long line and nothing shorter behind it: no title here.
         let long = "word ".repeat(40);
-        assert!(sanitize_title(&long).len() <= TITLE_MAX_LEN);
+        assert_eq!(sanitize_title(&long), "");
     }
 
     /// The one that mattered: the instruction goes in a system *block*, not a
@@ -690,7 +834,7 @@ mod tests {
     /// only a debug log in a daemon whose output goes to /dev/null.
     #[test]
     fn the_title_request_carries_its_instruction_as_a_system_block() {
-        let request = title_request("tidy the kitchen", "claude-sonnet-4-6");
+        let request = title_request("tidy the kitchen", "anthropic", "claude-sonnet-4-6");
 
         assert_eq!(request.system.len(), 1);
         assert!(request.system[0].text.contains("short title"));
@@ -723,16 +867,79 @@ mod tests {
         assert_eq!(sanitize_title("<think>thinking with no end"), "");
     }
 
-    /// A compliant reply is untouched, including one long enough to need
-    /// cutting - there is no shorter line to prefer, so it is still cut.
+    /// A compliant reply is untouched.
     #[test]
     fn sanitize_leaves_an_ordinary_reply_alone() {
         assert_eq!(
             sanitize_title("Tidy the kitchen sink"),
             "Tidy the kitchen sink"
         );
-        let long = "x".repeat(TITLE_MAX_LEN * 2);
-        assert_eq!(sanitize_title(&long).chars().count(), TITLE_MAX_LEN);
+        // Exactly at the cap is still a title.
+        let brim = "x".repeat(TITLE_MAX_LEN);
+        assert_eq!(sanitize_title(&brim), brim);
+    }
+
+    /// The bug this module was rewritten for. A reasoning model that never
+    /// reaches its answer returns one unbroken paragraph of working-out, so
+    /// there is no short line to prefer - and the old code fell back to the
+    /// first line *truncated*, which is how a run came to be titled with the
+    /// model's own thinking, cut at exactly the display cap.
+    ///
+    /// Truncating prose does not make it a title. Nothing is stored, and the
+    /// run keeps showing the task the user typed.
+    #[test]
+    fn sanitize_refuses_a_reply_with_no_line_short_enough_to_be_a_title() {
+        let leaked = "We need to generate a short title for the user's request. \
+                      The user wants to build a dashboard that shows every run \
+                      and its current stage, so the title should say that.";
+        assert!(leaked.len() > TITLE_MAX_LEN);
+        assert_eq!(sanitize_title(leaked), "");
+
+        // What the old fallback made of it, and what a dashboard displayed:
+        // the same prose cut at exactly the cap, which is why the stored title
+        // was 80 bytes to the byte. Nothing here is allowed to produce it.
+        let truncated = leviath_core::truncate_at_boundary(leaked, TITLE_MAX_LEN);
+        assert_eq!(
+            truncated,
+            "We need to generate a short title for the user's request. The user wants to buil"
+        );
+        assert_ne!(sanitize_title(leaked), truncated);
+    }
+
+    /// The cap is in bytes, so the fitting test has to be too. Counting chars
+    /// and cutting bytes let an 80-character CJK title pass the check and then
+    /// be sliced a quarter of the way through.
+    #[test]
+    fn sanitize_measures_the_cap_in_bytes_not_characters() {
+        let wide = "字".repeat(TITLE_MAX_LEN);
+        assert_eq!(wide.chars().count(), TITLE_MAX_LEN);
+        assert!(wide.len() > TITLE_MAX_LEN);
+        assert_eq!(sanitize_title(&wide), "");
+
+        // Comfortably inside the cap in bytes, so it is a title.
+        let short = "字".repeat(8);
+        assert_eq!(sanitize_title(&short), short);
+    }
+
+    /// `<think>` is not the only spelling. A local GGUF writes its reasoning
+    /// into the reply text and no provider strips it, so the title path is the
+    /// only place these can be caught.
+    #[test]
+    fn sanitize_strips_every_reasoning_tag_spelling() {
+        assert_eq!(
+            sanitize_title("<thinking>a long deliberation about the task</thinking>\nCache Warmup"),
+            "Cache Warmup"
+        );
+        assert_eq!(
+            sanitize_title("<reasoning>weighing the options</reasoning>\nQueue Drain Fix"),
+            "Queue Drain Fix"
+        );
+        // Nested spellings, and an unclosed one still drops what follows it.
+        assert_eq!(
+            sanitize_title("<thinking>outer <think>inner</think> more</thinking>\nDone"),
+            "Done"
+        );
+        assert_eq!(sanitize_title("<reasoning>no closing tag here"), "");
     }
 
     /// The title call bills like any other and used to be counted like none:
@@ -753,6 +960,7 @@ mod tests {
         tx.send(TitleOutcome {
             entity,
             result: Ok("Release notes".to_string()),
+            finish_reason: Some(leviath_providers::FinishReason::Complete),
             usage: Some(leviath_providers::TokenUsage {
                 prompt_tokens: 900,
                 completion_tokens: 12,
@@ -799,6 +1007,7 @@ mod tests {
             entity,
             // Sanitizes to nothing, so no title is stored.
             result: Ok("   ".to_string()),
+            finish_reason: Some(leviath_providers::FinishReason::Complete),
             usage: Some(leviath_providers::TokenUsage {
                 prompt_tokens: 500,
                 completion_tokens: 1,
@@ -840,6 +1049,7 @@ mod tests {
         tx.send(TitleOutcome {
             entity,
             result: Err(ProviderError::Other("down".to_string())),
+            finish_reason: None,
             usage: None,
             provider_name: "mock".to_string(),
             model: "m".to_string(),
