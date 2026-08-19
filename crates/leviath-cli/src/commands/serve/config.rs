@@ -361,6 +361,7 @@ mod tests {
             "runs.search",
             "runs.files.listing",
             "blueprints.envelope",
+            "blueprints.fan_outs",
             "context.history.page",
         ] {
             assert!(

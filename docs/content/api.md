@@ -171,7 +171,7 @@ Base path `/api`; all JSON unless noted.
 | `POST /api/agents/{id}/pause` · `/resume` | Pause a run · resume it |
 | `POST /api/agents/{id}/message` | Steer a running agent |
 | `GET/POST /api/agents/{id}/interaction` | Read / answer a pending question |
-| `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation. The listing is paginated and takes `q` |
+| `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation. The listing is paginated and takes `q`; the detail carries the manifest, the regions and the [fan-out limits](#fan-out-limits) |
 | `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key |
 | `GET /api/models` | Enumerate models |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
@@ -395,6 +395,45 @@ in the response says where the window actually began. That is what keeps the pie
 offset past the end of the file returns 416 rather than an empty window, so a loop cannot spin.
 
 A whole-file read serializes exactly as it always has. `offset` is omitted when it is zero.
+
+## Fan-out limits
+
+A [fan-out stage](/docs/sub-agents#fan-out) has two caps, and neither is the stage's
+`max_iterations`. `max_workers` is how many workers run at once and `max_items` is how many work
+items the split may produce at all. `GET /api/blueprints/{name}` reports both for every fan-out
+stage, resolved the way the daemon will apply them:
+
+```json
+{
+  "name": "reviewer",
+  "fan_outs": [
+    {
+      "stage": "split_review",
+      "worker_stage": "review_worker",
+      "merge_stage": "deep_review",
+      "max_workers": 30,
+      "max_items": 30,
+      "on_worker_failure": "continue",
+      "results_region": "worker_findings"
+    }
+  ],
+  "regions": ["…"],
+  "manifest": "…"
+}
+```
+
+`max_workers` is the default (30) when the manifest names none, and `null` when the stage is
+unlimited. `max_items` is `null` when there is no ceiling. Whichever of `worker_agent`,
+`worker_stage` or `worker_query` the stage uses is the one present. A blueprint that never fans out
+has an empty list. `blueprints.fan_outs` in the `capabilities` list on `GET /api/config` says the
+daemon reports this.
+
+Changing a cap is a manifest write: `PUT /api/blueprints/{name}` with the manifest text, the stage's
+`max_workers` or `max_items` set to the number you want, or to `0` for no cap at all. `POST
+/api/blueprints/validate` will tell you first if the value is not a whole number or is negative,
+which are errors rather than quiet fallbacks. The workers still share the daemon's inference pool
+(`[limits] max_concurrent_inferences`, 8 by default), so an unlimited fan-out queues at the model
+rather than running away.
 
 ## Tools and scripts
 

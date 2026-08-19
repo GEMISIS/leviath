@@ -164,7 +164,7 @@ pub struct FanOutWaiting {
 pub struct FanOutState {
     /// The fan-out configuration.
     pub config: FanOutConfig,
-    /// The concurrency cap.
+    /// The concurrency cap; `usize::MAX` for a stage with `max_workers = 0`.
     pub max_workers: usize,
     /// Work items not yet started.
     pub pending: Vec<WorkItem>,
@@ -269,7 +269,11 @@ pub fn fan_out_split(world: &mut World) {
             .remove::<InferenceResult>();
         match parse_work_items(&response) {
             Ok(items) => {
-                let max_workers = config.max_workers.max(1);
+                // Unlimited (`max_workers = 0`) is the largest cap there is,
+                // rather than a separate flag: the start loop below compares
+                // against it and nothing else, and the persisted state keeps
+                // the one number it always kept.
+                let max_workers = config.worker_cap().unwrap_or(usize::MAX);
                 // A split decides its own item count, so without a cap a model
                 // that returns five hundred items spawns five hundred runs. The
                 // cap also fixes each worker's share of the results region: past
@@ -1449,6 +1453,29 @@ mod tests {
         fan_out_collect(&mut world);
         assert!(world.get::<FanOutWaiting>(e).is_none());
         assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    }
+
+    /// `max_workers = 0` is unlimited: every item starts on the first collect
+    /// pass, and the persisted state carries the cap as the largest number
+    /// there is, which round-trips through JSON like any other.
+    #[test]
+    fn collect_with_max_workers_zero_starts_every_item_at_once() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(cfg(Some("merge"), 0, WorkerFailurePolicy::Continue)),
+            r#"[{"id":"a"},{"id":"b"},{"id":"c"},{"id":"d"},{"id":"e"}]"#,
+        );
+        fan_out_split(&mut world);
+        fan_out_collect(&mut world);
+        assert_eq!(world.get::<SubAgentChildren>(e).unwrap().children.len(), 5);
+        let state = world.get::<FanOutWaiting>(e).unwrap().to_state();
+        assert_eq!(state.max_workers, usize::MAX);
+        assert!(state.pending.is_empty());
+        let json = serde_json::to_string(&state).unwrap();
+        let back: FanOutState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_workers, usize::MAX);
     }
 
     #[test]

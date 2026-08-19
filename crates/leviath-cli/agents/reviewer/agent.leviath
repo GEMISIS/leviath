@@ -117,19 +117,22 @@ max_iterations = 4
 max_revisits = 1
 worker_stage = "review_worker"
 merge_stage = "deep_review"
-max_workers = 4
+# Every area at once rather than in waves; the daemon's inference pool paces the
+# requests. Set to 0 for no cap at all.
+max_workers = 30
 # An area nobody could review is a gap in the report, not a reason to throw the
-# other nine away. The failed worker is named in the results, and the deep review
+# others away. The failed worker is named in the results, and the deep review
 # is told to cover its area itself.
 on_worker_failure = "continue"
 # Where the workers' findings land, and the budget their shares divide. A region
 # of its own rather than the conversation, which is carrying the message history
 # alongside them.
 results_region = "worker_findings"
-# A ceiling on areas, not just on concurrency. Ten areas is enough breadth for
-# any one change, and past that each worker's share of the region is too small
-# to carry a usable finding list.
-max_items = 10
+# A ceiling on areas, not just on concurrency. Thirty areas covers a change of
+# any size while leaving each worker a usable share of the region for its
+# finding list; the merge is told when that share had to be trimmed. Set to 0
+# for no ceiling.
+max_items = 30
 split_prompt = """
 Split this review into areas that can be scrutinized independently, one work
 item each. An area is a file, a module, a subsystem, or one coherent group of

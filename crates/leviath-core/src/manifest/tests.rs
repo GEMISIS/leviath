@@ -2172,7 +2172,7 @@ split_prompt = "go"
             worker_stage: None,
             worker_query: None,
             merge_stage: None,
-            max_workers: 4, // default
+            max_workers: crate::blueprint::DEFAULT_MAX_WORKERS,
             on_worker_failure: crate::blueprint::WorkerFailurePolicy::Continue,
             split_prompt: "go".to_string(),
             results_region: None,
@@ -2208,7 +2208,7 @@ max_items = 12
             worker_stage: None,
             worker_query: None,
             merge_stage: None,
-            max_workers: 4,
+            max_workers: crate::blueprint::DEFAULT_MAX_WORKERS,
             on_worker_failure: crate::blueprint::WorkerFailurePolicy::Continue,
             split_prompt: "go".to_string(),
             results_region: Some("worker_rows".to_string()),
@@ -2218,12 +2218,57 @@ max_items = 12
     assert_eq!(bp.find_stage("parallel").unwrap().mode, expected);
 }
 
-/// A cap of zero or below would mean "no work items at all", which is not
-/// something anyone writes on purpose. Reading it as "no cap" matches an
-/// absent key rather than producing a fan-out that can never run.
+/// `0` is the manifest's word for "unlimited" on both caps: `max_items = 0`
+/// reads as no ceiling on how many items the split may produce (the same as
+/// leaving the key out), and `max_workers = 0` keeps the zero so the runtime
+/// starts every item at once. Neither is a fan-out that can never run.
 #[test]
-fn parse_manifest_fan_out_rejects_a_non_positive_max_items() {
-    for value in ["0", "-3", "\"twelve\""] {
+fn parse_manifest_fan_out_zero_caps_mean_unlimited() {
+    let toml = r#"
+[agent]
+name = "fanout-cap"
+
+[stages.parallel]
+mode = "fan_out"
+worker_agent = "w"
+split_prompt = "go"
+max_items = 0
+max_workers = 0
+"#;
+    let bp = parse_manifest(toml).unwrap();
+    let expected = crate::blueprint::StageMode::FanOut {
+        config: crate::blueprint::FanOutConfig {
+            worker_agent: Some("w".to_string()),
+            worker_stage: None,
+            worker_query: None,
+            merge_stage: None,
+            max_workers: 0,
+            on_worker_failure: crate::blueprint::WorkerFailurePolicy::Continue,
+            split_prompt: "go".to_string(),
+            results_region: None,
+            max_items: None,
+        },
+    };
+    let stage = bp.find_stage("parallel").unwrap();
+    assert_eq!(stage.mode, expected);
+    let crate::blueprint::StageMode::FanOut { config } = &stage.mode else {
+        unreachable!("asserted equal to a fan-out above");
+    };
+    assert_eq!(config.worker_cap(), None);
+}
+
+/// A negative or non-numeric cap is a mistake the author should hear about at
+/// parse time. `max_workers = -1` used to wrap to the largest `usize` and run
+/// unbounded, and `max_items = "twelve"` was read as no cap at all; both showed
+/// up only as a fan-out wider than the manifest appeared to allow.
+#[test]
+fn parse_manifest_fan_out_rejects_a_negative_or_non_numeric_cap() {
+    for (key, value, wants) in [
+        ("max_items", "-3", "must not be negative"),
+        ("max_items", "\"twelve\"", "must be a whole number"),
+        ("max_workers", "-1", "must not be negative"),
+        ("max_workers", "\"lots\"", "must be a whole number"),
+    ] {
         let toml = format!(
             r#"
 [agent]
@@ -2233,28 +2278,15 @@ name = "fanout-cap"
 mode = "fan_out"
 worker_agent = "w"
 split_prompt = "go"
-max_items = {value}
+{key} = {value}
 "#
         );
-        let bp = parse_manifest(&toml).unwrap();
-        let expected = crate::blueprint::StageMode::FanOut {
-            config: crate::blueprint::FanOutConfig {
-                worker_agent: Some("w".to_string()),
-                worker_stage: None,
-                worker_query: None,
-                merge_stage: None,
-                max_workers: 4,
-                on_worker_failure: crate::blueprint::WorkerFailurePolicy::Continue,
-                split_prompt: "go".to_string(),
-                results_region: None,
-                max_items: None,
-            },
-        };
-        assert_eq!(
-            bp.find_stage("parallel").unwrap().mode,
-            expected,
-            "max_items = {value}"
+        let err = parse_manifest(&toml).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("stage 'parallel': {key} {wants}")),
+            "{key} = {value}: {err}"
         );
+        assert!(err.contains("0 means unlimited"), "{key} = {value}: {err}");
     }
 }
 

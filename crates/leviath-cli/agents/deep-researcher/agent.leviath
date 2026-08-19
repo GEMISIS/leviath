@@ -88,12 +88,15 @@ max_iterations = 4
 max_revisits = 1
 worker_agent = "researcher"
 merge_stage = "analyze"
-max_workers = 4
+# Every sub-question at once rather than in waves; the daemon's inference
+# pool paces the requests. Set to 0 for no cap at all.
+max_workers = 30
 # Where the workers' findings land, and the budget their shares divide.
 results_region = "sub_findings"
-# A ceiling on sub-questions, not just on concurrency. Past this each worker's
-# share of the region is too small to carry a usable answer.
-max_items = 8
+# A ceiling on sub-questions, not just on concurrency. Thirty leaves each
+# worker a usable share of the region for its answer; the analyze stage is told
+# when that share had to be trimmed. Set to 0 for no ceiling.
+max_items = 30
 on_worker_failure = "continue"
 split_prompt = """
 Split the topic in `query` into sub-questions that can be researched
