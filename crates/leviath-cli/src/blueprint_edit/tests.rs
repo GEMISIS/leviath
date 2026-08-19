@@ -1681,3 +1681,70 @@ fn the_written_order_walks_arrays_of_tables_and_renumbers_them() {
     );
     assert_eq!(written_order(&doc)[0], vec![Seg::Key("d".into())]);
 }
+
+#[test]
+fn renaming_an_agent_moves_its_directory_and_the_name_in_its_manifest() {
+    let root =
+        std::env::temp_dir().join(format!("lev-blueprint-edit-rename-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let agents = root.join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let text = format!("# kept\n{}", templates::empty_blueprint("own").unwrap());
+    catalog::write_agent(&agents, "own", &text).unwrap();
+    catalog::write_agent(
+        &agents,
+        "taken",
+        &templates::empty_blueprint("taken").unwrap(),
+    )
+    .unwrap();
+    // Refusals leave everything alone.
+    assert!(catalog::rename_agent(&agents, "own", "bad name").is_err());
+    assert!(
+        catalog::rename_agent(&agents, "own", "taken")
+            .unwrap_err()
+            .contains("already exists")
+    );
+    assert!(
+        catalog::rename_agent(&agents, "ghost", "other")
+            .unwrap_err()
+            .contains("Could not read")
+    );
+    std::fs::create_dir_all(agents.join("junk")).unwrap();
+    std::fs::write(agents.join("junk").join("agent.leviath"), "= not toml").unwrap();
+    assert!(catalog::rename_agent(&agents, "junk", "other").is_err());
+    assert!(agents.join("own").exists());
+    // The same name is nothing to do.
+    assert_eq!(
+        catalog::rename_agent(&agents, "own", "own").unwrap(),
+        agents.join("own")
+    );
+    // A move the disk refuses: the manifest already carries the new name
+    // under the old directory, and says so.
+    let err = catalog::rename_agent_with(&agents, "own", "mine", &mut |_, _| {
+        Err(std::io::Error::other("disk says no"))
+    })
+    .unwrap_err();
+    assert!(err.contains("disk says no"), "{err}");
+    assert!(agents.join("own").exists());
+    let stuck = std::fs::read_to_string(agents.join("own").join("agent.leviath")).unwrap();
+    assert!(stuck.contains("name = \"mine\""));
+    std::fs::write(agents.join("own").join("agent.leviath"), &text).unwrap();
+    // A manifest that cannot be written: said, nothing moved.
+    let manifest = agents.join("own").join("agent.leviath");
+    let writable = std::fs::metadata(&manifest).unwrap().permissions();
+    let mut locked = writable.clone();
+    locked.set_readonly(true);
+    std::fs::set_permissions(&manifest, locked).unwrap();
+    let err = catalog::rename_agent(&agents, "own", "mine").unwrap_err();
+    assert!(err.contains("Could not write"), "{err}");
+    assert!(agents.join("own").exists());
+    std::fs::set_permissions(&manifest, writable).unwrap();
+    // The rename: the directory moves, the name changes, the comment stays.
+    let new = catalog::rename_agent(&agents, "own", "mine").unwrap();
+    assert_eq!(new, agents.join("mine"));
+    assert!(!agents.join("own").exists());
+    let moved = std::fs::read_to_string(new.join("agent.leviath")).unwrap();
+    assert!(moved.starts_with("# kept\n"), "{moved}");
+    assert!(moved.contains("name = \"mine\""), "{moved}");
+    let _ = std::fs::remove_dir_all(&root);
+}

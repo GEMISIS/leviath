@@ -183,9 +183,11 @@ fn an_empty_home_says_so_and_a_broken_manifest_declines_the_preview() {
     // Actions on nothing do nothing.
     dash.handle_key(key(KeyCode::Enter));
     dash.handle_key(key(KeyCode::Char('d')));
+    dash.handle_key(key(KeyCode::Char('R')));
     dash.handle_key(key(KeyCode::Char('r')));
     dash.handle_key(key(KeyCode::Char('l')));
     assert!(dash.agent_builder.is_some() && dash.agents().editor.is_none());
+    assert!(dash.agents().catalog.renaming.is_none());
     // A preview that cannot be built says why (an unreadable manifest, a
     // manifest the runtime rejects); the second still opens in the editor,
     // which edits TOML, not the runtime's view of it.
@@ -242,7 +244,7 @@ fn delete_and_reset_ask_first_and_launch_goes_to_the_new_run_screen() {
     assert!(screen.contains("edited"), "{screen}");
     assert!(screen.contains("puts the bundled copy back"), "{screen}");
     // Reset: No keeps it, Yes restores it. The dialog draws over the screen.
-    dash.handle_key(key(KeyCode::Char('r')));
+    dash.handle_key(key(KeyCode::Char('R')));
     assert!(text(&mut dash).contains("Reset to original?"));
     dash.tick_graphs(std::time::Duration::from_millis(100));
     assert!(matches!(
@@ -251,7 +253,7 @@ fn delete_and_reset_ask_first_and_launch_goes_to_the_new_run_screen() {
     ));
     dash.handle_key(key(KeyCode::Char('n')));
     assert!(dash.pending_confirm.is_none());
-    dash.handle_key(key(KeyCode::Char('r')));
+    dash.handle_key(key(KeyCode::Char('R')));
     dash.handle_key(key(KeyCode::Char('y')));
     assert!(
         std::fs::read_to_string(&manifest)
@@ -264,7 +266,7 @@ fn delete_and_reset_ask_first_and_launch_goes_to_the_new_run_screen() {
             .any(|t| t.message.contains("Reset coder"))
     );
     // Reset on an agent that is not an edited bundled one is a toast.
-    dash.handle_key(key(KeyCode::Char('r')));
+    dash.handle_key(key(KeyCode::Char('R')));
     assert!(dash.pending_confirm.is_none());
     assert!(
         dash.toasts
@@ -2012,5 +2014,152 @@ fn typing_in_a_chooser_never_reaches_the_editor_keys() {
     type_str(&mut dash, "haiku");
     assert!(dash.agents().editor.as_ref().unwrap().picker.is_some());
     assert_eq!(dash.agents().editor.as_ref().unwrap().message, None);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn r_renames_an_installed_agent_directory_manifest_and_arrangement() {
+    let (mut dash, root) = dashboard("rename");
+    let agents = root.join("agents");
+    // An arrangement saved under the old name comes along.
+    {
+        let mut store =
+            crate::blueprint_edit::LayoutStore::open(root.join("dash").join("graph-layouts.json"));
+        store.set(
+            "own",
+            [("work".to_string(), (3.0, 4.0))].into_iter().collect(),
+        );
+        store.save().unwrap();
+    }
+    dash.handle_key(key(KeyCode::Char('a')));
+    let at = dash
+        .agents()
+        .catalog
+        .visible()
+        .into_iter()
+        .position(|i| dash.agents().catalog.entries[i].name == "own")
+        .unwrap();
+    dash.agents().catalog.selected = at;
+    dash.handle_key(key(KeyCode::Char('r')));
+    assert!(dash.agents().catalog.renaming.is_some());
+    let screen = text(&mut dash);
+    assert!(screen.contains("Rename own"), "{screen}");
+    assert!(screen.contains("esc keep the name"), "{screen}");
+    // The prompt starts on the current name; a bad name says why and Enter
+    // does not go through; Esc keeps everything.
+    type_str(&mut dash, " x");
+    let screen = text(&mut dash);
+    assert!(screen.contains("Letters, digits"), "{screen}");
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(dash.agents().catalog.renaming.is_some());
+    dash.handle_key(key(KeyCode::Esc));
+    assert!(dash.agents().catalog.renaming.is_none());
+    assert!(agents.join("own").exists());
+    // A taken name says so; the agent's own name is fine and a no-op.
+    dash.handle_key(key(KeyCode::Char('r')));
+    for _ in 0..3 {
+        dash.handle_key(key(KeyCode::Backspace));
+    }
+    type_str(&mut dash, "coder");
+    assert!(
+        dash.agents()
+            .catalog
+            .renaming
+            .as_ref()
+            .unwrap()
+            .problem
+            .as_deref()
+            .is_some_and(|p| p.contains("already exists"))
+    );
+    for _ in 0..5 {
+        dash.handle_key(key(KeyCode::Backspace));
+    }
+    type_str(&mut dash, "own");
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(dash.agents().catalog.renaming.is_none());
+    assert!(agents.join("own").exists());
+    // The rename: directory, manifest name, arrangement, cursor, toast.
+    dash.handle_key(key(KeyCode::Char('r')));
+    for _ in 0..3 {
+        dash.handle_key(key(KeyCode::Backspace));
+    }
+    type_str(&mut dash, "mine");
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(!agents.join("own").exists());
+    let manifest = std::fs::read_to_string(agents.join("mine").join("agent.leviath")).unwrap();
+    assert!(manifest.contains("name = \"mine\""), "{manifest}");
+    assert_eq!(
+        dash.agents()
+            .catalog
+            .selected_entry()
+            .map(|e| e.name.clone()),
+        Some("mine".to_string())
+    );
+    assert!(
+        dash.toasts
+            .iter()
+            .any(|t| t.message.contains("Renamed own to mine"))
+    );
+    let store =
+        crate::blueprint_edit::LayoutStore::open(root.join("dash").join("graph-layouts.json"));
+    assert!(store.positions("own").is_none());
+    assert_eq!(
+        store.positions("mine").and_then(|p| p.get("work").copied()),
+        Some((3.0, 4.0))
+    );
+    // The new-run picker knows the new name too.
+    assert!(dash.new_run_agents.iter().any(|a| a.name == "mine"));
+    // Not renamable from here: a bundled agent not installed.
+    let at = dash
+        .agents()
+        .catalog
+        .visible()
+        .into_iter()
+        .position(|i| dash.agents().catalog.entries[i].name == "reviewer")
+        .unwrap();
+    dash.agents().catalog.selected = at;
+    dash.handle_key(key(KeyCode::Char('r')));
+    assert!(dash.agents().catalog.renaming.is_none());
+    assert!(
+        dash.toasts
+            .iter()
+            .any(|t| t.message.contains("bundled copy"))
+    );
+    // Nor an agent that lives elsewhere (the working directory's own).
+    std::fs::write(
+        root.join("work").join("agent.leviath"),
+        templates::empty_blueprint("here").unwrap(),
+    )
+    .unwrap();
+    dash.refresh_catalog();
+    let at = dash
+        .agents()
+        .catalog
+        .visible()
+        .into_iter()
+        .position(|i| dash.agents().catalog.entries[i].name == "here")
+        .unwrap();
+    dash.agents().catalog.selected = at;
+    dash.handle_key(key(KeyCode::Char('r')));
+    assert!(dash.agents().catalog.renaming.is_none());
+    assert!(
+        dash.toasts
+            .iter()
+            .any(|t| t.message.contains("outside the agents directory"))
+    );
+    // A rename the disk refuses is a toast, nothing moved.
+    dash.perform_agent_rename("mine", "mine");
+    dash.perform_agent_rename("ghost", "other");
+    assert!(
+        dash.toasts
+            .iter()
+            .any(|t| t.message.contains("Could not rename ghost"))
+    );
+    // Renamed out of the filter, the cursor stays where it was.
+    dash.agents().catalog.filter = "mine".to_string();
+    dash.agents().catalog.clamp();
+    dash.perform_agent_rename("mine", "yours");
+    assert!(agents.join("yours").exists());
+    assert!(dash.agents().catalog.visible().is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }

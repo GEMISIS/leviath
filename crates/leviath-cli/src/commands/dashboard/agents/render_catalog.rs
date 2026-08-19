@@ -41,6 +41,40 @@ impl Dashboard {
         if self.agents().chooser.is_some() {
             self.draw_chooser(frame, area);
         }
+        self.draw_rename_prompt(frame, area);
+    }
+
+    /// The rename prompt, when `r` opened one: the name being typed, and
+    /// why it will not do when it will not.
+    fn draw_rename_prompt(&mut self, frame: &mut Frame, area: Rect) {
+        let Some(rename) = self.agents().catalog.renaming.clone() else {
+            return;
+        };
+        let popup = centered(50, 20, area);
+        let popup = Rect {
+            height: popup.height.clamp(4, 6),
+            ..popup
+        };
+        let inner = popup_frame(
+            frame,
+            popup,
+            &format!("Rename {}", rename.from),
+            C_BORDER_FOCUS,
+        );
+        let mut name = vec![Span::styled("Name  ", Style::default().fg(C_DIM))];
+        name.extend(rename.name.display_spans(true).spans);
+        let problem = rename.problem.clone().unwrap_or_default();
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(name),
+                Line::from(Span::styled(problem, Style::default().fg(C_WARN))),
+                Line::from(Span::styled(
+                    "The directory and the manifest's name change; its arrangement comes along.",
+                    Style::default().fg(C_MUTED),
+                )),
+            ]),
+            inner,
+        );
     }
 
     fn draw_catalog_list(&mut self, frame: &mut Frame, area: Rect) {
@@ -224,7 +258,13 @@ impl Dashboard {
         let screen = self.agent_builder.as_deref().expect("callers check");
         // Priority order: on a narrow terminal the tail falls off, and `?`
         // always has the full list.
-        let hints = if screen.chooser.is_some() {
+        let hints = if screen.catalog.renaming.is_some() {
+            vec![
+                hint("esc", "keep the name"),
+                hint("type", "the new name"),
+                hint("enter", "rename"),
+            ]
+        } else if screen.chooser.is_some() {
             vec![
                 hint("esc", "back"),
                 hint("↑↓", "template"),
@@ -246,8 +286,9 @@ impl Dashboard {
                 hint("n", "new"),
                 hint("l", "launch"),
                 hint("?", "help"),
+                hint("r", "rename"),
                 hint("d", "delete"),
-                hint("r", "reset"),
+                hint("R", "reset"),
                 hint("/", "filter"),
                 hint("wheel", "scroll"),
             ]

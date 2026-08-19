@@ -81,7 +81,9 @@ same list.
   right-click menu for the stage, path or empty canvas under the pointer,
   a click on empty canvas selects nothing, undo and redo are `Ctrl-Z` and
   `Ctrl-Y`, and every bar names its controls: the run list calls the
-  screen out next to "new run".
+  screen out next to "new run". `r` on the catalog renames an installed
+  agent (directory, manifest name and saved arrangement together); reset
+  to the bundled copy moved to `R`.
 - **Breaking (websocket):** stage transitions and tool calls are frames of
   their own. `stage_transition`, `tool_call_started` and `tool_call_finished`
   used to arrive wrapped as `{"type":"world","event":{...}}`, so a client had

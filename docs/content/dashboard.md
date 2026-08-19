@@ -238,8 +238,9 @@ An installed bundled agent that has been edited says `edited`, and `r` puts the 
 | `Enter` / `e` | Open the agent in the editor. A bundled agent not installed yet opens from its embedded copy and is installed when saved |
 | `n` | New agent: start from the two-stage starter, or clone any agent in the catalog, under a name you type |
 | `l` | Launch it: the new-run screen with this agent picked |
+| `r` | Rename an installed agent: type the new name, `Enter` renames its directory and the `name` in its manifest (its saved arrangement comes along), `Esc` keeps it. A bundled agent not installed keeps its name (clone it with `n`); agents that live elsewhere are renamed where they are |
 | `d` | Delete an installed agent and its directory. Asks first. Agents that live elsewhere are edited in place but deleted where they are |
-| `r` | Reset an edited bundled agent to the copy bundled in the binary. Asks first |
+| `R` | Reset an edited bundled agent to the copy bundled in the binary. Asks first |
 | `/` | Filter by name or description; `Enter` keeps the filter, `Esc` clears it |
 | `?` / `F1` | Help |
 | `Esc` / `q` | Back to the run list |
