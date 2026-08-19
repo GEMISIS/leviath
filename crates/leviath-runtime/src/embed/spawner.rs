@@ -415,6 +415,13 @@ mod tests {
                 "literal",
             ),
             (
+                RegionSeed::Tools {
+                    calls: vec![leviath_core::layout::SeedToolCall::new("current_time")],
+                    refresh: leviath_core::layout::SeedRefresh::Once,
+                },
+                "tools",
+            ),
+            (
                 RegionSeed::Glob {
                     pattern: "p".to_string(),
                 },

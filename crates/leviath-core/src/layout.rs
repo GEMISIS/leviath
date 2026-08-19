@@ -473,7 +473,45 @@ pub enum RegionSeed {
     Tools {
         /// The calls to run, in order.
         calls: Vec<SeedToolCall>,
+        /// Whether the calls run once, or again on every stage entry.
+        refresh: SeedRefresh,
     },
+}
+
+/// When a [`RegionSeed::Tools`] seed runs again.
+///
+/// Every other seed kind resolves once, at spawn, and this defaults to the
+/// same: a region seeded from the filesystem or a literal has no reason to be
+/// re-read, and re-running a call on every stage entry costs a tool call and
+/// rewrites a region the cache was holding still.
+///
+/// [`EachStage`](Self::EachStage) is for the seeds where the answer moves.
+/// A clock is the clear case: a run that spends an hour in one stage and then
+/// enters another should date the second stage from when it started, not from
+/// when the run did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeedRefresh {
+    /// Resolve once, at spawn. The default, and what every other seed does.
+    #[default]
+    Once,
+    /// Resolve again whenever a stage is entered, replacing the region.
+    EachStage,
+}
+
+impl SeedRefresh {
+    /// Parse the manifest spelling, or `None` for a word that is neither.
+    ///
+    /// A wrong spelling is rejected rather than defaulted, so
+    /// `refresh = "each stage"` is reported instead of quietly meaning `once` -
+    /// which would read as the feature not working.
+    pub fn from_str_loose(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "once" | "spawn" => Some(Self::Once),
+            "each_stage" | "stage" => Some(Self::EachStage),
+            _ => None,
+        }
+    }
 }
 
 /// One tool call in a [`RegionSeed::Tools`] seed.
@@ -501,6 +539,49 @@ impl SeedToolCall {
             name: name.into(),
             args,
         }
+    }
+}
+
+#[cfg(test)]
+mod seed_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn both_spellings_and_their_aliases_parse() {
+        assert_eq!(SeedRefresh::from_str_loose("once"), Some(SeedRefresh::Once));
+        assert_eq!(
+            SeedRefresh::from_str_loose("spawn"),
+            Some(SeedRefresh::Once)
+        );
+        assert_eq!(
+            SeedRefresh::from_str_loose("each_stage"),
+            Some(SeedRefresh::EachStage)
+        );
+        assert_eq!(
+            SeedRefresh::from_str_loose("stage"),
+            Some(SeedRefresh::EachStage)
+        );
+        // Case and surrounding space are not the author's problem.
+        assert_eq!(
+            SeedRefresh::from_str_loose("  EACH_STAGE "),
+            Some(SeedRefresh::EachStage)
+        );
+    }
+
+    /// A word that is neither is rejected rather than defaulted. Defaulting
+    /// would make `refresh = "each stage"` silently mean `once`, which reads as
+    /// the feature not working rather than as a typo.
+    #[test]
+    fn an_unrecognised_word_is_not_quietly_once() {
+        assert_eq!(SeedRefresh::from_str_loose("each stage"), None);
+        assert_eq!(SeedRefresh::from_str_loose("always"), None);
+        assert_eq!(SeedRefresh::from_str_loose(""), None);
+    }
+
+    /// The default matches every other seed kind: resolve at spawn, once.
+    #[test]
+    fn the_default_is_once() {
+        assert_eq!(SeedRefresh::default(), SeedRefresh::Once);
     }
 }
 

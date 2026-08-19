@@ -326,33 +326,6 @@ pub(super) fn parse_region_mapping(v: &toml::Value) -> RegionMapping {
 /// Back-compat: a region literally named `task` with no `seed` gets an implicit
 /// `CallerInput { name: "task" }`, so unmodified blueprints seed the task text
 /// exactly as before.
-/// One entry of a `{ tools = [...] }` list.
-///
-/// Two spellings, because most calls take no arguments and should not have to
-/// look like they might: a bare string is the tool's name, and a table is
-/// `{ name = "...", args = { ... } }`. `args` is converted through
-/// `serde_json` because that is the shape a tool call carries everywhere else;
-/// a table with no readable `name` is dropped.
-fn parse_seed_tool_call(value: &toml::Value) -> Option<SeedToolCall> {
-    match value {
-        toml::Value::String(name) => Some(SeedToolCall::new(name.as_str())),
-        toml::Value::Table(t) => {
-            let name = t.get("name").and_then(|v| v.as_str())?;
-            match t.get("args") {
-                // Every TOML value has a JSON counterpart - the conversion has
-                // no failing case for a value that was itself parsed from TOML.
-                // A fallback here would be a branch nothing could reach.
-                Some(args) => Some(SeedToolCall::with_args(
-                    name,
-                    serde_json::to_value(args).expect("a parsed TOML value converts to JSON"),
-                )),
-                None => Some(SeedToolCall::new(name)),
-            }
-        }
-        _ => None,
-    }
-}
-
 pub(super) fn parse_region_seed(
     region_name: &str,
     value: Option<&toml::Value>,
@@ -401,6 +374,7 @@ pub(super) fn parse_region_seed(
             } else if let Some(name) = t.get("tool").and_then(|v| v.as_str()) {
                 Some(RegionSeed::Tools {
                     calls: vec![SeedToolCall::new(name)],
+                    refresh: parse_seed_refresh(t),
                 })
             } else if let Some(list) = t.get("tools").and_then(|v| v.as_array()) {
                 let calls: Vec<SeedToolCall> =
@@ -409,13 +383,56 @@ pub(super) fn parse_region_seed(
                 // through leaves the region unseeded and `lev validate` reports
                 // `region-seed-not-understood`, which is a better answer than a
                 // seed that silently runs nothing.
-                (!calls.is_empty()).then_some(RegionSeed::Tools { calls })
+                (!calls.is_empty()).then_some(RegionSeed::Tools {
+                    calls,
+                    refresh: parse_seed_refresh(t),
+                })
             } else {
                 t.get("caller")
                     .and_then(|v| v.as_str())
                     .map(|name| RegionSeed::CallerInput {
                         name: name.to_string(),
                     })
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The `refresh` key of a tool seed, defaulting to [`SeedRefresh::Once`].
+///
+/// An unreadable value falls back to the default rather than failing the
+/// manifest, matching how the rest of this parser treats a key it cannot make
+/// sense of; `lev validate` is where a typo is reported.
+fn parse_seed_refresh(table: &toml::value::Table) -> crate::layout::SeedRefresh {
+    table
+        .get("refresh")
+        .and_then(|v| v.as_str())
+        .and_then(crate::layout::SeedRefresh::from_str_loose)
+        .unwrap_or_default()
+}
+
+/// One entry of a `{ tools = [...] }` list.
+///
+/// Two spellings, because most calls take no arguments and should not have to
+/// look like they might: a bare string is the tool's name, and a table is
+/// `{ name = "...", args = { ... } }`. `args` is converted through
+/// `serde_json` because that is the shape a tool call carries everywhere else;
+/// a table with no readable `name` is dropped.
+fn parse_seed_tool_call(value: &toml::Value) -> Option<SeedToolCall> {
+    match value {
+        toml::Value::String(name) => Some(SeedToolCall::new(name.as_str())),
+        toml::Value::Table(t) => {
+            let name = t.get("name").and_then(|v| v.as_str())?;
+            match t.get("args") {
+                // Every TOML value has a JSON counterpart - the conversion has
+                // no failing case for a value that was itself parsed from TOML.
+                // A fallback here would be a branch nothing could reach.
+                Some(args) => Some(SeedToolCall::with_args(
+                    name,
+                    serde_json::to_value(args).expect("a parsed TOML value converts to JSON"),
+                )),
+                None => Some(SeedToolCall::new(name)),
             }
         }
         _ => None,

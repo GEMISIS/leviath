@@ -254,7 +254,10 @@ pub(super) fn resolve_seeds(
             // the user's `[tool_permissions]` - see `seed_tool`. Failures are
             // per call: one unavailable tool leaves its block out rather than
             // emptying the region the others filled.
-            RegionSeed::Tools { calls } => {
+            // `refresh` is not consulted here: spawn is the first stage entry,
+            // so an `each_stage` seed resolves here too and the runtime takes
+            // it from the next entry onward.
+            RegionSeed::Tools { calls, refresh: _ } => {
                 let mut blocks = Vec::new();
                 for call in calls {
                     match tools.run(call) {

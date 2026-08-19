@@ -273,9 +273,29 @@ answer costs it no turn.
 > lists every tool a blueprint seeds from, as `tool-seed`.
 
 A failed call is skipped with a warning and the other calls still fill the region; if the region is
-`required`, a failure is a spawn error naming the tool. Seeds resolve once, at spawn, and do not
-re-run when a run is reloaded, so a long run should call `current_time` again rather than trust a
-region stamped hours ago.
+`required`, a failure is a spawn error naming the tool.
+
+#### Refreshing on every stage
+
+Seeds resolve once, at spawn, like every other kind. `refresh = "each_stage"` resolves them again
+whenever a stage is entered:
+
+```toml
+environment = { kind = "pinned", seed = { tools = ["current_time"], refresh = "each_stage" } }
+```
+
+Use it where the answer moves. A run that spends an hour in one stage and then enters another
+should date the second stage from when it started, not from when the run did. The stage waits for
+the refreshed region before its first request, so the values are in place for the turn that reads
+them.
+
+It costs a tool call per stage entry for the life of the run, and rewrites a region that would
+otherwise sit still in the cached prefix, so leave it at the default for anything that does not
+actually change. A call that fails leaves the region as it was rather than blanking it: the
+previous value is merely stale, and stale beats absent. `lev validate` marks a refreshing seed
+"on every stage entry".
+
+Seeds do not re-run when a run is reloaded from a snapshot, whatever their `refresh` setting.
 
 `files`, `glob` and `rhai` seeds resolve against the run's working directory and may not leave it.
 A path that does is refused at spawn, before anything is read.
