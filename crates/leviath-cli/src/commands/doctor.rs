@@ -1,20 +1,24 @@
 //! `lev doctor` - prove the provider wiring works, one layer at a time.
 //!
-//! Four checks run in order and each one is reported, so a failure names the
+//! Five checks run in order and each one is reported, so a failure names the
 //! layer that broke instead of leaving the caller to guess:
 //!
 //! 1. `config` - the config file parses and a provider registry can be built.
-//! 2. `resolve` - the user's defaults pick a provider that is actually
+//! 2. `search` - the bundled research agents can reach a search engine. The odd
+//!    one out: it warns rather than fails, and it asks the *daemon* what it can
+//!    see rather than inspecting this process, because the daemon's environment
+//!    is fixed at exec time and is not the shell `doctor` was typed in.
+//! 3. `resolve` - the user's defaults pick a provider that is actually
 //!    registered. This is the check that catches a stage resolving to
 //!    `anthropic/claude-sonnet-4-6` (the hard-coded last resort in
 //!    [`ModelConfig::provider`](leviath_core::blueprint::ModelConfig::provider))
 //!    on a machine with no Anthropic key - the root cause of a fleet of runs
 //!    that spawned, sat at iteration 0, and never took a turn.
-//! 3. `inference` - one real call to that provider, straight through
+//! 4. `inference` - one real call to that provider, straight through
 //!    [`Provider::infer`]. No world, no run, nothing on disk.
-//! 4. `daemon` - a throwaway one-stage agent spawned over the control socket
+//! 5. `daemon` - a throwaway one-stage agent spawned over the control socket
 //!    and waited on, then deleted. This is the only check that exercises the
-//!    handoff, which is why it is worth the second billed call: checks 1-3
+//!    handoff, which is why it is worth the second billed call: checks 1-4
 //!    passing while this one fails is exactly the "credentials are fine, the
 //!    daemon is wedged" verdict that used to take a hand-built canary agent to
 //!    establish.
@@ -32,7 +36,9 @@ use anyhow::bail;
 use leviath_core::blueprint::ModelConfig;
 use leviath_providers::{InferenceRequest, Message, Provider};
 use leviath_runtime::ProviderRegistry;
-use leviath_runtime::control_socket::{ControlClient, ControlResponse};
+use leviath_runtime::control_socket::{
+    ControlClient, ControlRequest, ControlResponse, DaemonIdentity,
+};
 use leviath_runtime::pipeline::{bare_default_model, providers_tried, resolve_stage_model};
 
 use crate::commands::run::session::build_provider_registry_from_config;
@@ -48,10 +54,12 @@ fails is the diagnosis:
 
   config     the config file parses and a provider registry can be built.
              Fails on a malformed config.toml.
-  search     the bundled research agents can reach a search engine. Warns
-             (never fails) when BRAVE_API_KEY is unset, or is set but missing
-             from [security] allow_env_vars - which silently downgrades every
-             web_search to a keyless Wikipedia lookup.
+  search     the bundled research agents can reach a search engine. Asks the
+             daemon what it can see, not this shell, since only the daemon's
+             environment decides. Warns (never fails) when BRAVE_API_KEY is
+             unset, when the daemon was started before it existed, or when it
+             is missing from [security] allow_env_vars - each of which silently
+             downgrades every web_search to a keyless Wikipedia lookup.
   resolve    your default provider/model picks a provider that is actually
              registered. Fails when a key is missing or misspelled - and
              catches the case where a blueprint with no model falls back to
@@ -241,8 +249,8 @@ const SEARCH_KEY: &str = "BRAVE_API_KEY";
 
 /// Whether the bundled research agents can actually search the web.
 ///
-/// Two independent things have to be true, and getting one of them wrong is
-/// silent: the key has to be in the daemon's environment, *and* `[security]
+/// Two independent things have to be true, and getting either wrong is silent:
+/// the key has to be in **the daemon's** environment, *and* `[security]
 /// allow_env_vars` has to list it. The name ends in `KEY`, so the script host
 /// classes it as a credential and refuses to hand it to a Rhai tool that was
 /// not explicitly granted it - which means a user who exports the key and
@@ -252,30 +260,70 @@ const SEARCH_KEY: &str = "BRAVE_API_KEY";
 /// which still wrote a confident, fully cited report. Worth a line in `doctor`
 /// precisely because nothing else in the system says it out loud.
 ///
+/// `daemon` is the identity from the control handshake, and the key half of
+/// this check: a daemon's environment is fixed at exec time and is not this
+/// process's, so asking `std::env` answers for the shell `doctor` was typed in.
+/// The two disagree exactly when the bug is present - a key exported now,
+/// against a daemon started before it - so the daemon's answer wins whenever
+/// there is one, and the fallback says whose environment it is describing.
+///
+/// The allowlist half needs no such care: it comes from `config.toml`, which
+/// both processes read, and which the daemon re-reads per spawn.
+///
 /// Warns rather than fails: an install with no search key is perfectly good for
 /// everyone not running a research agent.
-fn search_check(config: &Config) -> Check {
+fn search_check(config: &Config, daemon: Option<&DaemonIdentity>) -> Check {
     let allowlisted = leviath_core::script_env_allowed(SEARCH_KEY, &config.security.allow_env_vars);
-    match (std::env::var(SEARCH_KEY), allowlisted) {
-        (Ok(key), true) if !key.is_empty() => Check::ok(
-            "search",
-            format!("brave ({SEARCH_KEY} is set and allowlisted)"),
+    let grant_fix = format!(
+        "Add `allow_env_vars = [\"{SEARCH_KEY}\"]` under `[security]` in ~/.leviath/config.toml"
+    );
+
+    // Whose environment we are describing, and what it holds. A daemon that did
+    // not report (older build, or an embedder) leaves `None` and we fall back to
+    // this process, saying so.
+    let in_env = daemon.and_then(|d| d.sees_tool_env(SEARCH_KEY));
+    let (present, whose) = match in_env {
+        Some(seen) => (seen, "the daemon"),
+        None => (
+            std::env::var_os(SEARCH_KEY).is_some_and(|v| !v.is_empty()),
+            "this shell (the daemon did not report; it may differ)",
         ),
-        (Ok(key), false) if !key.is_empty() => Check::warn(
+    };
+
+    match (present, allowlisted) {
+        (true, true) => Check::ok(
+            "search",
+            format!("brave ({SEARCH_KEY} readable by {whose})"),
+        ),
+        (true, false) => Check::warn(
             "search",
             format!(
-                "{SEARCH_KEY} is set but not granted, so every web_search falls back to \
-                 Wikipedia. Add `allow_env_vars = [\"{SEARCH_KEY}\"]` under `[security]` in \
-                 ~/.leviath/config.toml, then restart the daemon"
+                "{SEARCH_KEY} is readable by {whose} but not granted to script tools, so every \
+                 web_search falls back to Wikipedia. {grant_fix} - the daemon re-reads it, so no \
+                 restart is needed"
             ),
         ),
-        _ => Check::warn(
+        // The case a CLI-only check could never see: the key exists here, the
+        // grant exists, and the process that will run the tool still cannot
+        // read it. Naming the restart is the whole value of asking the daemon.
+        (false, _) if in_env == Some(false) && std::env::var_os(SEARCH_KEY).is_some() => {
+            Check::warn(
+                "search",
+                format!(
+                    "{SEARCH_KEY} is set in this shell but the daemon cannot see it - it was \
+                     started before the key existed, and a process does not inherit an \
+                     environment it already has. Run `lev daemon restart` from a shell that \
+                     exports {SEARCH_KEY}; until then every web_search falls back to Wikipedia"
+                ),
+            )
+        }
+        (false, _) => Check::warn(
             "search",
             format!(
-                "no search engine configured: {SEARCH_KEY} is unset, so research agents fall \
-                 back to a keyless Wikipedia lookup. Get a key from \
-                 https://brave.com/search/api/, put it in the daemon's environment, and add \
-                 `allow_env_vars = [\"{SEARCH_KEY}\"]` under `[security]`"
+                "no search engine configured: {SEARCH_KEY} is not readable by {whose}, so \
+                 research agents fall back to a keyless Wikipedia lookup. Get a key from \
+                 https://brave.com/search/api/ and export it in the shell the daemon starts \
+                 from. {grant_fix}"
             ),
         ),
     }
@@ -819,9 +867,21 @@ pub async fn run_checks(
         }
     };
     checks.push(config_check(&config, &registry));
-    // Offline and cheap, so it runs early enough to be seen even when a later
-    // network check fails. It only ever warns, so it never cuts the run short.
-    checks.push(search_check(&config));
+    // Ask the daemon who it is before judging its environment. `List` is
+    // idempotent and local, and it is only sent to force the handshake that
+    // fills `link().daemon` - the reply itself is not the point, and a daemon
+    // that will not answer just leaves the identity unknown, which the check
+    // reports as such rather than guessing.
+    let identity = match &daemon {
+        DaemonTarget::Client(client) => {
+            let _ = client.request(&ControlRequest::List).await;
+            client.link().daemon
+        }
+        DaemonTarget::Skip | DaemonTarget::Unavailable(_) => None,
+    };
+    // Runs early enough to be seen even when a later network check fails, and
+    // only ever warns, so it never cuts the run short.
+    checks.push(search_check(&config, identity.as_ref()));
 
     let (check, resolved) = resolve_check(&config, args.model.as_deref(), &registry);
     checks.push(check);

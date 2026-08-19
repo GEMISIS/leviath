@@ -45,6 +45,32 @@ pub fn control_dir() -> Option<std::path::PathBuf> {
 /// binary is newer and the daemon is running stale code.
 pub const CURRENT_BUILD: &str = env!("LEVIATH_BUILD");
 
+/// Environment variables that a bundled script tool needs and that only the
+/// daemon's own process can be asked about.
+///
+/// A daemon inherits its environment at exec time from whatever started it, and
+/// no client shares it. So `lev doctor` inspecting its own environment answers
+/// for the shell it was typed in, not for the process that will actually run
+/// the tool - which is how a working key and a daemon that could not see it
+/// reported as healthy while every search fell back to Wikipedia.
+///
+/// Kept to credentials a *bundled* tool reads, so the reported set is a fixed
+/// list in the source rather than anything scraped from the environment.
+pub const TOOL_ENV_PROBE: &[&str] = &["BRAVE_API_KEY"];
+
+/// Which of [`TOOL_ENV_PROBE`] this process can actually read, by name.
+///
+/// Presence only - the value is never read here and never leaves the process.
+/// An empty vec is the real answer "asked, saw none", which the identity type
+/// keeps distinct from "did not say".
+pub fn visible_tool_env() -> Vec<String> {
+    TOOL_ENV_PROBE
+        .iter()
+        .filter(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
 /// Path to the file where a running daemon records its build id
 /// (`<leviath-home>/.leviath/daemon.build`).
 pub fn build_marker_path() -> Option<std::path::PathBuf> {
@@ -1677,6 +1703,31 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             reply,
         });
         assert!(rx.await.unwrap());
+    }
+
+    /// Presence only, and only for the names the binary asks about - so this
+    /// can never become a way to read a daemon's environment.
+    #[test]
+    fn visible_tool_env_reports_the_probed_names_it_can_read() {
+        temp_env::with_var("BRAVE_API_KEY", Some("sk-brave"), || {
+            assert_eq!(visible_tool_env(), vec!["BRAVE_API_KEY".to_string()]);
+        });
+    }
+
+    #[test]
+    fn visible_tool_env_is_empty_when_nothing_probed_is_set() {
+        temp_env::with_var("BRAVE_API_KEY", None::<&str>, || {
+            assert!(visible_tool_env().is_empty());
+        });
+    }
+
+    /// An exported-but-empty variable reads as configured and is not: the
+    /// script that would use it gets an empty key and falls back anyway.
+    #[test]
+    fn visible_tool_env_treats_an_empty_value_as_absent() {
+        temp_env::with_var("BRAVE_API_KEY", Some(""), || {
+            assert!(visible_tool_env().is_empty());
+        });
     }
 
     #[test]

@@ -277,8 +277,20 @@ directory, or drop them in `~/.leviath/tools/` to offer them to every agent.
 >
 > Without that line the tool falls back to Wikipedia. It now says so in every result rather than
 > returning a bare empty list, and `lev doctor` reports it as a `search` warning, but the searches
-> still find nothing until you add the line. See
+> still find nothing until you add the line. The grant is config, which the daemon re-reads before
+> every run, so adding it needs no restart. See
 > [environment variables](/docs/configuration#environment-variables).
+
+> [!IMPORTANT]
+> The key itself is different: it has to be in **the daemon's** environment, not just the shell you
+> type `lev` in. A process inherits its environment when it starts, so a daemon that was already
+> running when you exported the key cannot see it, and every search falls back to Wikipedia while
+> your own shell looks correctly configured.
+>
+> `lev doctor` asks the daemon rather than itself, so it catches exactly this and tells you to
+> `lev daemon restart` from a shell that exports the key. (A daemon started from a desktop session
+> or a service manager inherits that environment, not your shell's - export the key where the
+> daemon actually starts.)
 
 A search that cannot reach an engine is the quietest failure a research agent has. The model is
 handed an empty result set, cannot tell it apart from "nobody has written about this", and closes

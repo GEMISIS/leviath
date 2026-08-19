@@ -663,7 +663,11 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     // Who this daemon is, told to every client that asks in its handshake. A
     // long-lived client (`lev serve`, `lev dash`, the ACP bridge) compares it
     // against its own build to tell a restart from an update.
-    let identity = DaemonIdentity::this_process(leviath_cli::daemon::setup::CURRENT_BUILD);
+    // It also reports which tool credentials this process can see, because that
+    // is a fact only this process holds: a client asking its own environment is
+    // answering for a different one.
+    let identity = DaemonIdentity::this_process(leviath_cli::daemon::setup::CURRENT_BUILD)
+        .with_tool_env(leviath_cli::daemon::setup::visible_tool_env());
     tokio::spawn(async move {
         // `Ok(None)` means someone connected but is not this user: the listener
         // has already closed that connection and logged it. Skip and keep
