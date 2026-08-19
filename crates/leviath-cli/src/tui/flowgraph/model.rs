@@ -153,6 +153,23 @@ fn transform_label(transform: &EdgeTransform) -> &'static str {
 
 impl StageEdge {
     /// The `[condition]` label an edge shows, empty for `always`.
+    /// The word the editor puts on every edge: what makes it fire.
+    pub(crate) fn editor_label(&self) -> &'static str {
+        match self.condition {
+            // A hint is a `hint = "..."` key; the parser leaves the
+            // condition at its default under it.
+            TransitionCondition::Always | TransitionCondition::LlmChoice if self.hint.is_some() => {
+                "hint"
+            }
+            TransitionCondition::Always => "always",
+            TransitionCondition::LlmChoice => "model's choice",
+            TransitionCondition::Error => "on error",
+            TransitionCondition::MaxIterations => "too many tries",
+            TransitionCondition::Stuck => "when stuck",
+            TransitionCondition::DeadEnd => "dead end",
+        }
+    }
+
     pub(crate) fn condition_label(&self) -> &'static str {
         match self.condition {
             TransitionCondition::Always => "",

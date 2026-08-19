@@ -470,6 +470,22 @@ fn stages_are_added_in_place_and_refused_when_wrong() {
     runtime_ok(&doc);
     doc.add_stage("last", None).unwrap();
     assert_eq!(doc.stage_names(), ["work", "review", "finish", "last"]);
+    // A path out of the new stage: its transitions table stops being written
+    // as an empty header, and comes back when the last path goes.
+    doc.add_edge("review", "finish").unwrap();
+    let text = doc.to_toml();
+    assert!(!text.contains("[stages.review.transitions]\n"), "{text}");
+    assert!(
+        text.contains("[stages.review.transitions.finish]"),
+        "{text}"
+    );
+    doc.delete_edge("review", "finish").unwrap();
+    assert!(
+        doc.to_toml().contains("[stages.review.transitions]\n"),
+        "{}",
+        doc.to_toml()
+    );
+    assert!(doc.stage("review").unwrap().is_terminal);
     // Refusals leave the document alone.
     let before = doc.to_toml();
     assert_eq!(
@@ -806,6 +822,12 @@ fn paths_are_added_kinded_gated_and_deleted() {
     assert_eq!(
         doc.delete_edge("ghost", "work"),
         Err(EditError::NoSuchStage("ghost".into()))
+    );
+    let mut bare = ManifestDoc::parse("[agent]\nname = \"b\"\n[stages.a]\n").unwrap();
+    assert_eq!(
+        bare.delete_edge("a", "a"),
+        Err(EditError::NoSuchEdge("a".into(), "a".into())),
+        "no transitions table"
     );
     assert_eq!(
         doc.set_edge_kind("work", "ghost", EdgeKind::Always),

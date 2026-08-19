@@ -36,7 +36,9 @@ cd release-notes
 
 That writes a directory with an `agent.leviath` file in it, plus a `.gitignore` and a
 `.env.example`. The blueprint it generates is a working one-stage agent. You are going to replace
-it, so open it and delete everything.
+it, so open it and delete everything. (There is also a graph editor for this in the
+[dashboard](/docs/dashboard#agent-editor): `lev dash`, then `a`, then `n`. This page writes the file
+by hand so every key is explained.)
 
 Every agent needs a name and an entry stage. Start there:
 

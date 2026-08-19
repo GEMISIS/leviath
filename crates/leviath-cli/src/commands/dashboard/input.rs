@@ -37,6 +37,12 @@ impl Dashboard {
             return;
         }
 
+        // The Agents screen (catalog, chooser, editor) is modal too.
+        if self.agent_builder.is_some() {
+            self.handle_agents_key(key);
+            return;
+        }
+
         // MCP management screen is modal: it owns all keys while open.
         if self.mcp_screen {
             self.handle_mcp_screen_key(key_code);
@@ -151,6 +157,10 @@ impl Dashboard {
                 // outcome: whether to ask again is a note about future
                 // questions, not a third answer to this one.
                 ConfirmAction::EnableYolo => self.accept_yolo_warning(dialog.remembered()),
+                ConfirmAction::AgentDelete { name } => self.perform_agent_delete(&name),
+                ConfirmAction::AgentReset { name } => self.perform_agent_reset(&name),
+                ConfirmAction::StageDelete { name } => self.editor_delete_stage(&name),
+                ConfirmAction::EditorDiscard => self.close_editor(),
             },
         }
     }
@@ -745,6 +755,7 @@ impl Dashboard {
                 self.refresh_mcp_rows();
             }
             KeyCode::Char('n') => self.open_new_run_screen(),
+            KeyCode::Char('a') => self.open_agents_screen(),
             _ => {}
         }
     }

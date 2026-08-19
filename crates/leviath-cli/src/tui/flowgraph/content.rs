@@ -125,6 +125,11 @@ pub(crate) struct StageNodeContent {
     pub(crate) is_entry: bool,
     pub(crate) is_terminal: bool,
     pub(crate) self_loop: bool,
+    // ── editor ──
+    /// The editor's problems list names this stage.
+    pub(crate) problem: bool,
+    /// The stage has a context layout of its own.
+    pub(crate) own_layout: bool,
     // ── live ──
     pub(crate) status: NodeStatus,
     /// The run's iteration count, when this is the current stage. It counts
@@ -147,6 +152,8 @@ impl StageNodeContent {
             is_entry: node.is_entry,
             is_terminal: node.is_terminal || node.allow_complete,
             self_loop: node.self_loop,
+            problem: false,
+            own_layout: false,
             status: NodeStatus::Pending,
             iteration: None,
             last_seen: None,
@@ -176,6 +183,9 @@ impl StageNodeContent {
         let mut prefix = String::new();
         if self.is_entry {
             prefix.push_str("▶ ");
+        }
+        if self.problem {
+            prefix.push_str("! ");
         }
         prefix.push_str(glyph);
         prefix.push(' ');
@@ -220,6 +230,9 @@ impl StageNodeContent {
         }
         if self.is_terminal {
             parts.push("⏹ can end".to_string());
+        }
+        if self.own_layout {
+            parts.push("▣ own context".to_string());
         }
         if let Some(seen) = &self.last_seen {
             parts.push(seen.clone());

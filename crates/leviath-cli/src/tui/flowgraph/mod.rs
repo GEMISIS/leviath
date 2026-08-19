@@ -23,4 +23,4 @@ pub(crate) mod view;
 pub(crate) use content::{RunPhase, WorkerCounts};
 pub(crate) use layout::Direction;
 pub(crate) use model::StageGraph;
-pub(crate) use view::{FlowView, LiveOverlay, Selection, StageLive};
+pub(crate) use view::{CanvasEvent, FlowView, LiveOverlay, Selection, StageLive};
