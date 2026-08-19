@@ -34,6 +34,7 @@ impl Dashboard {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
             .split(rows[0]);
+        self.agents().list_area = panes[0];
         self.draw_catalog_list(frame, panes[0]);
         self.draw_catalog_detail(frame, panes[1]);
         self.draw_catalog_hints(frame, rows[1]);
@@ -220,26 +221,35 @@ impl Dashboard {
     }
 
     fn draw_catalog_hints(&self, frame: &mut Frame, area: Rect) {
-        let filtering = self
-            .agent_builder
-            .as_ref()
-            .is_some_and(|s| s.catalog.filtering);
-        let hints = if filtering {
+        let screen = self.agent_builder.as_deref().expect("callers check");
+        // Priority order: on a narrow terminal the tail falls off, and `?`
+        // always has the full list.
+        let hints = if screen.chooser.is_some() {
             vec![
-                hint("type", "filter"),
-                hint("enter", "done"),
+                hint("esc", "back"),
+                hint("↑↓", "template"),
+                hint("type", "the name"),
+                hint("enter", "open the editor"),
+                hint("?", "help"),
+            ]
+        } else if screen.catalog.filtering {
+            vec![
                 hint("esc", "clear"),
+                hint("type", "filter"),
+                hint("enter", "keep"),
             ]
         } else {
             vec![
+                hint("esc", "back"),
+                hint("↑↓", "select"),
                 hint("enter", "edit"),
                 hint("n", "new"),
                 hint("l", "launch"),
+                hint("?", "help"),
                 hint("d", "delete"),
                 hint("r", "reset"),
                 hint("/", "filter"),
-                hint("?", "help"),
-                hint("esc", "back"),
+                hint("wheel", "scroll"),
             ]
         };
         draw_hint_bar(frame, area, None, &hints, false);

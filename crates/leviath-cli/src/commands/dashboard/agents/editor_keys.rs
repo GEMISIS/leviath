@@ -29,6 +29,10 @@ impl Dashboard {
             }
             return;
         }
+        if self.editor().menu.is_some() {
+            self.editor_menu_key(&key);
+            return;
+        }
         if self.editor().picker.is_some() {
             self.editor_picker_key(&key);
             return;
@@ -51,12 +55,13 @@ impl Dashboard {
         }
         match key.code {
             KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
-            KeyCode::Char('u') => {
+            KeyCode::Char('z') if ctrl && !key.modifiers.contains(KeyModifiers::SHIFT) => {
                 if !self.editor().undo() {
                     self.editor().message = Some("Nothing to undo".to_string());
                 }
             }
-            KeyCode::Char('r') if ctrl => {
+            // Ctrl-Y, and Ctrl-Shift-Z for those whose hands know that one.
+            KeyCode::Char('y') | KeyCode::Char('Z') | KeyCode::Char('z') if ctrl => {
                 if !self.editor().redo() {
                     self.editor().message = Some("Nothing to redo".to_string());
                 }
@@ -179,8 +184,16 @@ impl Dashboard {
                     return;
                 }
                 let after = self.editor().panel_stage();
+                let place = self.editor().place_next.take();
                 if self.editor_mutate(|d| d.add_stage(&name, after.as_deref())) {
                     let editor = self.editor();
+                    // A right click on empty canvas said where the box goes.
+                    if let Some(at) = place {
+                        let mut positions = editor.view.positions();
+                        positions.insert(name.clone(), at);
+                        let graph = editor.graph.clone();
+                        editor.view.replace_graph(graph, positions);
+                    }
                     editor.view.select_stage(&name);
                     editor.view.reveal(&name);
                     editor.sync_panel();
@@ -326,7 +339,7 @@ impl Dashboard {
 
     /// `c`: connect the selected stage to another, picked from a list (or
     /// to itself, which the canvas cannot draw as a drag).
-    fn editor_open_connect(&mut self) {
+    pub(super) fn editor_open_connect(&mut self) {
         let Some(from) = self.editor().panel_stage() else {
             self.editor().message = Some("Select a stage to connect from".to_string());
             return;
@@ -408,6 +421,7 @@ impl Dashboard {
                     let (name, positions) = (editor.name.clone(), editor.view.positions());
                     editor.layout.set(&name, positions);
                 }
+                CanvasEvent::ContextMenu { target, at } => self.editor_open_menu(&target, at),
             }
         }
         self.editor().sync_panel();

@@ -141,7 +141,10 @@ impl Dashboard {
             .collect();
 
         let empty_state_msg: Option<String> = if self.agents.is_empty() {
-            Some("  No agent runs yet. Press `n` to start one.".to_string())
+            Some(
+                "  No agent runs yet. Press `n` to start one, or `a` to build an agent."
+                    .to_string(),
+            )
         } else if self.display_indices.is_empty() {
             Some(format!(
                 "  No agent runs match \"{}\".",
@@ -568,6 +571,11 @@ impl Dashboard {
             ),
             Span::raw(" new run  "),
             Span::styled(
+                "[a]",
+                Style::default().fg(C_SUCCESS).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" agents  "),
+            Span::styled(
                 "[Tab]",
                 Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
             ),
@@ -585,8 +593,6 @@ impl Dashboard {
             Span::raw(" mark  "),
             Span::styled("[m]", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" mcp  "),
-            Span::styled("[a]", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" agents  "),
         ];
         if can_kill {
             spans.push(Span::styled(

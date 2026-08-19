@@ -289,57 +289,90 @@ impl Dashboard {
 
     fn draw_editor_hints(&mut self, frame: &mut Frame, area: Rect) {
         let editor = self.editor();
-        let hints = if editor.picker.is_some() {
+        // Priority order: on a narrow terminal the tail falls off, and `?`
+        // always has the full list.
+        let hints = if editor.menu.is_some() {
             vec![
+                hint("esc", "close"),
+                hint("↑↓", "move"),
+                hint("enter", "do it"),
+                hint("click", "pick / close"),
+            ]
+        } else if let Some((_, picker)) = &editor.picker {
+            let mut hints = vec![
+                hint("esc", "cancel"),
                 hint("type", "search"),
                 hint("↑↓", "move"),
-                hint("enter", "choose"),
-                hint("esc", "cancel"),
-            ]
+            ];
+            if picker.multi.is_some() {
+                hints.push(hint("space", "pick / drop"));
+                hints.push(hint("enter", "keep"));
+            } else {
+                hints.push(hint("enter", "choose"));
+            }
+            hints
         } else if editor.line.is_some() || editor.add_stage.is_some() || editor.add_region.is_some()
         {
-            vec![hint("enter", "apply"), hint("esc", "cancel")]
+            vec![
+                hint("esc", "cancel"),
+                hint("type", "edit"),
+                hint("enter", "apply"),
+            ]
         } else if matches!(editor.overlay, Some(Overlay::Prompts(_))) {
             vec![
-                hint("tab", "other prompt"),
-                hint("^s/esc", "apply"),
+                hint("esc / ^s", "apply"),
                 hint("^q", "discard"),
+                hint("tab", "other prompt"),
                 hint("^e", "$EDITOR"),
+                hint("?", "help"),
             ]
         } else if editor.overlay.is_some() {
             vec![
+                hint("esc", "close"),
                 hint("↑↓", "scroll"),
                 hint("y", "copy"),
-                hint("esc", "close"),
             ]
         } else {
             match editor.focus {
                 Focus::Canvas => vec![
+                    hint("esc", "close"),
                     hint("^s", "save"),
+                    hint("?", "help"),
                     hint("tab", "inspector"),
+                    hint("←→↑↓", "select"),
+                    hint("enter", "edit"),
+                    hint("right-click", "menu"),
                     hint("a", "add stage"),
                     hint("c", "connect"),
                     hint("x", "delete"),
-                    hint("enter", "edit"),
-                    hint("u", "undo"),
-                    hint("^r", "redo"),
+                    hint("^z", "undo"),
+                    hint("^y", "redo"),
                     hint("v", "definition"),
                     hint("p", "problems"),
-                    hint("?", "help"),
                     hint("r", "rotate"),
                     hint("f", "fit"),
-                    hint("esc", "close"),
+                    hint("+ -", "zoom"),
+                    hint("drag", "move / connect"),
                 ],
                 Focus::Inspector => vec![
+                    hint(
+                        "esc",
+                        if editor.panel_anchor.is_some() {
+                            "back"
+                        } else {
+                            "canvas"
+                        },
+                    ),
                     hint("^s", "save"),
+                    hint("?", "help"),
                     hint("↑↓", "row"),
                     hint("enter", "edit"),
                     hint("←→", "change"),
+                    hint("x", "remove"),
                     hint("1-3", "tab"),
                     hint("tab", "canvas"),
-                    hint("u", "undo"),
-                    hint("?", "help"),
-                    hint("esc", "canvas"),
+                    hint("^z", "undo"),
+                    hint("click", "pick a row"),
                 ],
             }
         };
@@ -350,6 +383,10 @@ impl Dashboard {
     /// definition, on top.
     fn draw_editor_overlays(&mut self, frame: &mut Frame, area: Rect) {
         if self.draw_editor_prompts(frame, area) {
+            return;
+        }
+        if let Some(menu) = self.editor().menu.as_mut() {
+            menu.draw(frame, area);
             return;
         }
         let editor = self.editor();

@@ -243,6 +243,7 @@ An installed bundled agent that has been edited says `edited`, and `r` puts the 
 | `/` | Filter by name or description; `Enter` keeps the filter, `Esc` clears it |
 | `?` / `F1` | Help |
 | `Esc` / `q` | Back to the run list |
+| mouse | Wheel over the list to move; wheel and drag on the preview to zoom and pan |
 
 ### Agent editor
 
@@ -280,8 +281,8 @@ the text comes back into the box when it closes.
 
 Every edit is checked as you make it, the way `lev validate` checks a file: the line under the graph
 says how many errors and warnings there are (`p` opens the list), a stage an error names carries a
-`!` on its box, and saving is refused while there are errors. `u` undoes the last edit, `Ctrl-R`
-redoes it. `v` shows the exact `agent.leviath` that will be saved, comments and all: the editor keeps
+`!` on its box, and saving is refused while there are errors. `Ctrl-Z` undoes the last edit, `Ctrl-Y`
+(or `Ctrl-Shift-Z`) redoes it. `v` shows the exact `agent.leviath` that will be saved, comments and all: the editor keeps
 your file's comments, key order and formatting, and only writes the keys it knows.
 
 An arrangement dragged into shape is kept per agent (in `dash/graph-layouts.json` under the data
@@ -291,7 +292,7 @@ directory), so a graph opens the way you left it; it is never part of the manife
 |---|---|
 | `Ctrl-S` | Save (checks first; errors block it and open the problems list) |
 | `Tab` | Move the keys between the graph and the inspector |
-| `u` / `Ctrl-R` | Undo / redo |
+| `Ctrl-Z` / `Ctrl-Y` | Undo / redo (`Ctrl-Shift-Z` redoes too) |
 | `v` | The definition; `y` copies it, `Esc` closes it |
 | `p` | Open or close the problems list under the graph |
 | `?` / `F1` | Help |
@@ -307,7 +308,8 @@ On the graph:
 | `c` | Connect the selected stage to another, picked from a list (or to itself: a loop) |
 | `x` / `Delete` | Delete the selected stage (asks first) or path |
 | `+` / `-` , `0`, `f`, `r` | Zoom, fit, turn the graph |
-| mouse | Click a box or a path to select it, drag a box to move it, drag a `●` handle onto another box to connect them, drag empty canvas to pan, wheel to zoom |
+| mouse | Click a box or a path to select it; click empty canvas to select nothing (back to **This agent**); drag a box to move it, drag a `●` handle onto another box to connect them, drag empty canvas to pan, wheel to zoom |
+| right-click | A menu for what is under the pointer: a stage (edit, connect to, add a stage after it, rename, edit prompts, delete), a path (edit, delete), or the empty canvas (add a stage there, fit, turn, show the definition). `↑` `↓` and `Enter` work it, `Esc` or a click elsewhere closes it |
 
 On the inspector:
 

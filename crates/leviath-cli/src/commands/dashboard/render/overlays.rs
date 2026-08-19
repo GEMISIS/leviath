@@ -98,6 +98,8 @@ fn agents_sections() -> Vec<HelpSection> {
             title: "Agents (a)",
             entries: vec![
                 ("↑ ↓ / k j", "select an agent"),
+                ("home / end, pgup / pgdn", "first / last, a page at a time"),
+                ("wheel", "over the list: move; over the preview: zoom"),
                 ("enter / e", "edit it (a bundled one installs when saved)"),
                 ("n", "new agent: start simple, or clone one"),
                 ("l", "launch it: the new-run screen with it picked"),
@@ -111,6 +113,7 @@ fn agents_sections() -> Vec<HelpSection> {
                     "filter by name or description; enter keeps it, esc clears it",
                 ),
                 ("esc / q", "back to the run list"),
+                ("? / F1", "this help"),
             ],
         },
         HelpSection {
@@ -138,7 +141,10 @@ fn agent_editor_sections() -> Vec<HelpSection> {
                     "save (checks first; errors block it and open the problems)",
                 ),
                 ("tab", "move the keys between the canvas and the inspector"),
-                ("u / ctrl-r", "undo / redo an edit"),
+                (
+                    "ctrl-z / ctrl-y",
+                    "undo / redo an edit (ctrl-shift-z redoes too)",
+                ),
                 (
                     "v",
                     "the definition: the exact file that will be saved (y copies it)",
@@ -162,16 +168,23 @@ fn agent_editor_sections() -> Vec<HelpSection> {
                 ("+ / - / 0, f, r", "zoom, fit, turn the graph"),
                 ("drag a box", "move it (the arrangement is kept per agent)"),
                 ("drag a ●", "connect two stages with the mouse"),
-                ("click", "select a stage or a path"),
+                (
+                    "click",
+                    "select a stage or a path; on empty canvas, select nothing",
+                ),
+                (
+                    "right-click",
+                    "a menu for the stage, path or canvas under the pointer",
+                ),
             ],
         },
         HelpSection {
             title: "Agent editor: inspector",
             entries: vec![
-                ("↑ ↓ / k j", "move between rows"),
+                ("↑ ↓ / k j, home / end", "move between rows"),
                 (
                     "enter",
-                    "edit the row: type, choose, flip, or press the button",
+                    "edit the row: type, choose, flip, open, or press the button",
                 ),
                 (
                     "← → / h l",
@@ -185,8 +198,26 @@ fn agent_editor_sections() -> Vec<HelpSection> {
                 ("← → on a model", "move it earlier or later in the chain"),
                 (
                     "esc",
-                    "back: a region returns to where it was opened from, otherwise the canvas",
+                    "back: a region or a loop's path returns to where it was opened from, otherwise the canvas",
                 ),
+                (
+                    "click",
+                    "pick a row (again to open it); click a tab to switch",
+                ),
+            ],
+        },
+        HelpSection {
+            title: "Agent editor: choosers and the definition",
+            entries: vec![
+                (
+                    "type",
+                    "search the list; ↑ ↓ move; enter chooses, esc cancels",
+                ),
+                (
+                    "space",
+                    "in the tools chooser: pick or drop a row; enter keeps the picks",
+                ),
+                ("↑ ↓, y", "in the definition: scroll, copy it"),
             ],
         },
         HelpSection {

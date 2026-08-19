@@ -59,7 +59,11 @@ same list.
   agent in the catalog; a bundled agent opens from its embedded copy and
   installs when saved, scripts and all; an edited bundled agent can be
   reset to the bundle. The editor keeps a file's comments, order and
-  formatting: it edits the manifest as a document.
+  formatting: it edits the manifest as a document. The canvas has a
+  right-click menu for the stage, path or empty canvas under the pointer,
+  a click on empty canvas selects nothing, undo and redo are `Ctrl-Z` and
+  `Ctrl-Y`, and every bar names its controls: the run list calls the
+  screen out next to "new run".
 - **Breaking (websocket):** stage transitions and tool calls are frames of
   their own. `stage_transition`, `tool_call_started` and `tool_call_finished`
   used to arrive wrapped as `{"type":"world","event":{...}}`, so a client had
