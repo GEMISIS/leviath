@@ -222,6 +222,10 @@ pub(crate) fn identified_daemon_in(
     let respond = std::sync::Arc::new(respond);
     let server_events = events.clone();
     let server = tokio::spawn(async move {
+        // Joined before the task ends: a test that "restarts" the daemon
+        // rebinds the same id, and on Windows a pipe instance still held by
+        // a connection task makes that bind fail with `AddrInUse`.
+        let mut served = Vec::new();
         for _ in 0..connections {
             let stream = listener
                 .accept()
@@ -231,7 +235,7 @@ pub(crate) fn identified_daemon_in(
             let identity = identity.clone();
             let respond = respond.clone();
             let mut rx = server_events.subscribe();
-            tokio::spawn(async move {
+            served.push(tokio::spawn(async move {
                 let (read_half, mut write_half) = tokio::io::split(stream);
                 let mut lines = BufReader::new(read_half).lines();
                 let _hello = lines.next_line().await.unwrap().unwrap();
@@ -256,7 +260,15 @@ pub(crate) fn identified_daemon_in(
                     out.push('\n');
                     let _ = write_half.write_all(out.as_bytes()).await;
                 }
-            });
+            }));
+        }
+        // The listener goes now, and so does this task's hold on the event
+        // sender: a subscribed connection ends only when every sender is gone,
+        // and the test's own clone is the one that should decide that.
+        drop(listener);
+        drop(server_events);
+        for connection in served {
+            connection.await.unwrap();
         }
     });
     let client = ControlClient::for_home(id, dir).with_build(TEST_BUILD);

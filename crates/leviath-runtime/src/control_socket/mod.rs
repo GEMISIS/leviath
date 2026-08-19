@@ -2115,6 +2115,11 @@ mod tests {
     /// A daemon at `id` with `token`, introducing itself as `identity`, that
     /// serves `connections` connections through the real handshake and then
     /// stops accepting. The fake host behind it answers every op.
+    ///
+    /// The returned task ends only once every connection it served has been
+    /// closed, not merely accepted. A test that "restarts" the daemon rebinds
+    /// the same id, and on Windows a pipe instance still held by a
+    /// connection task makes that bind fail with `AddrInUse`.
     fn identified_daemon(
         mut listener: ControlListener,
         token: ControlToken,
@@ -2126,16 +2131,25 @@ mod tests {
         spawn_fake_host(op_rx);
         let server_events = events.clone();
         let handle = tokio::spawn(async move {
+            let mut served = Vec::new();
             for _ in 0..connections {
                 let stream = listener.accept().await.unwrap().unwrap();
                 let op_tx = op_tx.clone();
                 let events = server_events.clone();
                 let token = token.clone();
                 let identity = identity.clone();
-                tokio::spawn(async move {
+                served.push(tokio::spawn(async move {
                     let _ =
                         handle_connection_as(stream, op_tx, events, Some(token), identity).await;
-                });
+                }));
+            }
+            // The listener goes now, and so does this task's hold on the event
+            // sender: a subscribed connection ends only when every sender is gone,
+            // and the test's own clone is the one that should decide that.
+            drop(listener);
+            drop(server_events);
+            for connection in served {
+                connection.await.unwrap();
             }
         });
         (events, handle)
