@@ -12,6 +12,14 @@ impl BuiltinTools {
         if !self.available(canonical) {
             return format!("[error] tool '{}' is not available on this platform", name);
         }
+        // The environment tools do no awaiting of their own (see `env.rs`), so
+        // they answer here rather than through five arms that each `.await`
+        // something which never yields. Taken before the match so the
+        // "is this one of mine" test and the dispatch are a single step -
+        // a guard arm would need a fallback branch nothing can reach.
+        if let Some(result) = self.execute_env_tool(canonical, &args) {
+            return result;
+        }
         match canonical {
             "read_file" => self.read_file(&args).await,
             "read_files" => self.read_files(&args).await,
@@ -19,6 +27,9 @@ impl BuiltinTools {
             "edit_file" => self.edit_file(&args).await,
             "list_dir" => self.list_dir(&args).await,
             "shell" => self.shell(&args).await,
+            // Like the context tools, this one needs the live world: the stage,
+            // iteration and token counts it reports exist only there.
+            "runtime_info" => "[error] runtime_info must be handled by the runtime".to_string(),
             n if n.starts_with("context_") => {
                 "[error] context tools must be handled by the runtime".to_string()
             }

@@ -218,6 +218,13 @@ fn permission_title(request: &InteractionRequest) -> String {
 fn tool_kind_for(tool_name: Option<&str>) -> ToolKind {
     match tool_name {
         Some("read_file" | "read_files" | "list_files" | "grep") => ToolKind::Read,
+        // The environment tools read the host and the run rather than a file,
+        // but `Read` is the closest kind the protocol has and is what a host
+        // should show: a lookup that returns information and changes nothing.
+        Some(
+            "current_time" | "system_info" | "locale_info" | "environment_info" | "which_command"
+            | "runtime_info",
+        ) => ToolKind::Read,
         Some("write_file" | "edit_file" | "apply_patch") => ToolKind::Edit,
         Some("delete_file") => ToolKind::Delete,
         Some("move_file") => ToolKind::Move,
@@ -484,6 +491,15 @@ this trailing text is ignored";
             ("read_files", ToolKind::Read),
             ("list_files", ToolKind::Read),
             ("grep", ToolKind::Read),
+            // The environment tools read the host and the run rather than a
+            // file, but a lookup that returns information and changes nothing
+            // is what `Read` means to a host picking an icon.
+            ("current_time", ToolKind::Read),
+            ("system_info", ToolKind::Read),
+            ("locale_info", ToolKind::Read),
+            ("environment_info", ToolKind::Read),
+            ("which_command", ToolKind::Read),
+            ("runtime_info", ToolKind::Read),
             ("write_file", ToolKind::Edit),
             ("edit_file", ToolKind::Edit),
             ("apply_patch", ToolKind::Edit),

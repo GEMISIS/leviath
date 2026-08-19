@@ -90,6 +90,7 @@ pub mod provider_creds;
 pub(crate) mod providers;
 pub(crate) mod repetition;
 pub mod restore;
+pub mod runtime_info_tool;
 pub mod script_provider;
 pub mod taint;
 pub mod telemetry;

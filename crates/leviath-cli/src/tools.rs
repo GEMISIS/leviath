@@ -232,6 +232,17 @@ pub fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPolicy {
         // own context and touch nothing outside it, and prompting per item
         // would make tracking work cost more than not tracking it.
         | "todo_add" | "todo_done" | "todo_note" => ToolPolicy::Allow,
+        // The environment tools report the clock, the machine, the locale, the
+        // paths and the run's own state. They read nothing the agent could not
+        // already infer from a `shell` call it was granted, mutate nothing, and
+        // reach no network. Prompting for the date would make grounding a run
+        // in the present cost an approval, which is how it would end up unused.
+        //
+        // `environment_info` is on this list despite naming environment
+        // variables because it answers to `[security] allow_env_vars` for their
+        // *values*: a credential-shaped name comes back listed, not read.
+        "current_time" | "system_info" | "locale_info" | "environment_info" | "which_command"
+        | "runtime_info" => ToolPolicy::Allow,
         "write_file" | "edit_file" | "shell" => ToolPolicy::Ask,
         // The sub-agent tools default to `Allow`, and the point of routing them
         // through this function at all is the *config*, not the prompt.
@@ -2317,6 +2328,17 @@ mod policy_tests {
         "ask_user_choice",
         "ask_user_confirm",
         "edit_document",
+        // Reviewed: read-only reports about the host and the run - the clock,
+        // the OS, the locale, the well-known directories, whether a program is
+        // installed, and this run's own stage and limits. None of them mutates
+        // anything, and `environment_info` withholds credential-shaped values
+        // under the same `allow_env_vars` rule a Rhai `env_var` read answers to.
+        "current_time",
+        "system_info",
+        "locale_info",
+        "environment_info",
+        "which_command",
+        "runtime_info",
     ];
 
     /// Every tool the runtime actually advertises, discovered rather than

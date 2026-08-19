@@ -3987,6 +3987,111 @@ fn infer_with(
     )
 }
 
+/// `runtime_info` is advertised by `leviath-tools` but answered here, because
+/// the stage, the iteration counts and the window occupancy exist only in the
+/// world. The failure this guards is the tool reaching the async lane, where
+/// `BuiltinTools::execute` would hand the model
+/// `[error] runtime_info must be handled by the runtime` instead of an answer.
+#[test]
+fn runtime_info_is_answered_from_the_world_and_never_reaches_the_lane() {
+    let mut world = World::new();
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let (offers, result) = infer_with(vec![tc("c1", "runtime_info")]);
+    let mut metadata = run_metadata();
+    metadata.unattended = true;
+    metadata.num_stages = 4;
+    // Four stages, and the one under the cursor caps its iterations. The cap is
+    // read from the blueprint at the cursor's index rather than from the agent,
+    // so a blueprint with distinct caps is what proves the right one is read.
+    let stages: Vec<leviath_core::Stage> = ["a", "b", "gather", "d"]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let mut st = leviath_core::Stage::new(
+                (*name).to_string(),
+                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+            );
+            st.max_iterations = Some(10 + i);
+            st
+        })
+        .collect();
+    let e = world
+        .spawn((
+            agent_state(),
+            metadata,
+            AgentBlueprint(blueprint(stages)),
+            offers,
+            result,
+            conv_window(),
+            StageCursor { index: 2 },
+            crate::pipeline::response::StageProgress {
+                iterations: 3,
+                ..Default::default()
+            },
+            ReadyForTools,
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    // Nothing was queued: the whole point is that it is answered inline.
+    assert!(
+        jrx.try_recv().is_err(),
+        "runtime_info must not be handed to the tool lane"
+    );
+
+    // A batch with nothing lane-bound applies its results straight into the
+    // window and never stashes them, so the window is the only record.
+    let window = world.get::<ContextWindow>(e).expect("the window survives");
+    let conversation = window
+        .regions
+        .iter()
+        .find(|r| r.name == "conversation")
+        .expect("the conversation region");
+    let text = conversation
+        .content
+        .iter()
+        .map(|entry| entry.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (_, from_brace) = text
+        .split_once('{')
+        .expect("the JSON answer is in the window");
+    let (body, _) = from_brace
+        .rsplit_once('}')
+        .expect("the JSON answer is closed");
+    let v: serde_json::Value =
+        serde_json::from_str(&format!("{{{body}}}")).expect("runtime_info answers with JSON");
+    // And the agent is released to infer on the answer rather than left waiting
+    // on a lane that was never given anything.
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    // The facts really came from this world rather than from defaults.
+    assert_eq!(v["run_id"], "run-1");
+    assert_eq!(v["agent"], "a");
+    assert_eq!(v["stage"]["name"], "s");
+    assert_eq!(v["stage"]["index"], 2);
+    assert_eq!(v["stage"]["of"], 4);
+    assert_eq!(v["stage"]["iterations"], 3);
+    // The cap of stage index 2, not of the first stage or the last.
+    assert_eq!(v["stage"]["max_iterations"], 12);
+    assert_eq!(v["stage"]["iterations_remaining"], 9);
+    assert_eq!(v["provider"], "p");
+    assert_eq!(v["model"], "m");
+    assert_eq!(v["working_directory"], "/w");
+    // And the field the model is meant to act on carries through.
+    assert_eq!(v["unattended"], true);
+    assert!(
+        v["interaction"]
+            .as_str()
+            .is_some_and(|g| g.contains("ask_user_text")),
+        "an unattended run is told which tools nobody will answer"
+    );
+}
+
 fn ctx_call(id: &str, region: &str, content: &str) -> crate::components::ToolCall {
     crate::components::ToolCall {
         tool_id: id.to_string(),

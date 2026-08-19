@@ -15,6 +15,7 @@ use tokio::time::{Duration, timeout};
 // its constructors.
 mod context;
 mod defs;
+mod env;
 mod exec;
 pub use exec::is_null_device;
 mod platform;
@@ -167,11 +168,11 @@ mod tests {
     // ── Tool definitions ──────────────────────────────────────────────────
 
     #[test]
-    fn tool_defs_returns_twenty_tools() {
+    fn tool_defs_returns_the_whole_catalog() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         let defs = tools.tool_defs();
-        assert_eq!(defs.len(), 20);
+        assert_eq!(defs.len(), 26);
     }
 
     #[test]
@@ -420,10 +421,10 @@ mod tests {
     }
 
     #[test]
-    fn names_returns_twenty_one_entries() {
+    fn names_returns_every_tool_and_alias() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
-        assert_eq!(tools.names().len(), 21);
+        assert_eq!(tools.names().len(), 27);
     }
 
     // ── Sub-agent tool definitions ────────────────────────────────────────
@@ -2098,7 +2099,7 @@ mod tests {
         let names: Vec<String> = tools.tool_defs().iter().map(|t| t.name.clone()).collect();
         assert!(!names.contains(&"shell".to_string()));
         // The other 16 built-ins remain.
-        assert_eq!(tools.tool_defs().len(), 19);
+        assert_eq!(tools.tool_defs().len(), 25);
         assert!(names.contains(&"read_file".to_string()));
         assert!(names.contains(&"context_write".to_string()));
         assert!(names.contains(&"present_for_review".to_string()));

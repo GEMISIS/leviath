@@ -144,6 +144,14 @@ thiserror = "2.0"
 toml = { version = "1.0", features = ["preserve_order"] }
 anyhow = "1.0"
 chrono = "0.4"
+# The IANA zone name (`America/Chicago`) behind the `current_time` tool. Already
+# in the lock file transitively via chrono, which uses it for `Local`; named here
+# so the tool reports the same zone chrono resolved rather than a second answer.
+iana-time-zone = "0.1"
+# The user's locale for the `locale_info` tool. `std` exposes none: Unix has
+# `LANG`/`LC_ALL`, Windows and macOS answer only through an OS call, and the
+# workspace forbids `unsafe`, so the three-platform lookup is delegated.
+sys-locale = "0.3"
 rhai = { version = "1.25", features = ["sync", "serde"] }
 glob = "0.3"
 # Free-space queries for the disk guard (`leviath-sys::disk`). Pure Rust over
@@ -190,7 +198,7 @@ libc = "0.2"
 # "socket" is for the control socket's peer-credential check (SO_PEERCRED on
 # Linux, LOCAL_PEERCRED on macOS/BSD), which is what stops another local user
 # from driving the daemon.
-nix = { version = "0.31", default-features = false, features = ["signal", "process", "user", "socket"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "process", "user", "socket", "hostname"] }
 temp-env = "0.3"
 crossterm = "0.29"
 # unstable-rendered-line-info: `Paragraph::line_count`, which the dashboard

@@ -241,6 +241,18 @@ fn interpret_icacls(success: bool, stderr: &[u8], path: &Path) -> io::Result<()>
 /// the coverage gate reads that as an uncovered region. A poisoned guard only
 /// happens when a test holding it has already failed, and failing the others
 /// with "poisoned" alongside it is no loss.
+/// This machine's hostname, or `None` when the OS declines to give one.
+///
+/// `COMPUTERNAME` rather than `GetComputerNameW`: Windows sets it for every
+/// process, and reaching the API directly would mean raw FFI in a workspace that
+/// forbids `unsafe`. The Unix side cannot use its environment equivalent for the
+/// opposite reason - `$HOSTNAME` there is a shell variable that is not exported.
+pub(crate) fn hostname() -> Option<String> {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+}
+
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

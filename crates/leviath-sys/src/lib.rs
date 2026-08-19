@@ -33,6 +33,8 @@ pub mod browser;
 pub mod disk;
 pub mod editor;
 pub mod keychain;
+pub mod locale;
+pub mod osinfo;
 pub mod perms;
 pub mod process;
 pub mod sandbox;
