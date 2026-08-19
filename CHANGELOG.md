@@ -59,6 +59,12 @@ same list.
   so a seed reaches nothing the agent could not, and a tool set to `ask` is
   refused rather than prompted because a seed runs before any prompt exists.
   `lev validate` lists them as `tool-seed`.
+- Fixed: `deep-researcher`, `researcher` and `wide-researcher` now know what day
+  it is. Each seeds a pinned `environment` region from `current_time` and
+  `locale_info`, and their research stages are told to judge "recent", "current"
+  and "latest" against it rather than against whatever they remember. This is
+  the bug that prompted the tools above: with no way to ask the date, a research
+  run reasoned from its training cutoff and worked a stale news cycle.
 - Fixed: `environment_info` reports credential-shaped environment variables by
   name with the value withheld, through the same `[security] allow_env_vars`
   gate a Rhai `env_var` read answers to, so an agent can tell a key is set

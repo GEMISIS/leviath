@@ -1,6 +1,6 @@
 [agent]
 name = "researcher"
-version = "0.0.3"
+version = "0.1.0"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 entry_stage = "gather"
 
@@ -10,6 +10,7 @@ read_file  = "allow"
 list_dir   = "allow"
 web_search = "allow"
 web_fetch  = "allow"
+current_time = "allow"
 write_file = "ask"
 bash       = "ask"
 
@@ -19,7 +20,7 @@ mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Gather relevant information on the topic"
 # web_search / web_fetch are provided by the agent's script tools (issue #97).
-available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append"]
+available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time"]
 max_iterations = 8
 max_revisits = 2
 system_prompt = """
@@ -35,6 +36,11 @@ Be efficient - do not search exhaustively:
    `sources_index` region with context_append:
    `[n] <title> - <url or path> - credibility: <high/med/low + why>`.
 
+
+Today's date is in the `environment` region. Treat it as authoritative over
+anything you remember: your training has a cutoff and this run does not. Judge
+"recent", "current" and "latest" against it, and note how old a source is when
+its age bears on the claim. Call current_time if you need the clock again.
 Prefer primary sources and well-established outlets; note when something is a blog,
 forum, or vendor claim. Once you have solid coverage of the sub-topics, transition
 to analyze - don't keep searching for marginal additions. The analyze stage will
@@ -67,7 +73,7 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Analyze and synthesize findings"
-available_tools = ["read_file", "web_fetch", "context_write", "context_append"]
+available_tools = ["read_file", "web_fetch", "context_write", "context_append", "current_time"]
 max_iterations = 20
 max_revisits = 3
 transition_prompt = """
@@ -193,6 +199,7 @@ query          = { kind = "pinned", budget = "1%", max_tokens = 1000, required =
 # Optional caller bounds: --scope "peer-reviewed sources since 2020 only".
 scope          = { kind = "pinned", budget = "1%", max_tokens = 1000, seed = "scope", volatility = "stable" }
 # Growing bibliography with credibility notes (curated by the agent).
+environment    = { kind = "pinned", budget = "1%", max_tokens = 600, seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
 sources_index  = { kind = "pinned", budget = "3%", max_tokens = 3000, volatility = "grows" }
 # Citation/confidence rules (seeded with a sensible default the agent follows).
 format         = { kind = "pinned", budget = "1%", max_tokens = 500, seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Mark each finding's confidence as high / medium / low based on source count and credibility." }, volatility = "stable" }
