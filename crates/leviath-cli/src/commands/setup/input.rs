@@ -24,6 +24,7 @@ use crate::tui::keymap;
 use crate::tui::widgets::confirm::ConfirmOutcome;
 use crate::tui::widgets::help::handle_help_key;
 use crate::tui::widgets::line_edit::{EditOutcome, LineEdit};
+use crate::tui::widgets::picker::PickerOutcome;
 
 /// What the loop should do after a key press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,57 +140,28 @@ impl Wizard {
         }
     }
 
-    /// The mouse while the chooser is open: the wheel moves within the list, a
-    /// click on a row takes it.
-    ///
-    /// A click outside the list is ignored rather than closing the chooser.
-    /// Closing on a stray click would discard a search somebody was halfway
-    /// through typing, and Esc is right there.
+    /// The mouse while the chooser is open: the widget moves or chooses, and
+    /// a choice is written back to the field.
     fn handle_picker_mouse(&mut self, mouse: MouseEvent, area: Rect, mut picker: Picker) {
-        match mouse.kind {
-            MouseEventKind::ScrollDown => picker.move_cursor(1),
-            MouseEventKind::ScrollUp => picker.move_cursor(-1),
-            MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(row) = super::render::picker_row_at(area, &picker, mouse.row) {
-                    picker.cursor = row;
-                    self.commit_picker(picker);
-                    return;
-                }
-            }
-            _ => {}
-        }
-        self.picker = Some(picker);
+        let outcome = picker.handle_mouse(&mouse, area);
+        self.settle_picker(picker, outcome);
     }
 
-    /// Keys while the chooser is open.
-    ///
-    /// Everything that is not navigation goes to the search box, so letters
-    /// type rather than acting: `q` in a chooser means the user is looking for
-    /// Qwen, and quitting setup instead would be indefensible.
+    /// Keys while the chooser is open: the widget filters, moves or chooses.
     fn handle_picker_key(&mut self, key: KeyEvent, mut picker: Picker) {
-        match key.code {
-            KeyCode::Up => picker.move_cursor(-1),
-            KeyCode::Down => picker.move_cursor(1),
-            KeyCode::PageUp => picker.move_cursor(-Wizard::PAGE),
-            KeyCode::PageDown => picker.move_cursor(Wizard::PAGE),
-            KeyCode::Home => picker.cursor = 0,
-            KeyCode::End => picker.move_cursor(isize::MAX),
-            _ => {
-                match picker.query.handle_key(&key) {
-                    EditOutcome::Commit => {
-                        self.commit_picker(picker);
-                        return;
-                    }
-                    // Esc closes without choosing, leaving the field as it was.
-                    EditOutcome::Cancel => return,
-                    EditOutcome::Pending => {}
-                }
-                // The filter just changed under the cursor, so a selection
-                // that has been filtered away must not linger off the end.
-                picker.move_cursor(0);
-            }
+        let outcome = picker.handle_key(&key);
+        self.settle_picker(picker, outcome);
+    }
+
+    /// What the chooser decided: keep it open, or close it with or without a
+    /// value. The wizard's chooser is single-select, so a many-choice never
+    /// arrives; treated as a cancel should the widget ever send one.
+    fn settle_picker(&mut self, picker: Picker, outcome: PickerOutcome) {
+        match outcome {
+            PickerOutcome::Pending => self.picker = Some(picker),
+            PickerOutcome::Chosen(index) => self.commit_picker(index),
+            PickerOutcome::Cancelled | PickerOutcome::ChosenMany(_) => {}
         }
-        self.picker = Some(picker);
     }
 
     /// Keys while a text field is open.
