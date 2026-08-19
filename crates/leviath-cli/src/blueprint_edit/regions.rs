@@ -42,6 +42,8 @@ pub enum RegionField {
     BudgetPercent,
     /// `max_tokens`, at least 1.
     MaxTokens,
+    /// `min_tokens`, at least 1.
+    MinTokens,
     /// `required = true`; off deletes the key.
     Required,
     /// `required_message`.
@@ -70,8 +72,13 @@ pub enum RegionValue {
 }
 
 impl ManifestDoc {
-    /// Add a region to a layout with starter values (`pinned`, `5%`, `4000`
-    /// tokens), creating `[context.regions]` when the scope has none.
+    /// Add a region to a layout with starter values (`pinned`, `5%`), creating
+    /// `[context.regions]` when the scope has none.
+    ///
+    /// No `max_tokens`: a starter ceiling is the thing that quietly undoes the
+    /// percentage on every model with a window worth having, and a new region
+    /// has no reason to want one. The author can add a floor or a ceiling
+    /// deliberately.
     pub fn add_region(&mut self, scope: &RegionScope, name: &str) -> Result<(), EditError> {
         require_name(name)?;
         let regions = self.regions_item_ensure(scope)?;
@@ -84,7 +91,6 @@ impl ManifestDoc {
         let mut region = InlineTable::new();
         region.insert("kind", Value::from("pinned"));
         region.insert("budget", Value::from("5%"));
-        region.insert("max_tokens", Value::from(4000));
         // Inline whichever shape the parent has: a headed `[context.regions]`
         // lists its regions as one-line inline tables, the way every bundled
         // agent writes them.
@@ -166,6 +172,9 @@ impl ManifestDoc {
             }
             (RegionField::MaxTokens, RegionValue::Number(n)) => {
                 set_or_remove_int(table, "max_tokens", n.map(|n| n.max(1)));
+            }
+            (RegionField::MinTokens, RegionValue::Number(n)) => {
+                set_or_remove_int(table, "min_tokens", n.map(|n| n.max(1)));
             }
             (RegionField::MaxItems, RegionValue::Number(n)) => {
                 set_or_remove_int(table, "max_items", n.map(|n| n.max(1)));

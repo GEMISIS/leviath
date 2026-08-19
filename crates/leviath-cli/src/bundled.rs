@@ -377,6 +377,98 @@ mod tests {
         }
     }
 
+    /// A bundled layout must actually grow with the model's context window.
+    ///
+    /// Every region was written as `budget = "N%"` *and* an absolute
+    /// `max_tokens`, and the cap is the smaller of the two on any window worth
+    /// having: `researcher` ran on a 1,048,576-token model with `raw_findings`
+    /// asking for 30% - 314,573 tokens - and getting the 40,000 its guard-rail
+    /// allowed. The percentages were decorative from about 167k upward.
+    ///
+    /// Stated as a ratio rather than a per-region ceiling so it holds whatever
+    /// the percentages are: resolve each layout against two windows a little
+    /// over 5x apart, and the room must scale with them. A layout clamped by
+    /// absolute caps scores 1.0 here, because both windows resolve to the same
+    /// fixed numbers.
+    ///
+    /// Asserted over whatever is bundled, so a new agent is held to it the day
+    /// it lands - and a deliberate ceiling on ONE region still passes, which is
+    /// the point: this forbids a clamped layout, not a considered cap.
+    #[test]
+    fn every_bundled_layout_scales_with_the_model_window() {
+        const NARROW: usize = 200_000;
+        const WIDE: usize = 1_048_576;
+        // The windows are 5.24x apart; require most of that to survive.
+        const MIN_GROWTH: f64 = 4.0;
+
+        let room = |layout: &leviath_core::ContextLayout, window: usize| -> usize {
+            layout
+                .resolved(window)
+                .regions
+                .iter()
+                .map(|r| r.max_tokens)
+                .sum()
+        };
+
+        let mut checked = 0;
+        for agent in BUNDLED_AGENTS {
+            let manifest = agent
+                .files
+                .iter()
+                .find(|(rel, _)| *rel == "agent.leviath")
+                .map(|(_, c)| *c)
+                .expect("every bundled agent ships a manifest");
+            let parsed = leviath_core::manifest::parse_manifest(manifest);
+            assert!(
+                parsed.is_ok(),
+                "bundled agent {} does not parse",
+                agent.name
+            );
+            let blueprint = parsed.expect("asserted Ok just above");
+
+            // Percentage ceilings may sum past 100% on purpose (regions rarely
+            // fill together), so the sum is not the thing to assert. What must
+            // hold at every window is the layout's own validation: the fixed
+            // pinned/hashmap/history regions have to leave the agent room to
+            // work. Checked across the range a real model spans, because the
+            // floors bind at the bottom of it and the percentages at the top.
+            for window in [32_768, 128_000, NARROW, WIDE] {
+                let resolved = blueprint.context_layout.resolved(window);
+                assert!(
+                    resolved.validate().is_ok(),
+                    "{}'s layout does not validate at a {window}-token window",
+                    agent.name
+                );
+                for stage in &blueprint.stages {
+                    if let Some(layout) = &stage.context_layout {
+                        assert!(
+                            layout.resolved(window).validate().is_ok(),
+                            "{}'s stage '{}' layout does not validate at a \
+                             {window}-token window",
+                            agent.name,
+                            stage.name
+                        );
+                    }
+                }
+            }
+
+            let narrow = room(&blueprint.context_layout, NARROW);
+            let wide = room(&blueprint.context_layout, WIDE);
+            let growth = wide as f64 / narrow as f64;
+            assert!(
+                growth >= MIN_GROWTH,
+                "{}'s context layout barely grows between a narrow window and a \
+                 wide one (growth {growth:.2}x, wanted at least {MIN_GROWTH}x, \
+                 {narrow} -> {wide} tokens of region room). An absolute \
+                 max_tokens is overriding the percentage budgets.",
+                agent.name
+            );
+            checked += 1;
+        }
+        // A vacuous pass would be a loop over nothing.
+        assert!(checked > 0, "no bundled agent was checked");
+    }
+
     /// Every bundled agent ends in a stage that hands something back, and
     /// nothing upstream can end the run before reaching it.
     ///

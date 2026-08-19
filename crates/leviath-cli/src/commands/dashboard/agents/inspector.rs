@@ -115,6 +115,7 @@ pub(in crate::commands::dashboard) enum FieldId {
     RegionKind,
     RegionBudget,
     RegionMaxTokens,
+    RegionMinTokens,
     RegionMaxItems,
     RegionStrategy,
     RegionOverflow,
@@ -576,13 +577,22 @@ fn region_fields(doc: &ManifestDoc, scope: &RegionScope, name: &str) -> Vec<Fiel
             FieldId::RegionBudget,
             "Share of context (%)",
             FieldValue::Number(region.budget_percent.map(|p| p as u64)),
-            "Give it a % of the window, a token cap, or both.",
+            "The share of the model's window this region may use. On its own it \
+             scales with whatever model the stage runs.",
         ),
         Field::new(
             FieldId::RegionMaxTokens,
-            "Token cap",
+            "Token ceiling",
             FieldValue::Number(region.max_tokens),
-            "Give it a % of the window, a token cap, or both.",
+            "Hard cap on the share above. Usually leave empty - a ceiling below \
+             the percentage clamps the region on every large-window model.",
+        ),
+        Field::new(
+            FieldId::RegionMinTokens,
+            "Token floor",
+            FieldValue::Number(region.min_tokens),
+            "Floor under the share above, for a small region that needs its \
+             tokens whatever the window is.",
         ),
         Field::new(
             FieldId::RegionMaxItems,

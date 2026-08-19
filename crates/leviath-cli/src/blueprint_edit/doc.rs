@@ -354,8 +354,18 @@ pub struct RegionView {
     pub kind: String,
     /// The `budget = "N%"` percentage, when it parses.
     pub budget_percent: Option<f64>,
-    /// `max_tokens`.
+    /// `max_tokens`, the absolute ceiling on a percentage budget.
+    ///
+    /// Usually absent: the percentage is what decides a region's size, and a
+    /// ceiling below it just clamps the region on every model large enough to
+    /// matter. Set it only where a region genuinely must not grow.
     pub max_tokens: Option<u64>,
+    /// `min_tokens`, the absolute floor under a percentage budget.
+    ///
+    /// The counterpart to `max_tokens`, and the one small pinned regions want:
+    /// a research question needs its ~1000 tokens whatever the model's window
+    /// is, and a percentage of a narrow window would not give it them.
+    pub min_tokens: Option<u64>,
     /// `required = true`.
     pub required: bool,
     /// `required_message`, or empty.
@@ -754,6 +764,7 @@ fn region_view(name: &str, table: &dyn TableLike) -> RegionView {
         kind: get_str(table, "kind").unwrap_or_default().to_string(),
         budget_percent: get_str(table, "budget").and_then(parse_percent),
         max_tokens: get_int(table, "max_tokens").and_then(|n| u64::try_from(n).ok()),
+        min_tokens: get_int(table, "min_tokens").and_then(|n| u64::try_from(n).ok()),
         required: get_bool(table, "required") == Some(true),
         required_message: get_str(table, "required_message")
             .unwrap_or_default()

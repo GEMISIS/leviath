@@ -305,24 +305,24 @@ is worse than no summary.
 # ─── Context layout ───────────────────────────────────────────────────────────
 # Percentage budgets (issue #100) with absolute guard-rails.
 [context.regions]
-query          = { kind = "pinned", budget = "1%", max_tokens = 1500, required = true, seed = "task", required_message = "State the research topic via --task.", volatility = "stable" }
-scope          = { kind = "pinned", budget = "1%", max_tokens = 1500, seed = "scope", volatility = "stable" }
-environment    = { kind = "pinned", budget = "1%", max_tokens = 600, seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
-sources_index  = { kind = "pinned", budget = "4%", max_tokens = 4000, volatility = "grows" }
-format         = { kind = "pinned", budget = "1%", max_tokens = 500, seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the References bibliography (title + URL/path). Mark each key finding's confidence as high / medium / low based on source count and credibility." }, volatility = "stable" }
+query          = { kind = "pinned", budget = "1%", required = true, seed = "task", required_message = "State the research topic via --task.", volatility = "stable" }
+scope          = { kind = "pinned", budget = "1%", seed = "scope", volatility = "stable" }
+environment    = { kind = "pinned", budget = "1%", seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
+sources_index  = { kind = "pinned", budget = "4%", volatility = "grows" }
+format         = { kind = "pinned", budget = "1%", seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the References bibliography (title + URL/path). Mark each key finding's confidence as high / medium / low based on source count and credibility." }, volatility = "stable" }
 
-sources        = { kind = "temporary",      budget = "30%", max_tokens = 50000 }
-claims         = { kind = "sliding_window", max_items = 40, budget = "8%", max_tokens = 9000 }
-contradictions = { kind = "clearable",      budget = "3%", max_tokens = 3000 }
+sources        = { kind = "temporary",      budget = "30%" }
+claims         = { kind = "sliding_window", max_items = 40, budget = "8%" }
+contradictions = { kind = "clearable",      budget = "3%" }
 # What the parallel researcher workers hand back, one entry each. Pinned: the
 # analysis stage reads it directly and it is the point of the fan-out.
-sub_findings   = { kind = "pinned", budget = "20%", max_tokens = 30000, volatility = "grows" }
-analysis         = { kind = "compacting",      budget = "30%", compact_at = "80%", threshold_tokens = 30000, max_tokens = 40000 }
-analysis_history = { kind = "compact_history", source_region = "analysis", budget = "3%", max_tokens = 15000, volatility = "grows" }
+sub_findings   = { kind = "pinned", budget = "20%", volatility = "grows" }
+analysis         = { kind = "compacting",      budget = "30%", compact_at = "80%" }
+analysis_history = { kind = "compact_history", source_region = "analysis", budget = "3%", volatility = "grows" }
 
-conversation   = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+conversation   = { kind = "sliding_window", max_items = 30, budget = "12%", strategy = "bulk", overflow = 10 }
 
 # Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
 # inference call's error text, or a note that a stage hit its iteration cap.
 # Pinned so it survives the edge transform into the stage that acts on it.
-error_report   = { kind = "pinned", budget = "1%", max_tokens = 2000 }
+error_report   = { kind = "pinned", budget = "1%" }

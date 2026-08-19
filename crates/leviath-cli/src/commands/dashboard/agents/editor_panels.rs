@@ -60,6 +60,7 @@ impl Dashboard {
         let field = match id {
             FieldId::RegionBudget => RegionField::BudgetPercent,
             FieldId::RegionMaxTokens => RegionField::MaxTokens,
+            FieldId::RegionMinTokens => RegionField::MinTokens,
             FieldId::RegionMaxItems => RegionField::MaxItems,
             FieldId::RegionOverflow => RegionField::Overflow,
             _ => return false,
