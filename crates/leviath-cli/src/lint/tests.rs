@@ -2153,3 +2153,87 @@ conversation = { kind = "sliding_window", max_items = 20, budget = "12%" }
         );
     }
 }
+
+// ─── required-region-unenforceable ───────────────────────────────────────────
+
+/// The shape that made `required` inert: the flag is set, and every stage that
+/// could satisfy it lacks the tool to write context. The runtime gate skips
+/// such a stage by design, so nothing anywhere enforces the region - and the
+/// stage downstream, told to build its deliverable from it, invents one instead.
+#[test]
+fn a_required_region_no_stage_can_write_is_warned_about() {
+    let toml = manifest_with_regions(
+        r#"sources_index = { kind = "pinned", max_tokens = 2000, required = true }"#,
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    let found = with_code(&findings, "required-region-unenforceable");
+    assert_eq!(found.len(), 1, "{:?}", codes(&findings));
+    assert_eq!(found[0].severity, LintSeverity::Warning);
+    assert!(
+        found[0].message.contains("sources_index"),
+        "{}",
+        found[0].message
+    );
+    assert!(
+        found[0]
+            .fix
+            .as_deref()
+            .is_some_and(|f| f.contains("context_append")),
+        "{:?}",
+        found[0].fix
+    );
+}
+
+/// One stage able to write context is enough: that is where the gate binds.
+#[test]
+fn a_required_region_some_stage_can_write_is_not_warned_about() {
+    let toml = manifest_with_regions(
+        r#"sources_index = { kind = "pinned", max_tokens = 2000, required = true }"#,
+    )
+    .replace(
+        "allow_complete = true",
+        "allow_complete = true\navailable_tools = [\"context_append\"]",
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    assert!(
+        with_code(&findings, "required-region-unenforceable").is_empty(),
+        "{:?}",
+        codes(&findings)
+    );
+}
+
+/// Caller-seeded regions are exempt, the same exemption the runtime gate makes:
+/// the caller owns them and they are validated at spawn, so no stage ever owed
+/// one. Without this every bundled agent's `query` region would warn.
+#[test]
+fn a_required_caller_seeded_region_is_not_warned_about() {
+    let toml = manifest_with_regions(
+        r#"query = { kind = "pinned", max_tokens = 2000, required = true, seed = "task" }"#,
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    assert!(
+        with_code(&findings, "required-region-unenforceable").is_empty(),
+        "{:?}",
+        codes(&findings)
+    );
+}
+
+/// Named once per region however many stages share the layout: the fix is on
+/// the declaration, so repeating it per stage is noise.
+#[test]
+fn an_unenforceable_required_region_is_named_once_across_stages() {
+    let toml = manifest_with_regions(
+        r#"sources_index = { kind = "pinned", max_tokens = 2000, required = true }"#,
+    )
+    .replace(
+        "[context.regions]",
+        "[stages.second]\nmode = \"autonomous\"\n\
+         model = { models = [{ provider = \"anthropic\", model = \"claude-sonnet-5\" }] }\n\
+         max_iterations = 10\nallow_complete = true\n\n[context.regions]",
+    );
+    let hits = codes(&lint(&toml, &LintEnv::default()))
+        .into_iter()
+        .filter(|c| *c == "required-region-unenforceable")
+        .count();
+    assert_eq!(hits, 1);
+}

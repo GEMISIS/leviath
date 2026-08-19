@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.2.1"
+version = "0.2.2"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 entry_stage = "survey"
 
@@ -34,10 +34,23 @@ For each source you use, append a bibliography line to `sources_index`
 Note interesting threads worth pulling on later. If sent back, focus on the named
 coverage gap.
 
+Establish what exists NOW before naming players. Search the field as of the date
+in `environment` and fetch the authoritative index for the domain (registry,
+leaderboard, release feed) before you settle the list of threads. A landscape
+recalled rather than gathered is by construction the landscape from before your
+cutoff, and this stage decides what the whole fan-out investigates.
+
 Today's date is in the `environment` region. Treat it as authoritative over
 anything you remember: your training has a cutoff and this run does not. Judge
 "recent", "current", "active" and "state of the art" against it, and note how
 old a source is when its age bears on the claim. Call current_time for the clock.
+Pass `freshness` to web_search whenever currency is part of the question.
+
+If web_search hands back a diagnostic instead of results - no engine configured,
+an engine error, or an encyclopedia fallback - then this run cannot see the web.
+Record that in `sources_index` and do NOT close the gap from memory. A landscape
+reported as unmapped is a usable result; one assembled from recall is not, and a
+reader cannot tell the two apart after the fact.
 """
 
 [stages.survey.tool_routing]
@@ -111,6 +124,19 @@ markdown fences. Each item:
 
 Every item MUST carry enough to work from alone: a worker is a separate agent
 and does not share this run's context, so the work item is all it gets.
+
+GROUND EVERY NAME IN `landscape`. A proper noun in a thread - a product, model,
+version, company, standard - must already appear there. If you cannot name the
+players from what the survey gathered, then finding them IS the thread ("which X
+exist as of the date in `environment`, and which are current"), not comparing a
+list you remember.
+
+This is not style. A worker starts from a clean context and cannot question your
+premise: it will faithfully research whatever you named. A list you recalled
+instead of surveyed therefore comes back as several workers' worth of
+independent-looking confirmation for candidates that may be years stale or may
+not exist at all, and the compare stage has no way to tell that apart from
+evidence. The fan-out multiplies whatever you put in, including the mistake.
 
 Prefer a handful of substantial threads over many thin ones. One thread is fine
 for a narrow area.
@@ -237,6 +263,20 @@ citing `sources_index` per the rules in `format`. Include:
 
 Write concisely - the reader wants the lay of the land quickly. Cite sources for
 non-obvious claims.
+
+Citations are load-bearing, so two rules bind absolutely:
+
+1. Every `[n]` must resolve to a line already in `sources_index`. A reference
+   points at something this run actually read - never a reconstructed URL, a
+   remembered paper or discussion thread, or a plausible-looking title. Never
+   invent the details that make a citation look checked: no vote counts, no
+   comment counts, no dates you did not read off the source.
+2. If `sources_index` is empty, you have no bibliography and therefore no
+   evidence. Do not write one. Say up front that the survey could not reach its
+   sources, drop the `[n]` markers, mark every finding low confidence, and
+   present what you have as background knowledge rather than findings.
+
+Confidence describes the evidence, not how sure the prose sounds.
 """
 
 [stages.summarize.transitions.summary]
@@ -295,7 +335,12 @@ file you wrote.
 query              = { kind = "pinned", budget = "1%", required = true, seed = "task", required_message = "State the survey topic/area via --task.", volatility = "stable" }
 scope              = { kind = "pinned", budget = "1%", seed = "scope", volatility = "stable" }
 environment        = { kind = "pinned", budget = "1%", seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
-sources_index      = { kind = "pinned", budget = "3%", volatility = "grows" }
+# `required`: the overview is built from this, and a stage that gathered nothing
+# used to hand an empty bibliography to `summarize`, which wrote the references
+# from memory rather than reporting that it had none. The gate binds the stages
+# that can write context and no-ops for the ones that cannot, so it can never
+# deadlock the deliverable.
+sources_index      = { kind = "pinned", budget = "3%", volatility = "grows", required = true, required_message = "You have not recorded a single source in `sources_index`. Append one bibliography line per source you actually read (context_append, region=\"sources_index\"): `[n] <title> - <url or path> - credibility: <high/med/low + why>`. If the searches came back empty or unavailable, record THAT as the finding - do not proceed as though sources were gathered." }
 format             = { kind = "pinned", budget = "1%", seed = { literal = "Cite non-obvious claims as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Prefer comparison tables where they clarify tradeoffs." }, volatility = "stable" }
 
 landscape          = { kind = "temporary",      budget = "30%" }

@@ -43,11 +43,15 @@ use crate::daemon::spawn::model_defaults;
 pub const DOCTOR_LONG_ABOUT: &str = "\
 Check that provider wiring works, end to end.
 
-Four checks run in order, and the first failure stops the rest. The check that
+Five checks run in order, and the first failure stops the rest. The check that
 fails is the diagnosis:
 
   config     the config file parses and a provider registry can be built.
              Fails on a malformed config.toml.
+  search     the bundled research agents can reach a search engine. Warns
+             (never fails) when BRAVE_API_KEY is unset, or is set but missing
+             from [security] allow_env_vars - which silently downgrades every
+             web_search to a keyless Wikipedia lookup.
   resolve    your default provider/model picks a provider that is actually
              registered. Fails when a key is missing or misspelled - and
              catches the case where a blueprint with no model falls back to
@@ -118,6 +122,13 @@ const PROBE_EXPECTED: &str = "PONG";
 pub enum CheckStatus {
     /// The layer works.
     Ok,
+    /// The layer works, in a degraded way the user should know about.
+    ///
+    /// Distinct from [`Self::Fail`] because it neither stops the checks after
+    /// it nor fails the command: a machine with no search key is a working
+    /// install for everyone not running a research agent, and turning that into
+    /// a red CI gate would teach people to ignore `doctor`.
+    Warn,
     /// The layer is broken; nothing after it ran.
     Fail,
 }
@@ -127,6 +138,7 @@ impl CheckStatus {
     fn label(&self) -> &'static str {
         match self {
             Self::Ok => "OK",
+            Self::Warn => "WARN",
             Self::Fail => "FAIL",
         }
     }
@@ -152,6 +164,16 @@ impl Check {
         Self {
             name,
             status: CheckStatus::Ok,
+            detail: detail.into(),
+            elapsed_ms: None,
+        }
+    }
+
+    /// A check that passed in a degraded state worth naming.
+    fn warn(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            status: CheckStatus::Warn,
             detail: detail.into(),
             elapsed_ms: None,
         }
@@ -202,10 +224,61 @@ pub fn format_report(checks: &[Check]) -> String {
         }
         out.push('\n');
     }
-    if checks.iter().all(|c| c.status == CheckStatus::Ok) {
+    // Keyed on "nothing failed", to agree with the exit code and the `passed`
+    // field in --json. A warning is a note about a degraded layer, not a verdict
+    // on the run, and a table that withheld "doctor passed" over one would read
+    // as a failure the exit code disagreed with.
+    if !checks.iter().any(|c| c.status == CheckStatus::Fail) {
         out.push_str("\ndoctor passed\n");
     }
     out
+}
+
+// ─── Check 2: search ──────────────────────────────────────────────────────────
+
+/// The environment variable the bundled `web_search` script reads.
+const SEARCH_KEY: &str = "BRAVE_API_KEY";
+
+/// Whether the bundled research agents can actually search the web.
+///
+/// Two independent things have to be true, and getting one of them wrong is
+/// silent: the key has to be in the daemon's environment, *and* `[security]
+/// allow_env_vars` has to list it. The name ends in `KEY`, so the script host
+/// classes it as a credential and refuses to hand it to a Rhai tool that was
+/// not explicitly granted it - which means a user who exports the key and
+/// nothing else gets the keyless Wikipedia fallback with no error anywhere.
+///
+/// That combination produced a run whose 47 searches all came back empty and
+/// which still wrote a confident, fully cited report. Worth a line in `doctor`
+/// precisely because nothing else in the system says it out loud.
+///
+/// Warns rather than fails: an install with no search key is perfectly good for
+/// everyone not running a research agent.
+fn search_check(config: &Config) -> Check {
+    let allowlisted = leviath_core::script_env_allowed(SEARCH_KEY, &config.security.allow_env_vars);
+    match (std::env::var(SEARCH_KEY), allowlisted) {
+        (Ok(key), true) if !key.is_empty() => Check::ok(
+            "search",
+            format!("brave ({SEARCH_KEY} is set and allowlisted)"),
+        ),
+        (Ok(key), false) if !key.is_empty() => Check::warn(
+            "search",
+            format!(
+                "{SEARCH_KEY} is set but not granted, so every web_search falls back to \
+                 Wikipedia. Add `allow_env_vars = [\"{SEARCH_KEY}\"]` under `[security]` in \
+                 ~/.leviath/config.toml, then restart the daemon"
+            ),
+        ),
+        _ => Check::warn(
+            "search",
+            format!(
+                "no search engine configured: {SEARCH_KEY} is unset, so research agents fall \
+                 back to a keyless Wikipedia lookup. Get a key from \
+                 https://brave.com/search/api/, put it in the daemon's environment, and add \
+                 `allow_env_vars = [\"{SEARCH_KEY}\"]` under `[security]`"
+            ),
+        ),
+    }
 }
 
 // ─── Check 1: config ──────────────────────────────────────────────────────────
@@ -746,6 +819,9 @@ pub async fn run_checks(
         }
     };
     checks.push(config_check(&config, &registry));
+    // Offline and cheap, so it runs early enough to be seen even when a later
+    // network check fails. It only ever warns, so it never cuts the run short.
+    checks.push(search_check(&config));
 
     let (check, resolved) = resolve_check(&config, args.model.as_deref(), &registry);
     checks.push(check);

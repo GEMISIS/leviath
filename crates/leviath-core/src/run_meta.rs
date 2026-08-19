@@ -493,6 +493,26 @@ pub struct RunFlags {
     /// before this field had.
     #[serde(default)]
     pub no_output_tools: bool,
+    /// `web_search` calls this run made, across every stage.
+    ///
+    /// Zero for an agent that never had the tool, which is most of them - the
+    /// pair says nothing about a run that could not have searched, the same
+    /// escape [`Self::no_output_tools`] applies to file modifications.
+    #[serde(default)]
+    pub searches_run: usize,
+    /// Of those, how many came back with nothing usable: no results, or a
+    /// diagnostic saying the search could not run.
+    ///
+    /// A research run whose searches all came back empty still finishes
+    /// `complete` and still writes a confident, fully cited report, because a
+    /// model handed an empty result set fills the gap from its training data
+    /// and cites what it remembers. One did exactly that across 47 consecutive
+    /// failed searches - no engine was configured - and nothing on disk
+    /// recorded that the report rested on nothing.
+    ///
+    /// `searches_empty == searches_run` with `searches_run > 0` is that run.
+    #[serde(default)]
+    pub searches_empty: usize,
     /// How many stages exhausted their `max_iterations`.
     #[serde(default)]
     pub max_iterations_hit: usize,

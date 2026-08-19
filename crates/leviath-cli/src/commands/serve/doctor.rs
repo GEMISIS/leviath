@@ -36,7 +36,10 @@ pub(super) async fn run_doctor(State(state): State<AppState>) -> Json<DoctorResp
             .into_iter()
             .map(|c| DoctorCheck {
                 name: c.name.to_string(),
-                ok: c.status == CheckStatus::Ok,
+                // Keyed on "did not fail", so a degraded-but-working layer
+                // reports the same verdict here as the CLI's exit code gives
+                // it. The detail carries what is degraded.
+                ok: c.status != CheckStatus::Fail,
                 detail: c.detail,
                 elapsed_ms: c.elapsed_ms,
             })
@@ -73,6 +76,9 @@ mod tests {
         let mut vars = crate::config::config_isolation_vars(&root);
         vars.push(("LEVIATH_HOME", Some(root.clone().into_os_string())));
         vars.push(("LEVIATH_RUNS_DIR", Some(root.join("runs").into_os_string())));
+        // The search check reads this, so a developer who has one exported
+        // would otherwise see a different check list than CI does.
+        vars.push(("BRAVE_API_KEY", None));
         temp_env::async_with_vars(vars, f(root)).await
     }
 
@@ -92,7 +98,8 @@ mod tests {
     }
 
     /// The endpoint over the shared production route table, against an empty
-    /// isolated config: `config` parses (ok), `resolve` fails (nothing
+    /// isolated config: `config` parses (ok), `search` warns (no key in the
+    /// isolated environment), `resolve` fails (nothing
     /// registered answers to the default provider), and the chain stops there -
     /// before any billed call. The failure arrives as an `ok: false` entry in
     /// a 200, which is the endpoint's whole contract.
@@ -112,11 +119,19 @@ mod tests {
                 .unwrap();
             let report: DoctorResp = serde_json::from_slice(&body).unwrap();
 
-            assert_eq!(report.checks.len(), 2, "config ok, resolve fail, stop");
+            assert_eq!(
+                report.checks.len(),
+                3,
+                "config ok, search warn, resolve fail, stop"
+            );
             let config_check = &report.checks[0];
             assert_eq!(config_check.name, "config");
             assert!(config_check.ok, "{}", config_check.detail);
-            let resolve_check = &report.checks[1];
+            // A warning is not a failure over the API either.
+            let search_check = &report.checks[1];
+            assert_eq!(search_check.name, "search");
+            assert!(search_check.ok, "{}", search_check.detail);
+            let resolve_check = &report.checks[2];
             assert_eq!(resolve_check.name, "resolve");
             assert!(!resolve_check.ok);
             assert!(

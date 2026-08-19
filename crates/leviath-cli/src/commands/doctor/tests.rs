@@ -33,6 +33,9 @@ where
     let mut vars = crate::config::config_isolation_vars(&root);
     vars.push(("LEVIATH_HOME", Some(root.clone().into_os_string())));
     vars.push(("LEVIATH_RUNS_DIR", Some(root.join("runs").into_os_string())));
+    // The search check reads this, so a developer who has one exported would
+    // otherwise see a different check list than CI does.
+    vars.push(("BRAVE_API_KEY", None));
     temp_env::async_with_vars(vars, f(root)).await
 }
 
@@ -188,6 +191,68 @@ fn format_report_of_a_failure_has_no_pass_line() {
     let out = format_report(&checks);
     assert!(out.contains("FAIL"), "{out}");
     assert!(!out.contains("doctor passed"), "{out}");
+}
+
+#[test]
+fn format_report_of_a_warning_still_passes() {
+    // A degraded layer is a note, not a verdict: the exit code and the `passed`
+    // field both say this run is fine, and the table has to agree with them.
+    let checks = vec![
+        Check::ok("config", "fine"),
+        Check::warn("search", "no search engine configured"),
+    ];
+    let out = format_report(&checks);
+    assert!(out.contains("search  WARN"), "columns pad: {out}");
+    assert!(out.ends_with("doctor passed\n"), "{out}");
+}
+
+// ─── search_check ─────────────────────────────────────────────────────────────
+
+/// Run `search_check` with `BRAVE_API_KEY` set to `key` and the allowlist set
+/// to `allowed`.
+fn search_with(key: Option<&str>, allowed: &[&str]) -> Check {
+    let mut config = Config::default();
+    config.security.allow_env_vars = allowed.iter().map(|s| (*s).to_string()).collect();
+    temp_env::with_var("BRAVE_API_KEY", key, || search_check(&config))
+}
+
+#[test]
+fn search_check_passes_when_the_key_is_set_and_allowlisted() {
+    let check = search_with(Some("sk-brave"), &["BRAVE_API_KEY"]);
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(check.detail.contains("brave"), "{}", check.detail);
+}
+
+#[test]
+fn search_check_warns_when_the_key_is_set_but_not_allowlisted() {
+    // The trap this check exists for: the name ends in KEY, so the script host
+    // refuses it and every search silently becomes a Wikipedia lookup.
+    let check = search_with(Some("sk-brave"), &[]);
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(
+        check.detail.contains("allow_env_vars"),
+        "names the fix: {}",
+        check.detail
+    );
+}
+
+#[test]
+fn search_check_warns_when_there_is_no_key_at_all() {
+    let check = search_with(None, &["BRAVE_API_KEY"]);
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(
+        check.detail.contains("Wikipedia"),
+        "says what happens instead: {}",
+        check.detail
+    );
+}
+
+#[test]
+fn search_check_treats_an_empty_key_as_no_key() {
+    // An exported-but-empty variable reads as configured and is not.
+    let check = search_with(Some(""), &["BRAVE_API_KEY"]);
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(check.detail.contains("unset"), "{}", check.detail);
 }
 
 // ─── config_check ─────────────────────────────────────────────────────────────
@@ -931,9 +996,9 @@ async fn run_checks_stops_at_an_unconfigured_provider() {
         run_checks(&DoctorArgs::default(), &build, DaemonTarget::Skip).await
     })
     .await;
-    assert_eq!(checks.len(), 2, "no inference is attempted: {checks:?}");
-    assert_eq!(checks[1].name, "resolve");
-    assert_eq!(checks[1].status, CheckStatus::Fail);
+    assert_eq!(checks.len(), 3, "no inference is attempted: {checks:?}");
+    assert_eq!(checks[2].name, "resolve");
+    assert_eq!(checks[2].status, CheckStatus::Fail);
 }
 
 #[tokio::test]
@@ -944,8 +1009,8 @@ async fn run_checks_stops_at_a_failing_inference() {
         run_checks(&DoctorArgs::default(), &build, DaemonTarget::Skip).await
     })
     .await;
-    assert_eq!(checks.len(), 3, "the daemon is never contacted: {checks:?}");
-    assert_eq!(checks[2].status, CheckStatus::Fail);
+    assert_eq!(checks.len(), 4, "the daemon is never contacted: {checks:?}");
+    assert_eq!(checks[3].status, CheckStatus::Fail);
 }
 
 #[tokio::test]
@@ -956,8 +1021,8 @@ async fn run_checks_skips_the_daemon_when_asked_to() {
         run_checks(&DoctorArgs::default(), &build, DaemonTarget::Skip).await
     })
     .await;
-    assert_eq!(checks.len(), 3, "--no-daemon stops after the inference");
-    assert!(checks.iter().all(|c| c.status == CheckStatus::Ok));
+    assert_eq!(checks.len(), 4, "--no-daemon stops after the inference");
+    assert!(checks.iter().all(|c| c.status != CheckStatus::Fail));
 }
 
 #[tokio::test]
@@ -972,14 +1037,14 @@ async fn run_checks_reports_a_daemon_that_would_not_start() {
         run_checks(&DoctorArgs::default(), &build, target).await
     })
     .await;
-    assert_eq!(checks.len(), 4, "{checks:?}");
-    assert!(checks[..3].iter().all(|c| c.status == CheckStatus::Ok));
-    assert_eq!(checks[3].status, CheckStatus::Fail);
-    assert!(checks[3].detail.contains("did not start"), "{checks:?}");
+    assert_eq!(checks.len(), 5, "{checks:?}");
+    assert!(checks[..4].iter().all(|c| c.status != CheckStatus::Fail));
+    assert_eq!(checks[4].status, CheckStatus::Fail);
+    assert!(checks[4].detail.contains("did not start"), "{checks:?}");
 }
 
 #[tokio::test]
-async fn run_checks_runs_all_four_against_a_healthy_daemon() {
+async fn run_checks_runs_all_five_against_a_healthy_daemon() {
     let checks = with_env(|root| async move {
         // A key of the wrong shape, so the warning branch runs too.
         write_config(
@@ -999,9 +1064,9 @@ async fn run_checks_runs_all_four_against_a_healthy_daemon() {
         .await
     })
     .await;
-    assert_eq!(checks.len(), 4, "{checks:?}");
+    assert_eq!(checks.len(), 5, "{checks:?}");
     assert!(
-        checks.iter().all(|c| c.status == CheckStatus::Ok),
+        checks.iter().all(|c| c.status != CheckStatus::Fail),
         "{checks:?}"
     );
 }
