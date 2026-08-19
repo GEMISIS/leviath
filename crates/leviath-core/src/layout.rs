@@ -458,6 +458,50 @@ pub enum RegionSeed {
         /// The shell command line, run with the platform shell in the workdir.
         command: String,
     },
+    /// The combined output of one or more tool calls, run at spawn.
+    ///
+    /// Like [`Command`](Self::Command) this *executes* something, but through
+    /// the run's own tool layer rather than a shell: any tool the agent could
+    /// call is callable here - a built-in, an MCP server's, a Rhai script's -
+    /// and each call answers to the same `tool_permissions` and taint rules it
+    /// would answer to mid-run. That is what makes an unrestricted list safe:
+    /// a seed can reach nothing the agent was not already granted.
+    ///
+    /// Several calls write into one region, in the order given, each under its
+    /// own heading. A failed call is skipped with a warning unless the region is
+    /// `required`, so one unavailable tool does not cost the others.
+    Tools {
+        /// The calls to run, in order.
+        calls: Vec<SeedToolCall>,
+    },
+}
+
+/// One tool call in a [`RegionSeed::Tools`] seed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SeedToolCall {
+    /// The tool to call, spelled as the agent would spell it (so an MCP tool
+    /// keeps its `<server>__<tool>` qualification).
+    pub name: String,
+    /// The arguments object. Empty for the many tools that take none.
+    pub args: serde_json::Value,
+}
+
+impl SeedToolCall {
+    /// A call with no arguments.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            args: serde_json::Value::Object(serde_json::Map::new()),
+        }
+    }
+
+    /// A call with an arguments object.
+    pub fn with_args(name: impl Into<String>, args: serde_json::Value) -> Self {
+        Self {
+            name: name.into(),
+            args,
+        }
+    }
 }
 
 /// Definition of a region in a layout.

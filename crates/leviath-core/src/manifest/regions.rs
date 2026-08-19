@@ -2,6 +2,7 @@
 //! budget, seed, and the tool-output routing that targets it.
 
 use super::*;
+use crate::layout::SeedToolCall;
 
 /// Parse a `[context.regions]` (or `[stages.<name>.context.regions]`) table into
 /// region definitions plus the summed absolute-budget total.
@@ -319,11 +320,39 @@ pub(super) fn parse_region_mapping(v: &toml::Value) -> RegionMapping {
 /// text); any other string → caller input keyed by that string, with the
 /// convenience alias `"input"` meaning "keyed by this region's own name".
 /// Table forms: `{ glob = "…" }`, `{ files = [...] }`, `{ literal = "…" }`,
-/// `{ rhai = "…" }`, `{ command = "…" }`, or `{ caller = "…" }`.
+/// `{ rhai = "…" }`, `{ command = "…" }`, `{ tool = "…" }`, `{ tools = [...] }`,
+/// or `{ caller = "…" }`.
 ///
 /// Back-compat: a region literally named `task` with no `seed` gets an implicit
 /// `CallerInput { name: "task" }`, so unmodified blueprints seed the task text
 /// exactly as before.
+/// One entry of a `{ tools = [...] }` list.
+///
+/// Two spellings, because most calls take no arguments and should not have to
+/// look like they might: a bare string is the tool's name, and a table is
+/// `{ name = "...", args = { ... } }`. `args` is converted through
+/// `serde_json` because that is the shape a tool call carries everywhere else;
+/// a table with no readable `name` is dropped.
+fn parse_seed_tool_call(value: &toml::Value) -> Option<SeedToolCall> {
+    match value {
+        toml::Value::String(name) => Some(SeedToolCall::new(name.as_str())),
+        toml::Value::Table(t) => {
+            let name = t.get("name").and_then(|v| v.as_str())?;
+            match t.get("args") {
+                // Every TOML value has a JSON counterpart - the conversion has
+                // no failing case for a value that was itself parsed from TOML.
+                // A fallback here would be a branch nothing could reach.
+                Some(args) => Some(SeedToolCall::with_args(
+                    name,
+                    serde_json::to_value(args).expect("a parsed TOML value converts to JSON"),
+                )),
+                None => Some(SeedToolCall::new(name)),
+            }
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn parse_region_seed(
     region_name: &str,
     value: Option<&toml::Value>,
@@ -369,6 +398,18 @@ pub(super) fn parse_region_seed(
                 Some(RegionSeed::Command {
                     command: command.to_string(),
                 })
+            } else if let Some(name) = t.get("tool").and_then(|v| v.as_str()) {
+                Some(RegionSeed::Tools {
+                    calls: vec![SeedToolCall::new(name)],
+                })
+            } else if let Some(list) = t.get("tools").and_then(|v| v.as_array()) {
+                let calls: Vec<SeedToolCall> =
+                    list.iter().filter_map(parse_seed_tool_call).collect();
+                // An empty or wholly unreadable list is not a tool seed. Falling
+                // through leaves the region unseeded and `lev validate` reports
+                // `region-seed-not-understood`, which is a better answer than a
+                // seed that silently runs nothing.
+                (!calls.is_empty()).then_some(RegionSeed::Tools { calls })
             } else {
                 t.get("caller")
                     .and_then(|v| v.as_str())

@@ -50,6 +50,15 @@ same list.
   `allow` and take no action. This closes a real gap: a research agent with no
   way to ask the date reasoned from its training cutoff and worked a stale news
   cycle.
+- New: a region can seed itself from tool calls -
+  `seed = { tools = ["current_time", "system_info"] }` - so an agent's first
+  inference already carries what those tools would have said. Several calls fill
+  one region, each under a heading naming the tool. Any tool the agent could
+  call works: a built-in, an MCP server's, or a Rhai script's. Each call
+  resolves against the same `[tool_permissions]` the tool lane applies mid-run,
+  so a seed reaches nothing the agent could not, and a tool set to `ask` is
+  refused rather than prompted because a seed runs before any prompt exists.
+  `lev validate` lists them as `tool-seed`.
 - Fixed: `environment_info` reports credential-shaped environment variables by
   name with the value withheld, through the same `[security] allow_env_vars`
   gate a Rhai `env_var` read answers to, so an agent can tell a key is set

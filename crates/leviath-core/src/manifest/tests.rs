@@ -6,6 +6,7 @@
 //! quarter of that.
 
 use super::*;
+use crate::layout::SeedToolCall;
 
 // ─── [stages.<name>.hooks] ────────────────────────────────────────────
 
@@ -971,6 +972,9 @@ config = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.yaml", "b.ya
 lit = { kind = "pinned", max_tokens = 500, seed = { literal = "hello" } }
 scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "init.rhai" } }
 facts = { kind = "pinned", max_tokens = 500, seed = { command = "git ls-files" } }
+clock = { kind = "pinned", max_tokens = 500, seed = { tool = "current_time" } }
+env = { kind = "pinned", max_tokens = 500, seed = { tools = ["current_time", "system_info"] } }
+toolchain = { kind = "pinned", max_tokens = 500, seed = { tools = [{ name = "which_command", args = { command = "git" } }, { name = "system_info" }, "locale_info"] } }
 plain = { kind = "pinned", max_tokens = 500 }
 conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
 "#;
@@ -1026,9 +1030,99 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             command: "git ls-files".to_string()
         })
     );
+    // `{ tool = "..." }` is the one-call shorthand, and carries no arguments.
+    assert_eq!(
+        region("clock"),
+        Some(RegionSeed::Tools {
+            calls: vec![SeedToolCall::new("current_time")]
+        })
+    );
+    // A list of bare names is a list of argument-free calls, in order.
+    assert_eq!(
+        region("env"),
+        Some(RegionSeed::Tools {
+            calls: vec![
+                SeedToolCall::new("current_time"),
+                SeedToolCall::new("system_info"),
+            ]
+        })
+    );
+    // The two entry spellings mix in one list, because most calls take no
+    // arguments and should not have to look like they might.
+    assert_eq!(
+        region("toolchain"),
+        Some(RegionSeed::Tools {
+            calls: vec![
+                SeedToolCall::with_args("which_command", serde_json::json!({ "command": "git" })),
+                // The table form without `args` means the same as the bare
+                // string: a call with no arguments, not one with null args.
+                SeedToolCall::new("system_info"),
+                SeedToolCall::new("locale_info"),
+            ]
+        })
+    );
     assert!(
         region("plain").is_none(),
         "a non-task region with no seed stays None"
+    );
+}
+
+/// A `tools` list that names nothing usable is not a tool seed. Leaving it
+/// unparsed is what makes `lev validate` report `region-seed-not-understood`,
+/// which is a better answer than a seed that silently runs nothing.
+#[test]
+fn a_tool_seed_with_no_readable_call_is_not_a_seed() {
+    let base = r#"
+[agent]
+name = "seed-test"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 4000, seed = "task_input" }
+conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
+"#;
+    let seed_of = |line: &str| {
+        let toml = format!("{base}{line}\n");
+        parse_manifest(&toml)
+            .unwrap()
+            .context_layout
+            .get_region("r")
+            .unwrap()
+            .seed
+            .clone()
+    };
+    // An empty list.
+    assert_eq!(
+        seed_of(r#"r = { kind = "pinned", max_tokens = 500, seed = { tools = [] } }"#),
+        None
+    );
+    // Entries of a shape that names no tool.
+    assert_eq!(
+        seed_of(r#"r = { kind = "pinned", max_tokens = 500, seed = { tools = [1, 2] } }"#),
+        None
+    );
+    // A table with no `name`.
+    assert_eq!(
+        seed_of(
+            r#"r = { kind = "pinned", max_tokens = 500, seed = { tools = [{ args = { a = 1 } }] } }"#
+        ),
+        None
+    );
+    // But one readable entry among unreadable ones still seeds, carrying only
+    // the entries that named something.
+    assert_eq!(
+        seed_of(
+            r#"r = { kind = "pinned", max_tokens = 500, seed = { tools = [1, "current_time"] } }"#
+        ),
+        Some(RegionSeed::Tools {
+            calls: vec![SeedToolCall::new("current_time")]
+        })
     );
 }
 

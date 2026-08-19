@@ -7,6 +7,7 @@
 //! is written once and used twice.
 
 use super::*;
+use crate::daemon::seed_tool;
 
 /// Resolve a blueprint-declared seed path against the run's working directory.
 ///
@@ -67,6 +68,10 @@ pub(super) fn seed_path_within(
 /// - `Command` runs a shell command in the workdir under `commands` -
 ///   sandboxed, time- and size-capped, and skippable. Every failure is
 ///   non-fatal unless the region is `required`.
+/// - `Tools` calls the run's own tools under `tools`, each through the same
+///   permission resolution the tool lane applies, and writes their combined
+///   output into the region. Failures are non-fatal on the same terms, per
+///   call, so one unavailable tool does not cost the others.
 /// - Any caller key (other than `task`) that isn't a declared `CallerInput`
 ///   region is rejected (typo protection, mirrors the CLI-side check).
 pub(super) fn resolve_seeds(
@@ -74,6 +79,7 @@ pub(super) fn resolve_seeds(
     args: &SpawnArgs,
     workdir: &str,
     commands: &SeedCommandPolicy,
+    tools: &crate::daemon::seed_tool::SeedToolPolicy,
     read_paths: &leviath_core::ReadPathPolicy,
 ) -> Result<HashMap<String, String>, String> {
     use leviath_core::layout::RegionSeed;
@@ -241,6 +247,52 @@ pub(super) fn resolve_seeds(
                             "command seed failed; region left empty"
                         );
                     }
+                }
+            }
+            // A tool seed also executes at spawn, but through the run's own
+            // tool layer rather than a shell, so each call already answers to
+            // the user's `[tool_permissions]` - see `seed_tool`. Failures are
+            // per call: one unavailable tool leaves its block out rather than
+            // emptying the region the others filled.
+            RegionSeed::Tools { calls } => {
+                let mut blocks = Vec::new();
+                for call in calls {
+                    match tools.run(call) {
+                        Ok(text) if !text.trim().is_empty() => {
+                            blocks.push(seed_tool::seed_block(&call.name, &text));
+                        }
+                        Ok(_) => tracing::warn!(
+                            region = %region.name,
+                            tool = %call.name,
+                            "tool seed returned nothing; skipped"
+                        ),
+                        Err(e) => {
+                            if region.required {
+                                return Err(format!(
+                                    "required region '{}': tool seed '{}' failed: {e}",
+                                    region.name, call.name
+                                ));
+                            }
+                            tracing::warn!(
+                                region = %region.name,
+                                tool = %call.name,
+                                error = %e,
+                                "tool seed failed; skipped"
+                            );
+                        }
+                    }
+                }
+                match seed_tool::join_blocks(blocks) {
+                    Some(content) => {
+                        seeds.insert(region.name.clone(), content);
+                    }
+                    None if region.required => {
+                        return Err(format!(
+                            "required region '{}': no tool seed produced anything",
+                            region.name
+                        ));
+                    }
+                    None => {}
                 }
             }
         }
