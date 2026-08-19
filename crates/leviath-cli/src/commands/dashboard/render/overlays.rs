@@ -103,9 +103,13 @@ fn agents_sections() -> Vec<HelpSection> {
                 ("enter / e", "edit it (a bundled one installs when saved)"),
                 ("n", "new agent: start simple, or clone one"),
                 ("l", "launch it: the new-run screen with it picked"),
-                ("d", "delete an installed agent (asks first)"),
                 (
                     "r",
+                    "rename an installed agent: its directory and its manifest's name",
+                ),
+                ("d", "delete an installed agent (asks first)"),
+                (
+                    "R",
                     "reset an edited bundled agent to the bundled copy (asks first)",
                 ),
                 (

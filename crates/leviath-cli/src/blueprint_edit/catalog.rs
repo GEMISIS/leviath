@@ -180,6 +180,48 @@ pub fn copy_bundled_extras(
     Ok(())
 }
 
+/// Rename an installed agent: its directory under the agents directory, and
+/// the `name` in its manifest (comments and all else kept). Refuses a name
+/// that will not do or is taken; an unreadable manifest is left as it is.
+pub fn rename_agent(agents_dir: &Path, from: &str, to: &str) -> Result<PathBuf, String> {
+    rename_agent_with(agents_dir, from, to, &mut |a, b| std::fs::rename(a, b))
+}
+
+/// [`rename_agent`] with the directory move injected, so a move the disk
+/// refuses can be exercised without a read-only filesystem.
+pub fn rename_agent_with(
+    agents_dir: &Path,
+    from: &str,
+    to: &str,
+    move_dir: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> Result<PathBuf, String> {
+    if !super::is_valid_name(to) {
+        return Err("Letters, digits, `.`, `_` and `-` only.".to_string());
+    }
+    let old = agents_dir.join(from);
+    let new = agents_dir.join(to);
+    if to == from {
+        return Ok(old);
+    }
+    if new.exists() {
+        return Err(format!("An agent named {to} already exists."));
+    }
+    let manifest_path = old.join("agent.leviath");
+    let text = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Could not read {}: {e}", manifest_path.display()))?;
+    let mut doc = super::ManifestDoc::parse(&text).map_err(|e| e.to_string())?;
+    doc.set_agent_name(to)
+        .expect("the name passed the same check set_agent_name makes");
+    // The manifest first, in place: if the directory cannot move the agent
+    // is still whole, only under its old name with the new one inside,
+    // which the next open shows and the next save writes.
+    std::fs::write(&manifest_path, doc.to_toml())
+        .map_err(|e| format!("Could not write {}: {e}", manifest_path.display()))?;
+    move_dir(&old, &new)
+        .map_err(|e| format!("Could not move {} to {}: {e}", old.display(), new.display()))?;
+    Ok(new)
+}
+
 /// Delete an installed agent's directory.
 pub fn delete_agent(agents_dir: &Path, name: &str) -> std::io::Result<()> {
     std::fs::remove_dir_all(agents_dir.join(name))

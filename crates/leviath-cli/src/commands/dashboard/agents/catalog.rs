@@ -12,6 +12,7 @@ use crate::blueprint_edit::catalog::{self, CatalogEntry, Source};
 use crate::config::Config;
 use crate::tui::flowgraph::{FlowView, StageGraph};
 use crate::tui::widgets::confirm::Confirm;
+use crate::tui::widgets::line_edit::{EditOutcome, LineEdit};
 
 /// The catalog's state.
 #[derive(Default)]
@@ -27,6 +28,33 @@ pub(in crate::commands::dashboard) struct Catalog {
     /// The graph of the entry the cursor is on, keyed by its name so it is
     /// rebuilt only when the cursor moves to another agent.
     pub(in crate::commands::dashboard) preview: Option<(String, Result<FlowView, String>)>,
+    /// `r` opened the rename prompt on an agent.
+    pub(in crate::commands::dashboard) renaming: Option<Rename>,
+}
+
+/// The rename prompt: the agent being renamed and the name being typed.
+#[derive(Debug, Clone)]
+pub(in crate::commands::dashboard) struct Rename {
+    pub(in crate::commands::dashboard) from: String,
+    pub(in crate::commands::dashboard) name: LineEdit,
+    /// Why the typed name will not do, once something was typed.
+    pub(in crate::commands::dashboard) problem: Option<String>,
+}
+
+impl Rename {
+    /// Whether the name will do, and if not why. `taken` are the names
+    /// already in the catalog (the agent's own is fine: nothing to do).
+    fn check(&mut self, taken: &[String]) -> bool {
+        let name = self.name.value().to_string();
+        self.problem = if !crate::blueprint_edit::is_valid_name(&name) {
+            Some("Letters, digits, `.`, `_` and `-` only.".to_string())
+        } else if name != self.from && taken.contains(&name) {
+            Some(format!("An agent named {name} already exists."))
+        } else {
+            None
+        };
+        self.problem.is_none()
+    }
 }
 
 impl Catalog {
@@ -110,6 +138,10 @@ impl Dashboard {
     /// Keys on the catalog.
     pub(in crate::commands::dashboard) fn handle_catalog_key(&mut self, key: KeyEvent) {
         let code = key.code;
+        if let Some(rename) = self.agents().catalog.renaming.take() {
+            self.catalog_rename_key(rename, &key);
+            return;
+        }
         let filtering = self.agents().catalog.filtering;
         if filtering {
             let catalog = &mut self.agents().catalog;
@@ -148,7 +180,8 @@ impl Dashboard {
             KeyCode::Enter | KeyCode::Char('e') => self.edit_selected_agent(),
             KeyCode::Char('n') => self.open_chooser(),
             KeyCode::Char('d') => self.request_agent_delete(),
-            KeyCode::Char('r') => self.request_agent_reset(),
+            KeyCode::Char('r') => self.start_agent_rename(),
+            KeyCode::Char('R') => self.request_agent_reset(),
             KeyCode::Char('l') => self.launch_selected_agent(),
             KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
             _ => {}
@@ -201,6 +234,87 @@ impl Dashboard {
         }
         screen.catalog.move_by(delta);
         true
+    }
+
+    /// `r`: the rename prompt on the selected agent, when it lives under the
+    /// agents directory (a bundled agent not installed keeps its name: clone
+    /// it under another with `n`; a configured one is renamed where it is).
+    fn start_agent_rename(&mut self) {
+        let Some(entry) = self.agents().catalog.selected_entry().cloned() else {
+            return;
+        };
+        if !entry.deletable() {
+            let why = match entry.source {
+                Source::Bundled => "It is the bundled copy; `n` clones it under another name.",
+                _ => "It lives outside the agents directory; rename it where it is.",
+            };
+            self.toast(
+                format!("{} cannot be renamed from here. {why}", entry.name),
+                ToastLevel::Info,
+            );
+            return;
+        }
+        self.agents().catalog.renaming = Some(Rename {
+            from: entry.name.clone(),
+            name: LineEdit::new(entry.name, false),
+            problem: None,
+        });
+    }
+
+    /// Keys on the rename prompt: typing edits the name, Enter renames
+    /// (when the name will do), Esc leaves the agent as it is.
+    fn catalog_rename_key(&mut self, mut rename: Rename, key: &KeyEvent) {
+        let taken: Vec<String> = self
+            .agents()
+            .catalog
+            .entries
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        match rename.name.handle_key(key) {
+            EditOutcome::Cancel => {}
+            EditOutcome::Pending => {
+                rename.check(&taken);
+                self.agents().catalog.renaming = Some(rename);
+            }
+            EditOutcome::Commit => {
+                if !rename.check(&taken) {
+                    self.agents().catalog.renaming = Some(rename);
+                    return;
+                }
+                let to = rename.name.value().to_string();
+                self.perform_agent_rename(&rename.from, &to);
+            }
+        }
+    }
+
+    /// The rename itself: the directory and the manifest's name, the
+    /// arrangement carried over, the catalog re-read with the cursor on
+    /// the new name.
+    pub(in crate::commands::dashboard) fn perform_agent_rename(&mut self, from: &str, to: &str) {
+        if from == to {
+            return;
+        }
+        let agents_dir = self.new_run_ctx.agents_dir.clone();
+        match catalog::rename_agent(&agents_dir, from, to) {
+            Ok(_) => {
+                let mut layout = self.layout_store();
+                layout.copy(from, to);
+                layout.forget(from);
+                let _ = layout.save();
+                self.refresh_catalog();
+                let catalog = &mut self.agents().catalog;
+                if let Some(at) = catalog
+                    .visible()
+                    .into_iter()
+                    .position(|i| catalog.entries[i].name == to)
+                {
+                    catalog.selected = at;
+                }
+                self.toast(format!("Renamed {from} to {to}"), ToastLevel::Info);
+            }
+            Err(e) => self.toast(format!("Could not rename {from}: {e}"), ToastLevel::Error),
+        }
     }
 
     /// `d`: confirm deleting the selected agent, when it can be deleted from
