@@ -73,6 +73,16 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // reason straight from the event stream, and one that doesn't has to
     // re-fetch the run every time a status arrives.
     "events.waiting_on",
+    // Stage transitions and tool call start/finish as first-class frames
+    // (`stage_transition`, `tool_call_started`, `tool_call_finished`) rather
+    // than wrapped in the untyped `world` envelope they used to ride. Breaking
+    // for a client that matched on `world`, which is why it is announced at
+    // all rather than left for a client to discover.
+    "events.stage_and_tool",
+    // `parent_id` on `agent_spawned` names the run that spawned a sub-agent, so
+    // a console can place a fan-out worker in the tree the moment it starts
+    // instead of fetching every new run to find out where it hangs.
+    "events.spawn_parent",
     "blueprints.envelope",
     "blueprints.query",
     "blueprints.manifest",

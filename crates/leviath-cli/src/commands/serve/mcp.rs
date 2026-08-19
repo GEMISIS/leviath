@@ -338,7 +338,7 @@ async fn connect_and_list(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::serve::types::ServerEvent;
+    use crate::commands::serve::events::ServerEvent;
     use axum::Router;
     use axum::body::Body;
     use axum::http::Request;

@@ -9,6 +9,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use leviath_runtime::host::WorldEvent;
 use sha2::Sha256;
 
+use super::events::ServerEvent;
 use super::types::*;
 use crate::config::WebhookConfig;
 use crate::runstate;
@@ -147,16 +148,21 @@ fn handle_event(state: &AppState, client: &reqwest::Client, event: WorldEvent) {
 }
 
 /// Map a [`WorldEvent`] to the [`ServerEvent`] WebSocket clients consume.
+///
+/// Exhaustive, with no catch-all: a variant the runtime grows later stops the
+/// build here rather than reaching subscribers under a generic envelope that
+/// no client knows to unwrap.
 fn to_server_event(event: WorldEvent) -> ServerEvent {
     match event {
         WorldEvent::Spawned {
             run_id,
             agent_id,
             blueprint,
+            parent_run_id,
         } => ServerEvent::AgentSpawned {
             agent_id,
             run_id,
-            parent_id: None,
+            parent_id: parent_run_id,
             blueprint,
         },
         WorldEvent::Status {
@@ -239,11 +245,44 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             run_id,
             line,
         },
-        // Everything else (stage transitions, tool call start/finish, and any
-        // variant the runtime grows later - the enum is non-exhaustive) is
-        // forwarded verbatim as its own serde-tagged JSON.
-        other => ServerEvent::World {
-            event: serde_json::to_value(&other).unwrap_or(serde_json::Value::Null),
+        WorldEvent::StageTransition {
+            run_id,
+            agent_id,
+            from,
+            to,
+            iteration,
+        } => ServerEvent::StageTransition {
+            agent_id,
+            run_id,
+            from,
+            to,
+            iteration,
+        },
+        WorldEvent::ToolCallStarted {
+            run_id,
+            agent_id,
+            call_id,
+            tool,
+        } => ServerEvent::ToolCallStarted {
+            agent_id,
+            run_id,
+            call_id,
+            tool,
+        },
+        WorldEvent::ToolCallFinished {
+            run_id,
+            agent_id,
+            call_id,
+            tool,
+            ok,
+            summary,
+        } => ServerEvent::ToolCallFinished {
+            agent_id,
+            run_id,
+            call_id,
+            tool,
+            ok,
+            summary,
         },
     }
 }
@@ -490,7 +529,8 @@ mod tests {
             mapped_tag(WorldEvent::Spawned {
                 run_id: "r".into(),
                 agent_id: "a".into(),
-                blueprint: "coder".into()
+                blueprint: "coder".into(),
+                parent_run_id: None,
             }),
             "agent_spawned"
         );
@@ -552,8 +592,8 @@ mod tests {
             }),
             "log"
         );
-        // Source-emitted events (and any future variant) ride the generic
-        // passthrough, keeping their own serde tags inside `event`.
+        // The source-emitted events are first-class frames of their own, not a
+        // generic envelope a client has to unwrap.
         assert_eq!(
             mapped_tag(WorldEvent::StageTransition {
                 run_id: "r".into(),
@@ -562,7 +602,7 @@ mod tests {
                 to: "implement".into(),
                 iteration: 1
             }),
-            "world"
+            "stage_transition"
         );
         assert_eq!(
             mapped_tag(WorldEvent::ToolCallStarted {
@@ -571,7 +611,7 @@ mod tests {
                 call_id: "c1".into(),
                 tool: "read_file".into()
             }),
-            "world"
+            "tool_call_started"
         );
         assert_eq!(
             mapped_tag(WorldEvent::ToolCallFinished {
@@ -582,24 +622,85 @@ mod tests {
                 ok: true,
                 summary: "ok".into()
             }),
-            "world"
+            "tool_call_finished"
         );
     }
 
+    /// The fine-grained events used to arrive wrapped as `{"type":"world",
+    /// "event":{...}}`, so every field a client wanted sat one level down
+    /// behind a tag it had to know to unwrap. They are flat frames now, and
+    /// the fields are asserted by name because that shape is the contract.
     #[test]
-    fn passthrough_keeps_the_inner_event_tag_and_run_id() {
-        let ev = to_server_event(WorldEvent::StageTransition {
+    fn stage_and_tool_frames_are_flat_and_named() {
+        let json = serde_json::to_value(to_server_event(WorldEvent::StageTransition {
             run_id: "run-9".into(),
             agent_id: "a".into(),
             from: "plan".into(),
             to: "implement".into(),
             iteration: 2,
-        });
-        assert_eq!(ev.run_id(), "run-9");
-        let json = serde_json::to_value(&ev).unwrap();
-        assert_eq!(json["event"]["event"], "stage_transition");
-        assert_eq!(json["event"]["from"], "plan");
-        assert_eq!(json["event"]["to"], "implement");
+        }))
+        .unwrap();
+        assert_eq!(json["type"], "stage_transition");
+        assert_eq!(json["run_id"], "run-9");
+        assert_eq!(json["agent_id"], "a");
+        assert_eq!(json["from"], "plan");
+        assert_eq!(json["to"], "implement");
+        assert_eq!(json["iteration"], 2);
+
+        let json = serde_json::to_value(to_server_event(WorldEvent::ToolCallStarted {
+            run_id: "run-9".into(),
+            agent_id: "a".into(),
+            call_id: "c1".into(),
+            tool: "read_file".into(),
+        }))
+        .unwrap();
+        assert_eq!(json["type"], "tool_call_started");
+        assert_eq!(json["run_id"], "run-9");
+        assert_eq!(json["call_id"], "c1");
+        assert_eq!(json["tool"], "read_file");
+
+        // `ok` and `summary` are the pair that says whether the call did
+        // anything; a client showing a green tick off the finish frame alone
+        // would be wrong for a `[blocked]` result.
+        let json = serde_json::to_value(to_server_event(WorldEvent::ToolCallFinished {
+            run_id: "run-9".into(),
+            agent_id: "a".into(),
+            call_id: "c1".into(),
+            tool: "read_file".into(),
+            ok: false,
+            summary: "[blocked] not allowed".into(),
+        }))
+        .unwrap();
+        assert_eq!(json["type"], "tool_call_finished");
+        assert_eq!(json["call_id"], "c1");
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["summary"], "[blocked] not allowed");
+    }
+
+    /// A sub-agent's spawn frame says who spawned it, so a console can place a
+    /// fan-out worker in the tree without fetching the run to find out.
+    #[test]
+    fn a_spawn_frame_carries_the_parent_run() {
+        let json = serde_json::to_value(to_server_event(WorldEvent::Spawned {
+            run_id: "child".into(),
+            agent_id: "a".into(),
+            blueprint: "worker".into(),
+            parent_run_id: Some("parent".into()),
+        }))
+        .unwrap();
+        assert_eq!(json["type"], "agent_spawned");
+        assert_eq!(json["parent_id"], "parent");
+
+        // A root run has no parent, and says so by omitting nothing: the field
+        // is present and null, which is what `AgentSpawned` has always sent.
+        let json = serde_json::to_value(to_server_event(WorldEvent::Spawned {
+            run_id: "root".into(),
+            agent_id: "a".into(),
+            blueprint: "coder".into(),
+            parent_run_id: None,
+        }))
+        .unwrap();
+        assert_eq!(json["parent_id"], serde_json::Value::Null);
     }
 
     #[tokio::test]

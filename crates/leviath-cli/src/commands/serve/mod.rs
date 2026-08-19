@@ -10,6 +10,7 @@ mod config;
 mod config_types;
 mod cursor;
 mod doctor;
+mod events;
 mod fs;
 mod interactions;
 mod mcp;
@@ -25,9 +26,14 @@ mod tree;
 mod types;
 mod websocket;
 
+#[cfg(test)]
+#[path = "event_seam_tests.rs"]
+mod event_seam_tests;
+
 pub(crate) use config::list_model_ids;
+pub use events::ServerEvent;
 use types::ServeLimits;
-pub use types::{AppState, ServeArgs, ServerEvent};
+pub use types::{AppState, ServeArgs};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
