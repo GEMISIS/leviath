@@ -108,8 +108,8 @@ pub(super) struct ExplorerState {
     pub(super) tab: ExplorerTab,
     /// Selected row on the timeline tab.
     pub(super) timeline_selected: usize,
-    /// The graph canvas. Owns the toggles (`u` unvisited, `e` escape edges),
-    /// the selection, the direction and the viewport.
+    /// The graph canvas. Owns the toggles (`t` whole graph, `e` escape
+    /// edges), the selection, the direction and the viewport.
     pub(super) view: FlowView,
 }
 

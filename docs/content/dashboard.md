@@ -106,8 +106,9 @@ skips marked runs that have already finished.
 Agent blueprints on the left, the task on the right, and above the task the selected blueprint's
 stage graph, so you can see what an agent will do before you give it a task: how many stages, in
 what order, where it loops back. It follows the selection, previews bundled blueprints that are not
-installed yet from the copy inside the binary, and says so when a manifest cannot be read. Drag to
-pan it; on a screen too short to fit both, the task keeps its rows and the preview is skipped. Once
+installed yet from the copy inside the binary, and says so when a manifest cannot be read. It is
+the explorer's canvas showing the whole graph: drag to pan, wheel to zoom; on a screen too short to
+fit both, the task keeps its rows and the preview is skipped. Once
 the run starts, the dashboard opens that run's page, and `Esc` from there goes back to the list
 rather than back into the form.
 
@@ -130,15 +131,17 @@ interaction timeout expires. The setting is off again every time the screen open
 
 ### Detail view
 
-On a terminal at least 32 rows tall the stage row is the blueprint's graph: one box per stage,
-transitions as edges, the stage the run is in in the run's colour, visited stages with their
-visit count, the selected stage reversed. `←` / `→` and `1`-`9` move through it exactly as they
-did through the tabs, and dragging pans it. On a shorter terminal, and for a run whose blueprint
-could not be read, the flat tab strip stays.
+On a terminal at least 36 rows tall the stage row is the blueprint's graph, drawn by the same
+canvas as the explorer: the path the run took and the options from where it is, boxes on layers,
+the stage the run is in in the run's colour, visited stages with their visit count. The selected
+box is the open stage tab, in a thick bright frame: `←` / `→` move it through the graph, `1`-`9`
+jump to a stage by number, and a click on a box picks it. Drag a box to move it, drag empty canvas
+to pan, `g` opens the same graph full screen with the rest of its keys. On a shorter terminal, and
+for a run whose blueprint could not be read, the flat tab strip stays.
 
 | Key | Action |
 |---|---|
-| `←` / `→` | Switch stage tab (`h` / `l` are not aliases here: `l` is Logs) |
+| `←` / `→` | Switch stage tab, through the graph when it is on screen (`h` / `l` are not aliases here: `l` is Logs) |
 | `1`–`9` | Jump to that stage tab |
 | `↑` / `↓` (or `k` / `j`) | Scroll the pane; in the Context view, move the tree cursor |
 | `PgUp` / `PgDn` | Scroll ten lines |
@@ -184,13 +187,16 @@ chain; a graph blueprint is a graph):
   with a minimap in the corner when there is more graph than screen. The stage the run is in
   spins in the run's colour, stages it has been through show a visit count (`×2`) and the time of
   their last visit, the last transition it took is animated, and revisit loops run along a lane
-  beside the boxes. While a run is on the canvas only the transitions it took and the ones it can
-  take from where it is are drawn (`t` shows them all), and the escape edges (`error`, `dead_end`,
-  `stuck`, `max_iterations`) are hidden until you ask for them, because nearly every stage has one
-  to the same hub. A fan-out stage that
-  is running shows its worker counts. Selecting a stage or an edge describes it on the line under
-  the canvas. Boxes can be dragged into an arrangement you prefer; the explorer remembers it, and
-  the view, for as long as the dashboard is open.
+  beside the boxes. While a run is on the canvas the picture is the path and the options: the
+  stages the run has been through and the one it is in, the transitions between them, and the
+  transitions it can take from where it is with the stages they lead to. Everything else waits
+  off screen until `t` shows the whole graph, so a stage never sits there without a line to it.
+  The escape edges (`error`, `dead_end`, `stuck`, `max_iterations`) are hidden until you ask for
+  them, because nearly every stage has one to the same hub; with the path in focus, `e` shows the
+  escapes from the current stage. A fan-out stage that is running shows its worker counts.
+  Selecting a stage or an edge describes it on the line under the canvas. Boxes can be dragged
+  into an arrangement you prefer; the explorer remembers it, and the view, for as long as the
+  dashboard is open.
 - **Timeline** lists each actual visit in order, with when it started, how long it lasted, and how
   many iterations it ran. `Enter` on a visit opens the context window exactly as it was at that
   point.
@@ -203,9 +209,8 @@ chain; a graph blueprint is a graph):
 | `+` / `-` , `0` | Zoom in / out, back to 100% |
 | `f` | Fit the whole graph on screen |
 | `r` | Turn the graph: left to right or top to bottom |
-| `t` | Show every edge, or only the path taken and what comes next |
+| `t` | The whole graph, or only the path taken and what comes next |
 | `e` | Show or hide the escape edges |
-| `u` | Show or hide stages the run has never entered |
 | `Tab` / `Shift-Tab` | Switch between Graph and Timeline |
 | `?` / `F1` | Help |
 | `Esc` / `g` | Close the explorer |

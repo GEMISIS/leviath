@@ -91,9 +91,10 @@ same list.
 - New: `lev validate --graph` prints the same stage graph as plain text
   (`--width` caps how wide).
 - New: the detail view's stage row is the blueprint's graph on a terminal
-  at least 32 rows tall: one box per stage, edges between them, the stage
-  the run is in lit up, `←`/`→` and `1`-`9` moving through it as they did
-  through the tabs. The flat strip stays on shorter terminals.
+  at least 36 rows tall, drawn by the explorer's canvas: the same boxes,
+  edges and colours, the stage the run is in lit up, the selected box the
+  open stage tab. `←`/`→` walk the graph, `1`-`9` jump by number, a click
+  picks a box, and boxes drag. The flat strip stays on shorter terminals.
 - New: the new-run screen previews the selected blueprint's stage graph
   above the task, bundled blueprints included before they are installed,
   and says so when a manifest cannot be read.
@@ -106,9 +107,11 @@ same list.
   animation runs at a walking pace, a dotted grid sits under the graph, and
   boxes can be dragged into an arrangement of your own, which the explorer
   keeps for the run.
-- Changed: while a run is on the canvas the graph draws only the
-  transitions it took and the ones it can take from where it is; `t` shows
-  them all. Hint bars fit the terminal: what does not fit gives way from
+- Changed: while a run is on the canvas the graph draws only the path and
+  the options: the stages the run has been through and is in, the
+  transitions between them, and what it can do from here with the stages
+  that leads to. A stage no line reaches is not drawn either; `t` shows the
+  whole graph. Hint bars fit the terminal: what does not fit gives way from
   the end (the explorer's) or the middle (the dashboard's, keeping help and
   back), with an ellipsis where it went, and the graph pane's title
   shortens on a narrow pane.

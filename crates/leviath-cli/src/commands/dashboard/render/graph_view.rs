@@ -26,34 +26,35 @@ use crate::tui::widgets::footer::{draw_hint_bar, hint};
 fn graph_title(
     width: u16,
     direction: FlowDirection,
-    show_untaken: bool,
+    show_all: bool,
     show_escape: bool,
-    show_unvisited: bool,
     zoom: f64,
 ) -> String {
     let on_off = |on: bool| if on { "on" } else { "off" };
-    if width < 110 {
+    let arrow = match direction {
+        FlowDirection::LeftToRight => "→",
+        FlowDirection::TopToBottom => "↓",
+    };
+    let what = if show_all {
+        "whole graph"
+    } else {
+        "path + options"
+    };
+    if width < 90 {
         return format!(
-            " Graph · {} · t:{} e:{} u:{} · {:.0}% ",
-            match direction {
-                FlowDirection::LeftToRight => "→",
-                FlowDirection::TopToBottom => "↓",
-            },
-            on_off(show_untaken),
+            " Graph · {arrow} · {} (t) · e:{} · {:.0}% ",
+            if show_all { "all" } else { "path" },
             on_off(show_escape),
-            on_off(show_unvisited),
             zoom * 100.0,
         );
     }
     format!(
-        " Graph · {} (r) · untaken edges {} (t) · escapes {} (e) · unvisited {} (u) · zoom {:.0}% ",
+        " Graph · {} (r) · {what} (t) · escapes {} (e) · zoom {:.0}% ",
         match direction {
             FlowDirection::LeftToRight => "left to right",
             FlowDirection::TopToBottom => "top to bottom",
         },
-        on_off(show_untaken),
         on_off(show_escape),
-        on_off(show_unvisited),
         zoom * 100.0,
     )
 }
@@ -145,9 +146,8 @@ impl Dashboard {
                 hint("enter", "open tab"),
                 hint("tab", "timeline"),
                 hint("?", "help"),
-                hint("t", "all edges"),
+                hint("t", "whole graph"),
                 hint("e", "escapes"),
-                hint("u", "unvisited"),
                 hint("r", "rotate"),
                 hint("f", "fit"),
                 hint("+ -", "zoom"),
@@ -179,9 +179,8 @@ impl Dashboard {
         let title = graph_title(
             area.width,
             explorer.view.direction(),
-            explorer.view.show_untaken(),
+            explorer.view.show_all(),
             explorer.view.show_escape(),
-            explorer.view.show_unvisited(),
             explorer.view.zoom(),
         );
         let block = Block::default()
@@ -334,7 +333,7 @@ mod tests {
         make_test_dashboard, rendered_buffer, style_at_text,
     };
     use crate::commands::dashboard::types::*;
-    use crate::tui::flowgraph::{FlowView, NodeStyle, StageGraph};
+    use crate::tui::flowgraph::{FlowView, StageGraph};
     use crate::tui::theme::*;
     use crossterm::event::KeyCode;
     use leviath_core::manifest::parse_manifest;
@@ -408,10 +407,7 @@ mode = "output"
     }
 
     fn explorer() -> ExplorerState {
-        ExplorerState::new(
-            "run-1".to_string(),
-            FlowView::new(stage_graph(), NodeStyle::Full, false),
-        )
+        ExplorerState::new("run-1".to_string(), FlowView::new(stage_graph(), false))
     }
 
     fn seed(dash: &mut crate::commands::dashboard::state::Dashboard, stages: &[(&str, i64)]) {
@@ -486,24 +482,31 @@ mode = "output"
 
         let (terminal, text) = rendered_at(&mut dash, 200, 50);
         assert!(text.contains("Stage explorer"), "{text}");
+        // By default the canvas is the path and the options: the stages the
+        // run has been through and where it can go from implement. Island
+        // hangs off review (not the current stage) and recover is behind an
+        // escape, so neither is drawn until `t`.
+        for stage in ["plan", "implement", "review"] {
+            assert!(text.contains(stage), "{stage}: {text}");
+        }
+        for stage in ["recover", "island"] {
+            assert!(!text.contains(stage), "{stage} hidden: {text}");
+        }
+        assert!(text.contains("implement ×2"), "revisit count: {text}");
+        assert!(text.contains("[llm_choice]"), "taken edge's label: {text}");
+        assert!(text.contains("escapes off (e)"), "{text}");
+        assert!(text.contains("path + options (t)"), "{text}");
+        assert!(text.contains("←→↑↓ select"), "hint bar: {text}");
+        assert!(text.contains("Select a stage with the arrows"), "{text}");
+        // The current stage is drawn in the active colour.
+        assert_eq!(style_at_text(&terminal, "implement ×2").fg, Some(C_ACTIVE));
+        // `t` brings the whole graph back, pending stages dim.
+        dash.stage_explorer.as_mut().unwrap().view.toggle_all();
+        let (terminal, text) = rendered_at(&mut dash, 200, 50);
         for stage in ["plan", "implement", "review", "recover", "island"] {
             assert!(text.contains(stage), "{stage}: {text}");
         }
-        assert!(text.contains("implement ×2"), "revisit count: {text}");
-        assert!(text.contains("[llm_choice]"), "condition label: {text}");
-        assert!(text.contains("escapes off (e)"), "{text}");
-        assert!(text.contains("untaken edges off (t)"), "{text}");
-        assert!(text.contains("←→↑↓ select"), "hint bar: {text}");
-        // Untaken edges are hidden by default: review's edge to island (never
-        // taken, and review is not the current stage) is not drawn; the path
-        // taken and the current stage's options are.
-        assert!(
-            !text.contains("[llm_choice]") || text.contains("implement ×2"),
-            "{text}"
-        );
-        assert!(text.contains("Select a stage with the arrows"), "{text}");
-        // The current stage is drawn in the active colour, a pending one dim.
-        assert_eq!(style_at_text(&terminal, "implement ×2").fg, Some(C_ACTIVE));
+        assert!(text.contains("whole graph (t)"), "{text}");
         assert_eq!(style_at_text(&terminal, "island").fg, Some(C_DIM));
         // The graph pane registered its canvas for the mouse.
         assert!(
@@ -568,11 +571,15 @@ mode = "output"
         // A narrow pane gets the short title, and the graph turns to fit it
         // (the title says so from the frame after the turn: the dashboard
         // redraws ten times a second).
-        rendered_at(&mut dash, 90, 40);
-        let (_, text) = rendered_at(&mut dash, 90, 40);
+        rendered_at(&mut dash, 80, 40);
+        let (_, text) = rendered_at(&mut dash, 80, 40);
         assert!(
-            text.contains("Graph · ↓ · t:off e:on u:on · 100%"),
+            text.contains("Graph · ↓ · path (t) · e:on · 100%"),
             "{text}"
+        );
+        assert_eq!(
+            super::graph_title(60, super::FlowDirection::LeftToRight, true, false, 1.0),
+            " Graph · → · all (t) · e:off · 100% "
         );
         // An edge: pick one directly on the canvas. The first carries a hint
         // and no condition; the loop back from review carries the reverse.
@@ -596,26 +603,26 @@ mode = "output"
     }
 
     #[test]
-    fn u_hides_unvisited_stages_from_the_graph_but_never_the_current_one() {
+    fn the_current_stage_and_its_options_show_even_before_the_archive_has_them() {
         let mut dash = make_test_dashboard();
         let mut agent = graph_agent();
         agent.stage = "review".to_string(); // current but never archived
         dash.agents.push(agent);
         dash.update_display_indices();
         seed(&mut dash, &[("plan", 10), ("implement", 70)]);
-        let mut explorer = explorer();
-        explorer.view.toggle_unvisited();
-        dash.stage_explorer = Some(explorer);
+        dash.stage_explorer = Some(explorer());
 
         let text = rendered(&mut dash);
-        assert!(!text.contains("island"), "{text}");
-        assert!(!text.contains("recover"), "{text}");
+        assert!(!text.contains("recover"), "behind an escape: {text}");
         assert!(text.contains("plan"), "{text}");
         assert!(
             text.contains("review"),
             "the current stage never hides: {text}"
         );
-        assert!(text.contains("unvisited off (u)"), "{text}");
+        assert!(
+            text.contains("island"),
+            "where the current stage can go: {text}"
+        );
     }
 
     #[test]

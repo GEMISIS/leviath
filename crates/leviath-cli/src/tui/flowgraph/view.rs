@@ -23,7 +23,8 @@ use ratatui::widgets::Block;
 use crate::tui::theme::C_ACCENT;
 
 use super::content::{
-    NodeStatus, NodeStyle, RunPhase, StageNodeContent, WorkerCounts, edge_style, palette,
+    NODE_HEIGHT, NodeStatus, RunPhase, StageNodeContent, WorkerCounts, edge_style, node_width,
+    palette,
 };
 use super::layout::{self, Direction, GraphLayout};
 use super::model::{EdgeClass, StageEdge, StageGraph};
@@ -89,18 +90,17 @@ pub(crate) struct FlowView {
     graph: Arc<StageGraph>,
     layout: GraphLayout,
     edges: Vec<EdgeMeta>,
-    style: NodeStyle,
     locked: bool,
     direction: Direction,
     /// Until the user turns the graph by hand, the first draw picks the
     /// direction that fits.
     auto_direction: bool,
     show_escape: bool,
-    show_unvisited: bool,
-    /// Edges the run has not followed and cannot follow next: hidden by
-    /// default once a run is on the canvas, so the picture is the path
-    /// taken plus what can happen from here. `t` shows the whole graph.
-    show_untaken: bool,
+    /// The whole graph, or (the default once a run is on the canvas) the
+    /// path taken plus what can happen from here: the stages visited, the
+    /// current one, the transitions between them, and the current stage's
+    /// options with the stages they lead to. `t` toggles.
+    show_all: bool,
     /// Transitions the run followed, from the last overlay.
     taken: HashSet<(String, String)>,
     /// The stage the run is in, from the last overlay.
@@ -119,13 +119,9 @@ pub(crate) struct FlowView {
     max_stem: f64,
 }
 
-/// Box size and gaps for a node style: `(node_w, node_h, gap_x, gap_y)`.
-fn metrics(style: NodeStyle, longest_id: usize) -> (f64, f64, f64, f64) {
-    let (gap_x, gap_y) = match style {
-        NodeStyle::Full => (8.0, 1.0),
-        NodeStyle::Compact => (6.0, 1.0),
-    };
-    (style.width(longest_id), style.height(), gap_x, gap_y)
+/// Box size and gaps: `(node_w, node_h, gap_x, gap_y)`.
+fn metrics(longest_id: usize) -> (f64, f64, f64, f64) {
+    (node_width(longest_id), NODE_HEIGHT, 8.0, 1.0)
 }
 
 /// Which sides an edge leaves and enters on, and how far it travels before
@@ -178,7 +174,7 @@ impl std::fmt::Debug for FlowView {
             .field("nodes", &self.graph.nodes.len())
             .field("direction", &self.direction)
             .field("show_escape", &self.show_escape)
-            .field("show_unvisited", &self.show_unvisited)
+            .field("show_all", &self.show_all)
             .finish()
     }
 }
@@ -235,7 +231,6 @@ fn handles(direction: Direction) -> Vec<Handle> {
 fn build(
     graph: &StageGraph,
     layout: &GraphLayout,
-    style: NodeStyle,
     locked: bool,
     direction: Direction,
 ) -> (Flow<StageNodeContent, StepEdge>, Vec<EdgeMeta>, f64) {
@@ -245,13 +240,7 @@ fn build(
         .map(|n| n.id.trim_start_matches("ext:").chars().count())
         .max()
         .unwrap_or(0);
-    let (node_w, node_h, gap_x, gap_y) = metrics(style, longest);
-    // A one-row box has no room to shrink: below zoom 1 it is zero rows
-    // tall and gone. Compact canvases stay at 1.0 and pan instead.
-    let min_zoom = match style {
-        NodeStyle::Full => 0.5,
-        NodeStyle::Compact => 1.0,
-    };
+    let (node_w, node_h, gap_x, gap_y) = metrics(longest);
 
     let nodes: Vec<Node<StageNodeContent>> = graph
         .nodes
@@ -261,7 +250,7 @@ fn build(
                 n.id.clone(),
                 (0.0, 0.0),
                 (node_w, node_h),
-                StageNodeContent::from_node(n, style),
+                StageNodeContent::from_node(n),
             )
             .with_handles(handles(direction))
             .with_connectable(false)
@@ -308,7 +297,9 @@ fn build(
     let mut flow = Flow::with_graph(nodes, edges)
         .expect("a StageGraph has unique ids, no self-loops and no dangling edges")
         .with_theme(Theme::Custom(palette()))
-        .with_min_zoom(min_zoom)
+        // Zoomed out by hand a box still keeps its frame down to a couple
+        // of rows; the fit itself never goes below 1.0.
+        .with_min_zoom(0.5)
         .with_max_zoom(1.0)
         // Marching ants at a walking pace; the default is a sprint.
         .with_animation_speed(220)
@@ -327,21 +318,19 @@ impl FlowView {
     /// pans and nothing selects or moves, for the band and the preview; the
     /// explorer is unlocked, so boxes can be dragged into a better
     /// arrangement and clicked to select.
-    pub(crate) fn new(graph: Arc<StageGraph>, style: NodeStyle, locked: bool) -> Self {
+    pub(crate) fn new(graph: Arc<StageGraph>, locked: bool) -> Self {
         let layout = layout::layout(&graph);
-        let (flow, edges, max_stem) = build(&graph, &layout, style, locked, Direction::LeftToRight);
+        let (flow, edges, max_stem) = build(&graph, &layout, locked, Direction::LeftToRight);
         Self {
             flow,
             graph,
             layout,
             edges,
-            style,
             locked,
             direction: Direction::LeftToRight,
             auto_direction: true,
             show_escape: false,
-            show_unvisited: true,
-            show_untaken: false,
+            show_all: false,
             taken: HashSet::new(),
             current: None,
             reveal: None,
@@ -368,13 +357,7 @@ impl FlowView {
 
     fn rebuild(&mut self, direction: Direction) {
         let selected = self.flow.first_selected_node_id();
-        let (flow, edges, max_stem) = build(
-            &self.graph,
-            &self.layout,
-            self.style,
-            self.locked,
-            direction,
-        );
+        let (flow, edges, max_stem) = build(&self.graph, &self.layout, self.locked, direction);
         self.flow = flow;
         self.edges = edges;
         self.max_stem = max_stem;
@@ -411,19 +394,14 @@ impl FlowView {
         self.show_escape
     }
 
-    /// Unvisited stages shown or hidden.
-    pub(crate) fn show_unvisited(&self) -> bool {
-        self.show_unvisited
+    /// The whole graph, or the run's path and options.
+    pub(crate) fn show_all(&self) -> bool {
+        self.show_all
     }
 
-    /// Untaken edges shown or hidden.
-    pub(crate) fn show_untaken(&self) -> bool {
-        self.show_untaken
-    }
-
-    /// Show or hide the edges the run has not followed.
-    pub(crate) fn toggle_untaken(&mut self) {
-        self.show_untaken = !self.show_untaken;
+    /// Switch between the whole graph and the run's path and options.
+    pub(crate) fn toggle_all(&mut self) {
+        self.show_all = !self.show_all;
         self.sync_visibility();
     }
 
@@ -510,7 +488,7 @@ impl FlowView {
                 .map(|n| n.id.trim_start_matches("ext:").chars().count())
                 .max()
                 .unwrap_or(0);
-            let (node_w, node_h, gap_x, gap_y) = metrics(self.style, longest);
+            let (node_w, node_h, gap_x, gap_y) = metrics(longest);
             self.layout.extent(dir, node_w, node_h, gap_x, gap_y)
         };
         let other = self.direction.rotated();
@@ -545,12 +523,6 @@ impl FlowView {
         self.sync_visibility();
     }
 
-    /// Show or hide stages the run has never entered.
-    pub(crate) fn toggle_unvisited(&mut self) {
-        self.show_unvisited = !self.show_unvisited;
-        self.sync_visibility();
-    }
-
     /// Keys the canvas answers to. Returns whether it took the key.
     pub(crate) fn handle_key(&mut self, code: KeyCode) -> bool {
         let action = match code {
@@ -573,8 +545,7 @@ impl FlowView {
             KeyCode::Char('f') => self.fit(),
             KeyCode::Char('r') => self.rotate(),
             KeyCode::Char('e') => self.toggle_escape(),
-            KeyCode::Char('u') => self.toggle_unvisited(),
-            KeyCode::Char('t') => self.toggle_untaken(),
+            KeyCode::Char('t') => self.toggle_all(),
             _ => return false,
         }
         true
@@ -661,34 +632,51 @@ impl FlowView {
         self.sync_visibility();
     }
 
-    /// Hidden nodes and edges follow the toggles: a node hides when it is
-    /// unvisited and unvisited stages are off; an edge hides when it is an
-    /// escape with escapes off, when a run is on the canvas and it is neither
-    /// a transition the run took nor one it can take from where it is (with
-    /// untaken edges off), or when either end is hidden (the canvas would
-    /// otherwise draw an arrow into nothing).
+    /// Hidden nodes and edges follow the toggles. With a run on the canvas
+    /// and `show_all` off, an edge shows when the run took it or can take it
+    /// from where it is, and a node shows when the run has been in it, is in
+    /// it, or can go to it next: no box without a line to it, no line into
+    /// nothing. Escape edges hide with escapes off whatever else is on.
     fn sync_visibility(&mut self) {
-        let hidden_nodes: Vec<String> = self
-            .flow
-            .nodes()
-            .filter(|n| !self.show_unvisited && n.content.status == NodeStatus::Pending)
-            .map(|n| n.id.clone())
-            .collect();
-        let hidden: HashSet<&str> = hidden_nodes.iter().map(String::as_str).collect();
+        let focused = self.current.is_some() && !self.show_all;
+        let current = self.current.clone().unwrap_or_default();
+        let live_edge = |edge: &StageEdge| {
+            self.taken.contains(&(edge.from.clone(), edge.to.clone())) || edge.from == current
+        };
+        let mut shown_nodes: HashSet<String> = HashSet::new();
+        if focused {
+            shown_nodes.insert(current.clone());
+            for meta in &self.edges {
+                let escape_hidden = meta.edge.class == EdgeClass::Escape && !self.show_escape;
+                if live_edge(&meta.edge) && !escape_hidden {
+                    shown_nodes.insert(meta.edge.from.clone());
+                    shown_nodes.insert(meta.edge.to.clone());
+                }
+            }
+            // A stage visited on the way, whichever edge brought the run.
+            for node in self.flow.nodes() {
+                if matches!(node.content.status, NodeStatus::Visited { .. }) {
+                    shown_nodes.insert(node.id.clone());
+                }
+            }
+        }
+        let mut changed = false;
         for id in self.graph.ids() {
-            self.flow.set_node_hidden(id, hidden.contains(id));
+            let hide = focused && !shown_nodes.contains(id);
+            changed |= self.flow.node(id).is_some_and(|n| n.hidden != hide);
+            self.flow.set_node_hidden(id, hide);
+        }
+        // A different set of boxes is a different picture: fit it again at
+        // the next draw (the fit follows the boxes on show).
+        if changed {
+            self.last_area = Rect::default();
         }
         for meta in &self.edges {
-            let untaken = self.current.is_some()
-                && !self.show_untaken
-                && !self
-                    .taken
-                    .contains(&(meta.edge.from.clone(), meta.edge.to.clone()))
-                && self.current.as_deref() != Some(meta.edge.from.as_str());
             let hide = (meta.edge.class == EdgeClass::Escape && !self.show_escape)
-                || untaken
-                || hidden.contains(meta.edge.from.as_str())
-                || hidden.contains(meta.edge.to.as_str());
+                || (focused && !live_edge(&meta.edge))
+                || (focused
+                    && !(shown_nodes.contains(&meta.edge.from)
+                        && shown_nodes.contains(&meta.edge.to)));
             self.flow.set_edge_hidden(&meta.id, hide);
         }
     }
@@ -745,6 +733,7 @@ impl FlowView {
     pub(crate) fn world_extent(&self) -> (f64, f64) {
         self.flow
             .nodes()
+            .filter(|n| !n.hidden)
             .map(|n| n.bounds())
             .fold((0.0_f64, 0.0_f64), |(w, h), b| {
                 (
@@ -813,7 +802,7 @@ mode = "output"
     }
 
     fn view() -> FlowView {
-        FlowView::new(graph(), NodeStyle::Full, false)
+        FlowView::new(graph(), false)
     }
 
     fn draw(view: &mut FlowView, w: u16, h: u16) -> (Terminal<TestBackend>, String) {
@@ -904,13 +893,14 @@ mode = "output"
         assert!(v.handle_key(KeyCode::Char('e')));
         assert!(v.show_escape());
         assert!(!v.edge_hidden("implement", "recover"));
-        assert!(v.handle_key(KeyCode::Char('u')));
-        assert!(!v.show_unvisited());
-        // Nothing has run, so every node is unvisited and hides, edges too.
-        assert!(v.node_hidden("plan"));
-        assert!(v.edge_hidden("plan", "implement"));
-        assert!(v.handle_key(KeyCode::Char('u')));
-        assert!(!v.node_hidden("plan"));
+        // No run on the canvas: `t` flips the flag and nothing hides either
+        // way, because there is no path to focus on.
+        assert!(!v.show_all());
+        assert!(v.handle_key(KeyCode::Char('t')));
+        assert!(v.show_all());
+        assert!(!v.node_hidden("plan") && !v.edge_hidden("plan", "implement"));
+        assert!(v.handle_key(KeyCode::Char('t')));
+        assert!(!v.node_hidden("plan") && !v.edge_hidden("plan", "implement"));
         assert!(v.handle_key(KeyCode::Char('f')));
         assert!(!v.handle_key(KeyCode::Char('x')));
         assert!(!v.handle_key(KeyCode::Enter));
@@ -994,35 +984,43 @@ mode = "output"
         assert_eq!(v.node_status("recover"), Some(NodeStatus::Pending));
         assert!(v.edge_animated("implement", "review"));
         assert!(!v.edge_animated("plan", "implement"));
-        // Untaken edges hide once a run is on the canvas: the path taken and
-        // the current stage's own options stay, the rest goes until `t`.
+        // With a run on the canvas the picture is the path and the options:
+        // the stages visited, the current one, what it can go to next, and
+        // the edges between them. The rest goes until `t`.
         assert!(!v.edge_hidden("plan", "implement"), "taken");
         assert!(
             !v.edge_hidden("review", "done"),
             "an option from the current stage"
         );
+        assert!(!v.node_hidden("done"), "where an option leads");
         assert!(
             v.edge_hidden("recover", "plan"),
             "neither taken nor available"
         );
-        assert!(!v.show_untaken());
+        assert!(v.node_hidden("recover"), "no line to it, no box");
+        // Escapes stay off even in focus: the escape into recover does not
+        // bring the box back...
+        assert!(v.edge_hidden("implement", "recover"));
+        // ...and turning escapes on does not either, because implement is
+        // not where the run is: in focus, `e` shows the escapes from here.
+        v.toggle_escape();
+        assert!(v.edge_hidden("implement", "recover"), "not on the path");
+        assert!(v.node_hidden("recover"));
+        v.toggle_escape();
+        assert!(!v.show_all());
         assert!(v.handle_key(KeyCode::Char('t')));
-        assert!(v.show_untaken());
+        assert!(v.show_all());
         assert!(!v.edge_hidden("recover", "plan"));
-        v.toggle_untaken();
+        assert!(!v.node_hidden("recover"));
+        v.toggle_all();
         assert!(v.edge_hidden("recover", "plan"));
+        assert!(v.node_hidden("recover"));
         // A non-fan-out current stage never shows worker counts.
         let (_, text) = draw(&mut v, 220, 50);
         assert!(!text.contains(" run ·"), "{text}");
         assert!(text.contains("iter 2"), "{text}");
         assert!(text.contains("10:00:00"), "{text}");
         assert!(text.contains("implement ×2"), "{text}");
-
-        // With unvisited hidden, the pending stages and their edges go.
-        v.toggle_unvisited();
-        assert!(v.node_hidden("done") && v.node_hidden("recover"));
-        assert!(v.edge_hidden("review", "done"));
-        assert!(!v.node_hidden("review"));
 
         // Moving on: the new current stage is revealed at the next draw, the
         // last one becomes visited, and a run that finished spins nothing.
@@ -1098,7 +1096,7 @@ merge_stage = "merge"
             )
             .unwrap(),
         ));
-        let mut v = FlowView::new(g, NodeStyle::Full, false);
+        let mut v = FlowView::new(g, false);
         v.apply_live(&LiveOverlay {
             current: Some("split".into()),
             run: Some(RunPhase::Waiting),
@@ -1136,7 +1134,7 @@ merge_stage = "merge"
     #[test]
     fn mouse_drag_pans_and_wheel_zooms_also_when_locked() {
         for locked in [false, true] {
-            let mut v = FlowView::new(graph(), NodeStyle::Compact, locked);
+            let mut v = FlowView::new(graph(), locked);
             draw(&mut v, 60, 12);
             v.select_stage("plan");
             let pan = v.pan();
@@ -1154,12 +1152,12 @@ merge_stage = "merge"
                 Selection::Node("plan".into()),
                 "a pan keeps the selection (locked={locked})"
             );
-            // A compact canvas cannot zoom out: its boxes are one row tall.
+            // The wheel zooms, locked or not.
             v.handle_mouse(mouse(MouseEventKind::ScrollDown, x, y));
-            assert_eq!(v.zoom(), 1.0, "locked={locked}");
+            assert!(v.zoom() < 1.0, "locked={locked}");
             v.tick(Duration::from_millis(100));
         }
-        // A full canvas zooms at the wheel.
+        // And zooms back in.
         let mut v = view();
         draw(&mut v, 220, 50);
         let c = v.canvas();
@@ -1173,19 +1171,19 @@ merge_stage = "merge"
 
     #[test]
     fn a_canvas_the_graph_overflows_starts_top_left_and_boxes_are_never_shrunk() {
-        let mut v = FlowView::new(graph(), NodeStyle::Compact, true);
+        let mut v = FlowView::new(graph(), true);
         draw(&mut v, 60, 12);
         assert_eq!(v.pan(), (1.0, 1.0), "the entry stage is on screen");
         assert_eq!(v.node_rect("plan").map(|r| r.0), Some(2));
         assert_eq!(v.direction(), Direction::LeftToRight);
         // Wide enough: centred like any other fit.
-        let mut v = FlowView::new(graph(), NodeStyle::Compact, true);
+        let mut v = FlowView::new(graph(), true);
         draw(&mut v, 200, 20);
         assert_ne!(v.pan(), (1.0, 1.0));
         assert_eq!(v.zoom(), 1.0);
         // A full canvas that overflows both ways keeps its boxes whole and
         // starts at the corner too, rather than shrinking them to fit.
-        let mut v = FlowView::new(graph(), NodeStyle::Full, false);
+        let mut v = FlowView::new(graph(), false);
         draw(&mut v, 60, 20);
         assert_eq!(v.zoom(), 1.0);
         assert_eq!(v.pan(), (1.0, 1.0));
@@ -1196,7 +1194,7 @@ merge_stage = "merge"
     fn a_tall_narrow_canvas_turns_the_graph_top_to_bottom_and_r_turns_it_back() {
         // Five stages of full boxes: 172 cells wide left to right, 24 rows
         // top to bottom. A 70x40 canvas fits only the second.
-        let mut v = FlowView::new(graph(), NodeStyle::Full, false);
+        let mut v = FlowView::new(graph(), false);
         v.select_stage("review");
         v.toggle_escape();
         draw(&mut v, 70, 40);
@@ -1246,11 +1244,11 @@ merge_stage = "merge"
         let moved = v.node_rect("plan").unwrap();
         assert!(moved.0 > x as i32 - 2 + 3, "{moved:?}");
         // A minimap appears when the graph is bigger than the canvas.
-        let mut v = FlowView::new(graph(), NodeStyle::Full, false);
+        let mut v = FlowView::new(graph(), false);
         let (_, text) = draw(&mut v, 90, 24);
         assert!(text.contains('▄'), "{text}");
         // And not when everything is on screen already.
-        let mut v = FlowView::new(graph(), NodeStyle::Full, false);
+        let mut v = FlowView::new(graph(), false);
         let (_, text) = draw(&mut v, 220, 50);
         assert!(!text.contains('▄'), "{text}");
         // Turning a canvas with nothing selected selects nothing after.

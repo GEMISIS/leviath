@@ -17,15 +17,15 @@ use super::graph::{bundled_stage_graph, load_stage_graph};
 use super::state::Dashboard;
 use super::theme::*;
 use super::types::*;
-use crate::tui::flowgraph::{FlowView, NodeStyle};
+use crate::tui::flowgraph::FlowView;
 
 /// The rows the task editor keeps for itself; the preview only appears
 /// when the pane has this many left over for it.
 pub(super) const TASK_MIN_HEIGHT: u16 = 8;
-/// The preview's smallest useful height (a border, two rows of boxes, a lane).
-pub(super) const PREVIEW_MIN_HEIGHT: u16 = 8;
+/// The preview's smallest useful height: a border, a row of boxes, a lane.
+pub(super) const PREVIEW_MIN_HEIGHT: u16 = 10;
 /// And its largest: more rows than this only show empty canvas.
-pub(super) const PREVIEW_MAX_HEIGHT: u16 = 14;
+pub(super) const PREVIEW_MAX_HEIGHT: u16 = 18;
 
 /// The preview canvas for one catalog row, kept between frames.
 #[derive(Debug)]
@@ -68,7 +68,7 @@ impl Dashboard {
             load_stage_graph(&agent.path)
         };
         let view = match graph {
-            Some(graph) => Ok(FlowView::new(graph, NodeStyle::Compact, true)),
+            Some(graph) => Ok(FlowView::new(graph, true)),
             None => Err(format!(
                 "no preview: could not read a blueprint at {}",
                 agent.path

@@ -411,7 +411,9 @@ impl Dashboard {
                     self.reset_context_history();
                 }
             }
-            // Stage tab navigation
+            // Stage tab navigation: through the graph band when it is on
+            // screen (its selection is the tab), by index otherwise.
+            KeyCode::Left | KeyCode::Right if self.band_shown() => self.band_key(key_code),
             KeyCode::Left => {
                 if self.selected_stage > 0 {
                     self.selected_stage -= 1;
@@ -450,6 +452,7 @@ impl Dashboard {
                     self.search_mode = false;
                     self.search_query.clear();
                     self.search_match_idx = 0;
+                    self.band_select_tab(idx);
                 }
             }
             // Content mode toggle
