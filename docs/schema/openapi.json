@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Leviath HTTP API",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "The REST and WebSocket surface `lev serve` puts in front of the shared-world daemon. Every route requires a bearer token. Paths here are checked against the router in crates/leviath-cli/src/commands/serve/mod.rs by a test in that file, so a route added without a spec entry fails the build. See https://leviath.dev/docs/api.",
     "license": {
       "name": "MIT"
@@ -1238,7 +1238,7 @@
           "scripts"
         ],
         "summary": "Rhai scripts this scope can see",
-        "description": "Script tools from the agent's `tools/` and the global directory, plus the region hooks, stage hooks and output validators the agent's manifest declares. Each entry carries its kind, its source (`agent` or `global`) and whether it compiles right now.",
+        "description": "Script tools from the agent's `tools/` and the global directory, the region hooks, stage hooks and output validators the agent's manifest declares, and the model providers in `~/.leviath/providers`. Each entry carries its kind, its source (`agent` or `global`) and whether it compiles right now; a provider also carries a `provider` object with what its `// @` annotations declare. Providers are listed with or without `agent`, since nothing scopes one to an agent.",
         "parameters": [
           {
             "name": "agent",
@@ -1262,7 +1262,7 @@
           "scripts"
         ],
         "summary": "Compile a script without writing it",
-        "description": "Takes `kind` and `content`, plus `hooks` for a stage hook, and answers with `valid` and the compiler's complaint. Writes nothing and runs nothing: every compiler here stops at the AST.",
+        "description": "Takes `kind` and `content`, plus `hooks` for a stage hook, and answers with `valid` and the compiler's complaint. Writes nothing and runs nothing: every compiler here stops at the AST, a provider's `initialize` included. A provider that does not define `initialize(config)` and `inference(state, request)` fails here rather than at the first inference.",
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
@@ -1287,7 +1287,8 @@
                 "tool",
                 "region_hook",
                 "stage_hook",
-                "output_validator"
+                "output_validator",
+                "provider"
               ]
             }
           },
@@ -1306,7 +1307,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Scope to this agent's own directory."
+            "description": "Scope to this agent's own directory. A `provider` is global to the machine and refuses this parameter."
           }
         ],
         "responses": {
@@ -1332,7 +1333,8 @@
                 "tool",
                 "region_hook",
                 "stage_hook",
-                "output_validator"
+                "output_validator",
+                "provider"
               ]
             }
           },
@@ -1351,7 +1353,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Scope to this agent's own directory."
+            "description": "Scope to this agent's own directory. A `provider` is global to the machine and refuses this parameter."
           }
         ],
         "responses": {
@@ -1377,7 +1379,8 @@
                 "tool",
                 "region_hook",
                 "stage_hook",
-                "output_validator"
+                "output_validator",
+                "provider"
               ]
             }
           },
@@ -1396,7 +1399,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Scope to this agent's own directory."
+            "description": "Scope to this agent's own directory. A `provider` is global to the machine and refuses this parameter."
           }
         ],
         "responses": {

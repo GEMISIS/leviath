@@ -24,6 +24,11 @@ fn global_root(home: &Path) -> PathBuf {
     home.join(".leviath").join("tools")
 }
 
+/// The global providers directory under a scratch `LEVIATH_HOME`.
+fn providers_root(home: &Path) -> PathBuf {
+    home.join(".leviath").join("providers")
+}
+
 /// Every script route, mounted the way production mounts them under
 /// `--allow-admin`, so a test drives the real handlers.
 fn admin_router() -> Router {
@@ -73,6 +78,15 @@ async fn send(method: &str, uri: &str, body: serde_json::Value) -> (StatusCode, 
 /// A tool script that compiles.
 const GOOD_TOOL: &str = "// @tool summarize\n// @description sums up\n\"ok\"";
 
+/// A provider script that compiles, with every annotation the listing reports.
+const GOOD_PROVIDER: &str = "// @provider groq\n\
+                             // @description an OpenAI-compatible gateway\n\
+                             // @default_model llama-3.3-70b\n\
+                             // @max_context_tokens 128000\n\
+                             // @supports_streaming true\n\
+                             fn initialize(config) { #{ url: config.base_url } }\n\
+                             fn inference(state, request) { #{ content: \"ok\" } }";
+
 // ─── ScriptKind ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -82,10 +96,11 @@ fn every_kind_round_trips_through_its_wire_spelling() {
         ScriptKind::RegionHook,
         ScriptKind::StageHook,
         ScriptKind::OutputValidator,
+        ScriptKind::Provider,
     ] {
         assert_eq!(ScriptKind::parse(kind.as_str()), Some(kind));
     }
-    assert_eq!(ScriptKind::parse("provider"), None);
+    assert_eq!(ScriptKind::parse("model_provider"), None);
 }
 
 // ─── compile_status ─────────────────────────────────────────────────────────
@@ -121,6 +136,40 @@ fn each_kind_is_compiled_by_its_own_compiler() {
         )
         .is_ok()
     );
+    assert!(compile_status(ScriptKind::Provider, "p", GOOD_PROVIDER, &[]).is_ok());
+}
+
+/// The other half of the same claim: a refusal carries the words of the
+/// compiler that refused it, so an editor shows the author what a run would
+/// have told them rather than a generic "does not compile".
+#[test]
+fn each_kind_reports_its_own_compilers_refusal() {
+    let refuse = |kind, content| {
+        compile_status(kind, "s", content, &[]).expect_err("the compiler refuses it")
+    };
+    let tool = refuse(ScriptKind::Tool, "// nothing at all\nlet");
+    assert!(tool.contains("@tool"), "{tool}");
+    let region = refuse(ScriptKind::RegionHook, "fn other(ctx) { () }");
+    assert!(region.contains("fn render(ctx)"), "{region}");
+    let hook = refuse(ScriptKind::StageHook, "let");
+    assert!(hook.contains("s:"), "{hook}");
+    let validator = refuse(ScriptKind::OutputValidator, "fn other(content) { () }");
+    assert!(validator.contains("fn validate(content)"), "{validator}");
+}
+
+/// The provider compiler reads the AST for both entry points. Before it
+/// existed, a script with no `inference` compiled, initialized, cached, and
+/// failed at the first inference - mid-run, looking like a provider outage.
+#[test]
+fn a_provider_that_is_missing_inference_fails() {
+    let status = compile_status(
+        ScriptKind::Provider,
+        "p",
+        "fn initialize(config) { #{} }",
+        &[],
+    );
+    let reason = status.expect_err("inference is required");
+    assert!(reason.contains("inference"), "{reason}");
 }
 
 /// A stage hook named for a hook it does not define is a spawn error, so it is
@@ -202,7 +251,7 @@ async fn a_name_that_already_carries_the_extension_is_the_same_file() {
 #[tokio::test]
 async fn an_unknown_kind_is_refused() {
     with_home(|_home| async move {
-        let (status, _) = resolve("provider", "x", None).expect_err("no such kind");
+        let (status, _) = resolve("model_provider", "x", None).expect_err("no such kind");
         assert_eq!(status, StatusCode::BAD_REQUEST);
     })
     .await;
@@ -341,7 +390,7 @@ notes = { kind = "custom", script = "notes.rhai", max_tokens = 500 }
 "#
 }
 
-/// Both scopes and all four kinds in one answer, which is the listing's whole
+/// Both scopes and all five kinds in one answer, which is the listing's whole
 /// job: what is here, what it plugs into, and whether it works.
 #[tokio::test]
 async fn the_listing_carries_every_kind_and_both_scopes() {
@@ -356,6 +405,7 @@ async fn the_listing_carries_every_kind_and_both_scopes() {
             "fn validate(content) { #{ valid: true } }",
         );
         write(&global_root(&home).join("shared.rhai"), GOOD_TOOL);
+        write(&providers_root(&home).join("groq.rhai"), GOOD_PROVIDER);
 
         let (status, body) = get_json("/api/scripts?agent=researcher").await;
         assert_eq!(status, StatusCode::OK);
@@ -374,6 +424,8 @@ async fn the_listing_carries_every_kind_and_both_scopes() {
         assert_eq!(find("output_validator", "check")["compiles"], true);
         assert_eq!(find("tool", "shared")["source"], "global");
         assert!(find("tool", "shared").get("agent").is_none());
+        assert_eq!(find("provider", "groq")["source"], "global");
+        assert_eq!(find("provider", "groq")["compiles"], true);
     })
     .await;
 }
@@ -579,7 +631,7 @@ async fn a_file_that_is_not_text_is_reported_rather_than_returned() {
 #[tokio::test]
 async fn reading_with_an_unknown_kind_is_a_400() {
     with_home(|_home| async move {
-        let (status, _) = get_json("/api/scripts/provider/x").await;
+        let (status, _) = get_json("/api/scripts/model_provider/x").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     })
     .await;
@@ -810,11 +862,267 @@ async fn validating_an_unknown_kind_is_a_400() {
         let (status, _) = send(
             "POST",
             "/api/scripts/validate",
-            serde_json::json!({ "kind": "provider", "content": "1" }),
+            serde_json::json!({ "kind": "model_provider", "content": "1" }),
         )
         .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    })
+    .await;
+}
+
+// ─── Providers ──────────────────────────────────────────────────────────────
+
+/// A provider is the one kind with a machine-wide directory and no agent-owned
+/// one, which is the inverse of the hooks.
+#[tokio::test]
+async fn a_provider_resolves_into_the_providers_directory() {
+    with_home(|home| async move {
+        let target = resolve("provider", "groq", None).expect("a provider is global");
+        assert_eq!(target.path, providers_root(&home).join("groq.rhai"));
+        assert_eq!(target.scope, "global");
+        assert!(target.agent.is_none());
+    })
+    .await;
+}
+
+/// Nothing scopes a provider to an agent, so an `?agent=` would write a file
+/// nothing would ever load. Refused rather than quietly ignored.
+#[tokio::test]
+async fn a_provider_with_an_agent_is_refused() {
+    with_home(|_home| async move {
+        let (status, body) = resolve("provider", "groq", Some("researcher")).expect_err("global");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.0.error.contains("?agent="), "{}", body.0.error);
+    })
+    .await;
+}
+
+/// Listed whether or not the request named an agent, because the answer is the
+/// same either way and a console draws one page from one call.
+#[tokio::test]
+async fn the_listing_carries_providers_in_both_scopes() {
+    with_home(|home| async move {
+        write(&providers_root(&home).join("groq.rhai"), GOOD_PROVIDER);
+        write(&agent_root(&home, "researcher").join("agent.leviath"), "");
+
+        for uri in ["/api/scripts", "/api/scripts?agent=researcher"] {
+            let (status, body) = get_json(uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            let scripts = body["scripts"].as_array().expect("a scripts array");
+            let listed = scripts
+                .iter()
+                .find(|s| s["kind"] == "provider")
+                .unwrap_or_else(|| panic!("no provider listed for {uri}"));
+            assert_eq!(listed["name"], "groq");
+            assert_eq!(listed["source"], "global");
+            assert!(listed.get("agent").is_none());
+            assert_eq!(listed["compiles"], true);
+        }
+    })
+    .await;
+}
+
+/// What the console shows without fetching and re-parsing every script.
+#[tokio::test]
+async fn a_listed_provider_carries_what_it_declares_about_itself() {
+    with_home(|home| async move {
+        write(&providers_root(&home).join("groq.rhai"), GOOD_PROVIDER);
+        let (status, body) = get_json("/api/scripts").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let meta = &body["scripts"][0]["provider"];
+        assert_eq!(meta["provider"], "groq");
+        assert_eq!(meta["description"], "an OpenAI-compatible gateway");
+        assert_eq!(meta["default_model"], "llama-3.3-70b");
+        assert_eq!(meta["max_context_tokens"], 128_000);
+        assert_eq!(meta["supports_streaming"], true);
+    })
+    .await;
+}
+
+/// Only a provider has annotations to report, so nothing else carries the key
+/// at all rather than carrying it empty.
+#[tokio::test]
+async fn a_listed_tool_carries_no_provider_metadata() {
+    with_home(|home| async move {
+        write(&global_root(&home).join("shared.rhai"), GOOD_TOOL);
+        let (_, body) = get_json("/api/scripts").await;
+        assert!(body["scripts"][0].get("provider").is_none());
+    })
+    .await;
+}
+
+/// A directory sitting where a script should be cannot be read, and the listing
+/// says so instead of leaving the entry out. Portable: `read_to_string` refuses
+/// a directory on every platform, so this needs no `cfg(unix)` twin.
+#[tokio::test]
+async fn a_provider_that_cannot_be_read_is_listed_as_failing() {
+    with_home(|home| async move {
+        std::fs::create_dir_all(providers_root(&home).join("groq.rhai")).expect("the directory");
+        let (status, body) = get_json("/api/scripts").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["scripts"][0]["kind"], "provider");
+        assert_eq!(body["scripts"][0]["compiles"], false);
+        assert!(
+            body["scripts"][0]["error"]
+                .as_str()
+                .expect("a reason")
+                .contains("cannot read"),
+            "{}",
+            body["scripts"][0]["error"]
+        );
+    })
+    .await;
+}
+
+/// Returned verbatim. The credential a provider uses comes from the config or
+/// the environment, not from the source, so there is nothing here to redact and
+/// an editor that saved what it was shown would overwrite the real script.
+#[tokio::test]
+async fn reading_a_provider_returns_its_source_and_its_annotations() {
+    with_home(|home| async move {
+        write(&providers_root(&home).join("groq.rhai"), GOOD_PROVIDER);
+        let (status, body) = get_json("/api/scripts/provider/groq").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["content"], GOOD_PROVIDER);
+        assert_eq!(body["kind"], "provider");
+        assert_eq!(body["source"], "global");
+        assert_eq!(body["compiles"], true);
+        assert_eq!(body["provider"]["default_model"], "llama-3.3-70b");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn reading_a_provider_with_an_agent_is_a_400() {
+    with_home(|home| async move {
+        write(&providers_root(&home).join("groq.rhai"), GOOD_PROVIDER);
+        let (status, _) = get_json("/api/scripts/provider/groq?agent=researcher").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn writing_a_provider_creates_it_in_the_providers_directory() {
+    with_home(|home| async move {
+        let (status, body) = send(
+            "PUT",
+            "/api/scripts/provider/groq",
+            serde_json::json!({ "content": GOOD_PROVIDER }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["compiles"], true);
+        let path = providers_root(&home).join("groq.rhai");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the file"),
+            GOOD_PROVIDER
+        );
+    })
+    .await;
+}
+
+/// The draft is still saved. A provider that will not load is skipped with a
+/// warning and selection falls through, so refusing the write would cost the
+/// author their work without protecting anything.
+#[tokio::test]
+async fn writing_a_provider_that_is_missing_inference_saves_it_and_says_so() {
+    with_home(|home| async move {
+        let (status, body) = send(
+            "PUT",
+            "/api/scripts/provider/half",
+            serde_json::json!({ "content": "fn initialize(config) { #{} }" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["compiles"], false);
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("a reason")
+                .contains("inference"),
+            "{}",
+            body["error"]
+        );
+        assert!(providers_root(&home).join("half.rhai").exists());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn deleting_a_provider_removes_it() {
+    with_home(|home| async move {
+        let path = providers_root(&home).join("groq.rhai");
+        write(&path, GOOD_PROVIDER);
+        let (status, _) = send(
+            "DELETE",
+            "/api/scripts/provider/groq",
+            serde_json::json!({}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(!path.exists());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn validating_a_provider_answers_both_ways() {
+    with_home(|_home| async move {
+        let (status, body) = send(
+            "POST",
+            "/api/scripts/validate",
+            serde_json::json!({ "kind": "provider", "content": GOOD_PROVIDER }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["valid"], true);
+
+        let (status, body) = send(
+            "POST",
+            "/api/scripts/validate",
+            serde_json::json!({ "kind": "provider", "content": "fn initialize(config) { #{} }" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["valid"], false);
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("a reason")
+                .contains("inference"),
+            "{}",
+            body["error"]
+        );
+    })
+    .await;
+}
+
+/// Validating compiles and reads the AST. It must never run the script, or an
+/// ungated route would execute whatever was posted to it.
+#[tokio::test]
+async fn validating_a_provider_does_not_run_initialize() {
+    with_home(|_home| async move {
+        let (status, body) = send(
+            "POST",
+            "/api/scripts/validate",
+            serde_json::json!({
+                "kind": "provider",
+                "content": "fn initialize(config) { throw \"it ran\"; }\n\
+                            fn inference(state, request) { #{} }",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["valid"], true);
     })
     .await;
 }

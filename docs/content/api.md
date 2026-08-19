@@ -175,7 +175,7 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key |
 | `GET /api/models` | Enumerate models |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
-| `GET /api/scripts?agent=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the agent's Rhai. Writes need admin. See [below](#tools-and-scripts) |
+| `GET /api/scripts?agent=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks and validators, and the global model providers. Writes need admin. See [below](#tools-and-scripts) |
 | `GET /api/mcp/servers` · `GET /{name}/status` · `POST /{name}/login` · `POST /{name}/test` | MCP servers (add/remove need admin) |
 | `GET /api/doctor` | The checks `lev doctor` runs, as data. A failing check is `ok: false` inside a 200, never an HTTP error |
 | `GET /api/fs/dirs?path=&hidden=` | One directory level of subdirectory names, for a folder picker. Absolute paths only, fenced by `--workdir-root`; `hidden=true` includes dot-prefixed names |
@@ -453,18 +453,18 @@ with the reason each was passed over, so a file with a syntax error does not sim
 nobody wrote. MCP tools are not here: they depend on a server being reachable rather than on
 anything installed, and `/api/mcp/servers/{name}` already answers for them.
 
-`GET /api/scripts` is the same ground from the editor's side, over the four kinds of Rhai an agent
-can carry: `tool`, `region_hook`, `stage_hook` and `output_validator`. Only tools have a directory of
-their own (`<agent>/tools/`, plus the global one); the other three are named by path in the manifest
-and resolved against the agent's own directory, so the listing derives them from what the manifest
-declares and the read and write routes address them at `<agent>/<name>.rhai`. A hook a manifest
-declares inside a subdirectory is outside what `{name}` can address, and is left out rather than
-listed under a name that would fetch nothing.
+`GET /api/scripts` is the same ground from the editor's side, over the five kinds of Rhai a machine
+can carry: `tool`, `region_hook`, `stage_hook`, `output_validator` and `provider`. Only tools have a
+directory an agent owns (`<agent>/tools/`, plus the global one); the hooks and the validator are
+named by path in the manifest and resolved against the agent's own directory, so the listing derives
+them from what the manifest declares and the read and write routes address them at
+`<agent>/<name>.rhai`. A hook a manifest declares inside a subdirectory is outside what `{name}` can
+address, and is left out rather than listed under a name that would fetch nothing.
 
 `GET/PUT/DELETE /api/scripts/{kind}/{name}` reads and writes one file, scoped by `?agent=<name>` or,
-with no `agent`, the global tools directory. `POST /api/scripts/validate` takes `kind` and `content`
-and compiles without writing, so an editor can check before saving instead of saving and waiting for
-a run to fail.
+with no `agent`, the machine's own directory for that kind. `POST /api/scripts/validate` takes `kind`
+and `content` and compiles without writing, so an editor can check before saving instead of saving
+and waiting for a run to fail.
 
 > [!WARNING]
 > `PUT` and `DELETE` are **not mounted at all** without `lev serve --allow-admin`, exactly like the
@@ -475,6 +475,33 @@ a run to fail.
 A write that does not compile is still saved, with `compiles: false` and the compiler's complaint in
 the response. A draft is worth keeping, and a tool that does not compile is skipped at spawn rather
 than breaking the agent.
+
+### Providers
+
+A [provider](/docs/rhai-providers) is the one kind no agent owns. It lives in `~/.leviath/providers/`
+and a stage reaches it by name, so these routes take **no** `?agent=` and refuse one rather than
+writing a file into an agent's directory that nothing would ever load. Providers are listed with or
+without an `agent`, since the answer is the same either way.
+
+Each listed provider carries a `provider` object with what its leading `// @` comments declare:
+`description`, `default_model`, `max_context_tokens`, `max_output_tokens` and `supports_streaming`.
+That is what lets a console show the catalog without fetching and re-parsing every script. No other
+kind carries the key at all.
+
+Validation checks more than syntax here. A provider needs `initialize(config)` and
+`inference(state, request)`, and a script defining only the first used to compile, initialize, cache
+and then fail at the first inference, part-way into a run. `POST /api/scripts/validate` with
+`kind: "provider"` answers that before the file is saved, and the loader refuses the same script
+rather than accepting one the API called invalid. Nothing runs during validation: `initialize` is
+read off the compiled AST, never called.
+
+`GET` returns the source verbatim. A provider's key comes from `initialize(config)`, which is the
+`[model_providers.<name>]` table `GET /api/config` already reports as a boolean plus a list of key
+names, or from `env_var`, which reads the daemon's environment. Neither value is in the file, so
+there is nothing here for redaction to protect, and an editor that saved what it was shown would
+write the redaction back over the real script.
+
+Check `scripts.providers` in the `capabilities` list before offering the kind.
 
 ## Feature detection
 

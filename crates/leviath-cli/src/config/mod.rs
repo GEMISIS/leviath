@@ -2615,6 +2615,40 @@ google_api_key = "AIza-existing"
         assert!(empty.contains("<unset>"), "{empty}");
     }
 
+    /// A gateway's key and its `extra` table are both credential-carrying:
+    /// `extra` is forwarded verbatim into a provider script's `initialize`,
+    /// which is where a second credential goes when the gateway wants one under
+    /// its own name. Names, never values.
+    #[test]
+    fn model_provider_config_debug_never_prints_the_keys() {
+        let gateway = ModelProviderConfig {
+            script: Some("groq.rhai".to_string()),
+            api_key: Some("gsk-SECRET-VALUE".to_string()),
+            base_url: Some("https://api.groq.example".to_string()),
+            rate_limit: None,
+            extra: HashMap::from([
+                (
+                    "org_token".to_string(),
+                    toml::Value::String("org-SECRET-VALUE".to_string()),
+                ),
+                ("region".to_string(), toml::Value::String("eu".to_string())),
+            ]),
+        };
+        let rendered = format!("{gateway:?}");
+        assert!(!rendered.contains("SECRET-VALUE"), "key leaked: {rendered}");
+        assert!(rendered.contains("api_key: \"<set>\""), "{rendered}");
+        // Sorted, so two runs of the same daemon print the same line.
+        assert!(
+            rendered.contains("extra_keys: [\"org_token\", \"region\"]"),
+            "{rendered}"
+        );
+        // What is not a secret is still worth reading.
+        assert!(rendered.contains("api.groq.example"), "{rendered}");
+
+        let bare = format!("{:?}", ModelProviderConfig::default());
+        assert!(bare.contains("api_key: \"<unset>\""), "{bare}");
+    }
+
     /// Unix-only: the assertion is about POSIX mode bits, which Windows does
     /// not have. `write_private`'s Windows path is a plain write, exercised by
     /// every other `save_to_path` test.

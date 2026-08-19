@@ -13,6 +13,30 @@ same list.
 
 ## Unreleased
 
+- New: the scripts API manages Rhai model providers. `provider` joins `tool`,
+  `region_hook`, `stage_hook` and `output_validator` as a `kind` on
+  `GET /api/scripts`, `GET/PUT/DELETE /api/scripts/{kind}/{name}` and
+  `POST /api/scripts/validate`, so a console can list, open, edit, validate and
+  save the drop-in providers in `~/.leviath/providers` instead of leaving them
+  as the one extension point that needed a text editor on the host. A provider
+  belongs to the machine rather than to an agent, so it is listed either way and
+  the routes refuse an `?agent=` rather than quietly scoping themselves to a
+  directory nothing loads. Each entry carries what the script's `// @` comments
+  declare, so a listing can show a provider's description and default model
+  without fetching every file. Announced as `scripts.providers`; the API
+  contract version is now 0.4.0.
+- Fixed: a provider script that defines `initialize` but not `inference` is
+  refused when it loads, rather than compiling, initializing, caching, and then
+  failing at the first inference part-way into a run. It is now skipped with a
+  warning like any other broken script, so model selection falls through to the
+  next configured model, and `POST /api/scripts/validate` reports it before the
+  file is even saved. Validation still runs nothing: the entry points are read
+  off the compiled script, never called.
+- Fixed: a `[model_providers.<name>]` entry no longer prints its credentials
+  through `Debug`. Both the `api_key` and the extra keys forwarded into the
+  script's `initialize` were printable, where the first-party provider config
+  had been careful not to be; the two now agree, reporting whether the key is
+  set and the names in the extra table and nothing more.
 - Fixed: `lev serve`, `lev dash`, and `lev agent-client` ride out a daemon
   restart instead of breaking. A request that lands while the daemon is down
   (a `lev daemon restart`, a supervisor relaunch, or the restart that follows

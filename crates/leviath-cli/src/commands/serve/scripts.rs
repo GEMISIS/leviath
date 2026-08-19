@@ -1,22 +1,27 @@
-//! Read and write the Rhai scripts an agent runs.
+//! Read and write the Rhai scripts a machine runs.
 //!
-//! Four extension points share one API because they share one editor: a script
-//! tool, a region hook, a stage hook and an output validator are all a `.rhai`
-//! file in the agent's directory, and only the `kind` says which compiler has to
-//! accept it.
+//! Five extension points share one API because they share one editor: a script
+//! tool, a region hook, a stage hook, an output validator and a model provider
+//! are all a `.rhai` file somewhere under the home directory, and only the
+//! `kind` says which compiler has to accept it.
 //!
 //! # Where each kind actually lives
 //!
-//! Only **script tools** have a directory convention: `<agent>/tools/*.rhai`,
-//! scanned at spawn, plus the global `~/.leviath/tools/` every agent gets. The
-//! other three are named by path in the manifest and resolved relative to the
-//! agent's own directory, with `resolve_*_scripts` in the daemon refusing any
-//! that lands outside it. There is no `hooks/` or `validators/` directory to
-//! list, so the listing derives those three from what the manifest declares,
-//! and the read/write routes address them at `<agent>/<name>.rhai` - the path a
-//! bare declared filename already resolves to. There is likewise no global
-//! directory for them: a hook only ever loads from beside the agent that
-//! declares it.
+//! Only **script tools** have a directory convention an agent owns:
+//! `<agent>/tools/*.rhai`, scanned at spawn, plus the global `~/.leviath/tools/`
+//! every agent gets. The hooks and the validator are named by path in the
+//! manifest and resolved relative to the agent's own directory, with
+//! `resolve_*_scripts` in the daemon refusing any that lands outside it. There
+//! is no `hooks/` or `validators/` directory to list, so the listing derives
+//! those three from what the manifest declares, and the read/write routes
+//! address them at `<agent>/<name>.rhai` - the path a bare declared filename
+//! already resolves to. There is likewise no global directory for them: a hook
+//! only ever loads from beside the agent that declares it.
+//!
+//! A **provider** is the inverse: `~/.leviath/providers/<name>.rhai` and nothing
+//! else. No agent owns one, and a stage reaches it by name rather than by path,
+//! so this route takes no `?agent=` and refuses one rather than inventing a
+//! per-agent layout that nothing would load.
 //!
 //! # Why the write half is gated
 //!
@@ -49,6 +54,8 @@ pub(super) enum ScriptKind {
     StageHook,
     /// A validator that decides whether an agent's output may be handed back.
     OutputValidator,
+    /// A drop-in model provider, global to the machine.
+    Provider,
 }
 
 impl ScriptKind {
@@ -59,6 +66,7 @@ impl ScriptKind {
             Self::RegionHook => "region_hook",
             Self::StageHook => "stage_hook",
             Self::OutputValidator => "output_validator",
+            Self::Provider => "provider",
         }
     }
 
@@ -70,10 +78,14 @@ impl ScriptKind {
             "region_hook" => Some(Self::RegionHook),
             "stage_hook" => Some(Self::StageHook),
             "output_validator" => Some(Self::OutputValidator),
+            "provider" => Some(Self::Provider),
             _ => None,
         }
     }
 }
+
+/// The kinds, spelled the way the 400s list them.
+const KIND_LIST: &str = "tool, region_hook, stage_hook, output_validator or provider";
 
 /// The global drop-in directory, `~/.leviath/tools`.
 ///
@@ -82,6 +94,13 @@ impl ScriptKind {
 /// a write lands nowhere rather than in the process's working directory.
 fn global_tools_dir() -> PathBuf {
     leviath_core::tools_dir().unwrap_or_default()
+}
+
+/// The drop-in provider directory, `~/.leviath/providers`.
+///
+/// Empty when no home resolves, for the same reason [`global_tools_dir`] is.
+fn global_providers_dir() -> PathBuf {
+    leviath_core::providers_dir().unwrap_or_default()
 }
 
 /// One resolved script file: which directory owns it, what it is called there,
@@ -117,10 +136,7 @@ fn resolve(kind: &str, name: &str, agent: Option<&str>) -> Result<Target, ApiErr
     let Some(kind) = ScriptKind::parse(kind) else {
         return Err(err(
             StatusCode::BAD_REQUEST,
-            format!(
-                "Unknown script kind '{kind}': expected tool, region_hook, stage_hook \
-                 or output_validator"
-            ),
+            format!("Unknown script kind '{kind}': expected {KIND_LIST}"),
         ));
     };
     let stem = name.strip_suffix(".rhai").unwrap_or(name);
@@ -134,8 +150,18 @@ fn resolve(kind: &str, name: &str, agent: Option<&str>) -> Result<Target, ApiErr
         ));
     }
 
-    let (dir, scope, owner) = match agent {
-        Some(agent) => {
+    let (dir, scope, owner) = match (agent, kind) {
+        // A provider is machine-wide. Scoping one to an agent would write a file
+        // nothing loads, so the agent is refused rather than ignored.
+        (Some(_), ScriptKind::Provider) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "A provider is global to the machine and lives in ~/.leviath/providers, \
+                 so this route takes no ?agent="
+                    .to_string(),
+            ));
+        }
+        (Some(agent), _) => {
             let base = agent_dir(agent)?;
             // Tools are scanned out of `tools/`; a hook or validator is named by
             // a manifest path that resolves against the agent's own directory.
@@ -145,19 +171,18 @@ fn resolve(kind: &str, name: &str, agent: Option<&str>) -> Result<Target, ApiErr
             };
             (dir, "agent", Some(agent.to_string()))
         }
-        None => match kind {
-            ScriptKind::Tool => (global_tools_dir(), "global", None),
-            _ => {
-                return Err(err(
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "A {} is only ever loaded from beside the agent that declares it, \
-                         so this route needs ?agent=<name>",
-                        kind.as_str()
-                    ),
-                ));
-            }
-        },
+        (None, ScriptKind::Tool) => (global_tools_dir(), "global", None),
+        (None, ScriptKind::Provider) => (global_providers_dir(), "global", None),
+        (None, _) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "A {} is only ever loaded from beside the agent that declares it, \
+                     so this route needs ?agent=<name>",
+                    kind.as_str()
+                ),
+            ));
+        }
     };
 
     let path = dir.join(format!("{stem}.rhai"));
@@ -228,29 +253,36 @@ fn guard(target: &Target, presence: Presence) -> Result<(), ApiError> {
 
 /// Compile `content` as `kind` and say only whether it worked.
 ///
-/// Each arm is the same compiler the daemon uses at spawn, so a script this
-/// accepts is one a run will accept. `hooks` is what a stage-hook file was named
-/// for; an empty slice asks only that it compiles, which is all that can be
-/// asked of a file no manifest points at yet.
+/// Each arm is the same compiler the daemon uses when it loads the script, so a
+/// script this accepts is one a run will accept. `hooks` is what a stage-hook
+/// file was named for; an empty slice asks only that it compiles, which is all
+/// that can be asked of a file no manifest points at yet.
+///
+/// Every arm stops at the AST. That is what lets `POST /api/scripts/validate`
+/// stay ungated: a provider's `initialize` is script code, and `check_source`
+/// reads it off the compiled AST rather than running it.
 fn compile_status(
     kind: ScriptKind,
     label: &str,
     content: &str,
     hooks: &[&str],
 ) -> Result<(), String> {
-    let outcome = match kind {
-        ScriptKind::Tool => leviath_scripting::tool::check_source(label, content).map(drop),
-        ScriptKind::RegionHook => leviath_scripting::region_hook::compile(label, content).map(drop),
-        ScriptKind::StageHook => {
-            leviath_scripting::stage_hook::compile(label, content, hooks).map(drop)
-        }
-        ScriptKind::OutputValidator => {
-            leviath_scripting::output_validator::compile(label, content).map(drop)
-        }
-    };
-    match outcome {
-        Ok(()) => Ok(()),
-        Err(e) => Err(e.to_string()),
+    match kind {
+        ScriptKind::Tool => leviath_scripting::tool::check_source(label, content)
+            .map(drop)
+            .map_err(|e| e.to_string()),
+        ScriptKind::RegionHook => leviath_scripting::region_hook::compile(label, content)
+            .map(drop)
+            .map_err(|e| e.to_string()),
+        ScriptKind::StageHook => leviath_scripting::stage_hook::compile(label, content, hooks)
+            .map(drop)
+            .map_err(|e| e.to_string()),
+        ScriptKind::OutputValidator => leviath_scripting::output_validator::compile(label, content)
+            .map(drop)
+            .map_err(|e| e.to_string()),
+        ScriptKind::Provider => leviath_providers::rhai_provider::check_source(label, content)
+            .map(drop)
+            .map_err(|e| e.to_string()),
     }
 }
 
@@ -272,10 +304,64 @@ pub(super) struct ScriptQuery {
     agent: Option<String>,
 }
 
+/// What a provider script's leading `// @` comments declare.
+///
+/// Carried as one nested object rather than as six more optional fields on
+/// every script: only a provider has any of it, and a shape whose fields are
+/// absent for four kinds out of five is a shape nobody can read. A console
+/// needs it to show which model a provider defaults to and how big a context it
+/// claims, without fetching and re-parsing the source.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct ProviderScriptMeta {
+    /// `// @provider`: the name the script claims, which is informational.
+    /// Selection goes by the filename stem, or by the `[model_providers]` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) provider: Option<String>,
+    /// `// @description`, empty when the script declares none.
+    pub(super) description: String,
+    /// `// @default_model`, used to fill an empty stage model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) default_model: Option<String>,
+    /// `// @max_context_tokens`, defaulted when unset.
+    pub(super) max_context_tokens: usize,
+    /// `// @max_output_tokens`, defaulted when unset.
+    pub(super) max_output_tokens: usize,
+    /// `// @supports_streaming`. Advisory: real streaming follows whether the
+    /// script defines `stream`.
+    pub(super) supports_streaming: bool,
+}
+
+impl From<leviath_providers::rhai_provider::ProviderMeta> for ProviderScriptMeta {
+    fn from(meta: leviath_providers::rhai_provider::ProviderMeta) -> Self {
+        Self {
+            provider: meta.provider,
+            description: meta.description,
+            default_model: meta.default_model,
+            max_context_tokens: meta.max_context_tokens,
+            max_output_tokens: meta.max_output_tokens,
+            supports_streaming: meta.supports_streaming,
+        }
+    }
+}
+
+/// A provider script's annotations, for a script that is one.
+///
+/// Parsing never fails - an unrecognized or unparseable directive is ignored
+/// and the default kept - so this is independent of whether the script
+/// compiles, and a draft that does not compile still reports what it declares.
+fn provider_meta(kind: ScriptKind, content: &str) -> Option<ProviderScriptMeta> {
+    match kind {
+        ScriptKind::Provider => {
+            Some(leviath_providers::rhai_provider::parse_provider_annotations(content).into())
+        }
+        _ => None,
+    }
+}
+
 /// One script in the listing.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct ScriptItem {
-    /// `tool`, `region_hook`, `stage_hook` or `output_validator`.
+    /// `tool`, `region_hook`, `stage_hook`, `output_validator` or `provider`.
     pub(super) kind: String,
     /// The `{name}` the read and write routes address it by.
     pub(super) name: String,
@@ -291,6 +377,9 @@ pub(super) struct ScriptItem {
     /// Why not, when it does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) error: Option<String>,
+    /// What the script declares about itself, for `kind: "provider"` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) provider: Option<ProviderScriptMeta>,
 }
 
 /// The body of `GET /api/scripts`.
@@ -321,6 +410,9 @@ pub(super) struct ScriptSource {
     /// Why not, when it does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) error: Option<String>,
+    /// What the script declares about itself, for `kind: "provider"` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) provider: Option<ProviderScriptMeta>,
 }
 
 /// The body of `PUT /api/scripts/{kind}/{name}`.
@@ -439,6 +531,25 @@ fn declared_scripts(bp: &leviath_core::Blueprint) -> BTreeMap<(ScriptKind, Strin
     declared
 }
 
+/// The `.rhai` files one drop-in directory holds, sorted.
+///
+/// Sorted because a listing that reorders itself between two calls is a listing
+/// nobody can edit against, and `read_dir` order is whatever the filesystem
+/// feels like. A directory that cannot be read is an empty one: the tools and
+/// providers directories are both optional, and neither missing one is an
+/// error to report.
+fn rhai_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rhai"))
+        .collect();
+    paths.sort();
+    paths
+}
+
 /// List the `.rhai` files in one tools directory, with the compile verdict
 /// `discover` already reached for each.
 ///
@@ -450,16 +561,7 @@ fn collect_tools(dir: &Path, scope: &'static str, agent: Option<&str>, out: &mut
     let reasons: HashMap<PathBuf, String> =
         failed.into_iter().map(|f| (f.path, f.reason)).collect();
 
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "rhai"))
-        .collect();
-    paths.sort();
-
-    for path in paths {
+    for path in rhai_files(dir) {
         let (compiles, error) = match reasons.get(&path) {
             Some(reason) => (false, Some(reason.clone())),
             None => (true, None),
@@ -476,6 +578,44 @@ fn collect_tools(dir: &Path, scope: &'static str, agent: Option<&str>, out: &mut
             path: path.display().to_string(),
             compiles,
             error,
+            provider: None,
+        });
+    }
+}
+
+/// List the `.rhai` files in the providers directory.
+///
+/// There is no `discover` to lean on the way [`collect_tools`] does: nothing
+/// scans this directory ahead of time, because a provider script is compiled
+/// only when an agent first names it. So each file is checked here, with the
+/// same `check_source` a write and a validate use.
+///
+/// Every entry is `global`. A provider belongs to the machine, not to an agent,
+/// which is why this runs whether or not the request named one.
+fn collect_providers(dir: &Path, out: &mut Vec<ScriptItem>) {
+    for path in rhai_files(dir) {
+        let label = path.display().to_string();
+        let (compiles, error, meta) = match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                let (compiles, error) =
+                    status_pair(compile_status(ScriptKind::Provider, &label, &content, &[]));
+                (
+                    compiles,
+                    error,
+                    provider_meta(ScriptKind::Provider, &content),
+                )
+            }
+            Err(e) => (false, Some(format!("cannot read '{label}': {e}")), None),
+        };
+        out.push(ScriptItem {
+            kind: ScriptKind::Provider.as_str().to_string(),
+            name: stem_of(&path),
+            source: "global".to_string(),
+            agent: None,
+            path: label,
+            compiles,
+            error,
+            provider: meta,
         });
     }
 }
@@ -515,6 +655,7 @@ fn collect_declared(dir: &Path, agent: &str, out: &mut Vec<ScriptItem>) {
             path: path.display().to_string(),
             compiles,
             error,
+            provider: None,
         });
     }
 }
@@ -524,9 +665,13 @@ fn collect_declared(dir: &Path, agent: &str, out: &mut Vec<ScriptItem>) {
 /// `GET /api/scripts[?agent=<name>]`: every script this scope can see.
 ///
 /// With an agent, that is the agent's own `tools/`, the hooks and validators its
-/// manifest declares, and the global tools directory. Without one, the global
-/// directory alone. `source` is what separates "this agent has it" from
+/// manifest declares, and the machine's global scripts. Without one, the global
+/// scripts alone. `source` is what separates "this agent has it" from
 /// "everything on this machine has it".
+///
+/// Providers are listed either way. Nothing scopes one to an agent, so leaving
+/// them out of the agent view would only mean a console had to make a second
+/// request to draw the same page.
 pub(super) async fn list_scripts(
     Query(q): Query<ScriptQuery>,
 ) -> Result<Json<ScriptsResp>, ApiError> {
@@ -537,6 +682,7 @@ pub(super) async fn list_scripts(
         collect_declared(&dir, name, &mut scripts);
     }
     collect_tools(&global_tools_dir(), "global", None, &mut scripts);
+    collect_providers(&global_providers_dir(), &mut scripts);
     Ok(Json(ScriptsResp { scripts }))
 }
 
@@ -563,6 +709,14 @@ fn read_script(target: &Target) -> Result<Json<ScriptSource>, ApiError> {
     };
     let label = target.path.display().to_string();
     let (compiles, error) = status_pair(compile_status(target.kind, &label, &content, &[]));
+    let meta = provider_meta(target.kind, &content);
+    // Returned verbatim. A provider takes its key from `initialize(config)`,
+    // which `/api/config` already redacts to a boolean and a list of key names,
+    // or from `env_var`, which reads the daemon's environment and never the
+    // file. Nothing puts a secret into the source that the author did not type
+    // there, so there is nothing here that redacting would protect and a great
+    // deal that it would break: an editor that saved what it was shown would
+    // write the redaction back over the real script.
     Ok(Json(ScriptSource {
         kind: target.kind.as_str().to_string(),
         name: stem_of(&target.path),
@@ -572,6 +726,7 @@ fn read_script(target: &Target) -> Result<Json<ScriptSource>, ApiError> {
         content,
         compiles,
         error,
+        provider: meta,
     }))
 }
 
@@ -656,11 +811,7 @@ pub(super) async fn validate_script(
     let Some(kind) = ScriptKind::parse(&body.kind) else {
         return Err(err(
             StatusCode::BAD_REQUEST,
-            format!(
-                "Unknown script kind '{}': expected tool, region_hook, stage_hook \
-                 or output_validator",
-                body.kind
-            ),
+            format!("Unknown script kind '{}': expected {KIND_LIST}", body.kind),
         ));
     };
     let hooks: Vec<&str> = body.hooks.iter().map(String::as_str).collect();
