@@ -50,8 +50,9 @@ lev models list --all                        # every provider, even unconfigured
 ```
 
 > [!NOTE]
-> Without `--remote`, `lev models list` prints a built-in table of well-known models. It is a
-> convenience, not the catalog. A model absent from it is not necessarily invalid: `lev validate`
+> Without `--remote`, `lev models list` prints a built-in table of well-known models (the exception
+> is `--provider <name>` naming a [script provider](/docs/rhai-providers), which is always asked
+> directly - it has no row in that table). It is a convenience, not the catalog. A model absent from it is not necessarily invalid: `lev validate`
 > flags an unrecognized string with an `unknown-model` warning, never an error, and the string is
 > still sent to the provider exactly as written. Locally an unrecognized model gets conservative
 > capability assumptions: 128K context and 8192 output on OpenRouter, 8192 context and 4096 output
