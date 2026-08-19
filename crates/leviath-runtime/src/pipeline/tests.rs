@@ -14339,6 +14339,87 @@ fn a_path_tool_aimed_at_a_region_is_told_it_is_a_region() {
     }
 }
 
+/// `read_files` takes `paths`, not `path`, and gets the same correction. The
+/// batch tool is the one an agent reaches for once the single read has failed a
+/// few times, so it is exactly where the hint must not go missing.
+#[test]
+fn the_batch_read_tool_gets_the_region_hint_too() {
+    let window = routed_window(&["raw_findings"], &[]);
+    let calls = vec![crate::components::ToolCall {
+        tool_id: "c1".to_string(),
+        name: "read_files".to_string(),
+        arguments: serde_json::json!({ "paths": ["raw_findings", "notes.md"] }),
+        thought_signature: None,
+    }];
+    let mut merged = vec![(
+        "c1".to_string(),
+        "[error] Failed to read 'raw_findings': No such file or directory (os error 2)".to_string(),
+    )];
+    crate::pipeline::annotate_path_errors(&window, &calls, &mut merged);
+    assert!(
+        merged[0].1.contains("is a context region, not a file"),
+        "{}",
+        merged[0].1
+    );
+}
+
+/// A region with room for some of the result keeps that much and the pointer
+/// says how much went missing.
+///
+/// The middle of the three outcomes, and the one that was silent longest: a
+/// region under `reject` with space left but not enough takes a prefix, and the
+/// old pointer described the whole result as stored either way.
+#[test]
+fn a_partly_stored_result_reports_what_was_dropped() {
+    let mut window = routed_window(&["data_preview"], &[]);
+    {
+        let region = window.get_region_mut("data_preview").expect("target");
+        region.admission = leviath_core::region::Admission::Reject;
+        // Room for a truncation (>100 tokens free) but not for the result.
+        region.max_tokens = 300;
+    }
+    let long = "x".repeat(8_000);
+    let calls = vec![crate::components::ToolCall {
+        tool_id: "call-1".to_string(),
+        name: "read_file".to_string(),
+        arguments: serde_json::json!({ "path": "manual.md" }),
+        thought_signature: None,
+    }];
+    let results = vec![("call-1".to_string(), long)];
+    apply_tool_results(
+        &mut window,
+        "",
+        &calls,
+        &results,
+        Some(&routed_to("data_preview")),
+        None,
+    );
+    let conversation = window.get_region("conversation").expect("conversation");
+    let text: String = conversation
+        .content
+        .iter()
+        .map(|e| e.content.clone())
+        .collect();
+    assert!(
+        text.contains("characters were dropped"),
+        "the pointer must quantify the loss: {text}"
+    );
+    assert!(
+        !text.contains("already in this prompt"),
+        "and must not describe a partial store as a whole one: {text}"
+    );
+    // The prefix really is there - a truncation that stored nothing would be
+    // the Dropped case wearing this message.
+    let stored = window.get_region("data_preview").expect("target region");
+    assert!(
+        stored
+            .content
+            .iter()
+            .any(|e| e.content.contains("truncated")),
+        "the region kept a marked prefix"
+    );
+}
+
 /// A directory handed to `read_file` is the same mistake with the right path:
 /// the OS error does not name the tool that would have worked.
 #[test]

@@ -1156,7 +1156,10 @@ mod tests {
         region.add_entry("curated".to_string(), 80).unwrap();
 
         let err = region.add_entry("newest".to_string(), 40).unwrap_err();
-        assert!(matches!(err, crate::error::Error::RegionFull { .. }));
+        assert_eq!(
+            err.to_string(),
+            "Region 'sources' is full (80/100 tokens) and does not evict automatically - release an entry before adding another"
+        );
         assert_eq!(region.content.len(), 1);
         assert_eq!(region.current_tokens, 80);
     }
@@ -1171,10 +1174,7 @@ mod tests {
         region.add_entry("kept".to_string(), 50).unwrap();
 
         let err = region.add_entry("enormous".to_string(), 500).unwrap_err();
-        assert!(matches!(
-            err,
-            crate::error::Error::TokenBudgetExceeded { .. }
-        ));
+        assert_eq!(err.to_string(), "Content exceeds token budget: 550 > 100");
         assert_eq!(region.content.len(), 1, "the region was not emptied for it");
     }
 

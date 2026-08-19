@@ -639,6 +639,16 @@ fn the_region_panel_edits_every_field_and_deletes() {
     assert_eq!(region(&mut dash).min_tokens, Some(800));
     dash.handle_key(key(KeyCode::Right));
     assert_eq!(region(&mut dash).min_tokens, Some(801));
+    // Back out to the region list, which renders each row's size from whatever
+    // the region carries - the percentage, and either absolute when set, which
+    // now that the percentage decides is the exception.
+    dash.handle_key(key(KeyCode::Esc));
+    let listed = text(&mut dash);
+    assert!(listed.contains("notes  sliding_window"), "{listed}");
+    let row = region(&mut dash);
+    assert_eq!((row.min_tokens, row.max_tokens), (Some(801), Some(4000)));
+    goto(&mut dash, FieldId::StageRegionRow("notes".into()));
+    dash.handle_key(key(KeyCode::Enter));
     // Required: off → on enables the reminder; typing it; off again.
     goto(&mut dash, FieldId::RegionMessage);
     assert!(
