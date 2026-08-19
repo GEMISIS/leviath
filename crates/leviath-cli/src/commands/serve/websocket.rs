@@ -8,10 +8,20 @@ use tokio::sync::broadcast;
 use super::events::ServerEvent;
 use super::types::*;
 
-/// How often the server pings an idle-or-not connection. A peer that has not
-/// ponged by the NEXT ping is declared dead. Browsers answer pings
-/// automatically, so a live client never trips this.
+/// How often the server pings an idle-or-not connection. Browsers answer pings
+/// automatically, so a live client never trips the deadline below.
 const WS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How long the oldest unanswered ping may stay unanswered before the peer is
+/// declared dead.
+///
+/// Deliberately a separate knob from [`WS_PING_INTERVAL`] rather than "gone by
+/// the next ping": the cadence answers "how often do we check", the deadline
+/// answers "how long do we wait", and conflating them meant a single dropped
+/// pong - one lost packet, one paused tab that resumed a moment late -
+/// disconnected an otherwise healthy client. At three times the cadence a peer
+/// gets three chances to answer before it is dropped.
+const WS_PONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How long one outbound frame may take to send+flush before the peer is
 /// declared dead. A peer that stopped reading without closing (a backgrounded
@@ -83,14 +93,16 @@ async fn handle_ws(
         rx,
         filter_run_id,
         WS_PING_INTERVAL,
+        WS_PONG_TIMEOUT,
         WS_SEND_TIMEOUT,
         greeting,
     )
     .await
 }
 
-/// Core of the WS relay, with the ping cadence and send deadline injected so
-/// tests can drive the dead-peer branches without real multi-second waits.
+/// Core of the WS relay, with the ping cadence, pong deadline and send
+/// deadline injected so tests can drive the dead-peer branches without real
+/// multi-second waits.
 ///
 /// The `select!` is deliberately **unbiased**: the old `biased;` variant
 /// polled the event branch first every iteration, so under a busy run the
@@ -101,6 +113,7 @@ async fn handle_ws_with(
     mut rx: broadcast::Receiver<ServerEvent>,
     filter_run_id: Option<String>,
     ping_every: std::time::Duration,
+    pong_timeout: std::time::Duration,
     send_timeout: std::time::Duration,
     greeting: Option<ServerEvent>,
 ) {
@@ -116,13 +129,17 @@ async fn handle_ws_with(
     // live, and pinging in the handshake's shadow confuses simple clients.
     let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + ping_every, ping_every);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut awaiting_pong = false;
+    // When the oldest still-unanswered ping went out, or `None` when every
+    // ping so far has been answered. A pong clears it; the deadline is
+    // measured from it, so answering late still costs nothing as long as it
+    // arrives inside `pong_timeout`.
+    let mut unanswered_since: Option<tokio::time::Instant> = None;
     loop {
         tokio::select! {
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(Message::Pong(_))) => awaiting_pong = false,
+                    Some(Ok(Message::Pong(_))) => unanswered_since = None,
                     Some(Err(_)) => break,
                     _ => {} // Ignore other client messages
                 }
@@ -153,10 +170,14 @@ async fn handle_ws_with(
                 }
             }
             _ = ping.tick() => {
-                // An unanswered previous ping, and a ping that cannot be
-                // sent, both mean the peer is gone without a Close (sleep,
-                // kill, dropped NAT mapping).
-                if awaiting_pong
+                // A ping left unanswered past the deadline, and a ping that
+                // cannot be sent, both mean the peer is gone without a Close
+                // (sleep, kill, dropped NAT mapping). Anything short of the
+                // deadline just gets another ping: a peer that missed one and
+                // answers the next is a live peer.
+                let overdue = unanswered_since
+                    .is_some_and(|since| since.elapsed() >= pong_timeout);
+                if overdue
                     || !send_within(
                         &mut socket,
                         send_timeout,
@@ -166,7 +187,7 @@ async fn handle_ws_with(
                 {
                     break;
                 }
-                awaiting_pong = true;
+                unanswered_since.get_or_insert_with(tokio::time::Instant::now);
             }
         }
     }
@@ -264,7 +285,7 @@ mod tests {
         assert_text_frame(0x2);
     }
 
-    /// A server whose WS route uses injected ping/send deadlines, so the
+    /// A server whose WS route uses injected ping/pong/send deadlines, so the
     /// dead-peer branches can be driven in tens of milliseconds. Shares the
     /// graceful-shutdown server plumbing with `spawn_test_server_with_shutdown`
     /// (whose shutdown path a dedicated test exercises); the shutdown sender
@@ -272,6 +293,7 @@ mod tests {
     async fn spawn_ping_test_server(
         state: AppState,
         ping_every: std::time::Duration,
+        pong_timeout: std::time::Duration,
         send_timeout: std::time::Duration,
     ) -> std::net::SocketAddr {
         let app = Router::new()
@@ -282,7 +304,15 @@ mod tests {
                         let rx = state.event_tx.subscribe();
                         let greeting = link_greeting(&state);
                         ws.on_upgrade(move |socket| {
-                            handle_ws_with(socket, rx, None, ping_every, send_timeout, greeting)
+                            handle_ws_with(
+                                socket,
+                                rx,
+                                None,
+                                ping_every,
+                                pong_timeout,
+                                send_timeout,
+                                greeting,
+                            )
                         })
                     },
                 ),
@@ -330,6 +360,9 @@ mod tests {
         let addr = spawn_ping_test_server(
             state,
             std::time::Duration::from_millis(80),
+            // Shorter than the cadence, so the tick after the first ping is
+            // already past the deadline: two ticks, not two seconds.
+            std::time::Duration::from_millis(1),
             std::time::Duration::from_secs(5),
         )
         .await;
@@ -342,6 +375,13 @@ mod tests {
     }
 
     /// A peer that answers pings stays connected across many intervals.
+    ///
+    /// This depends on the *pong deadline*, not on wall-clock scheduling: the
+    /// cadence is fast so the test is quick, but the deadline is 30 s, so the
+    /// client may be descheduled for an age between receiving a ping and
+    /// answering it and still be a live peer. The exchange count is fixed
+    /// rather than bounded by a wall clock for the same reason - a loaded
+    /// runner makes the test slower, never redder.
     #[tokio::test]
     async fn ws_stays_alive_when_client_pongs() {
         let state = test_state();
@@ -349,6 +389,7 @@ mod tests {
         let addr = spawn_ping_test_server(
             state,
             std::time::Duration::from_millis(60),
+            std::time::Duration::from_secs(30),
             std::time::Duration::from_secs(5),
         )
         .await;
@@ -356,14 +397,13 @@ mod tests {
         let mut client = WsTestClient::connect(addr, "/ws").await;
         wait_for_receiver_count(&tx, 1).await;
 
-        // Answer pings for ~5 intervals. Nothing else is broadcast on this
+        // Answer five consecutive pings. Nothing else is broadcast on this
         // channel, so every inbound frame is a ping.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
-        while std::time::Instant::now() < deadline {
+        for _ in 0..5 {
             let (opcode, payload) =
-                tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_frame())
+                tokio::time::timeout(std::time::Duration::from_secs(30), client.recv_frame())
                     .await
-                    .expect("expected a ping before the deadline");
+                    .expect("the server keeps pinging a peer that answers");
             assert_eq!(opcode, 0x9, "only pings flow on an idle channel");
             client.send_frame(0xA, &payload).await; // masked pong
         }
@@ -371,6 +411,48 @@ mod tests {
             tx.receiver_count(),
             1,
             "a ponging client must not be disconnected"
+        );
+        client.send_close().await;
+        wait_for_receiver_count(&tx, 0).await;
+    }
+
+    /// One dropped pong is not a dead peer: the client ignores the first ping
+    /// and answers the second, and the connection survives. Before the pong
+    /// deadline was split from the ping cadence this was fatal - the tick that
+    /// sent the second ping found the first unanswered and closed the socket.
+    #[tokio::test]
+    async fn ws_survives_a_missed_pong_when_the_next_one_answers() {
+        let state = test_state();
+        let tx = state.event_tx.clone();
+        let addr = spawn_ping_test_server(
+            state,
+            std::time::Duration::from_millis(40),
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let mut client = WsTestClient::connect(addr, "/ws").await;
+        wait_for_receiver_count(&tx, 1).await;
+
+        let (first, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), client.recv_frame())
+                .await
+                .expect("the first ping arrives");
+        assert_eq!(first, 0x9, "only pings flow on an idle channel");
+        // ...and goes unanswered. Reaching a second ping at all is the
+        // assertion: the old code broke the loop instead of sending it.
+        let (second, payload) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), client.recv_frame())
+                .await
+                .expect("a missed pong still earns another ping");
+        assert_eq!(second, 0x9);
+        client.send_frame(0xA, &payload).await; // masked pong, late but in time
+
+        assert_eq!(
+            tx.receiver_count(),
+            1,
+            "a peer that answers the second ping is alive"
         );
         client.send_close().await;
         wait_for_receiver_count(&tx, 0).await;
@@ -385,6 +467,7 @@ mod tests {
         let addr = spawn_ping_test_server(
             state,
             std::time::Duration::from_secs(3600), // pings out of the picture
+            std::time::Duration::from_secs(3600),
             std::time::Duration::from_millis(100),
         )
         .await;
