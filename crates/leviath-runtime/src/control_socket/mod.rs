@@ -355,6 +355,24 @@ pub struct DaemonIdentity {
     pub build: String,
     /// The daemon's process id.
     pub pid: u32,
+    /// Names - never values - of the tool credentials this process can see in
+    /// its own environment, out of the fixed set its binary asked about.
+    ///
+    /// A daemon's environment is fixed at exec time and no client shares it, so
+    /// a tool that reads a key from the environment can be misconfigured in a
+    /// way only the daemon can observe: a CLI inspecting *its own* environment
+    /// reports the shell it was typed in, which is a different process. That is
+    /// how `lev doctor` came to report a working search key while every run
+    /// still fell back to Wikipedia, because the daemon had been started from a
+    /// shell that did not export it.
+    ///
+    /// `None` means the process did not say (an older daemon, or an embedder
+    /// driving the runtime directly) - which a caller must report as "unknown",
+    /// never as "sees nothing". Names only: the value never crosses the wire,
+    /// and the set is chosen by the binary rather than scraped, so this cannot
+    /// become a way to enumerate a daemon's secrets.
+    #[serde(default)]
+    pub tool_env: Option<Vec<String>>,
 }
 
 impl DaemonIdentity {
@@ -364,12 +382,36 @@ impl DaemonIdentity {
     /// every client of it are built from the same tree, so comparing versions
     /// across the wire compares releases. The build id lives with the binary
     /// (it hashes the working tree), so the binary passes it in.
+    ///
+    /// Reports no [`tool_env`](Self::tool_env): which credentials are worth
+    /// probing is the binary's business, not the runtime's, so a process that
+    /// cares adds them with [`with_tool_env`](Self::with_tool_env).
     pub fn this_process(build: impl Into<String>) -> Self {
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
             build: build.into(),
             pid: std::process::id(),
+            tool_env: None,
         }
+    }
+
+    /// Report which tool credentials this process can see, by name.
+    ///
+    /// An empty list is a real answer ("asked, saw none") and is kept as one -
+    /// distinct from the `None` of a process that never said.
+    pub fn with_tool_env(mut self, names: Vec<String>) -> Self {
+        self.tool_env = Some(names);
+        self
+    }
+
+    /// Whether this process reported seeing the environment variable `name`.
+    ///
+    /// `None` when it did not report at all, so a caller can say "unknown"
+    /// rather than guess in either direction.
+    pub fn sees_tool_env(&self, name: &str) -> Option<bool> {
+        self.tool_env
+            .as_ref()
+            .map(|seen| seen.iter().any(|n| n == name))
     }
 
     /// The build to record when a process does not say. Named rather than a
@@ -2177,6 +2219,63 @@ mod tests {
                 std::process::id()
             )
         );
+    }
+
+    /// A process that never said which credentials it can see is "unknown", not
+    /// "sees nothing" - the distinction a caller needs to avoid reporting a
+    /// missing key against a daemon that simply predates the field.
+    #[test]
+    fn an_identity_that_did_not_report_tool_env_answers_unknown() {
+        let me = DaemonIdentity::this_process("abc123");
+        assert_eq!(me.tool_env, None);
+        assert_eq!(me.sees_tool_env("BRAVE_API_KEY"), None);
+    }
+
+    /// Reporting an empty list is a real answer - "asked, saw none" - and stays
+    /// distinguishable from having said nothing at all.
+    #[test]
+    fn reporting_no_tool_env_is_different_from_not_reporting() {
+        let blind = DaemonIdentity::this_process("abc123").with_tool_env(Vec::new());
+        assert_eq!(blind.tool_env, Some(Vec::new()));
+        assert_eq!(blind.sees_tool_env("BRAVE_API_KEY"), Some(false));
+    }
+
+    #[test]
+    fn a_reported_tool_env_answers_by_name() {
+        let seeing =
+            DaemonIdentity::this_process("abc123").with_tool_env(vec!["BRAVE_API_KEY".to_string()]);
+        assert_eq!(seeing.sees_tool_env("BRAVE_API_KEY"), Some(true));
+        assert_eq!(seeing.sees_tool_env("OTHER_KEY"), Some(false));
+    }
+
+    /// The names travel; nothing else does. A client on an older build reads
+    /// the rest of the identity and treats the field as absent.
+    #[test]
+    fn tool_env_round_trips_and_is_optional_on_the_wire() {
+        let seeing =
+            DaemonIdentity::this_process("abc123").with_tool_env(vec!["BRAVE_API_KEY".to_string()]);
+        let json = serde_json::to_string(&seeing).expect("an identity serializes");
+        assert_eq!(
+            serde_json::from_str::<DaemonIdentity>(&json).expect("and parses back"),
+            seeing
+        );
+        let older = format!(
+            r#"{{"version":"{}","build":"abc123","pid":{}}}"#,
+            env!("CARGO_PKG_VERSION"),
+            std::process::id()
+        );
+        let parsed: DaemonIdentity = serde_json::from_str(&older).expect("an older reply parses");
+        assert_eq!(parsed.sees_tool_env("BRAVE_API_KEY"), None);
+    }
+
+    /// Which credentials a process can see says nothing about which code it
+    /// runs, so it must not make two identities look like different builds.
+    #[test]
+    fn tool_env_does_not_affect_the_code_comparison() {
+        let blind = same_code(1);
+        let seeing = same_code(1).with_tool_env(vec!["BRAVE_API_KEY".to_string()]);
+        assert!(blind.same_code_as(&seeing));
+        assert!(!seeing.to_string().contains("BRAVE"), "{seeing}");
     }
 
     /// Versions must match; builds must match when both are known; a side that

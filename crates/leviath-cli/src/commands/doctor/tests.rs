@@ -127,6 +127,10 @@ fn scripted_daemon(dir: &Path, responses: Vec<String>) -> (ControlId, JoinHandle
     (id, handle)
 }
 
+/// The reply to the `List` the search check sends to force a handshake. Its
+/// contents are discarded - only the identity the handshake carries is wanted -
+/// but the daemon still has to answer it, so a scripted daemon must queue one.
+const LISTING: &str = r#"{"result":"list","runs":[],"finished":[]}"#;
 const SPAWNED: &str = r#"{"result":"spawned","run_id":"doctor-1-abc"}"#;
 const COMPLETE: &str = r#"{"result":"status","status":"Complete"}"#;
 const ACTIVE: &str = r#"{"result":"status","status":"Active"}"#;
@@ -208,12 +212,28 @@ fn format_report_of_a_warning_still_passes() {
 
 // ─── search_check ─────────────────────────────────────────────────────────────
 
-/// Run `search_check` with `BRAVE_API_KEY` set to `key` and the allowlist set
-/// to `allowed`.
-fn search_with(key: Option<&str>, allowed: &[&str]) -> Check {
+/// A daemon that reports seeing exactly `names`.
+fn daemon_seeing(names: &[&str]) -> DaemonIdentity {
+    DaemonIdentity::this_process("test")
+        .with_tool_env(names.iter().map(|s| (*s).to_string()).collect())
+}
+
+/// Run `search_check` against `daemon`, with `BRAVE_API_KEY` set to `key` in
+/// *this* process and the allowlist set to `allowed`.
+fn search_with_daemon(
+    key: Option<&str>,
+    allowed: &[&str],
+    daemon: Option<&DaemonIdentity>,
+) -> Check {
     let mut config = Config::default();
     config.security.allow_env_vars = allowed.iter().map(|s| (*s).to_string()).collect();
-    temp_env::with_var("BRAVE_API_KEY", key, || search_check(&config))
+    temp_env::with_var("BRAVE_API_KEY", key, || search_check(&config, daemon))
+}
+
+/// The common case: no daemon reported, so the check falls back to this
+/// process's own environment.
+fn search_with(key: Option<&str>, allowed: &[&str]) -> Check {
+    search_with_daemon(key, allowed, None)
 }
 
 #[test]
@@ -234,6 +254,13 @@ fn search_check_warns_when_the_key_is_set_but_not_allowlisted() {
         "names the fix: {}",
         check.detail
     );
+    // The grant is config, which the daemon re-reads per spawn - telling the
+    // user to restart here would be busywork.
+    assert!(
+        check.detail.contains("no restart is needed"),
+        "{}",
+        check.detail
+    );
 }
 
 #[test]
@@ -252,7 +279,73 @@ fn search_check_treats_an_empty_key_as_no_key() {
     // An exported-but-empty variable reads as configured and is not.
     let check = search_with(Some(""), &["BRAVE_API_KEY"]);
     assert_eq!(check.status, CheckStatus::Warn);
-    assert!(check.detail.contains("unset"), "{}", check.detail);
+    assert!(check.detail.contains("not readable"), "{}", check.detail);
+}
+
+#[test]
+fn search_check_without_a_daemon_says_whose_environment_it_read() {
+    // Answering for the wrong process silently is the bug this check exists to
+    // catch, so when it cannot reach the right one it must say so.
+    let check = search_with(Some("sk-brave"), &["BRAVE_API_KEY"]);
+    assert!(
+        check.detail.contains("the daemon did not report"),
+        "{}",
+        check.detail
+    );
+}
+
+#[test]
+fn search_check_believes_the_daemon_over_this_process() {
+    // The daemon has the key and this shell does not. Nothing is wrong: the
+    // process that runs the tool is the one that matters.
+    let check = search_with_daemon(
+        None,
+        &["BRAVE_API_KEY"],
+        Some(&daemon_seeing(&["BRAVE_API_KEY"])),
+    );
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(check.detail.contains("the daemon"), "{}", check.detail);
+}
+
+#[test]
+fn search_check_catches_a_daemon_started_before_the_key_existed() {
+    // The false negative a CLI-only check could never see: key here, grant in
+    // place, and the daemon still blind to it. This is the whole reason the
+    // daemon is asked.
+    let check = search_with_daemon(
+        Some("sk-brave"),
+        &["BRAVE_API_KEY"],
+        Some(&daemon_seeing(&[])),
+    );
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(
+        check.detail.contains("the daemon cannot see it"),
+        "names the real problem: {}",
+        check.detail
+    );
+    assert!(
+        check.detail.contains("lev daemon restart"),
+        "names the remedy: {}",
+        check.detail
+    );
+}
+
+#[test]
+fn search_check_reports_a_key_nobody_has_as_unconfigured() {
+    // Neither side has it: that is not a restart problem, it is a setup one,
+    // and pointing at `lev daemon restart` would send the user in circles.
+    let check = search_with_daemon(None, &["BRAVE_API_KEY"], Some(&daemon_seeing(&[])));
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(
+        check.detail.contains("brave.com/search/api"),
+        "{}",
+        check.detail
+    );
+    assert!(
+        !check.detail.contains("lev daemon restart"),
+        "no restart advice when there is no key to load: {}",
+        check.detail
+    );
 }
 
 // ─── config_check ─────────────────────────────────────────────────────────────
@@ -1054,7 +1147,14 @@ async fn run_checks_runs_all_five_against_a_healthy_daemon() {
             "anthropic_api_key = \"not-a-real-shape\"\n",
         );
         let build = always(registry_with("stub", StubProvider::replying("PONG")));
-        let (id, _server) = scripted_daemon(&root, vec![SPAWNED.to_string(), COMPLETE.to_string()]);
+        let (id, _server) = scripted_daemon(
+            &root,
+            vec![
+                LISTING.to_string(),
+                SPAWNED.to_string(),
+                COMPLETE.to_string(),
+            ],
+        );
         let client = ControlClient::new(id);
         run_checks(
             &DoctorArgs::default(),
