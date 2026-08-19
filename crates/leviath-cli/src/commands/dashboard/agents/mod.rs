@@ -13,9 +13,14 @@ mod catalog;
 mod chooser;
 mod editor;
 mod editor_keys;
+mod editor_panels;
 mod inspector;
+#[cfg(test)]
+mod panel_tests;
+mod prompts;
 mod render_catalog;
 mod render_editor;
+mod render_prompts;
 #[cfg(test)]
 mod tests;
 
@@ -24,6 +29,9 @@ use ratatui::layout::Rect;
 pub(in crate::commands::dashboard) use catalog::Catalog;
 pub(in crate::commands::dashboard) use chooser::Chooser;
 pub(in crate::commands::dashboard) use editor::Editor;
+pub(in crate::commands::dashboard) use prompts::ExternalEdit;
+#[cfg(test)]
+pub(in crate::commands::dashboard) use prompts::PromptFocus;
 
 use super::state::Dashboard;
 use crate::config::Config;
@@ -38,6 +46,12 @@ pub(in crate::commands::dashboard) struct AgentsScreen {
     pub(in crate::commands::dashboard) editor: Option<Editor>,
     /// The whole terminal at the last draw, for overlays that take the mouse.
     pub(in crate::commands::dashboard) last_area: Rect,
+    /// `provider/model` ids the providers reported, once the background
+    /// listing comes back; empty until then.
+    pub(in crate::commands::dashboard) model_catalog: Vec<String>,
+    /// The listing's channel, drained each tick.
+    pub(in crate::commands::dashboard) models_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<Vec<String>>>,
 }
 
 impl Dashboard {
@@ -46,12 +60,56 @@ impl Dashboard {
         let mut catalog = Catalog::default();
         let config = self.agents_config();
         catalog.refresh(&self.new_run_ctx, &config);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.agent_builder = Some(Box::new(AgentsScreen {
             catalog,
             chooser: None,
             editor: None,
             last_area: Rect::default(),
+            model_catalog: Vec::new(),
+            models_rx: Some(rx),
         }));
+        // Ask every configured provider for its models, off the UI loop; the
+        // chooser offers the closed catalog until they land.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let config = self.agents_config();
+            handle.spawn(async move {
+                let models = crate::commands::serve::list_model_ids(
+                    &config,
+                    &leviath_providers::provider::build_http_client,
+                )
+                .await;
+                let _ = tx.send(models);
+            });
+        }
+    }
+
+    /// Take the models the providers reported, when they have.
+    pub(in crate::commands::dashboard) fn drain_agents_models(&mut self) {
+        let Some(screen) = self.agent_builder.as_deref_mut() else {
+            return;
+        };
+        let Some(rx) = screen.models_rx.as_mut() else {
+            return;
+        };
+        loop {
+            match rx.try_recv() {
+                Ok(models) => {
+                    screen.model_catalog = models;
+                    if let Some(editor) = screen.editor.as_mut() {
+                        editor.models.extend(screen.model_catalog.iter().cloned());
+                        editor.models.sort();
+                        editor.models.dedup();
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return,
+                // The task has answered and gone: nothing more will come.
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    screen.models_rx = None;
+                    return;
+                }
+            }
+        }
     }
 
     /// Close the Agents screen, whatever it was showing.
@@ -96,6 +154,9 @@ impl Dashboard {
     ) -> bool {
         let area = self.agents().last_area;
         if self.editor_picker_mouse(event, area) {
+            return true;
+        }
+        if self.editor_inspector_mouse(event) {
             return true;
         }
         if self.route_mouse_to_graph(event) {

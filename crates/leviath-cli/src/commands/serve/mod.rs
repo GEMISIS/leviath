@@ -25,6 +25,7 @@ mod tree;
 mod types;
 mod websocket;
 
+pub(crate) use config::list_model_ids;
 use types::ServeLimits;
 pub use types::{AppState, ServeArgs, ServerEvent};
 

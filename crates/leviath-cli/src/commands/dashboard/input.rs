@@ -161,6 +161,10 @@ impl Dashboard {
                 ConfirmAction::AgentReset { name } => self.perform_agent_reset(&name),
                 ConfirmAction::StageDelete { name } => self.editor_delete_stage(&name),
                 ConfirmAction::EditorDiscard => self.close_editor(),
+                ConfirmAction::RegionDelete { scope, name } => {
+                    self.editor_delete_region(&scope, &name)
+                }
+                ConfirmAction::OverrideRemove { stage } => self.editor_remove_override(&stage),
             },
         }
     }

@@ -178,7 +178,30 @@ fn agent_editor_sections() -> Vec<HelpSection> {
                     "change the row in place: cycle a choice, step a number, flip a toggle",
                 ),
                 ("1 2 3", "a stage's tabs: behaviour, model & tools, context"),
-                ("esc", "back to the canvas"),
+                (
+                    "x / backspace",
+                    "remove the row: a model from the chain, a routing rule",
+                ),
+                ("← → on a model", "move it earlier or later in the chain"),
+                (
+                    "esc",
+                    "back: a region returns to where it was opened from, otherwise the canvas",
+                ),
+            ],
+        },
+        HelpSection {
+            title: "Agent editor: prompts",
+            entries: vec![
+                (
+                    "tab",
+                    "move between the system prompt and the transition prompt",
+                ),
+                ("ctrl-s / esc", "apply both and close"),
+                ("ctrl-q", "close without applying"),
+                (
+                    "ctrl-e",
+                    "open the focused prompt in $EDITOR (the dashboard waits for it)",
+                ),
             ],
         },
     ]

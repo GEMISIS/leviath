@@ -13,7 +13,6 @@ same list.
 
 ## Unreleased
 
-<<<<<<< Updated upstream
 - New: the scripts API manages Rhai model providers. `provider` joins `tool`,
   `region_hook`, `stage_hook` and `output_validator` as a `kind` on
   `GET /api/scripts`, `GET/PUT/DELETE /api/scripts/{kind}/{name}` and
@@ -38,23 +37,29 @@ same list.
   script's `initialize` were printable, where the first-party provider config
   had been careful not to be; the two now agree, reporting whether the key is
   set and the names in the extra table and nothing more.
-=======
 - New: `lev dash` has an Agents screen (`a`): the catalog of agents this
   machine can run, with each one's graph, and an editor that builds one on
   the same canvas the explorer draws. Stages are boxes you add (`a`),
   connect (`c`, or drag a handle), select and delete; an inspector edits
-  whatever is selected (the agent's description, entry stage and default
-  model; a stage's mode, description, tries, revisits, allow-complete and
-  fan-out settings; a path's kind, hint and approval gate). Every edit is
-  checked as `lev validate` would check the file, with the problems on a
-  line under the graph and a `!` on the stage they name; saving is refused
-  while there are errors. Undo and redo, a view of the exact file that
-  will be saved, and arrangements kept per agent. New agents start from a
-  two-stage starter or as a copy of any agent in the catalog; a bundled
-  agent opens from its embedded copy and installs when saved; an edited
-  bundled agent can be reset to the bundle. The editor keeps a file's
-  comments, order and formatting: it edits the manifest as a document.
->>>>>>> Stashed changes
+  whatever is selected: the agent's description, entry stage, default
+  model and shared context regions; a stage's behaviour (mode, description,
+  tries, revisits, allow-complete, fan-out settings, its loop back to
+  itself), its model chain and tools (the models every configured provider
+  reports, on top of the built-in catalog; the tools this install has), and
+  its context (the regions it sees, a layout of its own or the shared one,
+  where tool results land, per-tool routing); a path's kind, hint, approval
+  gate and what context crosses it (everything, pinned only, summarized, or
+  per-region rules with the summary instructions); a context region's every
+  setting. Prompts open full screen, and `Ctrl-E` hands one to `$EDITOR`
+  and takes it back. Every edit is checked as `lev validate` would check
+  the file, with the problems on a line under the graph and a `!` on the
+  stage they name; saving is refused while there are errors. Undo and redo,
+  a view of the exact file that will be saved, and arrangements kept per
+  agent. New agents start from a two-stage starter or as a copy of any
+  agent in the catalog; a bundled agent opens from its embedded copy and
+  installs when saved, scripts and all; an edited bundled agent can be
+  reset to the bundle. The editor keeps a file's comments, order and
+  formatting: it edits the manifest as a document.
 - Fixed: `lev serve`, `lev dash`, and `lev agent-client` ride out a daemon
   restart instead of breaking. A request that lands while the daemon is down
   (a `lev daemon restart`, a supervisor relaunch, or the restart that follows

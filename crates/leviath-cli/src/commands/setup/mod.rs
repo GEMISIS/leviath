@@ -989,6 +989,7 @@ mod tests {
             enable_should_fail: true,
             create_should_fail: false,
             draw_should_fail: false,
+            ..TestSetup::new()
         };
         assert!(
             execute_core(&mut wizard, &env, &mut enable_fails, &mut events)
@@ -1000,6 +1001,7 @@ mod tests {
             enable_should_fail: false,
             create_should_fail: true,
             draw_should_fail: false,
+            ..TestSetup::new()
         };
         assert!(
             execute_core(&mut wizard, &env, &mut create_fails, &mut events)

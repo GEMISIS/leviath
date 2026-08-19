@@ -13,8 +13,8 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use super::super::state::Dashboard;
 use super::super::theme::*;
 use super::super::types::PaneId;
-use super::editor::{Focus, Overlay};
-use super::inspector::{FieldValue, Panel, StageTab, panel_title};
+use super::editor::{Focus, InspectorHits, Overlay};
+use super::inspector::{Field, FieldValue, Panel, StageTab, panel_title};
 use crate::blueprint_edit::check::Severity;
 use crate::tui::widgets::footer::{draw_hint_bar, hint};
 use crate::tui::widgets::popup::{centered, popup_frame};
@@ -22,7 +22,7 @@ use crate::tui::widgets::popup::{centered, popup_frame};
 /// Under this many columns the panes take turns.
 const SIDE_BY_SIDE_MIN_WIDTH: u16 = 110;
 /// The inspector's width when both panes are on.
-const INSPECTOR_WIDTH: u16 = 54;
+const INSPECTOR_WIDTH: u16 = 58;
 /// Rows the expanded problems list takes.
 const PROBLEMS_ROWS: u16 = 6;
 
@@ -175,12 +175,22 @@ impl Dashboard {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let mut lines: Vec<Line> = Vec::new();
+        let mut hits = InspectorHits {
+            area,
+            ..InspectorHits::default()
+        };
         if let Panel::Stage { tab, .. } = &editor.panel {
             let mut spans = Vec::new();
+            let mut x = inner.x;
+            let mut tabs = Vec::new();
             for (i, t) in StageTab::ALL.iter().enumerate() {
                 let on = t == tab;
+                let text = format!(" {} {} ", i + 1, t.title());
+                let w = text.chars().count() as u16;
+                tabs.push((x, x + w));
+                x += w;
                 spans.push(Span::styled(
-                    format!(" {} {} ", i + 1, t.title()),
+                    text,
                     if on {
                         Style::default()
                             .fg(C_ACTIVE)
@@ -190,6 +200,7 @@ impl Dashboard {
                     },
                 ));
             }
+            hits.tabs = Some((inner.y, tabs));
             lines.push(Line::from(spans));
             lines.push(Line::from(""));
         }
@@ -200,9 +211,10 @@ impl Dashboard {
             )));
         }
         let fields = editor.fields();
-        let label_w = 26usize;
+        let label_w = 23usize;
         let value_w = (inner.width as usize).saturating_sub(label_w + 3);
         for (i, field) in fields.iter().enumerate() {
+            hits.rows.push(inner.y + lines.len() as u16);
             let on = focused && i == editor.cursor;
             let editing = editor.line.as_ref().filter(|(id, _)| *id == field.id);
             let label_style = if !field.enabled {
@@ -212,15 +224,29 @@ impl Dashboard {
             } else {
                 Style::default().fg(C_MUTED)
             };
-            let mut spans = vec![
-                Span::styled(if on { "› " } else { "  " }, Style::default().fg(C_ACCENT)),
-                Span::styled(format!("{:<label_w$}", field.label), label_style),
-            ];
+            let mut spans = vec![Span::styled(
+                if on { "› " } else { "  " },
+                Style::default().fg(C_ACCENT),
+            )];
+            // A button is its label: the whole row is the action, so it has
+            // no value column.
+            let is_button = matches!(field.value, FieldValue::Button);
+            if !is_button {
+                spans.push(Span::styled(
+                    format!("{:<label_w$}", field.label),
+                    label_style,
+                ));
+            }
             match editing {
                 Some((_, line)) => spans.extend(line.display_spans(true).spans),
                 None => {
-                    let (text, style) = value_text(&field.value, field.enabled, on);
-                    spans.push(Span::styled(fit(&text, value_w), style));
+                    let (text, style) = value_text(field, on);
+                    let room = if is_button {
+                        value_w + label_w
+                    } else {
+                        value_w
+                    };
+                    spans.push(Span::styled(fit(&text, room), style));
                 }
             }
             lines.push(Line::from(spans));
@@ -239,6 +265,9 @@ impl Dashboard {
                 }
             });
         let body_h = inner.height.saturating_sub(3);
+        // Rows under the help area are not drawn, so they are not clickable.
+        hits.rows.retain(|y| *y < inner.y + body_h);
+        editor.hit = hits;
         frame.render_widget(
             Paragraph::new(lines).wrap(Wrap { trim: false }),
             Rect {
@@ -267,8 +296,16 @@ impl Dashboard {
                 hint("enter", "choose"),
                 hint("esc", "cancel"),
             ]
-        } else if editor.line.is_some() || editor.add_stage.is_some() {
+        } else if editor.line.is_some() || editor.add_stage.is_some() || editor.add_region.is_some()
+        {
             vec![hint("enter", "apply"), hint("esc", "cancel")]
+        } else if matches!(editor.overlay, Some(Overlay::Prompts(_))) {
+            vec![
+                hint("tab", "other prompt"),
+                hint("^s/esc", "apply"),
+                hint("^q", "discard"),
+                hint("^e", "$EDITOR"),
+            ]
         } else if editor.overlay.is_some() {
             vec![
                 hint("↑↓", "scroll"),
@@ -309,34 +346,21 @@ impl Dashboard {
         draw_hint_bar(frame, area, None, &hints, false);
     }
 
-    /// The chooser, the add-stage prompt, and the definition, on top.
+    /// The picker, the name prompts, the prompts overlay, and the
+    /// definition, on top.
     fn draw_editor_overlays(&mut self, frame: &mut Frame, area: Rect) {
+        if self.draw_editor_prompts(frame, area) {
+            return;
+        }
         let editor = self.editor();
         if let Some((_, picker)) = &editor.picker {
             picker.draw(frame, area);
             return;
         }
-        if let Some(line) = &editor.add_stage {
-            let popup = centered(50, 20, area);
-            let popup = Rect {
-                height: popup.height.clamp(3, 5),
-                ..popup
-            };
-            let inner = popup_frame(frame, popup, "New stage", C_BORDER_FOCUS);
-            let mut spans = vec![Span::styled("Name  ", Style::default().fg(C_DIM))];
-            spans.extend(line.display_spans(true).spans);
-            frame.render_widget(
-                Paragraph::new(vec![
-                    Line::from(spans),
-                    Line::from(Span::styled(
-                        "Letters, digits, . _ - · Enter adds it after the selected stage",
-                        Style::default().fg(C_MUTED),
-                    )),
-                ]),
-                inner,
-            );
+        if self.draw_editor_name_popups(frame, area) {
             return;
         }
+        let editor = self.editor();
         if let Some(Overlay::Definition { scroll }) = &editor.overlay {
             let text = editor.doc.to_toml();
             let popup = centered(90, 90, area);
@@ -355,8 +379,9 @@ impl Dashboard {
     }
 }
 
-/// How a field's value reads on its row.
-fn value_text(value: &FieldValue, enabled: bool, on: bool) -> (String, Style) {
+/// How a field's value reads on its row (a button reads as its label).
+fn value_text(field: &Field, on: bool) -> (String, Style) {
+    let (value, enabled) = (&field.value, field.enabled);
     let base = if !enabled {
         Style::default().fg(C_DIM)
     } else if on {
@@ -375,9 +400,30 @@ fn value_text(value: &FieldValue, enabled: bool, on: bool) -> (String, Style) {
         FieldValue::Toggle(false) => ("[ ] off".to_string(), base),
         FieldValue::Choice(c) => (format!("‹ {c} ›"), base),
         FieldValue::Row(r) => (r.clone(), base),
+        FieldValue::Segment { options, index } => (
+            options
+                .iter()
+                .enumerate()
+                .map(|(i, o)| {
+                    if Some(i) == *index {
+                        format!("[{o}]")
+                    } else {
+                        format!(" {o} ")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+            base,
+        ),
         FieldValue::Button => (
-            "▸".to_string(),
-            base.fg(if enabled { C_ACCENT } else { C_DIM }),
+            format!("▸ {}", field.label),
+            if !enabled {
+                Style::default().fg(C_DIM)
+            } else if on {
+                Style::default().fg(C_ACTIVE).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(C_MUTED)
+            },
         ),
     }
 }

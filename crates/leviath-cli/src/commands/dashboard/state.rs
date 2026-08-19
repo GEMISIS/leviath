@@ -209,6 +209,11 @@ pub(crate) struct Dashboard {
     /// Where the editor keeps canvas arrangements; `None` keeps them in
     /// memory (tests).
     pub(super) layout_store_path: Option<std::path::PathBuf>,
+    /// A prompt handed to `$EDITOR`, waiting for the loop to leave the
+    /// terminal and run it.
+    pub(super) pending_external_edit: Option<super::agents::ExternalEdit>,
+    /// Where a prompt handed to `$EDITOR` is written while the editor runs.
+    pub(super) external_edit_dir: std::path::PathBuf,
     /// Sends resolve-and-spawn work to the background lane.
     pub(super) spawn_cmd_tx: mpsc::UnboundedSender<SpawnCommand>,
     /// Receives spawn results, drained into toasts each tick.

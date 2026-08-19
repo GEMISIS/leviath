@@ -2,7 +2,7 @@
 //! an overlay, the canvas, the inspector), and the canvas operations that
 //! change the graph.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
 use super::super::state::Dashboard;
@@ -16,10 +16,17 @@ impl Dashboard {
     /// Keys while the editor is open.
     pub(in crate::commands::dashboard) fn handle_editor_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // A message answers one key; the next key clears it.
+        self.editor().message = None;
         // Save works from anywhere in the editor, chooser and all: what is
-        // in the document is what is saved.
+        // in the document is what is saved. The prompts overlay is the one
+        // place it means "apply these": its text is not in the document yet.
         if ctrl && key.code == KeyCode::Char('s') {
-            self.editor_save();
+            if matches!(self.editor().overlay, Some(Overlay::Prompts(_))) {
+                self.editor_prompts_key(&key);
+            } else {
+                self.editor_save();
+            }
             return;
         }
         if self.editor().picker.is_some() {
@@ -28,6 +35,10 @@ impl Dashboard {
         }
         if self.editor().add_stage.is_some() {
             self.editor_add_stage_key(&key);
+            return;
+        }
+        if self.editor().add_region.is_some() {
+            self.editor_add_region_key(&key);
             return;
         }
         if self.editor().line.is_some() {
@@ -103,7 +114,14 @@ impl Dashboard {
     /// Keys on the inspector.
     fn editor_inspector_key(&mut self, code: KeyCode) {
         match code {
-            KeyCode::Esc => self.editor().focus = Focus::Canvas,
+            KeyCode::Esc => {
+                if self.editor().panel_anchor.is_some() {
+                    self.editor_leave_region();
+                } else {
+                    self.editor().focus = Focus::Canvas;
+                }
+            }
+            KeyCode::Char('x') | KeyCode::Delete => self.editor_remove_row(),
             KeyCode::Up | KeyCode::Char('k') => {
                 let editor = self.editor();
                 editor.cursor = editor.cursor.saturating_sub(1);
@@ -172,6 +190,21 @@ impl Dashboard {
         }
     }
 
+    /// Keys while the name of a new region is being typed.
+    fn editor_add_region_key(&mut self, key: &KeyEvent) {
+        let mut line = self.editor().add_region.take().expect("callers check");
+        match line.handle_key(key) {
+            EditOutcome::Pending => self.editor().add_region = Some(line),
+            EditOutcome::Cancel => {}
+            EditOutcome::Commit => {
+                let name = line.value().trim().to_string();
+                if !name.is_empty() {
+                    self.editor_add_region(&name);
+                }
+            }
+        }
+    }
+
     /// Keys on the chooser.
     fn editor_picker_key(&mut self, key: &KeyEvent) {
         let (purpose, mut picker) = self.editor().picker.take().expect("callers check");
@@ -196,24 +229,80 @@ impl Dashboard {
         true
     }
 
+    /// A click on the inspector: the row under it takes the cursor and the
+    /// keys; a click on a stage tab switches to it; a second click on the
+    /// row the cursor is on opens it, like Enter.
+    pub(in crate::commands::dashboard) fn editor_inspector_mouse(
+        &mut self,
+        event: MouseEvent,
+    ) -> bool {
+        let Some(editor) = self.agents().editor.as_mut() else {
+            return false;
+        };
+        if editor.overlay.is_some() || editor.line.is_some() || editor.add_stage.is_some() {
+            return false;
+        }
+        if event.kind != MouseEventKind::Down(MouseButton::Left) {
+            return false;
+        }
+        let hit = editor.hit.clone();
+        let inside = event.column >= hit.area.x
+            && event.column < hit.area.x + hit.area.width
+            && event.row >= hit.area.y
+            && event.row < hit.area.y + hit.area.height;
+        if !inside {
+            return false;
+        }
+        if let Some((tab_row, tabs)) = &hit.tabs
+            && event.row == *tab_row
+            && let Some(i) = tabs
+                .iter()
+                .position(|(x0, x1)| event.column >= *x0 && event.column < *x1)
+            && let Panel::Stage { name, .. } = &editor.panel
+        {
+            editor.panel = Panel::Stage {
+                name: name.clone(),
+                tab: StageTab::ALL[i],
+            };
+            editor.cursor = 0;
+            editor.focus = Focus::Inspector;
+            return true;
+        }
+        let was = (editor.focus, editor.cursor);
+        editor.focus = Focus::Inspector;
+        if let Some(i) = hit.rows.iter().position(|y| *y == event.row) {
+            editor.cursor = i;
+            if was == (Focus::Inspector, i) {
+                self.editor_activate();
+            }
+        }
+        true
+    }
+
     fn editor_settle_picker(&mut self, purpose: PickerFor, picker: Picker, outcome: PickerOutcome) {
         match outcome {
             PickerOutcome::Pending => self.editor().picker = Some((purpose, picker)),
-            PickerOutcome::Cancelled | PickerOutcome::ChosenMany(_) => {}
+            PickerOutcome::Cancelled => {}
+            PickerOutcome::ChosenMany(chosen) => self.editor_settle_tools(&chosen),
             PickerOutcome::Chosen(index) => {
                 let value = picker.options[index].value.clone();
                 match purpose {
                     PickerFor::Field(id) => self.editor_pick(&id, &value),
                     PickerFor::ConnectFrom(from) => self.editor_connect(&from, &value),
+                    other => self.editor_settle_more(other, &value),
                 }
             }
         }
     }
 
-    /// Keys on an overlay: the definition scrolls and closes.
+    /// Keys on an overlay: the prompts edit, the definition scrolls and
+    /// closes.
     fn editor_overlay_key(&mut self, key: &KeyEvent) {
         let editor = self.editor();
-        let Overlay::Definition { scroll } = editor.overlay.as_mut().expect("callers check");
+        let Some(Overlay::Definition { scroll }) = editor.overlay.as_mut() else {
+            self.editor_prompts_key(key);
+            return;
+        };
         match key.code {
             KeyCode::Esc | KeyCode::Char('v') | KeyCode::Char('q') => editor.overlay = None,
             KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
@@ -282,12 +371,12 @@ impl Dashboard {
     pub(in crate::commands::dashboard) fn editor_connect(&mut self, from: &str, to: &str) {
         let (from, to) = (from.to_string(), to.to_string());
         if self.editor_mutate(|d| d.add_edge(&from, &to)) {
-            let editor = self.editor();
             if from == to {
-                editor.view.select_stage(&from);
-            } else {
-                editor.view.select_edge(&from, &to);
+                self.editor_open_self_loop(&from);
+                return;
             }
+            let editor = self.editor();
+            editor.view.select_edge(&from, &to);
             editor.sync_panel();
             editor.focus = Focus::Inspector;
         }
@@ -298,7 +387,7 @@ impl Dashboard {
         match self.editor().panel.clone() {
             Panel::Stage { name, .. } => self.editor_request_delete_stage(&name),
             Panel::Edge { from, to } => self.editor_delete_edge(&from, &to),
-            Panel::Agent | Panel::External(_) => {
+            Panel::Agent | Panel::External(_) | Panel::Region { .. } => {
                 self.editor().message = Some("Select a stage or a path to delete".to_string());
             }
         }

@@ -15,15 +15,15 @@ use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::test_support::{make_test_dashboard, rendered_buffer};
 use crate::commands::dashboard::types::*;
 
-fn key(code: KeyCode) -> KeyEvent {
+pub(super) fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::empty())
 }
 
-fn ctrl(c: char) -> KeyEvent {
+pub(super) fn ctrl(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
 }
 
-fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+pub(super) fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
     MouseEvent {
         kind,
         column,
@@ -32,7 +32,7 @@ fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
     }
 }
 
-fn type_str(dash: &mut Dashboard, text: &str) {
+pub(super) fn type_str(dash: &mut Dashboard, text: &str) {
     for c in text.chars() {
         dash.handle_key(key(KeyCode::Char(c)));
     }
@@ -40,7 +40,7 @@ fn type_str(dash: &mut Dashboard, text: &str) {
 
 /// A dashboard whose agents directory is a fresh temp tree holding one
 /// agent of our own (`own`, the starter) and the installed coder.
-fn dashboard(tag: &str) -> (Dashboard, PathBuf) {
+pub(super) fn dashboard(tag: &str) -> (Dashboard, PathBuf) {
     let root = std::env::temp_dir().join(format!("lev-agents-screen-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let agents = root.join("agents");
@@ -56,17 +56,17 @@ fn dashboard(tag: &str) -> (Dashboard, PathBuf) {
     (dash, root)
 }
 
-fn draw(dash: &mut Dashboard, w: u16, h: u16) -> Terminal<TestBackend> {
+pub(super) fn draw(dash: &mut Dashboard, w: u16, h: u16) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
     terminal.draw(|f| dash.draw(f)).unwrap();
     terminal
 }
 
-fn text(dash: &mut Dashboard) -> String {
+pub(super) fn text(dash: &mut Dashboard) -> String {
     rendered_buffer(&draw(dash, 160, 50))
 }
 
-fn open_editor_on(dash: &mut Dashboard, name: &str) {
+pub(super) fn open_editor_on(dash: &mut Dashboard, name: &str) {
     dash.handle_key(key(KeyCode::Char('a')));
     let at = dash
         .agents()
@@ -574,6 +574,17 @@ fn the_canvas_adds_connects_selects_and_deletes_with_undo_behind_it() {
             .is_some()
     );
     assert!(text(&mut dash).contains("↺ loops"));
+    // The loop opened its own path panel; Esc goes back to the stage, a
+    // second Esc to the canvas.
+    assert!(matches!(
+        dash.agents().editor.as_ref().unwrap().panel,
+        Panel::Edge { .. }
+    ));
+    dash.handle_key(key(KeyCode::Esc));
+    assert!(matches!(
+        dash.agents().editor.as_ref().unwrap().panel,
+        Panel::Stage { .. }
+    ));
     // Connect from nothing selected: a message.
     dash.handle_key(key(KeyCode::Esc));
     dash.agents()
@@ -787,8 +798,13 @@ fn the_inspector_edits_every_kind_of_field() {
         .current_field()
         .unwrap();
     assert_eq!(field.id, FieldId::RegionRow("notes".into()));
+    // Enter opens the region's own panel; Esc comes back to the agent.
     dash.handle_key(key(KeyCode::Enter));
-    dash.handle_key(key(KeyCode::Right));
+    assert!(matches!(
+        dash.agents().editor.as_ref().unwrap().panel,
+        Panel::Region { .. }
+    ));
+    dash.handle_key(key(KeyCode::Esc));
     assert!(text(&mut dash).contains("Shared region"));
     dash.handle_key(key(KeyCode::Home));
     // The stage panel.
@@ -1230,7 +1246,8 @@ fn the_inspector_edits_every_kind_of_field() {
             .unwrap()
             .gated
     );
-    dash.handle_key(key(KeyCode::Down));
+    // The last row is the delete button.
+    dash.handle_key(key(KeyCode::End));
     dash.handle_key(key(KeyCode::Enter));
     assert!(
         dash.agents()
@@ -1371,10 +1388,10 @@ fn the_definition_overlay_scrolls_and_copies() {
     let (mut dash, root) = dashboard("definition");
     open_editor_on(&mut dash, "coder");
     dash.handle_key(key(KeyCode::Char('v')));
-    assert_eq!(
+    assert!(matches!(
         dash.agents().editor.as_ref().unwrap().overlay,
         Some(Overlay::Definition { scroll: 0 })
-    );
+    ));
     let screen = text(&mut dash);
     assert!(screen.contains("Definition"), "{screen}");
     assert!(screen.contains("name = \"coder\""), "{screen}");
@@ -1391,10 +1408,10 @@ fn the_definition_overlay_scrolls_and_copies() {
     ] {
         dash.handle_key(key(code));
     }
-    assert_eq!(
+    assert!(matches!(
         dash.agents().editor.as_ref().unwrap().overlay,
         Some(Overlay::Definition { scroll: 0 })
-    );
+    ));
     dash.handle_key(key(KeyCode::End));
     let screen = text(&mut dash);
     assert!(
@@ -1965,15 +1982,21 @@ fn a_dashboard_without_a_layout_path_keeps_arrangements_in_memory() {
         )
         .is_empty()
     );
-    assert!(
-        super::inspector::fields(
-            &doc,
-            &Panel::Stage {
-                name: "work".into(),
-                tab: StageTab::Model
-            }
-        )
-        .is_empty()
-    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn typing_in_a_chooser_never_reaches_the_editor_keys() {
+    // `u` is undo on the editor; inside a chooser it is a letter.
+    let (mut dash, root) = dashboard("chooser_letters");
+    open_editor_on(&mut dash, "coder");
+    dash.handle_key(key(KeyCode::Right));
+    dash.handle_key(key(KeyCode::Enter));
+    dash.handle_key(key(KeyCode::Char('2')));
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(dash.agents().editor.as_ref().unwrap().picker.is_some());
+    type_str(&mut dash, "haiku");
+    assert!(dash.agents().editor.as_ref().unwrap().picker.is_some());
+    assert_eq!(dash.agents().editor.as_ref().unwrap().message, None);
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -170,6 +170,8 @@ impl Dashboard {
             new_run_ctx,
             agent_builder: None,
             layout_store_path: None,
+            pending_external_edit: None,
+            external_edit_dir: std::env::temp_dir().join("leviath-dash-prompts"),
             spawn_cmd_tx,
             spawn_outcome_rx,
             spawn_bg_ends: Some((spawn_cmd_rx, spawn_outcome_tx)),
