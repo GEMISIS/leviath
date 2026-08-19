@@ -281,7 +281,17 @@ type DispatchToolsQuery = (
     Option<&'static crate::components::GateAutoApprove>,
     Option<&'static InFlightWork>,
     Option<&'static StageCursor>,
-    Option<&'static RunMetadata>,
+    // Nested rather than two more members: `QueryData` is implemented up to a
+    // fixed arity and this tuple had reached it. Grouping the two run-context
+    // components keeps the list inside the limit without splitting the system.
+    //
+    // `StageProgress` is here for `runtime_info`: `AgentState.iteration` is
+    // run-cumulative, so the per-stage count to compare against the stage's own
+    // cap comes from there.
+    (
+        Option<&'static RunMetadata>,
+        Option<&'static crate::pipeline::response::StageProgress>,
+    ),
     Option<&'static crate::components::OutputValidators>,
     // For the submit_output guard: a submission that is exactly the name of a
     // stage in this blueprint is a routing token, not an answer.
@@ -359,7 +369,7 @@ pub fn dispatch_tools(
         auto_gate,
         in_flight,
         cursor,
-        metadata,
+        (metadata, stage_progress),
         validators,
         blueprint,
     ) in agents.iter_mut()
@@ -420,6 +430,36 @@ pub fn dispatch_tools(
             // gate-prompt re-run of the same batch refuses identically.
             if let Some(refusal) = invalid_args_refusal(stage_inf, &c.name, &c.arguments) {
                 context_results.push((c.tool_id.clone(), refusal));
+                continue;
+            }
+            // Answered inline for the same reason the context tools are: the
+            // stage, the iteration counts and the window occupancy it reports
+            // live in the world, which the async lane cannot reach.
+            if crate::runtime_info_tool::is_runtime_info_tool(&c.name) {
+                let stage_max = blueprint
+                    .zip(cursor)
+                    .and_then(|(bp, cur)| bp.0.stages.get(cur.index))
+                    .and_then(|s| s.max_iterations);
+                let facts = crate::runtime_info_tool::RuntimeFacts {
+                    version: env!("CARGO_PKG_VERSION"),
+                    run_id: metadata.map(|m| m.run_id.as_str()),
+                    agent: metadata.map(|m| m.agent_name.as_str()),
+                    stage: &state.current_stage,
+                    stage_index: cursor
+                        .zip(metadata)
+                        .map(|(cur, m)| (cur.index, m.num_stages)),
+                    stage_iterations: (
+                        stage_progress.map(|p| p.iterations).unwrap_or(0),
+                        stage_max,
+                    ),
+                    total_iterations: state.iteration,
+                    provider_model: (&stage_inf.provider_name, &stage_inf.model),
+                    tools: stage_inf.tools.iter().map(|t| t.name.as_str()).collect(),
+                    unattended: metadata.is_some_and(|m| m.unattended),
+                    workdir: metadata.map(|m| m.workdir.as_str()),
+                };
+                let text = crate::runtime_info_tool::handle_runtime_info(&facts, &window);
+                context_results.push((c.tool_id.clone(), text));
                 continue;
             }
             if crate::context_tools::is_context_tool(&c.name) {

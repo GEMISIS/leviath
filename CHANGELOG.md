@@ -38,6 +38,23 @@ same list.
   daemon restart cannot fix. `lev dash` says the same in its log and a toast,
   and wears a chip on the run list while the daemon is unreachable or
   updated. The ACP bridge tells the editor in the conversation.
+- New: six read-only environment tools, so an agent can ground itself in the
+  world it is actually running in. `current_time` reports the date and time in
+  UTC and local with the timezone and offset; `system_info` the operating
+  system, version, architecture, CPU count, hostname and free disk;
+  `locale_info` the user's language and region; `environment_info` the working
+  directory, the well-known directories, `PATH` and the environment variables
+  the agent may see; `which_command` whether a program is installed and where;
+  and `runtime_info` this run's own agent, stage, iteration, model, context use
+  and whether anyone is available to answer a question. All six default to
+  `allow` and take no action. This closes a real gap: a research agent with no
+  way to ask the date reasoned from its training cutoff and worked a stale news
+  cycle.
+- Fixed: `environment_info` reports credential-shaped environment variables by
+  name with the value withheld, through the same `[security] allow_env_vars`
+  gate a Rhai `env_var` read answers to, so an agent can tell a key is set
+  without being handed it.
+
 - New: `lev dash` draws a run's blueprint as a stage graph. The stage
   explorer (`g` in the detail view) is a canvas now: stages are boxes on
   layers, transitions are routed edges, the stage the run is in spins in

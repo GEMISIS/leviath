@@ -174,6 +174,19 @@ pub(crate) fn kill_process_group(pgid: u32) -> io::Result<()> {
         .map_err(|e| io::Error::from_raw_os_error(e as i32))
 }
 
+/// This machine's hostname, or `None` when the OS declines to give one.
+///
+/// `nix::unistd::gethostname` rather than reading `$HOSTNAME`: that variable is
+/// a shell convenience, not part of the environment a process inherits, so it is
+/// usually unset for a daemon and would report "no hostname" on a machine that
+/// plainly has one.
+pub(crate) fn hostname() -> Option<String> {
+    nix::unistd::gethostname()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .filter(|h| !h.trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +262,15 @@ mod tests {
         // must surface as an error the caller can ignore, not a panic.
         let err = kill_process_group(0x7FFF_FFFF).expect_err("no such group");
         assert!(err.raw_os_error().is_some());
+    }
+
+    /// `gethostname` answers on every Unix CI runner, but what it answers
+    /// varies - so the assertion is the property the caller depends on, not the
+    /// name: a reported hostname is never blank, because `system_info` would
+    /// otherwise show the machine as having an empty name.
+    #[test]
+    fn hostname_is_absent_or_non_empty() {
+        assert!(hostname().is_none_or(|h| !h.trim().is_empty()));
     }
 
     #[test]

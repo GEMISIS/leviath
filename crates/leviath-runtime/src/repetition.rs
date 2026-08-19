@@ -52,6 +52,12 @@ const READONLY_TOOLS: &[&str] = &[
     "search",
     "context_read",
     "context_list",
+    "current_time",
+    "system_info",
+    "locale_info",
+    "environment_info",
+    "which_command",
+    "runtime_info",
 ];
 
 /// Tools considered "productive" (produce side effects / forward progress).

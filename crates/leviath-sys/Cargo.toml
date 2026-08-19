@@ -30,6 +30,12 @@ tracing = { workspace = true }
 # is otherwise pure Rust plus its TLS stack.
 fs4 = { workspace = true }
 
+# The user's locale (`locale`). As with free space above, there is no `std` API
+# and this crate forbids `unsafe`, so the platform call is delegated: Unix reads
+# the `LC_*`/`LANG` variables, macOS asks CoreFoundation and Windows calls
+# `GetUserDefaultLocaleName`.
+sys-locale = { workspace = true }
+
 # Only for `tokio::process::Command`, so the console-window decision can be made
 # once for both command flavours here rather than duplicated in every crate that
 # spawns children. `process` alone - this crate runs no runtime of its own.

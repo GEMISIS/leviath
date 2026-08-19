@@ -194,6 +194,52 @@ A child reports whatever it submitted through [`submit_output`](/docs/outputs). 
 submitted nothing says so, rather than returning an empty result. `output_format` asks the child for
 a particular shape, overriding what its blueprint declares.
 
+## Environment
+
+What time it is, what machine this is, and what the run itself is doing. A model has no way to
+know any of it: its training data has a cutoff and your run does not, so an agent asked about
+anything current will otherwise reason from whenever it was trained.
+
+| Tool | Purpose | Arguments |
+| --- | --- | --- |
+| `current_time` | The date and time now, in UTC and local, with the IANA timezone, UTC offset, weekday, ISO week and unix epoch. | none |
+| `system_info` | Operating system and version, architecture, CPU count, hostname, path separator, line ending, and free disk space in the working directory. | none |
+| `locale_info` | The user's language and region as a BCP-47 tag, such as `en-US`. | none |
+| `environment_info` | The working directory, the home, temporary, config and data directories, the entries on `PATH`, and the environment variables this agent may see. | none |
+| `which_command` | Whether a program is installed and where, the way `which` or `where` would. Looks the name up on `PATH` without running it. | `command` |
+| `runtime_info` | This run reporting on itself: agent, stage, iteration and limit, model and provider, context tokens spent, and whether anyone is available to answer a question. | none |
+
+All six are read-only, take no action, and default to `allow`, so grounding a run in the present
+costs no approval prompt.
+
+> [!TIP]
+> If an agent researches current events, cites release dates, or reasons about what is recent, give
+> it `current_time` and say so in the stage prompt. A tool that is advertised but never called
+> changes nothing.
+
+> [!NOTE]
+> `runtime_info` is the one to reach for before `ask_user_text`, `ask_user_choice`,
+> `ask_user_confirm` or `present_for_review`. It reports whether the run is unattended, and an
+> unattended run has nobody to answer those, so an agent that checks first can decide and record
+> the assumption instead of waiting.
+
+### What these tools do not reveal
+
+`environment_info` reports environment variables through the same gate a Rhai `env_var` read
+answers to. A credential-shaped name is listed under `withheld_variables` with its value omitted,
+so an agent can tell `ANTHROPIC_API_KEY` is set without seeing it. Name it in
+`[security] allow_env_vars` to hand the value over. See
+[environment variables](/docs/configuration#environment-variables).
+
+`system_info` reports the machine's hostname, and `environment_info` reports absolute paths that
+usually contain the user's account name. Both travel to whichever provider the stage calls, like
+everything else in the context window. Neither is granted to a stage that does not list it in
+`available_tools`.
+
+Not every platform answers every question. `os_version` is read from `/etc/os-release` on Linux and
+`SystemVersion.plist` on macOS; Windows publishes neither, so it reports `null` there rather than
+guessing. Fields that cannot be answered are always present and null, never missing.
+
 ## Web access
 
 Web tools are not built in. They ship as [Rhai script tools](/docs/rhai-tools) beside the agents
@@ -272,10 +318,13 @@ With nothing configured, tools fall back to these:
 | `todo_add`, `todo_done`, `todo_note` | `allow` |
 | `ask_user_text`, `ask_user_choice`, `ask_user_confirm`, `edit_document` | `allow` |
 | `spawn_agent`, `check_agent`, `wait_for_agent`, `send_to_agent`, `kill_agent` | `allow` |
+| `current_time`, `system_info`, `locale_info`, `environment_info`, `which_command`, `runtime_info` | `allow` |
 | Everything else, built-in or MCP | `ask` |
 
 Read-only built-ins and the agent's own context tools run freely, mutating ones ask, and
 human-in-the-loop tools are always allowed because prompting before a prompt would be circular.
+The environment tools read the host and the run and change nothing, so they are allowed on the same
+grounds as the file readers.
 
 ### How a policy is resolved
 

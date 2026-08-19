@@ -432,6 +432,65 @@ impl BuiltinTools {
                     "required": ["content"]
                 }),
             },
+            Tool {
+                name: "current_time".to_string(),
+                description: "Get the current date and time, in UTC and in this machine's local timezone. Your training data has a cutoff date; this does not. Call this before reasoning about anything current, recent, upcoming, or dated - what year it is, how old something is, whether a release has happened, or what counts as recent news. Do not assume today's date from memory.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+            Tool {
+                name: "system_info".to_string(),
+                description: "Describe the machine this agent runs on: operating system and version, CPU architecture, core count, hostname, the path separator and line ending convention, and free disk space in the working directory. Use this before writing platform-specific paths or commands.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+            Tool {
+                name: "locale_info".to_string(),
+                description: "Report the user's language and region (for example en-US), as the operating system has it configured. Use this to decide what language to write in, and how to format dates, numbers and currency for this user.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+            Tool {
+                name: "environment_info".to_string(),
+                description: "Report the working directory, the home, temporary, config and data directories for this platform, the entries on PATH, and the environment variables this agent may see. Credential-shaped variables are named but their values are withheld, so you can tell a variable is set without seeing its secret.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+            Tool {
+                name: "which_command".to_string(),
+                description: "Check whether a program is installed and report where it lives, the way `which` or `where` would. Looks the name up on PATH without running anything. Use this before writing a shell command that depends on a tool being present.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The program name to look up, such as \"git\" or \"python3\""
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            },
+            Tool {
+                name: "runtime_info".to_string(),
+                description: "Report this run's own state: the agent and stage running now, which iteration this is and the limit, the model and provider in use, how much of the context window is spent, and whether anyone is available to answer a question. Check whether the run is unattended before using ask_user_text, ask_user_choice, ask_user_confirm or present_for_review - unattended, those have nobody to answer them.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
         ];
         defs.retain(|t| self.available(&t.name));
         defs
@@ -586,6 +645,12 @@ impl BuiltinTools {
             "todo_add",
             "todo_done",
             "todo_note",
+            "current_time",
+            "system_info",
+            "locale_info",
+            "environment_info",
+            "which_command",
+            "runtime_info",
             crate::SUBMIT_OUTPUT_TOOL,
         ]
         .iter()

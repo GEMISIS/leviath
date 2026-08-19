@@ -53,3 +53,9 @@ pub(crate) fn current_uid() -> u32 {
 pub(crate) fn kill_process_group(_pgid: u32) -> io::Result<()> {
     Ok(())
 }
+
+/// No hostname API on such a target, so the caller reports that it is unknown
+/// rather than inventing a name for the machine.
+pub(crate) fn hostname() -> Option<String> {
+    None
+}

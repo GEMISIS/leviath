@@ -502,6 +502,26 @@ pub fn builtin_tool_classification(tool_name: &str) -> ToolClassification {
             ToolDirection::Outbound,
             TaintLevel::Public,
         ),
+        // The environment tools bring facts about the host *in*; none of them
+        // sends anything out, so none is a channel the gate needs to watch.
+        //
+        // `current_time` and `locale_info` are Public: the date and the user's
+        // language are not secrets. The other three are Internal because they
+        // name this machine, its directory layout, its installed software and
+        // the run's own configuration - not secret, but not for publishing
+        // either, so a Public-clearance outbound tool cannot forward them.
+        "current_time" | "locale_info" => ToolClassification::new(
+            TaintLevel::Public,
+            ToolDirection::Inbound,
+            TaintLevel::Public,
+        ),
+        "system_info" | "environment_info" | "which_command" | "runtime_info" => {
+            ToolClassification::new(
+                TaintLevel::Internal,
+                ToolDirection::Inbound,
+                TaintLevel::Public,
+            )
+        }
         "ask_user_text" | "ask_user_choice" | "ask_user_confirm" | "present_for_review" => {
             ToolClassification::new(
                 TaintLevel::Internal,
@@ -941,6 +961,55 @@ mod tests {
             let tc = builtin_tool_classification(name);
             assert_eq!(tc.sensitivity, TaintLevel::Public, "{name}");
             assert_eq!(tc.direction, ToolDirection::Outbound, "{name}");
+        }
+    }
+
+    /// The environment tools bring facts about the host in and send nothing
+    /// out, so none of them is a channel the gate needs to watch. Getting this
+    /// wrong is silent: the `_` fallback is outbound, so an unclassified
+    /// environment tool would be gated in every taint-tracking run, and asking
+    /// what day it is would raise a leak prompt.
+    #[test]
+    fn environment_tools_are_inbound_and_never_gated() {
+        for name in [
+            "current_time",
+            "system_info",
+            "locale_info",
+            "environment_info",
+            "which_command",
+            "runtime_info",
+        ] {
+            let tc = builtin_tool_classification(name);
+            assert_eq!(tc.direction, ToolDirection::Inbound, "{name}");
+            // Inbound tools are not gated at all, whatever the context holds.
+            assert_eq!(tc.clearance, TaintLevel::Public, "{name}");
+        }
+    }
+
+    /// The date and the user's language are not secrets; the machine's name,
+    /// its directory layout, its installed software and the run's own
+    /// configuration are not for publishing. The split matters because the
+    /// sensitivity is what an *outbound* tool later has to be cleared for.
+    #[test]
+    fn environment_tools_are_graded_by_what_they_reveal() {
+        for name in ["current_time", "locale_info"] {
+            assert_eq!(
+                builtin_tool_classification(name).sensitivity,
+                TaintLevel::Public,
+                "{name}"
+            );
+        }
+        for name in [
+            "system_info",
+            "environment_info",
+            "which_command",
+            "runtime_info",
+        ] {
+            assert_eq!(
+                builtin_tool_classification(name).sensitivity,
+                TaintLevel::Internal,
+                "{name}"
+            );
         }
     }
 
