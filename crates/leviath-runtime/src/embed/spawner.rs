@@ -155,6 +155,7 @@ impl EmbedSpawner {
                 // host's, through the tool context it supplies.
                 read_paths: None,
                 output_request: args.output.clone(),
+                model_override: args.model.clone(),
             },
             TokenTotals::default(),
             PersistWatermark::default(),

@@ -256,6 +256,7 @@ fn attach_run_record(
         unattended: args.yolo,
         read_paths: parts.read_path_counts,
         output_request: args.output.clone(),
+        model_override: args.model.clone(),
     };
     {
         let mut entity_mut = world.entity_mut(entity);

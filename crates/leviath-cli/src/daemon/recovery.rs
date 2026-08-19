@@ -275,7 +275,12 @@ fn reload_one(
         // from the persisted context snapshot after build_agent, so re-seeding
         // would be redundant (and could double up content).
         regions: Default::default(),
-        model: meta.model.clone(),
+        // The override the run was *launched* with, not the label its entry
+        // stage resolved to. `meta.model` is always set once a run has started,
+        // and handing it back here as `--model` pinned every stage of a
+        // reloaded run to the first stage's provider and model - a run that
+        // named nothing at launch lost its whole failover list on restart.
+        model: meta.model_override.clone(),
         workdir: meta.workdir.clone(),
         metadata: meta.metadata.clone(),
         callback_url: meta.callback_url.clone(),
@@ -679,6 +684,7 @@ mod tests {
                 format: Some("a2ui".to_string()),
                 ..Default::default()
             }),
+            model_override: None,
             waiting_on: None,
         };
         std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
@@ -930,6 +936,77 @@ mod tests {
                 .expect("reloaded run has metadata")
                 .unattended
         );
+    }
+
+    /// A reload replays the `--model` the run was launched with, and only that.
+    ///
+    /// `meta.model` is the label the entry stage resolved to, and it is set on
+    /// every run that has started. It used to be handed back as the override,
+    /// so a run launched with no `--model` came back with every stage pinned
+    /// to its first stage's pair. Here the label names a provider that is not
+    /// registered any more, the way a run resolved on a since-removed key
+    /// would: as an override that refused the reload outright; as a label it
+    /// is history, and the stages resolve afresh from the blueprint.
+    #[tokio::test]
+    async fn reload_replays_the_launch_override_not_the_resolved_label() {
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let runs = tempfile::tempdir().unwrap();
+
+        // No override at launch: an older `meta.json` with a label and no
+        // `model_override` field at all.
+        write_run(
+            runs.path(),
+            "run-label",
+            manifest.to_str().unwrap(),
+            RunStatus::Running,
+            None,
+        );
+        let meta_path = runs.path().join("run-label").join("meta.json");
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        let obj = raw.as_object_mut().unwrap();
+        obj.insert("model".into(), serde_json::json!("ghost/pinned"));
+        obj.remove("model_override");
+        std::fs::write(&meta_path, serde_json::to_string(&raw).unwrap()).unwrap();
+
+        let (world, entity) = reload_single(runs.path(), "run-label").await;
+        let md = world
+            .world()
+            .get::<RunMetadata>(entity)
+            .expect("reloaded run has metadata");
+        assert_eq!(md.model_override, None);
+        assert_eq!(
+            md.model.as_deref(),
+            Some("anthropic/m"),
+            "the entry stage resolves from the blueprint, not the stale label"
+        );
+
+        // A bare `--model` at launch: the reload asks for the same thing, so
+        // the stage keeps its provider and takes the named model.
+        write_run(
+            runs.path(),
+            "run-override",
+            manifest.to_str().unwrap(),
+            RunStatus::Running,
+            None,
+        );
+        let meta_path = runs.path().join("run-override").join("meta.json");
+        let mut meta: RunMeta =
+            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        meta.model = Some("anthropic/m-x".to_string());
+        meta.model_override = Some("m-x".to_string());
+        std::fs::write(&meta_path, serde_json::to_string(&meta).unwrap()).unwrap();
+        // The first run is terminal now, so only the second reloads.
+        std::fs::remove_dir_all(runs.path().join("run-label")).unwrap();
+
+        let (world, entity) = reload_single(runs.path(), "run-override").await;
+        let md = world
+            .world()
+            .get::<RunMetadata>(entity)
+            .expect("reloaded run has metadata");
+        assert_eq!(md.model_override.as_deref(), Some("m-x"));
+        assert_eq!(md.model.as_deref(), Some("anthropic/m-x"));
     }
 
     #[tokio::test]

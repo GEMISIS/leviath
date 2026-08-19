@@ -66,6 +66,10 @@ pub struct RunMetadata {
     /// blueprint's. Held so it reaches `meta.json` and survives a restart; the
     /// resolved per-stage shape lives on `StageInference`/`StageSetup`.
     pub output_request: Option<leviath_core::output::OutputSpec>,
+    /// The `--model` the caller gave at launch, verbatim, if any. Held so it
+    /// reaches `meta.json` and a restart replays the same override rather
+    /// than pinning the run to whatever `model` resolved to.
+    pub model_override: Option<String>,
 }
 
 /// Running token + tool-call totals accumulated across an agent's inferences, for
@@ -385,6 +389,7 @@ pub fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> RunMeta {
             &parked,
         ),
         output_request: md.output_request.clone(),
+        model_override: md.model_override.clone(),
     }
 }
 
@@ -425,6 +430,7 @@ mod tests {
             unattended: false,
             read_paths: None,
             output_request: None,
+            model_override: None,
         }
     }
 

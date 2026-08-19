@@ -419,6 +419,24 @@ pub struct RunMeta {
     /// caller asked once and should not have to ask again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_request: Option<crate::output::OutputSpec>,
+    /// The `--model` the run was launched with, exactly as given
+    /// (`provider/model` or a bare model), when the caller gave one.
+    ///
+    /// Distinct from `model`, which is what the entry stage *resolved to* and
+    /// is recorded whether or not anything was overridden. A daemon restart
+    /// rebuilds the run's spawn arguments from this file, and it used to hand
+    /// `model` back as the override: a run launched with no `--model` at all
+    /// came back with every stage pinned to its first stage's provider and
+    /// model, and its failover list gone. This field is what was actually
+    /// asked for, so a reload asks for the same thing - and for a run that
+    /// asked for nothing, resolves each stage afresh, as the launch did.
+    ///
+    /// Runs written before this field existed reload with no override. That
+    /// loses a `--model` given to such a run, which is the smaller harm: the
+    /// stage falls back to its blueprint's list rather than being pinned to a
+    /// pair the user may never have named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
 }
 
 /// How many `[read_paths]` entries a run's blueprint declared, and how many of
@@ -600,6 +618,7 @@ impl RunMeta {
             final_output: None,
             waiting_on: None,
             output_request: None,
+            model_override: None,
             flags: RunFlags::default(),
             yolo: false,
             read_paths: None,

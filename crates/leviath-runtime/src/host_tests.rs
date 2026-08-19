@@ -1900,6 +1900,7 @@ async fn unregistered_world_agents_are_adopted_and_become_cancellable() {
             unattended: false,
             read_paths: None,
             output_request: None,
+            model_override: None,
         },
     ));
     assert!(
@@ -2333,6 +2334,7 @@ async fn emit_events_broadcasts_agent_changes() {
             unattended: false,
             read_paths: None,
             output_request: None,
+            model_override: None,
         });
 
     // First emission after spawn: Spawned + Status + Tokens + Context.
@@ -3249,6 +3251,7 @@ async fn list_reports_blueprint_shape_and_unattended() {
             unattended: true,
             read_paths: None,
             output_request: None,
+            model_override: None,
         },
         TokenTotals {
             tool_calls: 9,

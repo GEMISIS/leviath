@@ -140,6 +140,15 @@ same list.
   ran on `qwen3.5:9b`, a model the user may never have pulled. The user's
   default now leads on its provider, with the blueprint's entries behind it as
   the failover, which is the order the docs already described.
+- Fixed: a daemon restart pinned every stage of a reloaded run to the model
+  its entry stage had resolved to. The reload rebuilt the run's spawn
+  arguments with `meta.json`'s `model` label (always set once a run has
+  started) as if it were the `--model` override, so a run launched with no
+  override came back with its failover list gone, and one whose provider had
+  been removed since could not reload at all. `meta.json` now records the
+  override actually given at launch (`model_override`), and the reload
+  replays that, resolving each stage afresh when there was none. Runs written
+  before this field reload with no override.
 - Changed: a fan-out stage's `max_workers` defaults to 30 rather than 4, so
   a split that produces ten work items runs them at once instead of in
   waves. `max_workers = 0` now means unlimited, where it used to be read

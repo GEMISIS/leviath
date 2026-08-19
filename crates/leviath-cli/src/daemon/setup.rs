@@ -692,6 +692,7 @@ mod tests {
             unattended: false,
             read_paths: None,
             output_request: None,
+            model_override: None,
         },));
         reaper(&mut world, with_meta.entity());
         assert!(tool_service.take(with_meta.entity()).is_none());
@@ -1550,6 +1551,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             final_output: None,
             waiting_on: None,
             output_request: None,
+            model_override: None,
         };
         std::fs::write(
             run_dir.join("meta.json"),
@@ -1652,6 +1654,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             final_output: None,
             waiting_on: None,
             output_request: None,
+            model_override: None,
         };
         std::fs::write(
             run_dir.join("meta.json"),
