@@ -602,7 +602,14 @@ fn the_region_panel_edits_every_field_and_deletes() {
     assert_eq!(region(&mut dash).budget_percent, Some(20.0));
     dash.handle_key(key(KeyCode::Left));
     assert_eq!(region(&mut dash).budget_percent, Some(19.0));
+    // A new region carries no ceiling, so the field starts empty and the first
+    // step writes one rather than nudging a starter value.
     goto(&mut dash, FieldId::RegionMaxTokens);
+    assert_eq!(region(&mut dash).max_tokens, None);
+    dash.handle_key(key(KeyCode::Enter));
+    type_str(&mut dash, "4000");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(region(&mut dash).max_tokens, Some(4000));
     dash.handle_key(key(KeyCode::Right));
     assert_eq!(region(&mut dash).max_tokens, Some(4001));
     dash.handle_key(key(KeyCode::Left));
@@ -622,6 +629,16 @@ fn the_region_panel_edits_every_field_and_deletes() {
             .as_deref()
             .is_some_and(|m| m.contains("whole number"))
     );
+    // The floor is the field that matters for a small pinned region, and it
+    // edits the same way.
+    goto(&mut dash, FieldId::RegionMinTokens);
+    assert_eq!(region(&mut dash).min_tokens, None);
+    dash.handle_key(key(KeyCode::Enter));
+    type_str(&mut dash, "800");
+    dash.handle_key(key(KeyCode::Enter));
+    assert_eq!(region(&mut dash).min_tokens, Some(800));
+    dash.handle_key(key(KeyCode::Right));
+    assert_eq!(region(&mut dash).min_tokens, Some(801));
     // Required: off → on enables the reminder; typing it; off again.
     goto(&mut dash, FieldId::RegionMessage);
     assert!(

@@ -339,23 +339,23 @@ guess.
 
 # ─── Context layout ───────────────────────────────────────────────────────────
 [context.regions]
-task            = { kind = "pinned", budget = "2%", max_tokens = 3000, required = true, seed = "task", required_message = "Name the log file(s)/dir and what to look for via --task.", volatility = "stable" }
-severity_index  = { kind = "pinned", budget = "2%", max_tokens = 2000 }
-findings        = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+task            = { kind = "pinned", budget = "2%", required = true, seed = "task", required_message = "Name the log file(s)/dir and what to look for via --task.", volatility = "stable" }
+severity_index  = { kind = "pinned", budget = "2%" }
+findings        = { kind = "sliding_window", max_items = 30, budget = "12%", strategy = "bulk", overflow = 10 }
 # The sweepers' submitted findings, on the way into the analyze stage. Its budget
 # is what each worker's share is divided from, so it matches the findings region
 # it feeds. Clearable: once analyze has folded the findings in, the raw worker
 # report is safe to drop.
-worker_findings = { kind = "clearable", budget = "12%", max_tokens = 15000 }
+worker_findings = { kind = "clearable", budget = "12%" }
 
-logs            = { kind = "temporary",       budget = "30%", max_tokens = 50000 }
-scripts         = { kind = "compacting",      budget = "20%", compact_at = "80%", threshold_tokens = 20000, max_tokens = 30000, volatility = "grows" }
-scripts_history = { kind = "compact_history", source_region = "scripts", budget = "3%", max_tokens = 10000, volatility = "grows" }
+logs            = { kind = "temporary",       budget = "30%" }
+scripts         = { kind = "compacting",      budget = "20%", compact_at = "80%", volatility = "grows" }
+scripts_history = { kind = "compact_history", source_region = "scripts", budget = "3%", volatility = "grows" }
 
-conversation    = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
-scratch         = { kind = "clearable", budget = "6%", max_tokens = 6000 }
+conversation    = { kind = "sliding_window", max_items = 30, budget = "12%", strategy = "bulk", overflow = 10 }
+scratch         = { kind = "clearable", budget = "6%" }
 
 # Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
 # inference call's error text, or a note that a stage hit its iteration cap.
 # Pinned so it survives the edge transform into the stage that acts on it.
-error_report    = { kind = "pinned", budget = "1%", max_tokens = 2000 }
+error_report    = { kind = "pinned", budget = "1%" }

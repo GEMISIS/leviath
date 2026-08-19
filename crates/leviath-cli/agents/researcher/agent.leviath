@@ -191,35 +191,41 @@ reads instead of the report, not a second copy of it.
 [stages.summary.transitions]
 
 # ─── Context layout ───────────────────────────────────────────────────────────
-# Budgets are a percentage of the model's context window (issue #100) with an
-# absolute `max_tokens`/`threshold_tokens` guard-rail. Percentages are ceilings.
+# Budgets are a percentage of the model's context window (issue #100), and the
+# percentage is the whole answer: every region scales with whatever model the
+# stage runs on. No absolute `max_tokens`/`threshold_tokens` guard-rails - a cap
+# below the percentage silently wins on every window worth having, which is how
+# a 1M-context run ended up with a 40k findings region. Percentages are ceilings,
+# not reservations: a region costs only what is stored in it, so a ceiling it
+# never reaches is free, and they may sum past 100% because regions rarely fill
+# together.
 [context.regions]
 # The research question - required. Supplied via --task (or the API/ACP task field).
-query          = { kind = "pinned", budget = "1%", max_tokens = 1000, required = true, seed = "task", required_message = "State the research question via --task.", volatility = "stable" }
+query          = { kind = "pinned", budget = "1%", required = true, seed = "task", required_message = "State the research question via --task.", volatility = "stable" }
 # Optional caller bounds: --scope "peer-reviewed sources since 2020 only".
-scope          = { kind = "pinned", budget = "1%", max_tokens = 1000, seed = "scope", volatility = "stable" }
+scope          = { kind = "pinned", budget = "1%", seed = "scope", volatility = "stable" }
 # Growing bibliography with credibility notes (curated by the agent).
-environment    = { kind = "pinned", budget = "1%", max_tokens = 600, seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
-sources_index  = { kind = "pinned", budget = "3%", max_tokens = 3000, volatility = "grows" }
+environment    = { kind = "pinned", budget = "1%", seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
+sources_index  = { kind = "pinned", budget = "3%", volatility = "grows" }
 # Citation/confidence rules (seeded with a sensible default the agent follows).
-format         = { kind = "pinned", budget = "1%", max_tokens = 500, seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Mark each finding's confidence as high / medium / low based on source count and credibility." }, volatility = "stable" }
+format         = { kind = "pinned", budget = "1%", seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Mark each finding's confidence as high / medium / low based on source count and credibility." }, volatility = "stable" }
 
 # Raw source material (bulk, evictable).
-raw_findings   = { kind = "temporary", budget = "30%", max_tokens = 40000 }
+raw_findings   = { kind = "temporary", budget = "30%" }
 # Extracted claims (with source refs) and cross-source conflicts.
-claims         = { kind = "sliding_window", max_items = 30, budget = "7%", max_tokens = 8000 }
-contradictions = { kind = "clearable",      budget = "3%", max_tokens = 3000 }
+claims         = { kind = "sliding_window", max_items = 30, budget = "7%" }
+contradictions = { kind = "clearable",      budget = "3%" }
 
 # Synthesis workspace (compacts to a running history when it grows).
-synthesis         = { kind = "compacting",      budget = "40%", compact_at = "80%", threshold_tokens = 30000, max_tokens = 50000 }
-synthesis_history = { kind = "compact_history", source_region = "synthesis", budget = "3%", max_tokens = 10000, volatility = "grows" }
+synthesis         = { kind = "compacting",      budget = "40%", compact_at = "80%" }
+synthesis_history = { kind = "compact_history", source_region = "synthesis", budget = "3%", volatility = "grows" }
 
 # The message stream. An explicit sliding_window `conversation` region is required -
 # the per-stage layout is rebuilt from this table on each transition, so an
 # auto-added one would be dropped after the first stage.
-conversation      = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+conversation      = { kind = "sliding_window", max_items = 30, budget = "12%", strategy = "bulk", overflow = 10 }
 
 # Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
 # inference call's error text, or a note that a stage hit its iteration cap.
 # Pinned so it survives the edge transform into the stage that acts on it.
-error_report      = { kind = "pinned", budget = "1%", max_tokens = 2000 }
+error_report      = { kind = "pinned", budget = "1%" }

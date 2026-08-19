@@ -967,6 +967,7 @@ impl Dashboard {
             | FieldId::MaxItems
             | FieldId::RegionBudget
             | FieldId::RegionMaxTokens
+            | FieldId::RegionMinTokens
             | FieldId::RegionMaxItems
             | FieldId::RegionOverflow => {
                 let value = match text.parse::<u64>() {

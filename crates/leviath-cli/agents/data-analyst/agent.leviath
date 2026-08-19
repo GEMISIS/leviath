@@ -249,25 +249,25 @@ model = "claude-sonnet-5"
 # ─── Context layout ───────────────────────────────────────────────────────────
 [context.regions]
 # The subject - required. Supplied via --task (or the API/ACP task field).
-subject       = { kind = "pinned", budget = "1%", max_tokens = 1000, required = true, seed = "task", required_message = "Say what to gather data on via --task.", volatility = "stable" }
+subject       = { kind = "pinned", budget = "1%", required = true, seed = "task", required_message = "Say what to gather data on via --task.", volatility = "stable" }
 # Optional caller bounds: --constraints "US only, since 2015".
-constraints   = { kind = "pinned", budget = "1%", max_tokens = 1000, seed = "constraints", volatility = "stable" }
+constraints   = { kind = "pinned", budget = "1%", seed = "constraints", volatility = "stable" }
 # The table's columns, decided in scope and followed by every later stage.
-schema        = { kind = "pinned", budget = "2%", max_tokens = 2000, required = true, required_message = "Write the table's columns to `schema` (context_write) before gathering: one line per column, as name | type | meaning | unit.", volatility = "grows" }
+schema        = { kind = "pinned", budget = "2%", required = true, required_message = "Write the table's columns to `schema` (context_write) before gathering: one line per column, as name | type | meaning | unit.", volatility = "grows" }
 # Bibliography, one line per source actually used.
-sources_index = { kind = "pinned", budget = "3%", max_tokens = 3000, volatility = "grows" }
+sources_index = { kind = "pinned", budget = "3%", volatility = "grows" }
 # What to distrust in the result. Read by the present stage.
-caveats       = { kind = "pinned", budget = "2%", max_tokens = 2000, volatility = "grows" }
+caveats       = { kind = "pinned", budget = "2%", volatility = "grows" }
 
 # Raw pages and search results (bulk, evictable).
-raw_sources   = { kind = "temporary", budget = "25%", max_tokens = 30000 }
+raw_sources   = { kind = "temporary", budget = "25%" }
 # The workers' consolidated rows, on the way into the merge. Its budget is what
 # each worker's share is divided from, so it gets the largest slice here.
-worker_rows   = { kind = "clearable", budget = "40%", max_tokens = 45000 }
+worker_rows   = { kind = "clearable", budget = "40%" }
 
-conversation  = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+conversation  = { kind = "sliding_window", max_items = 30, budget = "12%", strategy = "bulk", overflow = 10 }
 
 # Written by the runtime on an abnormal stage ending: the failed inference's
 # error text, or a note that a stage hit its iteration cap. Pinned so it
 # survives the edge transform into the stage that acts on it.
-error_report  = { kind = "pinned", budget = "1%", max_tokens = 2000 }
+error_report  = { kind = "pinned", budget = "1%" }

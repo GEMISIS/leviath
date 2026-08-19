@@ -138,14 +138,17 @@ read_file = "codebase"
 list_dir = "codebase"
 
 # Region budgets are percentages of the model's context window (ceilings, may sum
-# past 100%); the absolute max_tokens is an optional guard-rail cap. Every
-# blueprint needs an explicit `conversation` sliding_window - it holds the message
-# stream and is carried across stage transitions.
+# past 100%), so a region scales with whatever model the stage runs. Add an
+# absolute max_tokens only where a region genuinely must not grow: a cap below
+# the percentage wins on every large window, which is how a 1M-context model
+# ends up with a 40k region. Every blueprint needs an explicit `conversation`
+# sliding_window - it holds the message stream and is carried across stage
+# transitions.
 [context.regions]
-task         = {{ kind = "pinned",          budget = "2%",  max_tokens = 2000, required = true, seed = "task", required_message = "Describe the coding task via --task." }}
-codebase     = {{ kind = "temporary",       budget = "20%", max_tokens = 30000 }}
-conversation = {{ kind = "sliding_window",  max_items = 20, budget = "15%", max_tokens = 15000, strategy = "bulk", overflow = 10 }}
-scratch      = {{ kind = "clearable",       budget = "8%",  max_tokens = 10000 }}
+task         = {{ kind = "pinned",          budget = "2%", required = true, seed = "task", required_message = "Describe the coding task via --task." }}
+codebase     = {{ kind = "temporary",       budget = "20%" }}
+conversation = {{ kind = "sliding_window",  max_items = 20, budget = "15%", strategy = "bulk", overflow = 10 }}
+scratch      = {{ kind = "clearable",       budget = "8%" }}
 "#,
             name = name
         ),
@@ -195,15 +198,17 @@ well-supported vs speculative claims. Cite specific sources.
 """
 
 # Region budgets are percentages of the model's context window (ceilings, may sum
-# past 100%); absolute max_tokens / threshold_tokens are guard-rail caps. A
+# past 100%), so a region scales with whatever model the stage runs. Add an
+# absolute max_tokens / threshold_tokens only where a region must not grow: a cap
+# below the percentage wins on every large window. A
 # `compacting` region needs a paired `compact_history` region for its summaries.
 [context.regions]
-query           = {{ kind = "pinned",          budget = "2%",  max_tokens = 2000, required = true, seed = "task", required_message = "State the research question via --task." }}
-sources         = {{ kind = "temporary",       budget = "25%", max_tokens = 40000 }}
-findings        = {{ kind = "compacting",      budget = "12%", compact_at = "80%", threshold_tokens = 12000, max_tokens = 15000 }}
-findings_history = {{ kind = "compact_history", source_region = "findings", budget = "3%", max_tokens = 6000 }}
-conversation    = {{ kind = "sliding_window",  max_items = 15, budget = "12%", max_tokens = 12000, strategy = "bulk", overflow = 10 }}
-scratch         = {{ kind = "clearable",       budget = "6%",  max_tokens = 8000 }}
+query           = {{ kind = "pinned",          budget = "2%", required = true, seed = "task", required_message = "State the research question via --task." }}
+sources         = {{ kind = "temporary",       budget = "25%" }}
+findings        = {{ kind = "compacting",      budget = "12%", compact_at = "80%" }}
+findings_history = {{ kind = "compact_history", source_region = "findings", budget = "3%" }}
+conversation    = {{ kind = "sliding_window",  max_items = 15, budget = "12%", strategy = "bulk", overflow = 10 }}
+scratch         = {{ kind = "clearable",       budget = "6%" }}
 "#,
             name = name
         ),
@@ -232,12 +237,14 @@ thoroughly.
 """
 
 # Region budgets are percentages of the model's context window (ceilings, may sum
-# past 100%); the absolute max_tokens is an optional guard-rail cap. Every
+# past 100%), so a region scales with whatever model the stage runs. Add an
+# absolute max_tokens only where a region must not grow: a cap below the
+# percentage wins on every large window. Every
 # blueprint needs an explicit `conversation` sliding_window region.
 [context.regions]
-task         = {{ kind = "pinned",         budget = "2%",  max_tokens = 2000, required = true, seed = "task", required_message = "Describe the task via --task." }}
-conversation = {{ kind = "sliding_window", max_items = 10, budget = "12%", max_tokens = 10000, strategy = "bulk", overflow = 10 }}
-scratch      = {{ kind = "clearable",      budget = "6%",  max_tokens = 5000 }}
+task         = {{ kind = "pinned",         budget = "2%", required = true, seed = "task", required_message = "Describe the task via --task." }}
+conversation = {{ kind = "sliding_window", max_items = 10, budget = "12%", strategy = "bulk", overflow = 10 }}
+scratch      = {{ kind = "clearable",      budget = "6%" }}
 "#,
             name = name
         ),

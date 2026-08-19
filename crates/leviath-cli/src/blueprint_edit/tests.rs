@@ -211,7 +211,10 @@ fn the_views_read_the_coder_the_way_the_lair_does() {
     let task = shared.regions.iter().find(|r| r.name == "task").unwrap();
     assert_eq!(task.kind, "pinned");
     assert_eq!(task.budget_percent, Some(2.0));
-    assert_eq!(task.max_tokens, Some(4000));
+    // Neither a ceiling nor a floor: the percentage decides the size, and both
+    // absolutes are the thing that stopped it deciding anything.
+    assert_eq!(task.max_tokens, None);
+    assert_eq!(task.min_tokens, None);
     assert!(task.required);
     assert!(task.required_message.starts_with("Describe the task"));
     let conventions = shared
@@ -957,9 +960,11 @@ fn regions_are_added_renamed_deleted_and_edited_in_both_scopes() {
     assert!(doc.regions(None).is_empty());
     doc.add_region(&RegionScope::Shared, "notes").unwrap();
     let notes = doc.region(None, "notes").unwrap();
+    // A starter region is a percentage and nothing else: a default ceiling is
+    // exactly what stops the percentage deciding anything on a real window.
     assert_eq!(
         (notes.kind.as_str(), notes.budget_percent, notes.max_tokens),
-        ("pinned", Some(5.0), Some(4000))
+        ("pinned", Some(5.0), None)
     );
     assert!(
         doc.to_toml().contains("[context.regions]"),

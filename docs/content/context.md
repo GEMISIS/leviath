@@ -174,6 +174,14 @@ model resolves to 40,000 tokens. `compact_at = "80%"` then means 80% of *that*, 
 ceiling. Alongside `budget`, it caps the resolved percentage, so the region gets whichever is
 smaller.
 
+That last part is worth dwelling on, because it is easy to write a cap that quietly cancels the
+percentage. `budget = "30%", max_tokens = 40000` is 30% only below a 133k window; above that it is
+a flat 40,000 however large the model, and every bundled agent shipped that way until a 1M-context
+run held its findings to 40k while its own blueprint asked for 314k. If you mean the percentage,
+write the percentage on its own. Reach for `max_tokens` when a region genuinely must not grow, and
+`min_tokens` when a small one must not shrink on a narrow window - and check what the pair resolves
+to at the largest model you expect to run.
+
 A malformed `budget` or `compact_at` string is a hard error at load, so `lev validate` catches it
 instead of a run failing later.
 
@@ -600,5 +608,8 @@ token counts would need rewriting every time.
 
 > [!NOTE]
 > Percentages are ceilings, and they may add up to more than 100%. That is deliberate: regions
-> rarely fill at the same time, so reserving exact shares would waste most of the window. Use
-> `max_tokens` and `threshold_tokens` when you need a limit that really is hard.
+> rarely fill at the same time, so reserving exact shares would waste most of the window. A ceiling
+> also costs nothing until it is reached - a region is charged for what is stored in it, not for its
+> budget - which is why raising one is cheap and capping one is not. Use `max_tokens` and
+> `threshold_tokens` when you need a limit that really is hard, and remember they override the
+> percentage rather than sitting beside it.

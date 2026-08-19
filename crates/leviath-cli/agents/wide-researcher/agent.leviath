@@ -292,23 +292,23 @@ file you wrote.
 
 # ─── Context layout ───────────────────────────────────────────────────────────
 [context.regions]
-query              = { kind = "pinned", budget = "1%", max_tokens = 1000, required = true, seed = "task", required_message = "State the survey topic/area via --task.", volatility = "stable" }
-scope              = { kind = "pinned", budget = "1%", max_tokens = 1500, seed = "scope", volatility = "stable" }
-environment        = { kind = "pinned", budget = "1%", max_tokens = 600, seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
-sources_index      = { kind = "pinned", budget = "3%", max_tokens = 4000, volatility = "grows" }
-format             = { kind = "pinned", budget = "1%", max_tokens = 500, seed = { literal = "Cite non-obvious claims as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Prefer comparison tables where they clarify tradeoffs." }, volatility = "stable" }
+query              = { kind = "pinned", budget = "1%", required = true, seed = "task", required_message = "State the survey topic/area via --task.", volatility = "stable" }
+scope              = { kind = "pinned", budget = "1%", seed = "scope", volatility = "stable" }
+environment        = { kind = "pinned", budget = "1%", seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
+sources_index      = { kind = "pinned", budget = "3%", volatility = "grows" }
+format             = { kind = "pinned", budget = "1%", seed = { literal = "Cite non-obvious claims as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Prefer comparison tables where they clarify tradeoffs." }, volatility = "stable" }
 
-landscape          = { kind = "temporary",      budget = "30%", max_tokens = 50000 }
-deep_dives         = { kind = "sliding_window", max_items = 15, budget = "8%", max_tokens = 9000 }
+landscape          = { kind = "temporary",      budget = "30%" }
+deep_dives         = { kind = "sliding_window", max_items = 15, budget = "8%" }
 # What the parallel researcher workers hand back, one entry each. Pinned: it is
 # the whole point of the fan-out, and compare reads it directly.
-thread_findings    = { kind = "pinned", budget = "20%", max_tokens = 30000, volatility = "grows" }
-comparisons        = { kind = "compacting",      budget = "25%", compact_at = "80%", threshold_tokens = 25000, max_tokens = 35000, volatility = "grows" }
-comparison_history = { kind = "compact_history", source_region = "comparisons", budget = "3%", max_tokens = 10000, volatility = "grows" }
+thread_findings    = { kind = "pinned", budget = "20%", volatility = "grows" }
+comparisons        = { kind = "compacting",      budget = "25%", compact_at = "80%", volatility = "grows" }
+comparison_history = { kind = "compact_history", source_region = "comparisons", budget = "3%", volatility = "grows" }
 
-conversation       = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+conversation       = { kind = "sliding_window", max_items = 30, budget = "12%", strategy = "bulk", overflow = 10 }
 
 # Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
 # inference call's error text, or a note that a stage hit its iteration cap.
 # Pinned so it survives the edge transform into the stage that acts on it.
-error_report       = { kind = "pinned", budget = "1%", max_tokens = 2000 }
+error_report       = { kind = "pinned", budget = "1%" }
