@@ -42,7 +42,7 @@ pub(super) struct RedactedConfig {
 /// The API contract version. Held equal to the OpenAPI spec's `info.version` by
 /// a test, because a version that can silently disagree with the document it
 /// names is worse than no version at all.
-pub(super) const API_VERSION: &str = "0.3.0";
+pub(super) const API_VERSION: &str = "0.4.0";
 
 /// Every capability a client may check for.
 pub(super) const API_CAPABILITIES: &[&str] = &[
@@ -93,6 +93,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // finds out the same way it finds out about the MCP admin routes - by
     // calling one and reading the status.
     "scripts.write",
+    // `provider` as a fifth `kind` on the scripts routes: the drop-in model
+    // providers in `~/.leviath/providers`, which are global to the machine and
+    // take no `?agent=`. Separate from `scripts.read` because a build can serve
+    // the four agent-owned kinds without serving this one, and a console that
+    // offered the kind anyway would put an editor in front of a 400.
+    "scripts.providers",
     "config.gateways",
 ];
 

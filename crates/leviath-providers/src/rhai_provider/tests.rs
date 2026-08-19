@@ -814,3 +814,99 @@ fn a_script_sees_each_system_block_region_and_volatility() {
     let response = tokio_block(p.infer(&request)).expect("the script runs");
     assert_eq!(response.content, "task:stable,findings:grows");
 }
+
+// ── check_source ─────────────────────────────────────────────────────────────
+
+/// The smallest script that is a usable provider.
+const GOOD_PROVIDER: &str = "// @provider mock\n\
+                             // @description a mock\n\
+                             // @default_model mock-1\n\
+                             fn initialize(config) { #{} }\n\
+                             fn inference(state, request) { #{ content: \"hi\" } }";
+
+/// The `Other` message a shape or compile failure carries.
+fn refusal(err: ProviderError) -> String {
+    let ProviderError::Other(message) = err else {
+        unreachable!("a compile or shape failure is Other")
+    };
+    message
+}
+
+#[test]
+fn check_source_accepts_a_provider_and_returns_its_annotations() {
+    let meta = check_source("mock.rhai", GOOD_PROVIDER).expect("a usable provider");
+    assert_eq!(meta.provider.as_deref(), Some("mock"));
+    assert_eq!(meta.description, "a mock");
+    assert_eq!(meta.default_model.as_deref(), Some("mock-1"));
+}
+
+#[test]
+fn check_source_reports_a_syntax_error() {
+    let message = refusal(check_source("mock.rhai", "fn inference( { oops").unwrap_err());
+    assert!(
+        message.contains("compile provider script mock.rhai"),
+        "{message}"
+    );
+}
+
+/// The gap this exists to close: a script with no `inference` used to compile,
+/// initialize and cache, then fail at the first real inference.
+#[test]
+fn check_source_rejects_a_script_with_no_inference() {
+    let message = refusal(check_source("mock.rhai", "fn initialize(config) { #{} }").unwrap_err());
+    assert!(
+        message.contains("must define fn inference(state, request)"),
+        "{message}"
+    );
+}
+
+#[test]
+fn check_source_rejects_a_script_with_no_initialize() {
+    let message =
+        refusal(check_source("mock.rhai", "fn inference(state, request) { #{} }").unwrap_err());
+    assert!(
+        message.contains("must define fn initialize(config)"),
+        "{message}"
+    );
+}
+
+/// A function of the right name and the wrong shape is the likelier typo, and
+/// "not defined" would be a lie about a name that is right there in the file.
+#[test]
+fn check_source_names_the_arity_a_wrong_entry_point_has() {
+    let message = refusal(
+        check_source(
+            "mock.rhai",
+            "fn initialize(config) { #{} }\nfn inference(state) { #{} }",
+        )
+        .unwrap_err(),
+    );
+    assert!(
+        message.contains("fn inference must take 2 parameters (state, request), found 1"),
+        "{message}"
+    );
+}
+
+/// `check_source` compiles and introspects; it must not run the script, or the
+/// ungated validate route would be executing whatever was posted to it.
+#[test]
+fn check_source_does_not_run_initialize() {
+    let src = "fn initialize(config) { throw \"initialize ran\"; }\n\
+               fn inference(state, request) { #{} }";
+    check_source("mock.rhai", src).expect("the throw is never reached");
+}
+
+/// The loader agrees with the route: what `check_source` refuses, a load
+/// refuses too, so a script the API accepts is one a run will accept.
+#[test]
+fn from_source_rejects_a_script_with_no_inference() {
+    let message = refusal(
+        build("fn initialize(config) { #{} }", FakeExecutor::new())
+            .err()
+            .expect("inference is required"),
+    );
+    assert!(
+        message.contains("fn inference(state, request)"),
+        "{message}"
+    );
+}

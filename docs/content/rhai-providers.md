@@ -75,7 +75,9 @@ tokens_per_minute   = 100000
 ## The script contract
 
 A provider defines `initialize` and `inference` (required) and may add `stream`, `count_tokens`, and
-`list_models`. Metadata comes from leading `// @key value` comments.
+`list_models`. Metadata comes from leading `// @key value` comments. Both required functions are
+checked when the script loads, so one that is missing or takes the wrong number of parameters is
+skipped with a warning, the same as a syntax error, rather than failing part-way into a run.
 
 `initialize(config)` runs once when the provider loads. It runs **offline**, so no HTTP host
 functions are available here. Return a state map that is persisted and passed to every later call.
@@ -347,6 +349,12 @@ lev run <agent> --task "..."      # a live run through a stage that references t
 > so a syntax error looks like "my agent quietly used the wrong model". Run
 > `lev models list --provider <name>` first; a compile or auth error surfaces there instead of
 > hiding behind a fallback.
+
+If `lev serve` is running, `POST /api/scripts/validate` with `kind: "provider"` answers the same
+question without a run and without a key: it compiles the text and checks that `initialize(config)`
+and `inference(state, request)` are both there. The rest of the [scripts
+API](/docs/api#tools-and-scripts) manages the directory itself, so a console can list, open, edit and
+save a provider the same way it does a script tool.
 
 ## Not in scope
 

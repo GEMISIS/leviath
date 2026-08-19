@@ -50,6 +50,61 @@ use host::{BrokerJob, HostHttpError, HttpExecutor};
 
 pub use meta::{ProviderMeta, parse_provider_annotations};
 
+/// The entry points every provider script must define, as the error messages
+/// spell them: the name, how many parameters it takes, and the parameter list
+/// to show whoever has to fix it.
+const REQUIRED_FNS: [(&str, usize, &str); 2] = [
+    ("initialize", 1, "config"),
+    ("inference", 2, "state, request"),
+];
+
+/// Compile a provider script and check its shape without running any of it.
+///
+/// The counterpart to `leviath_scripting::tool::check_source` and
+/// `region_hook::compile`: what lets an editor find out whether a script is
+/// usable before a run does. It stops at the AST on purpose, because
+/// `initialize` is script code and the caller compiling arbitrary submitted
+/// text is an ungated HTTP route.
+///
+/// The engine is the one [`RhaiProvider::from_source`] compiles with rather
+/// than a bare `Engine::new`, so the verdict is the one a load would reach.
+/// That is not cosmetic: the shared hardening raises Rhai's expression-depth
+/// limits, which are low enough in a debug build to reject legitimate scripts.
+pub fn check_source(label: &str, src: &str) -> Result<ProviderMeta> {
+    let meta = parse_provider_annotations(src);
+    let ast = build_init_engine(Arc::new(Vec::new()))
+        .compile(src)
+        .map_err(|e| ProviderError::Other(format!("compile provider script {label}: {e}")))?;
+    require_entry_points(label, &ast)?;
+    Ok(meta)
+}
+
+/// Check that a compiled script defines `initialize` and `inference`.
+///
+/// Both are required, but only `initialize` used to be caught at load, because
+/// loading calls it. A script with no `inference` compiled, initialized and
+/// cached, then failed at the first real inference - by which point a run had
+/// started and the failure looked like a provider outage rather than a typo.
+/// Reading it off the AST moves that to the moment the script is read.
+fn require_entry_points(label: &str, ast: &AST) -> Result<()> {
+    for (name, params, signature) in REQUIRED_FNS {
+        if has_fn(ast, name, params) {
+            continue;
+        }
+        let found = ast
+            .iter_functions()
+            .find(|f| f.name == name)
+            .map(|f| f.params.len());
+        return Err(ProviderError::Other(match found {
+            Some(n) => {
+                format!("{label}: fn {name} must take {params} parameters ({signature}), found {n}")
+            }
+            None => format!("{label}: script must define fn {name}({signature})"),
+        }));
+    }
+    Ok(())
+}
+
 /// A boxed script-function call: builds the `Scope` and invokes one Rhai
 /// function on the given engine, returning its `Dynamic` result. Boxed (not a
 /// generic) so [`RhaiProvider::dispatch`] has a single instantiation.
@@ -139,6 +194,11 @@ impl RhaiProvider {
         let ast = init_engine
             .compile(src)
             .map_err(|e| ProviderError::Other(format!("compile provider script {name}: {e}")))?;
+        // Before `initialize` runs, so a script with no `inference` is refused
+        // here rather than at the first inference. A refused script is skipped
+        // with a warning and selection falls through to the next model, the
+        // same way a syntax error already behaves.
+        require_entry_points(&name, &ast)?;
 
         // Run initialize(config) offline (no network host fns registered).
         let config_dyn = rhai::serde::to_dynamic(init_config).unwrap_or(Dynamic::UNIT);

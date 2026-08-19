@@ -133,7 +133,7 @@ fn redacted(value: &Option<String>) -> &'static str {
 /// Every field is optional. Keys not recognized below flow into [`Self::extra`]
 /// and are forwarded to the script's `initialize(config)` alongside `base_url`
 /// and `api_key`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct ModelProviderConfig {
     /// Script filename stem or path. Defaults to `<name>.rhai` in the providers
     /// directory (`~/.leviath/providers/`).
@@ -156,4 +156,26 @@ pub struct ModelProviderConfig {
     /// Any additional keys, forwarded verbatim into the script's `initialize`.
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
+}
+
+/// Hand-written for the same reason [`ProviderConfig`]'s is, and with one extra
+/// hazard: `extra` is forwarded verbatim into the script's `initialize`, which
+/// is exactly where a second credential goes when a gateway wants one under its
+/// own name. A derived `Debug` would print both `api_key` and every value in
+/// `extra`, so this reports whether the key is set and the *names* in `extra`
+/// and nothing else - the same shape `GatewayInfo` puts on the wire.
+impl std::fmt::Debug for ModelProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Sorted: a `HashMap` iterates differently between two calls, and a
+        // debug line that reorders itself is one nobody can diff.
+        let mut extra_keys: Vec<&str> = self.extra.keys().map(String::as_str).collect();
+        extra_keys.sort_unstable();
+        f.debug_struct("ModelProviderConfig")
+            .field("script", &self.script)
+            .field("api_key", &redacted(&self.api_key))
+            .field("base_url", &self.base_url)
+            .field("rate_limit", &self.rate_limit)
+            .field("extra_keys", &extra_keys)
+            .finish()
+    }
 }
