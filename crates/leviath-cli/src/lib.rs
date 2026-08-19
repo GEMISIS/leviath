@@ -12,6 +12,7 @@
 //! struct around it says which command it belongs to.
 
 pub mod approvals;
+pub mod blueprint_edit;
 pub mod bundled;
 pub mod commands;
 pub mod config;

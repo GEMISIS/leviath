@@ -102,7 +102,9 @@ pub struct Wizard {
     /// why it is a `Cell`.
     pub help_scroll: std::cell::Cell<usize>,
     /// The open chooser for a Defaults value, if one is open.
-    pub picker: Option<Picker>,
+    pub(crate) picker: Option<Picker>,
+    /// Which Defaults field the open chooser is choosing for.
+    pub(crate) picker_field: usize,
 }
 
 /// The environment variables the wizard reports as already-supplying a
@@ -218,6 +220,7 @@ impl Wizard {
             show_advanced: false,
             help_scroll: std::cell::Cell::new(0),
             picker: None,
+            picker_field: 0,
         };
         wizard.rebuild_defaults();
         wizard
@@ -734,16 +737,18 @@ impl Wizard {
                 PickerOption { value, detail }
             })
             .collect();
-        self.picker = Some(Picker {
-            field,
+        self.picker_field = field;
+        // Opening on the current value rather than at the top: the list is
+        // long, and "where am I now" is the first thing you look for.
+        self.picker = Some(Picker::new(
             title,
-            explain: Self::precedence_explanation(field == Self::PROVIDER_FIELD),
-            query: crate::tui::widgets::line_edit::LineEdit::new(String::new(), false),
+            Self::precedence_explanation(field == Self::PROVIDER_FIELD)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             options,
-            // Opening on the current value rather than at the top: the list is
-            // long, and "where am I now" is the first thing you look for.
-            cursor: index,
-        });
+            index,
+        ));
     }
 
     /// What a provider id is, for the chooser's second column.
@@ -775,22 +780,18 @@ impl Wizard {
         format!("reported by {}", reported.join(", "))
     }
 
-    /// Take the chooser's answer, writing it back into the field it came from.
-    pub(super) fn commit_picker(&mut self, picker: Picker) {
-        let Some(chosen) = picker.selected() else {
-            // An empty filter has nothing to choose; closing without a change
-            // is the only honest outcome.
-            return;
-        };
+    /// Take the chooser's answer (an index into its options), writing it
+    /// back into the field it came from.
+    pub(super) fn commit_picker(&mut self, chosen: usize) {
         // The chooser's options were built from this field's, one for one and
-        // in order, so the match index *is* the field's index. Indexing rather
+        // in order, so the option index *is* the field's index. Indexing rather
         // than looking up: the field is where it was when the chooser opened,
         // and nothing rebuilds the form while one is on screen.
-        self.defaults[picker.field].value.set_index(chosen);
+        self.defaults[self.picker_field].value.set_index(chosen);
         self.dirty = true;
         // The concurrency default follows the provider, so an Ollama-first
         // setup does not inherit a number meant for hosted APIs.
-        if picker.field == Self::PROVIDER_FIELD {
+        if self.picker_field == Self::PROVIDER_FIELD {
             self.apply_provider_concurrency_default();
         }
     }

@@ -1426,13 +1426,7 @@ fn clicking_a_row_in_the_chooser_takes_it_and_the_wheel_moves_within_it() {
     assert!(w.picker.is_some());
 
     let row = (0..AREA.height)
-        .find(|y| {
-            crate::commands::setup::render::picker_row_at(
-                AREA,
-                w.picker.as_ref().expect("open"),
-                *y,
-            ) == Some(2)
-        })
+        .find(|y| w.picker.as_ref().expect("open").row_at(AREA, *y) == Some(2))
         .expect("the third match is on screen");
     w.handle_mouse(click(6, row), AREA);
 

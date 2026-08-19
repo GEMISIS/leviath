@@ -53,7 +53,7 @@ pub struct ListArgs {
 #[derive(serde::Serialize)]
 pub(crate) struct AgentInfo {
     pub(crate) name: String,
-    version: String,
+    pub(crate) version: String,
     pub(crate) description: String,
     /// The agent's `[read_paths]` grant status under the active config, when it
     /// declares any. Shown because a declaration nothing grants is inert, and

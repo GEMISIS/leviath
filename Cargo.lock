@@ -2456,9 +2456,11 @@ dependencies = [
  "socket2",
  "temp-env",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
  "toml",
+ "toml_edit",
  "tower",
  "tower-http 0.7.0",
  "tracing",
@@ -4814,6 +4816,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
