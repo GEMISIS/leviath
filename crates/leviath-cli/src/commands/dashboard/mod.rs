@@ -1,5 +1,6 @@
 //! `lev dash` - Interactive terminal UI for managing concurrent agents.
 
+mod agents;
 mod construct;
 mod context_tree;
 mod detail_band;
@@ -12,6 +13,7 @@ mod mcp;
 mod new_run;
 mod new_run_preview;
 mod render;
+mod run_actions;
 mod selection;
 mod state;
 #[cfg(test)]
@@ -240,6 +242,8 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
         mcp_ctx,
         new_run::production_new_run_context(),
     );
+    // The agent editor keeps its canvas arrangements under the data dir.
+    dashboard.layout_store_path = crate::blueprint_edit::LayoutStore::default_path();
 
     // Forward the dashboard's control commands to the daemon, and report each
     // result back so a refused command is surfaced rather than swallowed. A

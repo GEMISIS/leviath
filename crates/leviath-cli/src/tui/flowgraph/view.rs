@@ -20,6 +20,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::Block;
 
+use crate::blueprint_edit::Positions;
 use crate::tui::theme::C_ACCENT;
 
 use super::content::{
@@ -71,6 +72,15 @@ pub(crate) enum Selection {
     Nothing,
 }
 
+/// What the canvas did with the mouse that the editor has to act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CanvasEvent {
+    /// A handle was dragged onto another box: a path to add.
+    Connected { from: String, to: String },
+    /// A box was dropped somewhere new: positions to remember.
+    Moved,
+}
+
 /// One drawn edge, remembered so live restyling can find it.
 #[derive(Debug, Clone)]
 struct EdgeMeta {
@@ -91,6 +101,13 @@ pub(crate) struct FlowView {
     layout: GraphLayout,
     edges: Vec<EdgeMeta>,
     locked: bool,
+    /// An editor: handles show and connect, and the mouse's connections and
+    /// drops are reported through [`FlowView::take_events`].
+    edit: bool,
+    /// Where dragged boxes were left (an editor); empty means the layered
+    /// layout places every box.
+    positions: Positions,
+    events: Vec<CanvasEvent>,
     direction: Direction,
     /// Until the user turns the graph by hand, the first draw picks the
     /// direction that fits.
@@ -122,6 +139,39 @@ pub(crate) struct FlowView {
 /// Box size and gaps: `(node_w, node_h, gap_x, gap_y)`.
 fn metrics(longest_id: usize) -> (f64, f64, f64, f64) {
     (node_width(longest_id), NODE_HEIGHT, 8.0, 1.0)
+}
+
+/// Put saved positions on the boxes, and any box without one to the right
+/// of the rightmost saved box (the way The Lair appends a new stage), so an
+/// arrangement survives a stage being added.
+fn apply_positions(
+    flow: &mut Flow<StageNodeContent, StepEdge>,
+    positions: &Positions,
+    node_w: f64,
+    node_h: f64,
+    gap_x: f64,
+    gap_y: f64,
+) {
+    if positions.is_empty() {
+        return;
+    }
+    let mut right = f64::MIN;
+    let mut top = f64::MAX;
+    for (x, y) in positions.values() {
+        right = right.max(x + node_w);
+        top = top.min(*y);
+    }
+    let ids: Vec<String> = flow.nodes().map(|n| n.id.clone()).collect();
+    let mut appended = 0.0;
+    for id in ids {
+        match positions.get(&id) {
+            Some((x, y)) => flow.set_node_position(&id, (*x, *y)),
+            None => {
+                flow.set_node_position(&id, (right + gap_x, top + appended));
+                appended += node_h + gap_y;
+            }
+        }
+    }
 }
 
 /// Which sides an edge leaves and enters on, and how far it travels before
@@ -183,9 +233,10 @@ impl std::fmt::Debug for FlowView {
 /// attaches. The forward sides (out along the flow, in against it) sit at
 /// the middle of their edge; the lane sides carry the source a little past
 /// the middle and the target a little before it, so a loop leaves and
-/// re-enters at different cells. Hidden: the canvas is not an editor, and
-/// handle glyphs read as ports.
-fn handles(direction: Direction) -> Vec<Handle> {
+/// re-enters at different cells. Hidden on a viewer, where handle glyphs
+/// would read as ports; on an editor the flow-side pair shows and connects,
+/// and the lanes stay hidden (routing, not ports).
+fn handles(direction: Direction, edit: bool) -> Vec<Handle> {
     let (out, back, lane_a, lane_b) = match direction {
         Direction::LeftToRight => (
             HandlePosition::Right,
@@ -203,25 +254,29 @@ fn handles(direction: Direction) -> Vec<Handle> {
     vec![
         Handle::source(out)
             .with_id(out.side_name())
-            .with_hidden(true),
+            .with_hidden(!edit),
         Handle::source(lane_a)
             .with_id(lane_a.side_name())
             .with_offset(0.7)
+            .with_connectable(false)
             .with_hidden(true),
         Handle::source(lane_b)
             .with_id(lane_b.side_name())
             .with_offset(0.7)
+            .with_connectable(false)
             .with_hidden(true),
         Handle::target(back)
             .with_id(back.side_name())
-            .with_hidden(true),
+            .with_hidden(!edit),
         Handle::target(lane_a)
             .with_id(lane_a.side_name())
             .with_offset(0.3)
+            .with_connectable(false)
             .with_hidden(true),
         Handle::target(lane_b)
             .with_id(lane_b.side_name())
             .with_offset(0.3)
+            .with_connectable(false)
             .with_hidden(true),
     ]
 }
@@ -233,6 +288,8 @@ fn build(
     layout: &GraphLayout,
     locked: bool,
     direction: Direction,
+    edit: bool,
+    positions: &Positions,
 ) -> (Flow<StageNodeContent, StepEdge>, Vec<EdgeMeta>, f64) {
     let longest = graph
         .nodes
@@ -252,11 +309,13 @@ fn build(
                 (node_w, node_h),
                 StageNodeContent::from_node(n),
             )
-            .with_handles(handles(direction))
-            .with_connectable(false)
+            .with_handles(handles(direction, edit))
+            // An external blueprint is drawn, not edited: nothing connects to
+            // it and it cannot be moved.
+            .with_connectable(edit && n.kind != super::model::NodeKind::ExternalBlueprint)
             .with_deletable(false)
             .with_resizable(false)
-            .with_draggable(!locked)
+            .with_draggable(!locked && n.kind != super::model::NodeKind::ExternalBlueprint)
         })
         .collect();
 
@@ -286,7 +345,11 @@ fn build(
                 .with_target_side(tgt)
                 .with_deletable(false)
                 .with_hidden(e.class == EdgeClass::Escape);
-            let label = e.condition_label();
+            let label = if edit {
+                e.editor_label()
+            } else {
+                e.condition_label()
+            };
             if !label.is_empty() {
                 edge = edge.with_label(format!("[{label}]"));
             }
@@ -308,6 +371,20 @@ fn build(
         .with_deselect_on_pane_click(false)
         .with_locked(locked);
     flow.set_node_positions(layout.positions(direction, node_w, node_h, gap_x, gap_y));
+    apply_positions(&mut flow, positions, node_w, node_h, gap_x, gap_y);
+    if edit {
+        // A path that exists is not drawn twice, whichever handles a drag
+        // would route it through; and a box cannot be wired to itself on
+        // the canvas (rataflow refuses), so a self-loop is added by key.
+        let pairs: HashSet<(String, String)> = graph
+            .edges
+            .iter()
+            .map(|e| (e.from.clone(), e.to.clone()))
+            .collect();
+        flow.set_connection_validator(move |c| {
+            !pairs.contains(&(c.source.clone(), c.target.clone()))
+        });
+    }
     // No fit here: the first `render` settles the viewport for the area it
     // gets. A fit requested now would land after that and undo it.
     (flow, metas, max_stem)
@@ -319,14 +396,39 @@ impl FlowView {
     /// explorer is unlocked, so boxes can be dragged into a better
     /// arrangement and clicked to select.
     pub(crate) fn new(graph: Arc<StageGraph>, locked: bool) -> Self {
+        Self::build_view(graph, locked, false, Positions::new())
+    }
+
+    /// Build the canvas as an editor: handles show and connect, boxes drag,
+    /// every edge is drawn, and `positions` (from an earlier session) place
+    /// the boxes.
+    pub(crate) fn new_editor(graph: Arc<StageGraph>, positions: Positions) -> Self {
+        let mut view = Self::build_view(graph, false, true, positions);
+        view.show_all = true;
+        view.show_escape = true;
+        view.sync_visibility();
+        view
+    }
+
+    fn build_view(graph: Arc<StageGraph>, locked: bool, edit: bool, positions: Positions) -> Self {
         let layout = layout::layout(&graph);
-        let (flow, edges, max_stem) = build(&graph, &layout, locked, Direction::LeftToRight);
+        let (flow, edges, max_stem) = build(
+            &graph,
+            &layout,
+            locked,
+            Direction::LeftToRight,
+            edit,
+            &positions,
+        );
         Self {
             flow,
             graph,
             layout,
             edges,
             locked,
+            edit,
+            positions,
+            events: Vec::new(),
             direction: Direction::LeftToRight,
             auto_direction: true,
             show_escape: false,
@@ -347,7 +449,68 @@ impl FlowView {
     /// overlay carry over.
     pub(crate) fn rotate(&mut self) {
         self.auto_direction = false;
+        // Turning the graph is asking for the layout's arrangement.
+        self.positions.clear();
         self.rebuild(self.direction.rotated());
+    }
+
+    /// Draw a different graph on the same canvas (the editor after an edit):
+    /// selection by id, viewport, direction and toggles carry over;
+    /// `positions` place the boxes.
+    pub(crate) fn replace_graph(&mut self, graph: Arc<StageGraph>, positions: Positions) {
+        self.graph = graph;
+        self.layout = layout::layout(&self.graph);
+        self.positions = positions;
+        let area = self.last_area;
+        self.rebuild(self.direction);
+        // Same area, same camera: a rebuild here is an edit, not a resize.
+        self.last_area = area;
+    }
+
+    /// Where every stage box sits now, for the layout store.
+    pub(crate) fn positions(&self) -> Positions {
+        self.flow
+            .nodes()
+            .filter(|n| !n.id.starts_with("ext:"))
+            .map(|n| (n.id.clone(), (n.position.x, n.position.y)))
+            .collect()
+    }
+
+    /// The mouse's connections and drops since the last call.
+    pub(crate) fn take_events(&mut self) -> Vec<CanvasEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// Mark a stage as named by the problems list, and as having its own
+    /// context layout: the box shows a `!` and a `▣ own context` badge.
+    pub(crate) fn set_flags(&mut self, id: &str, problem: bool, own_layout: bool) {
+        if let Some(content) = self.flow.node_content_mut(id) {
+            content.problem = problem;
+            content.own_layout = own_layout;
+        }
+    }
+
+    /// Bring a stage on screen at the next draw.
+    pub(crate) fn reveal(&mut self, id: &str) {
+        self.reveal = Some(id.to_string());
+    }
+
+    /// Nothing selected: the inspector falls back to the agent.
+    pub(crate) fn clear_selection(&mut self) {
+        self.flow.clear_selection();
+    }
+
+    /// Select the path from one stage to another.
+    pub(crate) fn select_edge(&mut self, from: &str, to: &str) {
+        if let Some(meta) = self
+            .edges
+            .iter()
+            .find(|m| m.edge.from == from && m.edge.to == to)
+        {
+            let id = meta.id.clone();
+            self.flow.clear_selection();
+            self.flow.select_edge(&id);
+        }
     }
 
     /// Which way the layers run.
@@ -357,7 +520,19 @@ impl FlowView {
 
     fn rebuild(&mut self, direction: Direction) {
         let selected = self.flow.first_selected_node_id();
-        let (flow, edges, max_stem) = build(&self.graph, &self.layout, self.locked, direction);
+        let selected_edge = match self.selection() {
+            Selection::Edge(e) => Some((e.from, e.to)),
+            _ => None,
+        };
+        let viewport = self.flow.viewport;
+        let (flow, edges, max_stem) = build(
+            &self.graph,
+            &self.layout,
+            self.locked,
+            direction,
+            self.edit,
+            &self.positions,
+        );
         self.flow = flow;
         self.edges = edges;
         self.max_stem = max_stem;
@@ -368,9 +543,16 @@ impl FlowView {
         self.sync_visibility();
         if let Some(id) = selected {
             self.flow.select_node(&id);
+        } else if let Some((from, to)) = selected_edge {
+            self.select_edge(&from, &to);
         }
-        // Settle again for the current area at the next draw.
-        self.last_area = Rect::default();
+        // An editor keeps its camera across an edit; a rebuild from a turn
+        // settles again for the current area at the next draw.
+        if self.edit {
+            self.flow.viewport = viewport;
+        } else {
+            self.last_area = Rect::default();
+        }
     }
 
     /// The longest edge lane, in rows above or below the nodes.
@@ -564,7 +746,23 @@ impl FlowView {
                 | MouseEventKind::ScrollDown
         );
         if forward {
-            let _ = self.flow.handle_mouse_event(event);
+            let response = self.flow.handle_mouse_event(event);
+            if self.edit {
+                for ev in response.events() {
+                    match ev {
+                        rataflow::FlowEvent::ConnectionCompleted(c) => {
+                            self.events.push(CanvasEvent::Connected {
+                                from: c.source.clone(),
+                                to: c.target.clone(),
+                            });
+                        }
+                        rataflow::FlowEvent::NodeDragEnded { .. } => {
+                            self.events.push(CanvasEvent::Moved);
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
         forward
     }
@@ -1268,5 +1466,118 @@ merge_stage = "merge"
         // New size: fit again.
         draw(&mut v, 60, 20);
         assert_ne!(v.zoom(), zoomed);
+    }
+
+    #[test]
+    fn an_editor_shows_every_edge_connects_by_mouse_and_reports_it() {
+        let mut v = FlowView::new_editor(graph(), Positions::new());
+        assert!(v.show_all() && v.show_escape());
+        assert!(
+            !v.edge_hidden("implement", "recover"),
+            "escapes show on an editor"
+        );
+        let (_, text) = draw(&mut v, 220, 50);
+        assert!(
+            text.contains("[hint]") || text.contains("[always]"),
+            "{text}"
+        );
+        assert!(text.contains("●"), "handles show: {text}");
+        // Drag from done's source handle onto plan's target handle: a new
+        // connection, reported once and not drawn (the editor adds it).
+        let (_, dy, dr, db) = v.node_rect("done").expect("drawn");
+        let (px, py, _, pb) = v.node_rect("plan").expect("drawn");
+        let from = ((dr - 1) as u16, ((dy + db) / 2) as u16);
+        let to = (px as u16, ((py + pb) / 2) as u16);
+        v.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            from.0,
+            from.1,
+        ));
+        v.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            to.0 + 5,
+            to.1,
+        ));
+        v.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1));
+        v.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1));
+        assert_eq!(
+            v.take_events(),
+            vec![CanvasEvent::Connected {
+                from: "done".into(),
+                to: "plan".into()
+            }]
+        );
+        assert!(v.take_events().is_empty(), "taken once");
+        // A pair that already exists is refused by the validator: no event.
+        let (_, py2, pr, pb2) = v.node_rect("plan").expect("drawn");
+        let (ix, iy, _, ib) = v.node_rect("implement").expect("drawn");
+        let from = ((pr - 1) as u16, ((py2 + pb2) / 2) as u16);
+        let to = (ix as u16, ((iy + ib) / 2) as u16);
+        v.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            from.0,
+            from.1,
+        ));
+        v.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1));
+        v.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1));
+        assert!(v.take_events().is_empty(), "plan → implement exists");
+        // Dragging a box reports a move, and the positions read back.
+        let (x, y, _, _) = v.node_rect("review").expect("drawn");
+        let (x, y) = (x as u16 + 2, y as u16 + 1);
+        v.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+        v.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), x + 8, y + 4));
+        v.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), x + 8, y + 4));
+        assert_eq!(v.take_events(), vec![CanvasEvent::Moved]);
+        let positions = v.positions();
+        assert_eq!(positions.len(), 5, "every stage, no ext: nodes");
+        // Flags and selection helpers.
+        v.set_flags("plan", true, true);
+        v.set_flags("ghost", true, true);
+        v.select_stage("plan");
+        let (_, text) = draw(&mut v, 220, 50);
+        assert!(text.contains("! ○ plan"), "{text}");
+        assert!(text.contains("▣ own context"), "{text}");
+        v.clear_selection();
+        assert_eq!(v.selection(), Selection::Nothing);
+        let plan_implement = v
+            .graph()
+            .edges
+            .iter()
+            .find(|e| e.from == "plan" && e.to == "implement")
+            .cloned()
+            .expect("in the graph");
+        v.select_edge("plan", "implement");
+        assert_eq!(v.selection(), Selection::Edge(plan_implement.clone()));
+        v.select_edge("plan", "nowhere");
+        assert_eq!(
+            v.selection(),
+            Selection::Edge(plan_implement.clone()),
+            "an unknown path leaves the selection"
+        );
+        v.reveal("done");
+        draw(&mut v, 220, 50);
+        // Replace the graph: the moved box keeps its place, the camera stays,
+        // the selected edge is selected again.
+        let camera = v.pan();
+        let mut positions = v.positions();
+        let review = positions["review"];
+        // A stage the positions do not know lands right of the rightmost.
+        positions.remove("done");
+        v.replace_graph(graph(), positions.clone());
+        assert_eq!(v.positions()["review"], review);
+        assert_eq!(v.pan(), camera);
+        assert_eq!(v.selection(), Selection::Edge(plan_implement));
+        let done = v.positions()["done"];
+        assert!(
+            done.0 > review.0,
+            "appended to the right: {done:?} vs {review:?}"
+        );
+        // Turning the graph forgets the arrangement.
+        v.rotate();
+        assert_ne!(v.positions()["review"], review);
+        // A rebuild with a stage node selected keeps it.
+        v.select_stage("plan");
+        v.replace_graph(graph(), Positions::new());
+        assert_eq!(v.selection(), Selection::Node("plan".into()));
     }
 }

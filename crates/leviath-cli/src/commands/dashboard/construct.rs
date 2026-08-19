@@ -168,6 +168,8 @@ impl Dashboard {
             new_run_yolo: false,
             yolo_warning_silenced: false,
             new_run_ctx,
+            agent_builder: None,
+            layout_store_path: None,
             spawn_cmd_tx,
             spawn_outcome_rx,
             spawn_bg_ends: Some((spawn_cmd_rx, spawn_outcome_tx)),

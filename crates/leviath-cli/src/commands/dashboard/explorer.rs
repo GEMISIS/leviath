@@ -75,6 +75,14 @@ impl Dashboard {
         if let Some(Ok(view)) = self.new_run_preview.as_mut().map(|p| p.view.as_mut()) {
             view.tick(elapsed);
         }
+        if let Some(screen) = self.agent_builder.as_deref_mut() {
+            if let Some((_, Ok(view))) = screen.catalog.preview.as_mut() {
+                view.tick(elapsed);
+            }
+            if let Some(editor) = screen.editor.as_mut() {
+                editor.view.tick(elapsed);
+            }
+        }
     }
 
     /// Keys while the full-screen stage explorer is open. The explorer owns
@@ -296,6 +304,16 @@ impl Dashboard {
                     .filter(|_| open)
                     .and_then(|p| p.view.as_mut().ok())
             }
+            PaneId::AgentsPreview => self
+                .agent_builder
+                .as_deref_mut()
+                .and_then(|s| s.catalog.preview.as_mut())
+                .and_then(|(_, view)| view.as_mut().ok()),
+            PaneId::AgentEditorGraph => self
+                .agent_builder
+                .as_deref_mut()
+                .and_then(|s| s.editor.as_mut())
+                .map(|e| &mut e.view),
             PaneId::RunTable | PaneId::LogPanel => None,
         }
     }

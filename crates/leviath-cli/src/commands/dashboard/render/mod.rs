@@ -30,6 +30,20 @@ impl Dashboard {
         // registers where it actually drew.
         self.pane_rects.clear();
 
+        if self.agent_builder.is_some() {
+            self.draw_agents_screen(frame, frame.area());
+            self.apply_selection_overlay(frame);
+            self.draw_toasts(frame);
+            if self.show_help {
+                self.draw_help_overlay(frame);
+            }
+            // Delete, reset, discard and stage-delete confirmations open
+            // over this screen.
+            if let Some((_, dialog)) = &self.pending_confirm {
+                dialog.draw(frame, frame.area());
+            }
+            return;
+        }
         if self.mcp_screen {
             self.draw_mcp_screen(frame, frame.area());
             self.apply_selection_overlay(frame);

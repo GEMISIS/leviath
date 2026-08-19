@@ -585,6 +585,8 @@ impl Dashboard {
             Span::raw(" mark  "),
             Span::styled("[m]", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" mcp  "),
+            Span::styled("[a]", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" agents  "),
         ];
         if can_kill {
             spans.push(Span::styled(

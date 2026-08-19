@@ -77,6 +77,10 @@ pub(super) enum PaneId {
     DetailBand,
     /// The new-run screen's blueprint preview: a drag pans.
     NewRunPreview,
+    /// The Agents screen's preview of the selected agent: a drag pans.
+    AgentsPreview,
+    /// The agent editor's canvas: boxes drag, handles connect.
+    AgentEditorGraph,
 }
 
 impl PaneId {
@@ -85,7 +89,11 @@ impl PaneId {
     pub(super) fn is_graph(self) -> bool {
         matches!(
             self,
-            PaneId::ExplorerGraph | PaneId::DetailBand | PaneId::NewRunPreview
+            PaneId::ExplorerGraph
+                | PaneId::DetailBand
+                | PaneId::NewRunPreview
+                | PaneId::AgentsPreview
+                | PaneId::AgentEditorGraph
         )
     }
 }
@@ -155,6 +163,14 @@ pub(super) enum ConfirmAction {
     McpRemove { name: String },
     /// Turn on unattended runs for the new-run screen.
     EnableYolo,
+    /// Delete an installed agent's directory (the Agents screen).
+    AgentDelete { name: String },
+    /// Put a bundled agent's embedded copy back (the Agents screen).
+    AgentReset { name: String },
+    /// Delete a stage in the agent editor, with its paths.
+    StageDelete { name: String },
+    /// Close the agent editor and lose its unsaved edits.
+    EditorDiscard,
 }
 
 /// Display status for agents in the dashboard.

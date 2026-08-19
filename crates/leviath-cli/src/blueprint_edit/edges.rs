@@ -67,6 +67,11 @@ impl ManifestDoc {
             NEW_EDGE_HINT,
         );
         table.insert(to, edge);
+        // A headed `[stages.x.transitions]` with paths under it is implied
+        // by them; only an empty one (a terminal stage) is written out.
+        if let Item::Table(t) = transitions {
+            t.set_implicit(true);
+        }
         Ok(())
     }
 
@@ -75,10 +80,19 @@ impl ManifestDoc {
         let stage = self
             .stage_item_mut(from)
             .ok_or_else(|| EditError::NoSuchStage(from.to_string()))?;
-        let removed = child_mut(stage, "transitions")
-            .and_then(|t| t.as_table_like_mut().expect("child_mut checked").remove(to));
-        if removed.is_none() {
+        let Some(transitions) = child_mut(stage, "transitions") else {
             return Err(EditError::NoSuchEdge(from.to_string(), to.to_string()));
+        };
+        let table = transitions.as_table_like_mut().expect("child_mut checked");
+        if table.remove(to).is_none() {
+            return Err(EditError::NoSuchEdge(from.to_string(), to.to_string()));
+        }
+        // The last path gone: the empty table is what says "terminal", so
+        // it has to be written.
+        if let Item::Table(t) = transitions
+            && t.is_empty()
+        {
+            t.set_implicit(false);
         }
         Ok(())
     }

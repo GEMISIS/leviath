@@ -136,6 +136,10 @@ impl Dashboard {
     /// cursor, hit-tested against the rects each renderer registered this
     /// frame - not whichever pane the keyboard last touched.
     pub(super) fn handle_mouse(&mut self, event: MouseEvent) {
+        // The Agents screen's chooser and canvas take the mouse first.
+        if self.agent_builder.is_some() && self.handle_agents_mouse(event) {
+            return;
+        }
         // A graph canvas takes the mouse before the selection machinery: a
         // pan is not a copy highlight.
         if self.route_mouse_to_graph(event) {

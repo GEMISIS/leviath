@@ -41,6 +41,9 @@ panel and answer. `lev respond` does the same from the shell.
   **Logs**, and **Context** (JSON). Markdown is rendered. `g` opens the graph full screen.
 - **Interactions**: answer an agent's question (free-text, edit, multiple-choice, tool-approval, or
   confirm) or send it a mid-run message.
+- **Agents**: the catalog of agents this machine can run (`a`), and an editor that builds one on
+  the same graph canvas: stages as boxes, paths drawn between them, an inspector for whatever is
+  selected. The same editor The Lair has, in the terminal.
 - **Mouse support**: wheel scroll, click-drag select with copy-on-release, OSC52 copy over SSH,
   `y` to yank a pane, Shift+drag for native selection.
 - **`m`** opens the MCP management screen without leaving the dashboard.
@@ -57,7 +60,8 @@ where `?` would be typed as text: on the new-run screen every printable characte
 filter or the task.
 
 Besides the main list and the detail view below, there is a screen for starting a run (`n`), one for
-MCP servers (`m`), and the stage explorer (`g`, from the detail view).
+your agents and the agent editor (`a`), one for MCP servers (`m`), and the stage explorer (`g`, from
+the detail view).
 
 ### Main list
 
@@ -220,6 +224,78 @@ the cursor, click a stage to select it. While the explorer is open the detail vi
 what the table above says rather than what they mean underneath.
 
 `lev validate --graph <agent>` prints the same picture as plain text.
+
+### Agents (`a`)
+
+The catalog: every agent `lev run` can resolve (installed under `~/.leviath/agents`, configured in
+`agent_paths`, the working directory's own) and the ones bundled in the binary and not installed
+yet. The right half shows the selected agent's graph, what it does, where it lives and its stages.
+An installed bundled agent that has been edited says `edited`, and `r` puts the bundled copy back.
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` (or `k` / `j`), `Home` / `End`, `PgUp` / `PgDn` | Move |
+| `Enter` / `e` | Open the agent in the editor. A bundled agent not installed yet opens from its embedded copy and is installed when saved |
+| `n` | New agent: start from the two-stage starter, or clone any agent in the catalog, under a name you type |
+| `l` | Launch it: the new-run screen with this agent picked |
+| `d` | Delete an installed agent and its directory. Asks first. Agents that live elsewhere are edited in place but deleted where they are |
+| `r` | Reset an edited bundled agent to the copy bundled in the binary. Asks first |
+| `/` | Filter by name or description; `Enter` keeps the filter, `Esc` clears it |
+| `?` / `F1` | Help |
+| `Esc` / `q` | Back to the run list |
+
+### Agent editor
+
+The editor is one screen: the graph on the left, an inspector on the right showing whatever is
+selected on the graph, a problems line under the graph, and a hint bar. Nothing is written until you
+save. The inspector shows one thing at a time: **This agent** when nothing is selected (description,
+which stage a run starts at, the model every stage tries first, the shared context regions), a
+**Stage** (its behaviour: how it works, description, tries, revisits, whether it may finish the run,
+the fan-out settings when it fans out; move it in the file; delete it), or a **Path** (when it is
+taken, the hint the model routes on, whether it needs your approval; delete it). A field that does
+not apply is greyed rather than hidden, so the panel never reflows under the cursor.
+
+Every edit is checked as you make it, the way `lev validate` checks a file: the line under the graph
+says how many errors and warnings there are (`p` opens the list), a stage an error names carries a
+`!` on its box, and saving is refused while there are errors. `u` undoes the last edit, `Ctrl-R`
+redoes it. `v` shows the exact `agent.leviath` that will be saved, comments and all: the editor keeps
+your file's comments, key order and formatting, and only writes the keys it knows.
+
+An arrangement dragged into shape is kept per agent (in `dash/graph-layouts.json` under the data
+directory), so a graph opens the way you left it; it is never part of the manifest.
+
+| Key | Action |
+|---|---|
+| `Ctrl-S` | Save (checks first; errors block it and open the problems list) |
+| `Tab` | Move the keys between the graph and the inspector |
+| `u` / `Ctrl-R` | Undo / redo |
+| `v` | The definition; `y` copies it, `Esc` closes it |
+| `p` | Open or close the problems list under the graph |
+| `?` / `F1` | Help |
+| `Esc` | On the graph: close the editor (asks when there are unsaved edits). On the inspector: back to the graph |
+
+On the graph:
+
+| Key | Action |
+|---|---|
+| `←` `→` `↑` `↓` (or `h` `j` `k` `l`) | Select a stage in that direction; `[` / `]` the previous / next in file order |
+| `Enter` | Edit the selected stage or path in the inspector |
+| `a` | Add a stage after the selected one (asks its name) |
+| `c` | Connect the selected stage to another, picked from a list (or to itself: a loop) |
+| `x` / `Delete` | Delete the selected stage (asks first) or path |
+| `+` / `-` , `0`, `f`, `r` | Zoom, fit, turn the graph |
+| mouse | Click a box or a path to select it, drag a box to move it, drag a `●` handle onto another box to connect them, drag empty canvas to pan, wheel to zoom |
+
+On the inspector:
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` (or `k` / `j`), `Home` / `End` | Move between rows |
+| `Enter` | Edit the row: type into it, choose from a list, flip it, or press the button |
+| `←` / `→` (or `h` / `l`) | Change the row in place: cycle a choice, step a number, flip a toggle |
+| `1` `2` `3` | A stage's tabs: behaviour, model & tools, context |
+
+On a terminal under 110 columns the graph and the inspector take turns; `Tab` swaps them.
 
 ### MCP servers (`m`)
 

@@ -69,7 +69,13 @@ impl Dashboard {
     /// works in all of them, which is worth saying where somebody is looking
     /// rather than only where it happens to have been listed.
     pub(in crate::commands::dashboard) fn draw_help_overlay(&self, frame: &mut Frame) {
-        let mut sections: Vec<HelpSection> = if self.new_run_screen {
+        let mut sections: Vec<HelpSection> = if let Some(screen) = self.agent_builder.as_deref() {
+            if screen.editor.is_some() {
+                agent_editor_sections()
+            } else {
+                agents_sections()
+            }
+        } else if self.new_run_screen {
             new_run_sections()
         } else if self.mcp_screen {
             mcp_sections()
@@ -83,6 +89,99 @@ impl Dashboard {
         sections.extend(shared_sections());
         draw_help(frame, frame.area(), &sections, &self.help_scroll);
     }
+}
+
+/// The Agents screen's catalog.
+fn agents_sections() -> Vec<HelpSection> {
+    vec![
+        HelpSection {
+            title: "Agents (a)",
+            entries: vec![
+                ("↑ ↓ / k j", "select an agent"),
+                ("enter / e", "edit it (a bundled one installs when saved)"),
+                ("n", "new agent: start simple, or clone one"),
+                ("l", "launch it: the new-run screen with it picked"),
+                ("d", "delete an installed agent (asks first)"),
+                (
+                    "r",
+                    "reset an edited bundled agent to the bundled copy (asks first)",
+                ),
+                (
+                    "/",
+                    "filter by name or description; enter keeps it, esc clears it",
+                ),
+                ("esc / q", "back to the run list"),
+            ],
+        },
+        HelpSection {
+            title: "New agent (n)",
+            entries: vec![
+                (
+                    "↑ ↓",
+                    "pick the template; the name follows until you type one",
+                ),
+                ("enter", "open the editor on it (not saved until you save)"),
+                ("esc", "back to the catalog"),
+            ],
+        },
+    ]
+}
+
+/// The agent editor.
+fn agent_editor_sections() -> Vec<HelpSection> {
+    vec![
+        HelpSection {
+            title: "Agent editor: everywhere",
+            entries: vec![
+                (
+                    "ctrl-s",
+                    "save (checks first; errors block it and open the problems)",
+                ),
+                ("tab", "move the keys between the canvas and the inspector"),
+                ("u / ctrl-r", "undo / redo an edit"),
+                (
+                    "v",
+                    "the definition: the exact file that will be saved (y copies it)",
+                ),
+                ("p", "open / close the problems list under the canvas"),
+                (
+                    "esc",
+                    "on the canvas: close (asks when there are unsaved edits)",
+                ),
+            ],
+        },
+        HelpSection {
+            title: "Agent editor: canvas",
+            entries: vec![
+                ("↑ ↓ ← → / h j k l", "select a stage in that direction"),
+                ("[ / ]", "previous / next stage in file order"),
+                ("enter", "edit the selected stage or path in the inspector"),
+                ("a", "add a stage after the selected one (asks its name)"),
+                ("c", "connect the selected stage to another (or to itself)"),
+                ("x / delete", "delete the selected stage (asks) or path"),
+                ("+ / - / 0, f, r", "zoom, fit, turn the graph"),
+                ("drag a box", "move it (the arrangement is kept per agent)"),
+                ("drag a ●", "connect two stages with the mouse"),
+                ("click", "select a stage or a path"),
+            ],
+        },
+        HelpSection {
+            title: "Agent editor: inspector",
+            entries: vec![
+                ("↑ ↓ / k j", "move between rows"),
+                (
+                    "enter",
+                    "edit the row: type, choose, flip, or press the button",
+                ),
+                (
+                    "← → / h l",
+                    "change the row in place: cycle a choice, step a number, flip a toggle",
+                ),
+                ("1 2 3", "a stage's tabs: behaviour, model & tools, context"),
+                ("esc", "back to the canvas"),
+            ],
+        },
+    ]
 }
 
 /// The run list: the screen `lev dash` opens on.
@@ -105,6 +204,7 @@ fn run_list_sections() -> Vec<HelpSection> {
                 "mark/unmark the run, then move down (marked runs are killed/deleted together)",
             ),
             ("m", "manage MCP servers"),
+            ("a", "agents: the catalog and the editor"),
             ("esc", "clear the filter, then the marks"),
             ("q", "quit"),
         ],
