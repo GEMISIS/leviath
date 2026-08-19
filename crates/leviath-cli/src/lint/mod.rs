@@ -265,6 +265,7 @@ pub fn lint_manifest(content: &str, blueprint: &Blueprint, env: &LintEnv) -> Vec
 
     findings.extend(lint_dropped_seeds(&declared, blueprint));
     findings.extend(lint_command_seeds(blueprint));
+    findings.extend(lint_tool_seeds(blueprint));
     findings.extend(lint_read_paths(blueprint, env));
     findings.extend(lint_safe_commands(blueprint, env));
     findings.extend(lint_held_checkpoints(blueprint));

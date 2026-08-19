@@ -442,6 +442,32 @@
               "type": "string",
               "description": "A shell command run at spawn. The only seed that executes anything, and it runs before the first inference and so before any approval prompt. Gated by [security] allow_seed_commands and --no-seed-commands."
             },
+            "tool": {
+              "type": "string",
+              "description": "One tool to call at spawn, whose output fills the region. Shorthand for a single-entry `tools` list."
+            },
+            "tools": {
+              "type": "array",
+              "description": "Tools to call at spawn, in order, each writing a headed block into the region. Any tool the agent could call: a built-in, an MCP server's, or a Rhai script's. Each call resolves against the same [tool_permissions] the tool lane applies, so a seed reaches nothing the agent could not; a tool set to `ask` is refused, because a seed runs before any prompt exists.",
+              "minItems": 1,
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "description": "A tool name, for the many tools that take no arguments."
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name"],
+                    "properties": {
+                      "name": { "type": "string", "description": "The tool to call." },
+                      "args": { "type": "object", "description": "The arguments object." }
+                    }
+                  }
+                ]
+              }
+            },
             "caller": {
               "type": "string",
               "description": "The caller-input key to fill from, the table form of the plain string."

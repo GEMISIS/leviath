@@ -189,6 +189,8 @@ readme    = { kind = "pinned", seed = { files = ["README.md"] } }
 layout    = { kind = "temporary", seed = { glob = "src/**/*.rs" } }
 rules     = { kind = "pinned", seed = { literal = "Never edit generated files." } }
 env       = { kind = "pinned", seed = { command = "git log --oneline -20" } }
+clock     = { kind = "pinned", seed = { tool = "current_time" } }
+machine   = { kind = "pinned", seed = { tools = ["current_time", "system_info"] } }
 computed  = { kind = "temporary", seed = { rhai = "seeds/plan.rhai" } }
 inherited = { kind = "pinned", seed = { caller = "brief" } }
 ```
@@ -223,6 +225,57 @@ task refuses a task outright rather than running without it.
 > run once: a daemon restart does not replay them.
 
 #### Seed paths stay in the working directory
+
+### Seeding from tools
+
+A `tools` seed calls the run's own tools at spawn and writes their output into the region, so the
+agent's first inference already knows what the tools would have told it. Several calls fill one
+region, in order, each under a heading naming the tool:
+
+```toml
+environment = { kind = "pinned", budget = "1%", volatility = "stable", seed = { tools = [
+  "current_time",
+  "system_info",
+  "locale_info",
+] } }
+```
+
+```
+--- current_time ---
+{ "utc": "2026-08-18T19:32:07Z", ... }
+
+--- system_info ---
+{ "os": "macos", ... }
+```
+
+Any tool the agent could call works, spelled as the agent would spell it: a built-in, an
+[MCP server's](/docs/mcp) `<server>__<tool>`, or a [Rhai script tool](/docs/rhai-tools). A call that
+takes arguments uses the table form, and the two spellings mix in one list:
+
+```toml
+toolchain = { kind = "pinned", seed = { tools = [
+  { name = "which_command", args = { command = "git" } },
+  "locale_info",
+] } }
+```
+
+Use it for anything the agent should not have to think to ask for. The clearest case is the date: a
+research agent that never calls `current_time` reasons from its training cutoff, and seeding the
+answer costs it no turn.
+
+> [!IMPORTANT]
+> Unlike a `command` seed there is no separate kill switch, because a tool seed reaches nothing
+> new. Every call resolves against the same `[tool_permissions]` the tool lane applies mid-run, so a
+> seed can call exactly what the agent could call and nothing more, and a `deny` counts here too.
+>
+> A tool set to `ask` is **refused**, not prompted: a seed runs before the first inference, so there
+> is nobody to answer. Set it to `allow` if the agent is meant to call it at spawn. `lev validate`
+> lists every tool a blueprint seeds from, as `tool-seed`.
+
+A failed call is skipped with a warning and the other calls still fill the region; if the region is
+`required`, a failure is a spawn error naming the tool. Seeds resolve once, at spawn, and do not
+re-run when a run is reloaded, so a long run should call `current_time` again rather than trust a
+region stamped hours ago.
 
 `files`, `glob` and `rhai` seeds resolve against the run's working directory and may not leave it.
 A path that does is refused at spawn, before anything is read.

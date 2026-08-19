@@ -233,6 +233,7 @@ fn seed_kind_name(seed: &leviath_core::layout::RegionSeed) -> &'static str {
         RegionSeed::Files { .. } => "files",
         RegionSeed::Rhai { .. } => "rhai",
         RegionSeed::Command { .. } => "command",
+        RegionSeed::Tools { .. } => "tools",
     }
 }
 

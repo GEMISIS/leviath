@@ -15,6 +15,7 @@ pub mod recovery;
 pub mod sandbox_manager;
 pub mod script_host;
 pub mod seed_command;
+pub mod seed_tool;
 pub mod setup;
 pub mod spawn;
 pub mod subagent;

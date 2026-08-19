@@ -624,6 +624,74 @@ fn build_agent_inner(
         .first()
         .map(|s| format!("{}/{}", s.provider_name, s.model));
 
+    // The tool-permission layers and the Rhai script host, resolved here
+    // rather than beside the tool-state registration below because a
+    // `seed = { tools = [...] }` needs them: a seeded call answers to the
+    // same policy a mid-run call does, and a seeded *script* tool needs the
+    // host it would run under. Everything they read is already bound.
+    // Launch overrides: `--yolo` allows every tool (`*` wildcard); `--allow X`
+    // allows tool `X` outright.
+    let mut launch_overrides: HashMap<String, crate::config::ToolPolicy> = HashMap::new();
+    if args.yolo {
+        launch_overrides.insert("*".to_string(), crate::config::ToolPolicy::Allow);
+    }
+    for tool in &args.allow {
+        launch_overrides.insert(tool.clone(), crate::config::ToolPolicy::Allow);
+    }
+    // Rhai script-tool host (Layer 3): resolve `[tool_script_permissions]` once,
+    // with `read_file`/`shell` `inherit` deferring to the agent's own resolved
+    // policy for that built-in (evaluated against the entry stage).
+    let entry_stage_perms = stage_perms_by_index
+        .get(entry_index)
+        .cloned()
+        .unwrap_or_default();
+    // The agent may carry its own `[tool_script_permissions]` (it can ship its own
+    // tool scripts), overlaid per field on the global deps.config.
+    let effective_script_perms = crate::daemon::script_host::effective_script_permissions(
+        &deps.config.tool_script_permissions,
+        &content,
+    );
+    // Same ceiling `build_tool_state` resolves for the built-in tools: the
+    // global `[tool_permissions]` with this agent's `[agent_tool_permissions]`
+    // grants overlaid. Passing the raw global map here would silently ignore a
+    // per-agent grant when a script tool's `inherit` defers to the built-in.
+    let agent_scoped_perms = deps.config.permissions_for_agent(&agent_name);
+    let script_allow = crate::daemon::script_host::resolve_script_permissions(
+        &effective_script_perms,
+        &|builtin| {
+            crate::tools::resolve_policy(
+                builtin,
+                true,
+                &launch_overrides,
+                &entry_stage_perms,
+                &agent_perms,
+                &agent_scoped_perms,
+                deps.config.security.allow_blueprint_permissions,
+            )
+        },
+    );
+    let script_host: Arc<dyn leviath_scripting::ScriptHost> = Arc::new(
+        crate::daemon::script_host::DaemonScriptHost::new(
+            script_allow,
+            std::path::PathBuf::from(&args.workdir),
+        )
+        // Route a script `shell()` through the agent's per-stage sandbox (so a
+        // script can't escape the isolation the stage declared) and cap it at the
+        // configured wall-clock timeout.
+        .with_shell(
+            sandbox.clone(),
+            std::time::Duration::from_secs(deps.config.limits.script_shell_timeout_secs),
+            shell_env_policy(deps.config),
+        )
+        // `[security] allow_local_network`. Off by default, so a `web_fetch` URL
+        // the model picked out of attacker-influenced context cannot reach cloud
+        // metadata, the user's own `lev serve`, or their LAN.
+        .with_local_network(deps.config.security.allow_local_network)
+        // `[security] allow_env_vars`. Empty by default, so a script tool cannot
+        // read the user's provider keys and post them somewhere.
+        .with_env_allowlist(deps.config.security.allow_env_vars.clone()),
+    );
+
     // 5. Resolve region seeds (caller input + blueprint-declared sources) into
     // concrete content. On a fresh spawn (`enforce_seeds`), required caller-input
     // regions that weren't provided fail here - before any inference, so no
@@ -648,7 +716,43 @@ fn build_agent_inner(
             sandbox.clone(),
             shell_env_policy(deps.config),
         );
-        resolve_seeds(&blueprint, args, &args.workdir, &policy, &seed_read_paths)?
+        // A tool seed answers to the same layered resolution the tool lane
+        // applies mid-run, so a user's `[tool_permissions]` counts at spawn
+        // too - and a seed can reach nothing the agent could not reach.
+        let seed_launch = launch_overrides.clone();
+        let seed_stage = entry_stage_perms.clone();
+        let seed_agent = agent_perms.clone();
+        let seed_global = agent_scoped_perms.clone();
+        let seed_may_loosen = deps.config.security.allow_blueprint_permissions;
+        let tool_policy = crate::daemon::seed_tool::SeedToolPolicy::new(
+            crate::daemon::seed_tool::production_runner(
+                crate::daemon::seed_tool::SeedToolContext {
+                    builtins: builtins.clone(),
+                    builtin_names: builtin_names.clone(),
+                    script_tools: script_tools.clone(),
+                    script_host: script_host.clone(),
+                    mcp: deps.shared_mcp.clone(),
+                },
+                Arc::new(move |name: &str, is_builtin: bool| {
+                    crate::daemon::seed_tool::SeedToolPermissions {
+                        launch: &seed_launch,
+                        stage: &seed_stage,
+                        agent: &seed_agent,
+                        global: &seed_global,
+                        may_loosen: seed_may_loosen,
+                    }
+                    .resolve(name, is_builtin)
+                }),
+            ),
+        );
+        resolve_seeds(
+            &blueprint,
+            args,
+            &args.workdir,
+            &policy,
+            &tool_policy,
+            &seed_read_paths,
+        )?
     } else {
         HashMap::new()
     };
@@ -728,15 +832,6 @@ fn build_agent_inner(
     );
 
     // 8. Register the per-agent tool state.
-    // Launch overrides: `--yolo` allows every tool (`*` wildcard); `--allow X`
-    // allows tool `X` outright.
-    let mut launch_overrides: HashMap<String, crate::config::ToolPolicy> = HashMap::new();
-    if args.yolo {
-        launch_overrides.insert("*".to_string(), crate::config::ToolPolicy::Allow);
-    }
-    for tool in &args.allow {
-        launch_overrides.insert(tool.clone(), crate::config::ToolPolicy::Allow);
-    }
     let subagent = SubAgentHandle {
         sender: deps.subagent_tx,
         parent_run_id: args.run_id.clone(),
@@ -745,59 +840,6 @@ fn build_agent_inner(
         no_seed_commands: args.no_seed_commands,
         unattended: args.yolo,
     };
-    // Rhai script-tool host (Layer 3): resolve `[tool_script_permissions]` once,
-    // with `read_file`/`shell` `inherit` deferring to the agent's own resolved
-    // policy for that built-in (evaluated against the entry stage).
-    let entry_stage_perms = stage_perms_by_index
-        .get(entry_index)
-        .cloned()
-        .unwrap_or_default();
-    // The agent may carry its own `[tool_script_permissions]` (it can ship its own
-    // tool scripts), overlaid per field on the global deps.config.
-    let effective_script_perms = crate::daemon::script_host::effective_script_permissions(
-        &deps.config.tool_script_permissions,
-        &content,
-    );
-    // Same ceiling `build_tool_state` resolves for the built-in tools: the
-    // global `[tool_permissions]` with this agent's `[agent_tool_permissions]`
-    // grants overlaid. Passing the raw global map here would silently ignore a
-    // per-agent grant when a script tool's `inherit` defers to the built-in.
-    let agent_scoped_perms = deps.config.permissions_for_agent(&agent_name);
-    let script_allow = crate::daemon::script_host::resolve_script_permissions(
-        &effective_script_perms,
-        &|builtin| {
-            crate::tools::resolve_policy(
-                builtin,
-                true,
-                &launch_overrides,
-                &entry_stage_perms,
-                &agent_perms,
-                &agent_scoped_perms,
-                deps.config.security.allow_blueprint_permissions,
-            )
-        },
-    );
-    let script_host: Arc<dyn leviath_scripting::ScriptHost> = Arc::new(
-        crate::daemon::script_host::DaemonScriptHost::new(
-            script_allow,
-            std::path::PathBuf::from(&args.workdir),
-        )
-        // Route a script `shell()` through the agent's per-stage sandbox (so a
-        // script can't escape the isolation the stage declared) and cap it at the
-        // configured wall-clock timeout.
-        .with_shell(
-            sandbox.clone(),
-            std::time::Duration::from_secs(deps.config.limits.script_shell_timeout_secs),
-            shell_env_policy(deps.config),
-        )
-        // `[security] allow_local_network`. Off by default, so a `web_fetch` URL
-        // the model picked out of attacker-influenced context cannot reach cloud
-        // metadata, the user's own `lev serve`, or their LAN.
-        .with_local_network(deps.config.security.allow_local_network)
-        // `[security] allow_env_vars`. Empty by default, so a script tool cannot
-        // read the user's provider keys and post them somewhere.
-        .with_env_allowlist(deps.config.security.allow_env_vars.clone()),
-    );
     // Build the dynamic-tools re-resolution context (issue #97 escape hatch) and
     // tag the entity `DynamicTools` so the runtime polls it for mid-run re-scans.
     let dynamic = dynamic_tools.then(|| {
@@ -1581,6 +1623,86 @@ system = { kind = "pinned", max_tokens = 1000 }
             assert!(err.contains("workspace"), "got: {err}");
             assert!(err.contains(&workdir), "got: {err}");
         }
+    }
+
+    /// A real spawn, end to end: the blueprint seeds a region from a tool, and
+    /// the region the agent starts with holds that tool's answer.
+    ///
+    /// The unit tests above drive `resolve_seeds` with a stub runner, so they
+    /// prove the shape but not the wiring. What this one covers is the wiring:
+    /// that the spawn path builds a runner over the agent's real tools, that
+    /// the policy layers reach it, and that the result lands in the window
+    /// rather than in a map nobody reads.
+    ///
+    /// Multi-thread because the seeded call is awaited on the ambient runtime -
+    /// see `block_on_daemon`, which is what a daemon spawn does too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_agent_seeds_a_region_from_a_real_tool_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"seeded\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
+             [context.regions]\n\
+             task = { kind = \"pinned\", max_tokens = 4000, seed = \"task_input\" }\n\
+             environment = { kind = \"pinned\", max_tokens = 1000, \
+             seed = { tools = [\"current_time\", \"locale_info\"] } }\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let mut args = spawn_args(&manifest.to_string_lossy());
+        args.workdir = dir.path().to_string_lossy().to_string();
+        let entity = build_agent(
+            world.world_mut(),
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
+            &args,
+        )
+        .expect("spawn succeeds");
+
+        let window = world
+            .world()
+            .get::<leviath_runtime::components::ContextWindow>(entity)
+            .expect("the agent has a window");
+        let region = window
+            .regions
+            .iter()
+            .find(|r| r.name == "environment")
+            .expect("the seeded region exists");
+        let content: String = region
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Both calls ran, each under its own heading.
+        assert!(content.contains("--- current_time ---"), "{content}");
+        assert!(content.contains("--- locale_info ---"), "{content}");
+        // And it is the tool's real answer, not a placeholder: the clock's
+        // reading parses back as the instant it claims to be.
+        let (_, after) = content
+            .split_once("--- current_time ---")
+            .expect("the clock block");
+        let (json, _) = after
+            .split_once("--- locale_info ---")
+            .unwrap_or((after, ""));
+        let v: serde_json::Value =
+            serde_json::from_str(json.trim()).expect("the clock answered with JSON");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(v["utc"].as_str().expect("utc")).is_ok(),
+            "{json}"
+        );
     }
 
     #[tokio::test]
@@ -3389,6 +3511,13 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
 
     /// A blueprint that declares no `[read_paths]`, which is the normal case
     /// and the one where seed paths are confined to the workdir outright.
+    /// A tool-seed policy that runs nothing, for the seed tests that are about
+    /// the other seed kinds. A `{ tools = [...] }` seed under it fails every
+    /// call, which is the same shape as a tool that is not installed.
+    fn no_seed_tools() -> crate::daemon::seed_tool::SeedToolPolicy {
+        crate::daemon::seed_tool::SeedToolPolicy::disabled()
+    }
+
     fn no_read_paths() -> leviath_core::ReadPathPolicy {
         leviath_core::ReadPathPolicy {
             agent: "a".to_string(),
@@ -3420,7 +3549,15 @@ criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }"#,
             HashMap::from([("criteria".to_string(), "be safe".to_string())]),
             "/tmp",
         );
-        let seeds = resolve_seeds(&bp, &args, "/tmp", &seed_policy(), &no_read_paths()).unwrap();
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
         assert_eq!(seeds.get("task").map(String::as_str), Some("build it"));
         assert_eq!(seeds.get("criteria").map(String::as_str), Some("be safe"));
     }
@@ -3430,7 +3567,15 @@ criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }"#,
         let bp =
             bp(r#"spec = { kind = "pinned", max_tokens = 2000, seed = "input", required = true }"#);
         let args = args_with("t", HashMap::new(), "/tmp");
-        let err = resolve_seeds(&bp, &args, "/tmp", &seed_policy(), &no_read_paths()).unwrap_err();
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
         assert!(err.contains("spec"), "got: {err}");
     }
 
@@ -3438,7 +3583,15 @@ criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }"#,
     fn resolve_seeds_optional_caller_input_missing_is_omitted() {
         let bp = bp(r#"notes = { kind = "pinned", max_tokens = 2000, seed = "input" }"#);
         let args = args_with("t", HashMap::new(), "/tmp");
-        let seeds = resolve_seeds(&bp, &args, "/tmp", &seed_policy(), &no_read_paths()).unwrap();
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
         assert!(!seeds.contains_key("notes"));
     }
 
@@ -3457,6 +3610,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             &args,
             &dir.path().to_string_lossy(),
             &seed_policy(),
+            &no_seed_tools(),
             &no_read_paths(),
         )
         .unwrap();
@@ -3475,7 +3629,15 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             bp(r#"specs = { kind = "pinned", max_tokens = 4000, seed = { glob = "specs/*.md" } }"#);
         let wd = dir.path().to_string_lossy().to_string();
         let args = args_with("t", HashMap::new(), &wd);
-        let seeds = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap();
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
         let specs = seeds.get("specs").unwrap();
         assert!(specs.contains("spec one") && specs.contains("spec two"));
     }
@@ -3494,7 +3656,15 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         );
         let wd = dir.path().to_string_lossy().to_string();
         let args = args_with("hello", HashMap::new(), &wd);
-        let seeds = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap();
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
         assert_eq!(
             seeds.get("scripted").map(String::as_str),
             Some("seeded: hello")
@@ -3510,13 +3680,29 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["missing.txt"] }, required = true }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&req, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
+        let err = resolve_seeds(
+            &req,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
         assert!(err.contains("missing.txt"), "got: {err}");
         // Optional + a missing file → the region is simply omitted.
         let opt = bp(
             r#"docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["missing.txt"] } }"#,
         );
-        let seeds = resolve_seeds(&opt, &args, &wd, &seed_policy(), &no_read_paths()).unwrap();
+        let seeds = resolve_seeds(
+            &opt,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
         assert!(!seeds.contains_key("docs"));
     }
 
@@ -3529,12 +3715,28 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         let req = bp(
             r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "none/*.md" }, required = true }"#,
         );
-        let err = resolve_seeds(&req, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
+        let err = resolve_seeds(
+            &req,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
         assert!(err.contains("matched no files"), "got: {err}");
         // Optional glob with no matches → region omitted.
         let opt =
             bp(r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "none/*.md" } }"#);
-        let seeds = resolve_seeds(&opt, &args, &wd, &seed_policy(), &no_read_paths()).unwrap();
+        let seeds = resolve_seeds(
+            &opt,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
         assert!(!seeds.contains_key("specs"));
     }
 
@@ -3545,7 +3747,15 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         let wd = dir.path().to_string_lossy().to_string();
         let bp = bp(r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "[" } }"#);
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
         assert!(err.contains("bad glob"), "got: {err}");
     }
 
@@ -3559,11 +3769,220 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "boom.rhai" } }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
         assert!(err.contains("rhai seed failed"), "got: {err}");
     }
 
     // ─── command seeds (issue #108) ──────────────────────────────────────────
+
+    // ── tool seeds ────────────────────────────────────────────────────────
+
+    /// A tool-seed policy whose runner answers from a table, so a test can say
+    /// what each tool returns without a live MCP connection or a Rhai engine.
+    fn stub_tools(
+        answers: Vec<(&'static str, Result<String, String>)>,
+    ) -> crate::daemon::seed_tool::SeedToolPolicy {
+        let map: HashMap<String, Result<String, String>> = answers
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        crate::daemon::seed_tool::SeedToolPolicy::new(std::sync::Arc::new(move |name, _| {
+            map.get(name)
+                .cloned()
+                .unwrap_or_else(|| Err(format!("no such tool '{name}'")))
+        }))
+    }
+
+    fn tool_bp(seed: &str, required: bool) -> leviath_core::Blueprint {
+        let req = if required { ", required = true" } else { "" };
+        bp(&format!(
+            r#"environment = {{ kind = "pinned", max_tokens = 500, seed = {seed}{req} }}"#
+        ))
+    }
+
+    /// Several tools write into one region, in the order the blueprint listed
+    /// them, each under a heading naming the tool that produced it. The heading
+    /// matters: without it the model reads one undifferentiated blob.
+    #[test]
+    fn a_tool_seed_writes_every_call_into_one_region_in_order() {
+        let bp = tool_bp(r#"{ tools = ["current_time", "system_info"] }"#, false);
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &seed_policy(),
+            &stub_tools(vec![
+                ("current_time", Ok("{\"date\": \"2026-08-18\"}".to_string())),
+                ("system_info", Ok("{\"os\": \"macos\"}".to_string())),
+            ]),
+            &no_read_paths(),
+        )
+        .unwrap();
+        assert_eq!(
+            seeds.get("environment").map(String::as_str),
+            Some(
+                "--- current_time ---\n{\"date\": \"2026-08-18\"}\n\n\
+                 --- system_info ---\n{\"os\": \"macos\"}"
+            )
+        );
+    }
+
+    /// One tool being unavailable must not cost the others their output. A
+    /// region seeded from three sources where one is missing is still worth
+    /// two thirds of what it was for.
+    #[test]
+    fn a_failed_call_is_skipped_and_the_rest_still_seed() {
+        let bp = tool_bp(
+            r#"{ tools = ["current_time", "acme__missing", "locale_info"] }"#,
+            false,
+        );
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &seed_policy(),
+            &stub_tools(vec![
+                ("current_time", Ok("now".to_string())),
+                ("locale_info", Ok("en-US".to_string())),
+            ]),
+            &no_read_paths(),
+        )
+        .unwrap();
+        let content = seeds.get("environment").expect("still seeded");
+        assert!(content.contains("--- current_time ---\nnow"));
+        assert!(content.contains("--- locale_info ---\nen-US"));
+        assert!(!content.contains("acme__missing"), "{content}");
+    }
+
+    /// A tool that answers with nothing contributes no block, rather than a
+    /// heading over emptiness that reads as "this tool says the answer is
+    /// blank".
+    #[test]
+    fn a_call_that_returns_nothing_contributes_no_block() {
+        let bp = tool_bp(r#"{ tools = ["current_time", "quiet"] }"#, false);
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &seed_policy(),
+            &stub_tools(vec![
+                ("current_time", Ok("now".to_string())),
+                ("quiet", Ok("   \n".to_string())),
+            ]),
+            &no_read_paths(),
+        )
+        .unwrap();
+        assert_eq!(
+            seeds.get("environment").map(String::as_str),
+            Some("--- current_time ---\nnow")
+        );
+    }
+
+    /// Optional and everything failed: the region is left unseeded rather than
+    /// holding an empty string, which downstream reads as content.
+    #[test]
+    fn an_optional_region_whose_calls_all_fail_stays_unseeded() {
+        let bp = tool_bp(r#"{ tool = "current_time" }"#, false);
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &seed_policy(),
+            &stub_tools(vec![("current_time", Err("denied".to_string()))]),
+            &no_read_paths(),
+        )
+        .unwrap();
+        assert!(!seeds.contains_key("environment"));
+    }
+
+    /// A `required` region is the author saying the run is not worth starting
+    /// without it, so a failed call there is a spawn error naming the tool -
+    /// the same stance the files, glob and command seeds take.
+    #[test]
+    fn a_required_region_fails_the_spawn_when_its_tool_does() {
+        let bp = tool_bp(r#"{ tool = "current_time" }"#, true);
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &seed_policy(),
+            &stub_tools(vec![(
+                "current_time",
+                Err("set to `ask`, nobody to prompt".to_string()),
+            )]),
+            &no_read_paths(),
+        )
+        .unwrap_err();
+        assert!(err.contains("environment"), "{err}");
+        assert!(err.contains("current_time"), "{err}");
+        assert!(err.contains("nobody to prompt"), "{err}");
+    }
+
+    /// Required, and every call merely answered with nothing: still an error,
+    /// because an empty required region is the state the flag exists to refuse.
+    #[test]
+    fn a_required_region_fails_when_nothing_was_produced() {
+        let bp = tool_bp(r#"{ tool = "quiet" }"#, true);
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &seed_policy(),
+            &stub_tools(vec![("quiet", Ok(String::new()))]),
+            &no_read_paths(),
+        )
+        .unwrap_err();
+        assert!(err.contains("no tool seed produced anything"), "{err}");
+    }
+
+    /// The arguments a blueprint wrote reach the tool unchanged - the case that
+    /// would otherwise silently call `which_command` with no program name.
+    #[test]
+    fn a_call_carries_the_arguments_the_blueprint_wrote() {
+        let bp = tool_bp(
+            r#"{ tools = [{ name = "which_command", args = { command = "git" } }] }"#,
+            false,
+        );
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let captured = seen.clone();
+        let policy =
+            crate::daemon::seed_tool::SeedToolPolicy::new(std::sync::Arc::new(move |name, a| {
+                captured.lock().unwrap().push(format!("{name}:{a}"));
+                Ok("found".to_string())
+            }));
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &seed_policy(),
+            &policy,
+            &no_read_paths(),
+        )
+        .unwrap();
+        assert_eq!(
+            seeds.get("environment").map(String::as_str),
+            Some("--- which_command ---\nfound")
+        );
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            ["which_command:{\"command\":\"git\"}".to_string()]
+        );
+    }
 
     /// A blueprint with one command-seeded region, optionally `required`.
     fn command_bp(required: bool) -> leviath_core::Blueprint {
@@ -3582,6 +4001,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             &args,
             "/tmp",
             &stub_policy(Ok("src/lib.rs\nsrc/main.rs".to_string())),
+            &no_seed_tools(),
             &no_read_paths(),
         )
         .unwrap();
@@ -3608,7 +4028,15 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
                 ))
             }),
         };
-        let seeds = resolve_seeds(&bp, &args, "/work", &policy, &no_read_paths()).unwrap();
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/work",
+            &policy,
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
         assert_eq!(
             seeds.get("facts").map(String::as_str),
             Some("scan-repo@/work#9")
@@ -3624,6 +4052,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             &args,
             "/tmp",
             &stub_policy(Err("timed out".to_string())),
+            &no_seed_tools(),
             &no_read_paths(),
         )
         .unwrap();
@@ -3642,6 +4071,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             &args,
             "/tmp",
             &stub_policy(Err("boom".to_string())),
+            &no_seed_tools(),
             &no_read_paths(),
         )
         .unwrap_err();
@@ -3658,6 +4088,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             &args,
             "/tmp",
             &stub_policy(Ok("   \n".to_string())),
+            &no_seed_tools(),
             &no_read_paths(),
         )
         .unwrap();
@@ -3673,6 +4104,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             &args,
             "/tmp",
             &stub_policy(Ok(String::new())),
+            &no_seed_tools(),
             &no_read_paths(),
         )
         .unwrap_err();
@@ -3688,7 +4120,15 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         let args = args_with("t", HashMap::new(), "/tmp");
         let mut policy = stub_policy(Ok("SHOULD NOT BE USED".to_string()));
         policy.allowed = false;
-        let seeds = resolve_seeds(&bp, &args, "/tmp", &policy, &no_read_paths()).unwrap();
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &policy,
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
         assert!(!seeds.contains_key("facts"));
     }
 
@@ -3703,6 +4143,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             &args,
             "/tmp",
             &SeedCommandPolicy::disabled(),
+            &no_seed_tools(),
             &no_read_paths(),
         )
         .unwrap_err();
@@ -3720,7 +4161,15 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "sub*" }, required = true }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
         assert!(err.contains("read seed file"), "got: {err}");
     }
 
@@ -3732,7 +4181,15 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "nope.rhai" } }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
         assert!(err.contains("read rhai seed"), "got: {err}");
     }
 
@@ -3746,13 +4203,29 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         let req = bp(
             r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "empty.rhai" }, required = true }"#,
         );
-        let err = resolve_seeds(&req, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
+        let err = resolve_seeds(
+            &req,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
         assert!(err.contains("returned empty"), "got: {err}");
         // Optional + empty → region omitted (no error).
         let opt = bp(
             r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "empty.rhai" } }"#,
         );
-        let seeds = resolve_seeds(&opt, &args, &wd, &seed_policy(), &no_read_paths()).unwrap();
+        let seeds = resolve_seeds(
+            &opt,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
         assert!(!seeds.contains_key("scripted"));
     }
 
@@ -3766,7 +4239,15 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             HashMap::from([("ghost".to_string(), "x".to_string())]),
             "/tmp",
         );
-        let seeds = resolve_seeds(&bp, &args, "/tmp", &seed_policy(), &no_read_paths()).unwrap();
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
         assert_eq!(seeds.get("task").map(String::as_str), Some("t"));
         assert!(!seeds.contains_key("ghost"));
     }
@@ -3793,7 +4274,15 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"notes = { kind = "pinned", max_tokens = 2000, seed = { files = ["../config.toml"] } }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
         assert!(err.contains("outside the working directory"), "{err}");
         assert!(err.contains("read_paths"), "{err}");
     }
@@ -3808,7 +4297,15 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"notes = { kind = "pinned", max_tokens = 2000, seed = { files = ["notes.md"] } }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let seeds = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap();
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
         assert!(seeds.get("notes").is_some_and(|s| s.contains("hello")));
     }
 
@@ -3820,7 +4317,15 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         let bp =
             bp(r#"notes = { kind = "pinned", max_tokens = 2000, seed = { glob = "../*.toml" } }"#);
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
         assert!(err.contains("outside the working directory"), "{err}");
     }
 
@@ -3844,7 +4349,8 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"notes = { kind = "pinned", max_tokens = 2000, seed = { files = ["../config.toml"] } }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let seeds = resolve_seeds(&bp, &args, &wd, &seed_policy(), &policy).unwrap();
+        let seeds =
+            resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_seed_tools(), &policy).unwrap();
         assert!(seeds.get("notes").is_some_and(|s| s.contains("sk-SECRET")));
     }
 
@@ -3898,7 +4404,8 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"notes = { kind = "pinned", max_tokens = 2000, seed = { files = ["../config.toml"] } }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &policy).unwrap_err();
+        let err =
+            resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_seed_tools(), &policy).unwrap_err();
         assert!(err.contains("outside the working directory"), "{err}");
     }
 
@@ -3909,7 +4416,15 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"notes = { kind = "pinned", max_tokens = 2000, seed = { rhai = "../config.toml" } }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
         assert!(err.contains("outside the working directory"), "{err}");
     }
 
@@ -4009,8 +4524,15 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
         // spent a full turn on a question nobody asked.
         let bp = bp_taking_no_task(r#"notes = { kind = "pinned", max_tokens = 100 }"#);
         let args = args_with("do the thing", HashMap::new(), "/w");
-        let err = resolve_seeds(&bp, &args, "/w", &seed_policy(), &no_read_paths())
-            .expect_err("a task with nowhere to go should be refused");
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            "/w",
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .expect_err("a task with nowhere to go should be refused");
         assert!(err.contains("declares no region to put it in"), "{err}");
         // The message has to say what the agent *does* take, or the user is left
         // guessing which flag to reach for instead.
@@ -4022,8 +4544,15 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
         let bp =
             bp_taking_no_task(r#"diff = { kind = "pinned", max_tokens = 100, seed = "diff" }"#);
         let args = args_with("do the thing", HashMap::new(), "/w");
-        let err =
-            resolve_seeds(&bp, &args, "/w", &seed_policy(), &no_read_paths()).expect_err("refused");
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            "/w",
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .expect_err("refused");
         assert!(err.contains("it takes: diff"), "{err}");
     }
 
@@ -4036,8 +4565,15 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
         let mut regions = HashMap::new();
         regions.insert("diff".to_string(), "a patch".to_string());
         let args = args_with("", regions, "/w");
-        let seeds = resolve_seeds(&bp, &args, "/w", &seed_policy(), &no_read_paths())
-            .expect("no task was supplied, so there is nothing to refuse");
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/w",
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .expect("no task was supplied, so there is nothing to refuse");
         assert_eq!(seeds.get("diff").map(String::as_str), Some("a patch"));
     }
 
@@ -4045,8 +4581,15 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
     fn a_whitespace_only_task_is_not_treated_as_a_task() {
         let bp = bp_taking_no_task(r#"notes = { kind = "pinned", max_tokens = 100 }"#);
         let args = args_with("   \n ", HashMap::new(), "/w");
-        resolve_seeds(&bp, &args, "/w", &seed_policy(), &no_read_paths())
-            .expect("blank is the same as absent");
+        resolve_seeds(
+            &bp,
+            &args,
+            "/w",
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .expect("blank is the same as absent");
     }
 
     /// Every bundled agent that tells the user to pass `--task` can hold one.

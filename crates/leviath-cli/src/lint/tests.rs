@@ -1279,6 +1279,57 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
     assert!(fix.contains("allow_seed_commands"), "{fix}");
 }
 
+/// The tools a blueprint calls at spawn are an audit line for the same reason
+/// the commands are: they run before any approval prompt, so whoever is about
+/// to install a manifest they did not write should see them first.
+#[test]
+fn tool_seeds_are_listed_per_region() {
+    let toml = r#"
+[agent]
+name = "x"
+description = "d"
+entry_stage = "main"
+
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Main stage"
+max_iterations = 5
+
+[context.regions]
+environment = { kind = "pinned", max_tokens = 1000, seed = { tools = ["current_time", "system_info"] } }
+toolchain = { kind = "pinned", max_tokens = 1000, seed = { tool = "which_command" } }
+plain = { kind = "pinned", max_tokens = 1000 }
+conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
+"#;
+    let findings = lint(toml, &LintEnv::default());
+    assert_eq!(codes(&findings), ["tool-seed"]);
+    let message = &findings[0].message;
+    assert!(message.contains("2 region(s)"), "{message}");
+    // Named per region, and every tool in it, so the reader sees what runs and
+    // where its output lands.
+    assert!(
+        message.contains("environment: current_time, system_info"),
+        "{message}"
+    );
+    assert!(message.contains("toolchain: which_command"), "{message}");
+    // A region with no tool seed is not named.
+    assert!(!message.contains("plain"), "{message}");
+    // Unlike a command seed there is no separate switch to name; the answer to
+    // "will this run" is the permission table, so the fix says so.
+    let fix = findings[0]
+        .fix
+        .as_deref()
+        .expect("a seed note offers a fix");
+    assert!(fix.contains("tool_permissions"), "{fix}");
+    assert!(fix.contains("ask"), "{fix}");
+}
+
+#[test]
+fn no_tool_seeds_means_no_note() {
+    assert!(!codes(&lint(&manifest(CLEAN_STAGE), &LintEnv::default())).contains(&"tool-seed"));
+}
+
 #[test]
 fn no_command_seeds_means_no_note() {
     assert!(!codes(&lint(&manifest(CLEAN_STAGE), &LintEnv::default())).contains(&"command-seed"));

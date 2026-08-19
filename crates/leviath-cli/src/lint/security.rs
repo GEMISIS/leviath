@@ -104,6 +104,51 @@ pub(super) fn lint_command_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
     ]
 }
 
+/// List the tools a blueprint calls at spawn.
+///
+/// The sibling of [`lint_command_seeds`], and an audit line for the same
+/// reason: these run before the first inference and therefore before any
+/// approval prompt, so somebody about to `lev add` a blueprint they did not
+/// write should see them first.
+///
+/// Unlike a command seed there is no pre-approval to report. A seeded call
+/// resolves against the same `[tool_permissions]` a mid-run call does, so the
+/// question "will this run" has the same answer as "may this agent call it",
+/// which the permission table already states.
+pub(super) fn lint_tool_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
+    let seeds: Vec<String> = blueprint
+        .context_layout
+        .regions
+        .iter()
+        .filter_map(|r| match &r.seed {
+            Some(leviath_core::layout::RegionSeed::Tools { calls }) => {
+                let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+                Some(format!("{}: {}", r.name, names.join(", ")))
+            }
+            _ => None,
+        })
+        .collect();
+    if seeds.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        LintFinding::new(
+            LintSeverity::Note,
+            "tool-seed",
+            format!(
+                "{} region(s) call tools at spawn, before the first inference and \
+                 before any tool-approval prompt: {}",
+                seeds.len(),
+                seeds.join("; ")
+            ),
+        )
+        .with_fix(
+            "each call answers to `[tool_permissions]` exactly as a mid-run call would; \
+             a tool set to `ask` is refused at spawn because there is nobody to prompt",
+        ),
+    ]
+}
+
 /// Whether the *default* safe list covers `command`.
 ///
 /// Reports against the shipped defaults rather than the reader's own config:
