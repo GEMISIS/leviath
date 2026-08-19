@@ -127,7 +127,20 @@ async fn execute_core<S: TerminalSetup, E: EventSource>(
     setup.enable()?;
     let mut terminal = setup.create_terminal()?;
     let tick_rate = Duration::from_millis(100);
-    run_dashboard_loop(dashboard, control, &mut terminal, events, tick_rate).await?;
+    loop {
+        run_dashboard_loop(dashboard, control, &mut terminal, events, tick_rate).await?;
+        // The loop also returns when the agent editor wants `$EDITOR` on a
+        // prompt: hand the terminal over, run it, take the terminal back and
+        // carry on where the dashboard left off.
+        let Some(edit) = dashboard.take_external_edit() else {
+            break;
+        };
+        setup.disable();
+        let ran = setup.run_editor(&edit.path);
+        setup.enable()?;
+        terminal = setup.create_terminal()?;
+        dashboard.finish_external_edit(edit, ran);
+    }
     setup.disable();
     setup.print_done();
     Ok(())
@@ -185,6 +198,7 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
 
         // …and any run the new-run screen asked for.
         dashboard.drain_spawn_outcomes();
+        dashboard.drain_agents_models();
         // A run started here opens its own page, once the daemon reports it.
         dashboard.open_pending_run();
 
@@ -215,7 +229,7 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
             }
         }
 
-        if dashboard.should_quit {
+        if dashboard.should_quit || dashboard.has_external_edit() {
             return Ok(());
         }
     }
@@ -935,6 +949,70 @@ mod tests {
         .await;
     }
 
+    /// A prompt handed to `$EDITOR`: the loop returns, the editor runs with
+    /// the terminal released, the dashboard takes it back and carries on.
+    #[tokio::test]
+    async fn execute_core_runs_the_editor_on_a_pending_prompt_and_carries_on() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "execute_core_external_edit",
+            |d| async move {
+                let control = no_daemon_control();
+                let mut dashboard = init_dashboard(control.clone(), |_| false);
+                let path = d.join("prompt.md");
+                std::fs::write(&path, "before").unwrap();
+                dashboard.pending_external_edit = Some(agents::ExternalEdit {
+                    path: path.clone(),
+                    target: agents::PromptFocus::System,
+                });
+                let mut setup = TestSetup {
+                    editor_writes: Some("after".to_string()),
+                    ..TestSetup::new()
+                };
+                let mut events = TestEventSource::new(vec![key(KeyCode::Char('q'))]);
+                let result = execute_core(&mut dashboard, &control, &mut setup, &mut events).await;
+                assert!(result.is_ok());
+                assert!(dashboard.should_quit);
+                assert_eq!(setup.edited, vec![path.clone()]);
+                // The file was read back (and removed) even with no editor
+                // open to receive it.
+                assert!(!path.exists());
+                assert!(!dashboard.has_external_edit());
+            },
+        )
+        .await;
+    }
+
+    /// Taking the terminal back after `$EDITOR` can fail like the first take.
+    #[tokio::test]
+    async fn execute_core_reports_a_failed_retake_after_the_editor() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "execute_core_external_edit_retake",
+            |d| async move {
+                for (enable_on, create_on) in [(Some(2), None), (None, Some(2))] {
+                    let control = no_daemon_control();
+                    let mut dashboard = init_dashboard(control.clone(), |_| false);
+                    let path = d.join("prompt.md");
+                    std::fs::write(&path, "before").unwrap();
+                    dashboard.pending_external_edit = Some(agents::ExternalEdit {
+                        path: path.clone(),
+                        target: agents::PromptFocus::Transition,
+                    });
+                    let mut setup = TestSetup {
+                        enable_fails_on_call: enable_on,
+                        create_fails_on_call: create_on,
+                        ..TestSetup::new()
+                    };
+                    let mut events = TestEventSource::new(vec![key(KeyCode::Char('q'))]);
+                    let result =
+                        execute_core(&mut dashboard, &control, &mut setup, &mut events).await;
+                    assert!(result.is_err());
+                    assert_eq!(setup.edited.len(), 1);
+                }
+            },
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn execute_core_enable_error_propagates() {
         crate::runstate::with_isolated_runs_dir_async(
@@ -947,6 +1025,7 @@ mod tests {
                     enable_should_fail: true,
                     create_should_fail: false,
                     draw_should_fail: false,
+                    ..TestSetup::new()
                 };
                 let mut events = TestEventSource::new(vec![]);
                 let result = execute_core(&mut dashboard, &control, &mut setup, &mut events).await;
@@ -969,6 +1048,7 @@ mod tests {
                     enable_should_fail: false,
                     create_should_fail: true,
                     draw_should_fail: false,
+                    ..TestSetup::new()
                 };
                 let mut events = TestEventSource::new(vec![]);
                 let result = execute_core(&mut dashboard, &control, &mut setup, &mut events).await;

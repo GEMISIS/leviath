@@ -248,12 +248,35 @@ An installed bundled agent that has been edited says `edited`, and `r` puts the 
 
 The editor is one screen: the graph on the left, an inspector on the right showing whatever is
 selected on the graph, a problems line under the graph, and a hint bar. Nothing is written until you
-save. The inspector shows one thing at a time: **This agent** when nothing is selected (description,
-which stage a run starts at, the model every stage tries first, the shared context regions), a
-**Stage** (its behaviour: how it works, description, tries, revisits, whether it may finish the run,
-the fan-out settings when it fans out; move it in the file; delete it), or a **Path** (when it is
-taken, the hint the model routes on, whether it needs your approval; delete it). A field that does
-not apply is greyed rather than hidden, so the panel never reflows under the cursor.
+save. The inspector shows one thing at a time, and a field that does not apply is greyed rather than
+hidden, so the panel never reflows under the cursor:
+
+- **This agent**, when nothing is selected: description, which stage a run starts at, the model every
+  stage tries first, and the shared context regions (`Enter` on one opens it).
+- **A stage**, on three tabs (`1` `2` `3`). *Behaviour*: how it works, description, tries, revisits,
+  whether it may finish the run, the fan-out settings when it fans out, its loop back to itself when it
+  has one, the prompts, its place in the file, delete. *Model & tools*: the model chain (the first is
+  tried first; `Enter` swaps an entry, `x` drops it, `←` `→` move it, the last row adds a fallback)
+  and the tools it may use, picked from every tool this install has (`Space` toggles, `Enter` keeps).
+  *Context*: whether the stage sees the agent's shared regions or has a layout of its own, the regions
+  it sees (`Enter` opens one), a button to give it its own layout or go back to the shared one, where
+  tool results land by default, and per-tool routing (`Enter` on a row changes the region, `x` stops
+  routing the tool).
+- **A path**: when it is taken, the hint the model routes on, whether it needs your approval, what
+  context is carried across (everything, only pinned regions, everything summarized, or per-region
+  rules: carry, summarize or drop each one, with the instructions the summary follows), delete.
+- **A context region**, opened from a region row: name, kind (each kind says what it does), share of
+  the context window and token cap, the sliding-window knobs when it is one, whether it must be filled
+  before the run goes on and what to say if it is not, what seeds it, description, delete. `Esc` goes
+  back to where the region was opened from.
+
+The models the chooser offers come from every provider in your config (asked when the screen
+opens, so the list fills in a moment later) on top of the built-in catalog, marked with the context
+window when it is known. The prompts open full screen: the system prompt (what the stage is told)
+and the transition prompt (how it picks the next path; only read when there is more than one), with
+`Tab` between them, `Ctrl-S` or `Esc` to apply, `Ctrl-Q` to discard, and `Ctrl-E` to hand the
+focused prompt to `$EDITOR` (`$VISUAL` first): the dashboard steps aside while the editor runs and
+the text comes back into the box when it closes.
 
 Every edit is checked as you make it, the way `lev validate` checks a file: the line under the graph
 says how many errors and warnings there are (`p` opens the list), a stage an error names carries a
@@ -291,9 +314,21 @@ On the inspector:
 | Key | Action |
 |---|---|
 | `↑` / `↓` (or `k` / `j`), `Home` / `End` | Move between rows |
-| `Enter` | Edit the row: type into it, choose from a list, flip it, or press the button |
-| `←` / `→` (or `h` / `l`) | Change the row in place: cycle a choice, step a number, flip a toggle |
+| `Enter` | Edit the row: type into it, choose from a list, flip it, open it, or press the button |
+| `←` / `→` (or `h` / `l`) | Change the row in place: cycle a choice, step a number, flip a toggle, move a model in its chain |
+| `x` / `Backspace` | Remove the row: a model from the chain, a tool's routing |
 | `1` `2` `3` | A stage's tabs: behaviour, model & tools, context |
+| `Esc` | Back: a region or a loop's path returns to where it was opened from; otherwise to the graph |
+| mouse | Click a row to pick it (again to open it); click a tab to switch to it |
+
+In the prompts:
+
+| Key | Action |
+|---|---|
+| `Tab` | Move between the system prompt and the transition prompt |
+| `Ctrl-S` / `Esc` | Apply both and close |
+| `Ctrl-Q` | Close without applying |
+| `Ctrl-E` | Open the focused prompt in `$EDITOR`; the dashboard waits for it |
 
 On a terminal under 110 columns the graph and the inspector take turns; `Tab` swaps them.
 

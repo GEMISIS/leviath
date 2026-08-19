@@ -204,14 +204,36 @@ pub(super) async fn models_with(
     state: &AppState,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> Json<Vec<ModelEntry>> {
+    Json(list_models_from_config(&state.config, build_client).await)
+}
+
+/// Every model every configured provider reports, as `provider/id`: what the
+/// dashboard's agent editor offers once the providers have answered.
+pub(crate) async fn list_model_ids(
+    config: &crate::config::Config,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> Vec<String> {
+    list_models_from_config(config, build_client)
+        .await
+        .into_iter()
+        .map(|m| format!("{}/{}", m.provider, m.id))
+        .collect()
+}
+
+/// Every model every configured provider reports, for `GET /api/models` and
+/// the dashboard's agent editor alike.
+pub(super) async fn list_models_from_config(
+    config: &crate::config::Config,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> Vec<ModelEntry> {
     // Nothing to list if no client could be built; the endpoint answers with an
     // empty set rather than failing the request, matching how it treats a
     // provider whose `list_models` errors.
     let Ok(registry) = crate::commands::run::session::build_provider_registry_from_config_with(
-        &state.config,
+        config,
         build_client,
     ) else {
-        return Json(Vec::new());
+        return Vec::new();
     };
     let mut models = Vec::new();
 
@@ -233,7 +255,7 @@ pub(super) async fn models_with(
         }
     }
 
-    Json(models)
+    models
 }
 
 #[cfg(test)]
@@ -514,6 +536,22 @@ mod tests {
         assert!(!models.is_empty());
         assert!(models.iter().any(|m| m["provider"] == "claude-code"));
         assert!(models.iter().all(|m| m["id"].is_string()));
+    }
+
+    /// The dashboard's flat `provider/id` list is the same enumeration.
+    #[tokio::test]
+    async fn list_model_ids_flattens_to_provider_slash_id() {
+        let state = test_state_listing_models();
+        let ids = super::list_model_ids(
+            &state.config,
+            &leviath_providers::provider::build_http_client,
+        )
+        .await;
+        assert!(!ids.is_empty());
+        assert!(
+            ids.iter().any(|id| id.starts_with("claude-code/")),
+            "{ids:?}"
+        );
     }
 
     #[test]

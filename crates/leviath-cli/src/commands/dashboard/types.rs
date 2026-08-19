@@ -171,6 +171,13 @@ pub(super) enum ConfirmAction {
     StageDelete { name: String },
     /// Close the agent editor and lose its unsaved edits.
     EditorDiscard,
+    /// Delete a context region in the agent editor (and the routing into it).
+    RegionDelete {
+        scope: crate::blueprint_edit::RegionScope,
+        name: String,
+    },
+    /// Drop a stage's own context layout in the agent editor.
+    OverrideRemove { stage: String },
 }
 
 /// Display status for agents in the dashboard.

@@ -48,6 +48,22 @@ pub(super) fn ensure_child<'a>(item: &'a mut Item, key: &str) -> Result<&'a mut 
     Ok(child)
 }
 
+/// Like [`ensure_child`], for a table that only exists to hold other
+/// tables (`context` over `regions`, `tool_routing` over `overrides`): a new
+/// one is implicit, so the file does not get an empty `[stages.x.context]`
+/// header above `[stages.x.context.regions]`.
+pub(super) fn ensure_parent<'a>(item: &'a mut Item, key: &str) -> Result<&'a mut Item, EditError> {
+    let fresh = !item
+        .as_table_like()
+        .expect("callers pass a table")
+        .contains_key(key);
+    let child = ensure_child(item, key)?;
+    if fresh && let Some(table) = child.as_table_mut() {
+        table.set_implicit(true);
+    }
+    Ok(child)
+}
+
 /// An empty table of the shape a parent uses.
 pub(super) fn new_table(inline: bool) -> Item {
     if inline {

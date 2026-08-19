@@ -11,7 +11,8 @@ use super::super::types::*;
 use super::inspector::{self, Field, FieldId, FieldValue, Panel, StageTab};
 use crate::blueprint_edit::check::{Problems, check};
 use crate::blueprint_edit::{
-    EdgeKind, EditError, LayoutStore, ManifestDoc, StageModeView, WorkerKind, catalog,
+    EdgeKind, EditError, LayoutStore, ManifestDoc, StageModeView, TransformKind, WorkerKind,
+    catalog,
 };
 use crate::tui::flowgraph::{FlowView, Selection, StageGraph};
 use crate::tui::widgets::confirm::Confirm;
@@ -34,13 +35,25 @@ pub(in crate::commands::dashboard) enum PickerFor {
     Field(FieldId),
     /// The other end of a new path from this stage.
     ConnectFrom(String),
+    /// A model to append to the chain.
+    AddModel,
+    /// A model to put in place of the chain's `n`th.
+    ReplaceModel(usize),
+    /// The stage's tools (many).
+    Tools,
+    /// Which tool to route.
+    RoutingTool,
+    /// Where a tool's results land.
+    RoutingRegion(String),
 }
 
 /// A full-screen overlay over the editor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(in crate::commands::dashboard) enum Overlay {
     /// The exact manifest that will be saved, scrolled by `scroll` lines.
     Definition { scroll: usize },
+    /// A stage's prompts.
+    Prompts(Box<super::prompts::PromptsEditor>),
 }
 
 /// What is being opened.
@@ -66,6 +79,9 @@ pub(in crate::commands::dashboard) struct Editor {
     pub(in crate::commands::dashboard) name: String,
     /// Not saved anywhere yet.
     pub(in crate::commands::dashboard) is_new: bool,
+    /// The directory was made at open, only so the lint could see a
+    /// bundled agent's scripts; closing without a save removes it again.
+    pub(in crate::commands::dashboard) scratch_dir: bool,
     /// Where `agent.leviath` is written.
     pub(in crate::commands::dashboard) dir: PathBuf,
     pub(in crate::commands::dashboard) doc: ManifestDoc,
@@ -84,6 +100,11 @@ pub(in crate::commands::dashboard) struct Editor {
     pub(in crate::commands::dashboard) picker: Option<(PickerFor, Picker)>,
     /// The name of a stage about to be added.
     pub(in crate::commands::dashboard) add_stage: Option<LineEdit>,
+    /// The name of a region about to be added.
+    pub(in crate::commands::dashboard) add_region: Option<LineEdit>,
+    /// The canvas selection a pushed panel (a region, a stage's loop back
+    /// to itself) was opened from: the panel stays while it holds.
+    pub(in crate::commands::dashboard) panel_anchor: Option<Selection>,
     pub(in crate::commands::dashboard) overlay: Option<Overlay>,
     pub(in crate::commands::dashboard) problems: Problems,
     /// The problems list expanded under the canvas.
@@ -94,6 +115,23 @@ pub(in crate::commands::dashboard) struct Editor {
     pub(in crate::commands::dashboard) message: Option<String>,
     /// `provider/model` ids the model chooser offers.
     pub(in crate::commands::dashboard) models: Vec<String>,
+    /// Tool names the tools chooser offers.
+    pub(in crate::commands::dashboard) tools: Vec<String>,
+    /// Where the last frame put the inspector's rows: the screen row of
+    /// each field, and the column span of each stage tab, so a click lands
+    /// on the right one.
+    pub(in crate::commands::dashboard) hit: InspectorHits,
+}
+
+/// What the inspector drew last, for the mouse.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(in crate::commands::dashboard) struct InspectorHits {
+    /// The inspector's area (border included).
+    pub(in crate::commands::dashboard) area: ratatui::layout::Rect,
+    /// The screen row each field sits on, in field order.
+    pub(in crate::commands::dashboard) rows: Vec<u16>,
+    /// The screen row of the stage tab bar, and each tab's `[x0, x1)`.
+    pub(in crate::commands::dashboard) tabs: Option<(u16, Vec<(u16, u16)>)>,
 }
 
 /// Snapshots kept for undo.
@@ -139,6 +177,17 @@ impl Editor {
     /// Bring the panel in line with the canvas selection, keeping a stage
     /// panel's tab across stages.
     pub(in crate::commands::dashboard) fn sync_panel(&mut self) {
+        // A pushed panel (a region, a loop back to the same stage) stays
+        // while the selection that opened it holds and what it shows exists.
+        let pushed = match &self.panel {
+            Panel::Region { scope, name, .. } => self.doc.region(scope.stage(), name).is_some(),
+            Panel::Edge { from, to } if from == to => self.doc.edge(from, to).is_some(),
+            _ => false,
+        };
+        if pushed && self.panel_anchor.as_ref() == Some(&self.view.selection()) {
+            return;
+        }
+        self.panel_anchor = None;
         let tab = match &self.panel {
             Panel::Stage { tab, .. } => *tab,
             _ => StageTab::Behaviour,
@@ -285,14 +334,16 @@ impl Dashboard {
                 (name, true, dir, bundled_from)
             }
         };
-        // A copy of a bundled agent brings its scripts along now, so the
-        // lint sees the tools they define; an unsaved new agent's directory
-        // is removed again when the editor closes without saving.
-        if is_new
-            && !dir.exists()
+        // A bundled agent not installed yet (edited as itself, or as the
+        // start of a new one) brings its scripts along now, so the lint sees
+        // the tools they define and a save leaves a complete install; the
+        // directory is removed again when the editor closes without saving.
+        let mut scratch_dir = false;
+        if !dir.exists()
             && let Some(from) = bundled_from.as_deref().and_then(catalog::bundled)
         {
             let _ = catalog::copy_bundled_extras(&self.new_run_ctx.agents_dir, &name, from);
+            scratch_dir = true;
         }
         let layout = self.layout_store();
         let positions = layout.positions(&name).cloned().unwrap_or_default();
@@ -304,11 +355,28 @@ impl Dashboard {
             .map(|(p, m)| format!("{p}/{m}"))
             .collect();
         models.extend(doc.known_models());
+        models.extend(
+            self.agent_builder
+                .as_deref()
+                .map(|s| s.model_catalog.clone())
+                .unwrap_or_default(),
+        );
         models.sort();
         models.dedup();
+        // The tools this install has: built in, plus scripts under the
+        // agent's directory and the ones the manifest already names.
+        let mut tools: Vec<String> =
+            crate::tool_inventory::ToolInventory::discover(Some(&dir), Some(&name))
+                .names()
+                .into_iter()
+                .collect();
+        tools.extend(doc.known_tools());
+        tools.sort();
+        tools.dedup();
         let mut editor = Editor {
             name,
             is_new,
+            scratch_dir,
             dir,
             doc,
             undo: Vec::new(),
@@ -321,6 +389,8 @@ impl Dashboard {
             line: None,
             picker: None,
             add_stage: None,
+            add_region: None,
+            panel_anchor: None,
             overlay: None,
             problems,
             problems_open: false,
@@ -328,6 +398,8 @@ impl Dashboard {
             dirty: is_new,
             message: None,
             models,
+            tools,
+            hit: InspectorHits::default(),
         };
         editor.apply_flags();
         self.agents().editor = Some(editor);
@@ -421,7 +493,7 @@ impl Dashboard {
             (
                 editor.name.clone(),
                 editor.view.positions(),
-                editor.is_new.then(|| editor.dir.clone()),
+                editor.scratch_dir.then(|| editor.dir.clone()),
             )
         };
         {
@@ -429,7 +501,7 @@ impl Dashboard {
             editor.layout.set(&name, positions);
             let _ = editor.layout.save();
         }
-        // A new agent never saved leaves nothing behind (its scripts were
+        // An agent never saved leaves nothing behind (its scripts were
         // materialised for the lint's sake).
         if let Some(dir) = unsaved_dir
             && !dir.join("agent.leviath").exists()
@@ -458,8 +530,9 @@ impl Dashboard {
             }
             FieldValue::Toggle(on) => self.editor_set_toggle(&field.id, !on),
             FieldValue::Choice(_) => self.editor_open_choice(&field.id),
-            FieldValue::Row(_) => {}
+            FieldValue::Row(_) => self.editor_open_row(&field.id),
             FieldValue::Button => self.editor_button(&field.id),
+            FieldValue::Segment { .. } => self.editor_cycle_segment(&field.id, 1),
         }
     }
 
@@ -492,7 +565,13 @@ impl Dashboard {
                 let at = at.rem_euclid(options.len() as isize) as usize;
                 self.editor_pick(&field.id, &options[at]);
             }
-            FieldValue::Text(_) | FieldValue::Row(_) | FieldValue::Button => {}
+            FieldValue::Segment { .. } => self.editor_cycle_segment(&field.id, delta),
+            FieldValue::Row(_) => {
+                if let FieldId::ModelEntry(i) = field.id {
+                    self.editor_move_model(i, delta);
+                }
+            }
+            FieldValue::Text(_) | FieldValue::Button => {}
         }
     }
 
@@ -506,7 +585,7 @@ impl Dashboard {
                 let (from, to) = self.editor().panel_edge().expect("a path field");
                 self.editor_mutate(|d| d.set_edge_gate(&from, &to, on));
             }
-            _ => {}
+            _ => self.editor_set_toggle_more(id, on),
         }
     }
 
@@ -515,6 +594,9 @@ impl Dashboard {
         id: &FieldId,
         value: Option<u64>,
     ) {
+        if self.editor_set_number_more(id, value) {
+            return;
+        }
         let stage = self.editor().panel_stage().expect("a stage field");
         match id {
             FieldId::MaxIterations => {
@@ -622,7 +704,7 @@ impl Dashboard {
                     .and_then(|e| EdgeKind::CHOICES.iter().position(|k| *k == e.kind));
                 (options, current)
             }
-            _ => (Vec::new(), None),
+            _ => self.editor_choice_options_more(id),
         }
     }
 
@@ -633,6 +715,27 @@ impl Dashboard {
             return;
         }
         let (title, explain, details): (&str, &str, Vec<String>) = match id {
+            FieldId::RoutingDefault => (
+                "Tool results land in",
+                "Where a tool's output goes unless a row says otherwise.",
+                vec![],
+            ),
+            FieldId::EdgeTransform => (
+                "Context carried over",
+                "What crosses the path with the run. Pinned regions always do.",
+                TransformKind::CHOICES
+                    .iter()
+                    .map(|t| t.label().to_string())
+                    .collect(),
+            ),
+            FieldId::RegionKind => (
+                "How the region behaves",
+                "What the runtime does with it as the window fills.",
+                inspector::REGION_KINDS
+                    .iter()
+                    .map(|(_, h)| h.to_string())
+                    .collect(),
+            ),
             FieldId::EntryStage => ("Starts at", "The stage a run begins in.", vec![]),
             FieldId::DefaultModel => (
                 "Default model",
@@ -750,7 +853,7 @@ impl Dashboard {
                     .expect("an offered kind");
                 self.editor_mutate(|d| d.set_edge_kind(&from, &to, kind));
             }
-            _ => {}
+            _ => self.editor_pick_more(id, &value),
         }
     }
 
@@ -770,7 +873,7 @@ impl Dashboard {
                 let (from, to) = self.editor().panel_edge().expect("a path field");
                 self.editor_delete_edge(&from, &to);
             }
-            _ => {}
+            _ => self.editor_button_more(id),
         }
     }
 
@@ -829,9 +932,20 @@ impl Dashboard {
             }
             FieldId::StageName => {
                 let stage = self.editor().panel_stage().expect("a stage field");
+                // The box keeps its place under the new name.
+                let positions = self
+                    .editor()
+                    .view
+                    .positions()
+                    .into_iter()
+                    .map(|(id, at)| (if id == stage { text.clone() } else { id }, at))
+                    .collect();
                 if self.editor_mutate(|d| d.rename_stage(&stage, &text)) {
-                    self.editor().view.select_stage(&text);
-                    self.editor().sync_panel();
+                    let editor = self.editor();
+                    let graph = editor.graph.clone();
+                    editor.view.replace_graph(graph, positions);
+                    editor.view.select_stage(&text);
+                    editor.sync_panel();
                 }
             }
             FieldId::StageDescription => {
@@ -843,7 +957,11 @@ impl Dashboard {
             FieldId::MaxIterations
             | FieldId::MaxRevisits
             | FieldId::MaxWorkers
-            | FieldId::MaxItems => {
+            | FieldId::MaxItems
+            | FieldId::RegionBudget
+            | FieldId::RegionMaxTokens
+            | FieldId::RegionMaxItems
+            | FieldId::RegionOverflow => {
                 let value = match text.parse::<u64>() {
                     Ok(n) => Some(n),
                     Err(_) if text.is_empty() => None,
@@ -871,7 +989,7 @@ impl Dashboard {
                 let (from, to) = self.editor().panel_edge().expect("a path field");
                 self.editor_mutate(|d| d.set_edge_hint(&from, &to, &text));
             }
-            _ => {}
+            _ => self.editor_commit_line_more(id, &text),
         }
     }
 }

@@ -9,7 +9,7 @@ use toml_edit::{InlineTable, Item, Value};
 use super::doc::ManifestDoc;
 use super::stages::set_or_remove_int;
 use super::tables::{
-    child_mut, ensure_child, get_str, remove_and_report_empty, rename_key, set_bool,
+    child_mut, ensure_child, ensure_parent, get_str, remove_and_report_empty, rename_key, set_bool,
     set_or_remove_str, set_str,
 };
 use super::{EditError, require_name};
@@ -218,7 +218,7 @@ impl ManifestDoc {
         }
         let shared: Option<Item> = self.regions_item(None).cloned();
         let stage_item = self.stage_item_mut(stage).expect("require_stage checked");
-        let context = ensure_child(stage_item, "context")?;
+        let context = ensure_parent(stage_item, "context")?;
         let inline = context.is_inline_table();
         let regions = match shared {
             Some(item) if !inline => item,
@@ -304,7 +304,7 @@ impl ManifestDoc {
             }
             return Ok(());
         }
-        let routing = ensure_child(stage_item, "tool_routing")?;
+        let routing = ensure_parent(stage_item, "tool_routing")?;
         let overrides = ensure_child(routing, "overrides")?;
         set_str(
             overrides.as_table_like_mut().expect("ensure_child checked"),
@@ -332,7 +332,7 @@ impl ManifestDoc {
                 .stage_item_mut(name)
                 .ok_or_else(|| EditError::NoSuchStage(name.clone()))?,
         };
-        let context = ensure_child(parent, "context")?;
+        let context = ensure_parent(parent, "context")?;
         ensure_child(context, "regions")
     }
 

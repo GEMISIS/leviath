@@ -875,6 +875,10 @@ fn install_terminal_restore_panic_hook() {
 impl TerminalSetup for CrosstermSetup {
     type B = ratatui::backend::CrosstermBackend<io::Stdout>;
 
+    fn run_editor(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        leviath_sys::editor::launch(path)
+    }
+
     fn enable(&mut self) -> anyhow::Result<()> {
         install_terminal_restore_panic_hook();
         enable_raw_mode().map_err(anyhow::Error::from)?;

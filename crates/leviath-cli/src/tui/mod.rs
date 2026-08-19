@@ -96,6 +96,10 @@ pub trait TerminalSetup {
     fn disable(&mut self);
     /// Print whatever should remain on screen after the UI exits.
     fn print_done(&self);
+    /// Run the user's `$EDITOR` on `path` and wait for it to close. Called
+    /// between [`Self::disable`] and [`Self::enable`], so the editor has the
+    /// terminal to itself.
+    fn run_editor(&mut self, path: &std::path::Path) -> std::io::Result<()>;
 }
 
 // ─── Test doubles (shared crate-wide; see the module docs for why) ───────────
@@ -284,6 +288,18 @@ mod test_doubles {
         /// Hand back a backend whose every draw fails, so a loop's draw-error
         /// arm is reachable without a second `TerminalSetup` implementation.
         pub(crate) draw_should_fail: bool,
+        /// What `run_editor` writes into the file it is handed (`None` keeps
+        /// the file as it is).
+        pub(crate) editor_writes: Option<String>,
+        /// Every path `run_editor` was asked to open.
+        pub(crate) edited: Vec<std::path::PathBuf>,
+        /// Fail `enable` / `create_terminal` on this call (1-based) only:
+        /// the dashboard takes the terminal again after `$EDITOR`, and that
+        /// second take can fail too.
+        pub(crate) enable_fails_on_call: Option<usize>,
+        pub(crate) create_fails_on_call: Option<usize>,
+        pub(crate) enable_calls: usize,
+        pub(crate) create_calls: usize,
     }
 
     impl TestSetup {
@@ -292,6 +308,12 @@ mod test_doubles {
                 enable_should_fail: false,
                 create_should_fail: false,
                 draw_should_fail: false,
+                editor_writes: None,
+                edited: Vec::new(),
+                enable_fails_on_call: None,
+                create_fails_on_call: None,
+                enable_calls: 0,
+                create_calls: 0,
             }
         }
     }
@@ -300,14 +322,16 @@ mod test_doubles {
         type B = TestBackendHarness;
 
         fn enable(&mut self) -> anyhow::Result<()> {
-            if self.enable_should_fail {
+            self.enable_calls += 1;
+            if self.enable_should_fail || self.enable_fails_on_call == Some(self.enable_calls) {
                 anyhow::bail!("simulated enable failure");
             }
             Ok(())
         }
 
         fn create_terminal(&mut self) -> anyhow::Result<Terminal<Self::B>> {
-            if self.create_should_fail {
+            self.create_calls += 1;
+            if self.create_should_fail || self.create_fails_on_call == Some(self.create_calls) {
                 anyhow::bail!("simulated create_terminal failure");
             }
             let backend = match self.draw_should_fail {
@@ -320,6 +344,14 @@ mod test_doubles {
         fn disable(&mut self) {}
 
         fn print_done(&self) {}
+
+        fn run_editor(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+            self.edited.push(path.to_path_buf());
+            match &self.editor_writes {
+                Some(text) => std::fs::write(path, text),
+                None => Ok(()),
+            }
+        }
     }
 }
 
@@ -513,6 +545,7 @@ mod tests {
             enable_should_fail: true,
             create_should_fail: false,
             draw_should_fail: false,
+            ..TestSetup::new()
         };
         assert!(enable_fails.enable().is_err());
 
@@ -520,6 +553,7 @@ mod tests {
             enable_should_fail: false,
             create_should_fail: true,
             draw_should_fail: false,
+            ..TestSetup::new()
         };
         assert!(create_fails.create_terminal().is_err());
     }
