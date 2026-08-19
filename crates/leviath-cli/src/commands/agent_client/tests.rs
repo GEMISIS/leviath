@@ -245,6 +245,7 @@ fn spawned_event() -> WorldEvent {
         run_id: RUN_ID.to_string(),
         agent_id: RUN_ID.to_string(),
         blueprint: "coder".to_string(),
+        parent_run_id: None,
     }
 }
 

@@ -3372,6 +3372,7 @@ fn every_world_event_variant_carries_its_run_id() {
             run_id: rid.clone(),
             agent_id: aid.clone(),
             blueprint: "b".to_string(),
+            parent_run_id: None,
         },
         WorldEvent::Status {
             run_id: rid.clone(),

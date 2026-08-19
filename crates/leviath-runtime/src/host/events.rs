@@ -21,9 +21,13 @@ use leviath_core::interaction::InteractionRequest;
 /// the source by pipeline systems through [`WorldEventSink`]. Streamed over the
 /// control transport via `ControlRequest::Subscribe`.
 ///
-/// Marked non-exhaustive: new variants are additive, so consumers outside this
-/// crate must keep a catch-all arm.
-#[non_exhaustive]
+/// Deliberately *not* `#[non_exhaustive]`. A catch-all arm in the websocket
+/// gateway is how a variant gets declared, mapped, documented and then quietly
+/// never surfaced to a client under a generic envelope; making every consumer
+/// match exhaustively turns "somebody forgot to wire this up" from a runtime
+/// surprise into a compile error. The cost is that adding a variant is a
+/// breaking change for an out-of-workspace embedder, which is the right price:
+/// a new event kind changes what a subscriber sees either way.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum WorldEvent {
@@ -35,6 +39,13 @@ pub enum WorldEvent {
         agent_id: String,
         /// The blueprint / agent name.
         blueprint: String,
+        /// The run that spawned this one, when it is a sub-agent.
+        ///
+        /// A subscriber building a run tree otherwise has to fetch every new
+        /// run to find out where it hangs, and a fan-out of thirty workers is
+        /// thirty fetches for a fact the spawn already knew.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_run_id: Option<String>,
     },
     /// A run's status, stage, iteration, or tool-call count changed.
     Status {

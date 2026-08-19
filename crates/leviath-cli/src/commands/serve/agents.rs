@@ -109,12 +109,11 @@ pub(super) async fn spawn_agent(
 
     match state.control.spawn(args).await {
         Ok(ControlResponse::Spawned { run_id }) => {
-            let _ = state.event_tx.send(ServerEvent::AgentSpawned {
-                agent_id: run_id.clone(),
-                run_id: run_id.clone(),
-                parent_id: None,
-                blueprint: body.blueprint.clone(),
-            });
+            // No `AgentSpawned` from here. The daemon's change-detection pass
+            // emits one for every run the world gains, however it was
+            // launched, and this route used to emit a second for its own - so
+            // a subscriber saw the run appear twice, and only ever for the
+            // runs that came in through HTTP.
             tracing::info!(run_id = %run_id, blueprint = %body.blueprint, "spawned agent via API");
             Ok(Json(SpawnAgentResp {
                 agent_id: run_id.clone(),

@@ -88,16 +88,14 @@ impl WorldHost {
             let prev = self.emitted.get(&run_id).cloned();
 
             if prev.is_none() {
-                let blueprint = self
-                    .world
-                    .world()
-                    .get::<RunMetadata>(entity)
-                    .map(|m| m.agent_name.clone())
-                    .unwrap_or_default();
+                let metadata = self.world.world().get::<RunMetadata>(entity);
+                let blueprint = metadata.map(|m| m.agent_name.clone()).unwrap_or_default();
+                let parent_run_id = metadata.and_then(|m| m.parent_run_id.clone());
                 let _ = self.events.send(WorldEvent::Spawned {
                     run_id: run_id.clone(),
                     agent_id: agent_id.clone(),
                     blueprint,
+                    parent_run_id,
                 });
             }
 

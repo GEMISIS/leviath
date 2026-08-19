@@ -60,6 +60,26 @@ same list.
   installs when saved, scripts and all; an edited bundled agent can be
   reset to the bundle. The editor keeps a file's comments, order and
   formatting: it edits the manifest as a document.
+- **Breaking (websocket):** stage transitions and tool calls are frames of
+  their own. `stage_transition`, `tool_call_started` and `tool_call_finished`
+  used to arrive wrapped as `{"type":"world","event":{...}}`, so a client had
+  to know to unwrap them and per-run filtering read the run id out of untyped
+  JSON. They are flat, typed frames now and the `world` envelope is gone. The
+  API version moves to `0.4.0` and `GET /api/config` announces
+  `events.stage_and_tool`.
+- Changed: `agent_spawned` says who spawned a sub-agent. `parent_id` was
+  always `null`, because the underlying world event carried no parent, so a
+  console rendering a run tree had to fetch every new run to find out where it
+  hung; a fan-out of thirty workers was thirty fetches for a fact the spawn
+  already knew. Announced as `events.spawn_parent`.
+- Fixed: a run spawned through `POST /api/agents` arrived on the websocket
+  twice. The route sent its own `agent_spawned` on top of the one the daemon
+  already emits for every run, so a console counted the run twice, and only
+  for the runs that came in over HTTP.
+- Added: one test drives a real run from the host's change-detection pass,
+  over a real control socket, through the event relay, to a real websocket
+  frame. Each link had a test and none of them joined, so a break at any seam
+  between them passed the whole suite.
 - Fixed: `lev serve`, `lev dash`, and `lev agent-client` ride out a daemon
   restart instead of breaking. A request that lands while the daemon is down
   (a `lev daemon restart`, a supervisor relaunch, or the restart that follows

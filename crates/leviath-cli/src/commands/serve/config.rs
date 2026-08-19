@@ -269,7 +269,7 @@ mod tests {
     use tokio::sync::broadcast;
     use tower::ServiceExt;
 
-    use crate::commands::serve::types::ServerEvent;
+    use crate::commands::serve::events::ServerEvent;
     use crate::config::Config;
 
     /// A default config whose ollama endpoint cannot answer.

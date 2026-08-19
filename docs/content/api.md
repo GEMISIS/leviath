@@ -534,6 +534,34 @@ sequenceDiagram
   Serve-->>Browser: {done}
 ```
 
+### The frames
+
+Every frame is a JSON object with a `type`, and every frame except `daemon_link` carries a
+`run_id`, which is what `/ws/agents/{id}` filters on.
+
+| `type` | Sent when | Beyond `agent_id` and `run_id` |
+| --- | --- | --- |
+| `agent_spawned` | A run first appears | `blueprint`, and `parent_id` for a sub-agent |
+| `agent_status` | Status, stage, iteration or tool count moves | `status`, `stage`, `iteration`, `tool_calls`, `accepts_messages`, `wait_reason` |
+| `tokens` | The run's token totals move | `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens` |
+| `context_update` | The context window's usage moves | `total_tokens`, `max_tokens` |
+| `stage_transition` | A new stage is entered | `from`, `to`, `iteration` |
+| `tool_call_started` | A tool call goes to the async lane | `call_id`, `tool` |
+| `tool_call_finished` | That call returns | `call_id`, `tool`, `ok`, `summary` |
+| `log` | A log or output line is written | `line` |
+| `interaction_needed` | The run is blocked on a person | `request` |
+| `agent_completed` | The run reaches a terminal status | `status`, `result` (its error), `final_output` |
+| `daemon_link` | This server's link to the daemon changes | `connected`, `daemon`, `restarted`, `restart_advised` |
+
+`wait_reason` is present only on a parked run, and says what it is parked on rather than making
+you fetch the run to find out. `ok` on `tool_call_finished` is `false` for a result the engine
+refused or could not run, so a client should not read a finish frame as a success on its own.
+
+`stage_transition`, `tool_call_started` and `tool_call_finished` used to arrive wrapped as
+`{"type":"world","event":{…}}`. They are flat frames of their own as of API version `0.4.0`,
+announced as the `events.stage_and_tool` capability on `GET /api/config`; `parent_id` on
+`agent_spawned` is `events.spawn_parent`. There is no longer a `world` frame.
+
 ### When the daemon restarts
 
 The stream stays open across a [daemon](/docs/daemon) restart. `lev serve` reconnects to the daemon
