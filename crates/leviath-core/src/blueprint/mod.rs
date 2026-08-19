@@ -1972,7 +1972,16 @@ on_worker_failure = "fail_all"
 "#;
         let cfg: FanOutConfig = toml::from_str(toml).unwrap();
         assert_eq!(cfg.worker_agent.as_deref(), Some("fixer"));
-        assert_eq!(cfg.max_workers, 4); // default
+        assert_eq!(cfg.max_workers, DEFAULT_MAX_WORKERS);
+        assert_eq!(cfg.worker_cap(), Some(DEFAULT_MAX_WORKERS));
+        assert_eq!(
+            FanOutConfig {
+                max_workers: 0,
+                ..fanout_config()
+            }
+            .worker_cap(),
+            None
+        );
         assert_eq!(cfg.on_worker_failure, WorkerFailurePolicy::FailAll);
         // JSON round-trip preserves everything.
         let json = serde_json::to_string(&fanout_config()).unwrap();

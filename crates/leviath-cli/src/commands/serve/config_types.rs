@@ -77,6 +77,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "blueprints.query",
     "blueprints.manifest",
     "blueprints.validate.name",
+    // `fan_outs` on the blueprint detail route: each fan-out stage's limits as
+    // the daemon resolves them (`null` for unlimited, the default filled in),
+    // and the manifest's `0` spelling for "no cap" on `max_workers` and
+    // `max_items`. A console that has this can show and edit the caps without
+    // re-implementing the parser's defaults.
+    "blueprints.fan_outs",
     "tools.list",
     "scripts.read",
     // Announced whether or not `--allow-admin` was passed, which is a narrower

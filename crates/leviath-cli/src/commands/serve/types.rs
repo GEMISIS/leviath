@@ -496,6 +496,46 @@ pub(super) struct RegionInfo {
     pub(super) max_tokens: usize,
 }
 
+/// One fan-out stage of a blueprint, as the API reports it.
+///
+/// A console editing a fan-out stage showed `max_iterations` and nothing else,
+/// so the only limit in sight read as a retry count and the two that decide
+/// how many workers a stage gets, `max_workers` and `max_items`, were
+/// invisible unless you read the TOML. This is the same block resolved the
+/// way the daemon resolves it: defaults filled in, and `null` for a cap that
+/// is not there.
+#[derive(Debug, Serialize)]
+pub(super) struct FanOutInfo {
+    /// The stage's name.
+    pub(super) stage: String,
+    /// A separate installed blueprint the workers run as, when that is how the
+    /// stage picks its worker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) worker_agent: Option<String>,
+    /// A stage of this blueprint the workers run as, when that is how.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) worker_stage: Option<String>,
+    /// A discovery query matched against installed agents, when that is how.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) worker_query: Option<String>,
+    /// The stage that reconciles the workers' results, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) merge_stage: Option<String>,
+    /// How many workers run at once. `null` is unlimited (`max_workers = 0` in
+    /// the manifest); a stage that names no cap gets the default, and that
+    /// default is what appears here.
+    pub(super) max_workers: Option<usize>,
+    /// How many work items the split may produce at all. `null` is unlimited
+    /// (`max_items = 0`, or no key).
+    pub(super) max_items: Option<usize>,
+    /// `continue` or `fail_all`, as the manifest spells them.
+    pub(super) on_worker_failure: String,
+    /// The region the consolidated worker report is written to, when the
+    /// stage names one; `null` means the conversation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) results_region: Option<String>,
+}
+
 /// One blueprint, with the manifest text behind it.
 ///
 /// The detail route only. A listing that carried one of these per blueprint
@@ -515,6 +555,9 @@ pub(super) struct BlueprintDetail {
     /// manifest is: answering "what agents are there" should not cost every
     /// region of every agent on the machine.
     pub(super) regions: Vec<RegionInfo>,
+    /// The blueprint's fan-out stages, with their limits as the daemon will
+    /// apply them. Empty for a blueprint that never fans out.
+    pub(super) fan_outs: Vec<FanOutInfo>,
     /// The manifest exactly as it is on disk.
     ///
     /// Without this a console has no way to read what it is editing: naming

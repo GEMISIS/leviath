@@ -641,6 +641,32 @@ pub(super) fn parse_stage_model(stage_value: &toml::Value) -> ModelConfig {
     }
 }
 
+/// Read one of a fan-out stage's two caps, `max_workers` or `max_items`.
+///
+/// `Ok(None)` when the key is absent, so the caller picks the default;
+/// `Ok(Some(n))` for a non-negative integer, where `0` is the manifest's word
+/// for "unlimited" on both keys. Anything else is an error rather than a
+/// silent fallback: `max_workers = -1` used to wrap to the largest `usize` and
+/// so run unbounded, while `max_items = "twelve"` was read as no cap at all.
+/// Either mistake shows up as an unexpectedly wide fan-out, which is the wrong
+/// place to first hear about a typo.
+fn fan_out_cap(stage_value: &toml::Value, stage_name: &str, key: &str) -> Result<Option<usize>> {
+    let Some(value) = stage_value.get(key) else {
+        return Ok(None);
+    };
+    let n = value.as_integer().ok_or_else(|| {
+        Error::Other(format!(
+            "stage '{stage_name}': {key} must be a whole number (0 means unlimited)"
+        ))
+    })?;
+    let n = usize::try_from(n).map_err(|_| {
+        Error::Other(format!(
+            "stage '{stage_name}': {key} must not be negative (got {n}; 0 means unlimited)"
+        ))
+    })?;
+    Ok(Some(n))
+}
+
 /// Apply `[stages.<name>] mode`, along with the sub-tables a given mode reads
 /// (`interaction_points` for `interactive_points`, the fan-out block for
 /// `fan_out`). A stage that names no mode keeps the constructor's default.
@@ -807,19 +833,12 @@ pub(super) fn apply_stage_mode(
                 worker_stage: str_field("worker_stage"),
                 worker_query: str_field("worker_query"),
                 merge_stage: str_field("merge_stage"),
-                max_workers: stage_value
-                    .get("max_workers")
-                    .and_then(|v| v.as_integer())
-                    .map(|n| n as usize)
-                    .unwrap_or(4),
+                max_workers: fan_out_cap(stage_value, stage_name, "max_workers")?
+                    .unwrap_or(crate::blueprint::DEFAULT_MAX_WORKERS),
                 on_worker_failure,
                 split_prompt: str_field("split_prompt").unwrap_or_default(),
                 results_region: str_field("results_region"),
-                max_items: stage_value
-                    .get("max_items")
-                    .and_then(|v| v.as_integer())
-                    .filter(|n| *n > 0)
-                    .map(|n| n as usize),
+                max_items: fan_out_cap(stage_value, stage_name, "max_items")?.filter(|n| *n > 0),
             };
             stage.with_mode(StageMode::FanOut { config })
         }

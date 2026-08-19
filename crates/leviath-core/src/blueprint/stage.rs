@@ -172,7 +172,12 @@ pub struct FanOutConfig {
     /// Optional stage that reconciles worker results before transitioning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_stage: Option<String>,
-    /// Maximum number of workers running concurrently.
+    /// Most workers running at once. Defaults to [`DEFAULT_MAX_WORKERS`].
+    ///
+    /// `0` means unlimited: every work item starts as soon as the split has
+    /// produced it, and the daemon's inference pool (`[limits]
+    /// max_concurrent_inferences`) is what paces the requests. Read it through
+    /// [`Self::worker_cap`] rather than comparing against zero by hand.
     #[serde(default = "default_max_workers")]
     pub max_workers: usize,
     /// How to handle worker failures.
@@ -194,7 +199,8 @@ pub struct FanOutConfig {
     pub results_region: Option<String>,
 
     /// Most work items the split may produce. `None` means however many it
-    /// produces.
+    /// produces (a manifest spells that `max_items = 0`, or leaves the key
+    /// out).
     ///
     /// Distinct from `max_workers`, which caps how many run *at once*. This
     /// caps how many there are at all, which is what bounds both the run's cost
@@ -204,9 +210,30 @@ pub struct FanOutConfig {
     pub max_items: Option<usize>,
 }
 
+impl FanOutConfig {
+    /// The concurrency cap as an option: `Some(n)` for `max_workers = n`,
+    /// `None` when the stage is unlimited (`max_workers = 0`).
+    ///
+    /// The runtime and the API both want the question answered this way, and
+    /// answering it in one place keeps "zero is unlimited" from being restated
+    /// wherever the number is read.
+    pub fn worker_cap(&self) -> Option<usize> {
+        (self.max_workers > 0).then_some(self.max_workers)
+    }
+}
+
+/// `max_workers` when a fan-out stage does not set one.
+///
+/// Thirty rather than the four this started at. Four made a fan-out that split
+/// ten ways run in three waves, and the wait for the last wave was the wait a
+/// person saw. The inference pool caps concurrent model requests either way, so
+/// a wide fan-out over a narrow pool queues at the provider rather than at the
+/// stage.
+pub const DEFAULT_MAX_WORKERS: usize = 30;
+
 /// Default `max_workers` when unspecified.
 fn default_max_workers() -> usize {
-    4
+    DEFAULT_MAX_WORKERS
 }
 
 /// Style of interaction at an interaction point.

@@ -73,7 +73,9 @@ max_iterations = 4
 max_revisits = 1
 worker_stage = "scan_worker"
 merge_stage = "analyze"
-max_workers = 4
+# Every slice at once rather than in waves; the daemon's inference pool paces the
+# requests. Set to 0 for no cap at all.
+max_workers = 30
 # A file that will not parse is a gap in the sweep, not a reason to throw the
 # other workers' findings away. The failure is named in the results and the
 # analyze stage decides what to do about it.
@@ -82,11 +84,11 @@ on_worker_failure = "continue"
 # of its own rather than the conversation, which is carrying the message history
 # alongside them.
 results_region = "worker_findings"
-# A ceiling on slices, not just on concurrency. Eight is enough breadth for any
-# log set - a rotation with more files than that wants time windows, not one
-# worker each - and past it every worker's share of the region is too small to
-# carry the counts that make a finding evidence.
-max_items = 8
+# A ceiling on slices, not just on concurrency. Thirty covers a large rotation
+# one file each while leaving every worker a usable share of the region for the
+# counts that make a finding evidence; the analyze stage is told when that
+# share had to be trimmed. Set to 0 for no ceiling.
+max_items = 30
 split_prompt = """
 Split the sweep into slices that can be read independently, one work item each.
 A slice is one log file, one service's files, or one time window of a single

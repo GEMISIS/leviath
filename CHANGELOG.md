@@ -74,6 +74,22 @@ same list.
   ran on `qwen3.5:9b`, a model the user may never have pulled. The user's
   default now leads on its provider, with the blueprint's entries behind it as
   the failover, which is the order the docs already described.
+- Changed: a fan-out stage's `max_workers` defaults to 30 rather than 4, so
+  a split that produces ten work items runs them at once instead of in
+  waves. `max_workers = 0` now means unlimited, where it used to be read
+  as 1, and `max_items = 0` is spelled out as no ceiling. The daemon's
+  inference pool still paces the requests, so a wide fan-out queues at the
+  model rather than at the stage. The bundled `reviewer`, `data-analyst`,
+  `deep-researcher`, `log-analyzer` and `wide-researcher` agents raise both
+  caps to 30. A negative or non-numeric cap is a validation error; before,
+  `max_workers = -1` ran unbounded and `max_items = "twelve"` ran uncapped.
+- New: `GET /api/blueprints/{name}` carries `fan_outs`, one entry per
+  fan-out stage with its worker source, merge stage and both caps resolved
+  as the daemon applies them (`null` for unlimited). Announced as
+  `blueprints.fan_outs` in the `capabilities` list on `GET /api/config`.
+  Until now the only limit a console showed for a fan-out stage was
+  `max_iterations`, so the caps that decide how many workers a stage gets
+  looked like a retry count.
 
 ## 0.4.0 - 2026-08-18
 

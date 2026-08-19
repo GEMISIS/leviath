@@ -226,6 +226,7 @@
           "blueprints"
         ],
         "summary": "Fetch one blueprint",
+        "description": "The catalog entry plus the manifest text, the context regions, and fan_outs: one entry per fan-out stage with its worker source, merge stage and both caps (max_workers, max_items) resolved as the daemon applies them, null meaning unlimited.",
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"

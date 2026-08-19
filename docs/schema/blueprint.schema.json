@@ -281,7 +281,12 @@
           "items": { "$ref": "#/$defs/interactionPoint" }
         },
         "on_worker_failure": { "enum": ["continue", "fail_all"] },
-        "max_workers": { "type": "integer", "minimum": 1 },
+        "max_workers": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 30,
+          "description": "How many workers run at once. 0 means unlimited: every work item starts as soon as the split has produced it, and the daemon's inference pool paces the requests."
+        },
         "worker_agent": { "type": "string" },
         "worker_stage": { "type": "string" },
         "worker_query": { "type": "string" },
@@ -293,8 +298,8 @@
         },
         "max_items": {
           "type": "integer",
-          "minimum": 1,
-          "description": "Most work items the split may produce. Distinct from max_workers, which caps how many run at once. This caps how many exist at all, bounding both the run's cost and each worker's share of the results region."
+          "minimum": 0,
+          "description": "Most work items the split may produce. 0 (or no key) means however many it produces. Distinct from max_workers, which caps how many run at once. This caps how many exist at all, bounding both the run's cost and each worker's share of the results region."
         }
       }
     },

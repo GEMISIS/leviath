@@ -44,7 +44,7 @@ mode         = "fan_out"
 worker_stage = "fix_one"    # which worker to run, see below
 split_prompt = "..."        # prompt that produces the JSON array of work items
 merge_stage  = "verify"     # stage the parent resumes at once workers finish
-max_workers  = 8            # how many run at once, default 4
+max_workers  = 8            # how many run at once, default 30; 0 is unlimited
 on_worker_failure = "continue"
 ```
 
@@ -57,8 +57,8 @@ Those keys sit directly on the stage next to `mode = "fan_out"`, not in a sub-ta
 | `worker_query` | unset | A hint matched against installed agent types |
 | `merge_stage` | unset | Stage that reconciles worker results before the parent moves on |
 | `results_region` | `conversation` | Where the consolidated worker report lands |
-| `max_items` | unset | Most work items the split may produce |
-| `max_workers` | `4` | How many workers run at once |
+| `max_items` | unset | Most work items the split may produce. `0` or unset means however many it produces |
+| `max_workers` | `30` | How many workers run at once. `0` means unlimited |
 | `on_worker_failure` | `"continue"` | `continue` merges what succeeded. `fail_all` fails the whole fan-out if any worker fails |
 | `split_prompt` | `""` | Added to the stage's system prompt. Its reply is parsed as the list of work items |
 
@@ -75,7 +75,7 @@ installed agent instead, which is worth doing when one already does the job:
 mode = "fan_out"
 worker_agent = "researcher"    # every item is a full researcher run
 merge_stage = "analyze"
-max_workers = 4
+max_workers = 30
 ```
 
 That is what the bundled `deep-researcher` and `wide-researcher` do. The difference is not only who
@@ -154,6 +154,11 @@ Split a hundred ways and every worker gets a hundredth of the space. Past some p
 too small to be worth reading, and `max_items` is how you stop the split getting there. Without it,
 whatever the split produces is what runs.
 
+Both caps take `0` to mean no cap. `max_workers = 0` starts every work item the moment the split
+has produced it; `max_items = 0` is the same as leaving the key out. A negative value, or a value
+that is not a whole number, is a validation error rather than a quiet fallback, so a typo shows up
+in `lev validate` and not as a fan-out wider than the manifest appeared to allow.
+
 ## `max_workers` is not the knob you might think
 
 Three different settings limit concurrency, and they are easy to confuse. All three apply at once:
@@ -164,9 +169,13 @@ Three different settings limit concurrency, and they are easy to confuse. All th
 | `[limits] max_concurrent_inferences` | Model requests in flight | Per model, daemon-wide |
 | `[rate_limits.<provider>]` | Requests per minute | Per provider |
 
-So `max_workers = 8` starts eight sub-agents, but if the model pool only allows four requests at
-once, four of them wait. That is fine and costs nothing. See
+So `max_workers = 30` (the default) starts up to thirty sub-agents, but if the model pool only allows
+eight requests at once (also the default), the rest wait for a slot. That is fine and costs nothing;
+it is also why an unlimited fan-out is safe to run. See
 [inference pools](/docs/engine#inference-pools).
+
+Both caps can be read and changed over the [HTTP API](/docs/api#fan-out-limits): the blueprint
+detail route reports them resolved, and writing the manifest back is how they change.
 
 ## Any sub-agent can ask you a question
 

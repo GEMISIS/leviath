@@ -726,7 +726,7 @@ worker_query = "anything that reads logs"
             NodeKind::Stage(StageKind::FanOut {
                 worker: WorkerRef::Query("anything that reads logs".to_string()),
                 merge: None,
-                max_workers: 4,
+                max_workers: leviath_core::blueprint::DEFAULT_MAX_WORKERS,
             })
         );
         // External nodes come after every stage, and are not stages.

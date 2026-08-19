@@ -301,7 +301,9 @@ pub(super) async fn get_blueprint(
     let manifest = std::mem::take(&mut info.manifest);
     // Parsed from the text already in hand rather than re-read: the same
     // reason the manifest itself is carried through from discovery.
-    let regions = parse_manifest(&manifest)
+    let parsed = parse_manifest(&manifest).ok();
+    let regions = parsed
+        .as_ref()
         .map(|bp| {
             bp.context_layout
                 .regions
@@ -316,11 +318,45 @@ pub(super) async fn get_blueprint(
                 .collect()
         })
         .unwrap_or_default();
+    let fan_outs = parsed.as_ref().map(fan_out_infos).unwrap_or_default();
     Ok(Json(BlueprintDetail {
         info,
         regions,
+        fan_outs,
         manifest,
     }))
+}
+
+/// The fan-out stages of a blueprint, with their limits resolved.
+///
+/// The manifest text is on the same response, so a client *could* work these
+/// out itself, but only by re-implementing the parser's defaults and its
+/// reading of `0`. A console that got the default wrong would show a stage
+/// as capped at four workers when the daemon runs thirty; one that missed the
+/// zero rule would show "0 workers" for a stage that is unlimited. Resolving
+/// the numbers here means what the API says is what the run does.
+fn fan_out_infos(bp: &leviath_core::blueprint::Blueprint) -> Vec<FanOutInfo> {
+    bp.stages
+        .iter()
+        .filter_map(|stage| match &stage.mode {
+            leviath_core::blueprint::StageMode::FanOut { config } => Some(FanOutInfo {
+                stage: stage.name.clone(),
+                worker_agent: config.worker_agent.clone(),
+                worker_stage: config.worker_stage.clone(),
+                worker_query: config.worker_query.clone(),
+                merge_stage: config.merge_stage.clone(),
+                max_workers: config.worker_cap(),
+                max_items: config.max_items,
+                on_worker_failure: match config.on_worker_failure {
+                    leviath_core::blueprint::WorkerFailurePolicy::Continue => "continue",
+                    leviath_core::blueprint::WorkerFailurePolicy::FailAll => "fail_all",
+                }
+                .to_string(),
+                results_region: config.results_region.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(super) async fn create_blueprint(
@@ -968,6 +1004,113 @@ system_prompt = "Plan the work"
                 },
             ])
         );
+    }
+
+    /// The detail route resolves each fan-out stage's limits the way the
+    /// daemon does: the default filled in for a stage that names none, `null`
+    /// for a cap that is not there (`0` in the manifest, or no `max_items`),
+    /// and the number itself otherwise. Stages that do not fan out are not
+    /// listed, and a blueprint with no fan-out has an empty list rather than
+    /// no key.
+    #[tokio::test]
+    async fn the_detail_route_reports_the_blueprints_fan_out_limits() {
+        let manifest = r#"
+[agent]
+name = "spreader"
+
+[stages.plan]
+system_prompt = "Plan the work"
+
+[stages.spread]
+mode = "fan_out"
+worker_stage = "worker"
+merge_stage = "gather"
+split_prompt = "split it"
+results_region = "findings"
+on_worker_failure = "fail_all"
+max_workers = 0
+max_items = 12
+
+[stages.wide]
+mode = "fan_out"
+worker_agent = "researcher"
+split_prompt = "split it"
+
+[stages.worker]
+system_prompt = "Do one part"
+allow_as_worker = true
+
+[stages.gather]
+system_prompt = "Gather"
+
+[context.regions]
+findings = { kind = "clearable", max_tokens = 4000 }
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("spreader");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("agent.leviath"), manifest).unwrap();
+
+        let state = test_state_with_path(dir.path().to_path_buf());
+        let app = Router::new()
+            .route("/api/blueprints/{name}", get(get_blueprint))
+            .with_state(state);
+        let req = Request::builder()
+            .uri("/api/blueprints/spreader")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let bp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            bp["fan_outs"],
+            serde_json::json!([
+                {
+                    "stage": "spread",
+                    "worker_stage": "worker",
+                    "merge_stage": "gather",
+                    "max_workers": null,
+                    "max_items": 12,
+                    "on_worker_failure": "fail_all",
+                    "results_region": "findings",
+                },
+                {
+                    "stage": "wide",
+                    "worker_agent": "researcher",
+                    "max_workers": leviath_core::blueprint::DEFAULT_MAX_WORKERS,
+                    "max_items": null,
+                    "on_worker_failure": "continue",
+                },
+            ])
+        );
+    }
+
+    /// A blueprint that never fans out reports an empty list, so a client can
+    /// tell "no fan-out here" from a daemon too old to say.
+    #[tokio::test]
+    async fn a_blueprint_without_fan_out_reports_an_empty_fan_outs_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("test-bp");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("agent.leviath"), test_manifest()).unwrap();
+
+        let state = test_state_with_path(dir.path().to_path_buf());
+        let app = Router::new()
+            .route("/api/blueprints/{name}", get(get_blueprint))
+            .with_state(state);
+        let req = Request::builder()
+            .uri("/api/blueprints/test-bp")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let bp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(bp["fan_outs"], serde_json::json!([]));
     }
 
     /// The listing must not carry manifests: it answers "what agents are
