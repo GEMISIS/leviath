@@ -494,22 +494,21 @@ mod tests {
             // work. Checked across the range a real model spans, because the
             // floors bind at the bottom of it and the percentages at the top.
             for window in [32_768, 128_000, NARROW, WIDE] {
-                let resolved = blueprint.context_layout.resolved(window);
-                assert!(
-                    resolved.validate().is_ok(),
-                    "{}'s layout does not validate at a {window}-token window",
-                    agent.name
+                // The shared layout plus any per-stage override, as one
+                // sequence: a bundled agent may declare either, and a branch
+                // for the per-stage case would sit unreached while none does.
+                let layouts = std::iter::once(&blueprint.context_layout).chain(
+                    blueprint
+                        .stages
+                        .iter()
+                        .filter_map(|s| s.context_layout.as_ref()),
                 );
-                for stage in &blueprint.stages {
-                    if let Some(layout) = &stage.context_layout {
-                        assert!(
-                            layout.resolved(window).validate().is_ok(),
-                            "{}'s stage '{}' layout does not validate at a \
-                             {window}-token window",
-                            agent.name,
-                            stage.name
-                        );
-                    }
+                for layout in layouts {
+                    assert!(
+                        layout.resolved(window).validate().is_ok(),
+                        "a layout of {} does not validate at a {window}-token window",
+                        agent.name
+                    );
                 }
             }
 

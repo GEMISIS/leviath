@@ -234,20 +234,14 @@ fn agent_fields(doc: &ManifestDoc) -> Vec<Field> {
         ),
     ];
     for region in doc.regions(None) {
-        let budget = region
-            .budget_percent
-            .map(|p| format!("{p}%"))
-            .unwrap_or_default();
-        let tokens = region
-            .max_tokens
-            .map(|t| format!("{t} tokens"))
-            .unwrap_or_default();
         out.push(Field::new(
             FieldId::RegionRow(region.name.clone()),
             "Shared region",
             FieldValue::Row(format!(
-                "{}  {}  {budget} {tokens}",
-                region.name, region.kind
+                "{}  {}{}",
+                region.name,
+                region.kind,
+                region_size(&region)
             )),
             "A context region every stage sees unless it has a layout of its own.",
         ));
@@ -525,14 +519,20 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
     }
 }
 
-/// `· 5% · 4000 tokens`, whichever a region has.
+/// `· 5% · min 800 · max 4000`, whichever a region has.
+///
+/// Most regions now carry only the percentage - it is what decides the size,
+/// and an absolute beside it is the exception rather than the shape.
 fn region_size(region: &crate::blueprint_edit::RegionView) -> String {
     let mut s = String::new();
     if let Some(p) = region.budget_percent {
         s.push_str(&format!(" · {p}%"));
     }
+    if let Some(t) = region.min_tokens {
+        s.push_str(&format!(" · min {t}"));
+    }
     if let Some(t) = region.max_tokens {
-        s.push_str(&format!(" · {t} tokens"));
+        s.push_str(&format!(" · max {t}"));
     }
     s
 }
