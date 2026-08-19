@@ -112,6 +112,7 @@ mod tests {
             unattended: false,
             read_paths: None,
             output_request: None,
+            model_override: None,
         }
     }
 

@@ -23,6 +23,7 @@ fn meta(run_id: &str) -> RunMetadata {
         unattended: false,
         read_paths: None,
         output_request: None,
+        model_override: None,
     }
 }
 

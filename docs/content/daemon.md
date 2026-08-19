@@ -73,6 +73,18 @@ every result as it arrives. On reload it uses the journal to work out what actua
   this cannot close, because no journal can watch an external side effect happen atomically. Those
   calls come back as the same check-first error rather than being quietly re-run.
 
+A reloaded run keeps the launch options that shape it: `--yolo`, the output format it was asked for,
+and a `--model` override, replayed exactly as given. A run launched with no `--model` resolves each
+stage afresh on reload, the same way the launch did, so its failover list is intact. (Before 0.4.1,
+the reload handed back the entry stage's resolved `provider/model` as if it had been the override,
+which pinned every stage of a reloaded run to that one pair.)
+
+A reloaded run keeps the launch options that shape it: `--yolo`, the output format it was asked for,
+and a `--model` override, replayed exactly as given. A run launched with no `--model` resolves each
+stage afresh on reload, the same way the launch did, so its failover list is intact. (Before 0.4.1,
+the reload handed back the entry stage's resolved `provider/model` as if it had been the override,
+which pinned every stage of a reloaded run to that one pair.)
+
 If something on your end consumes completion webhooks, deduplicate on `delivery_id`, described in
 the [API guide](/docs/api). A completion that re-fires after a restart carries the same id as the
 original.
