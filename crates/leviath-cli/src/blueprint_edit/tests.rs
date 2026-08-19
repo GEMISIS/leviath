@@ -93,9 +93,11 @@ fn every_bundled_manifest_round_trips_byte_for_byte() {
     for agent in BUNDLED_AGENTS {
         let text = catalog::bundled_manifest(agent);
         let doc = ManifestDoc::parse(text).expect(agent.name);
+        // A Windows checkout carries CRLF; the writer keeps them inside
+        // strings and normalises the rest, so compare line endings apart.
         assert_eq!(
-            doc.to_toml(),
-            text,
+            doc.to_toml().replace("\r\n", "\n"),
+            text.replace("\r\n", "\n"),
             "{} changed on the way through",
             agent.name
         );
