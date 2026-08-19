@@ -163,23 +163,39 @@ impl WsTestClient {
     }
 
     /// Read one server frame (unmasked) and return (opcode, payload).
+    ///
+    /// Each read names the frame part it was after, so a server that hung up
+    /// mid-stream fails with "the server closed the connection before ..."
+    /// rather than a bare `Os { code: 54 }` from an anonymous `unwrap`.
     pub(super) async fn recv_frame(&mut self) -> (u8, Vec<u8>) {
         let mut header = [0u8; 2];
-        self.stream.read_exact(&mut header).await.unwrap();
+        self.stream
+            .read_exact(&mut header)
+            .await
+            .expect("the server closed the connection before the frame header");
         let opcode = header[0] & 0x0f;
         let mut len = (header[1] & 0x7f) as usize;
         if len == 126 {
             let mut ext = [0u8; 2];
-            self.stream.read_exact(&mut ext).await.unwrap();
+            self.stream
+                .read_exact(&mut ext)
+                .await
+                .expect("the server closed the connection before the 16-bit length");
             len = u16::from_be_bytes(ext) as usize;
         } else if len == 127 {
             let mut ext = [0u8; 8];
-            self.stream.read_exact(&mut ext).await.unwrap();
+            self.stream
+                .read_exact(&mut ext)
+                .await
+                .expect("the server closed the connection before the 64-bit length");
             len = u64::from_be_bytes(ext) as usize;
         }
         let mut payload = vec![0u8; len];
         if len > 0 {
-            self.stream.read_exact(&mut payload).await.unwrap();
+            self.stream
+                .read_exact(&mut payload)
+                .await
+                .expect("the server closed the connection before the frame payload");
         }
         (opcode, payload)
     }

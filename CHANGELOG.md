@@ -13,6 +13,15 @@ same list.
 
 ## Unreleased
 
+- Fixed: a WebSocket subscriber that drops a single pong is no longer
+  disconnected. The server's liveness check had no deadline of its own - a ping
+  left unanswered by the time the *next* ping was due meant a dead peer, so at
+  the 20-second cadence one lost packet or one tab that resumed a moment late
+  cost the client its stream. The pong deadline is now its own value (60
+  seconds, three cadences), so a peer gets three chances to answer, and the
+  test that covers a ponging client no longer has to win a 60 ms round trip on
+  a loaded CI runner to pass.
+
 - Fixed: agents no longer waste turns calling `read_file` on a context region.
   A stage that routes tool output into a region left a pointer in the
   conversation ending "read that region for the full result" - an instruction
