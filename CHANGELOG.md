@@ -25,6 +25,24 @@ same list.
   declare, so a listing can show a provider's description and default model
   without fetching every file. Announced as `scripts.providers`; the API
   contract version is now 0.4.0.
+- Fixed: a run is never titled with the model's own thinking. Runs on a
+  reasoning model were coming back titled "We need to generate a short title
+  for the user's request. The user wants to buil", which is chain-of-thought
+  cut at exactly the 80-byte display cap. Three things lined up. The titling
+  call allowed 64 output tokens, and a reasoning model spends that working up
+  to an answer it then never reaches. The OpenAI-shaped parsers promote the
+  `reasoning` channel into the reply when the reply itself is empty, which is
+  right for an agent turn and wrong for this one. And the sanitizer, finding no
+  line short enough to be a title, fell back to the first line truncated, so
+  the prose was stored rather than discarded. Now the title call asks the
+  provider not to think in the spelling that provider understands (`think` for
+  Ollama, `reasoning` for OpenRouter), has 512 tokens in case it thinks anyway,
+  and refuses both a reply that stopped at the token limit and one with no line
+  that fits. A run with no title shows the task you typed, which is what the
+  dashboard and `lev ps` already did. The cap is also measured in bytes on both
+  sides now, so an 80-character CJK title is refused rather than sliced a
+  quarter of the way through, and `<thinking>` and `<reasoning>` are stripped
+  alongside `<think>` for local models that write the tags inline.
 - Fixed: a provider script that defines `initialize` but not `inference` is
   refused when it loads, rather than compiling, initializing, caching, and then
   failing at the first inference part-way into a run. It is now skipped with a

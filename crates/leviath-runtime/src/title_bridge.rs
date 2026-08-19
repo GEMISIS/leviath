@@ -43,6 +43,12 @@ pub struct TitleOutcome {
     pub entity: Entity,
     /// The raw model reply (sanitized by the collect system), or the error.
     pub result: Result<String, ProviderError>,
+    /// How the provider says the reply ended. `None` for a call that never
+    /// completed. [`crate::title::collect_title`] refuses a reply that stopped
+    /// at the token limit: a title cut off mid-sentence is not a title, and
+    /// that is exactly the shape a reasoning model returns when it spends the
+    /// budget thinking.
+    pub finish_reason: Option<leviath_providers::FinishReason>,
     /// What the call billed, when it completed. `None` for a call that failed
     /// or timed out, which is the only case where nothing was served.
     pub usage: Option<leviath_providers::TokenUsage>,
@@ -78,14 +84,16 @@ pub async fn run_title_job(
     // collect system wants the title, the run's accounting wants the tokens,
     // and dropping the half this channel had no use for is how the title call
     // came to be billed and counted nowhere.
-    let (result, usage) = match tokio::time::timeout(deadline, provider.infer(&request)).await {
-        Ok(Ok(r)) => (Ok(r.content), Some(r.tokens_used)),
-        Ok(Err(e)) => (Err(e), None),
+    let call = tokio::time::timeout(deadline, provider.infer(&request)).await;
+    let (result, usage, finish_reason) = match call {
+        Ok(Ok(r)) => (Ok(r.content), Some(r.tokens_used), Some(r.finish_reason)),
+        Ok(Err(e)) => (Err(e), None, None),
         Err(_) => (
             Err(leviath_providers::ProviderError::Other(format!(
                 "title generation exceeded the {}s deadline and was aborted to free the pool slot",
                 deadline.as_secs()
             ))),
+            None,
             None,
         ),
     };
@@ -94,6 +102,7 @@ pub async fn run_title_job(
     let _ = results.send(TitleOutcome {
         entity,
         result,
+        finish_reason,
         usage,
         provider_name,
         model,
