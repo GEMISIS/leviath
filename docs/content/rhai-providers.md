@@ -340,15 +340,20 @@ For an API that is not OpenAI-shaped, rewrite `build_body` and the response pars
 match its wire format.
 
 ```bash
-lev models list --provider groq   # calls list_models, exercising auth and parse_json end to end
+lev models list --provider groq   # compiles the script and calls list_models
+lev doctor -m groq/<model>        # the same, then a real inference; exits non-zero on failure
 lev run <agent> --task "..."      # a live run through a stage that references the provider
 ```
 
+`lev models list --provider <name>` loads the script by name whether or not `--remote` is passed,
+since a script provider has no row in the built-in model table. A compile failure, and an error
+raised by `list_models` itself, are both reported by name.
+
 > [!TIP]
 > A broken provider script is skipped and model selection falls through to the next configured model,
-> so a syntax error looks like "my agent quietly used the wrong model". Run
-> `lev models list --provider <name>` first; a compile or auth error surfaces there instead of
-> hiding behind a fallback.
+> so a syntax error looks like "my agent quietly used the wrong model". Check it before you wire it
+> into a blueprint: `lev models list --provider <name>` shows the catalog and names any failure, and
+> `lev doctor -m <name>/<model>` does the same and exits non-zero, so it works as a CI gate.
 
 If `lev serve` is running, `POST /api/scripts/validate` with `kind: "provider"` answers the same
 question without a run and without a key: it compiles the text and checks that `initialize(config)`

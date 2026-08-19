@@ -553,6 +553,19 @@ async fn list_with_registry(
         }
     }
 
+    // A `--provider` naming something neither registered natively nor present
+    // in the built-in table is a script provider (or a typo). Ask the script
+    // layer: it is the only thing that can answer for one. A name the built-in
+    // table knows is left alone - `--provider openai` with no OpenAI key is an
+    // empty table, exactly as it has always been.
+    let mut script_provider_answered = false;
+    if let Some(ref name) = args.provider
+        && !available.contains(name)
+        && !builtin_table().iter().any(|e| e.provider == name.as_str())
+    {
+        script_provider_answered = merge_script_provider(&registry, name, &mut entries).await;
+    }
+
     // Apply provider filter (after remote merge so we respect the filter).
     if let Some(ref filter) = args.provider {
         entries.retain(|e| &e.provider == filter);
@@ -590,14 +603,23 @@ async fn list_with_registry(
     }
 
     if entries.is_empty() {
-        // Reachable two ways now: a `--provider` filter that matches nothing,
-        // or no configured provider at all (a fresh install). Both want the
-        // same nudge, and the second is the one worth naming.
+        // Reachable three ways now: a `--provider` filter that matches nothing,
+        // no configured provider at all (a fresh install), or a script provider
+        // that loaded and named no models. The last one is not the same answer
+        // as the other two - the script compiled and its credentials were
+        // accepted - so it says so rather than reading as "nothing here".
         println!("No models available.");
-        println!(
-            "(configure a provider with `lev setup`, or pass --all to see every \
-             model Leviath knows about)"
-        );
+        if script_provider_answered {
+            println!(
+                "(the script provider loaded and listed no models - its script \
+                 may not define `list_models(state)`)"
+            );
+        } else {
+            println!(
+                "(configure a provider with `lev setup`, or pass --all to see every \
+                 model Leviath knows about)"
+            );
+        }
         return Ok(());
     }
 
@@ -634,6 +656,51 @@ async fn list_with_registry(
     }
 
     Ok(())
+}
+
+/// Load the script provider called `name` and merge whatever `list_models`
+/// answers into `entries`. Returns whether it answered at all.
+///
+/// A script provider defines its catalog at run time, so the built-in table
+/// has no rows for one and `lev models list --provider <name>` used to print
+/// "No models available." for a perfectly good provider. Loading it here is
+/// what makes that command the smoke test `rhai-providers.md` prescribes: it
+/// compiles the script, runs `initialize`, and calls `list_models`.
+///
+/// Both failure paths report and continue rather than erroring, matching what
+/// `--remote` has always done for a native provider that will not answer - the
+/// non-zero gate for a provider script is `lev doctor -m <provider>/<model>`.
+async fn merge_script_provider(
+    registry: &leviath_runtime::ProviderRegistry,
+    name: &str,
+    entries: &mut Vec<ModelInfo>,
+) -> bool {
+    let Some(provider) = registry.get(name) else {
+        // Either a name with nothing behind it, or a script that failed to
+        // compile - the script layer logged which as it happened. Say the part
+        // it cannot: that this is why the table below is empty.
+        eprintln!(
+            "Warning: no provider named '{}' is configured, and no script \
+             provider by that name loaded",
+            name
+        );
+        return false;
+    };
+    match provider.list_models().await {
+        Ok(models) => {
+            for rm in models {
+                match entries.iter_mut().find(|e| e.id == rm.id) {
+                    Some(existing) => *existing = rm,
+                    None => entries.push(rm),
+                }
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("Warning: could not fetch models from '{}': {}", name, e);
+            false
+        }
+    }
 }
 
 // ─── show ─────────────────────────────────────────────────────────────────────
@@ -1865,6 +1932,141 @@ mod tests {
                     json: false,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
+    }
+
+    /// A registry whose only provider is a `.rhai` script in `dir`, exactly as
+    /// `lev models list` builds one for a real install. Not a mock: the script
+    /// is compiled, `initialize` runs, and `list_models` is dispatched, which
+    /// is the whole point of the command this covers.
+    fn script_registry(
+        dir: std::path::PathBuf,
+    ) -> impl Fn(&Config) -> Result<leviath_runtime::ProviderRegistry, leviath_providers::ProviderError>
+    {
+        move |_config: &Config| {
+            let layer = leviath_runtime::script_provider::ScriptProviderLayer::new(
+                dir.clone(),
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+                None,
+                Vec::new(),
+            );
+            Ok(leviath_runtime::ProviderRegistry::new()
+                .with_script_layer(std::sync::Arc::new(layer)))
+        }
+    }
+
+    /// The command `rhai-providers.md` prescribes as a provider script's smoke
+    /// test: it has to reach the script layer, since the built-in table has no
+    /// row for a provider that names its own models at run time (issue #523).
+    #[tokio::test]
+    async fn list_provider_reaches_a_script_provider() {
+        let dir = tempfile::tempdir().expect("a temp providers dir");
+        std::fs::write(
+            dir.path().join("scripted.rhai"),
+            "fn initialize(config) { #{ ok: true } }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }\n\
+             fn list_models(state) { [ #{ id: \"scripted-large\", max_context_tokens: 32768 } ] }",
+        )
+        .expect("the temp dir is writable");
+        let dir = dir.path().to_path_buf();
+        crate::config::with_isolated_config_path_async(
+            "models-list_provider_reaches_a_script_provider",
+            |_fake_dir| async move {
+                // JSON so the merged row is the whole output, not a table cell.
+                let args = ListArgs {
+                    remote: false,
+                    provider: Some("scripted".to_string()),
+                    all: false,
+                    json: true,
+                };
+                let result = list_with_registry(args, &script_registry(dir)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
+    }
+
+    /// A script provider that loads but names no models is not the same answer
+    /// as "nothing is configured", and does not print the `lev setup` nudge.
+    #[tokio::test]
+    async fn list_says_when_a_script_provider_loaded_and_listed_nothing() {
+        let dir = tempfile::tempdir().expect("a temp providers dir");
+        std::fs::write(
+            dir.path().join("quiet.rhai"),
+            "fn initialize(config) { #{ ok: true } }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }",
+        )
+        .expect("the temp dir is writable");
+        let dir = dir.path().to_path_buf();
+        crate::config::with_isolated_config_path_async(
+            "models-list_says_when_a_script_provider_listed_nothing",
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: false,
+                    provider: Some("quiet".to_string()),
+                    all: false,
+                    json: false,
+                };
+                let result = list_with_registry(args, &script_registry(dir)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
+    }
+
+    /// The auth failure the docs promise surfaces here: `list_models` threw, so
+    /// the command says so instead of printing an empty table and nothing else.
+    #[tokio::test]
+    async fn list_reports_a_script_provider_that_cannot_list() {
+        let dir = tempfile::tempdir().expect("a temp providers dir");
+        std::fs::write(
+            dir.path().join("angry.rhai"),
+            "fn initialize(config) { #{ ok: true } }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }\n\
+             fn list_models(state) { throw \"401 Unauthorized\" }",
+        )
+        .expect("the temp dir is writable");
+        let dir = dir.path().to_path_buf();
+        crate::config::with_isolated_config_path_async(
+            "models-list_reports_a_script_provider_that_cannot_list",
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: false,
+                    provider: Some("angry".to_string()),
+                    all: false,
+                    json: false,
+                };
+                let result = list_with_registry(args, &script_registry(dir)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
+    }
+
+    /// A built-in provider name is answered from the table, not by trying to
+    /// load a script of that name - `--provider openai` with no OpenAI key is
+    /// an empty table, exactly as it was before script providers were reached.
+    #[tokio::test]
+    async fn list_provider_naming_a_builtin_does_not_reach_the_script_layer() {
+        let dir = tempfile::tempdir().expect("a temp providers dir");
+        // A script that would fail to compile if it were ever reached.
+        std::fs::write(dir.path().join("openai.rhai"), "this is not rhai (")
+            .expect("the temp dir is writable");
+        let dir = dir.path().to_path_buf();
+        crate::config::with_isolated_config_path_async(
+            "models-list_provider_naming_a_builtin_skips_scripts",
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: false,
+                    provider: Some("openai".to_string()),
+                    all: true,
+                    json: false,
+                };
+                let result = list_with_registry(args, &script_registry(dir)).await;
                 assert!(result.is_ok());
             },
         )

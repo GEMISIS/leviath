@@ -292,6 +292,10 @@ it returns `false`.
 | `lev models list` | `-p/--provider <NAME>`, `-r/--remote` (live from the provider APIs, slower), `-a/--all` (include providers with no credential here) |
 | `lev models show <MODEL>` | `-p/--provider <NAME>` (required for a remote lookup), `-r/--remote` |
 
+`--provider` naming a [Rhai script provider](/docs/rhai-providers) loads that script and calls its
+`list_models`, with or without `--remote`: a script names its own catalog at run time, so there is
+no built-in table to read it from.
+
 ### `lev agent-client`
 
 Serve an agent over the [Agent Client Protocol](/docs/agent-client-protocol) as JSON-RPC on stdio.
@@ -588,9 +592,9 @@ the run. Nothing is left in `lev ps` or on disk.
 
 `--model` takes `provider/model` to pick both, and a bare model id pairs with your
 `default_provider`. `--model provider/model` is the way to reach a
-[Rhai script provider](/docs/rhai-providers), which
-is resolved by name and so cannot be listed. Use it to try a model string before wiring it into a
-blueprint.
+[Rhai script provider](/docs/rhai-providers), which is resolved by name. Use it to try a model
+string before wiring it into a blueprint - unlike `lev models list`, it exits non-zero when the
+model cannot be reached.
 
 `lev doctor` exits non-zero when a check fails, so it works as a CI gate. It bills two inferences
 per run, each capped at 64 output tokens; `--no-daemon` bills one.

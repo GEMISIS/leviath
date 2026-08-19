@@ -75,9 +75,9 @@ So config/resolve/inference OK with daemon FAIL means the daemon is the
 problem, not your keys - the distinction this command exists to make.
 
 `--model` takes the same forms `lev run --model` does: `provider/model` picks
-both (the way to reach a Rhai script provider, which cannot be listed), and a
-bare model id pairs with your default_provider. Use it to try a model string
-before wiring it into a blueprint.
+both (the way to reach a Rhai script provider by name), and a bare model id
+pairs with your default_provider. Use it to try a model string before wiring it
+into a blueprint.
 
 Two inferences are billed per run, capped at 64 output tokens each.
 `--no-daemon` stops after the third check and bills one.

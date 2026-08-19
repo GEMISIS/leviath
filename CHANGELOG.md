@@ -13,6 +13,19 @@ same list.
 
 ## Unreleased
 
+- Fixed: `lev models list --provider <name>` now reaches a Rhai script
+  provider. `ProviderRegistry::provider_names()` enumerates natively registered
+  providers only, and the script layer is consulted by `get()`, never by that -
+  so the one command `rhai-providers.md` prescribes for smoke-testing a
+  provider script answered "No models available." for a working provider and a
+  syntactically broken one alike. A `--provider` naming neither a registered
+  provider nor a row in the built-in table is now loaded through the script
+  layer and asked for its catalog, with or without `--remote` (a script names
+  its models at run time, so there is nothing local to read). A script that
+  will not load, and an error raised by its `list_models`, are each reported by
+  name instead of being folded into an empty table. `lev doctor --help` and the
+  CLI reference no longer say a script provider cannot be listed.
+
 - Added: `[limits.max_concurrent_inferences_by_provider]` caps in-flight
   requests to one provider across every model it serves, and
   `[limits.max_concurrent_inferences_by_model]` overrides the global cap for one
