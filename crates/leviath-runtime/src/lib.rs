@@ -92,6 +92,7 @@ pub(crate) mod repetition;
 pub mod restore;
 pub mod runtime_info_tool;
 pub mod script_provider;
+pub mod stage_seeds;
 pub mod taint;
 pub mod telemetry;
 pub(crate) mod tick_scope;

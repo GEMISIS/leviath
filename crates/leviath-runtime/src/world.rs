@@ -488,7 +488,15 @@ impl PipelineWorld {
                 // consumes the `StageJustEntered` marker it fires on - so the
                 // hook sees the stage's layout and prompt already in place, and
                 // whatever it writes is in the stage's first request.
-                run_stage_enter_hooks,
+                // Both fire on `StageJustEntered`, and both must precede
+                // `sync_tool_stages`, which consumes it. Nested for the 20-system
+                // `.chain()` limit, as the pairs above are.
+                //
+                // The seed re-runs any `refresh = "each_stage"` tool seed for
+                // the stage just entered, holding `ReadyToInfer` until the
+                // answers land - so the stage's first request carries the fresh
+                // values rather than the previous stage's.
+                (run_stage_enter_hooks, crate::stage_seeds::start_stage_seeds).chain(),
                 sync_tool_stages,
                 // Store any finished run title, then start newly-marked ones.
                 // Collect precedes persistence so a landed title is written on

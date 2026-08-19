@@ -363,11 +363,36 @@ type ToolQuery = (
 pub fn collect_tools(
     mut results: ResMut<ToolResults>,
     mut agents: Query<ToolQuery, With<AwaitingTools>>,
+    // Stage-entry seed batches ride the same lane, so they arrive on the same
+    // channel. They are claimed here rather than in a system of their own
+    // because a channel has one receiver: a second drainer would take whichever
+    // outcomes it happened to reach first, and the other kind would vanish.
+    mut seeding: Query<
+        (
+            &crate::stage_seeds::PendingStageSeeds,
+            &mut crate::components::ContextWindow,
+        ),
+        Without<AwaitingTools>,
+    >,
     sink: Option<Res<crate::host::WorldEventSink>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
+        // A seed batch is not a turn: its results fill regions and release the
+        // stage, rather than being appended to the conversation as tool results
+        // for calls the model never made.
+        if let Ok((pending, mut window)) = seeding.get_mut(outcome.entity) {
+            crate::tick_scope::enter(outcome.entity);
+            crate::stage_seeds::apply_stage_seeds(
+                outcome.entity,
+                pending,
+                &outcome.results,
+                &mut window,
+                &mut commands,
+            );
+            continue;
+        }
         let Ok((
             mut window,
             infer,

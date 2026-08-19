@@ -4092,6 +4092,239 @@ fn runtime_info_is_answered_from_the_world_and_never_reaches_the_lane() {
     );
 }
 
+/// The stage-entry refresh, end to end through the two systems that implement
+/// it: entering a stage dispatches the region's calls and holds the stage, and
+/// the landed batch fills the region and lets the stage go.
+///
+/// The hold is the part worth proving. Without it the stage's first request is
+/// built from the previous stage's values and the refresh changes nothing that
+/// the model ever sees.
+#[test]
+fn a_refreshing_region_holds_the_stage_until_its_seed_lands() {
+    use crate::stage_seeds::{PendingStageSeeds, apply_stage_seeds, start_stage_seeds};
+
+    let mut world = World::new();
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+
+    // One region that refreshes, one that does not.
+    let mut layout = leviath_core::layout::ContextLayout::new(
+        vec![
+            leviath_core::layout::RegionDefinition::new(
+                "conversation".to_string(),
+                RegionKind::Clearable,
+                10_000,
+            ),
+            leviath_core::layout::RegionDefinition::new(
+                "environment".to_string(),
+                RegionKind::Pinned,
+                1000,
+            ),
+            leviath_core::layout::RegionDefinition::new(
+                "machine".to_string(),
+                RegionKind::Pinned,
+                1000,
+            ),
+        ],
+        12_000,
+    );
+    layout.regions[1].seed = Some(leviath_core::layout::RegionSeed::Tools {
+        calls: vec![leviath_core::layout::SeedToolCall::new("current_time")],
+        refresh: leviath_core::layout::SeedRefresh::EachStage,
+    });
+    layout.regions[2].seed = Some(leviath_core::layout::RegionSeed::Tools {
+        calls: vec![leviath_core::layout::SeedToolCall::new("system_info")],
+        refresh: leviath_core::layout::SeedRefresh::Once,
+    });
+    let stages = vec![leviath_core::Stage::new(
+        "main".to_string(),
+        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+    )];
+    let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), stages, layout);
+
+    let mut window = ContextWindow::new(12_000);
+    window.add_region(Region::new(
+        "environment".to_string(),
+        RegionKind::Pinned,
+        1000,
+    ));
+    // What the previous stage left behind, so "kept" and "replaced" are
+    // distinguishable rather than both looking like an empty region.
+    window.replace_region("environment", "--- current_time ---\nSTALE".to_string(), 10);
+
+    let e = world
+        .spawn((
+            agent_state(),
+            AgentBlueprint(bp),
+            window,
+            StageJustEntered {
+                index: 0,
+                name: "main".to_string(),
+            },
+            ReadyToInfer,
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(start_stage_seeds);
+    s.run(&mut world);
+
+    // The stage is held, and the calls went out.
+    assert!(
+        world.get::<ReadyToInfer>(e).is_none(),
+        "the stage must not run before its seed lands"
+    );
+    let pending = world
+        .get::<PendingStageSeeds>(e)
+        .expect("the batch is recorded")
+        .clone();
+    // Only the refreshing region was dispatched: a `once` seed already ran at
+    // spawn and must not cost a call per stage for the rest of the run.
+    assert_eq!(pending.sites.len(), 1);
+    assert_eq!(pending.sites[0].region, "environment");
+    assert_eq!(pending.sites[0].tool, "current_time");
+    let job = jrx.try_recv().expect("a job was queued");
+    assert_eq!(job.entity, e);
+
+    // The batch lands.
+    // Applied through a system rather than by hand, because that is how
+    // `collect_tools` calls it - including the deferred commands that release
+    // the stage.
+    let results = vec![(pending.sites[0].id.clone(), "FRESH".to_string())];
+    let mut apply = Schedule::default();
+    apply.add_systems(
+        move |mut q: Query<(Entity, &PendingStageSeeds, &mut ContextWindow)>,
+              mut commands: Commands| {
+            for (entity, pending, mut window) in q.iter_mut() {
+                apply_stage_seeds(entity, pending, &results, &mut window, &mut commands);
+            }
+        },
+    );
+    apply.run(&mut world);
+
+    // The region carries the new answer, and the stage is released.
+    let text = world
+        .get::<ContextWindow>(e)
+        .unwrap()
+        .get_region("environment")
+        .unwrap()
+        .content
+        .iter()
+        .map(|entry| entry.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("--- current_time ---\nFRESH"), "{text}");
+    assert!(!text.contains("STALE"), "the stale value is gone: {text}");
+    assert!(
+        world.get::<ReadyToInfer>(e).is_some(),
+        "the stage is released"
+    );
+    assert!(world.get::<PendingStageSeeds>(e).is_none());
+}
+
+/// A seed batch rides the same lane as a model's tool calls, so it arrives on
+/// the same channel `collect_tools` drains. It has to be claimed there rather
+/// than by a second system: a channel has one receiver, and a second drainer
+/// would take whichever outcomes it reached first while the other kind vanished.
+///
+/// What this proves is that the claim happens - the region is filled and the
+/// stage released - and that the results are NOT appended to the conversation
+/// as tool results for calls the model never made.
+#[test]
+fn collect_tools_routes_a_seed_batch_to_its_region_not_to_the_conversation() {
+    use crate::stage_seeds::{PendingStageSeeds, SeedCallSite};
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolResults(rx));
+
+    let mut window = conv_window();
+    window.add_region(Region::new(
+        "environment".to_string(),
+        RegionKind::Pinned,
+        1000,
+    ));
+    let e = world
+        .spawn((
+            window,
+            PendingStageSeeds {
+                sites: vec![SeedCallSite {
+                    id: "stage-seed-0".to_string(),
+                    region: "environment".to_string(),
+                    tool: "current_time".to_string(),
+                }],
+            },
+        ))
+        .id();
+    tx.send(ToolOutcome {
+        elapsed: std::time::Duration::ZERO,
+        entity: e,
+        results: vec![("stage-seed-0".to_string(), "NOW".to_string())],
+    })
+    .unwrap();
+
+    run_collect_tools(&mut world);
+
+    let window = world.get::<ContextWindow>(e).unwrap();
+    let env = window
+        .get_region("environment")
+        .expect("the seeded region")
+        .content
+        .iter()
+        .map(|entry| entry.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(env.contains("--- current_time ---\nNOW"), "{env}");
+    // The conversation is untouched: a seed is not a turn.
+    assert!(
+        window
+            .get_region("conversation")
+            .expect("the conversation region")
+            .content
+            .is_empty(),
+        "a seed batch must not be appended to the conversation"
+    );
+    // And the stage is released, with the hold cleared.
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert!(world.get::<PendingStageSeeds>(e).is_none());
+}
+
+/// A stage entry for an agent with no refreshing region must not hold the
+/// stage - every transition in every ordinary run passes through this system.
+#[test]
+fn a_stage_entry_with_nothing_to_refresh_is_not_held() {
+    use crate::stage_seeds::{PendingStageSeeds, start_stage_seeds};
+
+    let mut world = World::new();
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let e = world
+        .spawn((
+            agent_state(),
+            AgentBlueprint(blueprint(vec![leviath_core::Stage::new(
+                "main".to_string(),
+                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+            )])),
+            conv_window(),
+            StageJustEntered {
+                index: 0,
+                name: "main".to_string(),
+            },
+            ReadyToInfer,
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(start_stage_seeds);
+    s.run(&mut world);
+
+    assert!(world.get::<ReadyToInfer>(e).is_some(), "not held");
+    assert!(world.get::<PendingStageSeeds>(e).is_none());
+    assert!(jrx.try_recv().is_err(), "nothing was queued");
+}
+
 fn ctx_call(id: &str, region: &str, content: &str) -> crate::components::ToolCall {
     crate::components::ToolCall {
         tool_id: id.to_string(),

@@ -1298,7 +1298,7 @@ max_iterations = 5
 
 [context.regions]
 environment = { kind = "pinned", max_tokens = 1000, seed = { tools = ["current_time", "system_info"] } }
-toolchain = { kind = "pinned", max_tokens = 1000, seed = { tool = "which_command" } }
+toolchain = { kind = "pinned", max_tokens = 1000, seed = { tool = "which_command", refresh = "each_stage" } }
 plain = { kind = "pinned", max_tokens = 1000 }
 conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
 "#;
@@ -1312,7 +1312,19 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         message.contains("environment: current_time, system_info"),
         "{message}"
     );
-    assert!(message.contains("toolchain: which_command"), "{message}");
+    // A refreshing seed says so: it is a tool call per stage for the life of
+    // the run, not one at spawn, and that is the part a reader should weigh.
+    assert!(
+        message.contains("toolchain: which_command (on every stage entry)"),
+        "{message}"
+    );
+    // While a seed that runs once carries no such note - the suffix appears
+    // exactly once in the message, on the entry that earned it.
+    assert_eq!(
+        message.matches("(on every stage entry)").count(),
+        1,
+        "{message}"
+    );
     // A region with no tool seed is not named.
     assert!(!message.contains("plain"), "{message}");
     // Unlike a command seed there is no separate switch to name; the answer to

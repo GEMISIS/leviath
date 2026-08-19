@@ -59,6 +59,12 @@ same list.
   so a seed reaches nothing the agent could not, and a tool set to `ask` is
   refused rather than prompted because a seed runs before any prompt exists.
   `lev validate` lists them as `tool-seed`.
+- New: `refresh = "each_stage"` on a tool seed re-runs its calls whenever a
+  stage is entered, for a seeded region whose answer moves. The stage waits for
+  the refreshed region before its first request, so the values are in place for
+  the turn that reads them; a failed call leaves the region as it was rather
+  than blanking it. The default stays `once`, which is what every other seed
+  kind does.
 - Fixed: `deep-researcher`, `researcher` and `wide-researcher` now know what day
   it is. Each seeds a pinned `environment` region from `current_time` and
   `locale_info`, and their research stages are told to judge "recent", "current"

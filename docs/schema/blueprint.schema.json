@@ -468,6 +468,11 @@
                 ]
               }
             },
+            "refresh": {
+              "enum": ["once", "each_stage"],
+              "default": "once",
+              "description": "For `tool`/`tools`: when the calls run again. `once` (the default, and what every other seed kind does) resolves at spawn. `each_stage` resolves again on every stage entry, for a seed whose answer moves - a clock, say - at the cost of a tool call per stage."
+            },
             "caller": {
               "type": "string",
               "description": "The caller-input key to fill from, the table form of the plain string."

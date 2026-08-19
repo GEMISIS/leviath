@@ -1034,7 +1034,8 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
     assert_eq!(
         region("clock"),
         Some(RegionSeed::Tools {
-            calls: vec![SeedToolCall::new("current_time")]
+            calls: vec![SeedToolCall::new("current_time")],
+            refresh: crate::layout::SeedRefresh::Once,
         })
     );
     // A list of bare names is a list of argument-free calls, in order.
@@ -1044,7 +1045,8 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             calls: vec![
                 SeedToolCall::new("current_time"),
                 SeedToolCall::new("system_info"),
-            ]
+            ],
+            refresh: crate::layout::SeedRefresh::Once,
         })
     );
     // The two entry spellings mix in one list, because most calls take no
@@ -1058,12 +1060,90 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
                 // string: a call with no arguments, not one with null args.
                 SeedToolCall::new("system_info"),
                 SeedToolCall::new("locale_info"),
-            ]
+            ],
+            refresh: crate::layout::SeedRefresh::Once,
         })
     );
     assert!(
         region("plain").is_none(),
         "a non-task region with no seed stays None"
+    );
+}
+
+/// `refresh` decides whether a tool seed runs again on every stage entry. It
+/// defaults to `once`, which is what every other seed kind does, so the key's
+/// absence must not be read as an opt-in.
+#[test]
+fn a_tool_seed_refreshes_only_when_it_says_so() {
+    let base = r#"
+[agent]
+name = "seed-test"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 4000, seed = "task_input" }
+conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
+"#;
+    let refresh_of = |line: &str| {
+        let toml = format!("{base}{line}\n");
+        match parse_manifest(&toml)
+            .unwrap()
+            .context_layout
+            .get_region("r")
+            .unwrap()
+            .seed
+            .clone()
+        {
+            Some(RegionSeed::Tools { refresh, .. }) => Some(refresh),
+            _ => None,
+        }
+    };
+    use crate::layout::SeedRefresh;
+    // Unset is `once`, for both spellings of a tool seed.
+    assert_eq!(
+        refresh_of(
+            r#"r = { kind = "pinned", max_tokens = 500, seed = { tool = "current_time" } }"#
+        ),
+        Some(SeedRefresh::Once)
+    );
+    assert_eq!(
+        refresh_of(
+            r#"r = { kind = "pinned", max_tokens = 500, seed = { tools = ["current_time"] } }"#
+        ),
+        Some(SeedRefresh::Once)
+    );
+    // And set, again for both.
+    assert_eq!(
+        refresh_of(
+            r#"r = { kind = "pinned", max_tokens = 500, seed = { tool = "current_time", refresh = "each_stage" } }"#
+        ),
+        Some(SeedRefresh::EachStage)
+    );
+    assert_eq!(
+        refresh_of(
+            r#"r = { kind = "pinned", max_tokens = 500, seed = { tools = ["current_time"], refresh = "each_stage" } }"#
+        ),
+        Some(SeedRefresh::EachStage)
+    );
+    // A value that is not a word at all falls back rather than failing the
+    // whole manifest, as the rest of this parser does with a key it cannot read.
+    assert_eq!(
+        refresh_of(
+            r#"r = { kind = "pinned", max_tokens = 500, seed = { tool = "current_time", refresh = 7 } }"#
+        ),
+        Some(SeedRefresh::Once)
+    );
+    assert_eq!(
+        refresh_of(
+            r#"r = { kind = "pinned", max_tokens = 500, seed = { tool = "current_time", refresh = "every stage" } }"#
+        ),
+        Some(SeedRefresh::Once)
     );
 }
 
@@ -1121,7 +1201,8 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             r#"r = { kind = "pinned", max_tokens = 500, seed = { tools = [1, "current_time"] } }"#
         ),
         Some(RegionSeed::Tools {
-            calls: vec![SeedToolCall::new("current_time")]
+            calls: vec![SeedToolCall::new("current_time")],
+            refresh: crate::layout::SeedRefresh::Once,
         })
     );
 }

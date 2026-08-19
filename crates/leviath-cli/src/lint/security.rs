@@ -121,9 +121,15 @@ pub(super) fn lint_tool_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
         .regions
         .iter()
         .filter_map(|r| match &r.seed {
-            Some(leviath_core::layout::RegionSeed::Tools { calls }) => {
+            Some(leviath_core::layout::RegionSeed::Tools { calls, refresh }) => {
                 let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
-                Some(format!("{}: {}", r.name, names.join(", ")))
+                // A seed that re-runs on every stage entry is worth saying so:
+                // it is a tool call per stage for the life of the run, not one.
+                let when = match refresh {
+                    leviath_core::layout::SeedRefresh::Once => "",
+                    leviath_core::layout::SeedRefresh::EachStage => " (on every stage entry)",
+                };
+                Some(format!("{}: {}{when}", r.name, names.join(", ")))
             }
             _ => None,
         })
