@@ -14207,10 +14207,16 @@ fn one_read_call() -> (Vec<crate::components::ToolCall>, Vec<(String, String)>) 
     )
 }
 
-/// The pointer that reaches the model when the region *is* visible: go and read
-/// it, because it can.
+/// The pointer that reaches the model when the region *is* visible: it is
+/// already in the prompt, so say where, and do not ask for a tool call.
+///
+/// This used to read "read that region for the full result", which is an
+/// instruction with nothing behind it - the region renders into the system
+/// prompt, and the stages that route mostly do not grant `context_read`. What
+/// models did instead was aim `read_file` at the region name, and across 152
+/// local runs that was 90 of 168 failed `read_file` calls.
 #[test]
-fn a_pointer_to_a_visible_region_says_to_read_it() {
+fn a_pointer_to_a_visible_region_says_it_is_already_in_the_prompt() {
     let mut window = routed_window(&["data_preview"], &[]);
     let (calls, results) = one_read_call();
     apply_tool_results(
@@ -14227,9 +14233,190 @@ fn a_pointer_to_a_visible_region_says_to_read_it() {
         .iter()
         .map(|e| e.content.clone())
         .collect();
+    assert!(text.contains("already in this prompt"), "{text}");
+    assert!(text.contains("no tool call is needed"), "{text}");
     assert!(
-        text.contains("read that region for the full result"),
-        "{text}"
+        text.contains("'data_preview' heading"),
+        "the pointer must name the heading the assembler emits: {text}"
+    );
+    assert!(
+        !text.contains("read that region"),
+        "the instruction with no tool behind it must be gone: {text}"
+    );
+}
+
+/// A region too full to take the result must not be described as having taken
+/// it.
+///
+/// The old pointer promised "the full result" whatever the region had actually
+/// kept. In the run that prompted this, `raw_findings` sat pinned at its ceiling
+/// and three of its thirty-five entries were truncated or dropped - two of them
+/// whole `web_fetch` results the model had been told were stored, and went on
+/// to reason as though they were.
+#[test]
+fn a_pointer_says_when_the_region_could_not_take_the_whole_result() {
+    // Reject admission, and already full: the write cannot be made to fit by
+    // rolling anything off, so the fallbacks are the only path.
+    let mut window = routed_window(&["data_preview"], &[]);
+    {
+        let region = window.get_region_mut("data_preview").expect("target");
+        region.admission = leviath_core::region::Admission::Reject;
+        region.max_tokens = 12;
+        region
+            .add_entry("something already here".to_string(), 10)
+            .expect("seed fits");
+    }
+    let (calls, results) = one_read_call();
+    apply_tool_results(
+        &mut window,
+        "",
+        &calls,
+        &results,
+        Some(&routed_to("data_preview")),
+        None,
+    );
+    let conversation = window.get_region("conversation").expect("conversation");
+    let text: String = conversation
+        .content
+        .iter()
+        .map(|e| e.content.clone())
+        .collect();
+    assert!(
+        text.contains("could NOT be stored") || text.contains("characters were dropped"),
+        "a partial or refused write must say so: {text}"
+    );
+    assert!(
+        !text.contains("already in this prompt"),
+        "and must not claim the result is there to read: {text}"
+    );
+}
+
+/// A path tool aimed at a context region is told what it actually hit.
+///
+/// The model sees `## raw_findings` in its prompt and `read_file` in its tool
+/// list, and joins them. The tools crate cannot correct that - it resolves
+/// paths and has never seen the context window - so the correction is added
+/// here, and it names the heading the region is already rendered under.
+#[test]
+fn a_path_tool_aimed_at_a_region_is_told_it_is_a_region() {
+    let window = routed_window(&["raw_findings"], &[]);
+    // The five spellings one real run produced for the same region, across
+    // three stages, before giving up.
+    for path in [
+        "raw_findings",
+        "/context/raw_findings",
+        "/Users/someone/papers/raw_findings",
+        "context/raw_findings",
+        "./raw_findings",
+    ] {
+        let calls = vec![crate::components::ToolCall {
+            tool_id: "c1".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({ "path": path }),
+            thought_signature: None,
+        }];
+        let mut merged = vec![(
+            "c1".to_string(),
+            "[error] Failed to read 'raw_findings': No such file or directory (os error 2)"
+                .to_string(),
+        )];
+        crate::pipeline::annotate_path_errors(&window, &calls, &mut merged);
+        assert!(
+            merged[0].1.contains("is a context region, not a file"),
+            "path {path} was not recognised as a region: {}",
+            merged[0].1
+        );
+        assert!(
+            merged[0].1.contains("already in this prompt"),
+            "the hint must say where to look instead: {}",
+            merged[0].1
+        );
+        assert!(
+            merged[0].1.starts_with("[error]"),
+            "the error prefix carries success/failure downstream and must survive: {}",
+            merged[0].1
+        );
+    }
+}
+
+/// A directory handed to `read_file` is the same mistake with the right path:
+/// the OS error does not name the tool that would have worked.
+#[test]
+fn a_directory_handed_to_read_file_names_list_dir() {
+    let window = routed_window(&["raw_findings"], &[]);
+    let calls = vec![crate::components::ToolCall {
+        tool_id: "c1".to_string(),
+        name: "read_file".to_string(),
+        arguments: serde_json::json!({ "path": "/Users/someone/papers" }),
+        thought_signature: None,
+    }];
+    let mut merged = vec![(
+        "c1".to_string(),
+        "[error] Failed to read '/Users/someone/papers': Is a directory (os error 21)".to_string(),
+    )];
+    crate::pipeline::annotate_path_errors(&window, &calls, &mut merged);
+    assert!(merged[0].1.contains("use list_dir"), "{}", merged[0].1);
+}
+
+/// An ordinary missing file is left exactly as it was: the hint is a correction
+/// for a specific confusion, not a decoration on every failure.
+#[test]
+fn an_ordinary_missing_file_error_is_not_annotated() {
+    let window = routed_window(&["raw_findings"], &[]);
+    let calls = vec![crate::components::ToolCall {
+        tool_id: "c1".to_string(),
+        name: "read_file".to_string(),
+        arguments: serde_json::json!({ "path": "notes.md" }),
+        thought_signature: None,
+    }];
+    let original =
+        "[error] Failed to read 'notes.md': No such file or directory (os error 2)".to_string();
+    let mut merged = vec![("c1".to_string(), original.clone())];
+    crate::pipeline::annotate_path_errors(&window, &calls, &mut merged);
+    assert_eq!(merged[0].1, original);
+}
+
+/// A successful call is never annotated either, however region-shaped its path
+/// looks - the hint keys off the failure, not the name.
+#[test]
+fn a_successful_path_call_is_left_alone() {
+    let window = routed_window(&["raw_findings"], &[]);
+    let calls = vec![crate::components::ToolCall {
+        tool_id: "c1".to_string(),
+        name: "read_file".to_string(),
+        arguments: serde_json::json!({ "path": "raw_findings" }),
+        thought_signature: None,
+    }];
+    let mut merged = vec![("c1".to_string(), "the file's contents".to_string())];
+    crate::pipeline::annotate_path_errors(&window, &calls, &mut merged);
+    assert_eq!(merged[0].1, "the file's contents");
+}
+
+/// A region the stage does not carry gets the honest version: it is a region,
+/// and there is nothing here to read.
+#[test]
+fn a_hidden_region_named_as_a_path_says_the_stage_does_not_carry_it() {
+    let window = routed_window(&["raw_findings"], &["raw_findings"]);
+    let calls = vec![crate::components::ToolCall {
+        tool_id: "c1".to_string(),
+        name: "read_file".to_string(),
+        arguments: serde_json::json!({ "path": "raw_findings" }),
+        thought_signature: None,
+    }];
+    let mut merged = vec![(
+        "c1".to_string(),
+        "[error] Failed to read 'raw_findings': No such file or directory (os error 2)".to_string(),
+    )];
+    crate::pipeline::annotate_path_errors(&window, &calls, &mut merged);
+    assert!(
+        merged[0].1.contains("this stage does not carry it"),
+        "{}",
+        merged[0].1
+    );
+    assert!(
+        !merged[0].1.contains("already in this prompt"),
+        "it is not in the prompt, and saying so is the bug this replaces: {}",
+        merged[0].1
     );
 }
 

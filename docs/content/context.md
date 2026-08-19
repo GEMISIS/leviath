@@ -581,6 +581,24 @@ of its own `[context.regions]` writes it where that stage cannot read it back, s
 refuses the blueprint and says which region to add. The four the runtime always carries are always
 valid targets: `conversation`, `tool_results`, `final_output` and `stage_instructions`.
 
+### What the model is told about a routed result
+
+A routed result cannot sit in the message stream - a `tool_result` has to follow its `tool_use`
+immediately - so the full output goes to the region and a short pointer stays in the conversation in
+its place. The pointer names the region, and says the contents are already in the prompt under that
+heading, because they are: a region the stage carries is rendered into the system prompt every turn.
+
+That wording matters more than it looks. The pointer used to end "read that region for the full
+result", which is an instruction with no tool behind it - and the model, holding `read_file` and no
+`context_read`, would aim `read_file` at the region name and keep trying spellings. Grant
+`context_read` on a stage that routes and reads files; `lev validate` warns
+(`routing-without-region-read`) when one does not, and a path tool pointed at a region name now says
+so in its error.
+
+The pointer also says what actually happened rather than what was meant. A region too full to take
+the result whole reports the truncation or the refusal, instead of promising a full result that is
+not there.
+
 An override entry can also carry both answers at once, which is usually what you mean when a tool
 needs its own region *and* its own ceiling:
 

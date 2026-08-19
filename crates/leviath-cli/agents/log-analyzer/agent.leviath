@@ -15,7 +15,7 @@ write_file = "ask"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Read log files, identify format and structure"
-available_tools = ["read_file", "list_dir", "bash", "context_write"]
+available_tools = ["read_file", "list_dir", "bash", "context_write", "context_read"]
 max_iterations = 15
 system_prompt = """
 Ingest the log files named in `task`. Determine:
@@ -157,7 +157,7 @@ instructions = "One finding per line, as `<severity> | <finding> | <evidence: co
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Identify anomalies, trends, and error patterns"
-available_tools = ["read_file", "bash", "context_write", "context_append"]
+available_tools = ["read_file", "bash", "context_write", "context_append", "context_read"]
 max_iterations = 25
 max_revisits = 3
 transition_prompt = """
@@ -212,7 +212,7 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Write and execute scripts to parse, filter, and aggregate log data"
-available_tools = ["read_file", "bash"]
+available_tools = ["read_file", "bash", "context_read"]
 max_iterations = 20
 max_revisits = 5
 transition_prompt = """

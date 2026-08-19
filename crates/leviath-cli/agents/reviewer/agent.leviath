@@ -59,7 +59,7 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Fast first pass for obvious issues"
-available_tools = ["read_file", "list_dir", "context_append"]
+available_tools = ["read_file", "list_dir", "context_append", "context_read"]
 max_iterations = 12
 system_prompt = """
 Do a fast first pass over the code in the `diff` region (and read_file for
@@ -203,7 +203,7 @@ instructions = "One finding per line, most severe first, as `severity | file:lin
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "In-depth analysis of correctness, security, and architecture"
-available_tools = ["read_file", "list_dir", "bash", "context_write", "context_append"]
+available_tools = ["read_file", "list_dir", "bash", "context_write", "context_append", "context_read"]
 max_iterations = 25
 max_revisits = 2
 system_prompt = """

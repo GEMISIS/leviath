@@ -164,7 +164,13 @@ fn the_views_read_the_coder_the_way_the_lair_does() {
     assert_eq!(discover.models.len(), 5);
     assert_eq!(
         discover.tools,
-        ["read_file", "list_dir", "bash", "context_write"]
+        [
+            "read_file",
+            "list_dir",
+            "bash",
+            "context_write",
+            "context_read"
+        ]
     );
     assert!(discover.system_prompt.contains("Before any planning"));
     assert!(!discover.is_terminal);

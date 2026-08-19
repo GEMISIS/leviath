@@ -22,7 +22,7 @@ bash       = "ask"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Map the codebase and synthesize a verification workflow"
-available_tools = ["read_file", "list_dir", "bash", "context_write"]
+available_tools = ["read_file", "list_dir", "bash", "context_write", "context_read"]
 max_iterations = 8
 max_revisits = 2
 system_prompt = """
@@ -108,7 +108,7 @@ condition = "dead_end"
 mode = "interactive_points"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Explore the codebase and produce a step-by-step implementation plan"
-available_tools = ["read_file", "list_dir", "ask_user_text", "ask_user_choice", "edit_document"]
+available_tools = ["read_file", "list_dir", "ask_user_text", "ask_user_choice", "edit_document", "context_read"]
 # Attended, planning is where this agent most wants its user, and all three of
 # these are available above. They are deliberately NOT in required_tools: an
 # unattended run drops them with the rest of the blocking tools, so `--yolo`
@@ -262,7 +262,7 @@ edit_options = ["Add detail - expand a section"]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Spike the riskiest assumption in the approved plan before executing it"
-available_tools = ["read_file", "list_dir", "write_file", "edit_file", "bash", "context_write", "context_append"]
+available_tools = ["read_file", "list_dir", "write_file", "edit_file", "bash", "context_write", "context_append", "context_read"]
 max_iterations = 15
 max_revisits = 2
 transition_prompt = """
@@ -338,7 +338,7 @@ condition = "dead_end"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Write code according to the approved plan"
-available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "ask_user_text", "ask_user_confirm", "context_append"]
+available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "ask_user_text", "ask_user_confirm", "context_append", "context_read"]
 max_iterations = 50
 max_revisits = 5
 # The ask_user_* tools suspend the run until a person answers, which is
@@ -465,7 +465,7 @@ condition = "dead_end"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Review the implementation and evaluate code quality"
-available_tools = ["read_file", "list_dir", "bash"]
+available_tools = ["read_file", "list_dir", "bash", "context_read"]
 max_iterations = 20
 max_revisits = 3
 # Lets the run end here (via "DONE") when the review approves the work,
@@ -551,7 +551,7 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Step back after no progress: diagnose the dead end and re-plan"
-available_tools = ["read_file", "list_dir", "bash", "context_write", "context_append"]
+available_tools = ["read_file", "list_dir", "bash", "context_write", "context_append", "context_read"]
 max_iterations = 8
 max_revisits = 2
 system_prompt = """

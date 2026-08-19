@@ -20,7 +20,7 @@ mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Gather relevant information on the topic"
 # web_search / web_fetch are provided by the agent's script tools (issue #97).
-available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time"]
+available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "context_read", "current_time"]
 max_iterations = 8
 max_revisits = 2
 system_prompt = """
@@ -73,7 +73,7 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Analyze and synthesize findings"
-available_tools = ["read_file", "web_fetch", "context_write", "context_append", "current_time"]
+available_tools = ["read_file", "web_fetch", "context_write", "context_append", "context_read", "current_time"]
 max_iterations = 20
 max_revisits = 3
 transition_prompt = """

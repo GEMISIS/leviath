@@ -6,6 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod policy;
+
+pub use policy::{Admission, EvictionStrategy, Volatility};
+
 /// The kind of content stored in a region entry.
 ///
 /// Entries carry typed metadata instead of relying on text-prefix parsing
@@ -54,34 +58,6 @@ pub struct SerializedToolCall {
     /// (Gemini's `thought_signature`). Persisted so it survives a restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
-}
-
-/// Eviction strategy for `SlidingWindow` regions.
-///
-/// Controls how entries are removed when the window exceeds its `max_items` limit.
-/// The choice of strategy affects prompt caching effectiveness: PerItem eviction
-/// shifts the message prefix every iteration (breaking cache), while Bulk and
-/// Compact keep the prefix stable between eviction events.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "strategy", rename_all = "snake_case")]
-pub enum EvictionStrategy {
-    /// Evict one turn group at a time (current behavior). Default.
-    #[default]
-    PerItem,
-    /// Evict in bulk when items exceed max + overflow.
-    /// Between bulk evictions, the prefix stays stable for caching.
-    Bulk {
-        /// How many items over max_items before triggering a bulk eviction.
-        /// When triggered, evicts items back down to max_items.
-        overflow: usize,
-    },
-    /// Summarize oldest entries when threshold is hit (requires external LLM call).
-    /// The region stores a `pending_compaction` flag; the runtime checks this
-    /// and performs compaction externally.
-    Compact {
-        /// Number of oldest entries to compact into a summary when triggered.
-        compact_count: usize,
-    },
 }
 
 /// A typed memory region within an agent's context window.
@@ -489,70 +465,6 @@ pub struct Region {
     pub describe_in_prompt: bool,
 }
 
-/// What a region does when a write does not fit.
-///
-/// The default is what every region did before this existed: make room. That
-/// is the right behaviour for a transcript, where the oldest turn is the least
-/// useful thing present and losing it costs nothing anyone will notice.
-///
-/// It is the wrong behaviour for a region holding material the agent chose to
-/// keep. There, silently dropping the oldest entry is a decision about what
-/// matters, taken by whichever write happened to arrive when the region was
-/// full - and the agent never learns it happened. [`Admission::Reject`] hands
-/// that decision back: the write fails, the agent is told the region is full,
-/// and it releases what it is finished with before adding more.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Admission {
-    /// Make room for the write - roll off the oldest entry, or let the
-    /// window-level cascade reclaim the region.
-    #[default]
-    Evict,
-    /// Refuse the write and say so. Nothing already in the region is lost to a
-    /// write the agent did not know would displace it.
-    Reject,
-}
-
-/// How much a region's contents move between requests.
-///
-/// This exists because a provider caches by *prefix*: an entry is readable next
-/// time only when every byte in front of it is unchanged, so a block that moves
-/// invalidates everything behind it however stable that later content is. The
-/// arrangement that pays is stable content first and churn last.
-///
-/// A region's [`RegionKind`] cannot answer this. A pinned region sounds
-/// immutable and is written constantly - `context_write` into a findings region
-/// is an ordinary move, and tool routing sends read results straight into one.
-/// A compact-history region sounds settled and gains an entry every time
-/// compaction fires. Inferring stability from the kind put churn at the front of
-/// the prefix and cost a measured 456,860 cache-write tokens against zero reads
-/// (issue #474).
-///
-/// So the blueprint says. The author knows whether a region is set once at spawn
-/// or written every turn, and nothing else does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Volatility {
-    /// Written rarely or never after setup: a task, a system prompt, a
-    /// convention the run does not revise. Sorted to the front, where it forms
-    /// the prefix everything else caches behind.
-    Stable,
-    /// Appended to, with existing entries left alone: a findings list, a
-    /// bibliography, a transcript of what has been read. Sorted after the stable
-    /// content, and split into chunks so the settled head of it can be cached
-    /// while only the tail is re-sent.
-    Grows,
-    /// Existing content changes in place: a scratchpad, a key-value store whose
-    /// keys are overwritten, anything rebuilt each turn. Sorted last, where it
-    /// invalidates nothing but itself.
-    ///
-    /// The default, and deliberately the pessimistic one: a blueprint that
-    /// declares nothing must never be made *worse* by this, and an optimistic
-    /// default is exactly how inferring stability from the kind went wrong.
-    #[default]
-    Rewritten,
-}
-
 mod schema;
 
 pub use schema::{ContentFormat, RegionSchema, Validator};
@@ -638,6 +550,19 @@ impl Region {
                     max: self.max_tokens,
                 });
             }
+            // `Evict` says it makes room, so it makes room. Until this existed
+            // the default admission refused the write exactly as `Reject` did,
+            // and the caller's fallback silently degraded the result to a
+            // truncation or to `[result omitted]` - losing the NEWEST material
+            // to protect the oldest, which is backwards for a working region.
+            if self.admission == Admission::Evict && self.kind.rolls_off_oldest() {
+                self.make_room(tokens);
+            }
+        }
+        // Still over after rolling off everything it could: one entry larger
+        // than the whole region. Nothing to drop that would help, so the caller
+        // gets the budget error and truncates.
+        if self.current_tokens + tokens > self.max_tokens {
             return Err(crate::error::Error::TokenBudgetExceeded {
                 used: self.current_tokens + tokens,
                 max: self.max_tokens,
@@ -674,6 +599,32 @@ impl Region {
         self.enforce_sliding_window();
 
         Ok(())
+    }
+
+    /// Roll off the oldest entries until `tokens` more would fit, and report
+    /// how many were dropped.
+    ///
+    /// This is what [`Admission::Evict`] has always claimed to do. Stops as
+    /// soon as the write fits, and does not start at all when it never can:
+    /// an entry larger than `max_tokens` does not fit an *empty* region either,
+    /// so evicting for it would destroy everything held and still fail. The
+    /// caller truncates instead, which is the right answer and needs the region
+    /// intact to have anywhere to put the truncation.
+    ///
+    /// Goes through [`remove_oldest`](Self::remove_oldest) rather than touching
+    /// `content` directly because that method is turn-group aware: an
+    /// `AssistantTurn` carrying tool calls leaves together with the
+    /// `ToolResult` entries that answer it, so eviction never strands a
+    /// `tool_use` that a provider would then reject.
+    pub fn make_room(&mut self, tokens: usize) -> usize {
+        if tokens > self.max_tokens {
+            return 0;
+        }
+        let mut evicted = 0;
+        while self.current_tokens + tokens > self.max_tokens && self.remove_oldest().is_some() {
+            evicted += 1;
+        }
+        evicted
     }
 
     /// Whether one more entry would push a sliding window past its item cap.
@@ -1159,6 +1110,149 @@ pub struct RegionEntry {
 ///
 #[cfg(test)]
 mod tests {
+
+    /// `Admission::Evict` evicts. It is the default, and its documentation has
+    /// always said "make room for the write - roll off the oldest entry", but
+    /// `push_entry` returned `TokenBudgetExceeded` for it exactly as it did for
+    /// `Reject`. Nothing ever rolled off by tokens; only a sliding window's
+    /// *count* limit did anything.
+    ///
+    /// What that cost was paid one region over: a full region refused the write,
+    /// and the tool-result caller degraded the result to a truncation or to
+    /// `[result omitted]` while still telling the model it had been stored.
+    #[test]
+    fn an_evicting_region_rolls_the_oldest_off_to_admit_a_write() {
+        let mut region = Region::new("findings".to_string(), RegionKind::Temporary, 100);
+        region.add_entry("oldest".to_string(), 40).unwrap();
+        region.add_entry("middle".to_string(), 40).unwrap();
+        assert_eq!(region.current_tokens, 80);
+
+        // Needs 40 of the 20 left: one entry has to go, and it is the oldest.
+        region.add_entry("newest".to_string(), 40).unwrap();
+
+        assert_eq!(region.current_tokens, 80);
+        let held: Vec<&str> = region.content.iter().map(|e| e.content.as_str()).collect();
+        assert_eq!(held, ["middle", "newest"]);
+    }
+
+    /// It rolls off only as far as it must - eviction is admission, not a purge.
+    #[test]
+    fn eviction_stops_as_soon_as_the_write_fits() {
+        let mut region = Region::new("findings".to_string(), RegionKind::Temporary, 100);
+        for i in 0..5 {
+            region.add_entry(format!("entry-{i}"), 20).unwrap();
+        }
+        region.add_entry("newest".to_string(), 20).unwrap();
+        let held: Vec<&str> = region.content.iter().map(|e| e.content.as_str()).collect();
+        assert_eq!(held, ["entry-1", "entry-2", "entry-3", "entry-4", "newest"]);
+    }
+
+    /// `Reject` still refuses, which is the entire reason an author sets it:
+    /// nothing curated is lost to a write they did not know would displace it.
+    #[test]
+    fn a_rejecting_region_still_refuses_rather_than_dropping_anything() {
+        let mut region = Region::new("sources".to_string(), RegionKind::Temporary, 100);
+        region.admission = Admission::Reject;
+        region.add_entry("curated".to_string(), 80).unwrap();
+
+        let err = region.add_entry("newest".to_string(), 40).unwrap_err();
+        assert!(matches!(err, crate::error::Error::RegionFull { .. }));
+        assert_eq!(region.content.len(), 1);
+        assert_eq!(region.current_tokens, 80);
+    }
+
+    /// An entry bigger than the whole region cannot be admitted by dropping
+    /// things, so the region keeps what it has and the caller truncates. The
+    /// failure mode this rules out is emptying a region for a write that was
+    /// never going to fit.
+    #[test]
+    fn an_entry_larger_than_the_region_does_not_empty_it() {
+        let mut region = Region::new("findings".to_string(), RegionKind::Temporary, 100);
+        region.add_entry("kept".to_string(), 50).unwrap();
+
+        let err = region.add_entry("enormous".to_string(), 500).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::Error::TokenBudgetExceeded { .. }
+        ));
+        assert_eq!(region.content.len(), 1, "the region was not emptied for it");
+    }
+
+    /// Eviction takes a whole turn group, so an `AssistantTurn` never leaves its
+    /// `ToolResult` entries behind. An orphaned `tool_use` is a provider 400,
+    /// which is why this goes through `remove_oldest` rather than splicing.
+    #[test]
+    fn eviction_never_strands_a_tool_result_without_its_call() {
+        let mut region = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+            100,
+        );
+        region
+            .add_typed_entry(
+                "call it".to_string(),
+                30,
+                EntryKind::AssistantTurn {
+                    tool_calls: vec![crate::SerializedToolCall {
+                        id: "t1".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({}),
+                        thought_signature: None,
+                    }],
+                },
+            )
+            .unwrap();
+        region
+            .add_typed_entry(
+                "the answer".to_string(),
+                30,
+                EntryKind::ToolResult {
+                    tool_call_id: "t1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    is_error: false,
+                },
+            )
+            .unwrap();
+
+        // Forces eviction: the pair together is 60 of the 100.
+        region.add_entry("next turn".to_string(), 60).unwrap();
+
+        assert!(
+            !region
+                .content
+                .iter()
+                .any(|e| matches!(e.kind, EntryKind::ToolResult { .. })),
+            "the result outlived the call that produced it"
+        );
+    }
+
+    /// A region whose kind owns its own retention is left to own it. A custom
+    /// region's `on_overflow` script IS the author's eviction policy, a pinned
+    /// region is meant to survive the run, and a HashMap already evicts by LRU.
+    #[test]
+    fn kinds_that_own_their_retention_do_not_roll_off() {
+        assert!(RegionKind::Temporary.rolls_off_oldest());
+        assert!(RegionKind::Clearable.rolls_off_oldest());
+        assert!(!RegionKind::Pinned.rolls_off_oldest());
+        assert!(
+            !RegionKind::Custom {
+                script: "r.rhai".to_string(),
+                persistent: false,
+            }
+            .rolls_off_oldest()
+        );
+        assert!(!RegionKind::HashMap { max_entries: None }.rolls_off_oldest());
+
+        // And a pinned region proves it in behaviour, not just in the predicate.
+        let mut pinned = Region::new("query".to_string(), RegionKind::Pinned, 100);
+        pinned.add_entry("the task".to_string(), 80).unwrap();
+        assert!(pinned.add_entry("more".to_string(), 40).is_err());
+        assert_eq!(pinned.content.len(), 1, "a pinned region kept its content");
+    }
+
     use super::*;
 
     // ─── Checklist items ────────────────────────────────────────────────────

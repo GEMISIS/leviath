@@ -6,6 +6,112 @@ use super::*;
 #[derive(Resource)]
 pub struct ToolResults(pub UnboundedReceiver<ToolOutcome>);
 
+/// What a region actually did with a tool result routed into it.
+///
+/// A routed result leaves a pointer in `conversation` describing where the
+/// output went, and the pointer is only worth anything if it is true: the
+/// region may have been too full to take the result whole, in which case
+/// "stored in region X" is a claim about tokens that are not there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stored {
+    /// The result went in as written.
+    Whole,
+    /// The region took a prefix; `omitted` characters did not fit.
+    Truncated { omitted: usize },
+    /// The region refused even a truncated entry; only a marker is there.
+    Dropped,
+}
+
+/// Tools whose first argument is a path into the workspace, and which therefore
+/// get the region hint below when that path is not one.
+const PATH_TOOLS: [&str; 5] = [
+    "read_file",
+    "read_files",
+    "list_dir",
+    "write_file",
+    "edit_file",
+];
+
+/// Append a corrective hint to a path tool's error when the path was never a
+/// path.
+///
+/// Models routinely aim `read_file` at a context region - `raw_findings`,
+/// `sources_index`, `claims` - because the region is a labelled block in their
+/// prompt and a file is the only thing they have a read verb for. The tools
+/// crate cannot tell them otherwise: it resolves paths and has no view of the
+/// context window. So the correction happens here, where the window is in
+/// scope, and it names the heading the region is already rendered under.
+///
+/// Measured on 152 local runs before this existed: 168 of 299 `read_file` calls
+/// failed, 90 of them on a region name, spread over 32 of the 46 runs that used
+/// the tool at all. One run spent five turns on five spellings of the same
+/// region across three stages. A quarter of those came from agents that route
+/// nothing and emit no pointer, which is why the fix has to live on the error
+/// rather than only on the routing pointer.
+pub(crate) fn annotate_path_errors(
+    window: &ContextWindow,
+    tool_calls: &[crate::components::ToolCall],
+    merged: &mut [(String, String)],
+) {
+    for (call, (_id, result)) in tool_calls.iter().zip(merged.iter_mut()) {
+        if !result.starts_with("[error]") || !PATH_TOOLS.contains(&call.name.as_str()) {
+            continue;
+        }
+        // `read_files` takes `paths`; everything else takes `path`. Either way
+        // the last segment is what identifies a region: the model reaches for
+        // `raw_findings`, `/context/raw_findings` and `<workdir>/raw_findings`
+        // in turn, and all three name the same thing.
+        let path = call
+            .arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                call.arguments
+                    .get("paths")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            });
+        let hint = match path.as_deref() {
+            Some(p) => region_hint(window, p),
+            None => None,
+        };
+        // "Is a directory" is the other half of the same problem: the model has
+        // the right path and the wrong tool, and the OS error does not say so.
+        let hint = hint.or_else(|| {
+            result.contains("Is a directory").then(|| {
+                "That path is a directory - use list_dir to see what is in it.".to_string()
+            })
+        });
+        if let Some(hint) = hint {
+            result.push(' ');
+            result.push_str(&hint);
+        }
+    }
+}
+
+/// The hint for a path whose last segment names a region this window holds.
+fn region_hint(window: &ContextWindow, path: &str) -> Option<String> {
+    let leaf = path
+        .rsplit(['/', '\\'])
+        .find(|s| !s.is_empty())
+        .unwrap_or(path);
+    let region = window.regions.iter().find(|r| r.name == leaf)?;
+    let name = &region.name;
+    match window.hidden.contains(name) {
+        false => Some(format!(
+            "'{name}' is a context region, not a file - its contents are already in this prompt, \
+             under the '{name}' heading. Read them there rather than through a tool."
+        )),
+        true => Some(format!(
+            "'{name}' is a context region rather than a file, and this stage does not carry it, \
+             so there is nothing to read here."
+        )),
+    }
+}
+
 /// Apply a completed tool batch to an agent's context window: add the assistant
 /// turn (with its tool calls) then each tool result, honoring the stage's
 /// tool-result routing (target region, `persist=false`→scratch, per-result
@@ -97,33 +203,47 @@ pub(crate) fn apply_tool_results(
         });
         // Add `content` (with entry `kind`) to `region`, honoring taint and falling
         // back to a truncated (then omitted) entry if the region is full.
+        //
+        // Reports which of the three happened, because the pointer left in the
+        // conversation describes this write and used to describe it wrongly:
+        // it promised the full result whatever the region had actually kept.
         let add_kind = |window: &mut ContextWindow,
                         region: &str,
                         kind: leviath_core::EntryKind,
                         content: String,
-                        tokens: usize| {
+                        tokens: usize|
+         -> Stored {
             let put = |w: &mut ContextWindow, c: String, t: usize| match taint_level {
                 Some(level) => w.add_typed_tainted_to_region(region, kind.clone(), c, t, level),
                 None => w.add_typed_entry(region, kind.clone(), c, t),
             };
-            if put(window, content.clone(), tokens).is_err() {
-                let available = window
-                    .get_region(region)
-                    .map(|r| r.max_tokens.saturating_sub(r.current_tokens))
-                    .unwrap_or(0);
-                let truncated = if available > 100 {
-                    let char_budget = (available - 10) * 4;
-                    let prefix = truncate_on_char_boundary(&content, char_budget);
-                    let omitted = content.len().saturating_sub(prefix.len());
-                    format!("{}... [truncated, {} chars omitted]", prefix, omitted)
-                } else {
-                    "[tool result truncated - context window full]".to_string()
-                };
-                let trunc_tokens = leviath_core::estimate_tokens(&truncated);
-                if put(window, truncated, trunc_tokens).is_err() {
-                    let _ = put(window, "[result omitted]".to_string(), 5);
-                }
+            if put(window, content.clone(), tokens).is_ok() {
+                return Stored::Whole;
             }
+            let available = window
+                .get_region(region)
+                .map(|r| r.max_tokens.saturating_sub(r.current_tokens))
+                .unwrap_or(0);
+            let (truncated, omitted) = if available > 100 {
+                let char_budget = (available - 10) * 4;
+                let prefix = truncate_on_char_boundary(&content, char_budget);
+                let omitted = content.len().saturating_sub(prefix.len());
+                (
+                    format!("{}... [truncated, {} chars omitted]", prefix, omitted),
+                    omitted,
+                )
+            } else {
+                (
+                    "[tool result truncated - context window full]".to_string(),
+                    content.len(),
+                )
+            };
+            let trunc_tokens = leviath_core::estimate_tokens(&truncated);
+            if put(window, truncated, trunc_tokens).is_ok() {
+                return Stored::Truncated { omitted };
+            }
+            let _ = put(window, "[result omitted]".to_string(), 5);
+            Stored::Dropped
         };
         let result_kind = || leviath_core::EntryKind::ToolResult {
             tool_call_id: tool_call_id.clone(),
@@ -156,19 +276,48 @@ pub(crate) fn apply_tool_results(
             } else {
                 ""
             };
-            // A region this stage does not render is one the model cannot go
-            // and read, so telling it to is worse than saying nothing: the
-            // instruction is unfollowable and the model spends turns trying
-            // (#370). `lev validate` refuses a blueprint that routes this way,
-            // so reaching here means a layout swapped underneath a routing rule
-            // rather than an author mistake - but the model still needs to be
-            // told the truth about where its output went.
-            let pointer = match window.hidden.contains(target_region) {
-                false => format!(
-                    "[output stored in context region '{target_region}' ({result_tokens} tokens) - read that region for the full result. Preview: {preview}{ellipsis}]"
-                ),
-                true => format!(
+            let hidden = window.hidden.contains(target_region);
+            // Stored FIRST, so the pointer can say what actually happened
+            // rather than what was intended. The two writes land in different
+            // regions, so the tool_use/tool_result adjacency Anthropic requires
+            // is unaffected by the order.
+            let stored = add_kind(
+                window,
+                target_region,
+                leviath_core::EntryKind::Text,
+                result_text,
+                result_tokens,
+            );
+            // What this text asks the model to do is the whole point of it.
+            //
+            // It used to say "read that region for the full result", which is
+            // an instruction with no tool behind it: the region is rendered
+            // into the system prompt already, and `context_read` is not granted
+            // by most stages that route. Models did the only thing left and
+            // pointed `read_file` at the region name - across 152 local runs,
+            // 90 of 168 failed `read_file` calls were a region name where a path
+            // belongs, one run spending five turns on five spellings of
+            // `raw_findings`. So the pointer now names the `## region` heading
+            // the assembler emits and says no call is needed.
+            //
+            // A region this stage does not render is the other half: the model
+            // cannot go and read it, so telling it to is worse than saying
+            // nothing (#370). `lev validate` refuses a blueprint that routes
+            // that way, so reaching here means a layout swapped underneath a
+            // routing rule rather than an author mistake - but the model still
+            // needs to be told the truth about where its output went.
+            let pointer = match (hidden, stored) {
+                (true, _) => format!(
                     "[output stored in context region '{target_region}' ({result_tokens} tokens), which this stage does not carry - it is kept for a later stage and cannot be read from here. Preview: {preview}{ellipsis}]"
+                ),
+                (false, Stored::Whole) => format!(
+                    "[output ({result_tokens} tokens) is in your context under the '{target_region}' heading - it is already in this prompt, so no tool call is needed to see it. Preview: {preview}{ellipsis}]"
+                ),
+                (false, Stored::Truncated { omitted }) => format!(
+                    "[output was too large for context region '{target_region}': the start of it is in this prompt under that heading and {omitted} characters were dropped. Release what you are finished with (context_delete) before fetching more this size. Preview: {preview}{ellipsis}]"
+                ),
+                (false, Stored::Dropped) => format!(
+                    "[output could NOT be stored - context region '{target_region}' is full and refused it, so only this preview survives. Release what you are finished with (context_delete) and fetch it again if you still need it. Preview: {preview}{ellipsis}]"
                 ),
             };
             let pointer_tokens = leviath_core::estimate_tokens(&pointer);
@@ -178,13 +327,6 @@ pub(crate) fn apply_tool_results(
                 result_kind(),
                 pointer,
                 pointer_tokens,
-            );
-            add_kind(
-                window,
-                target_region,
-                leviath_core::EntryKind::Text,
-                result_text,
-                result_tokens,
             );
         }
     }
@@ -464,6 +606,12 @@ pub fn collect_tools(
                 });
             }
         }
+        // A path tool aimed at a context region fails with an OS error that says
+        // nothing about why, and the model tries another spelling. Correct it
+        // here, before anything downstream reads the text: after the telemetry
+        // and modification passes above, which key off the `[error]` prefix the
+        // hint leaves in place, and before file tracking rewrites results.
+        annotate_path_errors(&window, &infer.tool_calls, &mut merged);
         // File tracking: sync read/write results into the configured HashMap
         // region and replace the inline result with a reference (de-dup context).
         if let Some(ft) = blueprint.and_then(|bp| bp.0.file_tracking.as_ref()) {
