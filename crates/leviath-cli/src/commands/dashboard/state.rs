@@ -391,9 +391,7 @@ impl Dashboard {
         self.detail_scroll = 0;
         // Default to the stage the run is actually on.
         self.selected_stage = self.selected_agent().map(|a| a.stage_index).unwrap_or(0);
-        // Fresh run, fresh exploration state.
-        self.context_tree = ContextTreeState::default();
-        self.stage_explorer = None;
+        self.reset_exploration();
     }
 
     pub(super) fn selected_agent(&self) -> Option<&DashboardAgent> {

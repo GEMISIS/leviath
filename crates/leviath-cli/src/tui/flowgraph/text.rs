@@ -8,14 +8,13 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 
-use super::content::NodeStyle;
 use super::model::StageGraph;
 use super::view::FlowView;
 
 /// Draw `graph` at most `width` columns wide. Escape edges are included:
 /// there is no key to reveal them on paper.
 pub(crate) fn render_to_text(graph: &StageGraph, width: u16) -> String {
-    let mut view = FlowView::new(Arc::new(graph.clone()), NodeStyle::Full, true);
+    let mut view = FlowView::new(Arc::new(graph.clone()), true);
     view.toggle_escape();
     view.fit();
     let (world_w, world_h) = view.world_extent();

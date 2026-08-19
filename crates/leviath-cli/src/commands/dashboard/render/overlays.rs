@@ -175,10 +175,9 @@ fn detail_sections() -> Vec<HelpSection> {
                 ("r", "turn the graph: left to right / top to bottom"),
                 (
                     "t",
-                    "show every edge, or only the path taken and what comes next",
+                    "the whole graph, or only the path taken and what comes next",
                 ),
                 ("e", "show or hide the escape edges (error, dead_end, ...)"),
-                ("u", "show or hide stages the run never entered"),
                 ("↑ ↓ / k j", "timeline: step through visits"),
                 ("drag", "move a box; on empty canvas, pan"),
                 ("wheel / click", "zoom / select on the canvas"),

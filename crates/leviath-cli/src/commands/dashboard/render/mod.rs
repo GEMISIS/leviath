@@ -724,11 +724,7 @@ mod tests {
         dash.detail_view = true;
         dash.stage_explorer = Some(crate::commands::dashboard::types::ExplorerState::new(
             "run-exp".to_string(),
-            crate::tui::flowgraph::FlowView::new(
-                graph,
-                crate::tui::flowgraph::NodeStyle::Full,
-                false,
-            ),
+            crate::tui::flowgraph::FlowView::new(graph, false),
         ));
         terminal.draw(|f| dash.draw(f)).unwrap();
         let text: String = terminal

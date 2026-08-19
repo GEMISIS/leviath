@@ -98,33 +98,13 @@ impl NodeStatus {
     }
 }
 
-/// How much of the box to draw.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NodeStyle {
-    /// A bordered box with a title row and two detail rows.
-    Full,
-    /// One row: `[ glyph name ×n ]`.
-    Compact,
-}
+/// A box's height on the canvas: a border, the title, two detail rows.
+pub(crate) const NODE_HEIGHT: f64 = 4.0;
 
-impl NodeStyle {
-    /// Node height on the canvas.
-    pub(crate) fn height(self) -> f64 {
-        match self {
-            NodeStyle::Full => 4.0,
-            NodeStyle::Compact => 1.0,
-        }
-    }
-
-    /// Node width for the longest id on the graph.
-    pub(crate) fn width(self, longest_id: usize) -> f64 {
-        match self {
-            // `╭ ▶ ⠋ name ×12 ╮`, and room for `⑂ 3 run · 1 done · 0 fail`.
-            NodeStyle::Full => (longest_id + 10).max(28) as f64,
-            // `[ ⠋ name ×12 ]`
-            NodeStyle::Compact => (longest_id + 9).max(14) as f64,
-        }
-    }
+/// A box's width for the longest id on the graph: `╭ ▶ ⠋ name ×12 ╮`, and
+/// room for `⑂ 3 run · 1 done · 0 fail`.
+pub(crate) fn node_width(longest_id: usize) -> f64 {
+    (longest_id + 10).max(28) as f64
 }
 
 /// Live counts of a fan-out stage's workers.
@@ -145,7 +125,6 @@ pub(crate) struct StageNodeContent {
     pub(crate) is_entry: bool,
     pub(crate) is_terminal: bool,
     pub(crate) self_loop: bool,
-    pub(crate) style: NodeStyle,
     // ── live ──
     pub(crate) status: NodeStatus,
     /// The run's iteration count, when this is the current stage. It counts
@@ -160,7 +139,7 @@ pub(crate) struct StageNodeContent {
 
 impl StageNodeContent {
     /// The blueprint's view of a node, before any run touched it.
-    pub(crate) fn from_node(node: &StageNode, style: NodeStyle) -> Self {
+    pub(crate) fn from_node(node: &StageNode) -> Self {
         Self {
             name: node.id.trim_start_matches("ext:").to_string(),
             kind_label: node.kind_label(),
@@ -168,7 +147,6 @@ impl StageNodeContent {
             is_entry: node.is_entry,
             is_terminal: node.is_terminal || node.allow_complete,
             self_loop: node.self_loop,
-            style,
             status: NodeStatus::Pending,
             iteration: None,
             last_seen: None,
@@ -278,8 +256,8 @@ impl NodeContent for StageNodeContent {
             Style::default().fg(colour)
         };
         let width = area.width as usize;
-        // Compact, or a box zoomed down to a row: brackets are the bounds.
-        if self.style == NodeStyle::Compact || area.height < 2 {
+        // A box zoomed down to a row: brackets are the bounds.
+        if area.height < 2 {
             let mut line = self.title(ctx.selected, width.saturating_sub(2));
             line.spans.insert(0, Span::styled("[", border_style));
             line.spans.push(Span::styled("]", border_style));
@@ -373,8 +351,8 @@ mod tests {
         }
     }
 
-    fn content(style: NodeStyle) -> StageNodeContent {
-        StageNodeContent::from_node(&node("plan", NodeKind::Stage(StageKind::Autonomous)), style)
+    fn content() -> StageNodeContent {
+        StageNodeContent::from_node(&node("plan", NodeKind::Stage(StageKind::Autonomous)))
     }
 
     fn draw(content: &StageNodeContent, area: Rect, selected: bool) -> (Buffer, String) {
@@ -410,7 +388,7 @@ mod tests {
     #[test]
     fn pending_visited_and_every_current_run_phase_render_their_glyph_and_colour() {
         let area = Rect::new(0, 0, 40, 4);
-        let mut c = content(NodeStyle::Full);
+        let mut c = content();
         let (buf, text) = draw(&c, area, false);
         assert!(text.contains(&format!("{GLYPH_PENDING} plan")), "{text}");
         assert_eq!(style_at(&buf, "plan").fg, Some(C_DIM));
@@ -488,7 +466,7 @@ mod tests {
         n.is_entry = true;
         n.self_loop = true;
         n.allow_complete = true;
-        let mut c = StageNodeContent::from_node(&n, NodeStyle::Full);
+        let mut c = StageNodeContent::from_node(&n);
         assert_eq!(c.kind_label, "fan-out");
         c.last_seen = Some("14:22:01".to_string());
         c.workers = Some(WorkerCounts {
@@ -504,10 +482,7 @@ mod tests {
         assert_eq!(c.status, NodeStatus::Pending);
         assert!(c.workers.is_none() && c.last_seen.is_none() && c.iteration.is_none());
 
-        let ext = StageNodeContent::from_node(
-            &node("ext:researcher", NodeKind::ExternalBlueprint),
-            NodeStyle::Full,
-        );
+        let ext = StageNodeContent::from_node(&node("ext:researcher", NodeKind::ExternalBlueprint));
         assert!(ext.is_external);
         assert_eq!(ext.name, "researcher");
         let (_, text) = draw(&ext, Rect::new(0, 0, 24, 4), false);
@@ -520,7 +495,7 @@ mod tests {
 
     #[test]
     fn a_short_area_keeps_its_bounds_and_the_name_gives_way_first() {
-        let c = content(NodeStyle::Full);
+        let c = content();
         // One row: brackets, always closed.
         let (_, text) = draw(&c, Rect::new(0, 0, 12, 1), false);
         assert!(
@@ -542,7 +517,7 @@ mod tests {
         assert!(text.contains("╰"), "{text}");
         assert!(!text.contains("autonomous"), "{text}");
         // A visit count survives the cut before the name does.
-        let mut counted = content(NodeStyle::Compact);
+        let mut counted = content();
         counted.status = NodeStatus::Visited {
             times: 12,
             errored: false,
@@ -558,7 +533,7 @@ mod tests {
         assert_eq!(fit("plan", 1), "…");
         assert_eq!(fit("plan", 0), "");
 
-        let compact = content(NodeStyle::Compact);
+        let compact = content();
         let (buf, text) = draw(&compact, Rect::new(0, 0, 14, 1), true);
         assert!(
             text.contains(&format!("[ {GLYPH_PENDING} plan ]")),
@@ -570,17 +545,14 @@ mod tests {
         let title = style_at(&buf, "plan");
         assert!(title.add_modifier.contains(Modifier::BOLD));
         assert!(!title.add_modifier.contains(Modifier::REVERSED));
-        assert_eq!(NodeStyle::Compact.height(), 1.0);
-        assert_eq!(NodeStyle::Full.height(), 4.0);
-        assert_eq!(NodeStyle::Compact.width(3), 14.0);
-        assert_eq!(NodeStyle::Compact.width(10), 19.0);
-        assert_eq!(NodeStyle::Full.width(10), 28.0);
-        assert_eq!(NodeStyle::Full.width(20), 30.0);
+        assert_eq!(NODE_HEIGHT, 4.0);
+        assert_eq!(node_width(10), 28.0);
+        assert_eq!(node_width(20), 30.0);
     }
 
     #[test]
     fn a_selected_full_node_gets_a_thick_focus_border_and_a_plain_bold_title() {
-        let mut c = content(NodeStyle::Full);
+        let mut c = content();
         c.status = NodeStatus::Current {
             run: RunPhase::Active,
             times: 1,

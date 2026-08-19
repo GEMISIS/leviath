@@ -12,12 +12,19 @@ use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
 use super::history::{clock, last_visit, visit_count};
 use super::state::Dashboard;
 use super::types::*;
-use crate::tui::flowgraph::{
-    FlowView, LiveOverlay, NodeStyle, RunPhase, Selection, StageLive, WorkerCounts,
-};
+use crate::tui::flowgraph::{FlowView, LiveOverlay, RunPhase, Selection, StageLive, WorkerCounts};
 use leviath_core::run_meta::StageRunStatus;
 
 impl Dashboard {
+    /// A detail view opened afresh starts its exploration afresh: the
+    /// context tree folded, no explorer, and a band that will start on the
+    /// tab that opens.
+    pub(super) fn reset_exploration(&mut self) {
+        self.context_tree = ContextTreeState::default();
+        self.stage_explorer = None;
+        self.detail_band = None;
+    }
+
     /// `g` in the detail view: open the explorer on the selected run. Every
     /// run has a graph (a linear blueprint is a chain); the one that has not
     /// is a run whose manifest could not be read, and that is said out loud
@@ -34,7 +41,7 @@ impl Dashboard {
                 // back as it was: viewport, dragged boxes, direction, toggles.
                 let view = match self.explorer_cache.take() {
                     Some((cached_run, view)) if cached_run == run_id => view,
-                    _ => FlowView::new(graph, NodeStyle::Full, false),
+                    _ => FlowView::new(graph, false),
                 };
                 self.stage_explorer = Some(ExplorerState::new(run_id, view));
             }
@@ -508,8 +515,8 @@ condition = "llm_choice"
             dash.stage_explorer.as_ref().unwrap().view.selection(),
             Selection::Node("plan".into())
         );
-        dash.handle_key(key(KeyCode::Char('u')));
-        assert!(!dash.stage_explorer.as_ref().unwrap().view.show_unvisited());
+        dash.handle_key(key(KeyCode::Char('t')));
+        assert!(dash.stage_explorer.as_ref().unwrap().view.show_all());
         dash.handle_key(key(KeyCode::Char('e')));
         assert!(dash.stage_explorer.as_ref().unwrap().view.show_escape());
         dash.handle_key(key(KeyCode::Char('r')));
@@ -542,7 +549,7 @@ condition = "llm_choice"
             dash.stage_explorer.as_ref().unwrap().view.selection(),
             Selection::Node("plan".into())
         );
-        assert!(!dash.stage_explorer.as_ref().unwrap().view.show_unvisited());
+        assert!(dash.stage_explorer.as_ref().unwrap().view.show_all());
         dash.handle_key(key(KeyCode::Enter));
         assert!(dash.stage_explorer.is_none());
         // Enter with nothing selected keeps the explorer open; Enter on an
