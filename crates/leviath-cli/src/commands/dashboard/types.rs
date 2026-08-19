@@ -353,6 +353,39 @@ pub(super) struct DaemonOutcome {
     pub(super) ok: bool,
 }
 
+/// The dashboard's view of its link to the daemon, refreshed each tick from
+/// the control client's own bookkeeping.
+///
+/// The dashboard polls the daemon ten times a second, so it notices a restart
+/// within a tick and needs no reconnect of its own; what it needs is to *say*
+/// so, once, and to say when the daemon that came back runs different code
+/// than this dashboard, since that is the one restart the dashboard should
+/// follow. Both are edge-triggered off this record.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct DaemonLinkView {
+    /// Whether the last poll went unanswered. Starts `false`: the daemon was
+    /// ensured before the dashboard opened.
+    pub(super) unreachable: bool,
+    /// The restart count last seen, so a return to a *different* daemon is
+    /// announced as a restart rather than a blip.
+    pub(super) restarts: u64,
+    /// The mismatch last announced, so the warning fires once per daemon and
+    /// the chip stays up until it is resolved.
+    pub(super) mismatch: Option<String>,
+}
+
+impl DaemonLinkView {
+    /// The chip the run list wears while something is wrong, and its colour;
+    /// `None` when the link is healthy and nothing needs saying.
+    pub(super) fn chip(&self) -> Option<(&'static str, Color)> {
+        match (self.unreachable, &self.mismatch) {
+            (true, _) => Some((" ⟳ daemon unreachable, reconnecting ", C_WARN)),
+            (false, Some(_)) => Some((" ⚠ daemon updated: restart lev dash ", C_ERROR)),
+            (false, None) => None,
+        }
+    }
+}
+
 /// A long-running MCP action dispatched from the (sync) MCP screen to the async
 /// background task, so browser login and connect-and-list never block the UI.
 #[derive(Debug, PartialEq)]

@@ -171,6 +171,9 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
         // driving can be shown as stale rather than ACTIVE.
         dashboard.sync_daemon_runs(control).await;
 
+        // …and whether those polls reached a daemon at all, and which one.
+        dashboard.sync_daemon_link(control);
+
         // Sync background runs from on-disk run-state dir (the daemon persists
         // meta/context/stages there).
         dashboard.sync_from_run_state();
@@ -307,7 +310,13 @@ pub async fn execute_with<S: TerminalSetup, E: EventSource>(
     yank_fn: fn(&str) -> bool,
 ) -> anyhow::Result<()> {
     let mut dashboard = init_dashboard(control.clone(), yank_fn);
-    execute_core(&mut dashboard, &control, setup, events).await
+    // The render loop's own polls must fail fast: they run inline at ten a
+    // second, and a poll that waited a restart out would freeze the screen for
+    // as long as the daemon was down. The background loops keep the patient
+    // client, so a cancel or a spawn asked for mid-restart lands once the
+    // daemon is back instead of failing.
+    let poll = control.with_reconnect_grace(std::time::Duration::ZERO);
+    execute_core(&mut dashboard, &poll, setup, events).await
 }
 
 #[cfg(test)]

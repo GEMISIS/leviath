@@ -34,23 +34,95 @@ pub(super) async fn event_loop(state: AppState, backoff: Duration) {
         leviath_net::ClientTimeouts::default(),
         state.limits.allow_local_network,
     );
+    let mut link = LinkWatch::new(&state);
     loop {
-        consume_once(&state, &client).await;
+        consume_once(&state, &client, &mut link).await;
         // The stream ended (daemon closed / restarted) or was unreachable; back
         // off briefly, then re-subscribe.
         tokio::time::sleep(backoff).await;
     }
 }
 
+/// The event loop's memory of its link to the daemon, so that a drop and a
+/// return are each announced once - to the log, and to WebSocket subscribers as
+/// a [`ServerEvent::DaemonLink`] - rather than on every failed re-subscribe.
+///
+/// A daemon restart is the interesting case. The gateway rides it out on its
+/// own (the control client waits the restart out and re-reads the token), so
+/// nothing a WebSocket client did needs redoing; but a run's events stopped
+/// for a moment, and if the daemon came back on a *different build*, this
+/// server is now the older half of the pair and should be restarted too. Both
+/// facts ride on the same event, and the second is also logged as a warning so
+/// the operator sees it without a browser.
+struct LinkWatch {
+    /// Whether the stream was up the last time this was consulted. Starts
+    /// `true`: the daemon was ensured before the server started, so the first
+    /// successful subscribe is not news and the first failure is.
+    connected: bool,
+    /// The restart count last announced, to tell a reconnect to the same
+    /// daemon from one to its replacement.
+    restarts: u64,
+}
+
+impl LinkWatch {
+    fn new(state: &AppState) -> Self {
+        Self {
+            connected: true,
+            restarts: state.control.link().restarts,
+        }
+    }
+
+    /// The stream is up. Announces it when it was down, or when the daemon
+    /// behind it changed while it was up (a restart fast enough that no
+    /// subscribe attempt failed in between).
+    fn up(&mut self, state: &AppState) {
+        let restarts = state.control.link().restarts;
+        let restarted = restarts != self.restarts;
+        if self.connected && !restarted {
+            return;
+        }
+        self.connected = true;
+        self.restarts = restarts;
+        match state.control.link().daemon {
+            Some(daemon) if restarted => {
+                tracing::info!(%daemon, "reconnected to the daemon after it restarted")
+            }
+            Some(daemon) => tracing::info!(%daemon, "reconnected to the daemon"),
+            None => tracing::info!("reconnected to the daemon"),
+        }
+        if let Some(mismatch) = state.control.code_mismatch() {
+            tracing::warn!("{mismatch}");
+        }
+        let _ = state
+            .event_tx
+            .send(ServerEvent::daemon_link(&state.control, true, restarted));
+    }
+
+    /// The stream is down. Announced once per outage.
+    fn down(&mut self, state: &AppState) {
+        if !self.connected {
+            return;
+        }
+        self.connected = false;
+        tracing::warn!("lost the daemon's event stream; reconnecting");
+        let _ = state
+            .event_tx
+            .send(ServerEvent::daemon_link(&state.control, false, false));
+    }
+}
+
 /// One subscribe-and-consume pass: forward events until the stream ends. Returns
 /// immediately if the daemon can't be reached.
-async fn consume_once(state: &AppState, client: &reqwest::Client) {
+async fn consume_once(state: &AppState, client: &reqwest::Client, link: &mut LinkWatch) {
     let Ok(mut stream) = state.control.subscribe().await else {
+        link.down(state);
         return;
     };
+    link.up(state);
     while let Some(event) = stream.next().await {
         handle_event(state, client, event);
     }
+    link.down(state);
 }
 
 /// Broadcast one world event to WebSocket subscribers, firing a completion
@@ -944,7 +1016,7 @@ mod tests {
         );
         let (state, mut rx) = state_with(control);
         let client = reqwest::Client::new();
-        consume_once(&state, &client).await; // returns when the stream closes
+        consume_once(&state, &client, &mut LinkWatch::new(&state)).await; // returns when the stream closes
         server.await.unwrap();
         assert_eq!(tag(&rx.try_recv().unwrap()), "agent_status");
     }
@@ -953,7 +1025,7 @@ mod tests {
     async fn consume_once_returns_when_daemon_absent() {
         let (state, _rx) = state_with(no_daemon_client());
         let client = reqwest::Client::new();
-        consume_once(&state, &client).await; // subscribe fails → returns immediately
+        consume_once(&state, &client, &mut LinkWatch::new(&state)).await; // subscribe fails → returns immediately
     }
 
     /// A fake daemon that accepts `passes` subscribe connections, streaming one
@@ -1000,14 +1072,135 @@ mod tests {
         // through consume_once → backoff → re-subscribe (its loop-back edge). A
         // zero backoff keeps it prompt, but the `recv().await`s - not scheduler
         // timing - are what gate the assertions, so this is platform-stable.
+        //
+        // The drop and the return are each announced to subscribers between
+        // the two run events: `daemon_link` down, then `daemon_link` up. The
+        // first subscribe announces nothing - the daemon was ensured before the
+        // server started, so a stream that simply comes up is not news.
         let dir = tempfile::tempdir().unwrap();
         let (control, server) = reconnecting_daemon(dir.path(), 2);
         let (state, mut rx) = state_with(control);
         let handle = tokio::spawn(event_loop(state, Duration::ZERO));
         assert_eq!(tag(&rx.recv().await.unwrap()), "agent_status");
+        let down = serde_json::to_value(rx.recv().await.unwrap()).unwrap();
+        assert_eq!(down["type"], "daemon_link");
+        assert_eq!(down["connected"], false);
+        let up = serde_json::to_value(rx.recv().await.unwrap()).unwrap();
+        assert_eq!(up["type"], "daemon_link");
+        assert_eq!(up["connected"], true);
+        // A tokenless test daemon never introduces itself, so this reconnect
+        // is to a daemon of unknown identity: not a restart, and no advice.
+        assert_eq!(up["restarted"], false);
+        assert!(up.get("daemon").is_none(), "{up}");
+        assert!(up.get("restart_advised").is_none(), "{up}");
         assert_eq!(tag(&rx.recv().await.unwrap()), "agent_status");
         handle.abort();
         server.await.unwrap();
+    }
+
+    /// A second failed pass announces nothing new: the drop was said once.
+    #[tokio::test]
+    async fn an_outage_is_announced_once_however_many_passes_fail() {
+        let (state, mut rx) = state_with(no_daemon_client());
+        let client = reqwest::Client::new();
+        let mut link = LinkWatch::new(&state);
+        consume_once(&state, &client, &mut link).await;
+        consume_once(&state, &client, &mut link).await;
+        let down = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        assert_eq!(down["type"], "daemon_link");
+        assert_eq!(down["connected"], false);
+        assert!(rx.try_recv().is_err(), "the second failure is not news");
+    }
+
+    /// The daemon says who it is, so a reconnect can say whether it is to
+    /// the same daemon or a new one, and whether the new one runs the same
+    /// code as this server. Three passes: no daemon (an outage), a daemon
+    /// (back), then a different daemon on newer code (restarted, and updated).
+    #[tokio::test]
+    async fn a_reconnect_reports_the_daemon_it_reached() {
+        use crate::test_support::{TEST_BUILD, identified_daemon_in, same_code_daemon};
+        use leviath_runtime::control_socket::{ControlResponse, ControlToken};
+        let ok = |_| ControlResponse::Ok { ok: true };
+        let dir = tempfile::tempdir().unwrap();
+        // A client with a token in hand (so it handshakes) and no patience
+        // (so the absent-daemon pass returns at once).
+        let _token = ControlToken::create(dir.path()).unwrap();
+        let control = ControlClient::for_home(control_id(dir.path()), dir.path())
+            .with_build(TEST_BUILD)
+            .with_reconnect_grace(Duration::ZERO);
+        let (state, mut rx) = state_with(control);
+        let client = reqwest::Client::new();
+        let mut link = LinkWatch::new(&state);
+        let next = |rx: &mut broadcast::Receiver<ServerEvent>| {
+            serde_json::to_value(rx.try_recv().expect("an announcement")).unwrap()
+        };
+
+        // Pass 1: nothing listening.
+        consume_once(&state, &client, &mut link).await;
+        let down = next(&mut rx);
+        assert_eq!(down["connected"], false);
+
+        // Pass 2: a daemon appears (and answers a request, so the handshake
+        // is a real one); its stream carries one event, then ends when its
+        // sender drops.
+        let (_a, events, server_a) = identified_daemon_in(dir.path(), same_code_daemon(1), 2, ok);
+        state
+            .control
+            .request(&leviath_runtime::control_socket::ControlRequest::List)
+            .await
+            .expect("served");
+        let ender = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = events.send(WorldEvent::Status {
+                run_id: "r".into(),
+                agent_id: "a".into(),
+                status: "active".into(),
+                stage: "s".into(),
+                iteration: 0,
+                tool_calls: 0,
+                accepts_messages: true,
+                wait_reason: None,
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(events);
+        });
+        consume_once(&state, &client, &mut link).await;
+        ender.await.unwrap();
+        server_a.await.unwrap();
+        let up = next(&mut rx);
+        assert_eq!(up["connected"], true);
+        assert_eq!(
+            up["restarted"], false,
+            "the first daemon seen is not a restart"
+        );
+        assert_eq!(up["daemon"]["pid"], 1);
+        assert!(up.get("restart_advised").is_none(), "{up}");
+        assert_eq!(next(&mut rx)["type"], "agent_status");
+        let down = next(&mut rx);
+        assert_eq!(down["connected"], false);
+
+        // Pass 3: a different daemon, on newer code, behind the same socket.
+        let mut newer = same_code_daemon(2);
+        newer.build = "newer-build".to_string();
+        let (_b, events, server_b) = identified_daemon_in(dir.path(), newer, 1, ok);
+        let ender = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(events);
+        });
+        consume_once(&state, &client, &mut link).await;
+        ender.await.unwrap();
+        server_b.await.unwrap();
+        let up = next(&mut rx);
+        assert_eq!(up["connected"], true);
+        assert_eq!(up["restarted"], true);
+        assert_eq!(up["daemon"]["pid"], 2);
+        assert!(
+            up["restart_advised"]
+                .as_str()
+                .unwrap()
+                .contains("newer-build"),
+            "{up}"
+        );
     }
 
     fn payload_meta() -> leviath_core::run_meta::RunMeta {

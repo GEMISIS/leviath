@@ -111,3 +111,15 @@ adjusting.
 > Editor integration is a thin front end over the daemon, exactly like `lev run` and `lev serve`. It
 > owns no agent world of its own. See the [daemon](/docs/daemon) for what actually hosts the run, and
 > the [CLI reference](/docs/cli) for the rest of the `lev` commands.
+
+## If the daemon restarts mid-turn
+
+A `lev daemon restart` while a prompt is streaming does not end the turn. The bridge waits for the
+daemon to come back (up to ten seconds), subscribes again, and follows the run, which the new
+daemon reloads from disk. The editor sees the output pause and resume. The turn ends only when no
+daemon returns, with whatever the run had written by then.
+
+If the daemon comes back on a different build than the bridge, which is what a `lev update` looks
+like from a session that was already open, the bridge says so in the conversation and carries on.
+The remedy is on the editor's side: start a new session, so the bridge and the daemon run the same
+code.

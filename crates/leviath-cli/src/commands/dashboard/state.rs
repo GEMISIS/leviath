@@ -224,6 +224,10 @@ pub(crate) struct Dashboard {
     /// the daemon did not answer - the disk view is then taken at face value
     /// rather than declaring every run stale.
     pub(super) daemon_run_ids: Option<std::collections::HashSet<String>>,
+    /// What the dashboard last knew about its link to the daemon, kept so a
+    /// change is announced once (see [`Self::sync_daemon_link`]) and the run
+    /// list can wear a chip while something is wrong.
+    pub(super) daemon_link: DaemonLinkView,
     /// Wall-clock source, injected so staleness is testable without sleeping.
     pub(super) clock: fn() -> i64,
     /// The background loop's ends of the MCP channels. `init_dashboard` takes
@@ -876,6 +880,61 @@ impl Dashboard {
             }
             _ => None,
         };
+    }
+
+    /// Notice what this tick's polls learned about the daemon itself, and say
+    /// it once: the daemon stopped answering, it is back (and whether it is
+    /// the same daemon or a restarted one), or it came back on a different
+    /// build than this dashboard.
+    ///
+    /// The polls above already ride out a restart on their own - they fail
+    /// fast, and the next tick simply succeeds - so nothing here reconnects.
+    /// It only announces, because a run list that silently went stale for two
+    /// seconds and silently recovered leaves the user guessing what happened,
+    /// and a daemon that came back updated is the one case where the fix is
+    /// on the user's side of the socket.
+    pub(super) fn sync_daemon_link(&mut self, control: &ControlClient) {
+        use crate::commands::dashboard::types::ToastLevel;
+        let link = control.link();
+        let mismatch = control.code_mismatch().map(|m| m.to_string());
+
+        match (self.daemon_link.unreachable, link.reachable) {
+            (false, false) => {
+                self.daemon_link.unreachable = true;
+                self.add_log("The daemon stopped answering; reconnecting.".to_string());
+                self.toast("daemon unreachable, reconnecting", ToastLevel::Warning);
+            }
+            (true, true) => {
+                self.daemon_link.unreachable = false;
+                let daemon = link
+                    .daemon
+                    .as_ref()
+                    .map(|d| format!(", now {d}"))
+                    .unwrap_or_default();
+                let what = match link.restarts != self.daemon_link.restarts {
+                    true => format!("The daemon restarted{daemon}; reconnected."),
+                    false => format!("Reconnected to the daemon{daemon}."),
+                };
+                self.add_log(what);
+                self.toast("reconnected to the daemon", ToastLevel::Info);
+            }
+            _ => {}
+        }
+        // A restart the polls never missed (fast enough that no tick failed)
+        // still moves the count; note it so the next reconnect is not
+        // misreported as one.
+        self.daemon_link.restarts = link.restarts;
+
+        if mismatch != self.daemon_link.mismatch {
+            if let Some(text) = &mismatch {
+                self.add_log(text.clone());
+                self.toast(
+                    "the daemon was updated; restart lev dash",
+                    ToastLevel::Error,
+                );
+            }
+            self.daemon_link.mismatch = mismatch;
+        }
     }
 
     /// Cycle the run-list sort mode and say so in the log.
@@ -2551,6 +2610,152 @@ mod tests {
         )))
         .await;
         assert_eq!(dash.daemon_run_ids, None);
+    }
+
+    /// The messages the log pane holds, newest last.
+    fn log_messages(dash: &Dashboard) -> Vec<String> {
+        dash.log.iter().map(|e| e.message.clone()).collect()
+    }
+
+    /// The daemon stops answering, then answers again: each said once, in the
+    /// log and as a toast, and the run list wears the chip in between. Polls
+    /// that keep failing, or keep succeeding, add nothing.
+    #[tokio::test]
+    async fn the_link_announces_an_outage_and_the_return_once_each() {
+        use crate::test_support::{TEST_BUILD, identified_daemon_in, same_code_daemon};
+        use leviath_runtime::control_socket::{ControlResponse, ControlToken, control_id};
+        {
+            {
+                let dir = tempfile::tempdir().unwrap();
+                let _token = ControlToken::create(dir.path()).unwrap();
+                let poll = ControlClient::for_home(control_id(dir.path()), dir.path())
+                    .with_build(TEST_BUILD)
+                    .with_reconnect_grace(std::time::Duration::ZERO);
+                let mut dash = make_test_dashboard();
+                dash.log.clear();
+                dash.toasts.clear();
+                assert!(dash.daemon_link.chip().is_none(), "healthy at first");
+
+                // Two failed polls: one announcement.
+                dash.sync_daemon_runs(&poll).await;
+                dash.sync_daemon_link(&poll);
+                dash.sync_daemon_runs(&poll).await;
+                dash.sync_daemon_link(&poll);
+                assert_eq!(
+                    log_messages(&dash),
+                    vec!["The daemon stopped answering; reconnecting.".to_string()]
+                );
+                assert_eq!(dash.toasts.len(), 1);
+                assert!(dash.daemon_link.unreachable);
+                let (chip, _) = dash.daemon_link.chip().expect("the chip is up");
+                assert!(chip.contains("daemon unreachable"), "{chip}");
+
+                // The daemon appears (the first one this dashboard has met, so
+                // not a restart) and two polls succeed: one announcement.
+                let (_c, _events, server) =
+                    identified_daemon_in(dir.path(), same_code_daemon(4), 2, |_| {
+                        ControlResponse::List {
+                            runs: vec![],
+                            finished: vec![],
+                            health: Default::default(),
+                        }
+                    });
+                dash.sync_daemon_runs(&poll).await;
+                dash.sync_daemon_link(&poll);
+                dash.sync_daemon_runs(&poll).await;
+                dash.sync_daemon_link(&poll);
+                server.await.unwrap();
+                let messages = log_messages(&dash);
+                assert_eq!(messages.len(), 2, "{messages:?}");
+                assert!(
+                    messages[1].starts_with("Reconnected to the daemon, now"),
+                    "{messages:?}"
+                );
+                assert!(messages[1].contains("pid 4"), "{messages:?}");
+                assert_eq!(dash.toasts.len(), 2);
+                assert!(!dash.daemon_link.unreachable);
+                assert!(dash.daemon_link.chip().is_none(), "the chip is down");
+                assert_eq!(dash.daemon_link.restarts, 0);
+            }
+        }
+    }
+
+    /// A different daemon behind the socket is announced as a restart, and
+    /// one on different code from this dashboard says so - once - and keeps
+    /// the chip up, since that restart is the dashboard's to make.
+    #[tokio::test]
+    async fn the_link_names_a_restart_and_an_update() {
+        use crate::test_support::{TEST_BUILD, identified_daemon_in, same_code_daemon};
+        use leviath_runtime::control_socket::{ControlResponse, ControlToken, control_id};
+        {
+            {
+                let dir = tempfile::tempdir().unwrap();
+                let _token = ControlToken::create(dir.path()).unwrap();
+                let poll = ControlClient::for_home(control_id(dir.path()), dir.path())
+                    .with_build(TEST_BUILD)
+                    .with_reconnect_grace(std::time::Duration::ZERO);
+                let empty = |_| ControlResponse::List {
+                    runs: vec![],
+                    finished: vec![],
+                    health: Default::default(),
+                };
+                let mut dash = make_test_dashboard();
+                dash.log.clear();
+                dash.toasts.clear();
+
+                // The first daemon, met and lost.
+                let (_c, _e, server) =
+                    identified_daemon_in(dir.path(), same_code_daemon(1), 1, empty);
+                dash.sync_daemon_runs(&poll).await;
+                dash.sync_daemon_link(&poll);
+                server.await.unwrap();
+                assert!(
+                    log_messages(&dash).is_empty(),
+                    "meeting the daemon is not news"
+                );
+                dash.sync_daemon_runs(&poll).await;
+                dash.sync_daemon_link(&poll);
+                assert_eq!(log_messages(&dash).len(), 1, "gone");
+
+                // Back as a different process on newer code.
+                let mut newer = same_code_daemon(2);
+                newer.build = "newer-build".to_string();
+                let (_c, _e, server) = identified_daemon_in(dir.path(), newer, 2, empty);
+                dash.sync_daemon_runs(&poll).await;
+                dash.sync_daemon_link(&poll);
+                let messages = log_messages(&dash);
+                assert_eq!(messages.len(), 3, "{messages:?}");
+                assert!(
+                    messages[1].starts_with("The daemon restarted, now"),
+                    "{messages:?}"
+                );
+                assert!(messages[1].contains("pid 2"), "{messages:?}");
+                assert!(messages[2].contains("newer-build"), "{messages:?}");
+                assert!(messages[2].contains("restart this process"), "{messages:?}");
+                assert_eq!(dash.daemon_link.restarts, 1);
+                let (chip, _) = dash.daemon_link.chip().expect("the chip stays up");
+                assert!(chip.contains("restart lev dash"), "{chip}");
+                assert_eq!(dash.toasts.len(), 3);
+
+                // Said once: another successful poll adds nothing.
+                dash.sync_daemon_runs(&poll).await;
+                dash.sync_daemon_link(&poll);
+                server.await.unwrap();
+                assert_eq!(log_messages(&dash).len(), 3);
+                assert_eq!(dash.toasts.len(), 3);
+
+                // And a daemon back on this dashboard's own code clears it:
+                // the chip comes down without a word.
+                let (_c, _e, server) =
+                    identified_daemon_in(dir.path(), same_code_daemon(3), 1, empty);
+                dash.sync_daemon_runs(&poll).await;
+                dash.sync_daemon_link(&poll);
+                server.await.unwrap();
+                assert!(dash.daemon_link.chip().is_none(), "the chip is down");
+                assert_eq!(dash.daemon_link.mismatch, None);
+                assert_eq!(log_messages(&dash).len(), 3, "nothing to say");
+            }
+        }
     }
 
     /// A stale run sorts above the finished ones: it is unfinished business the

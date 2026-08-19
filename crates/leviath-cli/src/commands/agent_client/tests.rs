@@ -1393,6 +1393,198 @@ async fn a_closed_event_stream_ends_the_turn() {
     h.close_input().await;
 }
 
+// ─── the daemon restarts mid-turn ────────────────────────────────────────────
+
+/// A fake daemon that drops the *first* event stream after `first` and serves
+/// every later `Subscribe` with `then`, held open - the shape of a daemon that
+/// restarted under a turn. With an `identity` it speaks the handshake, so a
+/// tokened client learns who it reached; without one it is tokenless.
+fn restarting_daemon(
+    identity: Option<leviath_runtime::control_socket::DaemonIdentity>,
+    first: Vec<WorldEvent>,
+    then: Vec<WorldEvent>,
+) -> ScriptedDaemon {
+    use leviath_runtime::control_socket::{ControlRequest, ControlResponse, ControlToken};
+    let dir = tempfile::tempdir().unwrap();
+    let id = control_id(dir.path());
+    let mut listener = bind_control_listener(&id).unwrap();
+    let client = match &identity {
+        Some(_) => {
+            let _token = ControlToken::create(dir.path()).unwrap();
+            ControlClient::for_home(id, dir.path()).with_build("this-build")
+        }
+        None => ControlClient::new(id),
+    };
+    let subscribes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (first, then) = (Arc::new(first), Arc::new(then));
+    let accept = tokio::spawn(async move {
+        loop {
+            let Ok(Some(stream)) = listener.accept().await else {
+                break;
+            };
+            let identity = identity.clone();
+            let subscribes = subscribes.clone();
+            let (first, then) = (first.clone(), then.clone());
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = tokio::io::split(stream);
+                let mut lines = BufReader::new(read_half).lines();
+                let say = |resp: ControlResponse| {
+                    let mut out = serde_json::to_string(&resp).unwrap();
+                    out.push('\n');
+                    out
+                };
+                if let Some(daemon) = identity {
+                    let _hello = lines.next_line().await.unwrap();
+                    let welcome = say(ControlResponse::Welcome { daemon });
+                    let _ = write_half.write_all(welcome.as_bytes()).await;
+                }
+                let line = lines.next_line().await.unwrap().unwrap();
+                match serde_json::from_str::<ControlRequest>(&line).unwrap() {
+                    ControlRequest::Subscribe => {
+                        let nth = subscribes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let events = if nth == 0 { first } else { then };
+                        for ev in events.iter() {
+                            let mut out = serde_json::to_string(ev).unwrap();
+                            out.push('\n');
+                            let _ = write_half.write_all(out.as_bytes()).await;
+                        }
+                        if nth > 0 {
+                            std::future::pending::<()>().await;
+                        }
+                        // The first stream ends here: "the daemon restarted".
+                    }
+                    ControlRequest::Spawn { .. } => {
+                        let out = say(ControlResponse::Spawned {
+                            run_id: RUN_ID.to_string(),
+                        });
+                        let _ = write_half.write_all(out.as_bytes()).await;
+                    }
+                    _ => {
+                        let out = say(ControlResponse::Ok { ok: true });
+                        let _ = write_half.write_all(out.as_bytes()).await;
+                    }
+                }
+            });
+        }
+    });
+    ScriptedDaemon {
+        client,
+        _dir: dir,
+        _accept: AbortOnDrop(accept),
+    }
+}
+
+/// The daemon restarts mid-turn: the event stream drops, and the turn used to
+/// end right there with a truncated reply while the run finished unwatched.
+/// Now the bridge follows the run onto the new daemon and the turn ends when
+/// the run does.
+#[tokio::test]
+async fn a_dropped_event_stream_is_followed_onto_the_new_daemon() {
+    let daemon = restarting_daemon(None, vec![status_event()], vec![completed("complete")]);
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    let result = h.recv_until(is_result).await;
+    assert_eq!(result.result.unwrap()["stopReason"], "end_turn");
+    h.close_input().await;
+}
+
+/// A run that finished while the stream was down is noticed as soon as the
+/// stream is back, without waiting for an event that will never come.
+#[tokio::test]
+async fn a_run_that_finished_during_the_drop_ends_the_turn_on_reconnect() {
+    let daemon = restarting_daemon(None, vec![], vec![]);
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    // The daemon's persistence lane recorded the finish before the stream came back.
+    h.write_meta_status("complete");
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    let result = h.recv_until(is_result).await;
+    assert_eq!(result.result.unwrap()["stopReason"], "end_turn");
+    h.close_input().await;
+}
+
+/// When no daemon comes back at all, the turn ends with what the run wrote so
+/// far - which is what it always did, now after having tried.
+#[tokio::test]
+async fn a_daemon_that_never_comes_back_ends_the_turn() {
+    use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
+    let dir = tempfile::tempdir().unwrap();
+    let id = control_id(dir.path());
+    let mut listener = bind_control_listener(&id).unwrap();
+    let accept = tokio::spawn(async move {
+        loop {
+            let Ok(Some(stream)) = listener.accept().await else {
+                break;
+            };
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut lines = BufReader::new(read_half).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            match serde_json::from_str::<ControlRequest>(&line).unwrap() {
+                // The turn subscribes first, then spawns. The subscribe is
+                // dropped unanswered; the spawn is honoured, and then the
+                // daemon is gone for good: nothing listens after this.
+                ControlRequest::Subscribe => continue,
+                _ => {
+                    let mut out = serde_json::to_string(&ControlResponse::Spawned {
+                        run_id: RUN_ID.to_string(),
+                    })
+                    .unwrap();
+                    out.push('\n');
+                    let _ = write_half.write_all(out.as_bytes()).await;
+                    break;
+                }
+            }
+        }
+    });
+    let daemon = ScriptedDaemon {
+        client: ControlClient::new(control_id(dir.path())),
+        _dir: dir,
+        _accept: AbortOnDrop(accept),
+    };
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "end_turn"
+    );
+    h.close_input().await;
+}
+
+/// The daemon that comes back runs different code than this bridge - it was
+/// updated under a running editor session. The turn continues, and the editor
+/// is told in the conversation, since the fix (restart the session) is on its
+/// side.
+#[tokio::test]
+async fn a_daemon_back_on_other_code_is_named_in_the_conversation() {
+    let mut updated = leviath_runtime::control_socket::DaemonIdentity::this_process("this-build");
+    updated.build = "newer-build".to_string();
+    let daemon = restarting_daemon(Some(updated), vec![], vec![completed("complete")]);
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    let notice = h
+        .recv_until(|m| {
+            m.method.as_deref() == Some("session/update")
+                && m.params.as_ref().is_some_and(|p| {
+                    p["update"]["content"]["text"]
+                        .as_str()
+                        .is_some_and(|t| t.contains("[leviath:"))
+                })
+        })
+        .await;
+    let text = notice.params.unwrap()["update"]["content"]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(text.contains("newer-build"), "{text}");
+    assert!(text.contains("restart this process"), "{text}");
+    let result = h.recv_until(is_result).await;
+    assert_eq!(result.result.unwrap()["stopReason"], "end_turn");
+    h.close_input().await;
+}
+
 // ─── pure helpers: run-status → stop reason ──────────────────────────────────
 
 mod run_status_helpers {

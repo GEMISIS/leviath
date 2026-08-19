@@ -44,6 +44,11 @@ panel and answer. `lev respond` does the same from the shell.
 - **Mouse support**: wheel scroll, click-drag select with copy-on-release, OSC52 copy over SSH,
   `y` to yank a pane, Shift+drag for native selection.
 - **`m`** opens the MCP management screen without leaving the dashboard.
+- **The daemon link**: the dashboard polls the [daemon](/docs/daemon) ten times a second, so a
+  daemon restart costs it nothing but a moment. It says so in the log pane and a toast when the
+  daemon stops answering and again when it is back. While the daemon is unreachable, or came back
+  on a different build than this dashboard, the run list wears a chip beside the sort chip. The
+  second case is the one that asks something of you: restart `lev dash` so both run the same code.
 
 ## Keys
 

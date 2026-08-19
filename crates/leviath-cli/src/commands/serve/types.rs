@@ -208,6 +208,30 @@ pub enum ServerEvent {
         /// The runtime's own serde-tagged event JSON, forwarded as-is.
         event: serde_json::Value,
     },
+    /// This server's own link to the daemon changed.
+    ///
+    /// Sent when the daemon's event stream drops and when it is back, and once
+    /// on connect so a subscriber that arrives mid-outage learns what it is
+    /// looking at. It is about no run in particular, so every subscription
+    /// receives it, per-run ones included: a run's events simply stop while
+    /// the daemon is down, and this is what says why.
+    DaemonLink {
+        /// Whether the server is receiving the daemon's events right now.
+        connected: bool,
+        /// The daemon on the other end, once it has said who it is.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        daemon: Option<leviath_runtime::control_socket::DaemonIdentity>,
+        /// Whether the daemon behind the link is a different process than the
+        /// one before it - a restart this server lived through and its clients
+        /// need not.
+        restarted: bool,
+        /// Present when the daemon and this server run different code, with
+        /// the remedy: restart `lev serve` to match. Requests keep working
+        /// while the two still understand each other; one that fails for this
+        /// reason answers 502 with the same text.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        restart_advised: Option<String>,
+    },
 }
 
 impl ServerEvent {
@@ -227,6 +251,29 @@ impl ServerEvent {
                 .get("run_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default(),
+            ServerEvent::DaemonLink { .. } => "",
+        }
+    }
+
+    /// Whether a subscription filtered to `run_id` should receive this event:
+    /// its own run's events, and the ones about no run at all.
+    pub fn is_for_run(&self, run_id: &str) -> bool {
+        matches!(self, ServerEvent::DaemonLink { .. }) || self.run_id() == run_id
+    }
+
+    /// The [`DaemonLink`](Self::DaemonLink) event for what `control` currently
+    /// knows, given whether the event stream is up and whether the daemon
+    /// behind it just changed.
+    pub(super) fn daemon_link(
+        control: &leviath_runtime::control_socket::ControlClient,
+        connected: bool,
+        restarted: bool,
+    ) -> Self {
+        ServerEvent::DaemonLink {
+            connected,
+            daemon: control.link().daemon,
+            restarted,
+            restart_advised: control.code_mismatch().map(|m| m.to_string()),
         }
     }
 }
@@ -353,6 +400,33 @@ pub(super) fn err(
     message: String,
 ) -> (axum::http::StatusCode, axum::response::Json<ErrorResponse>) {
     (code, axum::response::Json(ErrorResponse { error: message }))
+}
+
+/// The response for a control request the daemon did not answer.
+///
+/// Two different failures, told apart by the error's kind, because they have
+/// different remedies:
+///
+/// - **503 Service Unavailable**: the daemon is not reachable right now. It
+///   may be restarting (the client already waited a grace period for that),
+///   stopped, or wedged. Retrying later, or `lev daemon restart`, is the fix.
+/// - **502 Bad Gateway**: the daemon answered, but this server could not
+///   understand it - the daemon was updated under a running `lev serve`, and
+///   the two no longer speak the same protocol. Retrying cannot help; the
+///   message says what does, which is restarting `lev serve`.
+pub(super) fn daemon_error(
+    e: std::io::Error,
+) -> (axum::http::StatusCode, axum::response::Json<ErrorResponse>) {
+    match e.kind() {
+        std::io::ErrorKind::Unsupported => err(
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("This server needs a restart: {e}"),
+        ),
+        _ => err(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            format!("Daemon not reachable: {e}"),
+        ),
+    }
 }
 
 // ─── Pagination ─────────────────────────────────────────────────────────────
@@ -1159,6 +1233,55 @@ mod status_matches_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A daemon that is not there is a 503 (try later, or restart it); a
+    /// daemon that answered in a way this server cannot read is a 502 with the
+    /// remedy in the message, because no daemon restart fixes that.
+    #[test]
+    fn daemon_errors_are_503_unless_the_two_ends_no_longer_understand_each_other() {
+        let (code, body) = daemon_error(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "no socket",
+        ));
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.error, "Daemon not reachable: no socket");
+
+        let (code, body) = daemon_error(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the daemon is now version 9; restart this process",
+        ));
+        assert_eq!(code, axum::http::StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body.error,
+            "This server needs a restart: the daemon is now version 9; restart this process"
+        );
+    }
+
+    /// The link event is about no run: it filters as the empty run id, and a
+    /// per-run subscription still receives it.
+    #[test]
+    fn a_daemon_link_event_is_for_every_subscription() {
+        let link = ServerEvent::DaemonLink {
+            connected: false,
+            daemon: None,
+            restarted: false,
+            restart_advised: None,
+        };
+        assert_eq!(link.run_id(), "");
+        assert!(link.is_for_run("run-1"));
+        let log = ServerEvent::Log {
+            agent_id: "a".to_string(),
+            run_id: "run-1".to_string(),
+            line: "x".to_string(),
+        };
+        assert!(log.is_for_run("run-1"));
+        assert!(!log.is_for_run("run-2"));
+        // Absent fields stay absent on the wire.
+        let json = serde_json::to_value(&link).unwrap();
+        assert_eq!(json["type"], "daemon_link");
+        assert!(json.get("daemon").is_none());
+        assert!(json.get("restart_advised").is_none());
+    }
 
     #[test]
     fn server_event_agent_status_serialization() {

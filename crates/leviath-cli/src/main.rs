@@ -145,7 +145,7 @@ impl RiskyExecutors for RealExecutors {
         // The HTTP API is a gateway to the shared-world daemon: ensure it's
         // running, then serve, routing agent actions through its control socket.
         ensure_daemon_running().await?;
-        commands::serve::execute(args, control_client()?).await
+        commands::serve::execute(args, long_lived_control_client()?).await
     }
 
     async fn agent_client(
@@ -166,7 +166,7 @@ impl RiskyExecutors for RealExecutors {
         commands::agent_client::serve_over(
             tokio::io::BufReader::new(tokio::io::stdin()),
             tokio::io::stdout(),
-            control_client()?,
+            long_lived_control_client()?,
             args,
             leviath_cli::runstate::runs_dir(),
             default_cwd,
@@ -616,7 +616,7 @@ fn remove_legacy_services() -> Vec<std::path::PathBuf> {
 async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     use leviath_cli::daemon::setup::{control_address, setup_daemon_host};
     use leviath_runtime::control_socket::{
-        bind_control_listener, control_id_from_str, handle_connection,
+        DaemonIdentity, bind_control_listener, control_id_from_str, handle_connection_as,
     };
 
     // Refuse to start on a config that exists but doesn't parse. The old
@@ -660,6 +660,10 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     // connections stream world events from the host's event sender.
     let (op_tx, op_rx) = tokio::sync::mpsc::unbounded_channel();
     let events = host.event_sender();
+    // Who this daemon is, told to every client that asks in its handshake. A
+    // long-lived client (`lev serve`, `lev dash`, the ACP bridge) compares it
+    // against its own build to tell a restart from an update.
+    let identity = DaemonIdentity::this_process(leviath_cli::daemon::setup::CURRENT_BUILD);
     tokio::spawn(async move {
         // `Ok(None)` means someone connected but is not this user: the listener
         // has already closed that connection and logged it. Skip and keep
@@ -669,8 +673,9 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
             let op_tx = op_tx.clone();
             let events = events.clone();
             let token = token.clone();
+            let identity = identity.clone();
             tokio::spawn(async move {
-                let _ = handle_connection(stream, op_tx, events, Some(token)).await;
+                let _ = handle_connection_as(stream, op_tx, events, Some(token), identity).await;
             });
         }
     });
@@ -689,14 +694,27 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
 }
 
 /// Build a control client pointed at the daemon's control socket.
+///
+/// For one-shot commands: an absent daemon is reported at once, with the
+/// advice to start it. The build id lets the client tell a daemon that
+/// restarted from one that was updated under it.
 fn control_client() -> anyhow::Result<leviath_runtime::control_socket::ControlClient> {
     let id = leviath_cli::daemon::setup::control_address()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
     let dir = leviath_cli::daemon::setup::control_dir()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control token"))?;
-    Ok(leviath_runtime::control_socket::ControlClient::for_home(
-        id, &dir,
-    ))
+    Ok(
+        leviath_runtime::control_socket::ControlClient::for_home(id, &dir)
+            .with_build(leviath_cli::daemon::setup::CURRENT_BUILD),
+    )
+}
+
+/// [`control_client`] for the front-ends that outlive a daemon: `lev serve`,
+/// `lev dash`, `lev agent-client`. These wait a restart out instead of
+/// failing the request that landed in it - see
+/// [`RESTART_GRACE`](leviath_runtime::control_socket::RESTART_GRACE).
+fn long_lived_control_client() -> anyhow::Result<leviath_runtime::control_socket::ControlClient> {
+    Ok(control_client()?.with_reconnect_grace(leviath_runtime::control_socket::RESTART_GRACE))
 }
 
 /// Real `lev dash`: supplies the real crossterm terminal backend and event
@@ -707,7 +725,7 @@ async fn real_dashboard(_args: DashboardArgs) -> anyhow::Result<()> {
     // The dashboard is a client of the shared-world daemon: ensure it's running,
     // then observe/control it over the control socket.
     ensure_daemon_running().await?;
-    let control = control_client()?;
+    let control = long_lived_control_client()?;
     let mut setup = CrosstermSetup {
         viewport: Viewport::Fullscreen,
         mouse_capture: true,

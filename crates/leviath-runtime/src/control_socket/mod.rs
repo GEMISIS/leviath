@@ -28,6 +28,14 @@ use crate::components::AgentStatus;
 use crate::host::{ControlOp, DaemonHealth, RunListEntry, SpawnArgs, WorldEvent};
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
+mod client;
+pub use client::{
+    CodeMismatch, ControlClient, DEFAULT_CONTROL_TIMEOUT_SECS, LinkStatus, RESTART_GRACE,
+    SPAWN_CONTROL_TIMEOUT_SECS, WorldEventStream, request_timeout,
+};
+#[cfg(test)]
+use client::{is_transient, timeout_for};
+
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
@@ -49,7 +57,17 @@ pub use windows::{
 /// Shared by both sides rather than matched as prose: the client turns it back
 /// into an actionable error naming the token file, and a message the two ends
 /// spelled differently would silently stop being recognised.
-const AUTH_REQUIRED: &str = "authentication";
+pub(super) const AUTH_REQUIRED: &str = "authentication";
+
+/// Prefix on the daemon's reply to a request line it could not parse. Shared
+/// with the client so it can recognise it and, when the two ends run different
+/// code, name that as the cause.
+pub(super) const INVALID_REQUEST: &str = "invalid request";
+
+/// The daemon's reply when a request reached it while its serve loop was
+/// already gone. Shared with the client so it can recognise it: the request was
+/// dropped unprocessed, which makes a retry safe even for a spawn.
+pub(super) const SHUTTING_DOWN: &str = "daemon is shutting down";
 
 /// The most one connection may send before the stream is cut.
 ///
@@ -177,6 +195,12 @@ pub enum ControlRequest {
     Authenticate {
         /// The token read from `<leviath-home>/control.token`.
         token: String,
+        /// Ask the daemon to say who it is in reply ([`ControlResponse::Welcome`]
+        /// rather than a bare `Ok`). Defaulted so a daemon that predates the
+        /// field reads the request exactly as before, and a client that
+        /// predates it keeps getting the `Ok` it expects.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        hello: bool,
     },
     /// Spawn a new agent.
     Spawn {
@@ -235,6 +259,28 @@ pub enum ControlRequest {
     Subscribe,
 }
 
+impl ControlRequest {
+    /// Whether repeating this request can never do more than the first send
+    /// did. Decides what a client may retry after a request was written and
+    /// the daemon vanished before replying: a `List` asked twice is a `List`,
+    /// while a `Spawn` asked twice may be two runs.
+    ///
+    /// The mutating ops that *are* idempotent in effect - a second `Cancel`
+    /// of the same run does nothing - are still excluded, because their
+    /// second reply says `ok: false`, and the caller would report a cancel
+    /// that worked as "no such run".
+    pub fn is_read_only(&self) -> bool {
+        matches!(
+            self,
+            Self::Authenticate { .. }
+                | Self::Status { .. }
+                | Self::List
+                | Self::ListInteractions
+                | Self::Subscribe
+        )
+    }
+}
+
 /// A control response over the wire.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "result", rename_all = "snake_case")]
@@ -280,6 +326,80 @@ pub enum ControlResponse {
         /// A human-readable message.
         message: String,
     },
+    /// The answer to an `authenticate` that asked `hello`: who this daemon is.
+    ///
+    /// Sent instead of `Ok`, and only when asked for, so a client that does not
+    /// know this variant never receives it.
+    Welcome {
+        /// The daemon's identity.
+        daemon: DaemonIdentity,
+    },
+}
+
+/// Which process a control connection reached.
+///
+/// A daemon reports this in the authentication handshake, and a long-lived
+/// client keeps the last one it saw. That is how the client tells three
+/// situations apart that all begin with "the connection dropped": the same
+/// daemon is back (`pid` and `build` unchanged), the daemon restarted (`pid`
+/// moved, `build` did not), or the daemon was *updated* (`build` or `version`
+/// moved) - the one case where the client itself may need restarting, because
+/// the two ends no longer run the same code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonIdentity {
+    /// The Leviath version the daemon was built from (`0.4.0`).
+    pub version: String,
+    /// The build id, as `lev daemon` records it in `daemon.build`. `unknown`
+    /// when the process did not say (an embedder driving the runtime directly).
+    #[serde(default = "DaemonIdentity::unknown_build")]
+    pub build: String,
+    /// The daemon's process id.
+    pub pid: u32,
+}
+
+impl DaemonIdentity {
+    /// The identity of *this* process, given its build id.
+    ///
+    /// The version is this crate's, which is the workspace's: the daemon and
+    /// every client of it are built from the same tree, so comparing versions
+    /// across the wire compares releases. The build id lives with the binary
+    /// (it hashes the working tree), so the binary passes it in.
+    pub fn this_process(build: impl Into<String>) -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            build: build.into(),
+            pid: std::process::id(),
+        }
+    }
+
+    /// The build to record when a process does not say. Named rather than a
+    /// literal because [`same_code_as`](Self::same_code_as) must recognise it:
+    /// an unknown build is compared as "could be the same", never as the word.
+    pub fn unknown_build() -> String {
+        "unknown".to_string()
+    }
+
+    /// Whether the two ends run the same code, as far as they can tell.
+    ///
+    /// Versions must match. Builds must match too when both are known; a side
+    /// that does not know its build cannot contradict the other, so it does
+    /// not.
+    pub fn same_code_as(&self, other: &Self) -> bool {
+        let unknown = Self::unknown_build();
+        self.version == other.version
+            && (self.build == unknown || other.build == unknown || self.build == other.build)
+    }
+}
+
+impl std::fmt::Display for DaemonIdentity {
+    /// `0.4.0 (build 3ba95219, pid 4242)`: what a log line or a toast says.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} (build {}, pid {})",
+            self.version, self.build, self.pid
+        )
+    }
 }
 
 /// Translate a parsed request into a [`ControlOp`], forward it to the host, and
@@ -297,7 +417,7 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
                 Ok(Ok(run_id)) => ControlResponse::Spawned { run_id },
                 Ok(Err(message)) => ControlResponse::Error { message },
                 Err(_) => ControlResponse::Error {
-                    message: "daemon is shutting down".to_string(),
+                    message: SHUTTING_DOWN.to_string(),
                 },
             }
         }
@@ -450,10 +570,44 @@ pub async fn handle_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_connection_capped(stream, op_tx, events, token, MAX_REQUEST_BYTES).await
+    handle_connection_as(
+        stream,
+        op_tx,
+        events,
+        token,
+        DaemonIdentity::this_process(DaemonIdentity::unknown_build()),
+    )
+    .await
 }
 
-/// [`handle_connection`] with the per-request cap injected.
+/// [`handle_connection`], introducing the daemon as `identity` to a client that
+/// asks. The `lev daemon` binary passes its build id here; the plain form is
+/// for embedders and tests, which have no build id to give.
+pub async fn handle_connection_as<S>(
+    stream: S,
+    op_tx: UnboundedSender<ControlOp>,
+    events: broadcast::Sender<WorldEvent>,
+    token: Option<ControlToken>,
+    identity: DaemonIdentity,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    handle_connection_capped(stream, op_tx, events, token, identity, MAX_REQUEST_BYTES).await
+}
+
+/// The reply to a successful `authenticate`: `Welcome` when the client asked
+/// who it reached, the historical bare `Ok` when it did not.
+fn authenticated_reply(hello: bool, identity: &DaemonIdentity) -> ControlResponse {
+    match hello {
+        true => ControlResponse::Welcome {
+            daemon: identity.clone(),
+        },
+        false => ControlResponse::Ok { ok: true },
+    }
+}
+
+/// [`handle_connection_as`] with the per-request cap injected.
 ///
 /// The cap is a parameter purely so a test can cross it without pushing 8 MiB
 /// through a duplex - and crossing it is the only way to tell a per-request
@@ -463,6 +617,7 @@ async fn handle_connection_capped<S>(
     op_tx: UnboundedSender<ControlOp>,
     events: broadcast::Sender<WorldEvent>,
     token: Option<ControlToken>,
+    identity: DaemonIdentity,
     max_request_bytes: u64,
 ) -> std::io::Result<()>
 where
@@ -500,16 +655,17 @@ where
         // peer cannot sit probing the protocol.
         if !authenticated {
             let refused = match serde_json::from_str::<ControlRequest>(&line) {
-                Ok(ControlRequest::Authenticate { token: presented }) => {
-                    match token.as_ref().is_some_and(|t| t.matches(&presented)) {
-                        true => {
-                            authenticated = true;
-                            write_line(&mut write_half, &ControlResponse::Ok { ok: true }).await;
-                            continue;
-                        }
-                        false => "authentication failed",
+                Ok(ControlRequest::Authenticate {
+                    token: presented,
+                    hello,
+                }) => match token.as_ref().is_some_and(|t| t.matches(&presented)) {
+                    true => {
+                        authenticated = true;
+                        write_line(&mut write_half, &authenticated_reply(hello, &identity)).await;
+                        continue;
                     }
-                }
+                    false => "authentication failed",
+                },
                 _ => "authentication required: send an `authenticate` request first",
             };
             write_line(
@@ -532,11 +688,13 @@ where
                 drop(events);
                 return stream_events(&mut lines, &mut write_half, rx).await;
             }
-            // Already authenticated: a repeat is harmless, not an error.
-            Ok(ControlRequest::Authenticate { .. }) => ControlResponse::Ok { ok: true },
+            // Already authenticated: a repeat is harmless, not an error. On a
+            // tokenless daemon this is also the only way a client's `hello`
+            // gets answered, since no handshake gate ran.
+            Ok(ControlRequest::Authenticate { hello, .. }) => authenticated_reply(hello, &identity),
             Ok(req) => dispatch(req, &op_tx).await,
             Err(e) => ControlResponse::Error {
-                message: format!("invalid request: {e}"),
+                message: format!("{INVALID_REQUEST}: {e}"),
             },
         };
         write_line(&mut write_half, &response).await;
@@ -556,347 +714,6 @@ where
     let mut out = serde_json::to_string(response).expect("ControlResponse serializes");
     out.push('\n');
     let _ = write_half.write_all(out.as_bytes()).await;
-}
-
-/// How long a control request waits for the daemon before giving up, when
-/// `LEVIATH_CONTROL_TIMEOUT_SECS` is unset.
-///
-/// Generous enough to cover a busy daemon's control loop, short enough that a
-/// wedged one is reported rather than waited on indefinitely.
-pub const DEFAULT_CONTROL_TIMEOUT_SECS: u64 = 30;
-
-/// Floor on the deadline for a `Spawn`, which does more work than the other ops:
-/// the daemon connects the blueprint's MCP servers before spawning, and each of
-/// those has its own 30s connect timeout, so a blueprint declaring several
-/// servers can legitimately outlast the ordinary deadline. Without this floor a
-/// slow-but-succeeding spawn would be reported to the user as a timeout.
-pub const SPAWN_CONTROL_TIMEOUT_SECS: u64 = 300;
-
-/// The deadline for one control request. `LEVIATH_CONTROL_TIMEOUT_SECS`
-/// overrides it; `0` disables the deadline (for debugging a daemon that is
-/// legitimately slow). An unparseable value falls back to the default.
-pub fn request_timeout() -> std::time::Duration {
-    let secs = std::env::var("LEVIATH_CONTROL_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_CONTROL_TIMEOUT_SECS);
-    match secs {
-        0 => std::time::Duration::MAX,
-        secs => std::time::Duration::from_secs(secs),
-    }
-}
-
-/// The deadline for `req`: [`request_timeout`], raised to at least
-/// [`SPAWN_CONTROL_TIMEOUT_SECS`] for a `Spawn`. An explicitly disabled deadline
-/// (`0`) stays disabled.
-fn timeout_for(req: &ControlRequest) -> std::time::Duration {
-    let base = request_timeout();
-    match req {
-        ControlRequest::Spawn { .. } if base != std::time::Duration::MAX => {
-            base.max(std::time::Duration::from_secs(SPAWN_CONTROL_TIMEOUT_SECS))
-        }
-        _ => base,
-    }
-}
-
-/// The client half of the control transport: connects to the daemon's control
-/// socket (resolved from a [`ControlId`]), sends one [`ControlRequest`], and
-/// reads back its [`ControlResponse`]. A fresh connection per request keeps it
-/// simple and stateless.
-#[derive(Clone)]
-pub struct ControlClient {
-    id: ControlId,
-    /// The token to present, shared across clones so a refresh (see
-    /// [`Self::refresh_token`]) reaches every handler holding a clone. A `std`
-    /// mutex held only for reads/writes of the option, never across `.await`.
-    token: std::sync::Arc<std::sync::Mutex<Option<ControlToken>>>,
-    /// Where the token was looked for, so a refusal can name the file - and so
-    /// a refusal can re-read it: the daemon mints a fresh token on every start,
-    /// which is exactly when a long-lived client's cached copy goes stale.
-    token_dir: Option<PathBuf>,
-}
-
-impl ControlClient {
-    /// A client for the control socket identified by `id`, with no token.
-    ///
-    /// Only reaches a daemon that runs without one, which in practice means a
-    /// test driving the protocol directly. Real callers use
-    /// [`with_token`](Self::with_token) - see [`ControlToken`].
-    pub fn new(id: impl Into<ControlId>) -> Self {
-        Self {
-            id: id.into(),
-            token: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            token_dir: None,
-        }
-    }
-
-    /// Present `token` on every connection this client opens.
-    pub fn with_token(self, token: ControlToken) -> Self {
-        *leviath_core::sync::lock(&self.token) = Some(token);
-        self
-    }
-
-    /// A client that reads the daemon's token out of `dir`.
-    ///
-    /// A missing token file is **not** an error here. It has two very different
-    /// causes - no daemon is running, or one is running that predates tokens -
-    /// and the client cannot tell them apart, while the daemon can. Refusing to
-    /// even construct a client would make the second case unrecoverable: an
-    /// upgraded CLI could not ask the still-running pre-token daemon to shut
-    /// down, so it could neither stop it nor start a replacement, and the error
-    /// it printed ("Is the daemon running? Start it with `lev daemon start`")
-    /// would be advice the user was already following.
-    ///
-    /// The daemon is the enforcer. A client with no token connects, is refused
-    /// if the daemon requires one, and reports *that* - which is accurate.
-    pub fn for_home(id: impl Into<ControlId>, dir: &Path) -> Self {
-        Self {
-            id: id.into(),
-            token: std::sync::Arc::new(std::sync::Mutex::new(ControlToken::load(dir).ok())),
-            token_dir: Some(dir.to_path_buf()),
-        }
-    }
-
-    /// The token to present right now, if any.
-    fn current_token(&self) -> Option<ControlToken> {
-        leviath_core::sync::lock(&self.token).clone()
-    }
-
-    /// Re-read the token file after a refusal. Returns `true` when the file
-    /// held a *different* token than the cached one - the daemon restarted and
-    /// minted afresh, so a retry with the new token can succeed. `false` (file
-    /// missing, unreadable, or unchanged) means a retry would be refused the
-    /// same way.
-    ///
-    /// This is what lets a long-lived client (`lev serve`, `lev dash`, the ACP
-    /// bridge) survive a daemon restart: tokens are per-daemon-start by design,
-    /// and before this the only recovery was restarting the client too.
-    fn refresh_token(&self) -> bool {
-        let Some(dir) = &self.token_dir else {
-            return false;
-        };
-        let Ok(fresh) = ControlToken::load(dir) else {
-            return false;
-        };
-        let mut cached = leviath_core::sync::lock(&self.token);
-        let changed = cached.as_ref().is_none_or(|t| !t.matches(fresh.expose()));
-        if changed {
-            *cached = Some(fresh);
-        }
-        changed
-    }
-
-    /// Why the daemon refused us, said in terms of what the user can do.
-    fn refused(&self) -> std::io::Error {
-        let detail = match (self.current_token(), &self.token_dir) {
-            (None, Some(dir)) => format!(
-                "no control token was found at {}. If a daemon is running, it was \
-                 started by a different user or before this file existed - restart \
-                 it with `lev daemon restart`.",
-                ControlToken::path(dir).display()
-            ),
-            _ => "the daemon refused this client's control token. Restart it with \
-                  `lev daemon restart` to issue a fresh one."
-                .to_string(),
-        };
-        std::io::Error::new(std::io::ErrorKind::PermissionDenied, detail)
-    }
-
-    /// Send one request and await its response. Errors if the daemon can't be
-    /// reached, does not answer within [`request_timeout`], the connection closes
-    /// before a reply, or the reply doesn't parse.
-    pub async fn request(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
-        // The daemon services control ops from a single loop, so one op that
-        // takes a long time (or a wedged world) delays every other client. With
-        // no deadline, `lev cancel` and the dashboard simply hung - no output, no
-        // error, nothing to act on. A timeout turns that into a failure the
-        // caller can fall back from.
-        let deadline = timeout_for(req);
-        tokio::time::timeout(deadline, self.request_with_refresh(req))
-            .await
-            .unwrap_or_else(|_| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("the daemon did not respond within {}s", deadline.as_secs()),
-                ))
-            })
-    }
-
-    /// [`Self::request_uncapped`], retried once with a re-read token when the
-    /// daemon refuses the cached one. The daemon mints a fresh token every
-    /// start, so a refusal is most often not an intruder but a restart this
-    /// long-lived client slept through - `lev serve` held one client for its
-    /// whole life, and a single daemon restart (a crash, `lev daemon restart`,
-    /// or `ensure_daemon_running` replacing a stale build) bricked every
-    /// control op it made from then on until someone restarted serve too.
-    async fn request_with_refresh(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
-        match self.request_uncapped(req).await {
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && self.refresh_token() => {
-                self.request_uncapped(req).await
-            }
-            other => other,
-        }
-    }
-
-    /// [`Self::request`] without the deadline.
-    async fn request_uncapped(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
-        let stream = connect(&self.id).await?;
-        let (read_half, mut write_half) = tokio::io::split(stream);
-        let mut lines = BufReader::new(read_half).lines();
-        self.authenticate(&mut write_half, &mut lines).await?;
-
-        let mut line = serde_json::to_string(req).expect("ControlRequest serializes");
-        line.push('\n');
-        // A failed write means the peer is already gone; the read below then sees
-        // EOF and returns the error, so the write needs no separate propagation.
-        let _ = write_half.write_all(line.as_bytes()).await;
-
-        match lines.next_line().await? {
-            Some(resp_line) => {
-                let parsed: ControlResponse = serde_json::from_str(&resp_line)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                // A daemon that refused us: report what to do about it, not the
-                // wire message. Reached when this client had no token to send
-                // and so never ran the handshake.
-                match &parsed {
-                    ControlResponse::Error { message } if message.starts_with(AUTH_REQUIRED) => {
-                        Err(self.refused())
-                    }
-                    _ => Ok(parsed),
-                }
-            }
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "control connection closed before a response",
-            )),
-        }
-    }
-
-    /// Authenticate a fresh connection: send the token (when there is one) and
-    /// read the daemon's verdict. On every connection, because the client opens
-    /// a fresh one per request, so there is no session to carry the proof
-    /// across. With no token nothing is sent - a daemon that predates tokens
-    /// serves the request, and one that requires them refuses it, which is the
-    /// outcome to report either way.
-    async fn authenticate(
-        &self,
-        write_half: &mut tokio::io::WriteHalf<ClientStream>,
-        lines: &mut tokio::io::Lines<BufReader<tokio::io::ReadHalf<ClientStream>>>,
-    ) -> std::io::Result<()> {
-        let Some(token) = self.current_token() else {
-            return Ok(());
-        };
-        let hello = ControlRequest::Authenticate {
-            token: token.expose().to_string(),
-        };
-        let mut line = serde_json::to_string(&hello).expect("ControlRequest serializes");
-        line.push('\n');
-        let _ = write_half.write_all(line.as_bytes()).await;
-
-        // `.ok().flatten()`: a read error and a clean EOF are the same fact
-        // here - the daemon did not answer the handshake - and giving the
-        // error its own `?` arm leaves a branch no test can drive.
-        match lines.next_line().await.ok().flatten() {
-            Some(resp) => match serde_json::from_str::<ControlResponse>(&resp) {
-                Ok(ControlResponse::Ok { ok: true }) => Ok(()),
-                _ => Err(self.refused()),
-            },
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "control connection closed during authentication",
-            )),
-        }
-    }
-
-    /// Spawn a new agent.
-    pub async fn spawn(&self, args: SpawnArgs) -> std::io::Result<ControlResponse> {
-        self.request(&ControlRequest::Spawn {
-            args: Box::new(args),
-        })
-        .await
-    }
-
-    /// Query a run's status.
-    pub async fn status(&self, run_id: &str) -> std::io::Result<ControlResponse> {
-        self.request(&ControlRequest::Status {
-            run_id: run_id.to_string(),
-        })
-        .await
-    }
-
-    /// List every known live run.
-    pub async fn list(&self) -> std::io::Result<ControlResponse> {
-        self.request(&ControlRequest::List).await
-    }
-
-    /// Ask the daemon to shut down.
-    pub async fn shutdown(&self) -> std::io::Result<ControlResponse> {
-        self.request(&ControlRequest::Shutdown).await
-    }
-
-    /// Open a pushed event stream: connect, authenticate, send `Subscribe`, and
-    /// return a reader that yields [`WorldEvent`]s until the daemon closes the
-    /// connection. The HTTP/WS gateway uses this instead of polling.
-    ///
-    /// Authenticated like every other request - it was not, which meant a
-    /// production daemon (they all require a token) refused every subscription
-    /// before it began: the serve gateway's event loop read the refusal as a
-    /// closed stream and silently re-subscribed twice a second forever, and no
-    /// live event ever reached a WebSocket. Only tokenless test daemons ever
-    /// saw the stream work. Retried once with a re-read token on refusal, same
-    /// as [`Self::request`].
-    pub async fn subscribe(&self) -> std::io::Result<WorldEventStream> {
-        match self.subscribe_uncapped().await {
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && self.refresh_token() => {
-                self.subscribe_uncapped().await
-            }
-            other => other,
-        }
-    }
-
-    /// One subscribe attempt with the currently-cached token.
-    async fn subscribe_uncapped(&self) -> std::io::Result<WorldEventStream> {
-        let stream = connect(&self.id).await?;
-        let (read_half, mut write_half) = tokio::io::split(stream);
-        let mut lines = BufReader::new(read_half).lines();
-        self.authenticate(&mut write_half, &mut lines).await?;
-        let mut line =
-            serde_json::to_string(&ControlRequest::Subscribe).expect("ControlRequest serializes");
-        line.push('\n');
-        // A failed write means the peer is already gone; the read side then sees
-        // EOF and `next` returns `None`, so the write needs no separate handling.
-        let _ = write_half.write_all(line.as_bytes()).await;
-        Ok(WorldEventStream {
-            lines,
-            _write: write_half,
-        })
-    }
-}
-
-/// A reader over a `Subscribe` connection, yielding [`WorldEvent`]s the daemon
-/// pushes.
-pub struct WorldEventStream {
-    lines: tokio::io::Lines<BufReader<tokio::io::ReadHalf<ClientStream>>>,
-    // Held open so the connection (and thus the subscription) stays alive.
-    _write: tokio::io::WriteHalf<ClientStream>,
-}
-
-impl WorldEventStream {
-    /// The next event, or `None` once the connection closes.
-    ///
-    /// A line that does not parse as a [`WorldEvent`] is skipped, not treated
-    /// as end-of-stream: the daemon may be a newer build whose event enum grew
-    /// a variant this client does not know, and ending the stream on the first
-    /// such event would put the consumer into a reconnect loop that tears the
-    /// subscription down once per unknown event.
-    pub async fn next(&mut self) -> Option<WorldEvent> {
-        loop {
-            let line = self.lines.next_line().await.ok().flatten()?;
-            if let Ok(event) = serde_json::from_str(&line) {
-                return Some(event);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1156,7 +973,15 @@ mod tests {
                 .expect("our own connection is admitted");
             // A cap just over one request's length: three requests cross it,
             // so a budget that never refills cuts the connection partway.
-            handle_connection_capped(stream, op_tx, no_events(), None, 40).await
+            handle_connection_capped(
+                stream,
+                op_tx,
+                no_events(),
+                None,
+                DaemonIdentity::this_process("test"),
+                40,
+            )
+            .await
         });
 
         let stream = connect(&id).await.unwrap();
@@ -1518,6 +1343,7 @@ mod tests {
         let response = dispatch(
             ControlRequest::Authenticate {
                 token: "irrelevant".to_string(),
+                hello: false,
             },
             &op_tx,
         )
@@ -1546,6 +1372,7 @@ mod tests {
         let mut lines = BufReader::new(read_half).lines();
         let hello = serde_json::to_string(&ControlRequest::Authenticate {
             token: token.expose().to_string(),
+            hello: false,
         })
         .unwrap();
         for _ in 0..2 {
@@ -2281,5 +2108,606 @@ mod tests {
                 message: String::new()
             })
         );
+    }
+
+    // ── Riding out a daemon restart ─────────────────────────────────────────
+
+    /// A daemon at `id` with `token`, introducing itself as `identity`, that
+    /// serves `connections` connections through the real handshake and then
+    /// stops accepting. The fake host behind it answers every op.
+    fn identified_daemon(
+        mut listener: ControlListener,
+        token: ControlToken,
+        identity: DaemonIdentity,
+        connections: usize,
+    ) -> (broadcast::Sender<WorldEvent>, tokio::task::JoinHandle<()>) {
+        let (events, _r) = broadcast::channel::<WorldEvent>(16);
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        spawn_fake_host(op_rx);
+        let server_events = events.clone();
+        let handle = tokio::spawn(async move {
+            for _ in 0..connections {
+                let stream = listener.accept().await.unwrap().unwrap();
+                let op_tx = op_tx.clone();
+                let events = server_events.clone();
+                let token = token.clone();
+                let identity = identity.clone();
+                tokio::spawn(async move {
+                    let _ =
+                        handle_connection_as(stream, op_tx, events, Some(token), identity).await;
+                });
+            }
+        });
+        (events, handle)
+    }
+
+    /// An identity for a daemon on the same code as this process, at `pid`.
+    fn same_code(pid: u32) -> DaemonIdentity {
+        DaemonIdentity {
+            pid,
+            ..DaemonIdentity::this_process("build-a")
+        }
+    }
+
+    #[test]
+    fn this_process_identity_carries_the_crate_version_and_the_given_build() {
+        let me = DaemonIdentity::this_process("abc123");
+        assert_eq!(me.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(me.build, "abc123");
+        assert_eq!(me.pid, std::process::id());
+        assert_eq!(
+            me.to_string(),
+            format!(
+                "{} (build abc123, pid {})",
+                env!("CARGO_PKG_VERSION"),
+                std::process::id()
+            )
+        );
+    }
+
+    /// Versions must match; builds must match when both are known; a side that
+    /// does not know its build cannot contradict the other.
+    #[test]
+    fn same_code_compares_versions_and_known_builds() {
+        let a = same_code(1);
+        let mut b = same_code(2);
+        assert!(a.same_code_as(&b), "a different pid is the same code");
+        b.build = "build-b".to_string();
+        assert!(!a.same_code_as(&b), "a different build is different code");
+        b.build = DaemonIdentity::unknown_build();
+        assert!(a.same_code_as(&b), "an unknown build cannot contradict");
+        assert!(b.same_code_as(&a), "in either direction");
+        let mut c = same_code(3);
+        c.version = "0.0.1".to_string();
+        assert!(!a.same_code_as(&c), "a different version is different code");
+    }
+
+    /// The identity's build is optional on the wire (an older daemon never
+    /// sends one), and `hello: false` is left off the request entirely so a
+    /// daemon that predates the field sees exactly the request it always saw.
+    #[test]
+    fn the_handshake_additions_are_backward_compatible_on_the_wire() {
+        let plain = serde_json::to_value(ControlRequest::Authenticate {
+            token: "t".to_string(),
+            hello: false,
+        })
+        .unwrap();
+        assert_eq!(
+            plain,
+            serde_json::json!({"op": "authenticate", "token": "t"})
+        );
+        let asking = serde_json::to_value(ControlRequest::Authenticate {
+            token: "t".to_string(),
+            hello: true,
+        })
+        .unwrap();
+        assert_eq!(asking["hello"], true);
+        let parsed: ControlRequest =
+            serde_json::from_value(serde_json::json!({"op": "authenticate", "token": "t"}))
+                .unwrap();
+        assert_eq!(
+            parsed,
+            ControlRequest::Authenticate {
+                token: "t".to_string(),
+                hello: false
+            }
+        );
+        let identity: DaemonIdentity =
+            serde_json::from_value(serde_json::json!({"version": "0.4.0", "pid": 7})).unwrap();
+        assert_eq!(identity.build, DaemonIdentity::unknown_build());
+    }
+
+    #[test]
+    fn only_the_reading_requests_are_read_only() {
+        let run = || "r".to_string();
+        let read_only = [
+            ControlRequest::Authenticate {
+                token: run(),
+                hello: true,
+            },
+            ControlRequest::Status { run_id: run() },
+            ControlRequest::List,
+            ControlRequest::ListInteractions,
+            ControlRequest::Subscribe,
+        ];
+        let mutating = [
+            ControlRequest::Spawn {
+                args: Box::new(SpawnArgs::default()),
+            },
+            ControlRequest::Pause { run_id: run() },
+            ControlRequest::Resume { run_id: run() },
+            ControlRequest::Cancel { run_id: run() },
+            ControlRequest::Message {
+                agent_id: run(),
+                content: run(),
+                target_region: None,
+            },
+            ControlRequest::AnswerInteraction {
+                response: InteractionResponse {
+                    request_id: run(),
+                    value: None,
+                    choice_index: None,
+                    approved: None,
+                    scope: None,
+                },
+            },
+            ControlRequest::CancelInteraction { request_id: run() },
+            ControlRequest::Shutdown,
+        ];
+        assert!(read_only.iter().all(ControlRequest::is_read_only));
+        assert!(!mutating.iter().any(ControlRequest::is_read_only));
+    }
+
+    /// The reasons a connect can fail that mean "no daemon answered", versus
+    /// the ones where something did.
+    #[test]
+    fn transient_errors_are_the_absent_daemon_ones() {
+        use std::io::ErrorKind::*;
+        for kind in [
+            NotFound,
+            ConnectionRefused,
+            ConnectionReset,
+            ConnectionAborted,
+            BrokenPipe,
+            UnexpectedEof,
+        ] {
+            assert!(is_transient(&std::io::Error::new(kind, "x")), "{kind:?}");
+        }
+        for kind in [PermissionDenied, InvalidData, TimedOut, Unsupported, Other] {
+            assert!(!is_transient(&std::io::Error::new(kind, "x")), "{kind:?}");
+        }
+    }
+
+    /// `ERROR_PIPE_BUSY` has no `ErrorKind` of its own and is retryable by
+    /// definition.
+    #[cfg(windows)]
+    #[test]
+    fn a_busy_named_pipe_is_transient() {
+        assert!(is_transient(&std::io::Error::from_raw_os_error(231)));
+    }
+
+    /// The daemon introduces itself in the handshake, the client records it,
+    /// and a client whose build matches sees no mismatch. Before any handshake
+    /// the client knows nothing and says so.
+    #[tokio::test]
+    async fn the_client_learns_who_it_reached_from_the_handshake() {
+        let (listener, id, dir) = test_listener();
+        let token = ControlToken::create(dir.path()).unwrap();
+        let (_events, server) = identified_daemon(listener, token, same_code(41), 1);
+        let client = ControlClient::for_home(id, dir.path()).with_build("build-a");
+        assert_eq!(
+            client.link(),
+            LinkStatus {
+                daemon: None,
+                restarts: 0,
+                reachable: true,
+            }
+        );
+        client.list().await.expect("served");
+        assert_eq!(client.link().daemon, Some(same_code(41)));
+        assert_eq!(
+            client.link().restarts,
+            0,
+            "learning who it is is not a restart"
+        );
+        assert!(client.link().reachable);
+        assert_eq!(client.code_mismatch(), None);
+        server.await.unwrap();
+    }
+
+    /// A daemon that predates the question answers the handshake with the
+    /// bare `Ok` it always did. That is accepted, and the client simply keeps
+    /// not knowing who it reached.
+    #[tokio::test]
+    async fn a_daemon_that_predates_the_handshake_is_served_without_an_identity() {
+        let (mut listener, id, dir) = test_listener();
+        let _token = ControlToken::create(dir.path()).unwrap();
+        let client = ControlClient::for_home(id, dir.path()).with_build("build-a");
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut lines = BufReader::new(read_half).lines();
+            let _hello = lines.next_line().await.unwrap();
+            write_line(&mut write_half, &ControlResponse::Ok { ok: true }).await;
+            let _request = lines.next_line().await.unwrap();
+            write_line(&mut write_half, &ControlResponse::Ok { ok: true }).await;
+        });
+        client.shutdown().await.expect("served");
+        assert_eq!(client.link().daemon, None);
+        assert_eq!(client.code_mismatch(), None);
+        server.await.unwrap();
+    }
+
+    /// The plain `handle_connection` (embedders, tests) introduces the daemon
+    /// with an unknown build, which a client with a known build accepts as
+    /// possibly-the-same code.
+    #[tokio::test]
+    async fn a_daemon_that_does_not_know_its_build_is_not_a_mismatch() {
+        let (listener, id, dir) = test_listener();
+        let token = ControlToken::create(dir.path()).unwrap();
+        let (_events, server) = tokened_daemon(listener, token, 1);
+        let client = ControlClient::for_home(id, dir.path()).with_build("build-a");
+        client.list().await.expect("served");
+        let daemon = client.link().daemon.expect("introduced itself");
+        assert_eq!(daemon.build, DaemonIdentity::unknown_build());
+        assert_eq!(client.code_mismatch(), None);
+        server.await.unwrap();
+    }
+
+    /// A different daemon behind the same socket - a new pid - counts as a
+    /// restart, once per change; the same daemon answering again does not.
+    #[tokio::test]
+    async fn a_new_daemon_behind_the_socket_counts_as_a_restart() {
+        let (listener, id, dir) = test_listener();
+        let token = ControlToken::create(dir.path()).unwrap();
+        let (_events, first) = identified_daemon(listener, token.clone(), same_code(1), 2);
+        let client = ControlClient::for_home(id.clone(), dir.path()).with_build("build-a");
+        client.list().await.expect("served by the first daemon");
+        client.list().await.expect("and again");
+        assert_eq!(client.link().restarts, 0, "the same daemon twice");
+        first.await.unwrap();
+
+        // "Restart": a new listener on the same id, a new pid in the greeting.
+        let listener = bind_control_listener(&id).unwrap();
+        let (_events, second) = identified_daemon(listener, token, same_code(2), 1);
+        client.list().await.expect("served by the second daemon");
+        assert_eq!(client.link().restarts, 1);
+        assert_eq!(client.link().daemon.map(|d| d.pid), Some(2));
+        second.await.unwrap();
+    }
+
+    /// A request that lands while no daemon is listening waits for one, and
+    /// is served by the daemon that binds a moment later. This is the restart
+    /// window: `lev serve` answered 503 across it, `lev ps` printed "Daemon
+    /// not reachable", and the ACP bridge refused the turn.
+    #[tokio::test]
+    async fn a_request_during_the_restart_window_waits_for_the_new_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = control_id(dir.path());
+        let token = ControlToken::create(dir.path()).unwrap();
+        let client = ControlClient::for_home(id.clone(), dir.path())
+            .with_reconnect_grace(std::time::Duration::from_secs(5));
+        assert!(!is_daemon_running(&id), "nothing listening yet");
+
+        // The daemon comes back a little after the request goes out.
+        let late = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            let listener = bind_control_listener(&id).unwrap();
+            let (_events, server) = identified_daemon(listener, token, same_code(9), 1);
+            server.await.unwrap();
+        });
+        let response = client.list().await.expect("waited out the window");
+        assert!(format!("{response:?}").starts_with("List"));
+        assert!(client.link().reachable, "the outage is over");
+        late.await.unwrap();
+    }
+
+    /// The wait is per outage, not per request. Once the daemon has been gone
+    /// longer than the grace, callers fail fast instead of each waiting the
+    /// whole grace again - and the link reads as unreachable meanwhile.
+    #[tokio::test]
+    async fn an_outage_older_than_the_grace_fails_fast() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = control_id(dir.path());
+        let client = ControlClient::for_home(id, dir.path())
+            .with_reconnect_grace(std::time::Duration::from_millis(30));
+        // The first caller pays the grace (a backoff sleep or two)...
+        let started = std::time::Instant::now();
+        assert!(client.list().await.is_err());
+        assert!(started.elapsed() >= std::time::Duration::from_millis(30));
+        assert!(!client.link().reachable);
+        // ...and every caller after it fails at once.
+        let started = std::time::Instant::now();
+        assert!(client.list().await.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_millis(30));
+    }
+
+    /// A clone can opt out of the wait: `lev dash` polls on its render loop
+    /// and must not freeze the screen for the length of an outage.
+    #[tokio::test]
+    async fn a_zero_grace_clone_reports_an_absent_daemon_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = control_id(dir.path());
+        let patient = ControlClient::for_home(id, dir.path()).with_reconnect_grace(RESTART_GRACE);
+        let hasty = patient
+            .clone()
+            .with_reconnect_grace(std::time::Duration::ZERO);
+        let started = std::time::Instant::now();
+        assert!(hasty.list().await.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        // The clones share what they learn: the patient one now knows too.
+        assert!(!patient.link().reachable);
+    }
+
+    /// The daemon can vanish *after* the request was written. A request that
+    /// only reads is simply asked again of the daemon that comes back...
+    #[tokio::test]
+    async fn a_read_only_request_cut_off_before_its_reply_is_asked_again() {
+        let (mut listener, id, dir) = test_listener();
+        let token = ControlToken::create(dir.path()).unwrap();
+        let client = ControlClient::for_home(id.clone(), dir.path())
+            .with_reconnect_grace(std::time::Duration::from_secs(5));
+        // First connection: handshake, read the request, then hang up.
+        let dying = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut lines = BufReader::new(read_half).lines();
+            let _hello = lines.next_line().await.unwrap();
+            write_line(&mut write_half, &authenticated_reply(true, &same_code(1))).await;
+            let _request = lines.next_line().await.unwrap();
+            drop(listener);
+            // Dropping the stream: EOF before any reply.
+        });
+        // The replacement binds a moment after the first daemon is gone and
+        // answers properly.
+        let late = tokio::spawn(async move {
+            dying.await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            let listener = bind_control_listener(&id).unwrap();
+            let (_events, server) = identified_daemon(listener, token, same_code(2), 1);
+            server.await.unwrap();
+        });
+        let response = client.list().await.expect("asked again of the new daemon");
+        assert!(format!("{response:?}").starts_with("List"));
+        late.await.unwrap();
+    }
+
+    /// ...while one that mutates is not, because it may already have happened
+    /// - the daemon may have spawned the run and died before saying so, and
+    /// asking again is how a run gets started twice.
+    #[tokio::test]
+    async fn a_mutating_request_cut_off_before_its_reply_is_not_repeated() {
+        let (mut listener, id, dir) = test_listener();
+        let _token = ControlToken::create(dir.path()).unwrap();
+        let client = ControlClient::for_home(id, dir.path())
+            .with_reconnect_grace(std::time::Duration::from_secs(5));
+        let dying = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut lines = BufReader::new(read_half).lines();
+            let _hello = lines.next_line().await.unwrap();
+            write_line(&mut write_half, &authenticated_reply(true, &same_code(1))).await;
+            let _request = lines.next_line().await.unwrap();
+        });
+        let started = std::time::Instant::now();
+        let err = client
+            .spawn(SpawnArgs::default())
+            .await
+            .expect_err("a spawn that got no reply is reported, not repeated");
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "no wait"
+        );
+        dying.await.unwrap();
+    }
+
+    /// The one mutating reply that *is* safe to repeat: the daemon saying it
+    /// was already shutting down, which means the request was dropped
+    /// unprocessed. The spawn goes to the daemon that replaces it.
+    #[tokio::test]
+    async fn a_spawn_the_dying_daemon_dropped_goes_to_its_replacement() {
+        let (mut listener, id, dir) = test_listener();
+        let token = ControlToken::create(dir.path()).unwrap();
+        let client = ControlClient::for_home(id.clone(), dir.path())
+            .with_reconnect_grace(std::time::Duration::from_secs(5));
+        // A daemon whose host is already gone: `dispatch` cannot deliver the
+        // op, and says so.
+        let draining_token = token.clone();
+        let draining = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let (op_tx, op_rx) = mpsc::unbounded_channel();
+            drop(op_rx);
+            let _ = handle_connection_as(
+                stream,
+                op_tx,
+                no_events(),
+                Some(draining_token),
+                same_code(1),
+            )
+            .await;
+            drop(listener);
+        });
+        // Its replacement, a moment later, with a live host.
+        let late = tokio::spawn(async move {
+            draining.await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            let listener = bind_control_listener(&id).unwrap();
+            let (_events, server) = identified_daemon(listener, token, same_code(2), 1);
+            server.await.unwrap();
+        });
+        let args = SpawnArgs {
+            run_id: "run-x".to_string(),
+            ..Default::default()
+        };
+        let response = client
+            .spawn(args)
+            .await
+            .expect("spawned by the replacement");
+        assert_eq!(
+            response,
+            ControlResponse::Spawned {
+                run_id: "run-x".to_string()
+            }
+        );
+        late.await.unwrap();
+    }
+
+    /// Without the wait, the same reply is handed back as it always was.
+    #[tokio::test]
+    async fn a_shutting_down_reply_is_returned_when_there_is_no_grace() {
+        let (mut listener, id, dir) = test_listener();
+        let token = ControlToken::create(dir.path()).unwrap();
+        let client =
+            ControlClient::for_home(id, dir.path()).with_reconnect_grace(std::time::Duration::ZERO);
+        let draining = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let (op_tx, op_rx) = mpsc::unbounded_channel();
+            drop(op_rx);
+            let _ = handle_connection(stream, op_tx, no_events(), Some(token)).await;
+        });
+        let response = client.spawn(SpawnArgs::default()).await.unwrap();
+        assert_eq!(
+            response,
+            ControlResponse::Error {
+                message: SHUTTING_DOWN.to_string()
+            }
+        );
+        draining.await.unwrap();
+    }
+
+    /// The event stream is subscribed with the same patience: a subscribe
+    /// during the restart window attaches to the daemon that comes back.
+    #[tokio::test]
+    async fn a_subscribe_during_the_restart_window_attaches_to_the_new_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = control_id(dir.path());
+        let token = ControlToken::create(dir.path()).unwrap();
+        let client = ControlClient::for_home(id.clone(), dir.path())
+            .with_reconnect_grace(std::time::Duration::from_secs(5));
+        let (events_tx, events_rx) = tokio::sync::oneshot::channel();
+        let late = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let listener = bind_control_listener(&id).unwrap();
+            let (events, server) = identified_daemon(listener, token, same_code(3), 1);
+            let _ = events_tx.send(events.clone());
+            server.await.unwrap();
+        });
+        let mut stream = client.subscribe().await.expect("attached after the wait");
+        let events = events_rx.await.unwrap();
+        let event = loop {
+            let _ = events.send(completed("late-run"));
+            tokio::select! {
+                e = stream.next() => break e,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+            }
+        };
+        assert!(format!("{:?}", event.expect("the event arrives")).contains("late-run"));
+        drop(stream);
+        drop(events);
+        late.await.unwrap();
+    }
+
+    /// A daemon on different code that answers with something this client
+    /// cannot read: not "not reachable", and not a daemon-side bug, but the
+    /// one failure a restart of the daemon does not fix. The error says which
+    /// process to restart.
+    #[tokio::test]
+    async fn an_unreadable_reply_from_a_daemon_on_other_code_names_the_mismatch() {
+        let (mut listener, id, dir) = test_listener();
+        let _token = ControlToken::create(dir.path()).unwrap();
+        let client = ControlClient::for_home(id, dir.path()).with_build("build-a");
+        let mut other = same_code(5);
+        other.build = "build-b".to_string();
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut lines = BufReader::new(read_half).lines();
+            let _hello = lines.next_line().await.unwrap();
+            write_line(&mut write_half, &authenticated_reply(true, &other)).await;
+            let _request = lines.next_line().await.unwrap();
+            let _ = write_half
+                .write_all(b"{\"result\":\"from_the_future\"}\n")
+                .await;
+        });
+        let err = client.list().await.expect_err("could not read the reply");
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        let text = err.to_string();
+        assert!(text.contains("build build-b"), "{text}");
+        assert!(text.contains("built from version"), "{text}");
+        assert!(text.contains("restart this process"), "{text}");
+        assert!(text.contains("could not be read"), "{text}");
+        let mismatch = client.code_mismatch().expect("recorded");
+        assert_eq!(mismatch.daemon.build, "build-b");
+        assert_eq!(mismatch.client.build, "build-a");
+        server.await.unwrap();
+    }
+
+    /// The same unreadable reply from a daemon on the *same* code is the plain
+    /// parse error it always was: there is no update to blame.
+    #[tokio::test]
+    async fn an_unreadable_reply_from_the_same_code_is_a_plain_parse_error() {
+        let (mut listener, id, dir) = test_listener();
+        let _token = ControlToken::create(dir.path()).unwrap();
+        let client = ControlClient::for_home(id, dir.path()).with_build("build-a");
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut lines = BufReader::new(read_half).lines();
+            let _hello = lines.next_line().await.unwrap();
+            write_line(&mut write_half, &authenticated_reply(true, &same_code(5))).await;
+            let _request = lines.next_line().await.unwrap();
+            let _ = write_half.write_all(b"not json\n").await;
+        });
+        let err = client.list().await.expect_err("could not read the reply");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        server.await.unwrap();
+    }
+
+    /// And the mirror image: a request the daemon could not read. Named as a
+    /// mismatch when the two run different code, passed through as the
+    /// daemon's own error when they do not.
+    #[tokio::test]
+    async fn a_request_the_daemon_cannot_read_is_a_mismatch_only_across_code() {
+        for (build, expect_mismatch) in [("build-b", true), ("build-a", false)] {
+            let (mut listener, id, dir) = test_listener();
+            let _token = ControlToken::create(dir.path()).unwrap();
+            let client = ControlClient::for_home(id, dir.path()).with_build("build-a");
+            let mut daemon = same_code(5);
+            daemon.build = build.to_string();
+            let server = tokio::spawn(async move {
+                let stream = listener.accept().await.unwrap().unwrap();
+                let (read_half, mut write_half) = tokio::io::split(stream);
+                let mut lines = BufReader::new(read_half).lines();
+                let _hello = lines.next_line().await.unwrap();
+                write_line(&mut write_half, &authenticated_reply(true, &daemon)).await;
+                let _request = lines.next_line().await.unwrap();
+                write_line(
+                    &mut write_half,
+                    &ControlResponse::Error {
+                        message: format!("{INVALID_REQUEST}: unknown variant `list`"),
+                    },
+                )
+                .await;
+            });
+            let result = client.list().await;
+            match expect_mismatch {
+                true => {
+                    let err = result.expect_err("named as a mismatch");
+                    assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+                    assert!(err.to_string().contains("could not read this request"));
+                }
+                false => {
+                    let response = result.expect("the daemon's own error, passed through");
+                    assert_eq!(
+                        response,
+                        ControlResponse::Error {
+                            message: format!("{INVALID_REQUEST}: unknown variant `list`"),
+                        }
+                    );
+                }
+            }
+            server.await.unwrap();
+        }
     }
 }

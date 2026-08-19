@@ -37,10 +37,7 @@ pub(super) async fn get_interaction(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Unexpected daemon response: {other:?}"),
         )),
-        Err(e) => Err(err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("Daemon not reachable: {e}"),
-        )),
+        Err(e) => Err(daemon_error(e)),
     }
 }
 
@@ -87,10 +84,7 @@ pub(super) async fn submit_interaction(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Unexpected daemon response: {other:?}"),
         )),
-        Err(e) => Err(err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("Daemon not reachable: {e}"),
-        )),
+        Err(e) => Err(daemon_error(e)),
     }
 }
 
@@ -118,10 +112,7 @@ pub(super) async fn send_message(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Unexpected daemon response: {other:?}"),
         )),
-        Err(e) => Err(err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("Daemon not reachable: {e}"),
-        )),
+        Err(e) => Err(daemon_error(e)),
     }
 }
 
@@ -175,6 +166,56 @@ mod tests {
         ControlClient::new(leviath_runtime::control_socket::control_id(
             std::path::Path::new("/no/such/daemon"),
         ))
+    }
+
+    /// A daemon updated under a running server, answering with something this
+    /// server cannot read: not a 503 (retrying, or restarting the daemon,
+    /// cannot help) but a 502 naming the process that needs restarting.
+    #[tokio::test]
+    async fn a_daemon_on_other_code_that_cannot_be_read_is_a_502_naming_the_fix() {
+        use leviath_runtime::control_socket::{
+            ControlToken, DaemonIdentity, bind_control_listener, control_id,
+        };
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let dir = tempfile::tempdir().unwrap();
+        let id = control_id(dir.path());
+        let mut listener = bind_control_listener(&id).unwrap();
+        let _token = ControlToken::create(dir.path()).unwrap();
+        let mut updated = DaemonIdentity::this_process("this-build");
+        updated.build = "newer-build".to_string();
+        let server = tokio::spawn(async move {
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut lines = BufReader::new(read_half).lines();
+            let _hello = lines.next_line().await.unwrap();
+            let mut welcome =
+                serde_json::to_string(&ControlResponse::Welcome { daemon: updated }).unwrap();
+            welcome.push('\n');
+            let _ = write_half.write_all(welcome.as_bytes()).await;
+            let _request = lines.next_line().await.unwrap();
+            let _ = write_half
+                .write_all(b"{\"result\":\"from_the_future\"}\n")
+                .await;
+        });
+        let control = ControlClient::for_home(id, dir.path()).with_build("this-build");
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/agents/a1/interaction")
+            .body(Body::empty())
+            .unwrap();
+        let response = app_with(control).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("This server needs a restart"), "{text}");
+        assert!(text.contains("newer-build"), "{text}");
+        server.await.unwrap();
     }
 
     // ─── get_interaction ─────────────────────────────────────────────────────

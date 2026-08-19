@@ -87,6 +87,37 @@ stateDiagram-v2
   Stopped --> [*]
 ```
 
+## What the front-ends do while it restarts
+
+A daemon restart used to break whatever was talking to it. `lev serve` answered 503 for the
+second the socket was gone, and the ACP bridge ended its turn with half an answer. Now the
+long-lived front-ends ride the restart out: `lev serve`, `lev dash`, and `lev agent-client`.
+
+A request that arrives while the daemon is down waits up to ten seconds for it to come back. The
+new daemon serves it. The wait is per outage, not per request: a daemon that is really gone costs
+one caller the ten seconds, and every caller after that fails at once until it returns. Requests
+that could double an effect, a spawn or a message that got no reply, are reported rather than
+sent twice. One-shot commands such as `lev ps` do not wait: a daemon that is not running is
+reported at once, with the advice to start it.
+
+The daemon says who it is (version, build, pid) when a front-end connects. That is how each one
+tells a restart from an update:
+
+| What happened | `lev serve` | `lev dash` | `lev agent-client` |
+|---|---|---|---|
+| The daemon restarted on the same build | Logs it, and sends WebSocket clients a `daemon_link` event | A log line and a toast | Follows the run onto the new daemon, silently |
+| The daemon came back on a different build | Logs a warning, and the `daemon_link` event carries the advice | A log line, a toast, and a chip on the run list | Says so in the conversation |
+
+The advice is always the same: restart that front-end, so both ends run the same code. Requests
+keep working while the two still understand each other. One that fails because they no longer do
+is reported as exactly that (`lev serve` answers 502 rather than 503), since a daemon restart
+cannot fix it.
+
+> [!NOTE]
+> After `lev update`, the next `lev` command restarts the daemon onto the new build. A `lev serve`
+> or `lev dash` that was already running is now the older half of the pair, and says so. Restart
+> it when convenient.
+
 ## Run it unattended
 
 For an always-on setup, install the daemon under your operating system's service manager. It then
