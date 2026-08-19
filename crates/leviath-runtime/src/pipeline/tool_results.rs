@@ -433,6 +433,50 @@ pub(crate) fn stage_modifying_tools(
     names
 }
 
+/// Tally this batch's `web_search` calls onto the run's outcome flags, counting
+/// how many came back with nothing usable.
+///
+/// "Nothing usable" is an empty JSON array, an empty result, or a bracketed
+/// diagnostic - the shape `web_search` returns when it has no engine configured,
+/// when the engine errored, or when it fell back to an encyclopedia. All three
+/// mean the same thing to the run: this search did not see the web.
+///
+/// Worth persisting because the failure is otherwise invisible. A model handed
+/// an empty result set does not stop; it fills the gap from training data and
+/// cites what it remembers, so the run finishes `complete` with a fully cited
+/// report resting on nothing. One did that across 47 consecutive failed
+/// searches. `searches_empty == searches_run` is the only trace that survives.
+pub(crate) fn record_searches(
+    tool_calls: &[crate::components::ToolCall],
+    merged: &[(String, String)],
+    flags: Option<bevy_ecs::prelude::Mut<'_, crate::persistence::RunOutcomeFlags>>,
+) {
+    let Some(mut flags) = flags else { return };
+    for (call, (_id, result)) in tool_calls.iter().zip(merged.iter()) {
+        if leviath_tools::canonical_tool_name(&call.name) != "web_search" {
+            continue;
+        }
+        flags.0.searches_run += 1;
+        if search_found_nothing(result) {
+            flags.0.searches_empty += 1;
+        }
+    }
+}
+
+/// Whether a `web_search` result carries no usable hits.
+///
+/// Kept separate from [`record_searches`] because "what an empty search looks
+/// like" is the part that changes when the tool script does.
+fn search_found_nothing(result: &str) -> bool {
+    let trimmed = result.trim();
+    // A bracketed opener is the convention every script tool uses for a
+    // diagnostic ([error], [denied], and web_search's own prose), and no result
+    // set starts that way - a list of hits starts with `[{`.
+    trimmed.is_empty()
+        || trimmed == "[]"
+        || (trimmed.starts_with('[') && !trimmed.starts_with("[{"))
+}
+
 /// Tally this batch's file-modifying tool calls onto the stage's progress and the
 /// run's outcome flags. A result prefixed `[denied]` (permission layer) counts as
 /// *blocked* rather than successful - the agent tried and was refused, which a
@@ -546,7 +590,7 @@ pub fn collect_tools(
             blueprint,
             repetition,
             progress,
-            flags,
+            mut flags,
             activity,
             (metadata, agent_state),
         )) = agents.get_mut(outcome.entity)
@@ -586,6 +630,13 @@ pub fn collect_tools(
         // stage actually landed, so a `require_modifications` transition gate can
         // tell "analyzed the code and wrote nothing" from "made the change".
         // Done before file tracking, which rewrites successful results.
+        // Search accounting: a research run whose every search came back empty
+        // still writes a confident report, so the count has to survive the run.
+        record_searches(
+            &infer.tool_calls,
+            &merged,
+            flags.as_mut().map(bevy_ecs::prelude::Mut::reborrow),
+        );
         record_modifications(
             &infer.tool_calls,
             &merged,

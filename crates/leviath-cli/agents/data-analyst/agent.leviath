@@ -1,6 +1,6 @@
 [agent]
 name = "data-analyst"
-version = "0.0.3"
+version = "0.0.4"
 description = "Data analyst - searches the web for data on a subject, builds a clean CSV of it, and hands back a ready-to-use summary of what the numbers say"
 entry_stage = "scope"
 
@@ -23,13 +23,16 @@ bash       = "ask"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Decide the table's columns before gathering anything"
-available_tools = ["web_search", "context_write"]
+available_tools = ["web_search", "context_write", "current_time"]
 max_iterations = 8
 system_prompt = """
 Decide what table would answer the question in the `subject` region, honouring
 anything in `constraints`.
 
 Run two or three searches to learn what data actually exists on this subject.
+Today's date is in the `environment` region - treat it as authoritative over
+anything you remember, and let it decide what "current" or "latest" means for
+this table. Pass `freshness` to web_search when currency matters.
 Then write the schema to the `schema` region with context_write, as one line per
 column:
 
@@ -119,7 +122,7 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Gather the rows for one slice of the subject"
-available_tools = ["web_search", "web_fetch", "submit_output"]
+available_tools = ["web_search", "web_fetch", "submit_output", "current_time"]
 allow_as_worker = true
 require_output = true
 max_iterations = 25
@@ -136,7 +139,11 @@ every worker is using - it is all the context you get, so work from it.
 
 Record what you find, not what you expect. A value you could not source is an
 empty field, never an estimate: an invented number is worse than a missing one,
-because nobody downstream can tell which it was.
+because nobody downstream can tell which it was. The same goes for the whole
+slice: if web_search hands back a diagnostic instead of results - no engine
+configured, an engine error, or an encyclopedia fallback - then you cannot see
+the web, and every field you cannot source stays empty. Say so in `source_ref`
+rather than filling the table from memory. Call current_time for the date.
 
 Only your submitted rows reach the merge. Anything else you write is lost.
 """
@@ -252,6 +259,10 @@ model = "claude-sonnet-5"
 subject       = { kind = "pinned", budget = "1%", required = true, seed = "task", required_message = "Say what to gather data on via --task.", volatility = "stable" }
 # Optional caller bounds: --constraints "US only, since 2015".
 constraints   = { kind = "pinned", budget = "1%", seed = "constraints", volatility = "stable" }
+# The clock. This agent gathers data off the live web, so "latest", "current"
+# and "as of" are load-bearing, and the model's own sense of the date is its
+# training cutoff. The three researcher blueprints seed this the same way.
+environment   = { kind = "pinned", budget = "1%", seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
 # The table's columns, decided in scope and followed by every later stage.
 schema        = { kind = "pinned", budget = "2%", required = true, required_message = "Write the table's columns to `schema` (context_write) before gathering: one line per column, as name | type | meaning | unit.", volatility = "grows" }
 # Bibliography, one line per source actually used.

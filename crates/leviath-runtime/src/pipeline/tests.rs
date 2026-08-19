@@ -15076,3 +15076,68 @@ fn the_prefix_hash_tracks_the_prefix() {
     assert_eq!(a.system_hash, b.system_hash);
     assert_ne!(a.system_hash, c.system_hash);
 }
+
+// ── search accounting ──
+
+/// A search that came back with hits is counted, and counted as not-empty.
+///
+/// The result shape is what the bundled `web_search` returns on success: a JSON
+/// array of objects.
+#[test]
+fn collect_tools_counts_a_search_that_found_results() {
+    let (_, flags) = count_modifications(
+        &[(
+            "web_search",
+            serde_json::json!({"query": "gpt-oss-20b vram"}),
+            r#"[{"title":"t","url":"u","snippet":"s","date":"2026-08-01"}]"#,
+        )],
+        &[],
+    );
+    assert_eq!(flags.searches_run, 1);
+    assert_eq!(flags.searches_empty, 0);
+}
+
+/// The three shapes that mean "this search did not see the web": a bare empty
+/// array, an empty result, and the bracketed diagnostic `web_search` returns
+/// when it has no engine, when the engine errored, or when it fell back to an
+/// encyclopedia. All three counted, because the model cannot act on any of them
+/// and the run needs to record that its evidence is missing.
+#[test]
+fn collect_tools_counts_every_shape_of_empty_search() {
+    let (_, flags) = count_modifications(
+        &[
+            ("web_search", serde_json::json!({"query": "a"}), "[]"),
+            ("web_search", serde_json::json!({"query": "b"}), "  "),
+            (
+                "web_search",
+                serde_json::json!({"query": "c"}),
+                "[web_search could not search the web. BRAVE_API_KEY is not set…]",
+            ),
+            (
+                "web_search",
+                serde_json::json!({"query": "d"}),
+                "[error] web_search: something broke",
+            ),
+        ],
+        &[],
+    );
+    assert_eq!(flags.searches_run, 4);
+    assert_eq!(flags.searches_empty, 4, "every one saw nothing");
+}
+
+/// A run whose agent never searched says nothing about searching - the same
+/// escape `no_output_tools` applies to file modifications. Zero and zero is not
+/// a diagnosis, and a reader must not be able to mistake it for one.
+#[test]
+fn collect_tools_counts_no_searches_when_none_were_made() {
+    let (_, flags) = count_modifications(
+        &[(
+            "read_file",
+            serde_json::json!({"path": "a.rs"}),
+            "fn main() {}",
+        )],
+        &[],
+    );
+    assert_eq!(flags.searches_run, 0);
+    assert_eq!(flags.searches_empty, 0);
+}

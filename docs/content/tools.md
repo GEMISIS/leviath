@@ -248,12 +248,19 @@ network at all.
 
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
-| `web_search` | Search the web and return a JSON list of `{title, url, snippet}`. See below | `query`, `count` (optional, default 5) |
+| `web_search` | Search the web and return a JSON list of `{title, url, snippet, date}`. See below | `query`, `count` (optional, default 5), `freshness` (optional) |
 | `web_fetch` | Fetch a URL and return its readable text, with HTML stripped to prose. See below | `url` |
 
-`web_search` uses Brave Search when `BRAVE_API_KEY` is readable. Otherwise it falls back to a
-keyless Wikipedia search that needs no configuration. `web_fetch` truncates large pages, and a
-blocked or oversized request comes back as a diagnostic rather than failing the run.
+`web_search` uses Brave Search when `BRAVE_API_KEY` is readable. Otherwise there is no search
+engine, and the call falls back to a keyless Wikipedia lookup. Pass `freshness` to bound results by
+age, as `pd` / `pw` / `pm` / `py` (past day, week, month, year) or `YYYY-MM-DDtoYYYY-MM-DD`; each
+result carries the page's `date` when Brave knows it, which is what lets an agent judge "latest"
+against the run's own clock rather than its training cutoff.
+
+`web_fetch` truncates large pages, and a blocked or oversized request comes back as a diagnostic
+rather than failing the run. So does a page whose text is rendered client-side: fetching a Reddit
+thread returns HTML that strips to the single word "Reddit", so the tool names that instead of
+handing back the husk as if it were the discussion.
 
 Both ship with `data-analyst`, `researcher`, `deep-researcher`, and `wide-researcher`. To give
 another agent web access, copy them into that agent's `tools/`
@@ -268,9 +275,18 @@ directory, or drop them in `~/.leviath/tools/` to offer them to every agent.
 > allow_env_vars = ["BRAVE_API_KEY"]
 > ```
 >
-> Without that line the tool falls back to Wikipedia and says nothing about why. If your searches
-> come back looking like encyclopedia entries, this is usually the reason. See
+> Without that line the tool falls back to Wikipedia. It now says so in every result rather than
+> returning a bare empty list, and `lev doctor` reports it as a `search` warning, but the searches
+> still find nothing until you add the line. See
 > [environment variables](/docs/configuration#environment-variables).
+
+A search that cannot reach an engine is the quietest failure a research agent has. The model is
+handed an empty result set, cannot tell it apart from "nobody has written about this", and closes
+the gap from its training data, citing what it remembers. The report comes out confident and
+fully referenced. Three things make that visible now: `web_search` returns prose naming the
+problem instead of `[]`, `lev doctor` runs a `search` check, and every run records `searches_run`
+and `searches_empty` in its `meta.json` - equal counts, with a non-zero total, mean the run saw
+nothing and wrote a report anyway.
 
 > [!WARNING]
 > Fetches cannot reach loopback, private, or link-local addresses unless you set

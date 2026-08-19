@@ -638,6 +638,84 @@ pub(super) fn lint_compacted_deliverables(blueprint: &Blueprint) -> Vec<LintFind
         .collect()
 }
 
+/// A `required` region no stage is able to populate, so nothing enforces it.
+///
+/// `required` reads as a guarantee: a stage may not complete while the region is
+/// empty. The runtime gate that provides it
+/// (`leviath_runtime::pipeline::unmet_required_regions`) opens with an escape -
+/// a stage granting neither `context_write` nor `context_append` is skipped
+/// entirely, because gating a stage that could never populate the region would
+/// loop until the re-entry cap and then proceed anyway.
+///
+/// That escape is right per stage and wrong per blueprint. If *no* stage using
+/// the layout grants a context-writing tool, the flag is inert everywhere: it
+/// looks like the deliverable is protected, and it is not. The failure it hides
+/// is quiet - `sources_index` stayed empty through all seven stages of a
+/// research run and the report stage invented a bibliography rather than
+/// reporting it had none.
+///
+/// Caller-seeded regions are exempt for the same reason the runtime exempts
+/// them: the caller owns those, and they are validated at spawn.
+pub(super) fn lint_required_regions_enforceable(blueprint: &Blueprint) -> Vec<LintFinding> {
+    let writes_context = |stage: &leviath_core::Stage| {
+        stage
+            .available_tools
+            .iter()
+            .any(|t| t == "context_write" || t == "context_append")
+    };
+
+    let mut findings = Vec::new();
+    let mut named: Vec<&str> = Vec::new();
+    for stage in &blueprint.stages {
+        let layout = stage
+            .context_layout
+            .as_ref()
+            .unwrap_or(&blueprint.context_layout);
+        for region in &layout.regions {
+            if !region.required
+                || matches!(
+                    region.seed,
+                    Some(leviath_core::layout::RegionSeed::CallerInput { .. })
+                )
+                || named.contains(&region.name.as_str())
+            {
+                continue;
+            }
+            // Any stage sharing this region's layout and able to write context
+            // is enough: that stage is where the gate binds.
+            let enforceable = blueprint.stages.iter().any(|s| {
+                let l = s
+                    .context_layout
+                    .as_ref()
+                    .unwrap_or(&blueprint.context_layout);
+                writes_context(s) && l.regions.iter().any(|r| r.name == region.name)
+            });
+            if enforceable {
+                continue;
+            }
+            named.push(region.name.as_str());
+            findings.push(
+                LintFinding::new(
+                    LintSeverity::Warning,
+                    "required-region-unenforceable",
+                    format!(
+                        "region '{}' is declared required, but no stage that uses it grants \
+                         context_write or context_append - so nothing can populate it and the \
+                         gate that would hold a stage for it is skipped. The flag has no effect",
+                        region.name
+                    ),
+                )
+                .with_fix(format!(
+                    "add context_write or context_append to available_tools on the stage that \
+                     owes '{}', or drop required = true",
+                    region.name
+                )),
+            );
+        }
+    }
+    findings
+}
+
 /// A region that evicts, bounded by a share of a window nobody has measured.
 ///
 /// Percentage budgets exist so an author's intent survives a change of model:

@@ -1,6 +1,6 @@
 [agent]
 name = "researcher"
-version = "0.1.1"
+version = "0.1.2"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 entry_stage = "gather"
 
@@ -28,6 +28,11 @@ You are gathering source material on the topic in the `query` region, within any
 bounds set in `scope`.
 
 Be efficient - do not search exhaustively:
+0. If the question turns on what is current, latest, or state of the art,
+   establish what exists NOW before naming candidates: search the field as of
+   the date in `environment` and fetch the authoritative index for the domain
+   (registry, leaderboard, release feed). Every name you can recall is older
+   than your cutoff, so a list from memory is a list from the past.
 1. Run a FOCUSED first round of 3-5 web_search calls covering the distinct
    sub-topics of the question (not many rephrasings of the same query).
 2. web_fetch only the 2-3 most promising sources for detail; the search snippets
@@ -40,7 +45,14 @@ Be efficient - do not search exhaustively:
 Today's date is in the `environment` region. Treat it as authoritative over
 anything you remember: your training has a cutoff and this run does not. Judge
 "recent", "current" and "latest" against it, and note how old a source is when
-its age bears on the claim. Call current_time if you need the clock again.
+its age bears on the claim. Call current_time if you need the clock again. Pass
+`freshness` to web_search whenever "latest" or "current" is part of the question.
+
+If web_search hands back a diagnostic instead of results - no engine configured,
+an engine error, or an encyclopedia fallback - then this run cannot see the web.
+Record that in `sources_index` and do NOT close the gap from memory. Reporting a
+topic as unresearched is a usable result; a confident answer assembled from
+recall is not, and a reader cannot tell the two apart after the fact.
 Prefer primary sources and well-established outlets; note when something is a blog,
 forum, or vendor claim. Once you have solid coverage of the sub-topics, transition
 to analyze - don't keep searching for marginal additions. The analyze stage will
@@ -133,6 +145,20 @@ Structure:
 - Sources - the numbered bibliography from `sources_index`.
 
 Keep it tight and skimmable. Every non-obvious claim must carry a [n] citation.
+
+Citations are load-bearing, so two rules bind absolutely:
+
+1. Every `[n]` must resolve to a line already in `sources_index`. A reference
+   points at something this run actually read - never a reconstructed URL, a
+   remembered paper or discussion thread, or a plausible-looking title. Never
+   invent the details that make a citation look checked: no vote counts, no
+   comment counts, no dates you did not read off the source.
+2. If `sources_index` is empty, you have no bibliography and therefore no
+   evidence. Do not write one. Say up front that the research could not reach
+   its sources, drop the `[n]` markers, mark every finding low confidence, and
+   present what you have as background knowledge rather than findings.
+
+Confidence describes the evidence, not how sure the prose sounds.
 """
 
 [stages.summarize.transitions.summary]
@@ -206,7 +232,12 @@ query          = { kind = "pinned", budget = "1%", required = true, seed = "task
 scope          = { kind = "pinned", budget = "1%", seed = "scope", volatility = "stable" }
 # Growing bibliography with credibility notes (curated by the agent).
 environment    = { kind = "pinned", budget = "1%", seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
-sources_index  = { kind = "pinned", budget = "3%", volatility = "grows" }
+# `required`: the report is built from this, and a stage that gathered nothing
+# used to hand an empty bibliography to `summarize`, which wrote the references
+# from memory rather than reporting that it had none. The gate binds the stages
+# that can write context and no-ops for the ones that cannot, so it can never
+# deadlock the deliverable.
+sources_index  = { kind = "pinned", budget = "3%", volatility = "grows", required = true, required_message = "You have not recorded a single source in `sources_index`. Append one bibliography line per source you actually read (context_append, region=\"sources_index\"): `[n] <title> - <url or path> - credibility: <high/med/low + why>`. If the searches came back empty or unavailable, record THAT as the finding - do not proceed as though sources were gathered." }
 # Citation/confidence rules (seeded with a sensible default the agent follows).
 format         = { kind = "pinned", budget = "1%", seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Mark each finding's confidence as high / medium / low based on source count and credibility." }, volatility = "stable" }
 
