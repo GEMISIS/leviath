@@ -262,6 +262,18 @@ impl WorldHost {
                 .get::<crate::interaction_points::AwaitingInteractionPoint>(entity)
                 .is_none()
             && world.get::<AwaitingInteraction>(entity).is_none()
+            // An outstanding provider call is a live, unpersisted continuation
+            // just like a blocked `ask`: parking despawns the entity, and the
+            // response then lands on a dead one and is dropped on the collect
+            // system's stale path. So pausing a run mid-inference used to throw
+            // the call away silently - the run came back from its page-in as
+            // `ReadyToInfer` and paid for the same turn twice.
+            //
+            // `InFlightWork` covers the call still being out; `HeldInference`
+            // covers it having landed and being kept for the resume to apply.
+            // Either one keeps the run resident until it is resumed.
+            && world.get::<crate::pipeline::InFlightWork>(entity).is_none()
+            && world.get::<crate::pipeline::HeldInference>(entity).is_none()
     }
 
     /// Whether a terminal agent is safe to unload: it has no **live** parent that

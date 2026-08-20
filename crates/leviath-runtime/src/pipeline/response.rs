@@ -34,6 +34,13 @@ pub(crate) fn to_inference_result(
     }
 }
 
+/// What a person has to do about a provider that could not be reached.
+///
+/// A separate constant rather than a line-continued literal inside the
+/// `format!`: rustfmt reflows those, and it silently baked the source's own
+/// indentation into the middle of the sentence a user reads.
+const UNREACHABLE_REMEDY: &str = "check the network connection, then `lev resume` this run";
+
 /// What `collect_inference` selects.
 ///
 /// `&'static` is bevy's `WorldQuery` convention, not a claim about
@@ -338,7 +345,7 @@ pub fn collect_inference(
                     == Some(leviath_providers::UnavailableReason::Unreachable)
                 {
                     let message = format!(
-                        "could not reach '{called_provider}' ({err}): check the                          network connection, then `lev resume` this run"
+                        "could not reach '{called_provider}' ({err}): {UNREACHABLE_REMEDY}"
                     );
                     tracing::warn!(
                         provider = %called_provider,

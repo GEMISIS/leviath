@@ -928,6 +928,13 @@ fn collect_parks_a_run_whose_provider_is_unreachable() {
         "the remedy must name the way back: {}",
         parked.remedy
     );
+    // A line-continued literal here once let rustfmt reflow the source's own
+    // indentation into the middle of the sentence a user reads.
+    assert!(
+        !parked.remedy.contains("  "),
+        "the remedy is one clean sentence: {:?}",
+        parked.remedy
+    );
     assert!(
         world.get::<ReadyToInfer>(e).is_some(),
         "the retry stays staged so a resume re-dispatches rather than rebuilding"
