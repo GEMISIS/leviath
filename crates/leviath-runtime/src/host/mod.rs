@@ -428,16 +428,17 @@ impl WorldHost {
                     });
                 let _ = reply.send(status);
             }
+            // Both walk the sub-agent tree. Pausing only the run that was named
+            // leaves a fan-out parent's children running - the parent is
+            // `Waiting`, which is not pausable, so the request would report
+            // failure while the work carried on - and resuming only the parent
+            // would strand every child the pause had stopped.
             ControlOp::Pause { run_id, reply } => {
-                let ok = self
-                    .resolve_or_reload(&run_id)
-                    .is_some_and(|e| self.world.pause(e));
+                let ok = self.pause_tree(&run_id);
                 let _ = reply.send(ok);
             }
             ControlOp::Resume { run_id, reply } => {
-                let ok = self
-                    .resolve_or_reload(&run_id)
-                    .is_some_and(|e| self.world.resume(e));
+                let ok = self.resume_tree(&run_id);
                 let _ = reply.send(ok);
             }
             ControlOp::Cancel { run_id, reply } => {

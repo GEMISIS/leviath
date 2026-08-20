@@ -154,6 +154,12 @@ pub struct FanOutWaiting {
     active: Vec<ActiveWorker>,
     summaries: Vec<(String, String)>,
     failures: Vec<(String, String)>,
+    /// Set when the user pauses this parent. Its own status has to stay
+    /// `Waiting` - the merge poll reads it - so the pause lives here instead,
+    /// and holds back the one thing a parked parent still does on its own:
+    /// starting the next queued worker. Without it, pausing a fan-out would
+    /// pause the running children and immediately launch their replacements.
+    paused: bool,
 }
 
 /// The serializable form of [`FanOutWaiting`], written to `<run_dir>/fanout.json`
@@ -174,6 +180,10 @@ pub struct FanOutState {
     pub summaries: Vec<(String, String)>,
     /// Failed worker results as `(item_id, message)`.
     pub failures: Vec<(String, String)>,
+    /// Whether the fan-out was paused. `default` so a state written by an older
+    /// build still loads, as an un-paused one.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 impl FanOutWaiting {
@@ -183,6 +193,19 @@ impl FanOutWaiting {
     /// against a known denominator rather than an unexplained stall.
     pub fn outstanding(&self) -> usize {
         self.active.len() + self.pending.len()
+    }
+
+    /// Whether this parent's fan-out is paused (see the field).
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Latch or release the fan-out. Returns whether this changed anything, so
+    /// a caller can tell a real pause from a repeat.
+    pub fn set_paused(&mut self, paused: bool) -> bool {
+        let changed = self.paused != paused;
+        self.paused = paused;
+        changed
     }
 
     /// Project to the serializable [`FanOutState`] (workers by run-id).
@@ -198,6 +221,7 @@ impl FanOutWaiting {
                 .collect(),
             summaries: self.summaries.clone(),
             failures: self.failures.clone(),
+            paused: self.paused,
         }
     }
 }
@@ -232,6 +256,7 @@ pub fn restore_fan_out_waiting(
         active,
         summaries: state.summaries,
         failures,
+        paused: state.paused,
     });
 }
 
@@ -297,6 +322,7 @@ pub fn fan_out_split(world: &mut World) {
                     active: Vec::new(),
                     summaries: Vec::new(),
                     failures: Vec::new(),
+                    paused: false,
                 });
                 set_status(world, parent, AgentStatus::Waiting);
             }
@@ -418,8 +444,11 @@ pub fn fan_out_collect(world: &mut World) {
         }
         w.active = still_active;
 
-        // 2. Start pending workers up to the concurrency cap.
-        while w.active.len() < w.max_workers {
+        // 2. Start pending workers up to the concurrency cap - unless the
+        // fan-out is paused, in which case the queue stays where it is. Reaping
+        // above still runs: a worker that finished before the pause landed has a
+        // result worth keeping.
+        while !w.paused && w.active.len() < w.max_workers {
             let Some(item) = w.pending.pop_front() else {
                 break;
             };
@@ -1334,6 +1363,93 @@ mod tests {
     }
 
     // ── fan_out_collect: worker lifecycle + merge ─────────────────────────────
+
+    /// A paused fan-out does not start the next queued worker.
+    ///
+    /// Without the latch, pausing a parent pauses the children that are running
+    /// and the collector immediately launches their replacements out of
+    /// `pending` - so the run keeps spending money and the pause achieves
+    /// nothing visible.
+    #[test]
+    fn a_paused_fan_out_starts_no_further_workers() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        // Cap of one against three items, so there is always something queued.
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(cfg(Some("merge"), 1, WorkerFailurePolicy::Continue)),
+            r#"[{"id":"a"},{"id":"b"},{"id":"c"}]"#,
+        );
+        fan_out_split(&mut world);
+        fan_out_collect(&mut world);
+        assert_eq!(
+            world.get::<SubAgentChildren>(e).unwrap().children.len(),
+            1,
+            "one worker runs under a cap of one"
+        );
+
+        world
+            .get_mut::<FanOutWaiting>(e)
+            .expect("parked")
+            .set_paused(true);
+        // Finish the running worker: its slot frees, which is exactly when the
+        // collector would otherwise reach into the queue.
+        let running = world.get::<SubAgentChildren>(e).unwrap().children[0];
+        complete_worker(&mut world, running, "done");
+        fan_out_collect(&mut world);
+
+        assert_eq!(
+            world.get::<SubAgentChildren>(e).unwrap().children.len(),
+            1,
+            "the freed slot stays empty while the fan-out is paused"
+        );
+        let w = world.get::<FanOutWaiting>(e).expect("still parked");
+        assert_eq!(w.pending.len(), 2, "the queue is held, not consumed");
+        assert_eq!(
+            w.summaries.len(),
+            1,
+            "the worker that finished before the pause is still reaped"
+        );
+
+        // Releasing the latch lets the queue move again.
+        world
+            .get_mut::<FanOutWaiting>(e)
+            .expect("parked")
+            .set_paused(false);
+        fan_out_collect(&mut world);
+        assert_eq!(
+            world.get::<SubAgentChildren>(e).unwrap().children.len(),
+            2,
+            "resuming starts the next queued worker"
+        );
+    }
+
+    /// The latch survives a daemon restart: it rides the persisted fan-out state
+    /// like everything else the parent is parked on.
+    #[test]
+    fn the_fan_out_pause_round_trips_through_its_persisted_state() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(cfg(Some("merge"), 1, WorkerFailurePolicy::Continue)),
+            r#"[{"id":"a"},{"id":"b"}]"#,
+        );
+        fan_out_split(&mut world);
+        world
+            .get_mut::<FanOutWaiting>(e)
+            .expect("parked")
+            .set_paused(true);
+
+        let state = world.get::<FanOutWaiting>(e).expect("parked").to_state();
+        assert!(state.paused, "the latch is written out");
+
+        restore_fan_out_waiting(&mut world, e, state, &|_| None);
+        assert!(
+            world.get::<FanOutWaiting>(e).expect("parked").is_paused(),
+            "and comes back paused, so a restart does not quietly resume the fan-out"
+        );
+    }
 
     #[test]
     fn collect_starts_workers_then_merges_on_completion() {
