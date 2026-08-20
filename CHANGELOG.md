@@ -22,9 +22,12 @@ same list.
   provider nor a row in the built-in table is now loaded through the script
   layer and asked for its catalog, with or without `--remote` (a script names
   its models at run time, so there is nothing local to read). A script that
-  will not load, and an error raised by its `list_models`, are each reported by
-  name instead of being folded into an empty table. `lev doctor --help` and the
-  CLI reference no longer say a script provider cannot be listed.
+  will not load, and an error raised by its `list_models`, each now **fail the
+  command** rather than being folded into an empty table under an exit code of
+  0, so it works as the CI gate the docs send you to it for. A `--provider` the
+  built-in table knows but this install has no credential for is still an empty
+  table and still exits 0. `lev doctor --help` and the CLI reference no longer
+  say a script provider cannot be listed.
 
 - Added: `[limits.max_concurrent_inferences_by_provider]` caps in-flight
   requests to one provider across every model it serves, and

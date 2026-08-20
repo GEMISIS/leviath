@@ -294,7 +294,11 @@ it returns `false`.
 
 `--provider` naming a [Rhai script provider](/docs/rhai-providers) loads that script and calls its
 `list_models`, with or without `--remote`: a script names its own catalog at run time, so there is
-no built-in table to read it from.
+no built-in table to read it from. A `--provider` that names nothing at all - no configured
+provider, no row in the built-in table, no script of that name that loads - **exits non-zero**
+rather than printing an empty table, since there is nothing an empty table could be reporting.
+A provider the built-in table knows but this install has no credential for is still an empty table
+and still exits 0.
 
 ### `lev agent-client`
 
@@ -593,8 +597,8 @@ the run. Nothing is left in `lev ps` or on disk.
 `--model` takes `provider/model` to pick both, and a bare model id pairs with your
 `default_provider`. `--model provider/model` is the way to reach a
 [Rhai script provider](/docs/rhai-providers), which is resolved by name. Use it to try a model
-string before wiring it into a blueprint - unlike `lev models list`, it exits non-zero when the
-model cannot be reached.
+string before wiring it into a blueprint: it goes further than `lev models list --provider`, which
+compiles the provider and reads its catalog but never sends an inference.
 
 `lev doctor` exits non-zero when a check fails, so it works as a CI gate. It bills two inferences
 per run, each capped at 64 output tokens; `--no-daemon` bills one.

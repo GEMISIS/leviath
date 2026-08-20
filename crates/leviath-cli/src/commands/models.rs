@@ -555,15 +555,18 @@ async fn list_with_registry(
 
     // A `--provider` naming something neither registered natively nor present
     // in the built-in table is a script provider (or a typo). Ask the script
-    // layer: it is the only thing that can answer for one. A name the built-in
-    // table knows is left alone - `--provider openai` with no OpenAI key is an
-    // empty table, exactly as it has always been.
+    // layer: it is the only thing that can answer for one, and a name it cannot
+    // answer for is an error rather than an empty table, since nothing else
+    // could have answered either. A name the built-in table knows is left alone
+    // - `--provider openai` with no OpenAI key is an empty table, exactly as it
+    // has always been.
     let mut script_provider_answered = false;
     if let Some(ref name) = args.provider
         && !available.contains(name)
         && !builtin_table().iter().any(|e| e.provider == name.as_str())
     {
-        script_provider_answered = merge_script_provider(&registry, name, &mut entries).await;
+        merge_script_provider(&registry, name, &mut entries).await?;
+        script_provider_answered = true;
     }
 
     // Apply provider filter (after remote merge so we respect the filter).
@@ -659,7 +662,7 @@ async fn list_with_registry(
 }
 
 /// Load the script provider called `name` and merge whatever `list_models`
-/// answers into `entries`. Returns whether it answered at all.
+/// answers into `entries`.
 ///
 /// A script provider defines its catalog at run time, so the built-in table
 /// has no rows for one and `lev models list --provider <name>` used to print
@@ -667,40 +670,40 @@ async fn list_with_registry(
 /// what makes that command the smoke test `rhai-providers.md` prescribes: it
 /// compiles the script, runs `initialize`, and calls `list_models`.
 ///
-/// Both failure paths report and continue rather than erroring, matching what
-/// `--remote` has always done for a native provider that will not answer - the
-/// non-zero gate for a provider script is `lev doctor -m <provider>/<model>`.
+/// **Errors rather than warning.** This is the command the Rhai docs send you
+/// to *because* a broken provider script is otherwise skipped silently at model
+/// selection, and an empty table under an exit code of 0 is that same silence
+/// one step earlier. A name reaching this function has nothing in the built-in
+/// table either, so there is no answer to fall back to and nothing an exit code
+/// of 0 could honestly mean.
 async fn merge_script_provider(
     registry: &leviath_runtime::ProviderRegistry,
     name: &str,
     entries: &mut Vec<ModelInfo>,
-) -> bool {
+) -> anyhow::Result<()> {
     let Some(provider) = registry.get(name) else {
         // Either a name with nothing behind it, or a script that failed to
-        // compile - the script layer logged which as it happened. Say the part
-        // it cannot: that this is why the table below is empty.
-        eprintln!(
-            "Warning: no provider named '{}' is configured, and no script \
-             provider by that name loaded",
-            name
+        // compile - the script layer logged which as it happened, so this says
+        // the part it cannot: that the command found nothing to ask.
+        anyhow::bail!(
+            "no provider named '{name}' is configured, and no script provider \
+             by that name loaded. Check the spelling, `[model_providers.{name}]` \
+             in {}, and that {name}.rhai compiles (a load failure is logged \
+             above with the line it failed on).",
+            Config::config_path().display()
         );
-        return false;
     };
-    match provider.list_models().await {
-        Ok(models) => {
-            for rm in models {
-                match entries.iter_mut().find(|e| e.id == rm.id) {
-                    Some(existing) => *existing = rm,
-                    None => entries.push(rm),
-                }
-            }
-            true
-        }
-        Err(e) => {
-            eprintln!("Warning: could not fetch models from '{}': {}", name, e);
-            false
+    let models = provider
+        .list_models()
+        .await
+        .map_err(|e| anyhow::anyhow!("provider '{name}' could not list its models: {e}"))?;
+    for rm in models {
+        match entries.iter_mut().find(|e| e.id == rm.id) {
+            Some(existing) => *existing = rm,
+            None => entries.push(rm),
         }
     }
+    Ok(())
 }
 
 // ─── show ─────────────────────────────────────────────────────────────────────
@@ -1171,7 +1174,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_list_with_nonexistent_provider_filter() {
+    async fn execute_list_with_nonexistent_provider_filter_fails() {
         crate::config::with_isolated_config_path_async(
             "models-execute_list_with_nonexistent_provider_filter",
             |_fake_dir| async move {
@@ -1183,9 +1186,14 @@ mod tests {
                         json: false,
                     }),
                 };
-                // Should succeed but print "No models found."
-                let result = execute(args).await;
-                assert!(result.is_ok());
+                // Nothing registered, nothing in the built-in table, no script
+                // of that name: there is no answer, so this exits non-zero
+                // rather than printing an empty table.
+                let err = execute(args).await.expect_err("nothing can answer");
+                assert!(
+                    err.to_string().contains("nonexistent_provider"),
+                    "the message names the provider: {err}"
+                );
             },
         )
         .await;
@@ -1490,12 +1498,18 @@ mod tests {
     async fn list_json_with_no_configured_provider_is_an_empty_array() {
         // The prose report prints a nudge here. JSON must not: a caller reading
         // this branches on the array's length, and a sentence would not parse.
+        //
+        // `openai` rather than a made-up name: a provider the built-in table
+        // knows but this install has no credential for is the case that still
+        // has an honest empty answer. A name nothing can answer for is an error
+        // (see `execute_list_with_nonexistent_provider_filter_fails`), and an
+        // error has no array to print.
         crate::config::with_isolated_config_path_async(
             "models-list_json_empty",
             |_fake_dir| async move {
                 let args = ListArgs {
                     remote: false,
-                    provider: Some("no-such-provider".to_string()),
+                    provider: Some("openai".to_string()),
                     all: false,
                     json: true,
                 };
@@ -1562,7 +1576,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_unknown_provider_filter_finds_nothing() {
+    async fn list_unknown_provider_filter_is_an_error_not_an_empty_table() {
         crate::config::with_isolated_config_path_async(
             "models-list_unknown_provider_filter_finds_nothing",
             |_fake_dir| async move {
@@ -1572,9 +1586,15 @@ mod tests {
                     all: false,
                     json: false,
                 };
-                // Should print "No models found." and still succeed, not error.
-                let result = list_with_registry(args, &build_provider_registry_from_config).await;
-                assert!(result.is_ok());
+                let err = list_with_registry(args, &build_provider_registry_from_config)
+                    .await
+                    .expect_err("a name nothing can answer for is an error");
+                let msg = err.to_string();
+                assert!(msg.contains("no-such-provider"), "{msg}");
+                assert!(
+                    msg.contains(".rhai"),
+                    "it says where a script would go: {msg}"
+                );
             },
         )
         .await;
@@ -1922,12 +1942,15 @@ mod tests {
         crate::config::with_isolated_config_path_async(
             "models-list_remote_skips_providers_not_matching_filter",
             |_fake_dir| async move {
-                // provider filter is "mock-other", but the registry only has "mock"
-                // registered -> the `if filter != provider_name { continue; }`
-                // branch is exercised, and the mock is never queried.
+                // The registry only has "mock" registered, so the filter never
+                // matches and the `if filter != provider_name { continue; }`
+                // branch is exercised without the mock ever being queried.
+                // `openai` rather than a made-up name so the filter is one the
+                // built-in table can still answer for - an unanswerable name is
+                // an error, which would end the command before this branch.
                 let args = ListArgs {
                     remote: true,
-                    provider: Some("mock-other".to_string()),
+                    provider: Some("openai".to_string()),
                     all: false,
                     json: false,
                 };
@@ -2019,7 +2042,8 @@ mod tests {
     }
 
     /// The auth failure the docs promise surfaces here: `list_models` threw, so
-    /// the command says so instead of printing an empty table and nothing else.
+    /// the command fails with what the provider said instead of printing an
+    /// empty table under an exit code of 0.
     #[tokio::test]
     async fn list_reports_a_script_provider_that_cannot_list() {
         let dir = tempfile::tempdir().expect("a temp providers dir");
@@ -2040,8 +2064,15 @@ mod tests {
                     all: false,
                     json: false,
                 };
-                let result = list_with_registry(args, &script_registry(dir)).await;
-                assert!(result.is_ok());
+                let err = list_with_registry(args, &script_registry(dir))
+                    .await
+                    .expect_err("a provider that cannot list is a failed smoke test");
+                let msg = err.to_string();
+                assert!(msg.contains("angry"), "{msg}");
+                assert!(
+                    msg.contains("401 Unauthorized"),
+                    "the provider's own words survive: {msg}"
+                );
             },
         )
         .await;

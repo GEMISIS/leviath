@@ -341,19 +341,22 @@ match its wire format.
 
 ```bash
 lev models list --provider groq   # compiles the script and calls list_models
-lev doctor -m groq/<model>        # the same, then a real inference; exits non-zero on failure
+lev doctor -m groq/<model>        # the same, then a real inference
 lev run <agent> --task "..."      # a live run through a stage that references the provider
 ```
 
 `lev models list --provider <name>` loads the script by name whether or not `--remote` is passed,
-since a script provider has no row in the built-in model table. A compile failure, and an error
-raised by `list_models` itself, are both reported by name.
+since a script provider has no row in the built-in model table. It **exits non-zero** when the
+script does not compile, when there is no script of that name, and when `list_models` itself
+raises - so it works as a CI gate, and a passing run means the script compiled, `initialize` ran,
+and the provider answered.
 
 > [!TIP]
 > A broken provider script is skipped and model selection falls through to the next configured model,
 > so a syntax error looks like "my agent quietly used the wrong model". Check it before you wire it
-> into a blueprint: `lev models list --provider <name>` shows the catalog and names any failure, and
-> `lev doctor -m <name>/<model>` does the same and exits non-zero, so it works as a CI gate.
+> into a blueprint: `lev models list --provider <name>` compiles it and shows the catalog, and
+> `lev doctor -m <name>/<model>` goes one step further and bills a real inference. Both exit
+> non-zero on failure.
 
 If `lev serve` is running, `POST /api/scripts/validate` with `kind: "provider"` answers the same
 question without a run and without a key: it compiles the text and checks that `initialize(config)`
