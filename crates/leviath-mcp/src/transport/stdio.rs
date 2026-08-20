@@ -198,6 +198,31 @@ impl StdioTransport {
         }
     }
 
+    /// Whether the server process is still there, for a timeout to say so.
+    ///
+    /// A bare timeout reports that no answer came, which is the one thing the
+    /// caller already knows. It does not say whether the process is sitting
+    /// there ignoring the request or died before it could reply, and those are
+    /// different bugs with different fixes: a hang is the server's logic, an
+    /// exit is its startup.
+    ///
+    /// An exit is reachable even though a dead server usually closes the pipe
+    /// and trips the read instead. A launcher that spawns the real server and
+    /// returns - a `.cmd` shim, a wrapper script - leaves the grandchild
+    /// holding stdout, so the pipe stays open over a process that is already
+    /// gone, and the read waits out the full timeout with nothing to show for
+    /// it. That shape is exactly what an unexplained timeout looks like.
+    ///
+    /// A `try_wait` that errors is folded in with "still running": nothing has
+    /// reaped the process either way, and inventing a third phrase for a case
+    /// that means the same thing to the reader would be noise.
+    fn liveness(&mut self) -> &'static str {
+        match self.child.try_wait() {
+            Ok(Some(_)) => "the server process had already exited",
+            _ => "the server process is still running",
+        }
+    }
+
     /// Read one frame from the server, or `Ok(None)` at end of stream.
     async fn read_frame(&mut self) -> anyhow::Result<Option<Value>> {
         let mut line = String::new();
@@ -310,11 +335,16 @@ impl Transport for StdioTransport {
         // to block the caller forever.
         match tokio::time::timeout(timeout, self.read_until_response()).await {
             Ok(result) => result,
-            Err(_) => Err(self.with_stderr(format!(
-                "MCP server did not respond to '{}' within {}s",
-                req.method,
-                timeout.as_secs()
-            ))),
+            Err(_) => {
+                // Read before building the message: which of the two failures
+                // this is decides what the reader should go and look at.
+                let liveness = self.liveness();
+                Err(self.with_stderr(format!(
+                    "MCP server did not respond to '{}' within {}s - {liveness}",
+                    req.method,
+                    timeout.as_secs()
+                )))
+            }
         }
     }
 
@@ -729,6 +759,39 @@ for line in sys.stdin:
             .err()
             .expect("must time out, not hang");
         assert!(err.to_string().contains("did not respond"), "got: {err}");
+        // A live server that will not answer is the server's own logic, and the
+        // message has to say so - "no answer" alone sends the reader looking at
+        // the spawn, which worked.
+        assert!(
+            err.to_string().contains("still running"),
+            "names which failure this is: {err}"
+        );
+    }
+
+    /// The shape that makes a timeout unexplainable: the process is gone but
+    /// its stdout is not, so the read waits out the whole timeout instead of
+    /// hitting end-of-stream. A launcher that spawns the real server and
+    /// returns leaves exactly this behind, and without the liveness note the
+    /// error is indistinguishable from a server that simply ignored us.
+    #[tokio::test]
+    async fn a_timeout_against_a_dead_server_says_it_exited() {
+        let _guard = always_on_tracing_guard();
+        // Hands stdout to a grandchild that never writes, then exits. The pipe
+        // outlives the child we are holding.
+        let script = "import subprocess, sys, time\n\
+                      subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], stdout=sys.stdout)\n\
+                      sys.stdin.readline()\n";
+        let mut t = spawn_stub(script).await;
+        let err = t
+            .send_request(&init_request(), Duration::from_millis(500))
+            .await
+            .err()
+            .expect("must time out, not hang");
+        assert!(err.to_string().contains("did not respond"), "got: {err}");
+        assert!(
+            err.to_string().contains("had already exited"),
+            "names the exit rather than reporting a hang: {err}"
+        );
     }
 
     #[tokio::test]
