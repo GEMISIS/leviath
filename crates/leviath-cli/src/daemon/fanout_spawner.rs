@@ -104,18 +104,25 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         // The requested output shape rides along too: a caller who asked the
         // parent for a2ui wants its workers' contributions in the same shape,
         // and the worker's answer is what the merge stage reads.
-        let (parent_path, workdir, parent_run_id, unattended, output_request) = world
-            .get::<RunMetadata>(parent)
-            .map(|md| {
-                (
-                    md.agent_path.clone(),
-                    md.workdir.clone(),
-                    md.run_id.clone(),
-                    md.unattended,
-                    md.output_request.clone(),
-                )
-            })
-            .ok_or_else(|| "fan-out parent has no run metadata".to_string())?;
+        // So does the run's `--model` override, which the docs call absolute
+        // ("overrides everything"). It used to stop at the run boundary, so a
+        // fan-out of thirty workers sent the large majority of a run's spend to
+        // whatever the worker blueprint listed - silently, and against an
+        // instruction the operator had typed for this run (issue #534).
+        let (parent_path, workdir, parent_run_id, unattended, output_request, model_override) =
+            world
+                .get::<RunMetadata>(parent)
+                .map(|md| {
+                    (
+                        md.agent_path.clone(),
+                        md.workdir.clone(),
+                        md.run_id.clone(),
+                        md.unattended,
+                        md.output_request.clone(),
+                        md.model_override.clone(),
+                    )
+                })
+                .ok_or_else(|| "fan-out parent has no run metadata".to_string())?;
 
         let (resolve_path, entry_stage) =
             resolve_worker_source(config, &parent_path, self.agents_dir.as_deref())?;
@@ -125,7 +132,7 @@ impl FanOutSpawner for DaemonFanOutSpawner {
             path: &resolve_path,
             task: Some(&task),
             stdin_is_terminal: &never_interactive,
-            model: None,
+            model: model_override,
             workdir: &workdir,
             yolo: unattended,
             allow: Vec::new(),
@@ -459,6 +466,22 @@ mod tests {
         manifest_path: &str,
         yolo: bool,
     ) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
+        world_with_parent_args(manifest_path, yolo, None)
+    }
+
+    /// [`world_with_parent_yolo`], with the run's `--model` override too.
+    fn world_with_parent_model(
+        manifest_path: &str,
+        model: &str,
+    ) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
+        world_with_parent_args(manifest_path, false, Some(model.to_string()))
+    }
+
+    fn world_with_parent_args(
+        manifest_path: &str,
+        yolo: bool,
+        model: Option<String>,
+    ) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
         let cli = Arc::new(CliToolService::new());
         let mut registry = leviath_runtime::ProviderRegistry::new();
         registry.register("anthropic".to_string(), Arc::new(FakeProvider));
@@ -476,7 +499,7 @@ mod tests {
             blueprint_path: manifest_path.to_string(),
             task: "parent task".to_string(),
             regions: HashMap::new(),
-            model: None,
+            model,
             workdir: std::env::temp_dir().to_string_lossy().to_string(),
             metadata: HashMap::new(),
             callback_url: None,
@@ -561,6 +584,86 @@ mod tests {
                 unattended
             );
         }
+    }
+
+    /// A run-level `--model` covers the whole run, workers included. It used to
+    /// stop at the run boundary, so a fan-out of thirty workers sent the large
+    /// majority of a run's spend to whatever the worker blueprint listed -
+    /// silently, and against an instruction typed for this run (issue #534).
+    ///
+    /// Asserts the worker's *resolved stage model*, not just the field: what
+    /// matters is which model the worker actually calls.
+    #[tokio::test]
+    async fn spawn_worker_inherits_the_parents_model_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(&manifest, two_stage_manifest()).unwrap();
+        // The blueprint says `anthropic/m` at every stage; the run says `m2`.
+        let (mut world, spawner, parent) =
+            world_with_parent_model(&manifest.to_string_lossy(), "anthropic/m2");
+
+        let child = spawner
+            .spawn_worker(
+                world.world_mut(),
+                parent,
+                &cfg(Some("second"), None, None),
+                "item-1",
+                &serde_json::json!({"k": "v"}),
+            )
+            .expect("worker spawns");
+
+        let inference = world
+            .world()
+            .get::<leviath_runtime::pipeline::StageInference>(child)
+            .expect("the worker resolved a stage model");
+        assert_eq!(
+            inference.model, "m2",
+            "the worker runs the overridden model"
+        );
+        assert_eq!(
+            world
+                .world()
+                .get::<RunMetadata>(child)
+                .expect("worker has run metadata")
+                .model_override
+                .as_deref(),
+            Some("anthropic/m2"),
+            "and carries it on, so its own children inherit it too"
+        );
+    }
+
+    /// No override on the run leaves every worker resolving against its own
+    /// blueprint, exactly as before.
+    #[tokio::test]
+    async fn spawn_worker_without_an_override_uses_the_blueprints_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(&manifest, two_stage_manifest()).unwrap();
+        let (mut world, spawner, parent) = world_with_parent(&manifest.to_string_lossy());
+
+        let child = spawner
+            .spawn_worker(
+                world.world_mut(),
+                parent,
+                &cfg(Some("second"), None, None),
+                "item-1",
+                &serde_json::json!({}),
+            )
+            .expect("worker spawns");
+
+        let inference = world
+            .world()
+            .get::<leviath_runtime::pipeline::StageInference>(child)
+            .expect("the worker resolved a stage model");
+        assert_eq!(inference.model, "m");
+        assert!(
+            world
+                .world()
+                .get::<RunMetadata>(child)
+                .unwrap()
+                .model_override
+                .is_none()
+        );
     }
 
     #[tokio::test]

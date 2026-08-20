@@ -38,6 +38,14 @@ pub struct SubAgentHandle {
     /// with it whenever the parent is waiting on it. The operator asked for an
     /// unattended run; the tree is the run.
     pub unattended: bool,
+    /// The parent run's `--model` override, inherited by children.
+    ///
+    /// The docs call the override absolute - it "overrides everything" - and a
+    /// child named by the model at run time is part of the run, not a separate
+    /// one. Without this a spawned sub-agent quietly resolved against its own
+    /// blueprint's model list instead (issue #534). `None` when the run named
+    /// no model, which leaves every child resolving as it always has.
+    pub model_override: Option<String>,
 }
 
 // The sub-agent tool-name list lives in `leviath-tools` (next to the tool
@@ -150,7 +158,7 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
         path: blueprint,
         task: Some(&full_task),
         stdin_is_terminal: &never_interactive,
-        model: None,
+        model: h.model_override.clone(),
         workdir: &h.workdir,
         yolo: h.unattended,
         allow: Vec::new(),
@@ -388,6 +396,7 @@ mod tests {
             max_depth: 3,
             no_seed_commands: false,
             unattended: false,
+            model_override: None,
         };
 
         for bad in [
@@ -427,6 +436,7 @@ mod tests {
             max_depth: 3,
             no_seed_commands: false,
             unattended: false,
+            model_override: None,
         };
         let out = spawn(
             &h,
@@ -458,6 +468,7 @@ mod tests {
             max_depth: 3,
             no_seed_commands: false,
             unattended: false,
+            model_override: None,
         }
     }
 
@@ -705,6 +716,46 @@ task = { kind = "pinned", max_tokens = 1000 }
                 "a child inherits the parent's unattended setting"
             );
         }
+    }
+
+    /// A run's `--model` covers the children it spawns as well. The child is
+    /// named by the model at run time, so it is part of this run rather than a
+    /// separate one - and dropping the override there was silent (issue #534).
+    #[tokio::test]
+    async fn spawn_hands_the_parents_model_override_to_the_child() {
+        let bp = temp_blueprint();
+        let (mut h, seen, _t) = fake_host(Ok("child-1".to_string()), vec![], false);
+        h.model_override = Some("cerebras/gpt-oss-120b".to_string());
+        let out = handle(
+            &h,
+            &tc(
+                "spawn_agent",
+                json!({"blueprint": bp.path().to_str().unwrap(), "task": "go"}),
+            ),
+        )
+        .await;
+        assert!(out.contains("Spawned sub-agent"), "{out}");
+        assert_eq!(
+            seen.lock().unwrap()[0].model.as_deref(),
+            Some("cerebras/gpt-oss-120b")
+        );
+    }
+
+    /// A run with no override leaves the child on its own blueprint's models.
+    #[tokio::test]
+    async fn spawn_without_an_override_leaves_the_child_to_its_blueprint() {
+        let bp = temp_blueprint();
+        let (h, seen, _t) = fake_host(Ok("child-1".to_string()), vec![], false);
+        let out = handle(
+            &h,
+            &tc(
+                "spawn_agent",
+                json!({"blueprint": bp.path().to_str().unwrap(), "task": "go"}),
+            ),
+        )
+        .await;
+        assert!(out.contains("Spawned sub-agent"), "{out}");
+        assert!(seen.lock().unwrap()[0].model.is_none());
     }
 
     #[tokio::test]

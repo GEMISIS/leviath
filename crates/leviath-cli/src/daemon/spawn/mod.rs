@@ -840,6 +840,7 @@ fn build_agent_inner(
         max_depth: max_child_depth,
         no_seed_commands: args.no_seed_commands,
         unattended: args.yolo,
+        model_override: args.model.clone(),
     };
     // Build the dynamic-tools re-resolution context (issue #97 escape hatch) and
     // tag the entity `DynamicTools` so the runtime polls it for mid-run re-scans.

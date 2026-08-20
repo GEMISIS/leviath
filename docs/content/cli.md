@@ -35,7 +35,7 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 | Flag | Purpose |
 |---|---|
 | `-t`, `--task <TEXT\|FILE>` | The task prompt, or the path of a file holding it. Left off, your editor opens |
-| `-m`, `--model <MODEL>` | Model override, as `provider/model` or a bare model name |
+| `-m`, `--model <MODEL>` | Model override for the whole run, as `provider/model` or a bare model name. Fan-out workers and sub-agents inherit it |
 | `--workdir <DIR>` | Working directory for the run, defaulting to where you ran the command. See below |
 | `--yolo` | Run unattended. See below |
 | `--allow <TOOL>` | Allow one tool outright. Repeatable |
