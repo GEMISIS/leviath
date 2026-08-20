@@ -55,6 +55,23 @@ pub fn submit_output_description(described: &str) -> String {
     }
 }
 
+/// What a fan-out split is told about handing back its work items.
+///
+/// Says the two things a split gets wrong. One: each item is all its worker
+/// gets, because a worker is a separate agent with its own clean context - a
+/// reference to "the topic above" reaches nobody. Two: an empty list is a real
+/// answer, which matters most on a stage the run has entered before, where the
+/// honest reply is that the work is already done. A split that could not say
+/// that answered in prose instead, and prose is what used to end the run.
+const SUBMIT_WORK_ITEMS_DESCRIPTION: &str = "Hand back the work items for this fan-out. Each item starts one worker, and they all \
+     run at the same time.\n\nA worker is a separate agent with a clean context: it never \
+     sees this conversation, so everything it needs has to be inside its own `context`. \
+     Name each item precisely enough that two workers cannot end up answering the same \
+     question.\n\nIf there is nothing left to hand out - the work is already done, or \
+     everything this stage would split has been covered - call this with an empty `items` \
+     array. That is a valid answer and the run moves on to the next stage. Do not explain \
+     that in prose instead; this tool is the only reply that is read.";
+
 /// [`shell_tool_description`] for the resolved shell, computed once.
 ///
 /// `detect_shell` reads `$SHELL` and probes the filesystem on Unix, and
@@ -433,6 +450,38 @@ impl BuiltinTools {
                 }),
             },
             Tool {
+                // The one structured answer the framework asks for that used to
+                // be scraped out of prose. Offered by every `fan_out` stage; the
+                // free-text parse stays as the fallback for models that ignore
+                // it.
+                name: crate::SUBMIT_WORK_ITEMS_TOOL.to_string(),
+                description: SUBMIT_WORK_ITEMS_DESCRIPTION.to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "description": "One entry per unit of work. An empty array means there is nothing left to hand out.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {
+                                        "type": "string",
+                                        "description": "Short slug identifying this work item. Labels the worker in the consolidated report, so make it distinct and readable."
+                                    },
+                                    "context": {
+                                        "type": "object",
+                                        "description": "Everything the worker gets. It runs as a separate agent with a clean context and does not share yours, so this has to stand alone."
+                                    }
+                                },
+                                "required": ["id", "context"]
+                            }
+                        }
+                    },
+                    "required": ["items"]
+                }),
+            },
+            Tool {
                 name: "current_time".to_string(),
                 description: "Get the current date and time, in UTC and in this machine's local timezone. Your training data has a cutoff date; this does not. Call this before reasoning about anything current, recent, upcoming, or dated - what year it is, how old something is, whether a release has happened, or what counts as recent news. Do not assume today's date from memory.".to_string(),
                 parameters: json!({
@@ -652,6 +701,7 @@ impl BuiltinTools {
             "which_command",
             "runtime_info",
             crate::SUBMIT_OUTPUT_TOOL,
+            crate::SUBMIT_WORK_ITEMS_TOOL,
         ]
         .iter()
         // Drop any canonical built-in the current platform can't provide, so a

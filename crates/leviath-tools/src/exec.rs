@@ -39,6 +39,14 @@ impl BuiltinTools {
             SUBMIT_OUTPUT_TOOL => {
                 "[error] submit_output must be handled by the runtime".to_string()
             }
+            // The fan-out split reads this off the inference result before the
+            // dispatch layer ever sees it, so reaching here means a stage that
+            // is not a fan-out called it. Refused rather than run, for the same
+            // reason as above: there is no work item list for it to go into.
+            SUBMIT_WORK_ITEMS_TOOL => {
+                "[error] submit_work_items is only answerable by a fan_out stage's split"
+                    .to_string()
+            }
             _ => format!("[error] Unknown built-in tool: {}", name),
         }
     }

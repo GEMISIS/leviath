@@ -48,17 +48,35 @@ const MAX_SPLIT_RETRIES: usize = 2;
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SplitAttempts(pub usize);
 
-/// What the model is told after a split that could not be parsed.
+/// What the model is told after a split that could not be used.
 ///
 /// It names the failure and restates the shape rather than repeating the
 /// original instruction, because the original instruction is what just did not
 /// work.
-fn split_correction(reason: &str) -> String {
-    format!(
-        "Your previous response could not be used: {reason}. Reply with the JSON \
-         array of work items and nothing else - no prose before or after it, no \
-         markdown fences, no explanation. It must start with `[` and end with `]`."
-    )
+///
+/// The advice differs by how the answer arrived. A model that reached for the
+/// tool and got the arguments wrong needs the argument shape; one that answered
+/// in prose needs to be pointed at the tool, and told - because this is the
+/// thing a split gets wrong on a stage the run has entered before - that "the
+/// work is already done" is an answer it can give, as an empty list.
+fn split_correction(reason: &str, from_tool: bool) -> String {
+    let tool = leviath_core::blueprint::SUBMIT_WORK_ITEMS_TOOL;
+    match from_tool {
+        true => format!(
+            "Your `{tool}` call could not be used: {reason}. Call it again with an \
+             `items` array, each entry an object with a short `id` string and a \
+             `context` object holding everything its worker needs."
+        ),
+        false => format!(
+            "Your previous response could not be used: {reason}. Answer by calling \
+             `{tool}` with an `items` array - each entry an object with a short `id` \
+             string and a `context` object. If the work this stage would split is \
+             already done, call it with an empty `items` array; that is a real answer \
+             and the run moves on. If you cannot call tools, reply with the JSON array \
+             alone - no prose before or after it, no markdown fences. It must start \
+             with `[` and end with `]`."
+        ),
+    }
 }
 
 /// The first `MAX_SPLIT_SNIPPET` characters of what the model actually said,
@@ -97,19 +115,192 @@ pub struct WorkItem {
     pub context: serde_json::Value,
 }
 
-/// Parse a split response into work items. Tolerates markdown fences and prose by
-/// extracting the outermost `[ … ]`. (Ported from the deleted imperative engine.)
+/// Envelope keys a model wraps the array in often enough to be worth accepting.
+///
+/// Asking for a bare array and being handed `{"items": [...]}` is the single
+/// most common near miss, and refusing it costs a correction round to fix
+/// something that is not actually ambiguous.
+const WORK_ITEM_ENVELOPES: [&str; 4] = ["items", "work_items", "sub_questions", "tasks"];
+
+/// The sentinel character in the text-protocol tool-call markers some models
+/// emit as prose.
+///
+/// A fan-out stage advertises `submit_work_items` and nothing else, but a model
+/// trained to write its calls out as text will do that regardless of what the
+/// API offered. The run this parser was hardened for emitted literal
+/// `</｜DSML｜tool_calls>` markers in the middle of a report, and the brackets
+/// inside such a block are what a first-`[`-to-last-`]` scan latches onto.
+///
+/// Matched on the sentinel character rather than a list of protocol names: the
+/// names differ per model family, `｜` (U+FF5C, fullwidth vertical line) is what
+/// they have in common, and it does not otherwise appear in JSON.
+const TOOL_PROTOCOL_SENTINEL: char = '｜';
+
+/// How many words a generated work-item id keeps.
+const SLUG_WORDS: usize = 6;
+
+/// Parse a split response into work items.
+///
+/// Layered on purpose, most exact first: a fenced code block, then the whole
+/// response as JSON, then the outermost `[ … ]`. This is the fallback path - a
+/// model that calls `submit_work_items` never reaches here - so it is written to
+/// accept the near misses rather than to re-enforce a shape the tool already
+/// enforces.
+///
+/// Beyond a bare array it takes an `{"items": [...]}`-style envelope, a single
+/// bare object (a fan-out of one), and an array of plain strings (each becomes a
+/// one-question work item). Every one of those used to cost a correction round,
+/// and the run that motivated this had exactly one left to spend.
 pub fn parse_work_items(content: &str) -> Result<Vec<WorkItem>, String> {
-    let trimmed = content.trim();
+    let cleaned = strip_tool_protocol_markup(content);
+    let trimmed = cleaned.trim();
     // Every rejection folds into one error: this parses model output, so
     // "malformed input yields `Err`" has to hold for every shape of malformed.
-    let slice = match (trimmed.find('['), trimmed.rfind(']')) {
-        (Some(s), Some(e)) if e > s => trimmed.get(s..=e),
+    let candidates = [
+        fenced_block(trimmed),
+        Some(trimmed),
+        outermost_array(trimmed),
+    ];
+    let mut last_error = None;
+    for candidate in candidates.into_iter().flatten() {
+        match serde_json::from_str::<serde_json::Value>(candidate) {
+            Ok(value) => match work_items_from_value(value) {
+                Ok(items) => return Ok(items),
+                Err(e) => last_error = Some(e),
+            },
+            Err(e) => last_error = Some(format!("split output is not valid JSON: {e}")),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "split output is not a JSON array".to_string()))
+}
+
+/// Read work items out of a parsed JSON value, accepting the shapes a model
+/// reaches for when it is trying to answer the question that was asked.
+fn work_items_from_value(value: serde_json::Value) -> Result<Vec<WorkItem>, String> {
+    match value {
+        serde_json::Value::Array(items) => items.into_iter().map(work_item_from_value).collect(),
+        serde_json::Value::Object(map) => {
+            // An envelope first: `{"items": [...]}` is a wrapper, not a work
+            // item, and reading it as one would spawn a single worker carrying
+            // the whole list as its context.
+            match WORK_ITEM_ENVELOPES
+                .iter()
+                .find_map(|key| map.get(*key).filter(|v| v.is_array()).cloned())
+            {
+                Some(inner) => work_items_from_value(inner),
+                // A fan-out of one, which the split prompt explicitly allows for
+                // a narrow topic - but only when the object actually looks like
+                // a work item. Both of `WorkItem`'s fields default and unknown
+                // ones are tolerated, so without this guard *every* JSON object
+                // parses, and `{"items": "all of them"}` - a botched envelope -
+                // would become one nameless worker instead of a correction.
+                None if map.contains_key("id") || map.contains_key("context") => {
+                    Ok(vec![work_item_from_value(serde_json::Value::Object(map))?])
+                }
+                None => Err(
+                    "split output is a JSON object that is neither a work item (no `id` or \
+                     `context`) nor a list of them (no `items` array)"
+                        .to_string(),
+                ),
+            }
+        }
+        // Rendered through `Display`, which for a `Value` is its JSON, rather
+        // than through a hand-written name per variant: the variants that could
+        // reach here are only the scalars, so naming all six would leave two
+        // arms that no input can take.
+        other => Err(format!("split output is not a JSON array (found {other})")),
+    }
+}
+
+/// One element of the array, as a work item.
+///
+/// A plain string is taken as the question itself: a model that answers
+/// `["how does X work", "what happens after Y"]` has done the actual thinking
+/// and only skipped the wrapper. The id it is given labels the worker in the
+/// consolidated report; it is not something the worker reads.
+fn work_item_from_value(value: serde_json::Value) -> Result<WorkItem, String> {
+    match value {
+        serde_json::Value::String(question) => Ok(WorkItem {
+            id: slug(&question),
+            context: serde_json::json!({ "question": question }),
+        }),
+        other => serde_json::from_value(other)
+            .map_err(|e| format!("split output is not a valid JSON array of work items: {e}")),
+    }
+}
+
+/// A short, stable id for a work item that arrived without one.
+///
+/// Lowercase ASCII words joined by dashes and bounded, so a whole question does
+/// not become a section heading in the consolidated report.
+fn slug(text: &str) -> String {
+    text.chars()
+        .map(|c| match c.is_ascii_alphanumeric() {
+            true => c.to_ascii_lowercase(),
+            false => '-',
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|word| !word.is_empty())
+        .take(SLUG_WORDS)
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// The contents of the first fenced code block, if the response has one.
+///
+/// Preferred over the bracket scan because a response that fences its answer has
+/// said exactly where the answer is, and the prose around it may carry brackets
+/// of its own - one bibliography citation like `[6]` is enough to make the scan
+/// slice from the wrong place.
+fn fenced_block(text: &str) -> Option<&str> {
+    let after_open = text.split_once("```")?.1;
+    // The opening fence may carry a language tag on the rest of its line.
+    let body = match after_open.split_once('\n') {
+        Some((tag, rest)) if !tag.contains("```") => rest,
+        _ => after_open,
+    };
+    Some(body.split_once("```")?.0.trim())
+}
+
+/// The outermost `[ … ]` in the text: the last-resort extraction.
+fn outermost_array(text: &str) -> Option<&str> {
+    match (text.find('['), text.rfind(']')) {
+        (Some(start), Some(end)) if end > start => text.get(start..=end),
         _ => None,
     }
-    .ok_or_else(|| "split output is not a JSON array".to_string())?;
-    serde_json::from_str(slice)
-        .map_err(|e| format!("split output is not a valid JSON array of work items: {e}"))
+}
+
+/// Drop text-protocol tool-call markup, keeping everything around it.
+///
+/// Only pays for itself when a marker is actually present, which is rare, so the
+/// common path is one `contains` and a borrow.
+fn strip_tool_protocol_markup(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains(TOOL_PROTOCOL_SENTINEL) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    // Split rather than index: the offsets a `find` returns are on character
+    // boundaries, but model output is arbitrary UTF-8 and the workspace lint
+    // does not distinguish a safe slice from an unsafe one. `split_once` cannot
+    // land inside a character at all.
+    while let Some((before, after_open)) = rest.split_once('<') {
+        let Some((tag, after_close)) = after_open.split_once('>') else {
+            // An unclosed `<` is ordinary prose ("3 < 4"), so the remainder -
+            // which `rest` still holds whole - is copied as it stands.
+            break;
+        };
+        out.push_str(before);
+        if !tag.contains(TOOL_PROTOCOL_SENTINEL) {
+            out.push('<');
+            out.push_str(tag);
+            out.push('>');
+        }
+        rest = after_close;
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
 }
 
 /// Starts one worker for a fan-out work item. The implementor resolves the
@@ -260,14 +451,54 @@ pub fn restore_fan_out_waiting(
     });
 }
 
+/// A split's answer: the `submit_work_items` call it made, or failing that its
+/// assistant text.
+///
+/// Both are carried because the failure message and the correction round need to
+/// show the model what it actually said, and for a tool call that is the
+/// arguments rather than the (usually empty) text beside them.
+struct SplitAnswer {
+    /// What the work items are parsed out of.
+    payload: String,
+    /// Whether it came from a `submit_work_items` call.
+    from_tool: bool,
+}
+
+impl SplitAnswer {
+    /// Read the split out of an inference result, preferring the tool call.
+    ///
+    /// The tool is the reliable path: its arguments are already JSON and the
+    /// provider validated them against the schema. Text is the fallback, for a
+    /// stage whose model ignores tools - which is a real case, because a
+    /// blueprint picks its own model per stage and some of them are small local
+    /// ones.
+    fn read(infer: &InferenceResult) -> Self {
+        match infer
+            .tool_calls
+            .iter()
+            .find(|call| call.name == leviath_core::blueprint::SUBMIT_WORK_ITEMS_TOOL)
+        {
+            Some(call) => Self {
+                payload: call.arguments.to_string(),
+                from_tool: true,
+            },
+            None => Self {
+                payload: infer.response.clone(),
+                from_tool: false,
+            },
+        }
+    }
+}
+
 /// Fan-out split system (exclusive): for each `ProcessResponse` agent whose
-/// current stage is a fan-out stage, consume its response as the split output -
-/// parse the work items and park the agent in [`FanOutWaiting`] (or mark it
-/// `Error` if the split output isn't a JSON array). Removing `ProcessResponse`
+/// current stage is a fan-out stage, consume its `submit_work_items` call (or
+/// failing that its response text) as the split output - parse the work items
+/// and park the agent in [`FanOutWaiting`], or end the stage down its declared
+/// escape when the corrections are spent. Removing `ProcessResponse`
 /// here keeps the normal `process_response` routing from touching these agents.
 pub fn fan_out_split(world: &mut World) {
     crate::tick_scope::clear();
-    let mut candidates: Vec<(Entity, String, FanOutConfig)> = Vec::new();
+    let mut candidates: Vec<(Entity, SplitAnswer, FanOutConfig)> = Vec::new();
     {
         let mut q = world.query_filtered::<(
             Entity,
@@ -281,18 +512,31 @@ pub fn fan_out_split(world: &mut World) {
                 continue;
             }
             if let StageMode::FanOut { config } = &bp.0.stages[cursor.index].mode {
-                candidates.push((entity, infer.response.clone(), config.clone()));
+                candidates.push((entity, SplitAnswer::read(infer), config.clone()));
             }
         }
     }
 
-    for (parent, response, config) in candidates {
+    for (parent, answer, config) in candidates {
         crate::tick_scope::enter(parent);
+        let SplitAnswer {
+            payload: response,
+            from_tool,
+        } = answer;
         world
             .entity_mut(parent)
             .remove::<ProcessResponse>()
             .remove::<InferenceResult>();
-        match parse_work_items(&response) {
+        // A tool call's arguments are the envelope the schema asks for, so they
+        // go through the same value reader the free-text path ends at rather
+        // than through the text scanning in front of it.
+        let parsed = match from_tool {
+            true => serde_json::from_str::<serde_json::Value>(&response)
+                .map_err(|e| format!("submit_work_items arguments are not valid JSON: {e}"))
+                .and_then(work_items_from_value),
+            false => parse_work_items(&response),
+        };
+        match parsed {
             Ok(items) => {
                 // Unlimited (`max_workers = 0`) is the largest cap there is,
                 // rather than a separate flag: the start loop below compares
@@ -348,20 +592,34 @@ pub fn fan_out_split(world: &mut World) {
                             None => false,
                             Some(mut window) => {
                                 // The model sees what it said before the
-                                // correction, so "reply with only the array"
-                                // has something to correct.
-                                let tokens = leviath_core::estimate_tokens(&response);
+                                // correction, so "that did not work" has
+                                // something to point at.
+                                //
+                                // As text, even when it was a tool call: an
+                                // `AssistantTurn` carrying a real call obliges a
+                                // matching `ToolResult` with the same id in the
+                                // next request, and the split never produced one.
+                                // A dangling call is a shape most providers
+                                // reject outright.
+                                let shown = match from_tool {
+                                    true => format!(
+                                        "[called {}] {response}",
+                                        leviath_core::blueprint::SUBMIT_WORK_ITEMS_TOOL
+                                    ),
+                                    false => response.clone(),
+                                };
+                                let tokens = leviath_core::estimate_tokens(&shown);
                                 let _ = window.add_typed_entry(
                                     "conversation",
                                     leviath_core::EntryKind::AssistantTurn {
                                         tool_calls: Vec::new(),
                                     },
-                                    response.clone(),
+                                    shown,
                                     tokens,
                                 );
                                 crate::pipeline::inject_system_nudge(
                                     &mut window,
-                                    &split_correction(&message),
+                                    &split_correction(&message, from_tool),
                                 );
                                 true
                             }
@@ -1167,6 +1425,135 @@ mod tests {
 
     // ── parse_work_items ──────────────────────────────────────────────────────
 
+    /// The envelope near miss. Asking for a bare array and being handed
+    /// `{"items": [...]}` is the shape a model reaches for most often, and
+    /// reading the wrapper as a work item would spawn one worker carrying the
+    /// whole list.
+    #[test]
+    fn parse_work_items_unwraps_an_envelope() {
+        for key in ["items", "work_items", "sub_questions", "tasks"] {
+            let json = format!(r#"{{"{key}": [{{"id":"a"}},{{"id":"b"}}]}}"#);
+            let items = parse_work_items(&json).unwrap_or_else(|e| panic!("{key}: {e}"));
+            assert_eq!(items.len(), 2, "{key}");
+            assert_eq!(items[0].id, "a", "{key}");
+        }
+    }
+
+    /// A single bare object is a fan-out of one, which the split prompt
+    /// explicitly allows for a narrow topic.
+    #[test]
+    fn parse_work_items_takes_a_single_bare_object() {
+        let items = parse_work_items(r#"{"id":"only","context":{"question":"q"}}"#).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "only");
+        assert_eq!(items[0].context["question"], "q");
+    }
+
+    /// An array of plain strings: the model did the thinking and skipped the
+    /// wrapper. Each string becomes its own question, with a generated id.
+    #[test]
+    fn parse_work_items_takes_an_array_of_questions() {
+        let items =
+            parse_work_items(r#"["How does semaglutide work?", "What happens after"]"#).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, "how-does-semaglutide-work");
+        assert_eq!(items[0].context["question"], "How does semaglutide work?");
+        assert_eq!(items[1].id, "what-happens-after");
+    }
+
+    /// A generated id keeps a bounded number of words, so a long question does
+    /// not become a section heading in the consolidated report.
+    #[test]
+    fn a_generated_id_is_bounded() {
+        let long = "one two three four five six seven eight nine";
+        let items = parse_work_items(&format!(r#"["{long}"]"#)).unwrap();
+        assert_eq!(items[0].id, "one-two-three-four-five-six");
+    }
+
+    /// The bibliography case. A report with `[6]` in its citations used to make
+    /// the bracket scan slice from the wrong place; a fenced block says exactly
+    /// where the answer is, so it wins.
+    #[test]
+    fn parse_work_items_prefers_a_fenced_block_over_stray_brackets() {
+        let response = "See [6] and [14] above.\n```json\n[{\"id\":\"real\"}]\n```\nThanks!";
+        let items = parse_work_items(response).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "real");
+    }
+
+    /// A fence with no newline after it (so no language tag to strip) still
+    /// yields its body.
+    #[test]
+    fn parse_work_items_reads_a_fence_with_no_language_tag() {
+        assert_eq!(
+            parse_work_items("x ```[{\"id\":\"a\"}]``` y").unwrap()[0].id,
+            "a"
+        );
+    }
+
+    /// An unterminated fence is not a fenced block, so the bracket scan is what
+    /// answers.
+    #[test]
+    fn parse_work_items_falls_through_an_unterminated_fence() {
+        assert_eq!(
+            parse_work_items("```json\n[{\"id\":\"a\"}]").unwrap()[0].id,
+            "a"
+        );
+    }
+
+    /// Text-protocol tool-call markup emitted as prose. The run this parser was
+    /// hardened for wrote a whole report with these markers in it, and the
+    /// brackets inside them are what the bracket scan latched onto.
+    #[test]
+    fn parse_work_items_strips_text_protocol_tool_call_markup() {
+        let response = concat!(
+            "Here is the plan.\n",
+            "</\u{ff5c}DSML\u{ff5c}parameter>\n",
+            "</\u{ff5c}DSML\u{ff5c}tool_calls>\n",
+            "[{\"id\":\"kept\"}]"
+        );
+        let items = parse_work_items(response).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "kept");
+    }
+
+    /// Markup stripping leaves ordinary tags alone, and survives a dangling `<`
+    /// with nothing closing it.
+    #[test]
+    fn stripping_markup_keeps_real_tags_and_survives_a_dangling_bracket() {
+        let response = concat!(
+            "</\u{ff5c}X\u{ff5c}call> <b>bold</b> 3 < 4\n",
+            "[{\"id\":\"a\"}]"
+        );
+        let items = parse_work_items(response).unwrap();
+        assert_eq!(items[0].id, "a");
+    }
+
+    /// A JSON scalar is not a work-item list, and the message says what came
+    /// back rather than only naming the rule.
+    #[test]
+    fn parse_work_items_rejects_a_scalar_and_says_what_it_got() {
+        let err = parse_work_items("42").unwrap_err();
+        assert!(err.contains("not a JSON array"), "{err}");
+        assert!(err.contains("42"), "{err}");
+    }
+
+    /// An array whose elements are neither objects nor strings is a real
+    /// malformation, not a near miss.
+    #[test]
+    fn parse_work_items_rejects_an_array_of_the_wrong_thing() {
+        let err = parse_work_items("[1, 2, 3]").unwrap_err();
+        assert!(err.contains("work items"), "{err}");
+    }
+
+    /// Nothing array-shaped anywhere: the last-resort scan finds no brackets and
+    /// the error names that.
+    #[test]
+    fn parse_work_items_rejects_prose_with_no_json_at_all() {
+        let err = parse_work_items("I have completed the research.").unwrap_err();
+        assert!(!err.is_empty(), "{err}");
+    }
+
     #[test]
     fn parse_work_items_handles_array_prose_and_errors() {
         let ok = parse_work_items(r#"[{"id":"a"},{"id":"b","context":{"k":1}}]"#).unwrap();
@@ -1445,6 +1832,120 @@ mod tests {
 
         assert!(world.get::<FanOutWaiting>(e).is_some(), "the split took");
         assert_eq!(status_of(&world, e), AgentStatus::Waiting);
+    }
+
+    /// Put the parent back with a `submit_work_items` call instead of text, the
+    /// way a model that uses the tool leaves it.
+    fn spawn_parent_calling_the_tool(
+        world: &mut World,
+        bp: Blueprint,
+        arguments: serde_json::Value,
+    ) -> Entity {
+        let e = spawn_parent(world, bp, "");
+        world.entity_mut(e).insert(InferenceResult {
+            response: String::new(),
+            tool_calls: vec![crate::components::ToolCall {
+                tool_id: "call-1".to_string(),
+                name: leviath_core::blueprint::SUBMIT_WORK_ITEMS_TOOL.to_string(),
+                arguments,
+                thought_signature: None,
+            }],
+            tokens_used: 0,
+            timestamp: 0,
+        });
+        e
+    }
+
+    /// The reliable path: the split answers with a tool call and the arguments
+    /// are already the shape the schema asked for, so no text is scanned.
+    #[test]
+    fn a_split_tool_call_is_the_split() {
+        let mut world = World::new();
+        let e = spawn_parent_calling_the_tool(
+            &mut world,
+            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            serde_json::json!({"items": [
+                {"id": "a", "context": {"question": "q1"}},
+                {"id": "b", "context": {"question": "q2"}}
+            ]}),
+        );
+
+        fan_out_split(&mut world);
+
+        let w = world.get::<FanOutWaiting>(e).expect("parked");
+        assert_eq!(w.pending.len(), 2);
+        assert_eq!(w.pending[0].id, "a");
+        assert_eq!(w.pending[0].context["question"], "q1");
+    }
+
+    /// An empty list is a real answer: nothing left to hand out, so the stage
+    /// finishes and the run moves on rather than failing.
+    #[test]
+    fn an_empty_work_item_list_is_a_valid_split() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let e = spawn_parent_calling_the_tool(
+            &mut world,
+            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
+            serde_json::json!({"items": []}),
+        );
+
+        fan_out_split(&mut world);
+        assert!(world.get::<FanOutWaiting>(e).is_some(), "parked with none");
+        fan_out_collect(&mut world);
+
+        assert_eq!(status_of(&world, e), AgentStatus::Active);
+        assert_eq!(
+            world.get::<StageCursor>(e).map(|c| c.index),
+            Some(1),
+            "straight through to the merge stage"
+        );
+    }
+
+    /// A tool call whose arguments are the wrong shape is corrected like any
+    /// other miss, and the correction names the tool rather than telling a model
+    /// that just used it to reply in prose.
+    #[test]
+    fn a_malformed_tool_call_is_corrected_in_the_tools_own_terms() {
+        let mut world = World::new();
+        let e = spawn_parent_calling_the_tool(
+            &mut world,
+            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            serde_json::json!({"items": "all of them"}),
+        );
+
+        fan_out_split(&mut world);
+
+        assert_eq!(status_of(&world, e), AgentStatus::Active);
+        assert_eq!(world.get::<SplitAttempts>(e), Some(&SplitAttempts(1)));
+        let convo = conversation_text(&world, e);
+        assert!(
+            convo.contains("[called submit_work_items]"),
+            "the model sees the call it made: {convo}"
+        );
+        assert!(
+            convo.contains("`submit_work_items` call could not be used"),
+            "and a correction in the tool's terms: {convo}"
+        );
+    }
+
+    /// The text fallback's correction points at the tool and says an empty list
+    /// is available, because "the work is already done" answered in prose is
+    /// what ends a re-entered fan-out stage.
+    #[test]
+    fn the_text_correction_points_at_the_tool_and_offers_an_empty_list() {
+        let mut world = World::new();
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            "I have completed the research.",
+        );
+
+        fan_out_split(&mut world);
+
+        let convo = conversation_text(&world, e);
+        assert!(convo.contains("submit_work_items"), "{convo}");
+        assert!(convo.contains("empty `items` array"), "{convo}");
     }
 
     /// The correction budget belongs to one split, not to the whole run. A stage

@@ -30,7 +30,7 @@ pub use validate::*;
 /// Re-exported from `leviath-core`, which owns the name because the blueprint
 /// validator and the manifest parser both need it and neither may depend on
 /// this crate.
-pub use leviath_core::blueprint::SUBMIT_OUTPUT_TOOL;
+pub use leviath_core::blueprint::{SUBMIT_OUTPUT_TOOL, SUBMIT_WORK_ITEMS_TOOL};
 
 /// Built-in tools: read_file, write_file, edit_file, list_dir, shell.
 ///
@@ -172,7 +172,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         let defs = tools.tool_defs();
-        assert_eq!(defs.len(), 26);
+        assert_eq!(defs.len(), 27);
     }
 
     #[test]
@@ -261,6 +261,25 @@ mod tests {
             .await;
         assert!(
             result.contains("submit_output must be handled by the runtime"),
+            "{result}"
+        );
+    }
+
+    /// Same reasoning for the split's tool: the fan-out system reads it off the
+    /// inference result before dispatch, so a call reaching the executor came
+    /// from a stage that is not a fan-out and has nowhere to put work items.
+    #[tokio::test]
+    async fn submit_work_items_is_not_handled_by_builtin_execute() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let result = tools
+            .execute(
+                crate::SUBMIT_WORK_ITEMS_TOOL,
+                serde_json::json!({"items": []}),
+            )
+            .await;
+        assert!(
+            result.contains("only answerable by a fan_out stage"),
             "{result}"
         );
     }
@@ -424,7 +443,7 @@ mod tests {
     fn names_returns_every_tool_and_alias() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
-        assert_eq!(tools.names().len(), 27);
+        assert_eq!(tools.names().len(), 28);
     }
 
     // ── Sub-agent tool definitions ────────────────────────────────────────
@@ -2098,8 +2117,8 @@ mod tests {
         let tools = make_mobile_tools(&dir);
         let names: Vec<String> = tools.tool_defs().iter().map(|t| t.name.clone()).collect();
         assert!(!names.contains(&"shell".to_string()));
-        // The other 16 built-ins remain.
-        assert_eq!(tools.tool_defs().len(), 25);
+        // The other 17 built-ins remain.
+        assert_eq!(tools.tool_defs().len(), 26);
         assert!(names.contains(&"read_file".to_string()));
         assert!(names.contains(&"context_write".to_string()));
         assert!(names.contains(&"present_for_review".to_string()));
