@@ -652,6 +652,14 @@ fn register_host_functions(engine: &mut Engine, host: Arc<dyn ScriptHost>) {
     engine.register_fn("to_json", |v: Dynamic| -> HostRes<String> {
         guard_str("to_json", &mut || to_json_fn(&v))
     });
+    // An object map needs its own registration to shadow Rhai's `map_basic`
+    // `to_json(&mut Map)`, whose more specific signature would otherwise win.
+    // Rhai's formatter writes strings with Rust's `Debug`, so a non-printable
+    // character comes out as `\u{202f}` and the result is no longer JSON.
+    engine.register_fn("to_json", |map: Map| -> HostRes<String> {
+        let value = Dynamic::from_map(map);
+        guard_str("to_json", &mut || to_json_fn(&value))
+    });
     engine.register_fn("encode_uri", |s: &str| -> HostRes<String> {
         guard_str("encode_uri", &mut || Ok(percent_encode(s)))
     });
@@ -1679,6 +1687,24 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         let tool = tool_from("// @tool t\nencode_uri(\"a b&c-_.~\")");
         let out = execute(&tool, serde_json::json!({}), FakeHost::arc());
         assert_eq!(out, "a%20b%26c-_.~");
+    }
+
+    /// A tool script's `to_json(#{...})` must produce JSON, not Rhai's
+    /// `Debug`-escaped lookalike.
+    ///
+    /// Rhai's `map_basic` package registers `to_json(&mut Map)`, a more
+    /// specific signature than the `Dynamic` one this engine registers, so an
+    /// object map used to reach `format_map_as_json`. That writes strings with
+    /// `Debug`, which spells a narrow no-break space `\u{202f}`: not a JSON
+    /// escape, so whatever consumed the tool's output got something unparseable.
+    #[test]
+    fn to_json_on_a_map_is_valid_json_for_non_printable_characters() {
+        let text = "a\u{202f}b\u{200b}c\u{2011}d";
+        let script = format!("// @tool t\nto_json(#{{ s: \"{text}\" }})");
+        let out = execute(&tool_from(&script), serde_json::json!({}), FakeHost::arc());
+        assert!(!out.contains("\\u{"), "got: {out}");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("output must be JSON");
+        assert_eq!(parsed["s"], serde_json::Value::String(text.to_string()));
     }
 
     #[test]

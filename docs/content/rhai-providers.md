@@ -163,6 +163,11 @@ These are the only calls that reach outside the sandbox:
   `stream_request(url, body, headers, callback)` for SSE streaming. The callback is a Rhai closure
   invoked with each SSE `data:` payload.
 - Data: `parse_json(str)`, `to_json(value)`, `parse_sse(chunk)`.
+
+Build the request body as an object map and hand the whole map to `to_json`, the way the example
+below does. Never assemble the body by joining strings. A model reply routinely contains a quote,
+a newline or a backslash, and escaping those by hand is where a provider script breaks weeks later
+on one unusual page.
 - Env and encoding: `env_var(name)` (returns a string or `()`), `encode_uri(str)`,
   `encode_base64(str)`.
 - Tokens: `count_tokens_heuristic(text, hint)` where `hint` is `"openai"`, `"anthropic"`,
@@ -364,6 +369,30 @@ question without a run and without a key: it compiles the text and checks that `
 and `inference(state, request)` are both there. The rest of the [scripts
 API](/docs/api#tools-and-scripts) manages the directory itself, so a console can list, open, edit and
 save a provider the same way it does a script tool.
+
+## When the API refuses the body
+
+An API answering `HTTP 400` with a JSON parse error is complaining about the bytes your script
+sent, not about the conversation. The message names the offset:
+
+```
+API error: HTTP 400 Bad Request: {"message":": Invalid JSON: invalid escape at line 1 column 26527",
+"type":"invalid_request_error","param":"validation_error","code":"wrong_api_format"}
+```
+
+The tell is a run that worked for several turns and then stopped. Something reached the prompt that
+the body could not carry. Two causes account for almost all of it:
+
+| Symptom | Cause |
+|---|---|
+| Invalid escape, run had been fine for turns | A string joined by hand instead of passed through `to_json` |
+| Parse error that moves with the prompt size | Same, at a different offset |
+
+Leviath serializes with `to_json` for exactly this reason, including for an object map, where Rhai's
+own `to_json` would otherwise take over and write strings in Rust's debug spelling. That spelling
+renders an invisible character such as a narrow no-break space as `\u{202f}`, which JSON has no
+escape for, so one such character anywhere in the prompt invalidates the whole request. Passing your
+map to `to_json` is enough; nothing extra is needed.
 
 ## Not in scope
 

@@ -69,6 +69,18 @@ pub fn build_exec_engine(cfg: ExecConfig) -> Engine {
 fn register_pure_fns(engine: &mut Engine, env_allowlist: Arc<Vec<String>>) {
     engine.register_fn("parse_json", parse_json_fn);
     engine.register_fn("to_json", to_json_fn);
+    // Rhai's own `map_basic` package registers `to_json(&mut Map)`. An object
+    // map is the argument every provider script actually passes, and that
+    // signature is more specific than the `Dynamic` one above, so it used to
+    // win overload resolution and the serde encoder here was never reached.
+    // Rhai's formatter (`format_map_as_json`) writes strings with Rust's
+    // `Debug`, which escapes any non-printable character as `\u{202f}`. That is
+    // not a JSON escape, so the request body stopped being JSON the moment a
+    // narrow no-break space, a zero-width space or a BOM reached the prompt,
+    // and the API answered 400 with a parse error pointing at that offset.
+    // Registering the same signature into the engine's own namespace puts this
+    // encoder back in front of it.
+    engine.register_fn("to_json", |map: Map| to_json_fn(Dynamic::from_map(map)));
     engine.register_fn("parse_sse", parse_sse_fn);
     engine.register_fn("encode_uri", |s: &str| {
         leviath_scripting::tool::percent_encode(s)
