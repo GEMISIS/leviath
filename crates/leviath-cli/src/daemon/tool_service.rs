@@ -2459,6 +2459,7 @@ mod tests {
             max_depth: 3,
             no_seed_commands: false,
             unattended: false,
+            model_override: None,
         };
         let builtins = Arc::new(leviath_tools::BuiltinTools::new(
             leviath_tools::ToolContext::new(std::env::temp_dir()),

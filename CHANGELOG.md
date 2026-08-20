@@ -13,6 +13,19 @@ same list.
 
 ## Unreleased
 
+- Fixed: a run's `--model` override now covers fan-out workers and sub-agents,
+  not just the parent blueprint. Both spawn paths passed `model: None` while
+  carrying every other field of the parent down - workdir, `--yolo`,
+  `--no-seed-commands`, the requested output shape - so
+  `lev run deep-researcher --model cerebras/gpt-oss-120b` sent the parent's
+  stages to Cerebras and all thirty workers to whatever the worker blueprint
+  listed. That is the large majority of a run's spend landing on providers the
+  operator explicitly overrode away from, with no warning and no log line, and
+  it made benchmarking a provider this way report a number that was mostly not
+  about that provider. `providers.md` called the override absolute already
+  ("overrides everything"); it now is. A run that names no model leaves every
+  child resolving against its own blueprint exactly as before.
+
 - Fixed: `GET /api/models` now reports a Rhai script provider's models, so The
   Lair offers them on the new-run page, in the agent editor and in settings.
   `ProviderRegistry::provider_names()` returns natively registered providers

@@ -156,6 +156,10 @@ In order:
 
 1. `lev run --model <provider>/<model>`, which overrides everything and skips the check entirely. A
    bare `--model <model>` replaces only the model name and keeps the provider resolved below.
+   "Everything" means the whole run: every stage of the blueprint, every
+   [fan-out](/docs/sub-agents#fan-out) worker, and every sub-agent spawned with `spawn_agent`. A
+   worker's own blueprint may list different models; they are its failover candidates when the run
+   names no model, and are not consulted when it does.
 2. Your `default_provider` / `default_model` from `config.toml`, when `default_model` is set, the
    provider is configured, and the stage did not set `allow_user_default = false`. It leads even
    when the blueprint lists that same provider with a different model: `default_provider = "ollama"`
