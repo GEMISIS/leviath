@@ -8621,6 +8621,29 @@ fn spawn_outcome_agent(
     e
 }
 
+/// `fail_stage_world` is called from exclusive systems that may be looking at an
+/// entity another system already tore down. It records what it can and never
+/// panics: a run that went away mid-tick has nothing left to route.
+#[test]
+fn fail_stage_world_survives_a_gone_or_stateless_entity() {
+    let mut world = World::new();
+
+    let gone = world.spawn_empty().id();
+    world.despawn(gone);
+    fail_stage_world(&mut world, gone, "boom".to_string());
+    assert!(world.get_entity(gone).is_err(), "still gone");
+
+    // Present but carrying no `AgentState`: the outcome is still recorded, so
+    // whatever runs next sees the stage failed.
+    let bare = world.spawn_empty().id();
+    fail_stage_world(&mut world, bare, "boom".to_string());
+    assert_eq!(
+        world.get::<StageOutcome>(bare),
+        Some(&StageOutcome::Errored("boom".to_string()))
+    );
+    assert!(world.get::<ResolveTransition>(bare).is_some());
+}
+
 #[test]
 fn resolve_transition_routes_error_to_error_edge() {
     let err = conditioned_edge("recovery", TransitionCondition::Error);

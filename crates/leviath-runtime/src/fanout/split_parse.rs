@@ -70,17 +70,20 @@ pub fn parse_work_items(content: &str) -> Result<Vec<WorkItem>, String> {
         Some(trimmed),
         outermost_array(trimmed),
     ];
-    let mut last_error = None;
+    // The whole response is always one of the candidates, so a failing parse
+    // always leaves a real message behind and there is no "nothing was tried"
+    // case to invent an error for.
+    let mut last_error = String::new();
     for candidate in candidates.into_iter().flatten() {
         match serde_json::from_str::<serde_json::Value>(candidate) {
             Ok(value) => match work_items_from_value(value) {
                 Ok(items) => return Ok(items),
-                Err(e) => last_error = Some(e),
+                Err(e) => last_error = e,
             },
-            Err(e) => last_error = Some(format!("split output is not valid JSON: {e}")),
+            Err(e) => last_error = format!("split output is not valid JSON: {e}"),
         }
     }
-    Err(last_error.unwrap_or_else(|| "split output is not a JSON array".to_string()))
+    Err(last_error)
 }
 
 /// Read work items out of a parsed JSON value, accepting the shapes a model
@@ -224,7 +227,7 @@ mod tests {
     fn parse_work_items_unwraps_an_envelope() {
         for key in ["items", "work_items", "sub_questions", "tasks"] {
             let json = format!(r#"{{"{key}": [{{"id":"a"}},{{"id":"b"}}]}}"#);
-            let items = parse_work_items(&json).unwrap_or_else(|e| panic!("{key}: {e}"));
+            let items = parse_work_items(&json).expect("the envelope is unwrapped");
             assert_eq!(items.len(), 2, "{key}");
             assert_eq!(items[0].id, "a", "{key}");
         }
@@ -238,6 +241,25 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "only");
         assert_eq!(items[0].context["question"], "q");
+    }
+
+    /// The bare-object guard takes either field. An item with only a `context`
+    /// is still a work item; the id is what labels it in the report, and a
+    /// missing one is a cosmetic loss, not a malformation.
+    #[test]
+    fn parse_work_items_takes_a_bare_object_with_only_a_context() {
+        let items = parse_work_items(r#"{"context":{"question":"q"}}"#).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "");
+        assert_eq!(items[0].context["question"], "q");
+    }
+
+    /// A bare object shaped like a work item but with the wrong types is a real
+    /// malformation, and the message says so rather than inventing an item.
+    #[test]
+    fn parse_work_items_rejects_a_bare_object_with_the_wrong_types() {
+        let err = parse_work_items(r#"{"id": 42, "context": {}}"#).unwrap_err();
+        assert!(err.contains("work items"), "{err}");
     }
 
     /// An array of plain strings: the model did the thinking and skipped the
