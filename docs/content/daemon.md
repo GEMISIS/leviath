@@ -157,10 +157,17 @@ If a save leaves the file briefly unparseable, which happens while you are halfw
 edit, the daemon keeps serving the last version that worked. It reloads on your next clean save, so
 an in-progress edit never breaks a spawn.
 
-Two kinds of change do need `lev daemon restart`. Both set up connections and process-wide state
+`[model_providers.<name>]` reloads too, as of this release. A script provider's own `.rhai` file
+has always been re-read on each use, so a table beside it that needed a restart made two halves of
+one feature disagree in silence - setting a `base_url` and watching it do nothing looked exactly
+like having typed the key wrong. Both halves are now live: edit the script, the table, or
+`[security] allow_env_vars`, and the next provider load uses it.
+
+Some changes do still need `lev daemon restart`. They set up connections and process-wide state
 once at startup rather than per run:
 
-- Provider keys and `[model_providers]`, which build the provider registry.
+- **Native** provider keys (`[providers]`, `openrouter_api_key`, `ollama_base_url`), which build the
+  provider registry at boot.
 - `[[mcp_servers]]` (live MCP connections), `[observability]` (the telemetry pipeline), and
   `[security] allow_local_network` (the outbound-network policy).
 - The `[limits]` the world itself is built with: `stall_timeout_secs`, `wedge_timeout_secs`,

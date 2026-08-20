@@ -203,7 +203,7 @@ pub(super) async fn list_blueprints(
         ),
     };
 
-    let mut found = discover_blueprints(&state.config);
+    let mut found = discover_blueprints(&state.current_config());
 
     // `q` shares the search primitive but not the framework: three in-memory
     // string fields do not need sources, phases or highlights.
@@ -291,7 +291,7 @@ pub(super) async fn get_blueprint(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<BlueprintDetail>, StatusCode> {
-    let blueprints = discover_blueprints(&state.config);
+    let blueprints = discover_blueprints(&state.current_config());
     let mut info = blueprints
         .into_iter()
         .find(|b| b.name == name)
@@ -592,7 +592,7 @@ system_prompt = "do it"
     async fn page(dir: &tempfile::TempDir, extra: &str) -> (StatusCode, serde_json::Value) {
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
-            config: Arc::new(Config {
+            config: crate::commands::serve::testutil::fixed_config(Config {
                 agent_paths: vec![dir.path().to_path_buf()],
                 ..Default::default()
             }),
@@ -816,7 +816,6 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use axum::routing::{get, post};
-    use std::sync::Arc;
     use tokio::sync::broadcast;
     use tower::ServiceExt;
 
@@ -825,7 +824,7 @@ mod tests {
     fn test_state_with_path(path: PathBuf) -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
-            config: Arc::new(Config {
+            config: crate::commands::serve::testutil::fixed_config(Config {
                 agent_paths: vec![path],
                 ..Default::default()
             }),

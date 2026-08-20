@@ -13,6 +13,38 @@ same list.
 
 ## Unreleased
 
+- Fixed: `GET /api/models` now reports a Rhai script provider's models, so The
+  Lair offers them on the new-run page, in the agent editor and in settings.
+  `ProviderRegistry::provider_names()` returns natively registered providers
+  only and the script layer is reachable through `get()`, so an enumeration
+  built on it skipped script providers entirely - the same defect fixed for
+  `lev models list --provider` in the previous release, in a sibling surface.
+  The registry now answers `resolvable_names()` for callers that are
+  enumerating, and both the API path and `lev models list --remote` use it.
+  Until now the provider showed under Custom Gateways while none of its models
+  existed anywhere.
+
+- Fixed: `lev serve` no longer answers `GET /api/config` from a snapshot taken
+  at start-up. An edit saved through `PUT /api/config` was written to disk and
+  never read back, so reloading the page showed the old value and the save read
+  as lost; an edit made anywhere else was invisible for the life of the process,
+  and since `lev serve` is a separate process from `lev daemon`, restarting the
+  daemon did not help. Every handler now reads the file through the same
+  mtime-checked reloader the daemon uses, so a change - from this API or from
+  outside - is visible to the next request.
+
+- Fixed: `[model_providers.<name>]` is now as hot as the `.rhai` file it
+  configures. A provider script has always been re-read when its file changes,
+  but the table feeding its `initialize(config)` was captured at daemon boot, so
+  editing the script's code took effect on the next run while editing the config
+  it receives silently did nothing until `lev daemon restart`. Setting a
+  `base_url` and watching it have no effect was indistinguishable from having
+  typed the key wrong. The layer now reads that config on every load, and its
+  compiled-script cache is invalidated by a config change as well as by the
+  file's mtime. `[model_capabilities]`, `request_timeout_secs` and `[security]
+  allow_env_vars` reload with it; the shared HTTP client still does not, since
+  it holds a connection pool.
+
 - Fixed: a network blip no longer ends a run. `Response::json` does two things -
   read the body off the socket, then parse it - and every provider mapped both
   failures to "invalid response", which the retry policy treats as permanent. So

@@ -164,7 +164,7 @@ mod tests {
     fn app_with_root(workdir_root: Option<PathBuf>) -> Router {
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
-            config: Arc::new(Config::default()),
+            config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),

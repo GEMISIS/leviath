@@ -33,7 +33,8 @@ Four things about the lifecycle:
 - **Nothing runs until it is named.** The daemon does not scan and execute every file it finds at
   startup, only the ones an agent actually asks for.
 - **Edits apply on the next run.** The file's modification time is checked on each use, so a change
-  is picked up with no daemon restart.
+  is picked up with no daemon restart. Its `[model_providers.<name>]` table is read the same way, so
+  changing a `base_url` or an `api_key` needs no restart either.
 - **A broken script is skipped, not fatal.** It logs a warning, and starts working again as soon as
   you fix the file.
 

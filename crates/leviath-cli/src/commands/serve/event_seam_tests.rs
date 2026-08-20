@@ -137,6 +137,7 @@ async fn stand_up(runs_dir: &std::path::Path) -> Seam {
         runtime: tokio::runtime::Handle::current(),
         // A fixed clock, so nothing here is a function of how long CI took.
         now_secs: || 1_700_000_000,
+        reloader: None,
     });
 
     // The daemon half: the host's own event sender served over a real control
@@ -168,7 +169,7 @@ async fn stand_up(runs_dir: &std::path::Path) -> Seam {
         ControlClient::for_home(id, dir.path()).with_build(crate::test_support::TEST_BUILD);
     let (event_tx, _) = broadcast::channel(256);
     let state = AppState {
-        config: Arc::new(Config::default()),
+        config: crate::commands::serve::testutil::fixed_config(Config::default()),
         event_tx,
         control: control.clone(),
         mcp: super::mcp::McpAdmin::default(),

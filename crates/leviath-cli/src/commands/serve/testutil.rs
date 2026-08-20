@@ -9,6 +9,15 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
+/// A config source that never re-reads anything, for a test with no file to
+/// watch. Production watches [`crate::config::Config::config_path`] - see
+/// [`AppState::current_config`](super::types::AppState::current_config).
+pub(super) fn fixed_config(
+    config: crate::config::Config,
+) -> Arc<crate::daemon::config_reload::ConfigReloader> {
+    Arc::new(crate::daemon::config_reload::ConfigReloader::fixed(config))
+}
+
 /// Run `f` with `LEVIATH_HOME` redirected at a fresh scratch root, handing it
 /// that root.
 ///

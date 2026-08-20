@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 
 use super::events::ServerEvent;
 use crate::config::Config;
+use crate::daemon::config_reload::ConfigReloader;
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -97,7 +98,20 @@ pub struct ServeArgs {
 /// control-socket client that reaches the daemon.
 #[derive(Clone)]
 pub struct AppState {
-    pub(super) config: Arc<Config>,
+    /// Where the config comes from, rather than a copy of it.
+    ///
+    /// A snapshot taken at start-up was wrong in both directions: an edit made
+    /// through `PUT /api/config` was written to disk and never read back, so
+    /// reloading the page showed the old value and the edit read as lost; and
+    /// an edit made anywhere else - `lev setup`, an editor, the daemon's own
+    /// config - was invisible for the life of the process. `lev serve` is a
+    /// separate process from `lev daemon`, so restarting the daemon did not
+    /// help either (issue #532).
+    ///
+    /// This is the same [`ConfigReloader`] the daemon uses for its spawn-time
+    /// config: mtime-checked, last-good on a parse failure. Read it through
+    /// [`AppState::current_config`].
+    pub(super) config: Arc<ConfigReloader>,
     pub(super) event_tx: broadcast::Sender<ServerEvent>,
     /// Client for the shared-world daemon's control socket. Agent actions
     /// (spawn/cancel/message/interactions) go through this; read endpoints still
@@ -108,6 +122,16 @@ pub struct AppState {
     /// The spawn-request restrictions from [`ServeArgs`], resolved once at
     /// startup so every handler reads the same decision.
     pub(super) limits: Arc<ServeLimits>,
+}
+
+impl AppState {
+    /// The config as it is on disk right now.
+    ///
+    /// Every handler reads it through here rather than holding one, so an edit
+    /// - through this API or from outside - is visible to the next request.
+    pub(super) fn current_config(&self) -> Arc<Config> {
+        self.config.current()
+    }
 }
 
 /// What this server refuses regardless of who is asking.

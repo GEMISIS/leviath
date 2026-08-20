@@ -14,6 +14,13 @@
 //! - a deleted file → evicted, the provider disappears;
 //! - a broken script → not resolved (logged), so selection falls through.
 //!
+//! The `[model_providers.<name>]` table that feeds a script's `initialize` is
+//! read the same way, through a [`ScriptProviderConfig`] source the layer calls
+//! on every lookup rather than a copy taken at boot. It used to be a copy, so
+//! editing a provider's `base_url` did nothing until `lev daemon restart` while
+//! editing the script beside it took effect immediately - two halves of one
+//! feature disagreeing, silently (issue #533).
+//!
 //! [`ProviderRegistry`]: crate::ProviderRegistry
 
 use std::collections::HashMap;
@@ -38,25 +45,55 @@ pub struct ScriptProviderSpec {
     pub init_config: serde_json::Value,
 }
 
-/// A cached, compiled script provider plus the source mtime it was built from.
+/// Everything a script-provider load reads out of `config.toml`.
+///
+/// Grouped so the layer can take it from a *source* it calls per lookup - see
+/// [`ScriptProviderLayer::with_config_source`] - rather than holding a copy.
+#[derive(Clone, Debug, Default)]
+pub struct ScriptProviderConfig {
+    /// `[model_providers]`, keyed by provider name.
+    pub overrides: HashMap<String, ScriptProviderSpec>,
+    /// `[model_capabilities]`, applied to whatever a script reports.
+    pub default_caps: HashMap<String, ModelCapabilityOverride>,
+    /// The global request timeout a script's own calls are bounded by.
+    pub request_timeout_secs: Option<u64>,
+    /// `[security] allow_env_vars`: credential-shaped environment variables a
+    /// provider script may read. Empty by default - a provider script runs
+    /// during inference, not through a tool call, so nothing it does passes an
+    /// approval prompt.
+    pub env_allowlist: Arc<Vec<String>>,
+}
+
+/// A cached, compiled script provider, plus what it was built from.
+///
+/// Both halves matter. The mtime catches an edited script; the config catches
+/// an edited `[model_providers]` entry, which used to leave a stale provider
+/// cached under an unchanged file (issue #533). Compared by pointer, so a
+/// source that returns the same `Arc` while nothing has changed costs nothing.
 struct Cached {
     mtime: SystemTime,
+    config: Arc<ScriptProviderConfig>,
     provider: Arc<dyn Provider>,
 }
 
 /// Lazy, hot-reloading resolver for script providers.
 pub struct ScriptProviderLayer {
     dir: PathBuf,
-    overrides: HashMap<String, ScriptProviderSpec>,
-    default_caps: HashMap<String, ModelCapabilityOverride>,
-    request_timeout_secs: Option<u64>,
-    /// `[security] allow_env_vars`: credential-shaped environment variables a
-    /// provider script may read. Empty by default - a provider script runs
-    /// during inference, not through a tool call, so nothing it does passes an
-    /// approval prompt.
-    env_allowlist: Arc<Vec<String>>,
+    /// Where the config comes from, called on every lookup.
+    ///
+    /// A boxed closure rather than a captured map so the daemon can hand in
+    /// one that reads its live config, while every other caller hands in a
+    /// constant. `Box<dyn Fn>` rather than a generic parameter deliberately:
+    /// one instantiation regardless of the caller, which keeps coverage
+    /// honest (see `run/task.rs`'s `resolve_task_with` for the same choice).
+    config: Box<dyn Fn() -> Arc<ScriptProviderConfig> + Send + Sync>,
     /// The HTTP executor every script provider shares, built once when the
     /// layer is created.
+    ///
+    /// This one really is fixed at boot, and stays that way: it holds a
+    /// connection pool, which is the kind of live state the daemon's config
+    /// reload deliberately leaves alone. Its timeout is the client-level
+    /// default; the per-call bound in [`ScriptProviderConfig`] is live.
     ///
     /// Kept as the `Result` rather than unwrapped: constructing it reads the
     /// machine's root certificate store and can fail, and a layer is built
@@ -77,8 +114,7 @@ impl ScriptProviderLayer {
         request_timeout_secs: Option<u64>,
         env_allowlist: Vec<String>,
     ) -> Self {
-        let executor = leviath_providers::provider::build_http_client(request_timeout_secs)
-            .map(|client| Arc::new(ReqwestExecutor::new(client)) as Arc<dyn HttpExecutor>);
+        let executor = Self::build_executor(request_timeout_secs);
         Self::with_executor(
             dir,
             overrides,
@@ -105,15 +141,45 @@ impl ScriptProviderLayer {
             leviath_providers::provider::HttpError,
         >,
     ) -> Self {
-        Self {
-            dir,
+        let config = Arc::new(ScriptProviderConfig {
             overrides,
             default_caps,
             request_timeout_secs,
             env_allowlist: Arc::new(env_allowlist),
+        });
+        Self::with_config_source(dir, Box::new(move || config.clone()), executor)
+    }
+
+    /// A layer whose config is read from `config` on every lookup rather than
+    /// captured once.
+    ///
+    /// This is what makes `[model_providers.<name>]` as hot as the `.rhai`
+    /// file beside it. The source must return the *same* `Arc` while nothing
+    /// has changed - the cache compares by pointer, so a source that rebuilds
+    /// its answer every call recompiles every script on every lookup.
+    pub fn with_config_source(
+        dir: PathBuf,
+        config: Box<dyn Fn() -> Arc<ScriptProviderConfig> + Send + Sync>,
+        executor: std::result::Result<
+            Arc<dyn HttpExecutor>,
+            leviath_providers::provider::HttpError,
+        >,
+    ) -> Self {
+        Self {
+            dir,
+            config,
             executor,
             cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Build the shared HTTP executor a layer runs its scripts through. Its
+    /// timeout is fixed for the life of the layer; see the field's note.
+    pub fn build_executor(
+        request_timeout_secs: Option<u64>,
+    ) -> std::result::Result<Arc<dyn HttpExecutor>, leviath_providers::provider::HttpError> {
+        leviath_providers::provider::build_http_client(request_timeout_secs)
+            .map(|client| Arc::new(ReqwestExecutor::new(client)) as Arc<dyn HttpExecutor>)
     }
 
     /// Resolve `<name>` to its script path: an explicit `script` override
@@ -128,8 +194,8 @@ impl ScriptProviderLayer {
     /// and it can only come from the user's own config, not from a blueprint.
     ///
     /// `None` when the override escapes; the caller reports it and loads nothing.
-    fn resolve_path(&self, name: &str) -> Option<PathBuf> {
-        let stem = self
+    fn resolve_path(&self, name: &str, config: &ScriptProviderConfig) -> Option<PathBuf> {
+        let stem = config
             .overrides
             .get(name)
             .and_then(|s| s.script.as_deref())
@@ -155,6 +221,36 @@ impl ScriptProviderLayer {
         Some(self.dir.join(joined))
     }
 
+    /// Every script provider this layer could resolve right now, in no
+    /// particular order: the `.rhai` files sitting in its directory, plus any
+    /// name with a `[model_providers]` entry (which may point its `script` at a
+    /// file kept elsewhere).
+    ///
+    /// A name here is a *candidate*, not a promise - it still has to compile.
+    /// Callers that enumerate providers resolve each through
+    /// [`get_or_load`](Self::get_or_load) and skip what does not load.
+    ///
+    /// Deliberately not folded into `ProviderRegistry::provider_names`, whose
+    /// contract is "registered natively" and whose callers rely on every name
+    /// it returns being `get`-able without compiling anything.
+    pub fn candidate_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = (self.config)().overrides.keys().cloned().collect();
+        // A directory that cannot be read is not an error here: it means no
+        // convention-named scripts, which is the same answer as an empty one.
+        if let Ok(entries) = std::fs::read_dir(&self.dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "rhai")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                    && !names.iter().any(|n| n == stem)
+                {
+                    names.push(stem.to_string());
+                }
+            }
+        }
+        names
+    }
+
     /// Get (or lazily load / reload) the provider named `name`, or `None` when
     /// there is no such script or it fails to load.
     ///
@@ -171,7 +267,11 @@ impl ScriptProviderLayer {
     /// wasted work, never a wrong answer, and it self-corrects on the next
     /// lookup because entries are validated by mtime.
     pub fn get_or_load(&self, name: &str) -> Option<Arc<dyn Provider>> {
-        let Some(path) = self.resolve_path(name) else {
+        // One read per lookup, used for both the path and the settings, so a
+        // config that changes mid-load cannot resolve one file and configure
+        // another.
+        let config = (self.config)();
+        let Some(path) = self.resolve_path(name, &config) else {
             tracing::warn!(
                 provider = %name,
                 "script provider path escapes the providers directory - refusing to load"
@@ -184,11 +284,11 @@ impl ScriptProviderLayer {
             self.evict(name);
             return None;
         };
-        if let Some(cached) = self.cached_fresh(name, mtime) {
+        if let Some(cached) = self.cached_fresh(name, mtime, &config) {
             return Some(cached);
         }
 
-        let spec = self.overrides.get(name);
+        let spec = config.overrides.get(name);
         let init_config = spec
             .map(|s| s.init_config.clone())
             .unwrap_or_else(|| serde_json::json!({}));
@@ -212,10 +312,10 @@ impl ScriptProviderLayer {
             leviath_providers::rhai_provider::ScriptProviderSettings {
                 name: name.to_string(),
                 init_config,
-                caps: self.default_caps.clone(),
+                caps: config.default_caps.clone(),
                 rate_limit,
-                request_timeout_secs: self.request_timeout_secs,
-                env_allowlist: self.env_allowlist.clone(),
+                request_timeout_secs: config.request_timeout_secs,
+                env_allowlist: config.env_allowlist.clone(),
             },
         ) {
             Ok(p) => {
@@ -227,6 +327,7 @@ impl ScriptProviderLayer {
                         name.to_string(),
                         Cached {
                             mtime,
+                            config: config.clone(),
                             provider: provider.clone(),
                         },
                     );
@@ -241,12 +342,17 @@ impl ScriptProviderLayer {
     }
 
     /// The cached provider for `name`, but only if it was built from the script
-    /// as it is on disk right now. Holds the lock just long enough to clone an
-    /// `Arc`.
-    fn cached_fresh(&self, name: &str, mtime: SystemTime) -> Option<Arc<dyn Provider>> {
+    /// as it is on disk right now **and** from the config in force right now.
+    /// Holds the lock just long enough to clone an `Arc`.
+    fn cached_fresh(
+        &self,
+        name: &str,
+        mtime: SystemTime,
+        config: &Arc<ScriptProviderConfig>,
+    ) -> Option<Arc<dyn Provider>> {
         let cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         let cached = cache.get(name)?;
-        if cached.mtime == mtime {
+        if cached.mtime == mtime && Arc::ptr_eq(&cached.config, config) {
             Some(cached.provider.clone())
         } else {
             None
@@ -284,8 +390,122 @@ mod tests {
         f.set_modified(later).unwrap();
     }
 
+    /// The config a layer is holding, for the tests that call `resolve_path`
+    /// directly - the lookup path reads it once and threads it through, so the
+    /// method takes it rather than reading it a second time.
+    fn cfg(l: &ScriptProviderLayer) -> Arc<ScriptProviderConfig> {
+        (l.config)()
+    }
+
     fn layer(dir: PathBuf) -> ScriptProviderLayer {
         ScriptProviderLayer::new(dir, HashMap::new(), HashMap::new(), None, Vec::new())
+    }
+
+    /// The half of the feature that was frozen: the script file hot-reloads,
+    /// but its `[model_providers.<name>]` table was captured at boot, so
+    /// changing a `base_url` did nothing until a daemon restart - silently,
+    /// with the run using the old value (issue #533).
+    ///
+    /// The script here reports its `base_url` as a model id, so what the
+    /// provider was initialized with is directly observable.
+    #[tokio::test]
+    async fn a_config_change_reaches_the_next_load_without_touching_the_script() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "hot.rhai",
+            "fn initialize(config) { #{ base: config.base_url } }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }\n\
+             fn list_models(state) { [ #{ id: state.base } ] }",
+        );
+
+        // A source the test moves forward by hand, exactly as the daemon's
+        // reloader does when `config.toml`'s mtime changes.
+        let live: Arc<Mutex<Arc<ScriptProviderConfig>>> =
+            Arc::new(Mutex::new(Arc::new(spec_config("hot", "http://first"))));
+        let handle = live.clone();
+        let l = ScriptProviderLayer::with_config_source(
+            dir.path().to_path_buf(),
+            Box::new(move || handle.lock().unwrap().clone()),
+            ScriptProviderLayer::build_executor(None),
+        );
+
+        assert_eq!(first_model(&l).await, "http://first");
+        // Same `Arc` back on every call: an unchanged config must be a cache
+        // hit, not a recompile.
+        assert!(Arc::ptr_eq(
+            &l.get_or_load("hot").unwrap(),
+            &l.get_or_load("hot").unwrap()
+        ));
+
+        *live.lock().unwrap() = Arc::new(spec_config("hot", "http://second"));
+        assert_eq!(
+            first_model(&l).await,
+            "http://second",
+            "the edited config must reach the next load, with the file untouched"
+        );
+    }
+
+    /// One `ScriptProviderConfig` naming `provider`'s `base_url`.
+    fn spec_config(provider: &str, base_url: &str) -> ScriptProviderConfig {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            provider.to_string(),
+            ScriptProviderSpec {
+                init_config: serde_json::json!({ "base_url": base_url }),
+                ..Default::default()
+            },
+        );
+        ScriptProviderConfig {
+            overrides,
+            ..Default::default()
+        }
+    }
+
+    /// The id of the first model `hot` reports - which this script sets to
+    /// whatever `initialize` was handed.
+    async fn first_model(l: &ScriptProviderLayer) -> String {
+        let provider = l.get_or_load("hot").expect("the script loads");
+        provider.list_models().await.unwrap()[0].id.clone()
+    }
+
+    #[test]
+    fn candidate_names_are_the_files_on_disk_and_the_configured_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "groq.rhai", GOOD);
+        write(dir.path(), "notes.txt", "not a provider");
+        let mut overrides = HashMap::new();
+        // Configured, and its script lives outside the directory - so only the
+        // config half can name it.
+        overrides.insert(
+            "elsewhere".to_string(),
+            ScriptProviderSpec {
+                script: Some("/somewhere/else.rhai".to_string()),
+                ..Default::default()
+            },
+        );
+        // Configured *and* present by convention: named once, not twice.
+        overrides.insert("groq".to_string(), ScriptProviderSpec::default());
+        let l = ScriptProviderLayer::new(
+            dir.path().to_path_buf(),
+            overrides,
+            HashMap::new(),
+            None,
+            Vec::new(),
+        );
+
+        let mut names = l.candidate_names();
+        names.sort();
+        assert_eq!(names, vec!["elsewhere".to_string(), "groq".to_string()]);
+    }
+
+    #[test]
+    fn candidate_names_of_a_missing_directory_is_the_configured_set() {
+        let l = layer(PathBuf::from("/no/such/providers/dir"));
+        assert!(
+            l.candidate_names().is_empty(),
+            "an unreadable directory names nothing, the same as an empty one"
+        );
     }
 
     #[test]
@@ -388,10 +608,19 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert_eq!(l.resolve_path("a"), Some(dir.path().join("custom.rhai")));
-        assert_eq!(l.resolve_path("b"), Some(dir.path().join("custom.rhai")));
-        assert_eq!(l.resolve_path("c"), Some(abs));
-        assert_eq!(l.resolve_path("z"), Some(dir.path().join("z.rhai")));
+        assert_eq!(
+            l.resolve_path("a", &cfg(&l)),
+            Some(dir.path().join("custom.rhai"))
+        );
+        assert_eq!(
+            l.resolve_path("b", &cfg(&l)),
+            Some(dir.path().join("custom.rhai"))
+        );
+        assert_eq!(l.resolve_path("c", &cfg(&l)), Some(abs));
+        assert_eq!(
+            l.resolve_path("z", &cfg(&l)),
+            Some(dir.path().join("z.rhai"))
+        );
     }
 
     /// A relative `script` override may not climb out of the providers
@@ -423,7 +652,11 @@ mod tests {
             Vec::new(),
         );
         for name in ["a", "b", "c"] {
-            assert_eq!(l.resolve_path(name), None, "{name} should be refused");
+            assert_eq!(
+                l.resolve_path(name, &cfg(&l)),
+                None,
+                "{name} should be refused"
+            );
             assert!(l.get_or_load(name).is_none(), "{name} must not load");
         }
     }
@@ -448,7 +681,7 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(
-            l.resolve_path("a"),
+            l.resolve_path("a", &cfg(&l)),
             Some(dir.path().join("vendor/custom.rhai"))
         );
     }

@@ -172,6 +172,52 @@ pub fn build_provider_registry_from_config_with(
     ))
 }
 
+/// [`build_provider_registry_from_config_with`], with the script-provider
+/// layer reading `reloader` on every load rather than a snapshot of `config`.
+///
+/// The daemon builds its registry this way so an edit to
+/// `[model_providers.<name>]` reaches the next provider load with no restart,
+/// matching the `.rhai` file's own hot-reload (issue #533). Short-lived
+/// processes keep the snapshot: there is nothing to reload inside one command.
+pub fn build_provider_registry_live(
+    config: &Config,
+    reloader: std::sync::Arc<crate::daemon::config_reload::ConfigReloader>,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
+    let registry = leviath_runtime::provider_creds::build_provider_registry_with(
+        &provider_creds_from_config(config),
+        build_client,
+    )?;
+    Ok(attach_live_script_layer(
+        registry,
+        crate::config::providers_dir(),
+        config,
+        reloader,
+    ))
+}
+
+/// [`attach_script_layer`], with the layer reading `reloader` on every load.
+/// Split out for the same reason: both the with-dir and no-home paths are then
+/// unit-testable.
+fn attach_live_script_layer(
+    registry: ProviderRegistry,
+    dir: Option<std::path::PathBuf>,
+    config: &Config,
+    reloader: std::sync::Arc<crate::daemon::config_reload::ConfigReloader>,
+) -> ProviderRegistry {
+    let Some(dir) = dir else {
+        return registry;
+    };
+    let layer = leviath_runtime::script_provider::ScriptProviderLayer::with_config_source(
+        dir,
+        script_provider_config_source(reloader),
+        leviath_runtime::script_provider::ScriptProviderLayer::build_executor(
+            config.request_timeout_secs,
+        ),
+    );
+    registry.with_script_layer(std::sync::Arc::new(layer))
+}
+
 /// Attach a [`ScriptProviderLayer`](leviath_runtime::script_provider::ScriptProviderLayer)
 /// over `dir` (the providers directory) when one is available; otherwise return
 /// the registry unchanged. Split out so both the with-dir and no-home paths are
@@ -184,19 +230,69 @@ fn attach_script_layer(
     let Some(dir) = dir else {
         return registry;
     };
-    let overrides = config
-        .model_providers
-        .iter()
-        .map(|(name, mp)| (name.clone(), script_provider_spec(mp)))
-        .collect();
     let layer = leviath_runtime::script_provider::ScriptProviderLayer::new(
         dir,
-        overrides,
+        script_provider_config(config).overrides,
         config.model_capabilities.clone(),
         config.request_timeout_secs,
         config.security.allow_env_vars.clone(),
     );
     registry.with_script_layer(std::sync::Arc::new(layer))
+}
+
+/// The [`ScriptProviderConfig`](leviath_runtime::script_provider::ScriptProviderConfig)
+/// a script-provider load reads out of `config`.
+pub fn script_provider_config(
+    config: &Config,
+) -> leviath_runtime::script_provider::ScriptProviderConfig {
+    leviath_runtime::script_provider::ScriptProviderConfig {
+        overrides: config
+            .model_providers
+            .iter()
+            .map(|(name, mp)| (name.clone(), script_provider_spec(mp)))
+            .collect(),
+        default_caps: config.model_capabilities.clone(),
+        request_timeout_secs: config.request_timeout_secs,
+        env_allowlist: std::sync::Arc::new(config.security.allow_env_vars.clone()),
+    }
+}
+
+/// A script-provider config source that follows `reloader`, so an edit to
+/// `[model_providers.<name>]` reaches the next provider load without a daemon
+/// restart - the same way an edit to the `.rhai` file beside it already did
+/// (issue #533).
+///
+/// Memoised on the identity of the config the reloader hands back, which is a
+/// requirement rather than an optimisation: the layer's cache compares its
+/// stored config by pointer, so deriving a fresh one per call would recompile
+/// every script on every lookup.
+pub fn script_provider_config_source(
+    reloader: std::sync::Arc<crate::daemon::config_reload::ConfigReloader>,
+) -> Box<
+    dyn Fn() -> std::sync::Arc<leviath_runtime::script_provider::ScriptProviderConfig>
+        + Send
+        + Sync,
+> {
+    use std::sync::{Arc, Mutex, PoisonError};
+    type Memo = Mutex<
+        Option<(
+            Arc<Config>,
+            Arc<leviath_runtime::script_provider::ScriptProviderConfig>,
+        )>,
+    >;
+    let memo: Memo = Mutex::new(None);
+    Box::new(move || {
+        let current = reloader.current();
+        let mut memo = memo.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((from, derived)) = memo.as_ref()
+            && Arc::ptr_eq(from, &current)
+        {
+            return derived.clone();
+        }
+        let derived = Arc::new(script_provider_config(&current));
+        *memo = Some((current, derived.clone()));
+        derived
+    })
 }
 
 /// Translate a CLI [`ModelProviderConfig`](crate::config::ModelProviderConfig)
@@ -377,6 +473,56 @@ mod tests {
         assert!(registry.has("ollama"));
     }
 
+    /// The memo is a requirement, not an optimisation: the layer compares its
+    /// cached config by pointer, so a source that derived a fresh one per call
+    /// would recompile every script on every lookup.
+    #[test]
+    fn the_script_config_source_is_stable_until_the_config_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+        let reloader = std::sync::Arc::new(crate::daemon::config_reload::ConfigReloader::new(
+            path.clone(),
+            Config::default(),
+        ));
+        let source = script_provider_config_source(reloader);
+
+        let first = source();
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &source()),
+            "an unchanged config must hand back the very same value"
+        );
+        assert!(first.overrides.is_empty());
+
+        let mut edited = Config::default();
+        edited.model_providers.insert(
+            "cerebras".to_string(),
+            crate::config::ModelProviderConfig {
+                base_url: Some("https://api.cerebras.ai/v1".to_string()),
+                ..Default::default()
+            },
+        );
+        edited.save_to_path_public(&path).unwrap();
+        // Strictly newer, so the reload is observable even in the same tick.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+
+        let after = source();
+        assert!(
+            !std::sync::Arc::ptr_eq(&first, &after),
+            "a change is a new value"
+        );
+        assert_eq!(
+            after.overrides["cerebras"].init_config["base_url"],
+            "https://api.cerebras.ai/v1"
+        );
+    }
+
     #[test]
     fn script_provider_spec_assembles_init_config() {
         let mut extra = std::collections::HashMap::new();
@@ -397,6 +543,22 @@ mod tests {
         assert_eq!(spec.init_config["base_url"], "http://api");
         assert_eq!(spec.init_config["api_key"], "k");
         assert_eq!(spec.init_config["region"], "us");
+    }
+
+    #[test]
+    fn attach_live_script_layer_without_home_is_a_noop() {
+        let registry = attach_live_script_layer(
+            ProviderRegistry::new(),
+            None,
+            &Config::default(),
+            std::sync::Arc::new(crate::daemon::config_reload::ConfigReloader::fixed(
+                Config::default(),
+            )),
+        );
+        assert!(
+            registry.resolvable_names().is_empty(),
+            "no providers directory means no script layer to enumerate"
+        );
     }
 
     #[test]

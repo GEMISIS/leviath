@@ -138,7 +138,7 @@ fn handle_event(state: &AppState, client: &reqwest::Client, event: WorldEvent) {
     {
         fire_completion_webhook(
             client,
-            &state.config.webhook,
+            &state.current_config().webhook,
             run_id,
             status,
             final_output.as_ref(),
@@ -458,7 +458,6 @@ mod tests {
     use leviath_core::interaction::InteractionRequest;
     use leviath_core::run_meta::WaitReason;
     use leviath_runtime::control_socket::{ControlClient, bind_control_listener, control_id};
-    use std::sync::Arc;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::sync::broadcast;
 
@@ -466,7 +465,7 @@ mod tests {
         let (tx, rx) = broadcast::channel(64);
         (
             AppState {
-                config: Arc::new(Config::default()),
+                config: crate::commands::serve::testutil::fixed_config(Config::default()),
                 event_tx: tx,
                 control,
                 mcp: crate::commands::serve::mcp::McpAdmin::default(),
