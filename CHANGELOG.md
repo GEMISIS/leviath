@@ -13,6 +13,22 @@ same list.
 
 ## Unreleased
 
+- Added: `[limits.max_concurrent_inferences_by_provider]` caps in-flight
+  requests to one provider across every model it serves, and
+  `[limits.max_concurrent_inferences_by_model]` overrides the global cap for one
+  model id. `[limits] max_concurrent_inferences` was the only concurrency knob
+  and it applied to every model's pool, so bounding spend on one metered
+  provider also throttled Anthropic and OpenAI on the same machine - while
+  `configuration.md` and `engine.md` both described a per-model pool entry that
+  had no configuration surface at all. The provider cap is a second, coarser
+  pool in front of the per-model one: a request takes a slot in both and holds
+  both until it finishes. A provider nobody caps has no pool of its own, so
+  nothing an existing install runs is bounded any more tightly than before.
+  The daemon's health reading carries provider-pool occupancy alongside the
+  model pools (`lev ps --json` under `health`, and the lane heartbeat in the
+  log), because a run parked on a full provider pool sees every model pool with
+  room in it.
+
 - Fixed: a WebSocket subscriber that drops a single pong is no longer
   disconnected. The server's liveness check had no deadline of its own - a ping
   left unanswered by the time the *next* ping was due meant a dead peer, so at

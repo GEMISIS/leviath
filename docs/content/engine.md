@@ -313,8 +313,15 @@ paused agents it holds.
 
 The world holds one pool per model that caps how many requests can be in flight at once. An agent
 takes a slot before calling the provider and holds it for the whole request. The default cap is
-`[limits] max_concurrent_inferences` in the [config](/docs/configuration); per-model limits
-override it.
+`[limits] max_concurrent_inferences` in the [config](/docs/configuration); a model named in
+`[limits.max_concurrent_inferences_by_model]` uses its own number instead.
+
+A provider named in `[limits.max_concurrent_inferences_by_provider]` gets a second, coarser pool in
+front of that one, bounding every model it serves together. A request takes a slot in both and
+holds both for its duration. It is for the metered API where the point of a small pool is bounding
+spend: capping one provider at 1 leaves every other provider's pool untouched, which lowering the
+global number cannot do. A provider that is not named there has no pool of its own - the global
+fallback is a per-model number and is not applied a second time per provider.
 
 Waiting for a slot is ordinary backpressure and is never treated as a failure, however long it
 lasts. Waiting for a provider that was never configured is different: that agent has nothing to
@@ -322,8 +329,12 @@ wait for, so it fails after `[limits] stall_timeout_secs` (60 seconds by default
 forever).
 
 This knob gets confused with two others. Fan-out's `max_workers` bounds how many *sub-agents* a
-stage spawns. `[rate_limits.<provider>]` shapes how fast requests are sent. The pool bounds how
-many run at once. All three apply independently.
+stage spawns. `[rate_limits.<provider>]` shapes how fast requests are sent. The pools bound how
+many run at once. All of them apply independently.
+
+The daemon's health reading carries each pool's occupancy, providers included - in `lev ps --json`
+under `health`, and in the lane heartbeat in the log - because a run parked on a full provider pool
+sees every model pool with room in it.
 
 ## The tool lane
 

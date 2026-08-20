@@ -138,6 +138,9 @@ pub struct LaneSnapshot {
     pub agents: AgentCounts,
     /// Inference-pool occupancy, one entry per model actually used.
     pub inference: Vec<crate::inference_pool::PoolOccupancy>,
+    /// Provider-pool occupancy, one entry per provider that has a configured
+    /// cap and has been used. Empty on an install that caps no provider.
+    pub inference_providers: Vec<crate::inference_pool::ProviderPoolOccupancy>,
     /// Tool batches holding lane capacity and running.
     pub tools_busy: usize,
     /// Tool batches waiting for lane capacity.
@@ -156,20 +159,30 @@ impl LaneSnapshot {
     #[must_use]
     pub fn is_under_pressure(&self) -> bool {
         self.tools_saturated
-            || (self.agents.active > 0 && self.inference.iter().any(|p| p.is_full()))
+            || (self.agents.active > 0
+                && (self.inference.iter().any(|p| p.is_full())
+                    || self.inference_providers.iter().any(|p| p.is_full())))
     }
 
-    /// The per-model inference occupancy, rendered for a log line.
+    /// The inference occupancy, rendered for a log line: the per-model pools,
+    /// then the per-provider pools when any are configured.
+    ///
+    /// A provider pool is named rather than folded in with the models it
+    /// bounds, because "every model has room and nothing is dispatching" is
+    /// exactly the shape a provider cap produces, and it is unreadable unless
+    /// the provider's own number is on the line.
     #[must_use]
     pub fn inference_summary(&self) -> String {
-        if self.inference.is_empty() {
+        let models = self.inference.iter().map(ToString::to_string);
+        let providers = self
+            .inference_providers
+            .iter()
+            .map(|p| format!("provider:{p}"));
+        let parts: Vec<String> = models.chain(providers).collect();
+        if parts.is_empty() {
             return "none".to_string();
         }
-        self.inference
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(" ")
+        parts.join(" ")
     }
 }
 
@@ -731,6 +744,11 @@ impl PipelineWorld {
         LaneSnapshot {
             agents,
             inference: self.world.resource::<InferenceStage>().pools.occupancy(),
+            inference_providers: self
+                .world
+                .resource::<InferenceStage>()
+                .pools
+                .provider_occupancy(),
             tools_busy: tools.busy(),
             tools_queued: tools.queued(),
             tools_parked: tools.parked(),

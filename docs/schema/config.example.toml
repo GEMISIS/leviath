@@ -54,6 +54,17 @@ inference_retry_base_ms = 1000
 max_tool_call_write_bytes = 2147483648
 max_run_write_bytes = 10737418240
 
+# Override the global cap for one model. Every model not listed uses
+# max_concurrent_inferences above.
+[limits.max_concurrent_inferences_by_model]
+"gpt-oss-120b" = 2
+
+# Bound one provider across every model it serves - a second cap on top of the
+# per-model pool, for a metered API where the point is bounding spend. Shapes
+# concurrency; [rate_limits.<provider>] shapes rate.
+[limits.max_concurrent_inferences_by_provider]
+cerebras = 1
+
 [security]
 allow_seed_commands = true
 allow_local_network = false

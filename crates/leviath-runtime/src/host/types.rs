@@ -200,6 +200,11 @@ pub struct DaemonHealth {
     pub agents: crate::world::AgentCounts,
     /// Inference-pool occupancy, one entry per model actually used.
     pub inference: Vec<crate::inference_pool::PoolOccupancy>,
+    /// Provider-pool occupancy, one entry per provider with a configured cap
+    /// that has been used. Empty unless `[limits]` caps a provider, which is
+    /// why it is `default`ed rather than required of an older client's payload.
+    #[serde(default)]
+    pub inference_providers: Vec<crate::inference_pool::ProviderPoolOccupancy>,
     /// Tool batches holding lane capacity and running.
     pub tools_busy: usize,
     /// Tool batches waiting for lane capacity.

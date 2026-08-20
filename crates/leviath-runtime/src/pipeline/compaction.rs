@@ -141,7 +141,7 @@ pub fn dispatch_compaction(
         let Some(provider) = providers.0.get(&config.provider) else {
             continue; // compaction provider not registered - skip, non-fatal
         };
-        let Some(permit) = stage.pools.try_acquire(&config.model) else {
+        let Some(permit) = stage.pools.try_acquire(&config.provider, &config.model) else {
             continue; // pool full - skip compaction this round
         };
 
@@ -441,7 +441,7 @@ pub fn dispatch_edge_compact(
                     );
                     return None;
                 };
-                let Some(permit) = stage.pools.try_acquire(&config.model) else {
+                let Some(permit) = stage.pools.try_acquire(&config.provider, &config.model) else {
                     tracing::warn!(
                         model = %config.model,
                         regions = ?pending.0,

@@ -242,7 +242,7 @@ mod tests {
                 .into_iter()
                 .map(|r| (r.to_string(), request()))
                 .collect(),
-            permit: pools.try_acquire("m").expect("free"),
+            permit: pools.try_acquire("p", "m").expect("free"),
         }
     }
 

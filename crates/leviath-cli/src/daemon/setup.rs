@@ -10,7 +10,6 @@ use std::sync::Arc;
 use leviath_providers::Tool;
 use leviath_runtime::ProviderRegistry;
 use leviath_runtime::host::WorldHost;
-use leviath_runtime::inference_pool::InferencePoolConfig;
 use leviath_runtime::interaction_hub::InteractionHub;
 use leviath_runtime::world::PipelineWorld;
 use tokio::runtime::Handle;
@@ -246,9 +245,9 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     let tool_service = Arc::new(CliToolService::new());
     // The configured global fallback bounds concurrent inference for any model
     // without its own per-model pool entry (defaults to a small cap so a fresh
-    // install can't fan out unbounded requests against provider rate limits).
-    let pool_config =
-        InferencePoolConfig::new().with_default(parts.config.limits.max_concurrent_inferences);
+    // install can't fan out unbounded requests against provider rate limits),
+    // alongside the per-model overrides and the per-provider caps.
+    let pool_config = parts.config.limits.inference_pools();
     let mut world = PipelineWorld::new(
         parts.providers,
         tool_service.clone(),
@@ -679,7 +678,7 @@ mod tests {
         let mut world = PipelineWorld::new(
             ProviderRegistry::new(),
             tool_service.clone(),
-            InferencePoolConfig::new(),
+            leviath_runtime::inference_pool::InferencePoolConfig::new(),
             1,
             None,
             Handle::current(),

@@ -6,6 +6,8 @@
 //! that drifts from the field it fills is invisible until someone reads a
 //! config that omits it.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 fn default_max_concurrent_inferences() -> Option<usize> {
@@ -72,8 +74,8 @@ fn default_inference_retry_base_ms() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LimitsConfig {
     /// Global fallback cap on concurrent inference requests for any model
-    /// without its own per-model pool entry. Defaults to `Some(8)`; omit or set
-    /// a large number to effectively unbound it.
+    /// without its own entry in `max_concurrent_inferences_by_model`. Defaults
+    /// to `Some(8)`; omit or set a large number to effectively unbound it.
     ///
     /// One physical bound sits behind this for *script* providers: each of
     /// their in-flight calls occupies a blocking-pool thread, and the daemon's
@@ -294,9 +296,65 @@ pub struct LimitsConfig {
     /// unset in code, written by `lev setup`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_run_write_bytes: Option<u64>,
+
+    /// Per-model overrides of `max_concurrent_inferences`, keyed by model id.
+    ///
+    /// ```toml
+    /// [limits.max_concurrent_inferences_by_model]
+    /// "gpt-oss-120b" = 2
+    /// ```
+    ///
+    /// A model listed here uses its own number; every other model uses the
+    /// global one. This is the per-model pool the engine has always had - it
+    /// simply had no way to be configured.
+    ///
+    /// A `BTreeMap` so the file this is written back to keeps its order.
+    ///
+    /// Read once at daemon start, so a change needs a daemon restart.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub max_concurrent_inferences_by_model: BTreeMap<String, usize>,
+
+    /// Caps on concurrent inference requests to one provider, across every
+    /// model it serves, keyed by provider name.
+    ///
+    /// ```toml
+    /// [limits.max_concurrent_inferences_by_provider]
+    /// cerebras = 1
+    /// ```
+    ///
+    /// A *second*, coarser bound than the per-model pool, not a replacement for
+    /// it: a request needs a slot in both. It exists because the per-model cap
+    /// cannot express "spend no more than one request at a time at this metered
+    /// third-party API", and because lowering the global number to get that
+    /// would throttle Anthropic and OpenAI on the same machine too.
+    ///
+    /// Distinct from `[rate_limits.<provider>]`, which shapes how *fast*
+    /// requests are sent. This bounds how many are in flight at once.
+    ///
+    /// A provider absent from here has no pool of its own. The global fallback
+    /// is deliberately not applied per provider: it is a per-model number, and
+    /// applying it twice would tighten every install that never asked for it.
+    ///
+    /// Read once at daemon start, so a change needs a daemon restart.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub max_concurrent_inferences_by_provider: BTreeMap<String, usize>,
 }
 
 impl LimitsConfig {
+    /// The inference pools these limits describe, for the engine: the global
+    /// fallback, the per-model overrides, and the per-provider caps.
+    pub fn inference_pools(&self) -> leviath_runtime::inference_pool::InferencePoolConfig {
+        let mut config = leviath_runtime::inference_pool::InferencePoolConfig::new()
+            .with_default(self.max_concurrent_inferences);
+        for (model, limit) in &self.max_concurrent_inferences_by_model {
+            config.set_limit(model, *limit);
+        }
+        for (provider, limit) in &self.max_concurrent_inferences_by_provider {
+            config.set_provider_limit(provider, *limit);
+        }
+        config
+    }
+
     /// The write ceilings in effect, for the engine.
     pub fn write_limits(&self) -> leviath_core::write_limits::WriteLimits {
         leviath_core::write_limits::WriteLimits {
@@ -324,6 +382,8 @@ impl Default for LimitsConfig {
             interaction_timeout_secs: default_interaction_timeout_secs(),
             inference_retry_attempts: default_inference_retry_attempts(),
             inference_retry_base_ms: default_inference_retry_base_ms(),
+            max_concurrent_inferences_by_model: BTreeMap::new(),
+            max_concurrent_inferences_by_provider: BTreeMap::new(),
             // Deliberately `None` here and concrete in `lev setup`: the code
             // imposes no ceiling on a user who never opened the config, and a
             // fresh install gets a number written where it can be seen and

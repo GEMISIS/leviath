@@ -171,6 +171,7 @@ impl WorldHost {
         DaemonHealth {
             agents: snapshot.agents,
             inference: snapshot.inference,
+            inference_providers: snapshot.inference_providers,
             tools_busy: snapshot.tools_busy,
             tools_queued: snapshot.tools_queued,
             tools_parked: snapshot.tools_parked,

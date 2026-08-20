@@ -394,7 +394,7 @@ pub fn dispatch_inference(
                     stall(StallReason::ProviderMissing);
                     return;
                 };
-                let Some(permit) = stage.pools.try_acquire(&si.model) else {
+                let Some(permit) = stage.pools.try_acquire(&si.provider_name, &si.model) else {
                     // Every in-flight call on this model holds a permit; if
                     // this repeats for minutes, one of them is stuck (see the
                     // default request timeout in leviath-providers).

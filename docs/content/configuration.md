@@ -150,6 +150,12 @@ inference_retry_attempts  = 4    # tries per inference, the first one included
 inference_retry_base_ms   = 1000 # first retry wait for an ordinary blip; it doubles
 max_tool_call_write_bytes = 2147483648   # 2 GiB; delete the line for no limit
 max_run_write_bytes       = 10737418240  # 10 GiB; delete the line for no limit
+
+[limits.max_concurrent_inferences_by_model]
+"gpt-oss-120b" = 2               # this model's pool; others use the number above
+
+[limits.max_concurrent_inferences_by_provider]
+cerebras = 1                     # every model this provider serves, together
 ```
 
 | Key | Default | Notes |
@@ -171,12 +177,33 @@ max_run_write_bytes       = 10737418240  # 10 GiB; delete the line for no limit
 | `inference_retry_base_ms` | `1000` | First retry wait for an ordinary blip, doubling each retry. See below |
 | `max_tool_call_write_bytes` | unset | Most one tool call may write. See below |
 | `max_run_write_bytes` | unset | Most a whole run may write. See below |
+| `max_concurrent_inferences_by_model` | empty | Per-model overrides of the cap above. See below |
+| `max_concurrent_inferences_by_provider` | empty | Per-provider caps across every model a provider serves. See below |
 
-Eight of those need more than a table cell.
+Nine of those need more than a table cell.
 
 **`exact_token_counting`** measures each assembled request before sending it and refuses one that
 would overflow the window. On providers with a remote counting endpoint that costs a network round
 trip per inference, so it is off by default.
+
+**`max_concurrent_inferences_by_model`** and **`max_concurrent_inferences_by_provider`** are the
+two ways to say "not this one". The first replaces the global cap for one model id. The second adds
+a *separate*, coarser pool in front of it, bounding every model one provider serves together - a
+request needs a slot in both, and holds both until it finishes:
+
+```toml
+[limits]
+max_concurrent_inferences = 8
+
+[limits.max_concurrent_inferences_by_provider]
+cerebras = 1
+```
+
+That is one request at a time to `cerebras`, whatever it is serving, while every other provider
+keeps the eight. A provider not named here has no pool of its own; the global number is a per-model
+one and is not applied per provider as well. See
+[inference pools](/docs/engine#inference-pools), and note that this bounds *concurrency* while
+[`[rate_limits.<provider>]`](#rate_limitsprovider) bounds *rate*.
 
 **`stall_timeout_secs`** only fires for something the runtime cannot resolve on its own. Today that
 means a stage whose provider is not configured: the run is ready to work and has nowhere to send the
@@ -510,8 +537,10 @@ requests_per_minute = 50
 tokens_per_minute   = 40000
 ```
 
-This shapes request *rate*. `[limits] max_concurrent_inferences` bounds *concurrency*. Both apply.
-Script providers configure theirs under `[model_providers.<name>.rate_limit]` instead.
+This shapes request *rate*. `[limits] max_concurrent_inferences` and
+`[limits.max_concurrent_inferences_by_provider]` bound *concurrency*. Both apply. Script providers
+configure their rate limit under `[model_providers.<name>.rate_limit]` instead; their concurrency
+cap goes in `[limits.max_concurrent_inferences_by_provider]` with everyone else's.
 
 ## Keys nothing reads
 

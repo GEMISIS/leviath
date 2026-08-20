@@ -195,6 +195,22 @@
           "type": "integer",
           "minimum": 0,
           "description": "Most bytes a whole run may write to disk. Absent is unlimited. Catches what a per-call ceiling cannot: several individually plausible calls that together fill a disk. Same defaulting as max_tool_call_write_bytes."
+        },
+        "max_concurrent_inferences_by_model": {
+          "type": "object",
+          "description": "Per-model overrides of max_concurrent_inferences, keyed by model id. A model listed here uses its own number; every other model uses the global one.",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "max_concurrent_inferences_by_provider": {
+          "type": "object",
+          "description": "Caps on in-flight requests to one provider across every model it serves, keyed by provider name. A second, coarser bound than the per-model pool, not a replacement: a request needs a slot in both. Distinct from [rate_limits.<provider>], which shapes how fast requests are sent rather than how many run at once. A provider absent here has no pool of its own; the global fallback is not applied per provider.",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       }
     },
