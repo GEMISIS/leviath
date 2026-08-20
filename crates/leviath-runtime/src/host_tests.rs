@@ -545,6 +545,50 @@ async fn a_stage_boundary_is_crossed_without_waiting_for_the_redrive() {
     );
 }
 
+/// A host whose *provider* is capped rather than its model, so the only thing
+/// a second agent can be waiting on is the provider's pool.
+fn host_with_capped_provider(limit: usize) -> WorldHost {
+    let mut registry = crate::providers::ProviderRegistry::new();
+    registry.register("script".to_string(), Arc::new(Hangs { hang: true }));
+    let mut pools = InferencePoolConfig::new();
+    pools.set_provider_limit("script", limit);
+    WorldHost::new(PipelineWorld::new(
+        registry,
+        Arc::new(NoTools),
+        pools,
+        1,
+        None,
+        Handle::current(),
+    ))
+}
+
+/// A run parked on a full provider pool sees every model pool with room in it,
+/// so the heartbeat has to name the provider's own number or the line reads as
+/// "waiting on nothing" (issue #522).
+#[tokio::test]
+async fn the_heartbeat_names_a_full_provider_pool() {
+    leviath_testkit::with_tracing(|| async {
+        let mut host = host_with_capped_provider(1);
+        spawn(&mut host, "run-a", "agent-a");
+        spawn(&mut host, "run-b", "agent-b");
+        host.world_mut().run_to_fixed_point();
+
+        let busy = host.world_mut().lane_snapshot();
+        assert_eq!(busy.agents.active, 2);
+        assert_eq!(
+            busy.inference_summary(),
+            "m=1/unbounded provider:script=1/1",
+            "the model pool has room; the provider's is what everything is behind"
+        );
+        assert!(
+            busy.is_under_pressure(),
+            "a full provider pool with active agents is worth reporting"
+        );
+        host.log_lane_pressure(&busy);
+    })
+    .await;
+}
+
 /// The heartbeat's two levels. Under pressure it is worth an `info` line;
 /// idle it must not be, or a healthy daemon spams the log forever.
 #[tokio::test]

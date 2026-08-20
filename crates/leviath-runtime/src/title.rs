@@ -258,7 +258,7 @@ pub fn dispatch_title(
             commands.entity(entity).remove::<PendingTitle>();
             continue;
         };
-        let Some(permit) = stage.pools.try_acquire(&model) else {
+        let Some(permit) = stage.pools.try_acquire(&provider_name, &model) else {
             continue; // pool full - retry next tick
         };
 
@@ -526,7 +526,7 @@ mod tests {
                 provider_name: "mock".to_string(),
                 model: "m".to_string(),
                 request: title_request("task", "mock", "m"),
-                permit: pools.try_acquire("m").expect("free"),
+                permit: pools.try_acquire("p", "m").expect("free"),
             },
             std::time::Duration::from_millis(5),
             tx,
@@ -710,7 +710,7 @@ mod tests {
         let mut cfg = crate::inference_pool::InferencePoolConfig::new();
         cfg.set_limit("m", 1);
         let pools = crate::inference_pool::InferencePools::new(cfg);
-        let held = pools.try_acquire("m").unwrap();
+        let held = pools.try_acquire("p", "m").unwrap();
         let (mut world, _title_rx) = build_world(Ok("t"), pools);
         world.insert_resource(TitleSettings(config(None, None)));
         let e = world.spawn((metadata(Some("mock/m")), PendingTitle)).id();

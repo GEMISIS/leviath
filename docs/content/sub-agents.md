@@ -161,12 +161,13 @@ in `lev validate` and not as a fan-out wider than the manifest appeared to allow
 
 ## `max_workers` is not the knob you might think
 
-Three different settings limit concurrency, and they are easy to confuse. All three apply at once:
+Four different settings limit concurrency, and they are easy to confuse. All four apply at once:
 
 | Setting | Bounds | Scope |
 |---|---|---|
 | `max_workers` | Sub-agents this stage spawns | One fan-out stage |
 | `[limits] max_concurrent_inferences` | Model requests in flight | Per model, daemon-wide |
+| `[limits.max_concurrent_inferences_by_provider]` | Model requests in flight | Per provider, daemon-wide |
 | `[rate_limits.<provider>]` | Requests per minute | Per provider |
 
 So `max_workers = 30` (the default) starts up to thirty sub-agents, but if the model pool only allows

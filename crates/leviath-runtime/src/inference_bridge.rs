@@ -409,7 +409,7 @@ mod tests {
                 .expect("a small literal index is always a valid entity id"),
             provider,
             request: test_request(),
-            permit: pools.try_acquire("m").expect("free pool"),
+            permit: pools.try_acquire("p", "m").expect("free pool"),
             exact_token_counting: false,
         }
     }
@@ -422,8 +422,8 @@ mod tests {
         let mut cfg = InferencePoolConfig::new();
         cfg.set_limit("m", 1);
         let pools = InferencePools::new(cfg);
-        let permit = pools.try_acquire("m").expect("free pool");
-        assert!(pools.try_acquire("m").is_none(), "pool should be full");
+        let permit = pools.try_acquire("p", "m").expect("free pool");
+        assert!(pools.try_acquire("p", "m").is_none(), "pool should be full");
 
         // A provider that never answers - the stalled-call case a cancel exists
         // to escape.
@@ -461,7 +461,7 @@ mod tests {
             .expect("the cancel ended the job")
             .unwrap();
         assert!(
-            pools.try_acquire("m").is_some(),
+            pools.try_acquire("p", "m").is_some(),
             "the pool slot is free for the next agent"
         );
         assert!(
@@ -476,8 +476,8 @@ mod tests {
         let mut cfg = InferencePoolConfig::new();
         cfg.set_limit("m", 1);
         let pools = InferencePools::new(cfg);
-        let permit = pools.try_acquire("m").expect("free pool");
-        assert!(pools.try_acquire("m").is_none(), "pool should be full");
+        let permit = pools.try_acquire("p", "m").expect("free pool");
+        assert!(pools.try_acquire("p", "m").is_none(), "pool should be full");
 
         let provider = Arc::new(Scripted {
             steps: std::sync::Mutex::new(vec![Step::Hang].into()),
@@ -512,7 +512,7 @@ mod tests {
         assert!(err.to_string().contains("job timeout"), "got: {err}");
         // …and its pool slot is free again for the next agent.
         assert!(
-            pools.try_acquire("m").is_some(),
+            pools.try_acquire("p", "m").is_some(),
             "the slot must be released after the timeout"
         );
     }
@@ -594,7 +594,7 @@ mod tests {
                 .expect("a small literal index is always a valid entity id"),
             provider,
             request: test_request(), // max_tokens: 100
-            permit: pools.try_acquire("m").expect("free pool"),
+            permit: pools.try_acquire("p", "m").expect("free pool"),
             exact_token_counting: exact,
         }
     }

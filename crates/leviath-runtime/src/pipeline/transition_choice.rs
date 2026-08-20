@@ -165,7 +165,7 @@ pub fn dispatch_transition_choice(
                 .insert(note_stall(stalled, StallReason::ProviderMissing, now));
             continue; // provider not registered - retry later
         };
-        let Some(permit) = stage.pools.try_acquire(&si.model) else {
+        let Some(permit) = stage.pools.try_acquire(&si.provider_name, &si.model) else {
             commands
                 .entity(entity)
                 .insert(note_stall(stalled, StallReason::PoolFull, now));

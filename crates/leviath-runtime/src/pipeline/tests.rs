@@ -532,7 +532,7 @@ async fn dispatch_skips_when_pool_full() {
     let mut cfg = InferencePoolConfig::new();
     cfg.set_limit("m", 1);
     let pools = InferencePools::new(cfg);
-    let _held = pools.try_acquire("m").unwrap(); // occupy the only slot
+    let _held = pools.try_acquire("p", "m").unwrap(); // occupy the only slot
     let (mut world, _rx) = build_world(pools);
     let e = world
         .spawn((

@@ -132,7 +132,7 @@ pub fn dispatch_content_summary(
             commands.entity(entity).remove::<PendingContentSummary>();
             continue;
         };
-        let Some(permit) = stage.pools.try_acquire(&config.model) else {
+        let Some(permit) = stage.pools.try_acquire(&config.provider, &config.model) else {
             continue; // pool full - retry next tick (keep the pending marker)
         };
         let requests = pending

@@ -1960,6 +1960,37 @@ some_custom_thing = \"forwarded to the script\"
         assert_eq!(Config::default().limits.max_concurrent_inferences, Some(8));
     }
 
+    /// The `[limits]` tables reach the engine's pools: the global fallback for
+    /// an unlisted model, a per-model override, and a per-provider cap that is
+    /// deliberately *not* filled in from the global number (issue #522).
+    #[test]
+    fn inference_pools_carries_every_limits_table_through() {
+        let mut limits = LimitsConfig {
+            max_concurrent_inferences: Some(8),
+            ..Default::default()
+        };
+        limits
+            .max_concurrent_inferences_by_model
+            .insert("gpt-oss-120b".to_string(), 2);
+        limits
+            .max_concurrent_inferences_by_provider
+            .insert("cerebras".to_string(), 1);
+
+        let pools = limits.inference_pools();
+        assert_eq!(pools.limit_for("gpt-oss-120b"), Some(2), "per-model wins");
+        assert_eq!(
+            pools.limit_for("claude-sonnet-5"),
+            Some(8),
+            "an unlisted model takes the global fallback"
+        );
+        assert_eq!(pools.provider_limit_for("cerebras"), Some(1));
+        assert_eq!(
+            pools.provider_limit_for("anthropic"),
+            None,
+            "a provider nobody capped has no pool of its own"
+        );
+    }
+
     /// A config written before the field existed still gets the hour, and an
     /// explicit `0` still means "wait for a person however long it takes".
     #[test]
@@ -3502,6 +3533,14 @@ enabled = false
                 interaction_timeout_secs: 120,
                 inference_retry_attempts: 6,
                 inference_retry_base_ms: 250,
+                max_concurrent_inferences_by_model: std::collections::BTreeMap::from([(
+                    "gpt-oss-120b".to_string(),
+                    2,
+                )]),
+                max_concurrent_inferences_by_provider: std::collections::BTreeMap::from([(
+                    "cerebras".to_string(),
+                    1,
+                )]),
             },
             batch_tool_hint: true,
             shell_hint: false,
@@ -3562,6 +3601,20 @@ enabled = false
 
         assert_eq!(deserialized.default_provider, "anthropic");
         assert_eq!(deserialized.limits.max_concurrent_inferences, Some(4));
+        assert_eq!(
+            deserialized
+                .limits
+                .max_concurrent_inferences_by_model
+                .get("gpt-oss-120b"),
+            Some(&2)
+        );
+        assert_eq!(
+            deserialized
+                .limits
+                .max_concurrent_inferences_by_provider
+                .get("cerebras"),
+            Some(&1)
+        );
         assert_eq!(deserialized.limits.max_concurrent_tools, 3);
         assert_eq!(deserialized.limits.script_shell_timeout_secs, 45);
         assert_eq!(deserialized.limits.dead_cycles_before_relief, 6);
