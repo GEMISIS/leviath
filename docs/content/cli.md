@@ -173,6 +173,7 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 | warning | `compact-summarizes-deliverable` | A `compact` edge would hand a `required` region to the summarizer. See below |
 | warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `[read_paths]` shape. |
 | warning | `dead-end-possible` | Every route out of a stage can run out of budget. See below |
+| warning | `fanout-no-escape` | A `fan_out` stage with no `error` or `dead_end` edge, so an unusable split degrades to an empty fan-out. See [sub-agents](/docs/sub-agents) |
 | warning | `read-paths-not-granted` | The blueprint declares `[read_paths]` your `config.toml` does not grant. See below |
 | warning | `read-paths-grant-invalid` | A `read_paths` grant in your own config will not compile. It is a hard spawn error, named here first. |
 | note | `holds-under-yolo` | A checkpoint that still stops an unattended run for a person. See below |
