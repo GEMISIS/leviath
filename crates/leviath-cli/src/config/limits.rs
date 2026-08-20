@@ -340,17 +340,63 @@ pub struct LimitsConfig {
     pub max_concurrent_inferences_by_provider: BTreeMap<String, usize>,
 }
 
+/// A pool of `0` would take no request ever, so every run needing it parks
+/// for the life of the daemon as *ordinary backpressure* - never failed, never
+/// reported as an error, because waiting for a busy pool is exactly what the
+/// engine is supposed to do. A wedge with no message is the worst answer
+/// available, so it is clamped to one and said out loud.
+///
+/// One rather than unbounded, deliberately: someone writing `0` in a table of
+/// ceilings meant "as little as possible", and the documented way to say "no
+/// limit" for these keys is to omit them. The schema declares `minimum: 1`;
+/// this is what enforces it, since nothing validates config values against the
+/// schema at run time.
+///
+/// Mirrors the tool lane, which clamps its own width the same way
+/// (`ToolLane::new`).
+fn usable_pool_limit(limit: usize, what: &str) -> usize {
+    if limit == 0 {
+        tracing::warn!(
+            limit = %what,
+            "a concurrency limit of 0 would park every request on this pool \
+             forever, so it is being treated as 1; omit the key entirely for \
+             no limit"
+        );
+        return 1;
+    }
+    limit
+}
+
 impl LimitsConfig {
     /// The inference pools these limits describe, for the engine: the global
     /// fallback, the per-model overrides, and the per-provider caps.
+    ///
+    /// A `0` anywhere here is read as `1`: a pool of nothing would park every
+    /// request on it for the life of the daemon, since waiting for a full pool
+    /// is backpressure the engine never fails. Deleting the key is how a limit
+    /// is lifted.
     pub fn inference_pools(&self) -> leviath_runtime::inference_pool::InferencePoolConfig {
-        let mut config = leviath_runtime::inference_pool::InferencePoolConfig::new()
-            .with_default(self.max_concurrent_inferences);
+        let mut config = leviath_runtime::inference_pool::InferencePoolConfig::new().with_default(
+            self.max_concurrent_inferences
+                .map(|limit| usable_pool_limit(limit, "[limits] max_concurrent_inferences")),
+        );
         for (model, limit) in &self.max_concurrent_inferences_by_model {
-            config.set_limit(model, *limit);
+            config.set_limit(
+                model,
+                usable_pool_limit(
+                    *limit,
+                    &format!("[limits.max_concurrent_inferences_by_model] {model}"),
+                ),
+            );
         }
         for (provider, limit) in &self.max_concurrent_inferences_by_provider {
-            config.set_provider_limit(provider, *limit);
+            config.set_provider_limit(
+                provider,
+                usable_pool_limit(
+                    *limit,
+                    &format!("[limits.max_concurrent_inferences_by_provider] {provider}"),
+                ),
+            );
         }
         config
     }

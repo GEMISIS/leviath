@@ -205,6 +205,11 @@ one and is not applied per provider as well. See
 [inference pools](/docs/engine#inference-pools), and note that this bounds *concurrency* while
 [`[rate_limits.<provider>]`](#rate_limitsprovider) bounds *rate*.
 
+`0` is not a way to say "no limit" in any of the three, and not a way to disable a provider either:
+a pool of nothing would park every request on it for the life of the daemon, and waiting for a full
+pool is ordinary backpressure that is never failed or reported. A `0` is therefore read as `1` and
+said so in the log. To lift a limit, delete the key.
+
 **`stall_timeout_secs`** only fires for something the runtime cannot resolve on its own. Today that
 means a stage whose provider is not configured: the run is ready to work and has nowhere to send the
 request. Waiting for a busy model's pool is ordinary backpressure and is never failed, however long

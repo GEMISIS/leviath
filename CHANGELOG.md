@@ -13,6 +13,16 @@ same list.
 
 ## Unreleased
 
+- Fixed: an inference-pool limit of `0` no longer parks every affected run for
+  the life of the daemon. Waiting for a full pool is ordinary backpressure and
+  is deliberately never failed or reported, so a pool of nothing was a wedge
+  with nothing said about it - and the schema's `minimum: 1` had nothing
+  enforcing it, since config values are not validated against the schema at run
+  time. `[limits] max_concurrent_inferences` and both of its per-model and
+  per-provider tables now read a `0` as `1` and say so in the log, matching the
+  tool lane, which has always clamped its own width. To lift a limit, delete
+  the key.
+
 - Fixed: `lev models list --provider <name>` now reaches a Rhai script
   provider. `ProviderRegistry::provider_names()` enumerates natively registered
   providers only, and the script layer is consulted by `get()`, never by that -

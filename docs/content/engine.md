@@ -323,6 +323,10 @@ spend: capping one provider at 1 leaves every other provider's pool untouched, w
 global number cannot do. A provider that is not named there has no pool of its own - the global
 fallback is a per-model number and is not applied a second time per provider.
 
+The smallest a pool can be is 1. A configured `0` is read as `1`, since a pool of nothing would
+park every request on it forever under the backpressure rule below - which is exactly the shape
+nothing ever reports.
+
 Waiting for a slot is ordinary backpressure and is never treated as a failure, however long it
 lasts. Waiting for a provider that was never configured is different: that agent has nothing to
 wait for, so it fails after `[limits] stall_timeout_secs` (60 seconds by default; `0` waits
