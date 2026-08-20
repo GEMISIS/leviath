@@ -897,9 +897,9 @@ impl PipelineWorld {
         else {
             return;
         };
-        let Some(stage) = self.world.get_resource::<crate::pipeline::InferenceStage>() else {
-            return;
-        };
+        // Installed unconditionally by `PipelineWorld::new`, which is the only
+        // way to get a world that can reach this at all.
+        let stage = self.world.resource::<crate::pipeline::InferenceStage>();
         let channel = match held.lane {
             crate::pipeline::HeldLane::Stage => &stage.outcomes,
             crate::pipeline::HeldLane::TransitionChoice => &stage.transition_outcomes,
@@ -2092,6 +2092,50 @@ mod tests {
                 .response,
             "t1",
             "the very response that landed during the pause is the one used"
+        );
+    }
+
+    /// A held *routing* outcome goes back to the routing collector, not the
+    /// turn collector. The two lanes are separate on purpose - a stage-boundary
+    /// decision is not an agent turn - so replaying down the wrong one would
+    /// feed a routing answer into the run as if the model had spoken.
+    #[tokio::test]
+    async fn resume_replays_a_held_routing_call_on_its_own_lane() {
+        let mut world = build_world(registry_with(vec![]));
+        let e = spawn(&mut world);
+        assert!(world.pause(e));
+        world
+            .world_mut()
+            .entity_mut(e.entity())
+            .insert(crate::pipeline::HeldInference {
+                outcome: crate::inference_bridge::InferenceOutcome {
+                    entity: e.entity(),
+                    latency: std::time::Duration::ZERO,
+                    result: Ok(text("t1")),
+                },
+                lane: crate::pipeline::HeldLane::TransitionChoice,
+            });
+
+        assert!(world.resume(e));
+
+        assert!(
+            world
+                .world()
+                .get::<crate::pipeline::HeldInference>(e.entity())
+                .is_none(),
+            "the outcome is handed back rather than left parked"
+        );
+        // The turn lane must not have received it. Nothing consumed a turn, so
+        // the agent has still taken none.
+        world.tick();
+        assert_eq!(
+            world
+                .world()
+                .get::<AgentState>(e.entity())
+                .unwrap()
+                .iteration,
+            0,
+            "a routing answer replayed on the turn lane would have counted as a turn"
         );
     }
 

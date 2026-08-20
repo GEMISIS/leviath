@@ -897,7 +897,9 @@ fn collect_holds_a_failure_that_lands_on_a_paused_agent() {
 #[test]
 fn collect_parks_a_run_whose_provider_is_unreachable() {
     let (mut world, tx) = world_with_results();
-    let e = world.spawn((agent_state(), AwaitingInference)).id();
+    let e = world
+        .spawn((agent_state(), AwaitingInference, StageIoBuffer::default()))
+        .id();
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
@@ -934,6 +936,37 @@ fn collect_parks_a_run_whose_provider_is_unreachable() {
         world.get::<ResolveTransition>(e).is_none(),
         "parking returns before the transition logic, so no error edge is taken"
     );
+    // The stage log says it parked, not that it failed - that log is what the
+    // run's own transcript shows a reader afterwards.
+    let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
+    assert!(
+        logs.iter().any(|(_, l)| l.starts_with("[paused]")),
+        "the stage log records a park: {logs:?}"
+    );
+}
+
+/// The same park with no stage log attached. Not every agent carries a
+/// `StageIoBuffer`, and the park must not depend on one being there.
+#[test]
+fn a_run_with_no_stage_log_still_parks_on_an_unreachable_provider() {
+    let (mut world, tx) = world_with_results();
+    let e = world.spawn((agent_state(), AwaitingInference)).id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(leviath_providers::ProviderError::RequestFailed(
+            "reading response body: error decoding response body".to_string(),
+        )),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Paused
+    );
+    assert!(world.get::<crate::pipeline::PausedForSetup>(e).is_some());
 }
 
 #[test]
@@ -11375,6 +11408,53 @@ fn run_collect_transition(world: &mut World) {
     let mut s = Schedule::default();
     s.add_systems(collect_transition_choice);
     s.run(world);
+}
+
+/// A pause landing during a stage-boundary routing call gets the same
+/// protection as one landing during an ordinary turn. Every arm below the guard
+/// rewrites the status, so letting the outcome through would either route a
+/// paused run into its next stage or bury the pause under an error.
+#[test]
+fn collect_choice_holds_an_outcome_that_lands_on_a_paused_agent() {
+    let (mut world, tx) = world_with_transition_results();
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        stage_named("b", None, false, None),
+    ]);
+    let e = spawn_responding_agent(
+        &mut world,
+        bp,
+        vec![si("m0"), si("m1")],
+        vec![plain_edge("b")],
+    );
+    world.get_mut::<AgentState>(e).unwrap().status = AgentStatus::Paused;
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Ok(resp("b")),
+    })
+    .unwrap();
+
+    run_collect_transition(&mut world);
+
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Paused
+    );
+    assert_eq!(
+        world.get::<StageCursor>(e).unwrap().index,
+        0,
+        "a paused run does not move to the stage the routing call chose"
+    );
+    assert!(world.get::<AwaitingTransitionResponse>(e).is_some());
+    let held = world
+        .get::<HeldInference>(e)
+        .expect("the outcome is parked");
+    assert_eq!(
+        held.lane,
+        HeldLane::TransitionChoice,
+        "the lane is recorded so resume replays it to the right collector"
+    );
 }
 
 #[test]
