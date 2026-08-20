@@ -126,7 +126,11 @@ clap = { version = "4.6", features = ["derive"] }
 # `rustls-tls-native-roots` became `rustls` + `rustls-native-certs`, and
 # `macos-system-configuration` became `system-proxy`. `form` and `query`, which
 # used to be always-on, are now opt-in.
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "rustls-native-certs", "charset", "http2", "system-proxy", "blocking", "form", "query"] }
+# `gzip`/`brotli`/`zstd` are not optional niceties: without them reqwest sends no
+# `Accept-Encoding`, but a server can still answer compressed, and `Response::text`
+# then decodes the compressed bytes lossily into a page of replacement characters
+# that `web_fetch` hands to the model as if it were the article.
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "rustls-native-certs", "charset", "http2", "system-proxy", "blocking", "form", "query", "gzip", "brotli", "zstd"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # OpenTelemetry export ([observability] config, issue #73). OTLP goes over

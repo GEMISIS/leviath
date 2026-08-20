@@ -13,6 +13,31 @@ same list.
 
 ## Unreleased
 
+- Fixed: a Rhai script no longer builds a malformed request body when the
+  prompt contains an invisible character. Rhai's own standard library registers
+  `to_json(&mut Map)`, and an object map is exactly what a provider script
+  passes, so that more specific signature beat Leviath's serde encoder and every
+  request body went through Rhai's hand-rolled formatter instead. That formatter
+  writes strings with Rust's `Debug`, which spells a narrow no-break space
+  `\u{202f}`. JSON has no such escape, so a single invisible character anywhere
+  in the prompt made the whole request unparseable and the API answered `HTTP
+  400 ... invalid escape at line 1 column N`. The failure looked like a provider
+  outage rather than a client bug: runs worked for several turns, then every one
+  of them died at once, parent and fan-out workers together, as soon as a model
+  reply or a fetched page carried a narrow no-break space, a zero-width space, a
+  BOM, a bidi mark or a stray control byte. Printable characters were unaffected,
+  which is why quotes, dashes and box glyphs had passed for months. Both script
+  engines now register the encoder for an object map explicitly, so `to_json`
+  means serde in a provider script and in a tool script alike.
+- Fixed: `web_fetch` no longer returns a page of replacement characters when a
+  server answers compressed. The HTTP stack was built without `gzip`, `brotli`
+  and `zstd`, so it advertised no encoding, and a server that compressed anyway
+  had its bytes decoded lossily into mojibake that reached the model as though
+  it were the article. The three decoders are enabled, and a body that still
+  decodes mostly to replacement characters is refused with a message that says
+  so rather than handed on. The declared-content-type check was already there;
+  this catches the case that declares `text/html` and is not text.
+
 - Fixed: a run's `--model` override now covers fan-out workers and sub-agents,
   not just the parent blueprint. Both spawn paths passed `model: None` while
   carrying every other field of the parent down - workdir, `--yolo`,
