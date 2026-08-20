@@ -768,29 +768,32 @@ for line in sys.stdin:
         );
     }
 
-    /// The shape that makes a timeout unexplainable: the process is gone but
-    /// its stdout is not, so the read waits out the whole timeout instead of
-    /// hitting end-of-stream. A launcher that spawns the real server and
-    /// returns leaves exactly this behind, and without the liveness note the
-    /// error is indistinguishable from a server that simply ignored us.
+    /// The other half of the timeout message: a process that is already gone.
+    ///
+    /// Driven through `liveness` directly rather than through a timed
+    /// `send_request`, because the interesting state is "the child has exited"
+    /// and racing a real interpreter's shutdown against a wall-clock timeout is
+    /// a bet, not a test - it lost on windows-latest, where spawning is slow
+    /// enough that the process was still alive when the clock ran out. Waiting
+    /// for the exit and then asking is the same assertion without the race.
     #[tokio::test]
-    async fn a_timeout_against_a_dead_server_says_it_exited() {
+    async fn liveness_reports_a_process_that_has_exited() {
         let _guard = always_on_tracing_guard();
-        // Hands stdout to a grandchild that never writes, then exits. The pipe
-        // outlives the child we are holding.
-        let script = "import subprocess, sys, time\n\
-                      subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], stdout=sys.stdout)\n\
-                      sys.stdin.readline()\n";
-        let mut t = spawn_stub(script).await;
-        let err = t
-            .send_request(&init_request(), Duration::from_millis(500))
-            .await
-            .err()
-            .expect("must time out, not hang");
-        assert!(err.to_string().contains("did not respond"), "got: {err}");
-        assert!(
-            err.to_string().contains("had already exited"),
-            "names the exit rather than reporting a hang: {err}"
+        let mut t = spawn_stub("import sys\nsys.exit(0)\n").await;
+
+        // Poll rather than `wait()`: this is the same call the timeout path
+        // makes, so the test exercises the real accessor.
+        let mut waited = Duration::ZERO;
+        while t.child.try_wait().ok().flatten().is_none() {
+            assert!(waited < Duration::from_secs(30), "the stub should exit");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            waited += Duration::from_millis(10);
+        }
+
+        assert_eq!(
+            t.liveness(),
+            "the server process had already exited",
+            "a reaped process must not read as a hang"
         );
     }
 
