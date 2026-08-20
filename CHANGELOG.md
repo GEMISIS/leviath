@@ -13,6 +13,35 @@ same list.
 
 ## Unreleased
 
+- Fixed: `web_fetch` now retries a transport failure instead of losing the page
+  on the first one. A single `send()` was the whole story, so one dropped
+  connection or protocol fault ended that source permanently, and the
+  diagnostic the agent read said "the page may be too large (>1MB) or the
+  request was blocked" for every cause alike. An agent told the wrong reason
+  picks the wrong recovery, and one told "blocked" concludes the source is
+  unreachable and writes the citation from memory. That is how a research run
+  came to cite fifteen sources while having opened only eight of them, with a
+  credibility grade on each of the seven it never read. Transient failures now
+  get two more attempts, an HTTP/2 protocol fault pins the retry to an
+  HTTP/1.1-only client (a per-request version hint does not help, because ALPN
+  settles the protocol during the TLS handshake), and the message names what
+  actually happened and says outright that the fetch did not read the page.
+- Added: `[limits] script_http_max_per_host` (default `4`, `0` for unbounded)
+  and `[limits] script_http_timeout_secs` (default `30`). Nothing previously
+  bounded how many script-tool requests a run could aim at one origin: a
+  research stage batches six fetches, a fan-out multiplies that by the worker
+  count, and the result is most of two hundred simultaneous connections to a
+  single host. That reads as an attack, and the origin that answered such a
+  burst by failing every HTTP/2 stream is the same one whose pages the run then
+  cited without reading. Batching is unaffected; only requests sharing a host
+  stagger.
+- Changed: the batch-tool hint now names web searches and fetches, and says
+  that a batch runs in parallel. It previously listed only file and shell work,
+  so the agents doing the most fetching were the ones it spoke to least. The
+  three research blueprints say the same in their own words. Tool batches
+  already ran in parallel; what this buys is fewer, larger batches, and turns
+  are where a research run actually spends its wall clock.
+
 - Fixed: a Rhai script no longer builds a malformed request body when the
   prompt contains an invisible character. Rhai's own standard library registers
   `to_json(&mut Map)`, and an object map is exactly what a provider script
