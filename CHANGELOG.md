@@ -13,6 +13,50 @@ same list.
 
 ## Unreleased
 
+- Fixed: a runtime-detected failure no longer ends a run that declared a
+  recovery stage. A fan-out split that could not be parsed, a routing call that
+  failed or answered with a stage that does not exist, `on_worker_failure =
+  "fail_all"`, a lost workspace and a wedged run all wrote a terminal status
+  directly, which `resolve_transition` then skipped, so the `error` edge the
+  author wrote was never consulted. Every one of them now goes through the
+  stage's transition, and an errored stage falls back to a `dead_end` edge when
+  it has no `error` edge, matching the fallback that already ran the other way.
+  A `deep-researcher` run died of this with its four workers finished, its
+  analysis written, three stages still pending and an `error_recovery` stage
+  sitting unused in its graph.
+- Fixed: a fan-out split is never terminal. After its corrections are spent it
+  takes the stage's `error` edge, then its `dead_end` edge, and failing both an
+  empty fan-out into the merge stage, with the reason written into
+  `error_report` and counted in the new `splits_degraded` run flag. By the time
+  a split runs, the parent has usually done most of the work; ending the run
+  throws all of it away.
+- Fixed: a fan-out split's correction budget is per split rather than per run.
+  `SplitAttempts` was never cleared, so a stage whose first split needed one
+  correction got a single correction the next time it split, and a stage
+  entered twice could fail on its second answer.
+- Added: `submit_work_items`, the tool a `fan_out` stage's split answers with.
+  Every fan-out stage is offered it regardless of its `available_tools`. The
+  split was the one structured answer the framework asked for in prose and then
+  scraped a JSON array out of; free text remains the fallback, because a
+  blueprint picks its own model per stage. Its description says the thing a
+  split most needed to be told and had nowhere to read: an empty `items` array
+  is a real answer, and the run moves on to the merge stage.
+- Changed: a fan-out stage entered more than once is told which round it is on
+  and which work items already came back, and is asked for only what is still
+  unanswered. The prompt was previously byte for byte the one the model had
+  already answered, over a context holding the first round's findings and the
+  analysis built on them - so the model replied that the research was finished,
+  which was true and was not a list of work items. A first entry is unchanged.
+- Changed: the free-text split parser takes the near misses instead of spending
+  a correction on each: an `{"items": [...]}` envelope, a single bare object, a
+  plain array of question strings, and a fenced block in preference to the
+  first-bracket-to-last-bracket scan (one `[6]` in a bibliography was enough to
+  slice from the wrong place). It also strips text-protocol tool-call markup,
+  which some models emit as prose.
+- Added: `lev validate` warns (`fanout-no-escape`) about a `fan_out` stage with
+  no `error` and no `dead_end` transition, since that is the blueprint shape
+  where an unusable split degrades silently.
+
 - Fixed: `web_fetch` now retries a transport failure instead of losing the page
   on the first one. A single `send()` was the whole story, so one dropped
   connection or protocol fault ended that source permanently, and the

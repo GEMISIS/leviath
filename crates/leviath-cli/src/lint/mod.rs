@@ -286,6 +286,7 @@ pub fn lint_manifest(content: &str, blueprint: &Blueprint, env: &LintEnv) -> Vec
         findings.extend(lint_tool_policies(stage, &agent_permissions));
         findings.extend(lint_models(stage, env));
         findings.extend(lint_output_stage(stage));
+        findings.extend(lint_fanout_escape(stage));
     }
 
     // Worst first, stable within a severity so the order a check ran in is the

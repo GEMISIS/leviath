@@ -170,12 +170,71 @@ fn a_fan_out_stage_needs_no_max_iterations() {
 mode = "fan_out"
 worker_stage = "work"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+[stages.split.transitions.recover]
+condition = "error"
 
 [stages.work]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
 allow_as_worker = true
+
+[stages.recover]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+"#,
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    assert!(findings.is_empty(), "{:?}", codes(&findings));
+}
+
+/// A split the runtime cannot use no longer ends the run, but with no escape
+/// declared it degrades to an empty fan-out and the workers never run. The
+/// blueprint is the only place that can say where to go instead.
+#[test]
+fn a_fan_out_stage_without_an_escape_is_warned_about() {
+    let toml = manifest(
+        r#"
+[stages.split]
+mode = "fan_out"
+worker_stage = "work"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+
+[stages.work]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+allow_as_worker = true
+"#,
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    assert_eq!(codes(&findings), ["fanout-no-escape"]);
+}
+
+/// A `dead_end` edge answers the same question - "this stage may not be able to
+/// go on" - so it satisfies the check too.
+#[test]
+fn a_dead_end_edge_satisfies_the_fan_out_escape_check() {
+    let toml = manifest(
+        r#"
+[stages.split]
+mode = "fan_out"
+worker_stage = "work"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+[stages.split.transitions.recover]
+condition = "dead_end"
+
+[stages.work]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+allow_as_worker = true
+
+[stages.recover]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
 "#,
     );
     let findings = lint(&toml, &LintEnv::default());
@@ -1399,7 +1458,8 @@ mode = "fan_out"
 worker_stage = "work"
 merge_stage = "merge"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-[stages.split.transitions]
+[stages.split.transitions.merge]
+condition = "error"
 
 [stages.work]
 mode = "autonomous"

@@ -60,10 +60,56 @@ Those keys sit directly on the stage next to `mode = "fan_out"`, not in a sub-ta
 | `max_items` | unset | Most work items the split may produce. `0` or unset means however many it produces |
 | `max_workers` | `30` | How many workers run at once. `0` means unlimited |
 | `on_worker_failure` | `"continue"` | `continue` merges what succeeded. `fail_all` fails the whole fan-out if any worker fails |
-| `split_prompt` | `""` | Added to the stage's system prompt. Its reply is parsed as the list of work items |
+| `split_prompt` | `""` | Added to the stage's system prompt. It asks for the work items; see below |
 
 Set exactly one of `worker_agent`, `worker_stage`, or `worker_query`. `lev validate` checks that,
 and checks that a named `worker_stage` exists and has opted in with `allow_as_worker`.
+
+### How the split answers
+
+The stage's single inference is the split. It carries `split_prompt` in its system prompt, and it
+is offered one tool, `submit_work_items`, which every fan-out stage gets whether or not it lists
+any `available_tools`:
+
+```json
+{"items": [
+  {"id": "half-life", "context": {"question": "How long does semaglutide stay active?"}},
+  {"id": "after-stopping", "context": {"question": "What happens when someone stops?"}}
+]}
+```
+
+Each item's `context` is everything its worker gets. A worker is a separate agent with a clean
+context window and never sees the parent's conversation, so a reference to "the topic above"
+reaches nobody.
+
+A model that ignores the tool and replies in text is still understood. The reply is read as JSON,
+and an `{"items": [...]}` envelope, a single bare object, or a plain array of question strings are
+all accepted. A reply that cannot be read at all is handed back with a correction and asked again,
+twice, before the stage gives up.
+
+**An empty list is a real answer.** `submit_work_items` with `items: []` means there is nothing to
+hand out, and the run moves on to `merge_stage`. That matters most on a stage a run enters more
+than once: the second time through, the honest answer is often that the work is already done, and
+without a way to say it the split answers in prose instead. A re-entered fan-out stage is told
+which round it is on and what the previous round already covered.
+
+### When a split cannot be used
+
+A split that is still unusable after its corrections never ends the run. It takes, in order:
+
+1. the stage's `error` transition, if it declares one;
+2. its `dead_end` transition, if it declares one;
+3. failing both, an empty fan-out into `merge_stage`, with the reason written into `error_report`
+   and counted in the run's `splits_degraded` flag.
+
+The third is a degradation - the workers never ran, and whatever comes next works from less than
+the blueprint intended - so `lev validate` warns (`fanout-no-escape`) about a fan-out stage that
+declares neither escape.
+
+```toml
+[stages.investigate.transitions.error_recovery]
+condition = "error"
+```
 
 ### A worker that is a whole other agent
 

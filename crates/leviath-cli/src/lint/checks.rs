@@ -199,6 +199,49 @@ pub(super) fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFindin
         .collect()
 }
 
+/// A fan-out stage with no escape from a split that cannot be used.
+///
+/// The split asks a model for a structured answer, and a model can decline, run
+/// out of room, or answer the question it thinks it was asked. The runtime no
+/// longer ends the run over it - the chain is the stage's `error` edge, then its
+/// `dead_end` edge, then an empty fan-out into the merge stage - but that last
+/// step is a degradation: the workers never run and whatever comes next works
+/// from less than the blueprint intended.
+///
+/// A warning rather than an error, because the run does finish either way. What
+/// it buys is the difference between a stage the author routed somewhere on
+/// failure and one that silently produces nothing.
+pub(super) fn lint_fanout_escape(stage: &leviath_core::Stage) -> Vec<LintFinding> {
+    if !matches!(stage.mode, StageMode::FanOut { .. }) {
+        return Vec::new();
+    }
+    let escapes = stage
+        .transitions
+        .iter()
+        .flat_map(|t| t.values())
+        .any(|edge| {
+            matches!(
+                edge.condition,
+                leviath_core::blueprint::TransitionCondition::Error
+                    | leviath_core::blueprint::TransitionCondition::DeadEnd
+            )
+        });
+    if escapes {
+        return Vec::new();
+    }
+    vec![
+        LintFinding::new(
+            LintSeverity::Warning,
+            "fanout-no-escape",
+            "is a fan_out stage with no 'error' or 'dead_end' transition, so a split the \
+             runtime cannot use degrades to an empty fan-out and the workers never run"
+                .to_string(),
+        )
+        .in_stage(&stage.name)
+        .with_fix("add a transition with condition = \"error\" to a recovery stage".to_string()),
+    ]
+}
+
 /// A stage's own output declarations: a demand it cannot meet, a shape nothing
 /// will read, or a reporting stage that can also change the workspace.
 pub(super) fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding> {
