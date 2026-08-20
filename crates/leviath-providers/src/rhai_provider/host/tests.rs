@@ -337,3 +337,350 @@ async fn reqwest_executor_stream_non_2xx_error() {
         Err(HostHttpError::Api(_))
     ));
 }
+
+// ─── transport retry classification ─────────────────────────────────────────
+//
+// Driven as chain strings rather than `reqwest::Error`s: that type has no
+// public constructor, and the detail these read sits several `source()` links
+// down anyway. `error_chain` is what turns one into the other.
+
+#[test]
+fn h2_protocol_fault_is_recognised_and_retryable() {
+    // Verbatim from the run archive of deep-researcher-1787212645, where this
+    // permanently lost both investors.cerebras.ai primary sources.
+    let chain = "error sending request for url (https://investors.cerebras.ai/x): \
+                 client error (SendRequest): http2 error: stream error received: \
+                 unexpected internal error encountered";
+    assert!(is_h2_protocol_error(chain));
+    assert!(is_retryable_transport(chain));
+}
+
+#[test]
+fn transient_socket_failures_are_retryable() {
+    for chain in [
+        "error sending request: connection reset by peer",
+        "connection closed before message completed",
+        "os error 32: Broken pipe",
+        "unexpected EOF during handshake",
+        "operation timed out",
+        "H2 error: GOAWAY",
+    ] {
+        assert!(is_retryable_transport(chain), "should retry: {chain}");
+    }
+}
+
+#[test]
+fn permanent_failures_are_not_retryable() {
+    // Retrying these only spends the deadline before showing the agent the
+    // same error, so they fall straight through.
+    for chain in [
+        "error sending request: dns error: failed to lookup address information",
+        "tcp connect error: Connection refused (os error 61)",
+        "invalid certificate: UnknownIssuer",
+    ] {
+        assert!(!is_retryable_transport(chain), "should not retry: {chain}");
+        assert!(!is_h2_protocol_error(chain));
+    }
+}
+
+#[test]
+fn error_chain_walks_every_source() {
+    #[derive(Debug)]
+    struct Inner;
+    impl std::fmt::Display for Inner {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("http2 error: stream error received")
+        }
+    }
+    impl std::error::Error for Inner {}
+
+    #[derive(Debug)]
+    struct Outer(Inner);
+    impl std::fmt::Display for Outer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("error sending request")
+        }
+    }
+    impl std::error::Error for Outer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    let chain = error_chain(&Outer(Inner));
+    assert_eq!(
+        chain,
+        "error sending request: http2 error: stream error received"
+    );
+    // The whole point: the classification only works on the flattened chain,
+    // because the top-level message alone says nothing about h2.
+    assert!(!is_h2_protocol_error("error sending request"));
+    assert!(is_h2_protocol_error(&chain));
+}
+
+#[test]
+fn backoff_grows_with_the_attempt() {
+    assert_eq!(transport_backoff(1), std::time::Duration::from_millis(200));
+    assert_eq!(transport_backoff(2), std::time::Duration::from_millis(400));
+}
+
+// ─── body readability ───────────────────────────────────────────────────────
+
+#[test]
+fn text_content_types_pass() {
+    for ct in [
+        Some("text/html; charset=utf-8"),
+        Some("TEXT/PLAIN"),
+        Some("application/json"),
+        Some("application/xml"),
+        Some("application/xhtml+xml"),
+        Some("text/javascript"),
+        Some("application/x-yaml"),
+        Some("application/x-www-form-urlencoded"),
+        // No header at all is not evidence of binary, so it passes here and
+        // the mojibake check remains the backstop.
+        None,
+    ] {
+        assert!(
+            unsupported_content_type(ct).is_none(),
+            "should pass: {ct:?}"
+        );
+    }
+}
+
+#[test]
+fn binary_content_types_are_named() {
+    let reason = unsupported_content_type(Some("application/pdf")).expect("named");
+    assert!(reason.contains("application/pdf"), "{reason}");
+    assert!(reason.contains("read bytes, not a document"), "{reason}");
+    assert!(unsupported_content_type(Some("image/png")).is_some());
+    assert!(unsupported_content_type(Some("application/octet-stream")).is_some());
+}
+
+#[test]
+fn a_lossily_decoded_gzip_body_reads_as_mojibake() {
+    // What `Response::text` produces from a gzip member: the few ASCII bytes of
+    // the header survive and everything else becomes U+FFFD. finance.yahoo.com
+    // serves exactly this when the client cannot decode `Content-Encoding`.
+    let body: String = std::iter::repeat_n(char::REPLACEMENT_CHARACTER, 200).collect();
+    assert!(looks_like_mojibake(&body));
+    assert!(looks_like_mojibake(&format!("\u{1f}\u{8b}\u{8}{body}")));
+}
+
+#[test]
+fn ordinary_prose_is_not_mojibake() {
+    let prose = "Cerebras Systems introduced the CS-4, delivering 750 PFLOPS of AI \
+                 compute across three WSE-3 Turbo processors, with first shipments \
+                 beginning this quarter.";
+    assert!(!looks_like_mojibake(prose));
+    // A stray replacement character from one genuinely malformed byte is not
+    // enough: the check is a ratio precisely so this stays readable.
+    assert!(!looks_like_mojibake(&format!("{prose}\u{fffd}")));
+}
+
+#[test]
+fn short_bodies_are_never_called_mojibake() {
+    // Under the 64-char floor the ratio means nothing, and a short body has its
+    // own diagnostic in the tool script.
+    let tiny: String = std::iter::repeat_n(char::REPLACEMENT_CHARACTER, 8).collect();
+    assert!(!looks_like_mojibake(&tiny));
+    assert!(!looks_like_mojibake(""));
+}
+
+// ─── network-gated regression checks ────────────────────────────────────────
+//
+// `#[ignore]` so CI and the coverage gate never reach out. Run by hand with
+// `cargo test -p leviath-providers -- --ignored --nocapture` when touching the
+// transport. Both URLs are the ones that actually failed in
+// deep-researcher-1787212645; keeping them named is the point.
+
+#[tokio::test]
+#[ignore = "hits the live network"]
+async fn live_unsolicited_gzip_decodes_to_prose() {
+    // finance.yahoo.com answers `Content-Encoding: gzip` even when nothing
+    // asked for it. Without the reqwest gzip feature this returned a whole
+    // gzip member that `text()` decoded into U+FFFD noise, and that noise went
+    // straight into a research agent's `sources` region.
+    let client = crate::provider::build_http_client(Some(30)).expect("client builds");
+    let exec = ReqwestExecutor::new(client);
+    let body = exec
+        .execute(HostRequest {
+            method: HttpMethod::Get,
+            url: "https://finance.yahoo.com/quote/CBRS/".to_string(),
+            body: None,
+            headers: BTreeMap::new(),
+            timeout_secs: Some(30),
+        })
+        .await
+        .expect("fetch succeeds");
+    assert!(!looks_like_mojibake(&body), "body decoded to mojibake");
+    assert!(
+        body.to_lowercase().contains("cerebras"),
+        "expected readable prose, got {} chars starting {:?}",
+        body.len(),
+        body.chars().take(60).collect::<String>()
+    );
+}
+
+// ─── retry loop and body guards, end to end through the executor ────────────
+
+/// A server that kills the first `fail_first` connections without answering,
+/// then serves `body` once. Reproduces "the socket did not work this time",
+/// which is what the retry exists for.
+async fn flaky_server(fail_first: usize, body: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    );
+    tokio::spawn(async move {
+        for i in 0.. {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 8192];
+            let _ = sock.read(&mut buf).await;
+            if i < fail_first {
+                // Drop mid-request: the FIN reaches reqwest as
+                // "connection closed before message completed", which is
+                // exactly the transient shape the retry is for.
+                drop(sock);
+                continue;
+            }
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(body.as_bytes()).await;
+            let _ = sock.flush().await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn a_transient_transport_failure_is_retried() {
+    // Before the retry existed this was a permanently lost source: one failed
+    // send() and the URL was never read, while the bibliography still cited it.
+    let url = flaky_server(1, "recovered-body").await;
+    let out = ReqwestExecutor::new(
+        crate::provider::build_http_client(None).expect("a test client builds"),
+    )
+    .execute(req(HttpMethod::Get, url, None))
+    .await
+    .expect("the retry recovers");
+    assert_eq!(out, "recovered-body");
+}
+
+#[tokio::test]
+async fn retries_are_bounded() {
+    // One more failure than the budget allows, so the error still surfaces
+    // rather than the loop spinning.
+    let url = flaky_server(usize::MAX, "never-served").await;
+    let err = ReqwestExecutor::new(
+        crate::provider::build_http_client(None).expect("a test client builds"),
+    )
+    .execute(req(HttpMethod::Get, url, None))
+    .await
+    .expect_err("gives up");
+    assert!(matches!(err, HostHttpError::Transport(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn the_h1_fallback_client_serves_the_retry() {
+    // The fallback path is only taken on an h2 fault, which a plaintext local
+    // server cannot produce, so this proves the wiring: an executor holding a
+    // fallback still succeeds normally, and `with_h1_fallback` is the
+    // constructor the runtime uses.
+    let url = flaky_server(1, "fallback-wired").await;
+    let exec = ReqwestExecutor::with_h1_fallback(
+        crate::provider::build_http_client(None).expect("a test client builds"),
+        crate::provider::build_http1_client(None).expect("an h1 test client builds"),
+    );
+    let out = exec
+        .execute(req(HttpMethod::Get, url, None))
+        .await
+        .expect("the retry recovers");
+    assert_eq!(out, "fallback-wired");
+}
+
+#[tokio::test]
+async fn a_binary_content_type_is_refused_before_the_body_is_read() {
+    let url = mock_server("200 OK", &[("Content-Type", "application/pdf")], "%PDF-1.7").await;
+    let err = ReqwestExecutor::new(
+        crate::provider::build_http_client(None).expect("a test client builds"),
+    )
+    .execute(req(HttpMethod::Get, url, None))
+    .await
+    .expect_err("refused");
+    let HostHttpError::Api(msg) = err else {
+        panic!("expected an Api error, got {err:?}");
+    };
+    assert!(msg.contains("unreadable body"), "{msg}");
+    assert!(msg.contains("application/pdf"), "{msg}");
+}
+
+#[tokio::test]
+async fn a_mojibake_body_is_refused_rather_than_returned() {
+    // A body that survived the content-type check but decoded to noise. The
+    // agent must be told the fetch failed, because it cannot tell this from a
+    // page that genuinely says very little, and will cite it either way.
+    const NOISE: &str = "\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\
+                         \u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\
+                         \u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\
+                         \u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\
+                         \u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\
+                         \u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\
+                         \u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\
+                         \u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\
+                         \u{fffd}\u{fffd}";
+    let url = mock_server("200 OK", &[("Content-Type", "text/html")], NOISE).await;
+    let err = ReqwestExecutor::new(
+        crate::provider::build_http_client(None).expect("a test client builds"),
+    )
+    .execute(req(HttpMethod::Get, url, None))
+    .await
+    .expect_err("refused");
+    let HostHttpError::Api(msg) = err else {
+        panic!("expected an Api error, got {err:?}");
+    };
+    assert!(msg.contains("did not read the page"), "{msg}");
+}
+
+#[test]
+fn both_outbound_clients_build() {
+    assert!(crate::provider::build_http_client(Some(5)).is_ok());
+    assert!(crate::provider::build_http1_client(Some(5)).is_ok());
+}
+
+#[test]
+fn the_h1_client_is_chosen_only_after_an_h2_fault() {
+    let main = crate::provider::build_http_client(Some(5)).expect("main client builds");
+    let h1 = crate::provider::build_http1_client(Some(5)).expect("h1 client builds");
+
+    // The first attempt, and every attempt on an origin that never faulted,
+    // stays on HTTP/2 so the ordinary case keeps its multiplexing.
+    assert!(std::ptr::eq(retry_client(&main, Some(&h1), false), &main));
+    // Once an h2 fault is seen, the retry goes over HTTP/1.1.
+    assert!(std::ptr::eq(retry_client(&main, Some(&h1), true), &h1));
+    // With no fallback configured there is nothing to switch to, so the flag
+    // changes nothing rather than panicking.
+    assert!(std::ptr::eq(retry_client(&main, None, true), &main));
+    assert!(std::ptr::eq(retry_client(&main, None, false), &main));
+}
+
+#[test]
+fn the_executor_survives_losing_only_its_fallback() {
+    let ok = || crate::provider::build_http_client(Some(5)).expect("client builds");
+
+    // Both clients: the ordinary case.
+    assert!(executor_from_clients(Ok(ok()), Ok(ok())).is_ok());
+    // No HTTP/1.1 twin is a degraded executor, not a dead one - every origin
+    // that works over HTTP/2 still works, which is nearly all of them.
+    assert!(executor_from_clients(Ok(ok()), Err(crate::provider::malformed_url_error())).is_ok());
+    // No HTTPS client at all is the real failure, and it stays deferred to the
+    // moment a script provider is resolved.
+    assert!(executor_from_clients(Err(crate::provider::malformed_url_error()), Ok(ok()),).is_err());
+}

@@ -35,8 +35,23 @@ try {
         out = body;
     }
 } catch(e) {
-    // Most commonly the page exceeds the engine's 1MB string limit, or the host
-    // blocked the request. Report it so the agent can pick a smaller/other source.
-    out = `[web_fetch could not retrieve ${params.url}: ${e}. The page may be too large (>1MB) or the request was blocked — try a more specific page or rely on the web_search snippets.]`;
+    // Name what actually went wrong. The old text guessed "too large (>1MB) or
+    // blocked" for every failure, and both guesses were wrong for the two most
+    // common causes: a transport fault the host layer already retried, and a
+    // body this client could not decode. An agent told the wrong reason picks
+    // the wrong recovery - and one that reads "blocked" concludes the source is
+    // unreachable and cites it from memory instead.
+    let msg = `${e}`;
+    let lower = msg.to_lower();
+    let why = if lower.contains("unreadable body") {
+        "the response was not readable text (compressed, binary, or an encoding this client cannot decode). Try an API endpoint, an RSS/JSON feed, or a static mirror";
+    } else if lower.contains("http2") || lower.contains("connection") || lower.contains("timed out") {
+        "the connection failed even after retries, so the host is refusing this client or is down. Try a syndicated copy of the same content, or rely on the web_search snippets";
+    } else if lower.contains("http 4") || lower.contains("http 5") {
+        "the host answered with an error status. Check the URL, or try a syndicated copy";
+    } else {
+        "the page may exceed the engine's 1MB string limit, or the host blocked the request. Try a more specific page, or rely on the web_search snippets";
+    };
+    out = `[web_fetch could not retrieve ${params.url}: ${msg}. ${why}. Whatever this page says, this fetch did not read it - do not cite this URL or reconstruct its contents from memory.]`;
 }
 out
