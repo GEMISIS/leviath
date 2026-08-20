@@ -444,10 +444,7 @@ impl OpenRouterProvider {
             )));
         }
 
-        response
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))
+        crate::provider::decode_json(response).await
     }
 
     fn warn_if_unknown(&self, model: &str, resolved: &ModelCapabilities) {
@@ -507,10 +504,7 @@ impl Provider for OpenRouterProvider {
         )
         .await?;
 
-        let response_body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        let response_body: serde_json::Value = crate::provider::decode_json(response).await?;
 
         let result = parse_openai_response(&response_body)?;
 

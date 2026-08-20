@@ -275,10 +275,7 @@ impl OllamaProvider {
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
         let tags = crate::provider::check_http_response(tags, None).await?;
-        let tags: serde_json::Value = tags
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        let tags: serde_json::Value = crate::provider::decode_json(tags).await?;
 
         let names: Vec<String> = tags
             .get("models")
@@ -301,10 +298,7 @@ impl OllamaProvider {
                 .await
                 .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
             let show = crate::provider::check_http_response(show, None).await?;
-            let show: serde_json::Value = show
-                .json()
-                .await
-                .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+            let show: serde_json::Value = crate::provider::decode_json(show).await?;
             if let Some(window) = effective_window(&show) {
                 windows.insert(name, window);
             }
@@ -561,10 +555,7 @@ impl Provider for OllamaProvider {
         .await
         .map_err(|e| self.explain_truncation(e, request))?;
 
-        let response_body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        let response_body: serde_json::Value = crate::provider::decode_json(response).await?;
 
         self.parse_response(&response_body)
     }
@@ -658,10 +649,7 @@ impl Provider for OllamaProvider {
         // retrying can help.
         let response = crate::provider::check_http_response(response, None).await?;
 
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        let body: serde_json::Value = crate::provider::decode_json(response).await?;
 
         let models = body
             .get("models")

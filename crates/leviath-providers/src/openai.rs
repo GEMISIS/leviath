@@ -261,10 +261,7 @@ impl Provider for OpenAIProvider {
         let body = build_openai_request_body_with(request, TokenLimitField::MaxCompletionTokens);
         let response = self.post_chat(request, body).await?;
 
-        let response_body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        let response_body: serde_json::Value = crate::provider::decode_json(response).await?;
 
         let result = parse_openai_response(&response_body)?;
 
@@ -339,10 +336,7 @@ impl Provider for OpenAIProvider {
             )));
         }
 
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        let body: serde_json::Value = crate::provider::decode_json(response).await?;
 
         let models = body
             .get("data")

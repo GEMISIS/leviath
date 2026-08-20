@@ -1063,6 +1063,32 @@ pub async fn check_http_response(
     Ok(response)
 }
 
+/// Read a response body to completion and parse it as JSON.
+///
+/// The two halves fail for entirely different reasons and must not share an
+/// error variant. Bytes that never arrived - a reset connection, a socket that
+/// died while the machine was asleep, a truncated body - are a *transport*
+/// failure: [`ProviderError::RequestFailed`], which is transient, gets retried,
+/// counts against the provider's circuit breaker and is eligible for failover.
+/// Bytes that arrived and did not fit the schema are the provider's own fault:
+/// [`ProviderError::InvalidResponse`], which is permanent, because sending the
+/// same request again produces the same unusable answer.
+///
+/// `reqwest`'s own `Response::json` collapses both into one `Decode` error whose
+/// message is the famously unhelpful "error decoding response body". Routing
+/// that through `InvalidResponse` made every network blip permanent: a run with
+/// dozens of iterations of completed work died outright rather than retrying,
+/// because a dead socket was being reported as malformed JSON. The streaming
+/// path already drew this line correctly (see `openai_compat::stream_chat`);
+/// this is the buffered path drawing the same one.
+pub async fn decode_json<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> Result<T> {
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| ProviderError::RequestFailed(format!("reading response body: {e}")))?;
+    serde_json::from_slice(&bytes).map_err(|e| ProviderError::InvalidResponse(e.to_string()))
+}
+
 // Helper module for single-item streams
 mod stream_once {
     use futures_core::Stream;
@@ -2207,5 +2233,93 @@ mod tests {
     fn finish_reason_different_variants_not_eq() {
         assert_ne!(FinishReason::Stop, FinishReason::Complete);
         assert_ne!(FinishReason::TokenLimit, FinishReason::ToolCall);
+    }
+
+    // ─── decode_json: transport failure vs schema failure ──────────────────
+
+    /// Serve one HTTP response over a raw socket, then close it.
+    ///
+    /// Takes the literal bytes so a test can send a deliberately malformed or
+    /// truncated response, which the higher-level test servers go out of their
+    /// way to make impossible.
+    async fn serve_raw(raw: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept succeeds");
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock.write_all(raw).await;
+            let _ = sock.shutdown().await;
+        });
+        format!("http://{addr}/")
+    }
+
+    /// A body that stops early is a *transport* failure, not a parse failure.
+    ///
+    /// This is the regression the whole split exists for: a socket that dies
+    /// mid-body (a reset, or a machine that slept through the response) used to
+    /// surface as `InvalidResponse`, which `is_transient` calls permanent - so a
+    /// run with dozens of iterations of work behind it died without one retry.
+    #[tokio::test]
+    async fn decode_json_reports_a_truncated_body_as_a_transport_failure() {
+        // Declares 200 bytes, sends 9, then hangs up.
+        let url = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 200\r\n\r\n{\"a\": 1}\n").await;
+        let client = build_http_client(None).expect("an HTTPS client builds in tests");
+        let response = client.get(url).send().await.expect("headers arrive");
+
+        let err = decode_json::<serde_json::Value>(response)
+            .await
+            .expect_err("a truncated body cannot decode");
+
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&ProviderError::RequestFailed(String::new())),
+            "a body that never finished arriving is a transport failure: {err}"
+        );
+        assert!(err.is_transient(), "it must be retried: {err}");
+        assert_eq!(
+            err.unavailable_reason(),
+            Some(UnavailableReason::Unreachable),
+            "it must count against the provider and allow failover: {err}"
+        );
+    }
+
+    /// Bytes that all arrived and did not fit the schema stay permanent: the
+    /// same request would produce the same unusable answer, so retrying it only
+    /// spends the attempts.
+    #[tokio::test]
+    async fn decode_json_reports_a_complete_but_unparseable_body_as_invalid() {
+        let url = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nnot json").await;
+        let client = build_http_client(None).expect("an HTTPS client builds in tests");
+        let response = client.get(url).send().await.expect("headers arrive");
+
+        let err = decode_json::<serde_json::Value>(response)
+            .await
+            .expect_err("`not json` cannot parse");
+
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&ProviderError::InvalidResponse(String::new())),
+            "a fully delivered body that does not parse is the provider's fault: {err}"
+        );
+        assert!(!err.is_transient(), "retrying cannot help: {err}");
+        assert_eq!(
+            err.unavailable_reason(),
+            None,
+            "the provider is fine: {err}"
+        );
+    }
+
+    /// The happy path, so the success arm is not carried by the failure tests.
+    #[tokio::test]
+    async fn decode_json_parses_a_well_formed_body() {
+        let url = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n{\"ok\":true}\n").await;
+        let client = build_http_client(None).expect("an HTTPS client builds in tests");
+        let response = client.get(url).send().await.expect("headers arrive");
+
+        let body: serde_json::Value = decode_json(response).await.expect("it parses");
+        assert_eq!(body["ok"], serde_json::json!(true));
     }
 }

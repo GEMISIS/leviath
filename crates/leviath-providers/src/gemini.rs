@@ -208,10 +208,7 @@ impl GeminiProvider {
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
         let response = crate::provider::check_http_response(response, None).await?;
-        let value: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        let value: serde_json::Value = crate::provider::decode_json(response).await?;
         value
             .get("totalTokens")
             .and_then(|v| v.as_u64())
@@ -248,10 +245,7 @@ impl Provider for GeminiProvider {
         )
         .await?;
 
-        let response_body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        let response_body: serde_json::Value = crate::provider::decode_json(response).await?;
 
         let result = parse_openai_response(&response_body)?;
 
@@ -351,10 +345,7 @@ impl GeminiProvider {
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
         let response = crate::provider::check_http_response(response, None).await?;
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        let body: serde_json::Value = crate::provider::decode_json(response).await?;
 
         let models = body
             .get("models")
@@ -405,10 +396,7 @@ impl GeminiProvider {
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
         let response = crate::provider::check_http_response(response, None).await?;
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        let body: serde_json::Value = crate::provider::decode_json(response).await?;
 
         let models = body
             .get("data")
