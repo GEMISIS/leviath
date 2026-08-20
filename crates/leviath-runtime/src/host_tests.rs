@@ -1122,6 +1122,85 @@ async fn result_reports_the_submitted_answer() {
     );
 }
 
+/// A paused run with a provider call still outstanding stays resident.
+///
+/// Parking despawns the entity. An in-flight inference is a live, unpersisted
+/// continuation exactly like a blocked `ask`: if the run is paged out while the
+/// call is still going, the response lands on a dead entity and is dropped on
+/// the collect system's stale path - so the pause silently threw the call away
+/// and the page-in paid for the same turn again.
+#[tokio::test]
+async fn a_paused_run_with_a_call_still_out_is_not_parked() {
+    let mut host = host_with(vec![]);
+    host.set_reloader(Box::new(|world, run_id| {
+        let mut state = agent_state(run_id);
+        state.status = AgentStatus::Paused;
+        Some(world.spawn_agent((state,)))
+    }));
+    let e = spawn(&mut host, "run-a", "agent-a");
+    assert!(
+        ask(&mut host, |reply| ControlOp::Pause {
+            run_id: "run-a".to_string(),
+            reply
+        })
+        .await
+    );
+    let mut wm = crate::pipeline::PersistWatermark::default();
+    wm.stamp_status(leviath_core::run_meta::RunStatus::Paused);
+    host.world_mut()
+        .world_mut()
+        .entity_mut(e.entity())
+        .insert((wm, crate::pipeline::InFlightWork(vec![])));
+
+    host.emit_events();
+
+    assert!(
+        host.world.world().get::<AgentState>(e.entity()).is_some(),
+        "the run stays in the world while its call is still out"
+    );
+    assert!(host.by_run_id.contains_key("run-a"));
+}
+
+/// And one holding a response that landed during the pause stays resident too,
+/// or the held outcome goes with the entity and the resume re-requests it.
+#[tokio::test]
+async fn a_paused_run_holding_a_landed_response_is_not_parked() {
+    let mut host = host_with(vec![]);
+    host.set_reloader(Box::new(|world, run_id| {
+        let mut state = agent_state(run_id);
+        state.status = AgentStatus::Paused;
+        Some(world.spawn_agent((state,)))
+    }));
+    let e = spawn(&mut host, "run-a", "agent-a");
+    assert!(
+        ask(&mut host, |reply| ControlOp::Pause {
+            run_id: "run-a".to_string(),
+            reply
+        })
+        .await
+    );
+    let mut wm = crate::pipeline::PersistWatermark::default();
+    wm.stamp_status(leviath_core::run_meta::RunStatus::Paused);
+    host.world_mut().world_mut().entity_mut(e.entity()).insert((
+        wm,
+        crate::pipeline::HeldInference {
+            outcome: crate::inference_bridge::InferenceOutcome {
+                entity: e.entity(),
+                latency: std::time::Duration::ZERO,
+                result: Err(leviath_providers::ProviderError::Other("held".to_string())),
+            },
+            lane: crate::pipeline::HeldLane::Stage,
+        },
+    ));
+
+    host.emit_events();
+
+    assert!(
+        host.world.world().get::<AgentState>(e.entity()).is_some(),
+        "the run stays in the world while it holds a response for the resume"
+    );
+}
+
 /// A paused standalone root whose paused snapshot has been dispatched is
 /// paged out of the world: the entity is gone, but the listing and the
 /// Status op still report it, and a Resume pages it back in.

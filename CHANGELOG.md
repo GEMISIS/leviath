@@ -34,7 +34,11 @@ same list.
   on through its tool calls and stage transitions while it still displayed
   `paused`, and a failure overwrote the pause with an error and discarded the
   run. The outcome is now held and replayed on resume, so the response you have
-  already paid for is used rather than thrown away.
+  already paid for is used rather than thrown away. Relatedly, a paused run with
+  a call still outstanding is no longer paged out of memory while it waits: an
+  in-flight inference is a live continuation like a blocked prompt, and parking
+  the run meant the answer arrived at a despawned entity and was dropped, so the
+  resume quietly paid for the same turn twice.
 
 - Fixed: pausing a fan-out parent now pauses the runs that are actually working.
   A parent waiting on its children is not itself pausable - the merge poll reads
