@@ -8,11 +8,22 @@ use super::*;
 /// the model it may emit several `tool_use` blocks per response and should batch
 /// *independent* operations - while explicitly forbidding batching of dependent
 /// ones.
-pub(crate) const BATCH_TOOL_HINT: &str = "You can call multiple tools in a single response. \
-When operations are independent (reading, editing, or writing different files, or \
-writing a file then running a command that doesn't need its output), batch them in \
-one response to cut round trips. Do NOT batch when a call depends on a previous \
-call's result, or when you must see a command's output before deciding the next step.";
+///
+/// The examples name searches and fetches first because that is where the round
+/// trips actually pile up: a batch is dispatched with `join_all`, so eight
+/// fetches finish in about the time one does (measured: six completed inside a
+/// one-second span), while the inference call between two batches costs tens of
+/// seconds. A research run that spends 27 inference calls on 36 tool calls is
+/// paying almost all of its wall clock for turns, not for the web. The old text
+/// listed only file and shell work, so the agents doing the most fetching were
+/// the ones it spoke to least.
+pub(crate) const BATCH_TOOL_HINT: &str = "You can call multiple tools in a single response, \
+and a batch runs in parallel rather than one after another. When operations are \
+independent (searching for or fetching several different URLs, reading, editing, or \
+writing different files, or writing a file then running a command that doesn't need its \
+output), batch them in one response to cut round trips. A batch of eight fetches costs \
+about what one costs. Do NOT batch when a call depends on a previous call's result, or \
+when you must see a command's output before deciding the next step.";
 
 /// What the `shell` tool actually runs on Windows, and the PowerShell commands
 /// that stand in for the POSIX ones a model reaches for by reflex. Prepended to

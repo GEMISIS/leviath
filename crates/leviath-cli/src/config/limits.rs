@@ -22,6 +22,24 @@ fn default_max_concurrent_tools() -> usize {
     8
 }
 
+/// Seconds a script tool's HTTP request may take before it is abandoned.
+fn default_script_http_timeout_secs() -> u64 {
+    30
+}
+
+/// Concurrent script-tool HTTP requests allowed against any one host.
+///
+/// Four, not unbounded. A single research stage routinely batches six fetches,
+/// and a fan-out multiplies that by the worker count, so one agent could open
+/// nearly two hundred simultaneous connections to the same origin. That reads
+/// as an attack: `investors.cerebras.ai` answered such a burst by failing every
+/// HTTP/2 stream, and a run lost both of its primary sources to it. Batching
+/// still happens - this only staggers the requests that share a host, which is
+/// the only dimension where more concurrency stopped buying speed.
+fn default_script_http_max_per_host() -> usize {
+    4
+}
+
 fn default_script_shell_timeout_secs() -> u64 {
     60
 }
@@ -112,6 +130,20 @@ pub struct LimitsConfig {
     /// hang an agent on a runaway command. Defaults to `60`.
     #[serde(default = "default_script_shell_timeout_secs")]
     pub script_shell_timeout_secs: u64,
+
+    /// Seconds a script tool's HTTP request may take. Defaults to `30`.
+    #[serde(default = "default_script_http_timeout_secs")]
+    pub script_http_timeout_secs: u64,
+
+    /// Concurrent script-tool HTTP requests allowed per host. Defaults to `4`;
+    /// `0` means unbounded.
+    ///
+    /// Four, not unbounded: a research stage routinely batches six fetches and a
+    /// fan-out multiplies that by the worker count, so one run could open nearly
+    /// two hundred simultaneous connections to a single origin. Batching is
+    /// untouched by this; only the requests that share a host stagger.
+    #[serde(default = "default_script_http_max_per_host")]
+    pub script_http_max_per_host: usize,
 
     /// How long (seconds) a run may sit ready to work but unable to dispatch
     /// before it is failed instead of left running.
@@ -418,6 +450,8 @@ impl Default for LimitsConfig {
             default_max_iterations: default_default_max_iterations(),
             exact_token_counting: false,
             script_shell_timeout_secs: default_script_shell_timeout_secs(),
+            script_http_timeout_secs: default_script_http_timeout_secs(),
+            script_http_max_per_host: default_script_http_max_per_host(),
             stall_timeout_secs: default_stall_timeout_secs(),
             dead_cycles_before_relief: default_dead_cycles_before_relief(),
             finished_retention_secs: default_finished_retention_secs(),

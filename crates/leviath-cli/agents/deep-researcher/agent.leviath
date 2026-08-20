@@ -38,6 +38,12 @@ authoritative references, not a broad skim.
   question, then web_fetch the most authoritative results for detail. Prefer
   primary sources (papers, standards, official docs) over summaries. read_file for
   local documents. Raw content lands in `sources`.
+- Batch your searches and fetches. A batch of tool calls runs in PARALLEL, so
+  eight fetches in one response cost about what one costs, while the inference
+  call between two responses costs tens of seconds. Fetch every promising URL
+  from a round of searches in a single response rather than one at a time; the
+  only reason to hold one back is that you need an earlier result to know
+  whether you want it.
 - Today's date is in the `environment` region. Treat it as authoritative over
   anything you remember: your training has a cutoff and this run does not. Judge
   "recent", "current" and "latest" against it, and say how old a source is when

@@ -29,6 +29,7 @@ over depth:
 
 Run web_search across the distinct facets, web_fetch a few representative sources
 per facet, read_file for local material. Landscape material lands in `landscape`.
+Issue a round's searches, and then that round's fetches, as ONE response each: a batch runs in parallel, so eight fetches cost about what one costs, while the inference call between two responses costs tens of seconds.
 For each source you use, append a bibliography line to `sources_index`
 (context_append): `[n] <title> - <url/path> - credibility: <high/med/low>`.
 Note interesting threads worth pulling on later. If sent back, focus on the named

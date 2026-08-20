@@ -3553,6 +3553,8 @@ enabled = false
                 default_max_iterations: Some(99),
                 exact_token_counting: false,
                 script_shell_timeout_secs: 45,
+                script_http_timeout_secs: 15,
+                script_http_max_per_host: 2,
                 stall_timeout_secs: 90,
                 dead_cycles_before_relief: 6,
                 finished_retention_secs: 120,

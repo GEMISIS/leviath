@@ -259,7 +259,7 @@ fn transport_backoff(attempt: u32) -> std::time::Duration {
 /// the interesting detail (an `h2` protocol fault) is several links down the
 /// chain, and `reqwest::Error` has no public constructor, so a chain string is
 /// also the only shape a test can drive.
-fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+pub fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
     let mut out = err.to_string();
     let mut source = err.source();
     while let Some(e) = source {
@@ -276,7 +276,7 @@ fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
 /// work this time". A DNS failure or a refused connection is not: retrying
 /// those just spends the deadline, so they fall through to the error the agent
 /// sees.
-pub(crate) fn is_retryable_transport(chain: &str) -> bool {
+pub fn is_retryable_transport(chain: &str) -> bool {
     let lower = chain.to_lowercase();
     is_h2_protocol_error(chain)
         || lower.contains("connection reset")
@@ -294,7 +294,7 @@ pub(crate) fn is_retryable_transport(chain: &str) -> bool {
 /// internal error encountered` and served the same URL fine over HTTP/1.1.
 /// Both of that host's pages were primary sources for a research run, and
 /// because nothing retried, the run cited two URLs it had never read.
-pub(crate) fn is_h2_protocol_error(chain: &str) -> bool {
+pub fn is_h2_protocol_error(chain: &str) -> bool {
     let lower = chain.to_lowercase();
     lower.contains("http2 error") || lower.contains("h2 error")
 }
