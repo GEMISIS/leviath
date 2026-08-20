@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.2.3"
+version = "0.3.0"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 entry_stage = "survey"
 
@@ -118,10 +118,9 @@ independently, one work item each. A thread is an approach, a project, a school
 of thought, a question the survey raised - whatever divides the area without two
 workers covering the same ground.
 
-Output ONLY a JSON array, starting with '[' and ending with ']'. No prose, no
-markdown fences. Each item:
+Call `fan_out` with one entry in `items` per work item:
 
-[{"id": "<short-slug>", "context": {"thread": "<what to research>", "why": "<what the survey wants to know about it>"}}]
+  items: [{"id": "<short-slug>", "context": {"thread": "<what to research>", "why": "<what the survey wants to know about it>"}}]
 
 Every item MUST carry enough to work from alone: a worker is a separate agent
 and does not share this run's context, so the work item is all it gets.

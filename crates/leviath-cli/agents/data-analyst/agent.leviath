@@ -1,6 +1,6 @@
 [agent]
 name = "data-analyst"
-version = "0.0.6"
+version = "0.1.0"
 description = "Data analyst - searches the web for data on a subject, builds a clean CSV of it, and hands back a ready-to-use summary of what the numbers say"
 entry_stage = "scope"
 
@@ -108,10 +108,9 @@ Split the `subject` into slices that can be gathered independently, one work
 item each. A slice is a country, a company, a year range, a category - whatever
 divides this subject without two workers collecting the same rows.
 
-Output ONLY a JSON array, starting with '[' and ending with ']'. No prose, no
-markdown fences. Each item:
+Call `fan_out` with one entry in `items` per work item:
 
-[{"id": "<short-slug>", "context": {"slice": "<what to gather>", "schema": "<the columns, verbatim from the schema region>"}}]
+  items: [{"id": "<short-slug>", "context": {"slice": "<what to gather>", "schema": "<the columns, verbatim from the schema region>"}}]
 
 Every item MUST carry the schema: workers do not share this agent's context, so
 the work item is all they get. A worker with no schema cannot produce rows that

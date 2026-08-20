@@ -1,6 +1,6 @@
 [agent]
 name = "log-analyzer"
-version = "0.1.2"
+version = "0.2.0"
 description = "Analyzes log files - sweeps many files or time windows in parallel, then identifies anomalies, trends, and error patterns via a scripted analyze⇄script loop, maintaining a severity-ranked findings index"
 entry_stage = "ingest"
 
@@ -95,10 +95,9 @@ A slice is one log file, one service's files, or one time window of a single
 large file - whatever divides the data without two workers counting the same
 lines. Use the file inventory `findings` holds.
 
-Output ONLY a JSON array, starting with '[' and ending with ']'. No prose, no
-markdown fences. Each item:
+Call `fan_out` with one entry in `items` per work item:
 
-[{"id": "<short-slug>", "context": {"slice": "<the file path(s), and the time window if the file is split by time>", "format": "<the log format and its fields, verbatim from findings>", "looking_for": "<what this run is trying to find, from the task>"}}]
+  items: [{"id": "<short-slug>", "context": {"slice": "<the file path(s), and the time window if the file is split by time>", "format": "<the log format and its fields, verbatim from findings>", "looking_for": "<what this run is trying to find, from the task>"}}]
 
 Every item MUST carry the format and what the run is looking for: workers do not
 share this agent's context, so the work item is all they get. A worker that does

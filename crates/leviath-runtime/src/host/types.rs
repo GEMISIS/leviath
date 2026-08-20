@@ -153,6 +153,11 @@ pub struct RunListEntry {
     /// daemon simply omits it.
     #[serde(default)]
     pub empty_output: bool,
+    /// Fan-outs this run degraded: a `fan_out` stage that transitioned without
+    /// ever starting any workers. Defaulted like `empty_output`, for an older
+    /// daemon that omits it.
+    #[serde(default)]
+    pub splits_degraded: usize,
     /// How much of this run's `[read_paths]` its config granted at spawn.
     /// `None` for a blueprint that declares none, which is nearly every agent.
     ///

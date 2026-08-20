@@ -149,186 +149,214 @@ pub(crate) fn apply_tool_results(
     );
 
     for (tool_call_id, result) in tool_results {
-        let mut result_text = result.clone();
         let tool_name = tool_calls
             .iter()
             .find(|tc| tc.tool_id == *tool_call_id)
             .map(|tc| tc.name.clone())
             .unwrap_or_default();
+        apply_one_tool_result(
+            window,
+            &tool_name,
+            tool_call_id,
+            result.clone(),
+            routing,
+            sensitivities,
+        );
+    }
+}
 
-        // The tool's own ceiling when it has one, else the stage's.
-        let tool_cap = routing.and_then(|r| {
-            // Both sides canonicalized, exactly as `tool_overrides` below: the
-            // author writes `bash`, the model calls `shell`, and a literal
-            // comparison would silently miss in either direction.
+/// Land one tool result: cap it, route it, and leave the pointer that says where
+/// it went.
+///
+/// Split out of [`apply_tool_results`] because a fan-out started from a tool call
+/// parks its parent and delivers its result long after the rest of the batch has
+/// landed. That result has to be stored exactly as any other - same caps, same
+/// routing, same pointer - and a second copy of this logic would not have stayed
+/// equal to the first.
+pub(crate) fn apply_one_tool_result(
+    window: &mut ContextWindow,
+    tool_name: &str,
+    tool_call_id: &str,
+    result: String,
+    routing: Option<&leviath_core::blueprint::ToolResultRouting>,
+    sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
+) {
+    let mut result_text = result;
+    let tool_name = tool_name.to_string();
+    let tool_call_id = tool_call_id.to_string();
+
+    // The tool's own ceiling when it has one, else the stage's.
+    let tool_cap = routing.and_then(|r| {
+        // Both sides canonicalized, exactly as `tool_overrides` below: the
+        // author writes `bash`, the model calls `shell`, and a literal
+        // comparison would silently miss in either direction.
+        let canon = leviath_tools::canonical_tool_name(&tool_name);
+        r.tool_max_result_tokens
+            .iter()
+            .find(|(k, _)| leviath_tools::canonical_tool_name(k) == canon)
+            .map(|(_, v)| *v)
+            .or(r.max_result_tokens)
+    });
+    if let Some(max_tokens) = tool_cap {
+        let max_chars = max_tokens * 4;
+        if result_text.len() > max_chars {
+            result_text = truncate_on_char_boundary(&result_text, max_chars);
+            result_text.push_str("\n[...truncated]");
+        }
+    }
+    let result_tokens = leviath_core::estimate_tokens(&result_text);
+
+    let base_region = match routing {
+        Some(r) => {
+            // Match overrides by CANONICAL tool name so a `bash = "..."` override
+            // routes the `shell` tool (bash is an alias - the model calls the
+            // canonical `shell`, so a literal-key lookup would silently miss).
             let canon = leviath_tools::canonical_tool_name(&tool_name);
-            r.tool_max_result_tokens
+            r.tool_overrides
                 .iter()
                 .find(|(k, _)| leviath_tools::canonical_tool_name(k) == canon)
-                .map(|(_, v)| *v)
-                .or(r.max_result_tokens)
-        });
-        if let Some(max_tokens) = tool_cap {
-            let max_chars = max_tokens * 4;
-            if result_text.len() > max_chars {
-                result_text = truncate_on_char_boundary(&result_text, max_chars);
-                result_text.push_str("\n[...truncated]");
-            }
+                .map(|(_, v)| v.as_str())
+                .unwrap_or(r.default_region.as_str())
         }
-        let result_tokens = leviath_core::estimate_tokens(&result_text);
+        None => "conversation",
+    };
+    let target_region = match routing {
+        Some(r) if !r.persist && window.get_region("scratch").is_some() => "scratch",
+        _ => base_region,
+    };
 
-        let base_region = match routing {
-            Some(r) => {
-                // Match overrides by CANONICAL tool name so a `bash = "..."` override
-                // routes the `shell` tool (bash is an alias - the model calls the
-                // canonical `shell`, so a literal-key lookup would silently miss).
-                let canon = leviath_tools::canonical_tool_name(&tool_name);
-                r.tool_overrides
-                    .iter()
-                    .find(|(k, _)| leviath_tools::canonical_tool_name(k) == canon)
-                    .map(|(_, v)| v.as_str())
-                    .unwrap_or(r.default_region.as_str())
-            }
-            None => "conversation",
+    let taint_level = sensitivities.map(|s| {
+        s.get(&tool_name)
+            .copied()
+            .unwrap_or(leviath_core::TaintLevel::Public)
+    });
+    // Add `content` (with entry `kind`) to `region`, honoring taint and falling
+    // back to a truncated (then omitted) entry if the region is full.
+    //
+    // Reports which of the three happened, because the pointer left in the
+    // conversation describes this write and used to describe it wrongly:
+    // it promised the full result whatever the region had actually kept.
+    let add_kind = |window: &mut ContextWindow,
+                    region: &str,
+                    kind: leviath_core::EntryKind,
+                    content: String,
+                    tokens: usize|
+     -> Stored {
+        let put = |w: &mut ContextWindow, c: String, t: usize| match taint_level {
+            Some(level) => w.add_typed_tainted_to_region(region, kind.clone(), c, t, level),
+            None => w.add_typed_entry(region, kind.clone(), c, t),
         };
-        let target_region = match routing {
-            Some(r) if !r.persist && window.get_region("scratch").is_some() => "scratch",
-            _ => base_region,
-        };
-
-        let taint_level = sensitivities.map(|s| {
-            s.get(&tool_name)
-                .copied()
-                .unwrap_or(leviath_core::TaintLevel::Public)
-        });
-        // Add `content` (with entry `kind`) to `region`, honoring taint and falling
-        // back to a truncated (then omitted) entry if the region is full.
-        //
-        // Reports which of the three happened, because the pointer left in the
-        // conversation describes this write and used to describe it wrongly:
-        // it promised the full result whatever the region had actually kept.
-        let add_kind = |window: &mut ContextWindow,
-                        region: &str,
-                        kind: leviath_core::EntryKind,
-                        content: String,
-                        tokens: usize|
-         -> Stored {
-            let put = |w: &mut ContextWindow, c: String, t: usize| match taint_level {
-                Some(level) => w.add_typed_tainted_to_region(region, kind.clone(), c, t, level),
-                None => w.add_typed_entry(region, kind.clone(), c, t),
-            };
-            if put(window, content.clone(), tokens).is_ok() {
-                return Stored::Whole;
-            }
-            let available = window
-                .get_region(region)
-                .map(|r| r.max_tokens.saturating_sub(r.current_tokens))
-                .unwrap_or(0);
-            let (truncated, omitted) = if available > 100 {
-                let char_budget = (available - 10) * 4;
-                let prefix = truncate_on_char_boundary(&content, char_budget);
-                let omitted = content.len().saturating_sub(prefix.len());
-                (
-                    format!("{}... [truncated, {} chars omitted]", prefix, omitted),
-                    omitted,
-                )
-            } else {
-                (
-                    "[tool result truncated - context window full]".to_string(),
-                    content.len(),
-                )
-            };
-            let trunc_tokens = leviath_core::estimate_tokens(&truncated);
-            if put(window, truncated, trunc_tokens).is_ok() {
-                return Stored::Truncated { omitted };
-            }
-            let _ = put(window, "[result omitted]".to_string(), 5);
-            Stored::Dropped
-        };
-        let result_kind = || leviath_core::EntryKind::ToolResult {
-            tool_call_id: tool_call_id.clone(),
-            tool_name: tool_name.clone(),
-            is_error: false,
-        };
-
-        if target_region == "conversation" {
-            // Not routed (or routed back to the message stream): the tool_result
-            // lives in `conversation`, paired with its tool_use.
-            add_kind(
-                window,
-                "conversation",
-                result_kind(),
-                result_text,
-                result_tokens,
-            );
+        if put(window, content.clone(), tokens).is_ok() {
+            return Stored::Whole;
+        }
+        let available = window
+            .get_region(region)
+            .map(|r| r.max_tokens.saturating_sub(r.current_tokens))
+            .unwrap_or(0);
+        let (truncated, omitted) = if available > 100 {
+            let char_budget = (available - 10) * 4;
+            let prefix = truncate_on_char_boundary(&content, char_budget);
+            let omitted = content.len().saturating_sub(prefix.len());
+            (
+                format!("{}... [truncated, {} chars omitted]", prefix, omitted),
+                omitted,
+            )
         } else {
-            // Routed to a knowledge region. Anthropic requires each tool_result to sit
-            // in the message immediately after its tool_use, so the PAIR must stay in
-            // `conversation`: we keep a short pointer tool_result there (valid + cheap)
-            // and store the FULL output in the target region as TEXT. Text renders as a
-            // stable knowledge block for any region kind - a ToolResult block in a
-            // second sliding_window would desync from its tool_use (→ API 400), and
-            // dropping the conversation tool_result would orphan the tool_use (the
-            // assembler strips it, so the model can't see its own call landed → loops).
-            let preview: String = result_text.chars().take(160).collect();
-            let ellipsis = if result_text.len() > preview.len() {
-                "…"
-            } else {
-                ""
-            };
-            let hidden = window.hidden.contains(target_region);
-            // Stored FIRST, so the pointer can say what actually happened
-            // rather than what was intended. The two writes land in different
-            // regions, so the tool_use/tool_result adjacency Anthropic requires
-            // is unaffected by the order.
-            let stored = add_kind(
-                window,
-                target_region,
-                leviath_core::EntryKind::Text,
-                result_text,
-                result_tokens,
-            );
-            // What this text asks the model to do is the whole point of it.
-            //
-            // It used to say "read that region for the full result", which is
-            // an instruction with no tool behind it: the region is rendered
-            // into the system prompt already, and `context_read` is not granted
-            // by most stages that route. Models did the only thing left and
-            // pointed `read_file` at the region name - across 152 local runs,
-            // 90 of 168 failed `read_file` calls were a region name where a path
-            // belongs, one run spending five turns on five spellings of
-            // `raw_findings`. So the pointer now names the `## region` heading
-            // the assembler emits and says no call is needed.
-            //
-            // A region this stage does not render is the other half: the model
-            // cannot go and read it, so telling it to is worse than saying
-            // nothing (#370). `lev validate` refuses a blueprint that routes
-            // that way, so reaching here means a layout swapped underneath a
-            // routing rule rather than an author mistake - but the model still
-            // needs to be told the truth about where its output went.
-            let pointer = match (hidden, stored) {
-                (true, _) => format!(
-                    "[output stored in context region '{target_region}' ({result_tokens} tokens), which this stage does not carry - it is kept for a later stage and cannot be read from here. Preview: {preview}{ellipsis}]"
-                ),
-                (false, Stored::Whole) => format!(
-                    "[output ({result_tokens} tokens) is in your context under the '{target_region}' heading - it is already in this prompt, so no tool call is needed to see it. Preview: {preview}{ellipsis}]"
-                ),
-                (false, Stored::Truncated { omitted }) => format!(
-                    "[output was too large for context region '{target_region}': the start of it is in this prompt under that heading and {omitted} characters were dropped. Release what you are finished with (context_delete) before fetching more this size. Preview: {preview}{ellipsis}]"
-                ),
-                (false, Stored::Dropped) => format!(
-                    "[output could NOT be stored - context region '{target_region}' is full and refused it, so only this preview survives. Release what you are finished with (context_delete) and fetch it again if you still need it. Preview: {preview}{ellipsis}]"
-                ),
-            };
-            let pointer_tokens = leviath_core::estimate_tokens(&pointer);
-            add_kind(
-                window,
-                "conversation",
-                result_kind(),
-                pointer,
-                pointer_tokens,
-            );
+            (
+                "[tool result truncated - context window full]".to_string(),
+                content.len(),
+            )
+        };
+        let trunc_tokens = leviath_core::estimate_tokens(&truncated);
+        if put(window, truncated, trunc_tokens).is_ok() {
+            return Stored::Truncated { omitted };
         }
+        let _ = put(window, "[result omitted]".to_string(), 5);
+        Stored::Dropped
+    };
+    let result_kind = || leviath_core::EntryKind::ToolResult {
+        tool_call_id: tool_call_id.clone(),
+        tool_name: tool_name.clone(),
+        is_error: false,
+    };
+
+    if target_region == "conversation" {
+        // Not routed (or routed back to the message stream): the tool_result
+        // lives in `conversation`, paired with its tool_use.
+        add_kind(
+            window,
+            "conversation",
+            result_kind(),
+            result_text,
+            result_tokens,
+        );
+    } else {
+        // Routed to a knowledge region. Anthropic requires each tool_result to sit
+        // in the message immediately after its tool_use, so the PAIR must stay in
+        // `conversation`: we keep a short pointer tool_result there (valid + cheap)
+        // and store the FULL output in the target region as TEXT. Text renders as a
+        // stable knowledge block for any region kind - a ToolResult block in a
+        // second sliding_window would desync from its tool_use (→ API 400), and
+        // dropping the conversation tool_result would orphan the tool_use (the
+        // assembler strips it, so the model can't see its own call landed → loops).
+        let preview: String = result_text.chars().take(160).collect();
+        let ellipsis = if result_text.len() > preview.len() {
+            "…"
+        } else {
+            ""
+        };
+        let hidden = window.hidden.contains(target_region);
+        // Stored FIRST, so the pointer can say what actually happened
+        // rather than what was intended. The two writes land in different
+        // regions, so the tool_use/tool_result adjacency Anthropic requires
+        // is unaffected by the order.
+        let stored = add_kind(
+            window,
+            target_region,
+            leviath_core::EntryKind::Text,
+            result_text,
+            result_tokens,
+        );
+        // What this text asks the model to do is the whole point of it.
+        //
+        // It used to say "read that region for the full result", which is
+        // an instruction with no tool behind it: the region is rendered
+        // into the system prompt already, and `context_read` is not granted
+        // by most stages that route. Models did the only thing left and
+        // pointed `read_file` at the region name - across 152 local runs,
+        // 90 of 168 failed `read_file` calls were a region name where a path
+        // belongs, one run spending five turns on five spellings of
+        // `raw_findings`. So the pointer now names the `## region` heading
+        // the assembler emits and says no call is needed.
+        //
+        // A region this stage does not render is the other half: the model
+        // cannot go and read it, so telling it to is worse than saying
+        // nothing (#370). `lev validate` refuses a blueprint that routes
+        // that way, so reaching here means a layout swapped underneath a
+        // routing rule rather than an author mistake - but the model still
+        // needs to be told the truth about where its output went.
+        let pointer = match (hidden, stored) {
+            (true, _) => format!(
+                "[output stored in context region '{target_region}' ({result_tokens} tokens), which this stage does not carry - it is kept for a later stage and cannot be read from here. Preview: {preview}{ellipsis}]"
+            ),
+            (false, Stored::Whole) => format!(
+                "[output ({result_tokens} tokens) is in your context under the '{target_region}' heading - it is already in this prompt, so no tool call is needed to see it. Preview: {preview}{ellipsis}]"
+            ),
+            (false, Stored::Truncated { omitted }) => format!(
+                "[output was too large for context region '{target_region}': the start of it is in this prompt under that heading and {omitted} characters were dropped. Release what you are finished with (context_delete) before fetching more this size. Preview: {preview}{ellipsis}]"
+            ),
+            (false, Stored::Dropped) => format!(
+                "[output could NOT be stored - context region '{target_region}' is full and refused it, so only this preview survives. Release what you are finished with (context_delete) and fetch it again if you still need it. Preview: {preview}{ellipsis}]"
+            ),
+        };
+        let pointer_tokens = leviath_core::estimate_tokens(&pointer);
+        add_kind(
+            window,
+            "conversation",
+            result_kind(),
+            pointer,
+            pointer_tokens,
+        );
     }
 }
 

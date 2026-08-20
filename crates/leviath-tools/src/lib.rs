@@ -30,7 +30,7 @@ pub use validate::*;
 /// Re-exported from `leviath-core`, which owns the name because the blueprint
 /// validator and the manifest parser both need it and neither may depend on
 /// this crate.
-pub use leviath_core::blueprint::{SUBMIT_OUTPUT_TOOL, SUBMIT_WORK_ITEMS_TOOL};
+pub use leviath_core::blueprint::{FAN_OUT_TOOL, SUBMIT_OUTPUT_TOOL};
 
 /// Built-in tools: read_file, write_file, edit_file, list_dir, shell.
 ///
@@ -265,21 +265,17 @@ mod tests {
         );
     }
 
-    /// Same reasoning for the split's tool: the fan-out system reads it off the
-    /// inference result before dispatch, so a call reaching the executor came
-    /// from a stage that is not a fan-out and has nowhere to put work items.
+    /// Same reasoning for the fan-out tool: it parks the calling agent on its
+    /// workers, which is world state this executor cannot reach.
     #[tokio::test]
-    async fn submit_work_items_is_not_handled_by_builtin_execute() {
+    async fn fan_out_is_not_handled_by_builtin_execute() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         let result = tools
-            .execute(
-                crate::SUBMIT_WORK_ITEMS_TOOL,
-                serde_json::json!({"items": []}),
-            )
+            .execute(crate::FAN_OUT_TOOL, serde_json::json!({"items": []}))
             .await;
         assert!(
-            result.contains("only answerable by a fan_out stage"),
+            result.contains("fan_out must be handled by the runtime"),
             "{result}"
         );
     }

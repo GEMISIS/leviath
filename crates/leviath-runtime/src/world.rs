@@ -45,9 +45,9 @@ use crate::pipeline::{
     dispatch_tools, dispatch_transition_choice, enforce_max_iterations, fail_stalled_dispatch,
     fail_wedged_runs, gate_requires_children, handle_empty_response, poll_dynamic_tool_refresh,
     process_response, reflect_interaction_status, refresh_advertised_tools,
-    require_context_regions, require_final_output, resolve_transition, run_after_inference_hooks,
-    run_before_inference_hooks, run_stage_enter_hooks, run_stage_exit_hooks, run_terminal_hooks,
-    run_tool_call_hooks, sync_tool_stages,
+    require_context_regions, require_fan_out, require_final_output, resolve_transition,
+    run_after_inference_hooks, run_before_inference_hooks, run_stage_enter_hooks,
+    run_stage_exit_hooks, run_terminal_hooks, run_tool_call_hooks, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::ToolLane;
@@ -455,7 +455,6 @@ impl PipelineWorld {
                     .chain(),
                 collect_inference,
                 // Intercept a fan-out stage's split response before normal routing.
-                crate::fanout::fan_out_split,
                 // `after_inference` sees the response before anything is
                 // written to context or dispatched from it.
                 (run_after_inference_hooks, process_response).chain(),
@@ -484,7 +483,13 @@ impl PipelineWorld {
                 // submitted one. Beside its sibling and before any transition
                 // resolves, so an unfinished stage is sent back rather than
                 // silently ending the run with nothing to hand back.
-                require_final_output,
+                // Nested for the 20-system `.chain()` limit, as the pairs
+                // below are. `require_fan_out` is the same shape for a fan_out
+                // stage trying to leave without having started any workers:
+                // starting them is the whole job of the stage, and a merge stage
+                // running on nothing used to be indistinguishable from one
+                // running on a genuinely empty fan-out.
+                (require_final_output, require_fan_out),
                 // Intercept a would-be transition for an interactive-points stage
                 // (e.g. plan_approval) and drive the interaction-point lane.
                 crate::interaction_points::gate_interaction_points,
@@ -494,8 +499,14 @@ impl PipelineWorld {
                 (run_stage_exit_hooks, resolve_transition).chain(),
                 dispatch_transition_choice,
                 collect_transition_choice,
-                // Drive fan-out workers and merge once they finish.
-                crate::fanout::fan_out_collect,
+                // Start any fan-out the dispatcher accepted this tick, then
+                // drive its workers and merge once they finish. Chained so a
+                // fan-out started here launches on this tick, not the next.
+                (
+                    crate::fanout::start_pending_fan_outs,
+                    crate::fanout::fan_out_collect,
+                )
+                    .chain(),
                 // Narrate lifecycle/activity into the telemetry sink. Must run
                 // before `sync_tool_stages` (which consumes the transient
                 // `StageJustEntered` marker) and before `dispatch_persistence`

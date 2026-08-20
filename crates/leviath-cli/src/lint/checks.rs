@@ -160,7 +160,7 @@ pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lint
 pub(super) fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFinding> {
     // Only autonomous stages are a problem: the interactive modes are where a
     // person is expected, and the one tool a fan_out stage carries is its own
-    // `submit_work_items`, which blocks on nobody.
+    // `fan_out`, which blocks on nobody.
     if !matches!(stage.mode, StageMode::Autonomous) || stage.allow_blocking_tools {
         return Vec::new();
     }

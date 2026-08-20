@@ -16,6 +16,7 @@ fn healthy_daemon() -> DaemonHealth {
 
 fn entry(run_id: &str, status: AgentStatus) -> RunListEntry {
     RunListEntry {
+        splits_degraded: 0,
         run_id: run_id.to_string(),
         title: None,
         status,

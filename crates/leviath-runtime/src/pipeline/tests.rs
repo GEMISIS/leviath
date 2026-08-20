@@ -2376,6 +2376,7 @@ fn dispatch_persistence_serializes_fan_out_waiting() {
         &mut world,
         e,
         crate::fanout::FanOutState {
+            origin: crate::fanout::FanOutOrigin::Stage,
             config: FanOutConfig {
                 worker_agent: None,
                 worker_stage: Some("w".to_string()),

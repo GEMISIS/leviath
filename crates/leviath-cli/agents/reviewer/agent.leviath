@@ -1,6 +1,6 @@
 [agent]
 name = "reviewer"
-version = "0.1.2"
+version = "0.2.0"
 description = "Code review agent - discover, scan, review the areas in parallel, then deep review and report, with error recovery and multi-provider fallback"
 entry_stage = "discover"
 
@@ -139,10 +139,9 @@ item each. An area is a file, a module, a subsystem, or one coherent group of
 hunks - whatever divides the change without two workers reviewing the same
 lines. Start from the areas `findings` already flags.
 
-Output ONLY a JSON array, starting with '[' and ending with ']'. No prose, no
-markdown fences. Each item:
+Call `fan_out` with one entry in `items` per work item:
 
-[{"id": "<short-slug>", "context": {"area": "<the files or hunks to review>", "code": "<the diff hunks for this area, verbatim>", "focus": "<what to look hardest at here>", "conventions": "<what this project calls correct, verbatim from discovery>"}}]
+  items: [{"id": "<short-slug>", "context": {"area": "<the files or hunks to review>", "code": "<the diff hunks for this area, verbatim>", "focus": "<what to look hardest at here>", "conventions": "<what this project calls correct, verbatim from discovery>"}}]
 
 Every item MUST carry its code and the conventions: workers do not share this
 agent's context, so the work item is all they get. A worker that does not know

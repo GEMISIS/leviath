@@ -363,6 +363,10 @@ fn completion_payload(
         // it achieved anything. A harness batching hundreds of runs has no
         // other way to tell the difference without re-reading the workspace.
         "empty_output": meta.flags.empty_output,
+        // Same question one level down: a fan-out stage that started no workers
+        // leaves its merge stage working from nothing, and a caller reading only
+        // `status` cannot tell that from a run whose fan-out was genuinely empty.
+        "splits_degraded": meta.flags.splits_degraded,
     })
 }
 

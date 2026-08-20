@@ -1010,12 +1010,12 @@ pub(crate) fn attach_stage_components(
         .remove::<crate::interaction_points::InteractionPointRounds>()
         .remove::<RequiredReentries>()
         .remove::<OutputReentries>()
-        // The fan-out split's correction budget is one of those. Left standing,
-        // it is a per-run budget rather than a per-entry one: a split that
-        // needed one correction the first time through left the counter at 1,
-        // and the second entry into the same stage got a single correction
-        // before the stage failed. That is how a `deep-researcher` run ended.
-        .remove::<crate::fanout::SplitAttempts>()
+        // A fan-out stage owes its own workers on every entry. Only the
+        // "already did it" marker is cleared: `PreviousWorkItems` deliberately
+        // survives, because it is what tells the second round what the first
+        // one already covered.
+        .remove::<FanOutReentries>()
+        .remove::<crate::fanout::FannedOut>()
         .insert(ReadyToInfer);
     match &setup.routing {
         Some(routing) => {

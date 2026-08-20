@@ -342,6 +342,111 @@ pub fn require_final_output(
     }
 }
 
+/// What a fan-out stage is told when it tries to leave without fanning out.
+const MISSING_FAN_OUT_NUDGE: &str = "This stage has not started its workers yet. Call `fan_out` \
+     with the work items - that is the whole job of this stage, and nothing \
+     downstream runs until you do. If there is genuinely nothing to hand out, \
+     call it with an empty `items` array to say so.";
+
+/// How many times a fan-out stage is asked again before it is let through.
+///
+/// Matches [`leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP`] and exists for
+/// the same reason: a model that cannot produce the one thing its stage is for
+/// should cost a bounded number of prompts, not the stage's whole
+/// `max_revisits` budget.
+const FAN_OUT_REENTRY_CAP: usize = leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP;
+
+/// Times this stage has been asked again to fan out.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FanOutReentries(pub usize);
+
+/// What [`require_fan_out`] selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about lifetimes:
+/// the borrow is bound when the query is fetched.
+type RequireFanOutQuery = (
+    Entity,
+    &'static AgentBlueprint,
+    &'static StageCursor,
+    &'static mut ContextWindow,
+    Option<&'static FanOutReentries>,
+    Option<&'static StageOutcome>,
+    Option<&'static crate::fanout::FannedOut>,
+    Option<&'static mut crate::persistence::RunOutcomeFlags>,
+);
+
+/// Hold a `fan_out` stage that is trying to transition without having fanned
+/// out, and ask it again.
+///
+/// A fan-out stage exists to start workers. Before this, a stage whose model
+/// answered in prose simply transitioned, and the merge stage ran on nothing -
+/// silently, because "no workers ran" and "there was nothing to hand out" look
+/// identical from the far side. That was the quiet half of the failure that
+/// killed a `deep-researcher` run; the loud half was the runtime ending the run
+/// over it.
+///
+/// Neither now. The stage is asked again a bounded number of times and then let
+/// through with `splits_degraded` recorded, which is the same shape
+/// [`require_final_output`] uses for a missing answer: never strand a run over a
+/// thing the model would not do, and never let it pass for success either.
+pub fn require_fan_out(
+    mut agents: Query<RequireFanOutQuery, With<ResolveTransition>>,
+    mut commands: Commands,
+) {
+    crate::tick_scope::clear();
+    for (entity, bp, cursor, mut window, reentries, outcome, fanned_out, mut flags) in
+        agents.iter_mut()
+    {
+        crate::tick_scope::enter(entity);
+        let stage = &bp.0.stages[cursor.index];
+        if !matches!(
+            stage.mode,
+            leviath_core::blueprint::StageMode::FanOut { .. }
+        ) {
+            continue;
+        }
+        // Set by every accepted call and cleared on stage entry, so its
+        // presence means "this entry has already fanned out" rather than "this
+        // run has, at some point".
+        if fanned_out.is_some() {
+            continue;
+        }
+        // A stage already ending on an error or its iteration cap is not held
+        // here - that transition takes precedence - but the flag still has to be
+        // honest about what the merge stage is about to work from.
+        if outcome.is_some() {
+            tracing::warn!(stage = %stage.name, "fan_out stage ended without starting any workers");
+            if let Some(flags) = flags.as_mut() {
+                flags.0.splits_degraded += 1;
+            }
+            continue;
+        }
+        let round = reentries.map_or(0, |r| r.0);
+        if round >= FAN_OUT_REENTRY_CAP {
+            tracing::warn!(
+                stage = %stage.name,
+                attempts = FAN_OUT_REENTRY_CAP,
+                "fan_out stage never started its workers; proceeding without them"
+            );
+            crate::pipeline::note_unusable_split(
+                &mut window,
+                &stage.name,
+                "the stage never called `fan_out`",
+            );
+            if let Some(flags) = flags.as_mut() {
+                flags.0.splits_degraded += 1;
+            }
+            continue; // proceed rather than strand the run
+        }
+        crate::pipeline::response::inject_system_nudge(&mut window, MISSING_FAN_OUT_NUDGE);
+        commands
+            .entity(entity)
+            .remove::<ResolveTransition>()
+            .insert(ReadyToInfer)
+            .insert(FanOutReentries(round + 1));
+    }
+}
+
 /// What a chosen edge's gate says about the transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GateDecision {

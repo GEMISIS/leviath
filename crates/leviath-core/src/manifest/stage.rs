@@ -415,24 +415,24 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         }
     }
 
-    // A fan-out stage's split gets its own submission tool, on the same
-    // reasoning: the shape lives on the Stage's own tool list so `lev
-    // validate`, the tool filter and the lint all read the same honest
-    // list, rather than the dispatch layer special-casing the mode.
+    // `mode = "fan_out"` is sugar for granting the fan-out tool, on the same
+    // reasoning as `mode = "output"` above: the grant lives on the Stage's own
+    // tool list so `lev validate`, the tool filter and the lint all read the
+    // same honest list, rather than the dispatch layer special-casing the mode.
     //
-    // Added regardless of what the author wrote in `available_tools` -
-    // which for a fan-out stage is usually `[]`, because the split runs no
-    // tools of its own. That empty list is a statement about the work, not
-    // about how the answer comes back.
+    // Added regardless of what the author wrote in `available_tools` - which for
+    // a fan-out stage is usually `[]`, because the stage runs no tools of its
+    // own. That empty list is a statement about the work, not about how the
+    // stage starts its workers.
     if matches!(stage.mode, StageMode::FanOut { .. })
         && !stage
             .available_tools
             .iter()
-            .any(|t| t == crate::blueprint::SUBMIT_WORK_ITEMS_TOOL)
+            .any(|t| t == crate::blueprint::FAN_OUT_TOOL)
     {
         stage
             .available_tools
-            .push(crate::blueprint::SUBMIT_WORK_ITEMS_TOOL.to_string());
+            .push(crate::blueprint::FAN_OUT_TOOL.to_string());
     }
 
     // Parse allow_blocking_tools flag: says this autonomous stage means
