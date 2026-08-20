@@ -1960,6 +1960,35 @@ some_custom_thing = \"forwarded to the script\"
         assert_eq!(Config::default().limits.max_concurrent_inferences, Some(8));
     }
 
+    /// A pool of `0` takes no request ever, and waiting for a full pool is
+    /// ordinary backpressure the engine never fails - so a `0` left as written
+    /// parks every affected run for the life of the daemon with nothing said.
+    /// Every one of the three keys is clamped to 1 instead.
+    #[test]
+    fn a_zero_inference_pool_is_clamped_to_one() {
+        with_tracing(|| {
+            let mut limits = LimitsConfig {
+                max_concurrent_inferences: Some(0),
+                ..Default::default()
+            };
+            limits
+                .max_concurrent_inferences_by_model
+                .insert("stuck-model".to_string(), 0);
+            limits
+                .max_concurrent_inferences_by_provider
+                .insert("stuck-provider".to_string(), 0);
+
+            let pools = limits.inference_pools();
+            assert_eq!(pools.limit_for("stuck-model"), Some(1));
+            assert_eq!(
+                pools.limit_for("any-other-model"),
+                Some(1),
+                "the global fallback is clamped too"
+            );
+            assert_eq!(pools.provider_limit_for("stuck-provider"), Some(1));
+        });
+    }
+
     /// The `[limits]` tables reach the engine's pools: the global fallback for
     /// an unlisted model, a per-model override, and a per-provider cap that is
     /// deliberately *not* filled in from the global number (issue #522).
