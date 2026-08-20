@@ -174,7 +174,8 @@ pair with a provider that is named separately, so they take `qwen3.8:latest`; on
 `default_provider` is read bare and `lev doctor` says so; a blueprint entry is sent as written.
 
 Check the spelling against `lev models list --provider <name> --remote`, which asks the provider
-rather than Leviath's built-in table. Note that a valid dated identifier such as
+rather than Leviath's built-in table. A provider *name* it cannot reach at all fails the command
+outright, so a typo there is answered rather than shown as an empty table. Note that a valid dated identifier such as
 `deepseek/deepseek-v4-flash-0731` may be absent from the offline table while still working, so
 absence there is not proof of a bad name. See
 [model identifiers](/docs/providers#model-identifiers).
