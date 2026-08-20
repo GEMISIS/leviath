@@ -140,6 +140,12 @@ pub async fn setup_daemon_host_with(
     // redirect policy has no per-agent context to consult; see
     // `script_host::set_local_network_allowed`.
     crate::daemon::script_host::set_local_network_allowed(config.security.allow_local_network);
+    // Same mirror, same reason: the shared blocking client has no handle on the
+    // config by the time a script tool calls through it.
+    crate::daemon::script_host::set_script_http_max_per_host(
+        config.limits.script_http_max_per_host,
+    );
+    crate::daemon::script_host::set_script_http_timeout(config.limits.script_http_timeout_secs);
     // Built before the registry, and shared with it: a script provider's
     // `[model_providers.<name>]` table is read through this, so editing it
     // takes effect on the next load exactly as editing the `.rhai` beside it

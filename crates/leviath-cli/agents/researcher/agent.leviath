@@ -36,7 +36,7 @@ Be efficient - do not search exhaustively:
 1. Run a FOCUSED first round of 3-5 web_search calls covering the distinct
    sub-topics of the question (not many rephrasings of the same query).
 2. web_fetch only the 2-3 most promising sources for detail; the search snippets
-   in `raw_findings` are usually enough on their own.
+   in `raw_findings` are usually enough on their own. Issue a round's searches, and then that round's fetches, as ONE response each: a batch runs in parallel, so eight fetches cost about what one costs, while the inference call between two responses costs tens of seconds.
 3. As you go, append one bibliography line per source you actually use to the
    `sources_index` region with context_append:
    `[n] <title> - <url or path> - credibility: <high/med/low + why>`.

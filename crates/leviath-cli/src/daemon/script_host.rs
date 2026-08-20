@@ -496,15 +496,110 @@ static HTTP_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
 /// "refused to follow redirect: private address" and "too many redirects" are
 /// different problems with different fixes, and both were reaching the script
 /// author as the same opaque sentence.
-fn error_chain(e: &dyn std::error::Error) -> String {
-    let mut parts = vec![e.to_string()];
-    let mut source = e.source();
-    while let Some(err) = source {
-        parts.push(err.to_string());
-        source = err.source();
-    }
-    parts.join(": ")
+fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    leviath_providers::rhai_provider::host::error_chain(e)
 }
+
+/// Concurrent script-tool HTTP requests allowed per host; `0` is unbounded.
+///
+/// A process-wide mirror of `[limits] script_http_max_per_host`, for the same
+/// reason [`ALLOW_LOCAL_REDIRECTS`] is one: [`HTTP_CLIENT`] is process-wide and
+/// the request path has no handle on the config.
+static HTTP_MAX_PER_HOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(4);
+
+/// Apply `[limits] script_http_max_per_host` for this process.
+pub fn set_script_http_max_per_host(max: usize) {
+    HTTP_MAX_PER_HOST.store(max, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// In-flight script-tool requests per host, and the condvar waiters park on.
+static IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static IN_FLIGHT_FREED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// A permit to have one request in flight against `host`, released on drop.
+///
+/// A condvar rather than a `tokio::sync::Semaphore` because script tools run on
+/// `spawn_blocking` threads with no runtime handle to await on.
+struct HostPermit(Option<String>);
+
+impl HostPermit {
+    /// Take a permit for `url`'s host, blocking while that host is at its cap.
+    ///
+    /// A URL with no host (and an unbounded cap) takes no permit at all, so the
+    /// unlimited setting costs nothing.
+    fn acquire(url: &str) -> Self {
+        let max = HTTP_MAX_PER_HOST.load(std::sync::atomic::Ordering::Relaxed);
+        let Some(host) = host_of(url).filter(|_| max > 0) else {
+            return Self(None);
+        };
+        let mut counts = IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while counts.get(&host).copied().unwrap_or(0) >= max {
+            counts = IN_FLIGHT_FREED
+                .wait(counts)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *counts.entry(host.clone()).or_insert(0) += 1;
+        Self(Some(host))
+    }
+}
+
+impl Drop for HostPermit {
+    fn drop(&mut self) {
+        let Some(host) = self.0.take() else {
+            return;
+        };
+        let mut counts = IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // `or_insert(1)` rather than `if let Some(..)`: acquire always inserted
+        // the key and this is its only remover, so the missing case cannot
+        // happen - and written as a branch it was a region no test could enter.
+        let remaining = counts.entry(host.clone()).or_insert(1);
+        *remaining = remaining.saturating_sub(1);
+        if *remaining == 0 {
+            counts.remove(&host);
+        }
+        drop(counts);
+        IN_FLIGHT_FREED.notify_all();
+    }
+}
+
+/// The host part of `url`, lowercased. `None` when it does not parse.
+fn host_of(url: &str) -> Option<String> {
+    reqwest::Url::parse(url)
+        .ok()?
+        .host_str()
+        .map(str::to_lowercase)
+}
+
+/// Seconds a script tool's HTTP request may take; `0` leaves the client's own
+/// deadline in charge.
+///
+/// Applied per request rather than on [`HTTP_CLIENT`] because that static is
+/// built lazily at first use, which may be before or after the config is read.
+/// A per-request timeout also wins over the client's, so this is the value that
+/// actually governs.
+static HTTP_TIMEOUT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(30);
+
+/// Apply `[limits] script_http_timeout_secs` for this process.
+pub fn set_script_http_timeout(secs: u64) {
+    HTTP_TIMEOUT_SECS.store(secs, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The configured per-request deadline, if one is set.
+fn script_http_timeout() -> Option<Duration> {
+    match HTTP_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        secs => Some(Duration::from_secs(secs)),
+    }
+}
+
+/// How many extra attempts a script tool's request gets after a transport
+/// failure that looks transient.
+const SCRIPT_HTTP_RETRIES: u32 = 2;
 
 /// Whether *redirect hops* may land on loopback / private / link-local
 /// addresses.
@@ -556,16 +651,59 @@ impl RealScriptIo {
     /// `Response::text` decodes *anything* lossily, so a PNG or MP3 came back as
     /// a page of U+FFFD replacement characters reported as a **successful**
     /// fetch - no error, no signal, straight into the model's context.
-    fn send(req: reqwest::blocking::RequestBuilder) -> Result<String, String> {
-        Self::send_capped(req, MAX_RESPONSE_BYTES)
+    fn send(
+        url: &str,
+        build: &dyn Fn() -> reqwest::blocking::RequestBuilder,
+    ) -> Result<String, String> {
+        Self::send_capped(url, build, MAX_RESPONSE_BYTES)
+    }
+
+    /// Send `req`, retrying a transport failure that looks transient, and
+    /// holding a per-host permit for the duration so a batched fan-out cannot
+    /// open an unbounded number of connections to one origin.
+    ///
+    /// Takes a builder *factory* rather than a `RequestBuilder`, because `send`
+    /// consumes the builder and `try_clone` has a `None` arm (a streaming body)
+    /// that no script tool can reach - a branch nothing could ever test. Asking
+    /// the caller to rebuild removes it.
+    fn send_with_retry(
+        url: &str,
+        build: &dyn Fn() -> reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::Response, String> {
+        let _permit = HostPermit::acquire(url);
+        let mut attempt = 0;
+        loop {
+            let req = match script_http_timeout() {
+                Some(t) => build().timeout(t),
+                None => build(),
+            };
+            match req.send() {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    let chain = error_chain(&e);
+                    if attempt >= SCRIPT_HTTP_RETRIES
+                        || !leviath_providers::rhai_provider::host::is_retryable_transport(&chain)
+                    {
+                        return Err(format!("request failed: {chain}"));
+                    }
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_millis(200 * u64::from(attempt)));
+                }
+            }
+        }
     }
 
     /// [`send`](Self::send) with the body cap injected, so the oversized-body
     /// refusal is testable against a small response instead of a 32 MiB one.
-    fn send_capped(req: reqwest::blocking::RequestBuilder, max: u64) -> Result<String, String> {
-        let resp = req
-            .send()
-            .map_err(|e| format!("request failed: {}", error_chain(&e)))?;
+    fn send_capped(
+        url: &str,
+        build: &dyn Fn() -> reqwest::blocking::RequestBuilder,
+        max: u64,
+    ) -> Result<String, String> {
+        // One `send()` used to be the whole story here, and a single HTTP/2
+        // stream error therefore lost the page for good: a research run cited
+        // two primary sources it had never opened because of exactly this.
+        let resp = Self::send_with_retry(url, build)?;
         let status = resp.status();
         let content_type = resp
             .headers()
@@ -732,7 +870,9 @@ pub(crate) fn cap_script_io(mut s: String) -> String {
 impl ScriptIo for RealScriptIo {
     fn http_get(&self, url: &str, headers: BTreeMap<String, String>) -> Result<String, String> {
         let client = Self::client();
-        Self::send(Self::with_headers(client.get(url), headers))
+        Self::send(url, &|| {
+            Self::with_headers(client.get(url), headers.clone())
+        })
     }
 
     fn http_post(
@@ -742,10 +882,9 @@ impl ScriptIo for RealScriptIo {
         headers: BTreeMap<String, String>,
     ) -> Result<String, String> {
         let client = Self::client();
-        Self::send(Self::with_headers(
-            client.post(url).body(body.to_string()),
-            headers,
-        ))
+        Self::send(url, &|| {
+            Self::with_headers(client.post(url).body(body.to_string()), headers.clone())
+        })
     }
 
     fn run_shell(&self, mut cmd: TokioCommand, timeout: Duration) -> Result<String, String> {
@@ -866,6 +1005,183 @@ pub(crate) fn combine_shell_output(stdout: &[u8], stderr: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// A server that drops the first connection without answering, then serves
+    /// normally. Reproduces the "the socket did not work this time" shape that
+    /// used to lose a source outright.
+    ///
+    /// A blocking listener over exactly two connections, so the spawned body
+    /// *returns*. An `accept` loop that runs forever leaves its own closing
+    /// region uncovered, which is why [`mock_http`] hands `tokio::spawn` a
+    /// future with no block of ours in it.
+    fn flaky_http() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for (i, mut sock) in listener.incoming().take(2).flatten().enumerate() {
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf);
+                // The first caller gets a FIN mid-request and nothing else.
+                if i > 0 {
+                    let body = "RETRIED-OK";
+                    let _ = sock.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                }
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Before the retry, one dropped connection was the whole story: the page
+    /// was lost and the bibliography still cited it.
+    #[test]
+    fn a_dropped_connection_is_retried_rather_than_lost() {
+        let base = flaky_http();
+        let client = RealScriptIo::client();
+        let url = format!("{base}/x");
+        let out = RealScriptIo::send(&url, &|| client.get(&url));
+        assert_eq!(out.expect("the retry recovers"), "RETRIED-OK");
+    }
+
+    /// A host that never answers still gives up rather than looping, and says
+    /// so in the message the agent reads.
+    #[test]
+    fn a_dead_host_gives_up_with_a_named_failure() {
+        let _guard = lock_http_limits();
+        let previous = HTTP_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed);
+        // Also the no-deadline arm: `0` leaves the client's own timeout in
+        // charge rather than stamping one per request.
+        set_script_http_timeout(0);
+        let client = RealScriptIo::client();
+        // Nothing listening: connection refused is not retryable, so this
+        // returns on the first attempt instead of spending the budget.
+        let out = RealScriptIo::send("http://127.0.0.1:19997/x", &|| {
+            client.get("http://127.0.0.1:19997/x")
+        });
+        set_script_http_timeout(previous);
+        let err = out.expect_err("a dead host fails");
+        assert!(err.contains("request failed"), "got: {err}");
+    }
+
+    // ─── per-host request gate ──────────────────────────────────────────────
+
+    /// `HTTP_MAX_PER_HOST` and `HTTP_TIMEOUT_SECS` are process-wide, so every
+    /// test that writes one races every test that reads it - the same hazard
+    /// [`REDIRECT_MIRROR`] exists for, and it bit exactly the same way: a
+    /// concurrent test raising the cap made the "over the cap" test's second
+    /// request sail straight through.
+    static HTTP_LIMITS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the script-HTTP limits lock.
+    fn lock_http_limits() -> std::sync::MutexGuard<'static, ()> {
+        HTTP_LIMITS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn host_of_lowercases_and_ignores_unparseable_urls() {
+        assert_eq!(
+            host_of("https://Example.COM/a/b"),
+            Some("example.com".into())
+        );
+        assert_eq!(host_of("http://127.0.0.1:8080/x"), Some("127.0.0.1".into()));
+        assert_eq!(host_of("not a url"), None);
+        // A parseable URL with no host still yields nothing to key a permit on.
+        assert_eq!(host_of("data:text/plain,hi"), None);
+    }
+
+    #[test]
+    fn a_permit_is_held_then_released() {
+        let _guard = lock_http_limits();
+        let previous = HTTP_MAX_PER_HOST.load(std::sync::atomic::Ordering::Relaxed);
+        set_script_http_max_per_host(2);
+        {
+            let _a = HostPermit::acquire("https://gate.example/a");
+            let _b = HostPermit::acquire("https://gate.example/b");
+            let held = IN_FLIGHT
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get("gate.example")
+                .copied();
+            assert_eq!(held, Some(2), "both permits counted against the host");
+            // A different host is counted separately, so one slow origin cannot
+            // stall fetches to every other one.
+            let _c = HostPermit::acquire("https://other.example/c");
+            assert_eq!(
+                IN_FLIGHT
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get("other.example")
+                    .copied(),
+                Some(1)
+            );
+        }
+        // Dropping every permit removes the key rather than leaving a zero.
+        assert!(
+            !IN_FLIGHT
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key("gate.example")
+        );
+        set_script_http_max_per_host(previous);
+    }
+
+    #[test]
+    fn an_unbounded_cap_takes_no_permit_at_all() {
+        let _guard = lock_http_limits();
+        let previous = HTTP_MAX_PER_HOST.load(std::sync::atomic::Ordering::Relaxed);
+        set_script_http_max_per_host(0);
+        let _p = HostPermit::acquire("https://unbounded.example/x");
+        assert!(
+            !IN_FLIGHT
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key("unbounded.example"),
+            "0 means unlimited, so nothing is tracked"
+        );
+        set_script_http_max_per_host(previous);
+    }
+
+    #[test]
+    fn a_request_over_the_cap_waits_for_a_slot() {
+        let _guard = lock_http_limits();
+        let previous = HTTP_MAX_PER_HOST.load(std::sync::atomic::Ordering::Relaxed);
+        set_script_http_max_per_host(1);
+        let held = HostPermit::acquire("https://queue.example/first");
+        let waiter = std::thread::spawn(|| {
+            let _second = HostPermit::acquire("https://queue.example/second");
+            "got in"
+        });
+        // The second request cannot proceed while the first holds the only slot.
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !waiter.is_finished(),
+            "the cap did not hold the second request"
+        );
+        drop(held);
+        assert_eq!(waiter.join().expect("waiter finishes"), "got in");
+        set_script_http_max_per_host(previous);
+    }
+
+    #[test]
+    fn the_http_timeout_switch_round_trips() {
+        let _guard = lock_http_limits();
+        let previous = HTTP_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed);
+        set_script_http_timeout(7);
+        assert_eq!(script_http_timeout(), Some(Duration::from_secs(7)));
+        // Zero hands the deadline back to the client rather than meaning "now".
+        set_script_http_timeout(0);
+        assert_eq!(script_http_timeout(), None);
+        set_script_http_timeout(previous);
+    }
     use super::*;
     use std::sync::Mutex;
 
@@ -1541,7 +1857,8 @@ mod tests {
         let base = mock_http().await;
         let out = tokio::task::spawn_blocking(move || {
             let client = RealScriptIo::client();
-            RealScriptIo::send(client.get(format!("{base}/gibberish")))
+            let url = format!("{base}/gibberish");
+            RealScriptIo::send(&url, &|| client.get(&url))
         })
         .await
         .expect("join");
@@ -1583,7 +1900,8 @@ mod tests {
         let out = tokio::task::spawn_blocking(move || {
             let client = RealScriptIo::client();
             // `/ok` returns "GET-BODY" (8 bytes) with a Content-Length.
-            RealScriptIo::send_capped(client.get(format!("{base}/ok")), 4)
+            let url = format!("{base}/ok");
+            RealScriptIo::send_capped(&url, &|| client.get(&url), 4)
         })
         .await
         .unwrap();
