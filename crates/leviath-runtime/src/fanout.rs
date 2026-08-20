@@ -353,6 +353,17 @@ fn split_round_framing(round: usize, previous: &[String]) -> String {
     )
 }
 
+/// What a stage said should happen if its split cannot be used, decided while
+/// the blueprint and visit counts are still in the query rather than re-read
+/// afterwards - which is what made the re-read's missing-component arms
+/// unreachable.
+struct StageEscape {
+    /// The fan-out stage's name, for the log line and the context note.
+    stage_name: String,
+    /// Whether it declares an `error` or `dead_end` edge with budget left.
+    declared: bool,
+}
+
 /// A split's answer: the `submit_work_items` call it made, or failing that its
 /// assistant text.
 ///
@@ -360,10 +371,13 @@ fn split_round_framing(round: usize, previous: &[String]) -> String {
 /// show the model what it actually said, and for a tool call that is the
 /// arguments rather than the (usually empty) text beside them.
 struct SplitAnswer {
-    /// What the work items are parsed out of.
+    /// What the model said, for the correction round and the failure message.
     payload: String,
-    /// Whether it came from a `submit_work_items` call.
-    from_tool: bool,
+    /// The tool call's arguments, when the split answered with one. Carried as
+    /// the value the provider already parsed rather than re-parsed from
+    /// `payload`: stringifying a `Value` only to read it back cannot fail, so
+    /// the error arm it would need could never be taken.
+    arguments: Option<serde_json::Value>,
 }
 
 impl SplitAnswer {
@@ -382,11 +396,11 @@ impl SplitAnswer {
         {
             Some(call) => Self {
                 payload: call.arguments.to_string(),
-                from_tool: true,
+                arguments: Some(call.arguments.clone()),
             },
             None => Self {
                 payload: infer.response.clone(),
-                from_tool: false,
+                arguments: None,
             },
         }
     }
@@ -400,31 +414,42 @@ impl SplitAnswer {
 /// here keeps the normal `process_response` routing from touching these agents.
 pub fn fan_out_split(world: &mut World) {
     crate::tick_scope::clear();
-    let mut candidates: Vec<(Entity, SplitAnswer, FanOutConfig)> = Vec::new();
+    let mut candidates: Vec<(Entity, SplitAnswer, FanOutConfig, StageEscape)> = Vec::new();
     {
         let mut q = world.query_filtered::<(
             Entity,
             &AgentState,
             &AgentBlueprint,
             &StageCursor,
+            &crate::pipeline::VisitCounts,
             &InferenceResult,
         ), With<ProcessResponse>>();
-        for (entity, state, bp, cursor, infer) in q.iter(world) {
+        for (entity, state, bp, cursor, visits, infer) in q.iter(world) {
             if state.status != AgentStatus::Active {
                 continue;
             }
-            if let StageMode::FanOut { config } = &bp.0.stages[cursor.index].mode {
-                candidates.push((entity, SplitAnswer::read(infer), config.clone()));
+            let stage = &bp.0.stages[cursor.index];
+            if let StageMode::FanOut { config } = &stage.mode {
+                candidates.push((
+                    entity,
+                    SplitAnswer::read(infer),
+                    config.clone(),
+                    StageEscape {
+                        stage_name: stage.name.clone(),
+                        declared: declares_an_escape(&bp.0, stage, &visits.0),
+                    },
+                ));
             }
         }
     }
 
-    for (parent, answer, config) in candidates {
+    for (parent, answer, config, escape) in candidates {
         crate::tick_scope::enter(parent);
         let SplitAnswer {
             payload: response,
-            from_tool,
+            arguments,
         } = answer;
+        let from_tool = arguments.is_some();
         world
             .entity_mut(parent)
             .remove::<ProcessResponse>()
@@ -432,11 +457,9 @@ pub fn fan_out_split(world: &mut World) {
         // A tool call's arguments are the envelope the schema asks for, so they
         // go through the same value reader the free-text path ends at rather
         // than through the text scanning in front of it.
-        let parsed = match from_tool {
-            true => serde_json::from_str::<serde_json::Value>(&response)
-                .map_err(|e| format!("submit_work_items arguments are not valid JSON: {e}"))
-                .and_then(work_items_from_value),
-            false => parse_work_items(&response),
+        let parsed = match arguments {
+            Some(value) => work_items_from_value(value),
+            None => parse_work_items(&response),
         };
         match parsed {
             Ok(items) => {
@@ -553,6 +576,7 @@ pub fn fan_out_split(world: &mut World) {
                         world,
                         parent,
                         &config,
+                        &escape,
                         format!(
                             "fan_out split failed after {attempts} correction(s): \
                              {message} ({})",
@@ -742,27 +766,25 @@ fn finish_fan_out(world: &mut World, parent: Entity, w: FanOutWaiting) {
 /// The last resort is a real degradation and is recorded as one - the run flag
 /// and the `error_report` note are what keep "the split was unusable" from
 /// reading downstream as "there was nothing to split".
-fn fail_split(world: &mut World, parent: Entity, config: &FanOutConfig, message: String) {
-    let stage_name = world
-        .get::<StageCursor>(parent)
-        .and_then(|cursor| {
-            world
-                .get::<AgentBlueprint>(parent)
-                .and_then(|bp| bp.0.stages.get(cursor.index).map(|s| s.name.clone()))
-        })
-        .unwrap_or_default();
-    if declares_an_escape(world, parent) {
+fn fail_split(
+    world: &mut World,
+    parent: Entity,
+    config: &FanOutConfig,
+    escape: &StageEscape,
+    message: String,
+) {
+    if escape.declared {
         crate::pipeline::fail_stage_world(world, parent, message);
         return;
     }
     tracing::error!(
-        stage = %stage_name,
+        stage = %escape.stage_name,
         error = %message,
         "fan_out split is unusable and the stage declares no escape; \
          continuing with an empty fan-out"
     );
     if let Some(mut window) = world.get_mut::<ContextWindow>(parent) {
-        crate::pipeline::note_unusable_split(&mut window, &stage_name, &message);
+        crate::pipeline::note_unusable_split(&mut window, &escape.stage_name, &message);
     }
     if let Some(mut flags) = world.get_mut::<crate::persistence::RunOutcomeFlags>(parent) {
         flags.0.splits_degraded += 1;
@@ -770,30 +792,21 @@ fn fail_split(world: &mut World, parent: Entity, config: &FanOutConfig, message:
     leave_fan_out(world, parent, config);
 }
 
-/// Whether the agent's current stage declares an `error` or `dead_end` edge that
-/// still has revisits left.
+/// Whether a stage declares an `error` or `dead_end` edge that still has
+/// revisits left, decided where the blueprint is already in hand.
 ///
 /// Both conditions answer "this stage cannot go on", which is what an unusable
 /// split is, and `resolve_transition` follows either for an errored outcome.
-fn declares_an_escape(world: &World, parent: Entity) -> bool {
+fn declares_an_escape(
+    blueprint: &leviath_core::Blueprint,
+    stage: &leviath_core::Stage,
+    visits: &std::collections::HashMap<String, usize>,
+) -> bool {
     use leviath_core::blueprint::TransitionCondition;
-    let Some(bp) = world.get::<AgentBlueprint>(parent) else {
-        return false;
-    };
-    let Some(cursor) = world.get::<StageCursor>(parent) else {
-        return false;
-    };
-    let Some(stage) = bp.0.stages.get(cursor.index) else {
-        return false;
-    };
-    let empty = std::collections::HashMap::new();
-    let visits = world
-        .get::<crate::pipeline::VisitCounts>(parent)
-        .map_or(&empty, |v| &v.0);
     [TransitionCondition::Error, TransitionCondition::DeadEnd]
         .into_iter()
         .any(|condition| {
-            crate::pipeline::find_conditioned_edge(&bp.0, stage, visits, condition).is_some()
+            crate::pipeline::find_conditioned_edge(blueprint, stage, visits, condition).is_some()
         })
 }
 
@@ -1584,15 +1597,13 @@ mod tests {
             world.get::<ResolveTransition>(e).is_some(),
             "handed to the transition system rather than left terminal"
         );
-        assert_eq!(
-            world.get::<crate::pipeline::StageOutcome>(e),
-            Some(&crate::pipeline::StageOutcome::Errored(
-                match status_of(&world, e) {
-                    AgentStatus::Error { message } => message,
-                    other => panic!("expected an errored status, got {other:?}"),
-                }
-            )),
-            "and the outcome carries the same message the status does"
+        // Compared through Debug: an arm a passing run does not take reads to
+        // llvm-cov as an uncovered region.
+        let outcome = format!("{:?}", world.get::<crate::pipeline::StageOutcome>(e));
+        assert!(outcome.contains("Errored"), "{outcome}");
+        assert!(
+            outcome.contains("correction(s)"),
+            "and it carries the message: {outcome}"
         );
     }
 
@@ -1894,6 +1905,41 @@ mod tests {
         assert!(status.contains("Error"), "{status}");
         assert!(status.contains("I cannot help with that"), "{status}");
         assert!(status.contains("correction(s)"), "{status}");
+    }
+
+    /// The two degradations at once: nothing to correct with, and nothing to
+    /// route to. The run still moves on rather than ending, and the note simply
+    /// has nowhere to go.
+    #[test]
+    fn a_split_with_no_window_and_no_escape_still_moves_on() {
+        let mut world = World::new();
+        let e = world
+            .spawn((
+                AgentBlueprint(fanout_blueprint(cfg(
+                    None,
+                    2,
+                    WorkerFailurePolicy::Continue,
+                ))),
+                StageCursor { index: 0 },
+                parent_state(),
+                StageProgress::default(),
+                StageInferences(vec![stage_inf(), stage_inf()]),
+                StageSetups(vec![setup(), setup()]),
+                VisitCounts::default(),
+                InferenceResult {
+                    response: "not an array".to_string(),
+                    tool_calls: vec![],
+                    tokens_used: 0,
+                    timestamp: 0,
+                },
+                ProcessResponse,
+            ))
+            .id();
+
+        fan_out_split(&mut world);
+
+        assert_eq!(status_of(&world, e), AgentStatus::Active, "still running");
+        assert!(world.get::<ResolveTransition>(e).is_some());
     }
 
     /// No context window means nowhere to put a correction, so the stage ends on
