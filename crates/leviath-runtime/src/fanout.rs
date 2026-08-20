@@ -315,6 +315,11 @@ pub fn fan_out_split(world: &mut World) {
                     }
                     _ => items,
                 };
+                // The corrections this split needed are spent. Clearing them
+                // here as well as on stage entry means a stage re-entered by a
+                // path that does not go through `attach_stage_components` still
+                // starts its next split with the full budget.
+                world.entity_mut(parent).remove::<SplitAttempts>();
                 world.entity_mut(parent).insert(FanOutWaiting {
                     config,
                     max_workers,
@@ -330,7 +335,7 @@ pub fn fan_out_split(world: &mut World) {
                 // A split that did not parse is a formatting miss, not a dead
                 // run: send the model its own answer plus a correction and ask
                 // again, the way every other stage handles a response it cannot
-                // use. Only once the corrections are spent does the run fail.
+                // use. Only once the corrections are spent does the stage end.
                 let attempts = world.get::<SplitAttempts>(parent).map_or(0, |a| a.0);
                 // Correcting needs somewhere to put the correction, so an agent
                 // with no context window falls through to the failure below
@@ -378,16 +383,15 @@ pub fn fan_out_split(world: &mut World) {
                     // Name what came back as well as the rule it broke: the
                     // rule alone cannot tell a refusal from an empty response
                     // from prose.
-                    set_status(
+                    fail_split(
                         world,
                         parent,
-                        AgentStatus::Error {
-                            message: format!(
-                                "fan_out split failed after {attempts} correction(s): \
-                                 {message} ({})",
-                                response_snippet(&response)
-                            ),
-                        },
+                        &config,
+                        format!(
+                            "fan_out split failed after {attempts} correction(s): \
+                             {message} ({})",
+                            response_snippet(&response)
+                        ),
                     );
                 }
             }
@@ -524,15 +528,17 @@ pub fn slim_merged_workers(
 /// Apply the failure policy, inject the consolidated report, and transition.
 fn finish_fan_out(world: &mut World, parent: Entity, w: FanOutWaiting) {
     if !w.failures.is_empty() && w.config.on_worker_failure == WorkerFailurePolicy::FailAll {
-        set_status(
+        // Down the stage's `error` edge, which is what `WorkerFailurePolicy::FailAll`
+        // has always been documented as doing. Writing the status alone made it a
+        // dead run instead, so a blueprint with an `error_recovery` stage got the
+        // recovery it declared only for provider failures, never for this.
+        crate::pipeline::fail_stage_world(
             world,
             parent,
-            AgentStatus::Error {
-                message: format!(
-                    "fan_out: {} worker(s) failed (on_worker_failure = fail_all)",
-                    w.failures.len()
-                ),
-            },
+            format!(
+                "fan_out: {} worker(s) failed (on_worker_failure = fail_all)",
+                w.failures.len()
+            ),
         );
         return;
     }
@@ -552,10 +558,88 @@ fn finish_fan_out(world: &mut World, parent: Entity, w: FanOutWaiting) {
     let report = build_report(&w.summaries, &w.failures, budget);
     inject_results(world, parent, &region, &report);
 
-    // Ready the parent to run again, then jump to the merge stage (if any) or let
-    // the fan-out stage's own transition resolve.
+    leave_fan_out(world, parent, &w.config);
+}
+
+/// End an unusable split without ending the run.
+///
+/// The escape chain is the stage's `error` edge, then its `dead_end` edge, then
+/// an empty fan-out into the merge stage. There is deliberately no terminal arm.
+///
+/// A split failure used to write `AgentStatus::Error` straight onto the agent,
+/// which is terminal, so `resolve_transition` never saw it and the recovery the
+/// author declared was never taken. A `deep-researcher` run died exactly that
+/// way: its four workers had already finished, `analyze` had already run, and
+/// its graph carried both an `error` edge to `error_recovery` and a `dead_end`
+/// edge to `synthesize`. Neither fired, and three stages were still pending.
+///
+/// The last resort is a real degradation and is recorded as one - the run flag
+/// and the `error_report` note are what keep "the split was unusable" from
+/// reading downstream as "there was nothing to split".
+fn fail_split(world: &mut World, parent: Entity, config: &FanOutConfig, message: String) {
+    let stage_name = world
+        .get::<StageCursor>(parent)
+        .and_then(|cursor| {
+            world
+                .get::<AgentBlueprint>(parent)
+                .and_then(|bp| bp.0.stages.get(cursor.index).map(|s| s.name.clone()))
+        })
+        .unwrap_or_default();
+    if declares_an_escape(world, parent) {
+        crate::pipeline::fail_stage_world(world, parent, message);
+        return;
+    }
+    tracing::error!(
+        stage = %stage_name,
+        error = %message,
+        "fan_out split is unusable and the stage declares no escape; \
+         continuing with an empty fan-out"
+    );
+    if let Some(mut window) = world.get_mut::<ContextWindow>(parent) {
+        crate::pipeline::note_unusable_split(&mut window, &stage_name, &message);
+    }
+    if let Some(mut flags) = world.get_mut::<crate::persistence::RunOutcomeFlags>(parent) {
+        flags.0.splits_degraded += 1;
+    }
+    leave_fan_out(world, parent, config);
+}
+
+/// Whether the agent's current stage declares an `error` or `dead_end` edge that
+/// still has revisits left.
+///
+/// Both conditions answer "this stage cannot go on", which is what an unusable
+/// split is, and `resolve_transition` follows either for an errored outcome.
+fn declares_an_escape(world: &World, parent: Entity) -> bool {
+    use leviath_core::blueprint::TransitionCondition;
+    let Some(bp) = world.get::<AgentBlueprint>(parent) else {
+        return false;
+    };
+    let Some(cursor) = world.get::<StageCursor>(parent) else {
+        return false;
+    };
+    let Some(stage) = bp.0.stages.get(cursor.index) else {
+        return false;
+    };
+    let empty = std::collections::HashMap::new();
+    let visits = world
+        .get::<crate::pipeline::VisitCounts>(parent)
+        .map_or(&empty, |v| &v.0);
+    [TransitionCondition::Error, TransitionCondition::DeadEnd]
+        .into_iter()
+        .any(|condition| {
+            crate::pipeline::find_conditioned_edge(&bp.0, stage, visits, condition).is_some()
+        })
+}
+
+/// Ready the parent to run again and move it on: to the `merge_stage` when the
+/// config names one, otherwise letting the fan-out stage's own transition
+/// resolve.
+///
+/// Shared by the normal completion and by the never-terminal split failure, so
+/// both leave the stage by the same door.
+fn leave_fan_out(world: &mut World, parent: Entity, config: &FanOutConfig) {
     set_status(world, parent, AgentStatus::Active);
-    match w.config.merge_stage.as_deref().and_then(|name| {
+    match config.merge_stage.as_deref().and_then(|name| {
         world
             .get::<AgentBlueprint>(parent)
             .and_then(|bp| bp.0.stages.iter().position(|s| s.name == name))
@@ -994,6 +1078,28 @@ mod tests {
         Blueprint::new("t".to_string(), "d".to_string(), vec![s0, s1], layout)
     }
 
+    /// [`fanout_blueprint`] with a conditioned escape edge off the fan-out
+    /// stage, which is what a real blueprint declares and the bare helper does
+    /// not.
+    fn fanout_blueprint_with_escape(
+        config: FanOutConfig,
+        condition: leviath_core::blueprint::TransitionCondition,
+    ) -> Blueprint {
+        let mut bp = fanout_blueprint(config);
+        bp.stages[0].transitions = Some(std::collections::HashMap::from([(
+            "merge".to_string(),
+            leviath_core::blueprint::TransitionEdge {
+                target: "merge".to_string(),
+                condition,
+                hint: None,
+                transform: leviath_core::blueprint::EdgeTransform::Direct,
+                gate: None,
+                stuck: None,
+            },
+        )]));
+        bp
+    }
+
     fn parent_state() -> AgentState {
         AgentState {
             agent_id: "parent".to_string(),
@@ -1150,11 +1256,13 @@ mod tests {
         );
     }
 
+    /// A split that never parses, from a stage that declares no escape at all,
+    /// carries on with an empty fan-out. Nothing about an unusable split ends a
+    /// run any more: the parent has usually already done most of the work by the
+    /// time the split runs, and throwing that away is the failure this whole
+    /// path exists to prevent.
     #[test]
-    fn split_errors_on_non_array_output() {
-        // The corrections have to be spent before the run dies, so this drives
-        // the split until they are. Failing on the first answer is the bug the
-        // retry exists to fix.
+    fn an_unusable_split_never_ends_the_run() {
         let mut world = World::new();
         let e = spawn_parent(
             &mut world,
@@ -1166,7 +1274,99 @@ mod tests {
             redrive_split(&mut world, e, "definitely not a json array");
         }
         assert!(world.get::<FanOutWaiting>(e).is_none());
+        assert_eq!(status_of(&world, e), AgentStatus::Active, "still running");
+        assert!(
+            world.get::<ResolveTransition>(e).is_some(),
+            "and moving on out of the fan-out stage"
+        );
+        let convo = conversation_text(&world, e);
+        assert!(
+            convo.contains("could not be used") && convo.contains("No workers ran"),
+            "the next stage is told the fan-out produced nothing: {convo}"
+        );
+    }
+
+    /// The escape the author declared is the one that is taken: an `error` edge
+    /// off the fan-out stage routes the parent there instead of degrading.
+    #[test]
+    fn an_unusable_split_takes_the_stages_error_edge() {
+        let mut world = World::new();
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint_with_escape(
+                cfg(None, 2, WorkerFailurePolicy::Continue),
+                leviath_core::blueprint::TransitionCondition::Error,
+            ),
+            "definitely not a json array",
+        );
+        for _ in 0..=MAX_SPLIT_RETRIES {
+            fan_out_split(&mut world);
+            redrive_split(&mut world, e, "definitely not a json array");
+        }
         assert_errored(&world, e);
+        assert!(
+            world.get::<ResolveTransition>(e).is_some(),
+            "handed to the transition system rather than left terminal"
+        );
+        assert_eq!(
+            world.get::<crate::pipeline::StageOutcome>(e),
+            Some(&crate::pipeline::StageOutcome::Errored(
+                match status_of(&world, e) {
+                    AgentStatus::Error { message } => message,
+                    other => panic!("expected an errored status, got {other:?}"),
+                }
+            )),
+            "and the outcome carries the same message the status does"
+        );
+    }
+
+    /// A `dead_end` edge counts too. An author who declared only that escape
+    /// meant "this stage may not be able to go on", which is exactly what an
+    /// unusable split is.
+    #[test]
+    fn an_unusable_split_takes_a_dead_end_edge() {
+        let mut world = World::new();
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint_with_escape(
+                cfg(None, 2, WorkerFailurePolicy::Continue),
+                leviath_core::blueprint::TransitionCondition::DeadEnd,
+            ),
+            "definitely not a json array",
+        );
+        for _ in 0..=MAX_SPLIT_RETRIES {
+            fan_out_split(&mut world);
+            redrive_split(&mut world, e, "definitely not a json array");
+        }
+        assert_errored(&world, e);
+        assert!(world.get::<ResolveTransition>(e).is_some());
+    }
+
+    /// A degraded split is recorded on the run record, so "the merge stage ran
+    /// with nothing" is visible after the fact rather than only in the log.
+    #[test]
+    fn a_degraded_split_is_recorded_on_the_run_flags() {
+        let mut world = World::new();
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            "definitely not a json array",
+        );
+        world
+            .entity_mut(e)
+            .insert(crate::persistence::RunOutcomeFlags::default());
+        for _ in 0..=MAX_SPLIT_RETRIES {
+            fan_out_split(&mut world);
+            redrive_split(&mut world, e, "definitely not a json array");
+        }
+        assert_eq!(
+            world
+                .get::<crate::persistence::RunOutcomeFlags>(e)
+                .unwrap()
+                .0
+                .splits_degraded,
+            1
+        );
     }
 
     /// Put the parent back where a fresh inference would leave it, so the split
@@ -1247,14 +1447,51 @@ mod tests {
         assert_eq!(status_of(&world, e), AgentStatus::Waiting);
     }
 
-    /// Once the corrections are spent the run does fail, and the message names
-    /// what came back rather than only the rule it broke.
+    /// The correction budget belongs to one split, not to the whole run. A stage
+    /// re-entered later gets its full budget back.
+    ///
+    /// This is the fault that turned a prompt problem into a dead run: a
+    /// `deep-researcher` split needed one correction on its first pass, the
+    /// counter stayed at 1, and when `analyze` routed back through `gather` into
+    /// the same fan-out stage the second split got a single correction before
+    /// the stage failed.
+    #[test]
+    fn a_successful_split_clears_the_correction_budget() {
+        let mut world = World::new();
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            "no array here",
+        );
+
+        fan_out_split(&mut world);
+        assert_eq!(
+            world.get::<SplitAttempts>(e),
+            Some(&SplitAttempts(1)),
+            "the first miss spends one"
+        );
+        redrive_split(&mut world, e, r#"[{"id":"a","context":{}}]"#);
+        fan_out_split(&mut world);
+
+        assert!(world.get::<FanOutWaiting>(e).is_some(), "the split took");
+        assert!(
+            world.get::<SplitAttempts>(e).is_none(),
+            "and the budget it spent is handed back for the next split"
+        );
+    }
+
+    /// Once the corrections are spent the stage does end, and the message names
+    /// what came back rather than only the rule it broke. Read off a blueprint
+    /// with an `error` edge, because that is where the message now lives.
     #[test]
     fn the_failure_message_quotes_what_the_model_actually_said() {
         let mut world = World::new();
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint_with_escape(
+                cfg(None, 2, WorkerFailurePolicy::Continue),
+                leviath_core::blueprint::TransitionCondition::Error,
+            ),
             "I cannot help with that request.",
         );
         for _ in 0..=MAX_SPLIT_RETRIES {
@@ -1269,18 +1506,17 @@ mod tests {
         assert!(status.contains("correction(s)"), "{status}");
     }
 
-    /// No context window means nowhere to put a correction, so the run fails on
+    /// No context window means nowhere to put a correction, so the stage ends on
     /// the first malformed split rather than looping while being told nothing.
     #[test]
     fn a_split_with_nowhere_to_put_a_correction_fails_at_once() {
         let mut world = World::new();
         let e = world
             .spawn((
-                AgentBlueprint(fanout_blueprint(cfg(
-                    None,
-                    2,
-                    WorkerFailurePolicy::Continue,
-                ))),
+                AgentBlueprint(fanout_blueprint_with_escape(
+                    cfg(None, 2, WorkerFailurePolicy::Continue),
+                    leviath_core::blueprint::TransitionCondition::Error,
+                )),
                 StageCursor { index: 0 },
                 parent_state(),
                 StageProgress::default(),

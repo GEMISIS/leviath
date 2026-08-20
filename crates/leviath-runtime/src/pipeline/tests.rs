@@ -8651,6 +8651,32 @@ fn resolve_transition_routes_error_to_error_edge() {
     );
 }
 
+/// No `error` edge, but a `dead_end` one. Both say "this stage may not be able
+/// to go on", and the dead-end arm already falls back to the `error` edge; an
+/// author who declared only the one escape should get it either way.
+#[test]
+fn resolve_transition_routes_error_down_a_dead_end_edge_when_that_is_the_only_escape() {
+    let escape = conditioned_edge("recovery", TransitionCondition::DeadEnd);
+    let a = stage_named("a", Some(vec![("e".to_string(), escape)]), false, None);
+    let recovery = stage_named("recovery", None, false, None);
+    let bp = blueprint(vec![a, recovery]);
+    let mut world = World::new();
+    let e = spawn_outcome_agent(
+        &mut world,
+        bp,
+        StageOutcome::Errored("boom".to_string()),
+        AgentStatus::Error {
+            message: "boom".to_string(),
+        },
+    );
+    run_transition(&mut world);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Active
+    );
+}
+
 #[test]
 fn resolve_transition_errors_terminally_without_an_error_edge() {
     // Stage 'a' has only an Always edge to 'b' - no error edge.

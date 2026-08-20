@@ -51,13 +51,19 @@ pub fn check_workspace_health(
             workdir = %md.workdir,
             "working directory is gone; failing the run"
         );
-        state.status = AgentStatus::Error {
-            message: format!("workspace '{}' is no longer accessible", md.workdir),
-        };
         if let Some(mut flags) = flags {
             flags.0.workspace_lost = true;
         }
         commands.entity(entity).remove::<ReadyToInfer>();
+        // Through the stage's transition rather than straight to a dead run: an
+        // `error_recovery` stage usually works in context alone, so it can still
+        // say what happened even with the directory gone.
+        crate::pipeline::fail_stage(
+            &mut commands,
+            entity,
+            &mut state,
+            format!("workspace '{}' is no longer accessible", md.workdir),
+        );
     }
 }
 
@@ -226,6 +232,23 @@ pub(crate) fn note_error(window: &mut ContextWindow, stage: &str, message: &str)
         format!(
             "[Inference error in stage '{stage}'] {message}. Diagnose this failure from \
              the error text above before retrying or working around it."
+        ),
+    );
+}
+
+/// Write a note saying a fan-out split could not be used, so the stage that
+/// runs next knows the workers never ran.
+///
+/// Distinct from [`note_error`] because it is not an inference error and the
+/// advice differs: nothing failed to reach the provider, the model answered
+/// with something that is not a work-item list, and whatever runs next has to
+/// work from the material already in context rather than from findings that
+/// were never gathered.
+pub(crate) fn note_unusable_split(window: &mut ContextWindow, stage: &str, message: &str) {
+    note_abnormal_ending(
+        window,
+        format!(
+            "[Fan-out split in stage '{stage}' could not be used] {message}. No workers ran,              so there are no sub-findings from this stage. Work from what is already in              context and say plainly which parts are unsupported because of it."
         ),
     );
 }
