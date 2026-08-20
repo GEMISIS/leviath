@@ -96,6 +96,22 @@ pub fn collect_inference(
                 .remove::<InFlightWork>();
             continue;
         }
+        // The user paused the run while this inference was in flight. Pause is
+        // documented as letting the in-flight step finish, so the outcome
+        // arriving is expected - but it must not *act*. Applying a success walks
+        // the run on through tool calls and stage changes while it still reads
+        // `paused`; applying a failure overwrites the deliberate pause with
+        // `Error` and throws away everything the run had done. Park the whole
+        // outcome and let `resume` replay it through this same system.
+        if state.status == AgentStatus::Paused {
+            commands
+                .entity(outcome.entity)
+                .insert(crate::pipeline::HeldInference {
+                    outcome,
+                    lane: crate::pipeline::HeldLane::Stage,
+                });
+            continue;
+        }
         let idx = cursor.map_or(0, |c| c.index);
         // Whoever we actually called. Read before the error arm below, which
         // may swap the component over to the next provider.
@@ -302,6 +318,48 @@ pub fn collect_inference(
                             blocker: leviath_core::run_meta::SetupBlocker::CreditsExhausted,
                             remedy: message,
                         })
+                        .insert(ReadyToInfer);
+                    continue;
+                }
+                // The provider could not be reached at all and there is no
+                // candidate left to try. That is the network being down, not the
+                // run being wrong: the request never got an answer, so nothing
+                // about this run is known to be bad. Failing here throws away
+                // every iteration it has completed for a condition that is
+                // usually over in seconds and is always somebody else's to fix,
+                // so it parks on the same terms as an empty account (issue
+                // #456) and `lev resume` picks it back up.
+                //
+                // Reachable only once the retry policy is spent - a transport
+                // failure is transient, so `run_inference_job` has already tried
+                // and backed off `inference_retry_attempts` times before the
+                // outcome gets here.
+                if err.unavailable_reason()
+                    == Some(leviath_providers::UnavailableReason::Unreachable)
+                {
+                    let message = format!(
+                        "could not reach '{called_provider}' ({err}): check the                          network connection, then `lev resume` this run"
+                    );
+                    tracing::warn!(
+                        provider = %called_provider,
+                        error = %err,
+                        "provider unreachable; pausing the run for a resume"
+                    );
+                    if let Some(mut buffer) = buffer {
+                        buffer.logs.push((idx, format!("[paused] {message}")));
+                    }
+                    state.status = AgentStatus::Paused;
+                    commands
+                        .entity(outcome.entity)
+                        .remove::<AwaitingInference>()
+                        .remove::<InFlightWork>()
+                        .insert(crate::pipeline::PausedForSetup {
+                            blocker: leviath_core::run_meta::SetupBlocker::ProvidersUnavailable,
+                            remedy: message,
+                        })
+                        // Kept on purpose, as the credits park does: the retry is
+                        // already staged, so a resume re-dispatches this same
+                        // inference rather than rebuilding anything.
                         .insert(ReadyToInfer);
                     continue;
                 }

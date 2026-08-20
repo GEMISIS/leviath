@@ -809,6 +809,133 @@ fn collect_applies_ok_and_advances_to_process_response() {
     assert_eq!(stored.tool_calls[0].name, "read_file");
 }
 
+// ─── a paused run is not walked forward by its own in-flight result ────────
+
+/// An agent paused mid-inference must not be advanced by the response landing.
+///
+/// This is the half of the bug that looked like a spontaneous resume: the run
+/// still read `paused` while its tool calls ran and its stage moved on.
+#[test]
+fn collect_holds_a_success_that_lands_on_a_paused_agent() {
+    let (mut world, tx) = world_with_results();
+    let mut state = agent_state();
+    state.status = AgentStatus::Paused;
+    let e = world.spawn((state, AwaitingInference)).id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Ok(resp("hi")),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Paused,
+        "the pause is what the user asked for; a landing response must not undo it"
+    );
+    assert!(
+        world.get::<ProcessResponse>(e).is_none(),
+        "advancing to ProcessResponse is the resume nobody asked for"
+    );
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().iteration,
+        0,
+        "a held turn has not been taken"
+    );
+    assert!(
+        world.get::<AwaitingInference>(e).is_some(),
+        "the marker stays: the collect system's query needs it on replay"
+    );
+    let held = world
+        .get::<HeldInference>(e)
+        .expect("the outcome is parked");
+    assert_eq!(held.lane, HeldLane::Stage);
+    assert!(
+        held.outcome.result.is_ok(),
+        "the response is kept whole, not discarded - it is already paid for"
+    );
+}
+
+/// The half that actually destroyed runs: a failure landing on a paused agent
+/// used to overwrite `Paused` with `Error`, ending a run with dozens of
+/// iterations of completed work behind it.
+#[test]
+fn collect_holds_a_failure_that_lands_on_a_paused_agent() {
+    let (mut world, tx) = world_with_results();
+    let mut state = agent_state();
+    state.status = AgentStatus::Paused;
+    let e = world.spawn((state, AwaitingInference)).id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(leviath_providers::ProviderError::RequestFailed(
+            "reading response body: error decoding response body".to_string(),
+        )),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Paused,
+        "a paused run stays paused and stays resumable"
+    );
+    assert!(
+        world.get::<ResolveTransition>(e).is_none(),
+        "the failure must not be routed into the stage's error edge either"
+    );
+    assert!(world.get::<HeldInference>(e).is_some());
+}
+
+// ─── an unreachable provider parks the run instead of ending it ────────────
+
+/// A provider that never answered says nothing about the run, so ending it
+/// throws away completed work for a condition that is usually over in seconds.
+#[test]
+fn collect_parks_a_run_whose_provider_is_unreachable() {
+    let (mut world, tx) = world_with_results();
+    let e = world.spawn((agent_state(), AwaitingInference)).id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(leviath_providers::ProviderError::RequestFailed(
+            "reading response body: error decoding response body".to_string(),
+        )),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Paused,
+        "a network failure parks the run; it does not end it"
+    );
+    let parked = world
+        .get::<crate::pipeline::PausedForSetup>(e)
+        .expect("it parks with a remedy a person can act on");
+    assert_eq!(
+        parked.blocker,
+        leviath_core::run_meta::SetupBlocker::ProvidersUnavailable
+    );
+    assert!(
+        parked.remedy.contains("lev resume"),
+        "the remedy must name the way back: {}",
+        parked.remedy
+    );
+    assert!(
+        world.get::<ReadyToInfer>(e).is_some(),
+        "the retry stays staged so a resume re-dispatches rather than rebuilding"
+    );
+    assert!(
+        world.get::<ResolveTransition>(e).is_none(),
+        "parking returns before the transition logic, so no error edge is taken"
+    );
+}
+
 #[test]
 fn collect_marks_error_on_failure() {
     let (mut world, tx) = world_with_results();

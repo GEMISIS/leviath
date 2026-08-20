@@ -871,10 +871,43 @@ impl PipelineWorld {
                 self.world
                     .entity_mut(entity)
                     .remove::<crate::pipeline::PausedForSetup>();
+                self.replay_held_inference(entity);
                 self.set_status(agent, AgentStatus::Active)
             }
             _ => false,
         }
+    }
+
+    /// Put back an inference outcome that landed while the agent was paused.
+    ///
+    /// The result is sent to the same channel it originally came in on, so the
+    /// collect system applies it through its ordinary arms on the next tick -
+    /// no duplicated success/failure handling, and no wasted call: whatever the
+    /// provider already charged for is still used. The agent kept its
+    /// `Awaiting*` marker while held, which is what makes it visible to that
+    /// system's query.
+    ///
+    /// A no-op for the ordinary case of a run that was paused with nothing in
+    /// flight.
+    fn replay_held_inference(&mut self, entity: Entity) {
+        let Some(held) = self
+            .world
+            .entity_mut(entity)
+            .take::<crate::pipeline::HeldInference>()
+        else {
+            return;
+        };
+        let Some(stage) = self.world.get_resource::<crate::pipeline::InferenceStage>() else {
+            return;
+        };
+        let channel = match held.lane {
+            crate::pipeline::HeldLane::Stage => &stage.outcomes,
+            crate::pipeline::HeldLane::TransitionChoice => &stage.transition_outcomes,
+        };
+        // A closed channel means the pipeline is shutting down; the run is being
+        // torn down with it, so there is nothing to salvage and nothing to warn
+        // about.
+        let _ = channel.send(held.outcome);
     }
 
     /// Cancel an agent (it stops starting new work; in-flight results still land).
@@ -1995,6 +2028,71 @@ mod tests {
         assert!(world.resume(e));
         world.run_until_idle(30).await;
         assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
+    }
+
+    /// A response that landed during the pause is applied on resume, not thrown
+    /// away.
+    ///
+    /// The call was already made and already charged for. Dropping it would make
+    /// the model redo the turn, so the outcome is parked whole and replayed down
+    /// the channel it came in on - which also means the collect system's arms
+    /// are not duplicated anywhere.
+    #[tokio::test]
+    async fn resume_replays_an_inference_that_landed_while_paused() {
+        // Empty on purpose: nothing here can serve an inference, so any progress
+        // the agent makes has to have come from the parked outcome.
+        let mut world = build_world(registry_with(vec![]));
+        let e = spawn(&mut world);
+        assert!(world.pause(e));
+        // Put the agent where a pause-during-inference leaves it: the call is
+        // out, so it is awaiting a result rather than ready to dispatch one.
+        world
+            .world_mut()
+            .entity_mut(e.entity())
+            .remove::<crate::pipeline::ReadyToInfer>()
+            .insert(crate::pipeline::AwaitingInference);
+        world
+            .world_mut()
+            .entity_mut(e.entity())
+            .insert(crate::pipeline::HeldInference {
+                outcome: crate::inference_bridge::InferenceOutcome {
+                    entity: e.entity(),
+                    latency: std::time::Duration::ZERO,
+                    result: Ok(text("t1")),
+                },
+                lane: crate::pipeline::HeldLane::Stage,
+            });
+
+        assert!(world.resume(e));
+
+        assert!(
+            world
+                .world()
+                .get::<crate::pipeline::HeldInference>(e.entity())
+                .is_none(),
+            "the outcome is handed back to the pipeline, not left parked"
+        );
+        // One tick is all the replay needs: the outcome goes back down the
+        // channel and the ordinary collect system applies it.
+        world.tick();
+        assert_eq!(
+            world
+                .world()
+                .get::<AgentState>(e.entity())
+                .unwrap()
+                .iteration,
+            1,
+            "the held turn is taken on resume, not re-requested from the provider"
+        );
+        assert_eq!(
+            world
+                .world()
+                .get::<crate::components::InferenceResult>(e.entity())
+                .expect("the held response was applied")
+                .response,
+            "t1",
+            "the very response that landed during the pause is the one used"
+        );
     }
 
     #[tokio::test]

@@ -201,6 +201,43 @@ pub struct PausedForSetup {
     pub remedy: String,
 }
 
+/// An inference outcome that landed while its agent was `Paused`, kept until
+/// the run resumes.
+///
+/// Pause is documented as "finishes any in-flight step, then stops before
+/// starting new work", so a call dispatched before the pause is expected to come
+/// back afterwards. What must not happen is that its result *acts*: applying a
+/// success walks the run on through `ProcessResponse`, its tool calls and its
+/// stage transitions, which is a resume nobody asked for; applying a failure
+/// overwrites the deliberate `Paused` with `Error` and throws the run away.
+///
+/// The outcome is therefore parked here, whole, and replayed by
+/// [`PipelineWorld::resume`](crate::world::PipelineWorld::resume) through the
+/// ordinary channel - so the response the user already paid for is not
+/// discarded, and no arm of the collect system has to be duplicated.
+///
+/// The agent keeps its `Awaiting*` marker while held: that is the query filter
+/// the collect system uses, and the run genuinely is still waiting on this
+/// result.
+#[derive(Component)]
+pub struct HeldInference {
+    /// The parked outcome, replayed verbatim on resume.
+    pub outcome: crate::inference_bridge::InferenceOutcome,
+    /// Which collect system is waiting for it. The two lanes have separate
+    /// channels on purpose - a routing decision is not an agent turn - so a
+    /// replay has to go back to the one it came from.
+    pub lane: HeldLane,
+}
+
+/// Which inference lane a [`HeldInference`] belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldLane {
+    /// An ordinary agent turn, collected by `collect_inference`.
+    Stage,
+    /// A stage-boundary routing call, collected by `collect_transition_choice`.
+    TransitionChoice,
+}
+
 /// Dispatch-stall watchdog: fail any agent whose dispatch has been declining for
 /// an unresolvable reason longer than [`StallTimeout`].
 ///
