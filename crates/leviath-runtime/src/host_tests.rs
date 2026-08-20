@@ -3303,6 +3303,90 @@ async fn a_gate_outranks_the_generic_interaction_marker() {
     assert_eq!(reason, Some(WaitReason::TaintGate));
 }
 
+/// Pausing a fan-out parent latches the fan-out itself, and resuming releases
+/// it.
+///
+/// The parent keeps its `Waiting` status either way - the merge poll reads it -
+/// so the latch is the only durable record that the queue is held. Without it,
+/// the pause would stop the running children and the collector would start
+/// their replacements out of `pending` on the very next tick.
+#[tokio::test]
+async fn pausing_a_fan_out_parent_holds_its_worker_queue() {
+    let mut host = host_with(vec![]);
+    let parent = spawn(&mut host, "parent-fo", "parent-fo");
+    let worker = spawn(&mut host, "worker-fo", "worker-fo");
+    {
+        let world = host.world_mut().world_mut();
+        world
+            .get_mut::<AgentState>(parent.entity())
+            .expect("parent has state")
+            .status = AgentStatus::Waiting;
+        crate::fanout::restore_fan_out_waiting(
+            world,
+            parent.entity(),
+            crate::fanout::FanOutState {
+                config: leviath_core::blueprint::FanOutConfig {
+                    worker_agent: None,
+                    worker_stage: Some("work".to_string()),
+                    worker_query: None,
+                    merge_stage: None,
+                    max_workers: 1,
+                    on_worker_failure: Default::default(),
+                    split_prompt: String::new(),
+                    results_region: None,
+                    max_items: None,
+                },
+                max_workers: 1,
+                pending: vec![crate::fanout::WorkItem::default()],
+                active: vec![("item-1".to_string(), "worker-fo".to_string())],
+                summaries: Vec::new(),
+                failures: Vec::new(),
+                paused: false,
+            },
+            &|run_id| (run_id == "worker-fo").then_some(worker.entity()),
+        );
+    }
+
+    assert!(
+        ask(&mut host, |reply| ControlOp::Pause {
+            run_id: "parent-fo".to_string(),
+            reply
+        })
+        .await,
+        "the request takes even though the parent's own status is not pausable"
+    );
+    assert!(
+        host.world_mut()
+            .world()
+            .get::<crate::fanout::FanOutWaiting>(parent.entity())
+            .expect("still parked")
+            .is_paused(),
+        "the fan-out is latched, so no replacement worker starts"
+    );
+    assert_eq!(
+        host.world.agent_status(parent),
+        Some(AgentStatus::Waiting),
+        "and the parent keeps the status its merge poll depends on"
+    );
+
+    assert!(
+        ask(&mut host, |reply| ControlOp::Resume {
+            run_id: "parent-fo".to_string(),
+            reply
+        })
+        .await
+    );
+    assert!(
+        !host
+            .world_mut()
+            .world()
+            .get::<crate::fanout::FanOutWaiting>(parent.entity())
+            .expect("still parked")
+            .is_paused(),
+        "resuming releases the queue"
+    );
+}
+
 /// A fan-out parent reports how many workers are left, so "waiting" reads as
 /// progress against a denominator rather than an unexplained stall.
 #[tokio::test]

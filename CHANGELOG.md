@@ -13,6 +13,38 @@ same list.
 
 ## Unreleased
 
+- Fixed: a network blip no longer ends a run. `Response::json` does two things -
+  read the body off the socket, then parse it - and every provider mapped both
+  failures to "invalid response", which the retry policy treats as permanent. So
+  a dead socket got no retry, no failover and no circuit-breaker record: it went
+  straight to the terminal error arm and took the run's work with it. Measured on
+  a laptop that slept for 31 minutes and woke onto a different network: three
+  runs with 35-38 iterations of completed work each died with `Invalid response:
+  error decoding response body` twenty seconds after the lid opened, and a fourth
+  died the same way on an ordinary blip with no sleep involved. A body that never
+  finished arriving is now reported as the transport failure it is - retried,
+  counted against the provider, eligible for failover - while bytes that arrived
+  and did not fit the schema stay permanent. If the provider still cannot be
+  reached once the retries are spent, the run parks with a remedy instead of
+  failing, so `lev resume` gets the work back.
+
+- Fixed: a paused run is no longer walked forward, or killed, by the inference
+  that was already in flight when it paused. Pause lets the outstanding step
+  finish, but its result was applied unconditionally: a success carried the run
+  on through its tool calls and stage transitions while it still displayed
+  `paused`, and a failure overwrote the pause with an error and discarded the
+  run. The outcome is now held and replayed on resume, so the response you have
+  already paid for is used rather than thrown away.
+
+- Fixed: pausing a fan-out parent now pauses the runs that are actually working.
+  A parent waiting on its children is not itself pausable - the merge poll reads
+  that status - so the request was refused while every child carried on. Pause
+  and resume now walk the whole sub-agent tree, as cancel already did, and a
+  paused fan-out stops starting the next queued worker instead of immediately
+  replacing the children it just paused. Resuming the parent releases them all.
+  `lev pause`/`lev resume`, the REST endpoints and the dashboard's `p`/`r` keys
+  all go through it.
+
 - Fixed: an inference-pool limit of `0` no longer parks every affected run for
   the life of the daemon. Waiting for a full pool is ordinary backpressure and
   is deliberately never failed or reported, so a pool of nothing was a wedge
