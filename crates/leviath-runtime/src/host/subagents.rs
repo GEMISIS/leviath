@@ -7,6 +7,7 @@
 //! here too, so the sender and its only reader are in one file.
 
 use super::*;
+use crate::fanout::FanOutWaiting;
 
 impl WorldHost {
     /// Service one [`SubAgentOp`] from a tool lane, replying on its oneshot.
@@ -186,21 +187,71 @@ impl WorldHost {
         false
     }
 
-    pub(super) fn cancel_tree(&mut self, run_id: &str) -> bool {
-        let Some(root) = self.resolve_or_reload(run_id) else {
-            return false;
-        };
-        // Collect the subtree (parent before children), then cancel each.
-        let mut subtree = Vec::new();
-        let mut stack = vec![root.entity()];
+    /// Every entity in `root`'s sub-agent tree, parent before children.
+    fn subtree(&self, root: Entity) -> Vec<Entity> {
+        let mut out = Vec::new();
+        let mut stack = vec![root];
         while let Some(e) = stack.pop() {
-            subtree.push(e);
+            out.push(e);
             if let Some(kids) = self.world.world().get::<SubAgentChildren>(e) {
                 stack.extend(kids.children.iter().copied());
             }
         }
+        out
+    }
+
+    /// Pause a run and everything it spawned.
+    ///
+    /// Pausing a fan-out parent on its own does nothing a user would recognise
+    /// as a pause: the parent is `Waiting` - a status the merge poll depends on,
+    /// so `PipelineWorld::pause` rightly refuses to overwrite it - while the
+    /// children that are actually burning tokens run on. So the request is
+    /// applied to the whole tree, exactly as if each child had been paused by
+    /// hand, and each fan-out parent is latched so the collector does not start
+    /// the next queued worker behind the pause.
+    ///
+    /// Reports whether anything took, which is what tells a caller a
+    /// still-running tree apart from one that was already finished.
+    pub(super) fn pause_tree(&mut self, run_id: &str) -> bool {
+        let Some(root) = self.resolve_or_reload(run_id) else {
+            return false;
+        };
+        let mut acted = false;
+        for e in self.subtree(root.entity()) {
+            acted |= self.world.pause(self.world.own_agent(e));
+            if let Some(mut fan_out) = self.world.world_mut().get_mut::<FanOutWaiting>(e) {
+                acted |= fan_out.set_paused(true);
+            }
+        }
+        acted
+    }
+
+    /// Resume a run and everything it spawned.
+    ///
+    /// The mirror of [`Self::pause_tree`], and it must not give up on the root:
+    /// a fan-out parent is `Waiting`, which `PipelineWorld::resume` refuses, so
+    /// resuming the tree through the parent would otherwise report failure and
+    /// leave every paused child paused with nothing left to resume them.
+    pub(super) fn resume_tree(&mut self, run_id: &str) -> bool {
+        let Some(root) = self.resolve_or_reload(run_id) else {
+            return false;
+        };
+        let mut acted = false;
+        for e in self.subtree(root.entity()) {
+            acted |= self.world.resume(self.world.own_agent(e));
+            if let Some(mut fan_out) = self.world.world_mut().get_mut::<FanOutWaiting>(e) {
+                acted |= fan_out.set_paused(false);
+            }
+        }
+        acted
+    }
+
+    pub(super) fn cancel_tree(&mut self, run_id: &str) -> bool {
+        let Some(root) = self.resolve_or_reload(run_id) else {
+            return false;
+        };
         let mut cancelled = false;
-        for e in subtree {
+        for e in self.subtree(root.entity()) {
             // Read the agent id before cancelling - the entity stays valid until
             // it is reaped, but reading first keeps this independent of that.
             let agent_id = self

@@ -2352,6 +2352,7 @@ fn dispatch_persistence_serializes_fan_out_waiting() {
             active: vec![],
             summaries: vec![],
             failures: vec![],
+            paused: false,
         },
         &|_| None,
     );

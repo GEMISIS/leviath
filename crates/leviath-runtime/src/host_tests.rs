@@ -1777,6 +1777,86 @@ async fn cancel_cascades_to_the_whole_tree() {
     );
 }
 
+/// Pausing a run pauses everything it spawned.
+///
+/// A fan-out parent is the case that matters: its own status is `Waiting`, which
+/// is not pausable, so before this the request reported failure while every
+/// child carried on burning tokens.
+#[tokio::test]
+async fn pause_cascades_to_the_whole_tree() {
+    let mut host = host_with(vec![]);
+    host.set_spawner(child_spawner());
+    spawn(&mut host, "parent", "parent");
+    ask_sub(&mut host, |reply| SubAgentOp::Spawn {
+        args: Box::new(SpawnArgs {
+            run_id: "child".to_string(),
+            ..Default::default()
+        }),
+        parent_run_id: "parent".to_string(),
+        max_depth: 3,
+        reply,
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        ask(&mut host, |reply| ControlOp::Pause {
+            run_id: "parent".to_string(),
+            reply
+        })
+        .await
+    );
+    assert_eq!(
+        host.world.agent_status(host.by_run_id["child"]),
+        Some(AgentStatus::Paused),
+        "pausing the parent pauses its children"
+    );
+}
+
+/// And resuming it resumes them again.
+///
+/// The parent is `Waiting`, which `resume` refuses, so a cascade that gave up on
+/// the root would report failure and leave every child paused with nothing left
+/// to bring them back.
+#[tokio::test]
+async fn resume_cascades_to_the_whole_tree() {
+    let mut host = host_with(vec![]);
+    host.set_spawner(child_spawner());
+    spawn(&mut host, "parent", "parent");
+    ask_sub(&mut host, |reply| SubAgentOp::Spawn {
+        args: Box::new(SpawnArgs {
+            run_id: "child".to_string(),
+            ..Default::default()
+        }),
+        parent_run_id: "parent".to_string(),
+        max_depth: 3,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(
+        ask(&mut host, |reply| ControlOp::Pause {
+            run_id: "parent".to_string(),
+            reply
+        })
+        .await
+    );
+
+    assert!(
+        ask(&mut host, |reply| ControlOp::Resume {
+            run_id: "parent".to_string(),
+            reply
+        })
+        .await,
+        "resuming the tree reports success even though the root itself was never paused"
+    );
+    assert_eq!(
+        host.world.agent_status(host.by_run_id["child"]),
+        Some(AgentStatus::Active),
+        "resuming the parent resumes the children the pause stopped"
+    );
+}
+
 /// A child that was already reaped is skipped rather than tripping the
 /// cancel: `SubAgentChildren` still names it, but the entity is gone, so
 /// there is no agent id to close interactions for.
@@ -3260,6 +3340,7 @@ async fn wait_reason_counts_outstanding_fan_out_workers() {
                 active: vec![("item-1".to_string(), "run-b".to_string())],
                 summaries: Vec::new(),
                 failures: Vec::new(),
+                paused: false,
             },
             &|run_id| (run_id == "run-b").then_some(worker.entity()),
         );

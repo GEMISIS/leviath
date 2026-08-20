@@ -1717,6 +1717,7 @@ mod tests {
             active: vec![("item-1".to_string(), "worker-fo".to_string())],
             summaries: vec![],
             failures: vec![],
+            paused: false,
         };
         std::fs::write(
             runs.path().join("parent-fo").join("fanout.json"),

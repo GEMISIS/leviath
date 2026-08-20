@@ -620,13 +620,23 @@ impl Dashboard {
     /// will actually pause, so an ineligible row sends nothing instead of
     /// producing a guaranteed refusal toast.
     fn handle_pause(&mut self) {
+        // `Waiting` is included because the daemon pauses the whole sub-agent
+        // tree: a fan-out parent sits here while its children do the work, so
+        // refusing the key would leave the only row a user thinks to press it on
+        // doing nothing at all.
         if let Some(agent) = self.selected_agent()
             && matches!(
                 agent.status,
-                AgentDisplayStatus::Active | AgentDisplayStatus::Idle | AgentDisplayStatus::Stale
+                AgentDisplayStatus::Active
+                    | AgentDisplayStatus::Idle
+                    | AgentDisplayStatus::Stale
+                    | AgentDisplayStatus::Waiting
             )
         {
             let agent_id = agent.id.clone();
+            // Snapshotted before the send, which is what the optimistic flip
+            // below keys on.
+            let waiting = agent.status == AgentDisplayStatus::Waiting;
             let _ = self.cmd_tx.send(DaemonCommand::Pause {
                 run_id: agent_id.clone(),
             });
@@ -640,17 +650,29 @@ impl Dashboard {
                 .agents
                 .get_mut(idx)
                 .expect("index snapshotted from the still-unchanged display_indices/agents above");
-            a.status = AgentDisplayStatus::Paused;
+            // A waiting parent keeps its own status - the merge poll depends on
+            // it, so the daemon pauses the children instead. Flipping this row
+            // would be a claim the next poll contradicts; the children's rows
+            // are where the pause shows up.
+            if !waiting {
+                a.status = AgentDisplayStatus::Paused;
+            }
             self.add_log(format!("{}: pause requested", agent_id));
         }
     }
 
     /// Resume the selected agent if it is paused.
     fn handle_resume(&mut self) {
+        // `Waiting` for the same reason as the pause key: that is the row a
+        // fan-out parent occupies while its paused children wait to be let go.
         if let Some(agent) = self.selected_agent()
-            && agent.status == AgentDisplayStatus::Paused
+            && matches!(
+                agent.status,
+                AgentDisplayStatus::Paused | AgentDisplayStatus::Waiting
+            )
         {
             let agent_id = agent.id.clone();
+            let waiting = agent.status == AgentDisplayStatus::Waiting;
             let _ = self.cmd_tx.send(DaemonCommand::Resume {
                 run_id: agent_id.clone(),
             });
@@ -664,7 +686,9 @@ impl Dashboard {
                 .agents
                 .get_mut(idx)
                 .expect("index snapshotted from the still-unchanged display_indices/agents above");
-            a.status = AgentDisplayStatus::Active;
+            if !waiting {
+                a.status = AgentDisplayStatus::Active;
+            }
             self.add_log(format!("{}: resume requested", agent_id));
         }
     }
@@ -1791,12 +1815,12 @@ mod tests {
         }
     }
 
-    /// Waiting and finished runs are not pausable: nothing is sent, so the user
-    /// never sees a guaranteed refusal toast.
+    /// Finished runs are not pausable: nothing is sent, so the user never sees a
+    /// guaranteed refusal toast. `Waiting` is deliberately absent - see
+    /// `pause_and_resume_reach_a_waiting_parents_children`.
     #[test]
     fn pause_is_a_no_op_for_unpausable_states() {
         for status in [
-            AgentDisplayStatus::Waiting,
             AgentDisplayStatus::Paused,
             AgentDisplayStatus::Complete,
             AgentDisplayStatus::Cancelled,
@@ -1829,6 +1853,44 @@ mod tests {
             })
         );
         assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
+    }
+
+    /// A fan-out parent sits at `Waiting` while its children do the work, and it
+    /// is the row a user actually presses `p` on. The daemon pauses the whole
+    /// sub-agent tree, so the key has to reach it - but the parent keeps its own
+    /// status, because the merge poll reads it, so this row must not flip.
+    /// Claiming otherwise would be undone by the very next poll.
+    #[test]
+    fn pause_and_resume_reach_a_waiting_parents_children() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        dash.agents
+            .push(make_test_agent("parent", AgentDisplayStatus::Waiting));
+        dash.update_display_indices();
+
+        dash.handle_key(key(KeyCode::Char('p')));
+        assert_eq!(
+            cmd_rx.try_recv().ok(),
+            Some(DaemonCommand::Pause {
+                run_id: "parent".to_string()
+            }),
+            "the request has to get through; the children are what pauses"
+        );
+        assert_eq!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Waiting,
+            "the parent's own row does not lie about a status it keeps"
+        );
+
+        dash.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(
+            cmd_rx.try_recv().ok(),
+            Some(DaemonCommand::Resume {
+                run_id: "parent".to_string()
+            }),
+            "and resuming through the parent is how the children are let go"
+        );
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Waiting);
     }
 
     #[test]
