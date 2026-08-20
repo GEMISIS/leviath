@@ -94,9 +94,37 @@ impl ProviderRegistry {
     }
 
     /// Get all *natively-registered* provider names. Script providers are
-    /// resolved on demand and so are not enumerated here.
+    /// resolved on demand and so are not enumerated here - see
+    /// [`resolvable_names`](Self::resolvable_names) for the set that includes
+    /// them.
     pub fn provider_names(&self) -> Vec<&str> {
         self.providers.keys().map(|k| k.as_str()).collect()
+    }
+
+    /// Every provider name this registry could answer for right now: the
+    /// natively registered ones, then the script providers the layer can see.
+    ///
+    /// This is what an *enumeration* wants - "list every model I can reach" -
+    /// where [`provider_names`](Self::provider_names) answers "what is
+    /// registered". Building the list on `provider_names` alone is what hid
+    /// script providers from `lev models list` (#523) and then, in the same
+    /// shape, from `GET /api/models` (#531).
+    ///
+    /// A script name here is a candidate: [`get`](Self::get) compiles it on
+    /// demand and returns `None` if it will not load, so a caller iterating
+    /// this must handle a name it cannot resolve.
+    pub fn resolvable_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.providers.keys().cloned().collect();
+        if let Some(layer) = &self.script_layer {
+            for name in layer.candidate_names() {
+                // A native provider of the same name wins, exactly as `get`
+                // resolves it, so it is never listed twice.
+                if !names.iter().any(|n| n == &name) {
+                    names.push(name);
+                }
+            }
+        }
+        names
     }
 }
 
@@ -153,6 +181,53 @@ mod tests {
         fn capabilities(&self, _model: &str) -> ModelCapabilities {
             ModelCapabilities::default()
         }
+    }
+
+    /// What an *enumeration* needs, and what `provider_names` cannot give it:
+    /// the script providers too. Building `GET /api/models` and
+    /// `lev models list --remote` on `provider_names` is what hid them
+    /// (issues #523, #531).
+    #[test]
+    fn resolvable_names_adds_the_script_layer_without_duplicating_a_native() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("scripted.rhai"),
+            "fn initialize(c) { #{} }\nfn inference(s, r) { #{ content: \"x\" } }",
+        )
+        .unwrap();
+        // A script of the same name as a native provider: `get` prefers the
+        // native one, so it must be listed once.
+        std::fs::write(
+            dir.path().join("native.rhai"),
+            "fn initialize(c) { #{} }\nfn inference(s, r) { #{ content: \"x\" } }",
+        )
+        .unwrap();
+
+        let mut registry = ProviderRegistry::new();
+        registry.register("native".to_string(), mock());
+        assert_eq!(
+            registry.resolvable_names(),
+            vec!["native".to_string()],
+            "with no layer attached this is just the registered set"
+        );
+
+        let layer = crate::script_provider::ScriptProviderLayer::new(
+            dir.path().to_path_buf(),
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            Vec::new(),
+        );
+        let registry = registry.with_script_layer(Arc::new(layer));
+
+        let mut names = registry.resolvable_names();
+        names.sort();
+        assert_eq!(names, vec!["native".to_string(), "scripted".to_string()]);
+        assert_eq!(
+            registry.provider_names(),
+            vec!["native"],
+            "provider_names keeps its own contract"
+        );
     }
 
     fn mock() -> Arc<dyn Provider> {

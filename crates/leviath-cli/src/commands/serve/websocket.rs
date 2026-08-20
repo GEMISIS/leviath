@@ -208,7 +208,6 @@ mod tests {
 
     use axum::Router;
     use axum::routing::get;
-    use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
@@ -219,7 +218,7 @@ mod tests {
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
-            config: Arc::new(Config::default()),
+            config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
@@ -664,7 +663,7 @@ mod tests {
         daemon.client.list().await.expect("served, and introduced");
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
-            config: Arc::new(Config::default()),
+            config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: daemon.client.clone(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
@@ -818,7 +817,7 @@ mod tests {
         // `handle_ws` without needing to fabricate the error directly.
         let (tx, _) = broadcast::channel::<ServerEvent>(2);
         let state = AppState {
-            config: Arc::new(Config::default()),
+            config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx.clone(),
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
@@ -945,7 +944,7 @@ mod tests {
     async fn handle_ws_breaks_on_closed_channel_via_server_shutdown() {
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
         let state = AppState {
-            config: Arc::new(Config::default()),
+            config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx.clone(),
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),

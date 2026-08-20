@@ -52,8 +52,11 @@ fn redact(c: &Config) -> RedactedConfig {
     }
 }
 
+/// `GET /api/config`. Reads the file rather than a start-up copy, so an edit
+/// made through [`put_config`] - or by anything else on the machine - is
+/// visible to the very next request (issue #532).
 pub(super) async fn get_config(State(state): State<AppState>) -> Json<RedactedConfig> {
-    Json(redact(&state.config))
+    Json(redact(&state.current_config()))
 }
 
 /// `PUT /api/config` (admin-only). Loads the on-disk config, applies every
@@ -204,7 +207,7 @@ pub(super) async fn models_with(
     state: &AppState,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> Json<Vec<ModelEntry>> {
-    Json(list_models_from_config(&state.config, build_client).await)
+    Json(list_models_from_config(&state.current_config(), build_client).await)
 }
 
 /// Every model every configured provider reports, as `provider/id`: what the
@@ -222,6 +225,14 @@ pub(crate) async fn list_model_ids(
 
 /// Every model every configured provider reports, for `GET /api/models` and
 /// the dashboard's agent editor alike.
+///
+/// Iterates `resolvable_names` rather than `provider_names`, so a Rhai script
+/// provider is asked too. It used to be skipped here: `provider_names` returns
+/// natively registered providers only, and a script provider is reachable only
+/// through `get`. The result was that The Lair listed a script provider under
+/// its gateways while offering none of its models, on the new-run page, in the
+/// agent editor and in settings alike (issue #531 - the same defect #523 fixed
+/// for the CLI).
 pub(super) async fn list_models_from_config(
     config: &crate::config::Config,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
@@ -237,10 +248,15 @@ pub(super) async fn list_models_from_config(
     };
     let mut models = Vec::new();
 
-    for provider_name in registry.provider_names() {
-        let provider = registry
-            .get(provider_name)
-            .expect("provider_names returns registered names");
+    for provider_name in registry.resolvable_names() {
+        // A script name is a candidate until it compiles, so unlike the old
+        // `provider_names` loop this cannot assume the lookup succeeds. A
+        // script that will not load is skipped with its own log line already
+        // written by the layer, exactly as a provider whose `list_models`
+        // errors is skipped below.
+        let Some(provider) = registry.get(&provider_name) else {
+            continue;
+        };
         if let Ok(list) = provider.list_models().await {
             for m in list {
                 models.push(ModelEntry {
@@ -283,7 +299,7 @@ mod tests {
     fn state_without_a_reachable_ollama() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
-            config: Arc::new(Config {
+            config: crate::commands::serve::testutil::fixed_config(Config {
                 ollama_base_url: Some("http://127.0.0.1:1".to_string()),
                 ..Config::default()
             }),
@@ -297,7 +313,7 @@ mod tests {
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
-            config: Arc::new(Config::default()),
+            config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
@@ -308,7 +324,7 @@ mod tests {
     fn test_state_with_keys() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
-            config: Arc::new(Config {
+            config: crate::commands::serve::testutil::fixed_config(Config {
                 providers: crate::config::ProviderConfig {
                     anthropic_api_key: Some("sk-ant-test".to_string()),
                     openai_api_key: Some("sk-openai-test".to_string()),
@@ -441,7 +457,7 @@ mod tests {
     async fn get_config_agent_paths_included() {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         let state = AppState {
-            config: Arc::new(Config {
+            config: crate::commands::serve::testutil::fixed_config(Config {
                 agent_paths: vec![
                     std::path::PathBuf::from("/my/agents"),
                     std::path::PathBuf::from("/other/agents"),
@@ -476,7 +492,7 @@ mod tests {
     fn test_state_listing_models() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
-            config: Arc::new(Config {
+            config: crate::commands::serve::testutil::fixed_config(Config {
                 providers: crate::config::ProviderConfig {
                     anthropic_base_url: None,
                     openai_base_url: None,
@@ -538,12 +554,56 @@ mod tests {
         assert!(models.iter().all(|m| m["id"].is_string()));
     }
 
+    /// A script provider's models must reach `GET /api/models`, or The Lair
+    /// lists the gateway under settings while offering none of its models on
+    /// the new-run page or in the agent editor (issue #531).
+    ///
+    /// A real `.rhai` on disk under an isolated `LEVIATH_HOME`, not a mock:
+    /// the endpoint builds its own registry, so the only way to put a script
+    /// provider in front of it is to put one where it looks.
+    #[tokio::test]
+    async fn api_models_includes_a_script_providers_models() {
+        let home = tempfile::tempdir().unwrap();
+        let providers = home.path().join(".leviath").join("providers");
+        std::fs::create_dir_all(&providers).unwrap();
+        std::fs::write(
+            providers.join("scripted.rhai"),
+            "fn initialize(config) { #{ ok: true } }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }\n\
+             fn list_models(state) { [ #{ id: \"scripted-large\", \
+             max_context_tokens: 32768 } ] }",
+        )
+        .unwrap();
+        // A second script that will not compile: it must be skipped rather
+        // than take the endpoint down with it.
+        std::fs::write(providers.join("broken.rhai"), "fn initialize(config) { #{").unwrap();
+
+        let models = temp_env::async_with_vars(
+            [("LEVIATH_HOME", Some(home.path()))],
+            list_models_from_config(
+                &Config::default(),
+                &leviath_providers::provider::build_http_client,
+            ),
+        )
+        .await;
+
+        let scripted: Vec<_> = models.iter().filter(|m| m.provider == "scripted").collect();
+        let named: Vec<&str> = models.iter().map(|m| m.provider.as_str()).collect();
+        assert_eq!(scripted.len(), 1, "the script provider answered: {named:?}");
+        assert_eq!(scripted[0].id, "scripted-large");
+        assert_eq!(scripted[0].max_context_tokens, 32768);
+        assert!(
+            !models.iter().any(|m| m.provider == "broken"),
+            "a script that will not compile is skipped, not fatal"
+        );
+    }
+
     /// The dashboard's flat `provider/id` list is the same enumeration.
     #[tokio::test]
     async fn list_model_ids_flattens_to_provider_slash_id() {
         let state = test_state_listing_models();
         let ids = super::list_model_ids(
-            &state.config,
+            &state.current_config(),
             &leviath_providers::provider::build_http_client,
         )
         .await;
@@ -603,7 +663,7 @@ mod tests {
     fn state_with_config_path(path: std::path::PathBuf) -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
-            config: Arc::new(Config::default()),
+            config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin {
@@ -612,6 +672,111 @@ mod tests {
             },
             limits: Default::default(),
         }
+    }
+
+    /// [`state_with_config_path`], but its config source *watches* that file
+    /// rather than holding a copy - the way `lev serve` builds one. What the
+    /// handlers see is then whatever is on disk, which is the whole point of
+    /// issue #532.
+    fn state_watching_config_path(path: std::path::PathBuf) -> AppState {
+        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        AppState {
+            config: Arc::new(crate::daemon::config_reload::ConfigReloader::new(
+                path.clone(),
+                Config::default(),
+            )),
+            event_tx: tx,
+            control: crate::commands::serve::testutil::no_daemon_client(),
+            mcp: crate::commands::serve::mcp::McpAdmin {
+                config_path: path,
+                ..Default::default()
+            },
+            limits: Default::default(),
+        }
+    }
+
+    /// Force a file's mtime strictly newer, so the reload is observable even
+    /// when the write lands in the same clock tick as the last one (mirrors
+    /// `config_reload`'s own test helper).
+    fn bump_mtime(path: &std::path::Path) {
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(later).unwrap();
+    }
+
+    /// The endpoint's answer as JSON rather than as `RedactedConfig`: a
+    /// gateway serializes with `skip_serializing_if` fields that its own
+    /// `Deserialize` requires, so the wire form is the only faithful reading.
+    async fn get_config_request(state: AppState) -> serde_json::Value {
+        let app = Router::new()
+            .route("/api/config", get(get_config))
+            .with_state(state);
+        let req = Request::builder()
+            .uri("/api/config")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).expect("the endpoint answers with JSON")
+    }
+
+    /// The round trip issue #532 is about: save an edit, reload the page, and
+    /// the edit is still there. `put_config` writes the file and `get_config`
+    /// used to answer from a start-up copy, so the second half showed the old
+    /// value and the save read as lost.
+    #[tokio::test]
+    async fn an_edit_through_put_is_visible_to_the_next_get() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+        let state = state_watching_config_path(path.clone());
+
+        let before = get_config_request(state.clone()).await;
+        assert_ne!(before["default_provider"], "openai");
+
+        let body = serde_json::json!({ "default_provider": "openai" }).to_string();
+        let resp = put_config_request(state.clone(), &body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        bump_mtime(&path);
+
+        let after = get_config_request(state).await;
+        assert_eq!(
+            after["default_provider"], "openai",
+            "the edit this server just wrote must be what it reports"
+        );
+    }
+
+    /// And an edit made by anything else on the machine - `lev setup`, an
+    /// editor, the daemon - is picked up the same way. `lev serve` is a
+    /// separate process, so a daemon restart never fixed this one.
+    #[tokio::test]
+    async fn an_edit_made_outside_the_api_is_picked_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+        let state = state_watching_config_path(path.clone());
+        let before = get_config_request(state.clone()).await;
+        assert_eq!(before["gateways"].as_array().map(Vec::len), Some(0));
+
+        let mut edited = Config::default();
+        edited.model_providers.insert(
+            "cerebras".to_string(),
+            crate::config::ModelProviderConfig {
+                base_url: Some("https://api.cerebras.ai/v1".to_string()),
+                ..Default::default()
+            },
+        );
+        edited.save_to_path_public(&path).unwrap();
+        bump_mtime(&path);
+
+        let after = get_config_request(state).await;
+        let gateways = after["gateways"].as_array().expect("a gateway array");
+        assert_eq!(gateways.len(), 1, "the new gateway is reported");
+        assert_eq!(gateways[0]["name"], "cerebras");
+        assert_eq!(gateways[0]["base_url"], "https://api.cerebras.ai/v1");
     }
 
     async fn put_config_request(state: AppState, body: &str) -> axum::http::Response<Body> {

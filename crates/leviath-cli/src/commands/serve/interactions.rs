@@ -128,7 +128,6 @@ mod tests {
     use axum::routing::{get, post};
     use leviath_core::interaction::InteractionRequest;
     use leviath_runtime::control_socket::ControlClient;
-    use std::sync::Arc;
     use tokio::sync::broadcast;
     use tower::ServiceExt;
 
@@ -136,7 +135,7 @@ mod tests {
     fn app_with(control: ControlClient) -> Router {
         let (tx, _) = broadcast::channel(16);
         let state = AppState {
-            config: Arc::new(Config::default()),
+            config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control,
             mcp: crate::commands::serve::mcp::McpAdmin::default(),

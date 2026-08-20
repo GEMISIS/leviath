@@ -47,7 +47,7 @@ pub(super) async fn spawn_agent(
     State(state): State<AppState>,
     Json(body): Json<SpawnAgentReq>,
 ) -> Result<Json<SpawnAgentResp>, (StatusCode, Json<ErrorResponse>)> {
-    let blueprints = discover_blueprints(&state.config);
+    let blueprints = discover_blueprints(&state.current_config());
     let bp_info = blueprints
         .iter()
         .find(|b| b.name == body.blueprint)
@@ -844,7 +844,7 @@ mod tests {
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
-            config: Arc::new(Config::default()),
+            config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: no_daemon(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
@@ -870,7 +870,7 @@ mod tests {
 
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
-            config: Arc::new(Config {
+            config: crate::commands::serve::testutil::fixed_config(Config {
                 agent_paths: vec![agents.path().to_path_buf()],
                 ..Default::default()
             }),
@@ -1140,7 +1140,7 @@ mod tests {
     fn test_state_with_agent_paths(paths: Vec<PathBuf>, control: ControlClient) -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
-            config: Arc::new(Config {
+            config: crate::commands::serve::testutil::fixed_config(Config {
                 agent_paths: paths,
                 ..Default::default()
             }),
@@ -2963,7 +2963,7 @@ system_prompt = "Plan the work"
         use axum::routing::delete;
         let (tx, _) = broadcast::channel(16);
         let state = AppState {
-            config: Arc::new(Config::default()),
+            config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control,
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
@@ -3019,7 +3019,7 @@ system_prompt = "Plan the work"
         use axum::routing::post;
         let (tx, _) = broadcast::channel(16);
         let state = AppState {
-            config: Arc::new(Config::default()),
+            config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control,
             mcp: crate::commands::serve::mcp::McpAdmin::default(),

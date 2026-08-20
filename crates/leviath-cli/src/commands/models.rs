@@ -508,30 +508,38 @@ async fn list_with_registry(
         entries.retain(|e| available.contains(&e.provider));
     }
 
+    // The one name the script path below owns outright, so the sweep does not
+    // also query it: it reports a failure differently (fatal there, a warning
+    // here) and querying it twice would be a wasted round trip.
+    let script_target = args.provider.as_deref().filter(|name| {
+        !available.contains(*name) && !builtin_table().iter().any(|e| e.provider == *name)
+    });
+
     // --remote: fetch live model lists and merge (remote wins on same ID).
     if args.remote {
-        for provider_name in registry.provider_names() {
+        // `resolvable_names`, not `provider_names`: a script provider is
+        // reachable only through `get`, so a sweep built on the registered
+        // names alone silently omitted every one of them - the same shape as
+        // issues #523 and #531.
+        for provider_name in registry.resolvable_names() {
             // If the caller filtered to a specific provider, skip others.
             if let Some(ref filter) = args.provider
-                && filter != provider_name
+                && filter != &provider_name
             {
                 continue;
             }
+            if script_target == Some(provider_name.as_str()) {
+                continue; // asked for, and answered for, below
+            }
 
-            // `registry.get(provider_name)` is structurally guaranteed
-            // `Some` here - `provider_name` comes from
-            // `registry.provider_names()` just above, and both methods read
-            // the same underlying map (see `leviath-runtime/src/providers.rs`'s
-            // `ProviderRegistry`). There is no way to construct a registry
-            // where a name from `provider_names()` isn't `get()`-able, so
-            // `.expect()` documents that invariant instead of leaving a
-            // defensive-but-unreachable `if let` branch permanently
-            // uncovered - the same choice already made by
-            // `commands/serve/config.rs`'s `get_models` for this identical
-            // pattern.
-            let provider = registry
-                .get(provider_name)
-                .expect("provider_names returns registered names");
+            // A script name is a candidate until it compiles, so this cannot
+            // assume the lookup succeeds the way the old `provider_names` loop
+            // could. One that will not load is skipped here - the layer has
+            // already logged why - and is only ever fatal when the caller named
+            // it with `--provider`, which is `script_target` above.
+            let Some(provider) = registry.get(&provider_name) else {
+                continue;
+            };
             match provider.list_models().await {
                 Ok(remote_models) => {
                     for rm in remote_models {
@@ -561,10 +569,7 @@ async fn list_with_registry(
     // - `--provider openai` with no OpenAI key is an empty table, exactly as it
     // has always been.
     let mut script_provider_answered = false;
-    if let Some(ref name) = args.provider
-        && !available.contains(name)
-        && !builtin_table().iter().any(|e| e.provider == name.as_str())
-    {
+    if let Some(name) = script_target {
         merge_script_provider(&registry, name, &mut entries).await?;
         script_provider_answered = true;
     }
@@ -2003,6 +2008,72 @@ mod tests {
                 let args = ListArgs {
                     remote: false,
                     provider: Some("scripted".to_string()),
+                    all: false,
+                    json: true,
+                };
+                let result = list_with_registry(args, &script_registry(dir)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
+    }
+
+    /// `--remote` sweeps every provider it can resolve, script providers now
+    /// included - the sweep used to be built on `provider_names`, which names
+    /// only the natively registered ones (issues #523, #531).
+    #[tokio::test]
+    async fn list_remote_sweeps_script_providers_too() {
+        let dir = tempfile::tempdir().expect("a temp providers dir");
+        std::fs::write(
+            dir.path().join("swept.rhai"),
+            "fn initialize(config) { #{ ok: true } }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }\n\
+             fn list_models(state) { [ #{ id: \"swept-large\" } ] }",
+        )
+        .expect("the temp dir is writable");
+        // A second script that will not compile: the sweep skips it rather
+        // than failing, which is only fatal when `--provider` named it.
+        std::fs::write(
+            dir.path().join("wont-compile.rhai"),
+            "fn initialize(config) { #{",
+        )
+        .expect("the temp dir is writable");
+        let dir = dir.path().to_path_buf();
+        crate::config::with_isolated_config_path_async(
+            "models-list_remote_sweeps_script_providers_too",
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: true,
+                    provider: None,
+                    all: false,
+                    json: true,
+                };
+                let result = list_with_registry(args, &script_registry(dir)).await;
+                assert!(result.is_ok(), "one broken script does not fail the sweep");
+            },
+        )
+        .await;
+    }
+
+    /// A `--provider` naming a script provider is answered once, by the path
+    /// that reports its failures properly - not twice, once by each.
+    #[tokio::test]
+    async fn a_named_script_provider_is_not_also_swept() {
+        let dir = tempfile::tempdir().expect("a temp providers dir");
+        std::fs::write(
+            dir.path().join("once.rhai"),
+            "fn initialize(config) { #{ ok: true } }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }\n\
+             fn list_models(state) { [ #{ id: \"once-large\" } ] }",
+        )
+        .expect("the temp dir is writable");
+        let dir = dir.path().to_path_buf();
+        crate::config::with_isolated_config_path_async(
+            "models-a_named_script_provider_is_not_also_swept",
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: true,
+                    provider: Some("once".to_string()),
                     all: false,
                     json: true,
                 };

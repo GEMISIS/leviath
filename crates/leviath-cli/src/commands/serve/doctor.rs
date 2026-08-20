@@ -54,7 +54,6 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use std::path::PathBuf;
-    use std::sync::Arc;
     use tokio::sync::broadcast;
     use tower::ServiceExt;
 
@@ -85,7 +84,7 @@ mod tests {
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
-            config: Arc::new(Config::default()),
+            config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: leviath_runtime::control_socket::ControlClient::new(
                 leviath_runtime::control_socket::control_id(std::path::Path::new(

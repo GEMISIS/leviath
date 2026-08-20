@@ -140,8 +140,17 @@ pub async fn setup_daemon_host_with(
     // redirect policy has no per-agent context to consult; see
     // `script_host::set_local_network_allowed`.
     crate::daemon::script_host::set_local_network_allowed(config.security.allow_local_network);
-    let providers = crate::commands::run::session::build_provider_registry_from_config_with(
+    // Built before the registry, and shared with it: a script provider's
+    // `[model_providers.<name>]` table is read through this, so editing it
+    // takes effect on the next load exactly as editing the `.rhai` beside it
+    // already did (issue #533).
+    let reloader = Arc::new(crate::daemon::config_reload::ConfigReloader::new(
+        Config::config_path(),
+        config.clone(),
+    ));
+    let providers = crate::commands::run::session::build_provider_registry_live(
         &config,
+        reloader.clone(),
         build_client,
     )?;
     // Ask each provider what its models are before anything runs on one.
@@ -180,6 +189,7 @@ pub async fn setup_daemon_host_with(
         mcp_pool,
         runtime,
         now_secs: || chrono::Utc::now().timestamp(),
+        reloader: Some(reloader),
     }))
 }
 
@@ -230,6 +240,10 @@ pub struct HostParts {
     pub runtime: Handle,
     /// The clock, injected so a test does not depend on the wall clock.
     pub now_secs: fn() -> i64,
+    /// The daemon's config source. Built before the provider registry so the
+    /// script-provider layer can follow it too (issue #533); `None` builds a
+    /// fixed one from `config`, for a caller with nothing to watch.
+    pub reloader: Option<Arc<crate::daemon::config_reload::ConfigReloader>>,
 }
 
 /// Build the daemon's [`WorldHost`]: one world hosting every agent, its tool
@@ -330,14 +344,20 @@ pub fn build_host(parts: HostParts) -> WorldHost {
 
     // Config hot-reload: after boot, spawn-time parts.config (permissions,
     // `[read_paths]`, sandbox, limits, taint) is served from here, reloaded
-    // when `parts.config.toml` changes on disk. The boot infrastructure (provider
-    // registry, MCP pool, network policy, telemetry) keeps the boot snapshot -
-    // those hold live connections and need a restart - so the reloader takes a
-    // clone and the boot snapshot stays usable below.
-    let reloader = std::sync::Arc::new(crate::daemon::config_reload::ConfigReloader::new(
-        Config::config_path(),
-        parts.config.clone(),
-    ));
+    // when `parts.config.toml` changes on disk. The boot infrastructure that
+    // holds live connections - the MCP pool, the network policy, the telemetry
+    // sink - keeps the boot snapshot and needs a restart, so the reloader takes
+    // a clone and the boot snapshot stays usable below.
+    //
+    // Normally handed in: `setup_daemon_host_with` builds it before the
+    // provider registry so the script-provider layer can follow it as well
+    // (issue #533). A caller that did not gets a fixed one over its own config.
+    let reloader = parts.reloader.clone().unwrap_or_else(|| {
+        std::sync::Arc::new(crate::daemon::config_reload::ConfigReloader::new(
+            Config::config_path(),
+            parts.config.clone(),
+        ))
+    });
 
     // Install the fan-out spawner as a world resource so the parts.runtime's fan-out
     // systems can start workers (it captures the same context as the spawner
@@ -1313,6 +1333,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             ),
             runtime: Handle::current(),
             now_secs: || 0,
+            reloader: None,
         });
     }
 
@@ -1342,6 +1363,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             ),
             runtime: Handle::current(),
             now_secs: || 0,
+            reloader: None,
         });
         assert!(
             host.world_mut()
@@ -1381,6 +1403,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             ),
             runtime: Handle::current(),
             now_secs: || 0,
+            reloader: None,
         });
         assert!(
             host.world_mut()
@@ -1415,6 +1438,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             ),
             runtime: Handle::current(),
             now_secs: || 0,
+            reloader: None,
         });
         let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
         let (reply, reply_rx) = oneshot::channel();
@@ -1494,6 +1518,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             ),
             runtime: Handle::current(),
             now_secs: || 100,
+            reloader: None,
         });
 
         // Drive a Spawn control op through the host.
@@ -1600,6 +1625,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             ),
             runtime: Handle::current(),
             now_secs: || 100,
+            reloader: None,
         });
 
         // The reloaded run is registered → Status resolves it.
@@ -1637,6 +1663,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             ),
             runtime: Handle::current(),
             now_secs: || 100,
+            reloader: None,
         });
 
         // Persist a running run only now - build_host's startup reload already ran,

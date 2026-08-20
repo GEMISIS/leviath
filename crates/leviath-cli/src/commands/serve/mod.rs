@@ -266,7 +266,10 @@ async fn execute_with_shutdown(
     let (event_tx, _) = broadcast::channel::<ServerEvent>(256);
 
     let state = AppState {
-        config: Arc::new(cfg),
+        config: Arc::new(crate::daemon::config_reload::ConfigReloader::new(
+            Config::config_path(),
+            cfg,
+        )),
         event_tx: event_tx.clone(),
         control,
         mcp: mcp::McpAdmin::default(),
@@ -701,7 +704,7 @@ mod tests {
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
-            config: Arc::new(Config::default()),
+            config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: no_daemon_control(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
@@ -1183,7 +1186,7 @@ system_prompt = "Run"
         let state = test_state();
         let cloned = state.clone();
         // Both should work (no panic)
-        let _ = cloned.config.default_provider.clone();
+        let _ = cloned.current_config().default_provider.clone();
     }
 
     #[test]
