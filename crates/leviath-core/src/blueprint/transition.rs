@@ -222,6 +222,23 @@ pub const MODIFYING_TOOLS: &[&str] = &["write_file", "edit_file"];
 /// tools crate.
 pub const SUBMIT_OUTPUT_TOOL: &str = "submit_output";
 
+/// The tool a `fan_out` stage's split calls to hand back its work items.
+///
+/// The split used to be free text that the runtime scraped a JSON array out of,
+/// which is the one place in the framework where a structured answer was asked
+/// for in prose and parsed by hand. A model that answered with a report, an
+/// apology, or its own text-protocol tool-call syntax cost a correction round
+/// each time, and a `deep-researcher` run spent its whole budget that way.
+///
+/// Offered implicitly by every fan-out stage - the free-text parse stays as the
+/// fallback, because a stage's model is chosen by the blueprint and not every
+/// model uses tools well.
+///
+/// Named here for the same reason [`SUBMIT_OUTPUT_TOOL`] is: the manifest parser
+/// and the blueprint validator both need it and neither may depend on the tools
+/// crate.
+pub const SUBMIT_WORK_ITEMS_TOOL: &str = "submit_work_items";
+
 /// Times a stage is re-run for a missing final output before the gate gives up
 /// and lets it through with the run's `output_forced` flag set. Matches
 /// [`DEFAULT_GATE_ATTEMPTS`], and is overridden by a stage's `max_revisits`.
