@@ -302,6 +302,19 @@ pub fn collect_transition_choice(
                 .remove::<InFlightWork>();
             continue;
         }
+        // Paused mid-routing. Same hazard as the stage lane: every arm below
+        // rewrites the status, so letting a landing outcome through would either
+        // route a paused run into its next stage or bury the pause under an
+        // `Error`. Park it for `resume` to replay.
+        if state.status == AgentStatus::Paused {
+            commands
+                .entity(outcome.entity)
+                .insert(crate::pipeline::HeldInference {
+                    outcome,
+                    lane: crate::pipeline::HeldLane::TransitionChoice,
+                });
+            continue;
+        }
         let response = match outcome.result {
             Ok(response) => response,
             Err(err) => {
