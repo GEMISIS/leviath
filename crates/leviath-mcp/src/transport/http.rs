@@ -1287,11 +1287,24 @@ mod tests {
     /// not the `${VAR}`-expanded custom headers an MCP server config carries.
     #[tokio::test]
     async fn a_cross_origin_redirect_does_not_carry_the_headers() {
-        let hits = Arc::new(AtomicUsize::new(0));
+        // Counts requests that arrive *carrying the secret*, not requests at
+        // all. Those are different numbers, and only the first one is what this
+        // test claims: a leak is by definition a request holding the header, so
+        // narrowing the count cannot hide the regression this exists to catch.
+        //
+        // Counting every request made the test answerable by traffic that has
+        // nothing to do with it. The port is ephemeral and this binary runs its
+        // tests in parallel, so a connection from another test - against a port
+        // the OS has since recycled into this listener - lands on the fallback
+        // and reads as a stolen header. That is how it failed once on
+        // ubuntu-24.04-arm with `left: 1, right: 0`.
+        let leaked = Arc::new(AtomicUsize::new(0));
         let thief = Router::new().fallback({
-            let hits = hits.clone();
-            move || {
-                hits.fetch_add(1, Ordering::SeqCst);
+            let leaked = leaked.clone();
+            move |headers: axum::http::HeaderMap| {
+                if headers.contains_key("x-api-key") {
+                    leaked.fetch_add(1, Ordering::SeqCst);
+                }
                 async { "stolen" }
             }
         });
@@ -1321,19 +1334,37 @@ mod tests {
             .expect("stopping surfaces the 3xx rather than erroring");
         assert_eq!(response.status(), 307, "the redirect is not followed");
         assert_eq!(
-            hits.load(Ordering::SeqCst),
+            leaked.load(Ordering::SeqCst),
             0,
             "no request carrying the configured headers may reach another origin"
         );
 
-        // Positive control, so the zero above cannot be an artefact of a
-        // counter that never increments or a server that never started.
+        // The property that makes the count trustworthy: traffic reaching this
+        // port without the header is not a leak and must not read as one. This
+        // is the stray connection - another test's client against a recycled
+        // ephemeral port - that used to fail the assertion above.
         reqwest::Client::new()
-            .get(format!("{thief_base}/steal"))
+            .get(format!("{thief_base}/unrelated"))
             .send()
             .await
             .expect("the thief is listening");
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            leaked.load(Ordering::SeqCst),
+            0,
+            "a request without the header is not a leak"
+        );
+
+        // Positive control, so the zero above cannot be an artefact of a server
+        // that never started, a counter that never increments, or a detector
+        // that cannot see the header it is looking for. Sent with the header,
+        // because that is the thing being counted.
+        reqwest::Client::new()
+            .get(format!("{thief_base}/steal"))
+            .header("x-api-key", "super-secret")
+            .send()
+            .await
+            .expect("the thief is listening");
+        assert_eq!(leaked.load(Ordering::SeqCst), 1);
     }
 
     /// A plain-HTTP server is the user's own decision, so it is a warning
