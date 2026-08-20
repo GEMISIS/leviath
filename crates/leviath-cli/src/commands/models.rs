@@ -2047,6 +2047,41 @@ mod tests {
         .await;
     }
 
+    /// A script provider that names a model the built-in table also carries
+    /// replaces that row rather than adding a second one, the same way a
+    /// `--remote` fetch does. `--all` is what keeps the built-in rows in the
+    /// table for it to collide with.
+    #[tokio::test]
+    async fn a_script_provider_overrides_a_builtin_row_with_the_same_id() {
+        let dir = tempfile::tempdir().expect("a temp providers dir");
+        let builtin_id = builtin_table()[0].model_id.to_string();
+        std::fs::write(
+            dir.path().join("mirror.rhai"),
+            format!(
+                "fn initialize(config) {{ #{{ ok: true }} }}\n\
+                 fn inference(state, request) {{ #{{ content: \"ok\" }} }}\n\
+                 fn list_models(state) {{ [ #{{ id: \"{builtin_id}\", \
+                 max_context_tokens: 4096 }} ] }}"
+            ),
+        )
+        .expect("the temp dir is writable");
+        let dir = dir.path().to_path_buf();
+        crate::config::with_isolated_config_path_async(
+            "models-a_script_provider_overrides_a_builtin_row",
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: false,
+                    provider: Some("mirror".to_string()),
+                    all: true,
+                    json: true,
+                };
+                let result = list_with_registry(args, &script_registry(dir)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
+    }
+
     /// A built-in provider name is answered from the table, not by trying to
     /// load a script of that name - `--provider openai` with no OpenAI key is
     /// an empty table, exactly as it was before script providers were reached.
