@@ -1,6 +1,6 @@
 [agent]
 name = "data-analyst"
-version = "0.0.5"
+version = "0.0.6"
 description = "Data analyst - searches the web for data on a subject, builds a clean CSV of it, and hands back a ready-to-use summary of what the numbers say"
 entry_stage = "scope"
 

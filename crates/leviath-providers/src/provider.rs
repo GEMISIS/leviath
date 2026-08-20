@@ -885,6 +885,30 @@ pub type HttpClientFactory<'a> =
 pub fn build_http_client(
     timeout_secs: Option<u64>,
 ) -> std::result::Result<reqwest::Client, reqwest::Error> {
+    outbound_builder(timeout_secs).build()
+}
+
+/// The same client, pinned to HTTP/1.1.
+///
+/// Some origins negotiate HTTP/2 over ALPN and then fail every stream on it.
+/// `investors.cerebras.ai` is one, measured: `curl` succeeds over either
+/// protocol, while this stack gets `http2 error: stream error received:
+/// unexpected internal error encountered` on **every** attempt, and both of
+/// that host's pages were primary sources a research run ended up citing
+/// without ever reading. A per-request `Version::HTTP_11` does not help,
+/// because ALPN picks the protocol during the TLS handshake and the request
+/// version is only a hint by then - it takes a separate client.
+///
+/// Built once and used only as a retry path, so the ordinary case still gets
+/// HTTP/2 multiplexing.
+pub fn build_http1_client(
+    timeout_secs: Option<u64>,
+) -> std::result::Result<reqwest::Client, reqwest::Error> {
+    outbound_builder(timeout_secs).http1_only().build()
+}
+
+/// The builder both outbound clients share.
+fn outbound_builder(timeout_secs: Option<u64>) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .pool_max_idle_per_host(0)
         // Follow a redirect only while it stays on the host the key was meant
@@ -909,7 +933,6 @@ pub fn build_http_client(
         .timeout(std::time::Duration::from_secs(
             timeout_secs.unwrap_or(DEFAULT_INFERENCE_TIMEOUT_SECS),
         ))
-        .build()
 }
 
 /// Trait for LLM providers.

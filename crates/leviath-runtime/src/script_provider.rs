@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
-use leviath_providers::rhai_provider::host::{HttpExecutor, ReqwestExecutor};
+use leviath_providers::rhai_provider::host::HttpExecutor;
 use leviath_providers::{ModelCapabilityOverride, Provider, RateLimitConfig, RhaiProvider};
 
 /// Per-provider configuration from `[model_providers.<name>]`. All fields are
@@ -178,8 +178,13 @@ impl ScriptProviderLayer {
     pub fn build_executor(
         request_timeout_secs: Option<u64>,
     ) -> std::result::Result<Arc<dyn HttpExecutor>, leviath_providers::provider::HttpError> {
-        leviath_providers::provider::build_http_client(request_timeout_secs)
-            .map(|client| Arc::new(ReqwestExecutor::new(client)) as Arc<dyn HttpExecutor>)
+        // An HTTP/1.1-only twin rides along as the retry path for origins that
+        // negotiate HTTP/2 and then fail every stream on it. Losing only the
+        // twin is a degraded executor, not a dead one.
+        leviath_providers::rhai_provider::host::executor_from_clients(
+            leviath_providers::provider::build_http_client(request_timeout_secs),
+            leviath_providers::provider::build_http1_client(request_timeout_secs),
+        )
     }
 
     /// Resolve `<name>` to its script path: an explicit `script` override
