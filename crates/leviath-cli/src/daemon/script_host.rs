@@ -590,7 +590,11 @@ impl RealScriptIo {
         if let Some(msg) = oversized_body_message(resp.content_length(), max) {
             return Err(msg);
         }
-        let text = cap_script_io(resp.text().map_err(|e| format!("read body: {e}"))?);
+        let text = resp.text().map_err(|e| format!("read body: {e}"))?;
+        if let Some(msg) = mojibake_message(&text) {
+            return Err(msg);
+        }
+        let text = cap_script_io(text);
         if status.is_success() {
             Ok(text)
         } else {
@@ -637,6 +641,39 @@ fn is_binary_content_type(content_type: &str) -> bool {
     BINARY_CONTENT_PREFIXES
         .iter()
         .any(|prefix| essence.starts_with(prefix))
+}
+
+/// Share of replacement characters above which a decoded body is mojibake
+/// rather than text. Real prose in any charset stays far under this; a body
+/// that was never text at all lands near 1.0, because every byte the decoder
+/// could not interpret becomes U+FFFD.
+const MOJIBAKE_REPLACEMENT_SHARE: f64 = 0.1;
+
+/// The refusal for a body that decoded into replacement characters, or `None`
+/// when the text is usable.
+///
+/// This is the case [`is_binary_content_type`] cannot catch: a response that
+/// declares `text/html` and answers with compressed or otherwise binary bytes.
+/// The decode does not fail, it succeeds lossily, so before this the agent
+/// received a page of U+FFFD and cited it as though it had read the article.
+/// The test is on the *decoded* text, never on raw UTF-8 validity, so a
+/// correctly decoded Shift-JIS or Windows-1252 page still passes.
+fn mojibake_message(text: &str) -> Option<String> {
+    let total = text.chars().count();
+    if total == 0 {
+        return None;
+    }
+    let replacements = text
+        .chars()
+        .filter(|c| *c == char::REPLACEMENT_CHARACTER)
+        .count();
+    if (replacements as f64) < (total as f64) * MOJIBAKE_REPLACEMENT_SHARE {
+        return None;
+    }
+    Some(format!(
+        "body did not decode as text ({replacements} of {total} characters were unreadable) \
+         - the response was probably compressed or binary despite its content type"
+    ))
 }
 
 /// The diagnostic a script tool sees for a binary body. Phrased for the model:
@@ -1395,6 +1432,18 @@ mod tests {
                         vec![0x93u8, 0xfa, 0x96, 0x7b, 0x8c, 0xea],
                     )
                 }),
+            )
+            // Declared text, answered with bytes that are not text in any
+            // charset: the shape a compressed body arrives in. `text()` decodes
+            // it lossily and succeeds, so only the decoded result gives it away.
+            .route(
+                "/gibberish",
+                get(|| async {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/html")],
+                        vec![0x1fu8, 0x8b, 0x08, 0x00, 0xff, 0xfe, 0xfd, 0xfc, 0xfb, 0xfa],
+                    )
+                }),
             );
         tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
             listener, app,
@@ -1483,6 +1532,36 @@ mod tests {
         let msg = oversized_body_message(Some(999_999_999), 1_000).expect("should refuse");
         assert!(msg.contains("999999999"), "{msg}");
         assert!(msg.contains("1000-byte limit"), "{msg}");
+    }
+
+    /// The mojibake guard in the real `send` path: a `text/html` response whose
+    /// body is not text in any charset is refused rather than handed on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_refuses_a_body_that_did_not_decode_as_text() {
+        let base = mock_http().await;
+        let out = tokio::task::spawn_blocking(move || {
+            let client = RealScriptIo::client();
+            RealScriptIo::send(client.get(format!("{base}/gibberish")))
+        })
+        .await
+        .expect("join");
+        let err = out.expect_err("gibberish is not text");
+        assert!(err.contains("did not decode as text"), "{err}");
+    }
+
+    /// A body that decoded into replacement characters is refused, and real
+    /// text in any charset is not.
+    #[test]
+    fn mojibake_is_refused_and_ordinary_text_is_not() {
+        let msg = mojibake_message("\u{fffd}\u{fffd}\u{fffd}\u{fffd}a").expect("should refuse");
+        assert!(msg.contains("4 of 5 characters"), "{msg}");
+        assert!(msg.contains("compressed or binary"), "{msg}");
+        // Decoded Japanese, a lone stray replacement char in a long page, and
+        // an empty body all stay on the text path.
+        assert!(mojibake_message("\u{30a6}\u{30a7}\u{30cf}").is_none());
+        let mostly_text = format!("{}{}", char::REPLACEMENT_CHARACTER, "a".repeat(20));
+        assert!(mojibake_message(&mostly_text).is_none());
+        assert!(mojibake_message("").is_none());
     }
 
     /// A body at or under the cap proceeds, and so does one with no declared
