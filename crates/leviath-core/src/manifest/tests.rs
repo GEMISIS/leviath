@@ -2808,14 +2808,14 @@ mode = "output"
     bp.validate().expect("the auto-grant satisfies validation");
 }
 
-/// A `fan_out` stage is granted `submit_work_items` regardless of what it
-/// listed, and listing it by hand does not produce two of them.
+/// A `fan_out` stage is granted `fan_out` regardless of what it listed, and
+/// listing it by hand does not produce two of them.
 ///
 /// The grant ignores `available_tools` because a fan-out stage's is usually
 /// `[]` - the split runs no tools of its own - and that empty list is a
 /// statement about the work, not about how the answer comes back.
 #[test]
-fn fan_out_mode_grants_the_work_item_tool_exactly_once() {
+fn fan_out_mode_grants_the_fan_out_tool_exactly_once() {
     let bare = r#"
 [agent]
 name = "fanout-test"
@@ -2837,13 +2837,13 @@ allow_as_worker = true
         .expect("the stage exists");
     assert_eq!(
         stage.available_tools,
-        vec![crate::blueprint::SUBMIT_WORK_ITEMS_TOOL.to_string()],
+        vec![crate::blueprint::FAN_OUT_TOOL.to_string()],
         "granted even though the author wrote an empty list"
     );
 
     let spelled_out = bare.replace(
         "available_tools = []",
-        "available_tools = [\"submit_work_items\", \"read_file\"]",
+        "available_tools = [\"fan_out\", \"read_file\"]",
     );
     let stage = parse_manifest(&spelled_out)
         .expect("parses")
@@ -2853,7 +2853,7 @@ allow_as_worker = true
     assert_eq!(
         stage.available_tools,
         vec![
-            crate::blueprint::SUBMIT_WORK_ITEMS_TOOL.to_string(),
+            crate::blueprint::FAN_OUT_TOOL.to_string(),
             "read_file".to_string()
         ],
         "the author's own list is kept and the grant is not duplicated"

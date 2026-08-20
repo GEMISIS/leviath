@@ -1,20 +1,38 @@
-//! Fan-out stage handling as ECS systems.
+//! The fan-out engine: many sub-agents at once, and their results together.
 //!
-//! A `fan_out` stage (see [`leviath_core::blueprint::StageMode::FanOut`]) runs
-//! its single inference as a **split** - its prompt (with the config's
-//! `split_prompt` folded in by [`crate::pipeline`]) asks the model for a JSON
-//! array of work items. [`fan_out_split`] intercepts that response (before the
-//! normal `process_response` routing), parses the items, and parks the parent in
-//! [`FanOutWaiting`]. [`fan_out_collect`] then starts one worker per item -
-//! bounded by `max_workers` concurrent workers - via the daemon-installed
-//! [`FanOutSpawner`], tracks them as the parent's `SubAgentChildren`, and once
-//! every worker is terminal applies the failure policy, injects a consolidated
-//! report into the parent's conversation, and transitions to the `merge_stage`
-//! (or falls through to the stage's normal transition).
+//! # One engine, two entry points
+//!
+//! Both start at [`begin_fan_out`], which parks the parent in [`FanOutWaiting`].
+//! [`fan_out_collect`] then starts one worker per item - bounded by
+//! `max_workers` - through the daemon-installed [`FanOutSpawner`], tracks them
+//! as the parent's `SubAgentChildren`, and once every worker is terminal applies
+//! the failure policy and builds the consolidated report.
+//!
+//! What differs is only how that report is delivered, which is exactly what
+//! [`FanOutOrigin`] records:
+//!
+//! - **The [`FAN_OUT_TOOL`] tool**, callable from any stage that grants it. The
+//!   dispatcher reads the call ([`parse_fan_out_call`]), hands it over as
+//!   [`PendingFanOut`], and [`start_pending_fan_outs`] begins it. The report
+//!   comes back as that call's tool result, routed by the stage's
+//!   `tool_routing` like any other, and the agent carries on where it was.
+//! - **A `mode = "fan_out"` stage** (see
+//!   [`leviath_core::blueprint::StageMode::FanOut`]), which is sugar for
+//!   granting the same tool: its report goes to the config's `results_region`
+//!   and the stage transitions to its `merge_stage`.
+//!
+//! Because both park the same way, both survive a daemon restart through
+//! `fanout.json` (see [`FanOutState`]).
+//!
+//! # What lives elsewhere
 //!
 //! The runtime only **starts and tracks** workers; resolving *which* blueprint a
 //! worker runs (self-at-worker-stage, a named agent, or a capability query) is
 //! the CLI's job, encapsulated behind the [`FanOutSpawner`] it installs.
+//!
+//! A single sub-agent is `spawn_agent`, not a fan-out of one.
+//!
+//! [`FAN_OUT_TOOL`]: leviath_core::blueprint::FAN_OUT_TOOL
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -25,89 +43,10 @@ use leviath_core::blueprint::{FanOutConfig, StageMode, WorkerFailurePolicy};
 use crate::components::{
     AgentState, AgentStatus, ContextWindow, InferenceResult, ParentRef, SubAgentChildren,
 };
-use crate::pipeline::{AgentBlueprint, ProcessResponse, ResolveTransition, StageCursor};
-
-mod split_parse;
-
-use split_parse::work_items_from_value;
-pub use split_parse::{WorkItem, parse_work_items};
+use crate::pipeline::{AgentBlueprint, ResolveTransition, StageCursor};
 
 /// Depth cap for fan-out workers when the parent's blueprint doesn't set one.
 const DEFAULT_FANOUT_DEPTH: usize = 3;
-
-/// How many times a malformed split is sent back to the model before the run
-/// fails.
-///
-/// A split asks for one exact shape, and a model that answers with prose or an
-/// apology has not failed at the work, only at the format. Failing the run on
-/// the first such answer throws away everything the parent has done, which is
-/// what a deep-researcher run reported: one non-conforming response ended it.
-/// Two corrections is enough to clear a formatting slip without letting a model
-/// that cannot produce the shape loop for ever.
-const MAX_SPLIT_RETRIES: usize = 2;
-
-/// How many corrective attempts a parent's split has already had.
-///
-/// Absent until the first malformed split, so a split that parses first time
-/// costs nothing.
-#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SplitAttempts(pub usize);
-
-/// What the model is told after a split that could not be used.
-///
-/// It names the failure and restates the shape rather than repeating the
-/// original instruction, because the original instruction is what just did not
-/// work.
-///
-/// The advice differs by how the answer arrived. A model that reached for the
-/// tool and got the arguments wrong needs the argument shape; one that answered
-/// in prose needs to be pointed at the tool, and told - because this is the
-/// thing a split gets wrong on a stage the run has entered before - that "the
-/// work is already done" is an answer it can give, as an empty list.
-fn split_correction(reason: &str, from_tool: bool) -> String {
-    let tool = leviath_core::blueprint::SUBMIT_WORK_ITEMS_TOOL;
-    match from_tool {
-        true => format!(
-            "Your `{tool}` call could not be used: {reason}. Call it again with an \
-             `items` array, each entry an object with a short `id` string and a \
-             `context` object holding everything its worker needs."
-        ),
-        false => format!(
-            "Your previous response could not be used: {reason}. Answer by calling \
-             `{tool}` with an `items` array - each entry an object with a short `id` \
-             string and a `context` object. If the work this stage would split is \
-             already done, call it with an empty `items` array; that is a real answer \
-             and the run moves on. If you cannot call tools, reply with the JSON array \
-             alone - no prose before or after it, no markdown fences. It must start \
-             with `[` and end with `]`."
-        ),
-    }
-}
-
-/// The first `MAX_SPLIT_SNIPPET` characters of what the model actually said,
-/// for the failure message.
-///
-/// The old message named the rule that was broken but never what came back, so
-/// an operator reading `split output is not a JSON array` could not tell a
-/// refusal from an empty response from prose. Bounded because a split response
-/// can be long, and truncated on a character boundary because model output is
-/// arbitrary UTF-8.
-fn response_snippet(response: &str) -> String {
-    let trimmed = response.trim();
-    if trimmed.is_empty() {
-        return "the response was empty".to_string();
-    }
-    // Taken as characters rather than bytes: a byte ceiling can land inside a
-    // character, and model output is arbitrary UTF-8.
-    let kept: String = trimmed.chars().take(MAX_SPLIT_SNIPPET).collect();
-    match kept.len() < trimmed.len() {
-        true => format!("the response began: {kept}…"),
-        false => format!("the response was: {kept}"),
-    }
-}
-
-/// How much of a failed split response the error message carries, in characters.
-const MAX_SPLIT_SNIPPET: usize = 200;
 
 /// Starts one worker for a fan-out work item. The implementor resolves the
 /// worker's blueprint (per `config`'s `worker_stage` / `worker_agent` /
@@ -141,6 +80,30 @@ struct ActiveWorker {
     run_id: String,
 }
 
+/// How a fan-out was started, and so how its results come back.
+///
+/// One engine, two entry points. The workers, the concurrency cap, the failure
+/// policy and the merged report are identical either way; only the last step
+/// differs, and this is the whole of that difference.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum FanOutOrigin {
+    /// A `mode = "fan_out"` stage. The report goes to the config's
+    /// `results_region` and the stage transitions to its `merge_stage`.
+    ///
+    /// The default so a `fanout.json` written before the tool existed still
+    /// loads, as the only thing it could have been.
+    #[default]
+    Stage,
+    /// A `fan_out` tool call from an ordinary stage. The report comes back as
+    /// that call's result - routed by the stage's `tool_routing` like any other,
+    /// so the blueprint decides where it lands or whether it lands at all - and
+    /// the agent carries on where it left off.
+    Tool {
+        /// The tool call this fan-out is the result of.
+        call_id: String,
+    },
+}
+
 /// A parent parked while its fan-out workers run. Holds the not-yet-started
 /// `pending` items, the currently-`active` workers, and the accumulated results.
 #[derive(Component)]
@@ -157,6 +120,8 @@ pub struct FanOutWaiting {
     /// starting the next queued worker. Without it, pausing a fan-out would
     /// pause the running children and immediately launch their replacements.
     paused: bool,
+    /// Which entry point started this, and so how its report is delivered.
+    origin: FanOutOrigin,
 }
 
 /// The serializable form of [`FanOutWaiting`], written to `<run_dir>/fanout.json`
@@ -181,6 +146,9 @@ pub struct FanOutState {
     /// build still loads, as an un-paused one.
     #[serde(default)]
     pub paused: bool,
+    /// Which entry point started this. `default` (a stage) for the same reason.
+    #[serde(default)]
+    pub origin: FanOutOrigin,
 }
 
 impl FanOutWaiting {
@@ -209,6 +177,7 @@ impl FanOutWaiting {
     pub(crate) fn to_state(&self) -> FanOutState {
         FanOutState {
             config: self.config.clone(),
+            origin: self.origin.clone(),
             max_workers: self.max_workers,
             pending: self.pending.iter().cloned().collect(),
             active: self
@@ -247,6 +216,7 @@ pub fn restore_fan_out_waiting(
         }
     }
     world.entity_mut(parent).insert(FanOutWaiting {
+        origin: state.origin.clone(),
         config: state.config,
         max_workers: state.max_workers,
         pending: state.pending.into_iter().collect(),
@@ -256,6 +226,14 @@ pub fn restore_fan_out_waiting(
         paused: state.paused,
     });
 }
+
+/// Set on an agent that has started a fan-out in its current stage.
+///
+/// Cleared on stage entry, unlike [`PreviousWorkItems`], because the two answer
+/// different questions: "has this entry fanned out yet" gates the nudge, and
+/// "what did the last round cover" is what the next round is told.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FannedOut;
 
 /// The ids a fan-out stage's last split handed out, so a later split of the same
 /// stage can be told what has already been researched.
@@ -323,7 +301,7 @@ pub fn frame_split_round(
 
 /// What a re-entered fan-out stage is told before it splits again.
 fn split_round_framing(round: usize, previous: &[String]) -> String {
-    let tool = leviath_core::blueprint::SUBMIT_WORK_ITEMS_TOOL;
+    let tool = leviath_core::blueprint::FAN_OUT_TOOL;
     let already = match previous.is_empty() {
         // A previous round whose ids were lost - a daemon restart between the
         // two entries drops the component - still gets the framing, because the
@@ -353,240 +331,211 @@ fn split_round_framing(round: usize, previous: &[String]) -> String {
     )
 }
 
-/// What a stage said should happen if its split cannot be used, decided while
-/// the blueprint and visit counts are still in the query rather than re-read
-/// afterwards - which is what made the re-read's missing-component arms
-/// unreachable.
-struct StageEscape {
-    /// The fan-out stage's name, for the log line and the context note.
-    stage_name: String,
-    /// Whether it declares an `error` or `dead_end` edge with budget left.
-    declared: bool,
+/// One unit of work produced by a fan-out call.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkItem {
+    /// Stable id (used to label the worker in the consolidated report).
+    #[serde(default)]
+    pub id: String,
+    /// Free-form context handed to the worker (seeded into its pinned context).
+    #[serde(default)]
+    pub context: serde_json::Value,
 }
 
-/// A split's answer: the `submit_work_items` call it made, or failing that its
-/// assistant text.
+/// A `fan_out` call the dispatcher has read but not yet started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FanOutRequest {
+    /// The agent to run for every item, when the caller named one. `None` inside
+    /// a fan-out stage, whose blueprint names the worker instead.
+    pub agent: Option<String>,
+    /// The work, one entry per worker.
+    pub items: Vec<WorkItem>,
+    /// A per-call concurrency cap, when the caller asked for one.
+    pub max_workers: Option<usize>,
+}
+
+/// Whether a tool call is the fan-out tool.
+pub fn is_fan_out_tool(name: &str) -> bool {
+    name == leviath_core::blueprint::FAN_OUT_TOOL
+}
+
+/// Read a `fan_out` call's arguments.
 ///
-/// Both are carried because the failure message and the correction round need to
-/// show the model what it actually said, and for a tool call that is the
-/// arguments rather than the (usually empty) text beside them.
-struct SplitAnswer {
-    /// What the model said, for the correction round and the failure message.
-    payload: String,
-    /// The tool call's arguments, when the split answered with one. Carried as
-    /// the value the provider already parsed rather than re-parsed from
-    /// `payload`: stringifying a `Value` only to read it back cannot fail, so
-    /// the error arm it would need could never be taken.
-    arguments: Option<serde_json::Value>,
+/// Strict, unlike the free-text parser it replaced: the arguments came through a
+/// schema the provider enforced, so a shape that does not fit is a real mistake
+/// and the model is told so rather than guessed at. The refusal is an `[error]`
+/// tool result, which the model corrects on its next turn like any other.
+pub fn parse_fan_out_call(arguments: &serde_json::Value) -> Result<FanOutRequest, String> {
+    let object = arguments
+        .as_object()
+        .ok_or_else(|| "fan_out arguments must be an object".to_string())?;
+    let items = match object.get("items") {
+        Some(serde_json::Value::Array(items)) => items,
+        Some(_) => return Err("fan_out `items` must be an array".to_string()),
+        None => return Err("fan_out requires an `items` array".to_string()),
+    };
+    let items: Vec<WorkItem> = items
+        .iter()
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| format!("fan_out item is not {{id, context}}: {e}"))
+        })
+        .collect::<Result<_, _>>()?;
+    let agent = object
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|a| !a.trim().is_empty());
+    let max_workers = object
+        .get("max_workers")
+        .and_then(serde_json::Value::as_u64)
+        .map(|n| n as usize);
+    Ok(FanOutRequest {
+        agent,
+        items,
+        max_workers,
+    })
 }
 
-impl SplitAnswer {
-    /// Read the split out of an inference result, preferring the tool call.
-    ///
-    /// The tool is the reliable path: its arguments are already JSON and the
-    /// provider validated them against the schema. Text is the fallback, for a
-    /// stage whose model ignores tools - which is a real case, because a
-    /// blueprint picks its own model per stage and some of them are small local
-    /// ones.
-    fn read(infer: &InferenceResult) -> Self {
-        match infer
-            .tool_calls
-            .iter()
-            .find(|call| call.name == leviath_core::blueprint::SUBMIT_WORK_ITEMS_TOOL)
-        {
-            Some(call) => Self {
-                payload: call.arguments.to_string(),
-                arguments: Some(call.arguments.clone()),
-            },
-            None => Self {
-                payload: infer.response.clone(),
-                arguments: None,
-            },
-        }
+/// Turn a request into the config the engine runs it under.
+///
+/// A stage's `[stages.x]` fan-out keys are the starting point when there are any;
+/// a call from an ordinary stage has none, so it gets the engine defaults and
+/// names its worker in the call. Either way the result is one `FanOutConfig`, so
+/// everything downstream - the cap, the failure policy, the report - is the same
+/// code for both entry points.
+pub fn config_for(request: &FanOutRequest, stage: Option<&FanOutConfig>) -> FanOutConfig {
+    let mut config = stage.cloned().unwrap_or_else(|| FanOutConfig {
+        worker_agent: None,
+        worker_stage: None,
+        worker_query: None,
+        merge_stage: None,
+        max_workers: leviath_core::blueprint::DEFAULT_MAX_WORKERS,
+        on_worker_failure: WorkerFailurePolicy::Continue,
+        split_prompt: String::new(),
+        results_region: None,
+        max_items: None,
+    });
+    // A named agent wins over the blueprint's worker: an ordinary stage has no
+    // worker to inherit, and a fan-out stage that names one in the call meant it.
+    if let Some(agent) = &request.agent {
+        config.worker_agent = Some(agent.clone());
+        config.worker_stage = None;
+        config.worker_query = None;
     }
+    if let Some(max_workers) = request.max_workers {
+        config.max_workers = max_workers;
+    }
+    config
 }
 
-/// Fan-out split system (exclusive): for each `ProcessResponse` agent whose
-/// current stage is a fan-out stage, consume its `submit_work_items` call (or
-/// failing that its response text) as the split output - parse the work items
-/// and park the agent in [`FanOutWaiting`], or end the stage down its declared
-/// escape when the corrections are spent. Removing `ProcessResponse`
-/// here keeps the normal `process_response` routing from touching these agents.
-pub fn fan_out_split(world: &mut World) {
+/// A `fan_out` call the dispatcher accepted, waiting for a tick with world
+/// access to start it.
+///
+/// The hand-off exists because starting a fan-out is world work - it resolves
+/// the worker blueprint through the injected spawner - and `dispatch_tools` is
+/// an ordinary system. The same shape the interaction and gate-prompt lanes use.
+#[derive(Component, Debug, Clone)]
+pub struct PendingFanOut {
+    /// The tool call whose result this fan-out will be.
+    pub call_id: String,
+    /// What the model asked for.
+    pub request: FanOutRequest,
+}
+
+/// Start every fan-out the dispatcher accepted this tick (exclusive).
+///
+/// Ordered before [`fan_out_collect`], so a fan-out started here has its workers
+/// launched on the same tick rather than a tick later.
+pub fn start_pending_fan_outs(world: &mut World) {
     crate::tick_scope::clear();
-    let mut candidates: Vec<(Entity, SplitAnswer, FanOutConfig, StageEscape)> = Vec::new();
-    {
-        let mut q = world.query_filtered::<(
-            Entity,
-            &AgentState,
-            &AgentBlueprint,
-            &StageCursor,
-            &crate::pipeline::VisitCounts,
-            &InferenceResult,
-        ), With<ProcessResponse>>();
-        for (entity, state, bp, cursor, visits, infer) in q.iter(world) {
-            if state.status != AgentStatus::Active {
-                continue;
-            }
-            let stage = &bp.0.stages[cursor.index];
-            if let StageMode::FanOut { config } = &stage.mode {
-                candidates.push((
-                    entity,
-                    SplitAnswer::read(infer),
-                    config.clone(),
-                    StageEscape {
-                        stage_name: stage.name.clone(),
-                        declared: declares_an_escape(&bp.0, stage, &visits.0),
-                    },
-                ));
-            }
-        }
+    let pending: Vec<(Entity, PendingFanOut)> = {
+        let mut q = world.query::<(Entity, &PendingFanOut)>();
+        q.iter(world).map(|(e, p)| (e, p.clone())).collect()
+    };
+    for (entity, PendingFanOut { call_id, request }) in pending {
+        crate::tick_scope::enter(entity);
+        world.entity_mut(entity).remove::<PendingFanOut>();
+        // A fan-out stage's own keys when there are any, so a stage that set
+        // `max_items` or `on_worker_failure` still gets them; nothing when an
+        // ordinary stage called the tool.
+        let stage_config = world
+            .get::<StageCursor>(entity)
+            .and_then(|cursor| {
+                world.get::<AgentBlueprint>(entity).map(|bp| {
+                    match &bp.0.stages[cursor.index].mode {
+                        StageMode::FanOut { config } => Some(config.clone()),
+                        _ => None,
+                    }
+                })
+            })
+            .flatten();
+        let config = config_for(&request, stage_config.as_ref());
+        begin_fan_out(
+            world,
+            entity,
+            config,
+            request.items,
+            FanOutOrigin::Tool { call_id },
+        );
     }
+}
 
-    for (parent, answer, config, escape) in candidates {
-        crate::tick_scope::enter(parent);
-        let SplitAnswer {
-            payload: response,
-            arguments,
-        } = answer;
-        let from_tool = arguments.is_some();
-        world
-            .entity_mut(parent)
-            .remove::<ProcessResponse>()
-            .remove::<InferenceResult>();
-        // A tool call's arguments are the envelope the schema asks for, so they
-        // go through the same value reader the free-text path ends at rather
-        // than through the text scanning in front of it.
-        let parsed = match arguments {
-            Some(value) => work_items_from_value(value),
-            None => parse_work_items(&response),
-        };
-        match parsed {
-            Ok(items) => {
-                // Unlimited (`max_workers = 0`) is the largest cap there is,
-                // rather than a separate flag: the start loop below compares
-                // against it and nothing else, and the persisted state keeps
-                // the one number it always kept.
-                let max_workers = config.worker_cap().unwrap_or(usize::MAX);
-                // A split decides its own item count, so without a cap a model
-                // that returns five hundred items spawns five hundred runs. The
-                // cap also fixes each worker's share of the results region: past
-                // some number of ways to divide it, every section is too small
-                // to say anything.
-                let items = match config.max_items {
-                    Some(cap) if items.len() > cap => {
-                        tracing::warn!(
-                            produced = items.len(),
-                            cap,
-                            "fan_out split produced more items than max_items; keeping the first"
-                        );
-                        items.into_iter().take(cap).collect::<Vec<_>>()
-                    }
-                    _ => items,
-                };
-                // The corrections this split needed are spent. Clearing them
-                // here as well as on stage entry means a stage re-entered by a
-                // path that does not go through `attach_stage_components` still
-                // starts its next split with the full budget.
-                world.entity_mut(parent).remove::<SplitAttempts>();
-                // Kept for the next entry into this stage, which is told what
-                // was already researched rather than being asked the same
-                // question over a context that answers it.
-                world.entity_mut(parent).insert(PreviousWorkItems(
-                    items.iter().map(|i| i.id.clone()).collect(),
-                ));
-                world.entity_mut(parent).insert(FanOutWaiting {
-                    config,
-                    max_workers,
-                    pending: items.into_iter().collect(),
-                    active: Vec::new(),
-                    summaries: Vec::new(),
-                    failures: Vec::new(),
-                    paused: false,
-                });
-                set_status(world, parent, AgentStatus::Waiting);
-            }
-            Err(message) => {
-                // A split that did not parse is a formatting miss, not a dead
-                // run: send the model its own answer plus a correction and ask
-                // again, the way every other stage handles a response it cannot
-                // use. Only once the corrections are spent does the stage end.
-                let attempts = world.get::<SplitAttempts>(parent).map_or(0, |a| a.0);
-                // Correcting needs somewhere to put the correction, so an agent
-                // with no context window falls through to the failure below
-                // rather than looping without ever being told anything.
-                let corrected = match attempts < MAX_SPLIT_RETRIES {
-                    false => false,
-                    true => {
-                        let mut entity = world.entity_mut(parent);
-                        match entity.get_mut::<ContextWindow>() {
-                            None => false,
-                            Some(mut window) => {
-                                // The model sees what it said before the
-                                // correction, so "that did not work" has
-                                // something to point at.
-                                //
-                                // As text, even when it was a tool call: an
-                                // `AssistantTurn` carrying a real call obliges a
-                                // matching `ToolResult` with the same id in the
-                                // next request, and the split never produced one.
-                                // A dangling call is a shape most providers
-                                // reject outright.
-                                let shown = match from_tool {
-                                    true => format!(
-                                        "[called {}] {response}",
-                                        leviath_core::blueprint::SUBMIT_WORK_ITEMS_TOOL
-                                    ),
-                                    false => response.clone(),
-                                };
-                                let tokens = leviath_core::estimate_tokens(&shown);
-                                let _ = window.add_typed_entry(
-                                    "conversation",
-                                    leviath_core::EntryKind::AssistantTurn {
-                                        tool_calls: Vec::new(),
-                                    },
-                                    shown,
-                                    tokens,
-                                );
-                                crate::pipeline::inject_system_nudge(
-                                    &mut window,
-                                    &split_correction(&message, from_tool),
-                                );
-                                true
-                            }
-                        }
-                    }
-                };
-                if corrected {
-                    tracing::warn!(
-                        attempt = attempts + 1,
-                        max = MAX_SPLIT_RETRIES,
-                        error = %message,
-                        "fan_out split did not parse; asking the model again"
-                    );
-                    world
-                        .entity_mut(parent)
-                        .insert(SplitAttempts(attempts + 1))
-                        .insert(crate::pipeline::ReadyToInfer);
-                } else {
-                    // Name what came back as well as the rule it broke: the
-                    // rule alone cannot tell a refusal from an empty response
-                    // from prose.
-                    fail_split(
-                        world,
-                        parent,
-                        &config,
-                        &escape,
-                        format!(
-                            "fan_out split failed after {attempts} correction(s): \
-                             {message} ({})",
-                            response_snippet(&response)
-                        ),
-                    );
-                }
-            }
+/// Start a fan-out: park `parent` on its workers.
+///
+/// The single way in. Both entry points - the `fan_out` tool from any stage, and
+/// a `fan_out` stage's own call - land here with a config and a list, and
+/// everything after this point is [`fan_out_collect`] regardless of which it was.
+///
+/// An empty list is allowed and is not a special case: the parent parks with
+/// nothing pending, the collector finds nothing running, and it finishes on the
+/// next tick with an empty report. That is what "there is nothing to hand out"
+/// has to do, and making it a separate path is how it would drift.
+pub fn begin_fan_out(
+    world: &mut World,
+    parent: Entity,
+    config: FanOutConfig,
+    items: Vec<WorkItem>,
+    origin: FanOutOrigin,
+) {
+    // Unlimited (`max_workers = 0`) is the largest cap there is, rather than a
+    // separate flag: the start loop compares against it and nothing else.
+    let max_workers = config.worker_cap().unwrap_or(usize::MAX);
+    // A caller decides its own item count, so without a cap a model that returns
+    // five hundred items spawns five hundred runs. The cap also fixes each
+    // worker's share of the results region: past some number of ways to divide
+    // it, every section is too small to say anything.
+    let items = match config.max_items {
+        Some(cap) if items.len() > cap => {
+            tracing::warn!(
+                produced = items.len(),
+                cap,
+                "fan_out produced more items than max_items; keeping the first"
+            );
+            items.into_iter().take(cap).collect::<Vec<_>>()
         }
-    }
+        _ => items,
+    };
+    // Kept for the next entry into this stage, which is told what was already
+    // handed out rather than being asked the same question over a context that
+    // answers it.
+    world
+        .entity_mut(parent)
+        .insert(PreviousWorkItems(
+            items.iter().map(|i| i.id.clone()).collect(),
+        ))
+        .insert(FannedOut)
+        .insert(FanOutWaiting {
+            config,
+            max_workers,
+            pending: items.into_iter().collect(),
+            active: Vec::new(),
+            summaries: Vec::new(),
+            failures: Vec::new(),
+            paused: false,
+            origin,
+        });
+    set_status(world, parent, AgentStatus::Waiting);
 }
 
 /// Fan-out collect system (exclusive): drive each [`FanOutWaiting`] parent - reap
@@ -733,6 +682,20 @@ fn finish_fan_out(world: &mut World, parent: Entity, w: FanOutWaiting) {
         return;
     }
 
+    // Everything above this line is common to both entry points; everything
+    // below is the one thing that differs between them.
+    match &w.origin {
+        FanOutOrigin::Stage => finish_stage_fan_out(world, parent, &w),
+        FanOutOrigin::Tool { call_id } => {
+            let call_id = call_id.clone();
+            finish_tool_fan_out(world, parent, &w, &call_id);
+        }
+    }
+}
+
+/// A `mode = "fan_out"` stage: the report goes to the region the blueprint named
+/// and the stage moves on to its `merge_stage`.
+fn finish_stage_fan_out(world: &mut World, parent: Entity, w: &FanOutWaiting) {
     // Where the results land, and how much room they have there. A blueprint
     // that names a region of its own gets that region's budget to divide; the
     // default is the conversation region, which is also carrying the message
@@ -751,63 +714,54 @@ fn finish_fan_out(world: &mut World, parent: Entity, w: FanOutWaiting) {
     leave_fan_out(world, parent, &w.config);
 }
 
-/// End an unusable split without ending the run.
+/// A `fan_out` tool call: the report is that call's result, and the agent picks
+/// up its stage where it left off.
 ///
-/// The escape chain is the stage's `error` edge, then its `dead_end` edge, then
-/// an empty fan-out into the merge stage. There is deliberately no terminal arm.
-///
-/// A split failure used to write `AgentStatus::Error` straight onto the agent,
-/// which is terminal, so `resolve_transition` never saw it and the recovery the
-/// author declared was never taken. A `deep-researcher` run died exactly that
-/// way: its four workers had already finished, `analyze` had already run, and
-/// its graph carried both an `error` edge to `error_recovery` and a `dead_end`
-/// edge to `synthesize`. Neither fired, and three stages were still pending.
-///
-/// The last resort is a real degradation and is recorded as one - the run flag
-/// and the `error_report` note are what keep "the split was unusable" from
-/// reading downstream as "there was nothing to split".
-fn fail_split(
-    world: &mut World,
-    parent: Entity,
-    config: &FanOutConfig,
-    escape: &StageEscape,
-    message: String,
-) {
-    if escape.declared {
-        crate::pipeline::fail_stage_world(world, parent, message);
-        return;
-    }
-    tracing::error!(
-        stage = %escape.stage_name,
-        error = %message,
-        "fan_out split is unusable and the stage declares no escape; \
-         continuing with an empty fan-out"
-    );
-    if let Some(mut window) = world.get_mut::<ContextWindow>(parent) {
-        crate::pipeline::note_unusable_split(&mut window, &escape.stage_name, &message);
-    }
-    if let Some(mut flags) = world.get_mut::<crate::persistence::RunOutcomeFlags>(parent) {
-        flags.0.splits_degraded += 1;
-    }
-    leave_fan_out(world, parent, config);
-}
-
-/// Whether a stage declares an `error` or `dead_end` edge that still has
-/// revisits left, decided where the blueprint is already in hand.
-///
-/// Both conditions answer "this stage cannot go on", which is what an unusable
-/// split is, and `resolve_transition` follows either for an errored outcome.
-fn declares_an_escape(
-    blueprint: &leviath_core::Blueprint,
-    stage: &leviath_core::Stage,
-    visits: &std::collections::HashMap<String, usize>,
-) -> bool {
-    use leviath_core::blueprint::TransitionCondition;
-    [TransitionCondition::Error, TransitionCondition::DeadEnd]
-        .into_iter()
-        .any(|condition| {
-            crate::pipeline::find_conditioned_edge(blueprint, stage, visits, condition).is_some()
+/// Routed through the same path every other tool result takes, so the stage's
+/// `tool_routing` decides where it lands - a region of its own, the conversation,
+/// or (for a blueprint whose workers write files and whose parent does not need
+/// to read their prose) somewhere it is cheaply dropped. That flexibility is not
+/// a fan-out feature; it is the one every tool already has.
+fn finish_tool_fan_out(world: &mut World, parent: Entity, w: &FanOutWaiting, call_id: &str) {
+    let routing = world
+        .get::<crate::components::ToolResultRoutingComponent>(parent)
+        .map(|r| r.routing.clone());
+    let region = routing
+        .as_ref()
+        .map(|r| {
+            r.tool_overrides
+                .iter()
+                .find(|(k, _)| {
+                    leviath_tools::canonical_tool_name(k) == leviath_core::blueprint::FAN_OUT_TOOL
+                })
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| r.default_region.clone())
         })
+        .unwrap_or_else(|| "conversation".to_string());
+    // Sized against the region the result is actually routed to, so a report
+    // headed for a big `sub_findings` is not trimmed to fit a conversation it
+    // never enters.
+    let budget = world
+        .get::<ContextWindow>(parent)
+        .and_then(|window| window.get_region(&region).map(|r| r.max_tokens));
+    let report = build_report(&w.summaries, &w.failures, budget);
+    let sensitivities = world
+        .get::<crate::pipeline::ToolSensitivities>(parent)
+        .map(|s| s.0.clone());
+    if let Some(mut window) = world.get_mut::<ContextWindow>(parent) {
+        crate::pipeline::apply_one_tool_result(
+            &mut window,
+            leviath_core::blueprint::FAN_OUT_TOOL,
+            call_id,
+            report,
+            routing.as_ref(),
+            sensitivities.as_ref(),
+        );
+    }
+    set_status(world, parent, AgentStatus::Active);
+    world
+        .entity_mut(parent)
+        .insert(crate::pipeline::ReadyToInfer);
 }
 
 /// Ready the parent to run again and move it on: to the `merge_stage` when the
@@ -1106,8 +1060,8 @@ mod tests {
     use super::*;
     use crate::components::{InferenceConfig, ToolResultRoutingComponent};
     use crate::pipeline::{
-        ReadyToInfer, StageInference, StageInferences, StageProgress, StageSetup, StageSetups,
-        VisitCounts,
+        ProcessResponse, ReadyToInfer, StageInference, StageInferences, StageProgress, StageSetup,
+        StageSetups, VisitCounts,
     };
     use leviath_core::blueprint::{ModelConfig, Stage};
     use leviath_core::layout::{ContextLayout, RegionDefinition};
@@ -1257,28 +1211,6 @@ mod tests {
         Blueprint::new("t".to_string(), "d".to_string(), vec![s0, s1], layout)
     }
 
-    /// [`fanout_blueprint`] with a conditioned escape edge off the fan-out
-    /// stage, which is what a real blueprint declares and the bare helper does
-    /// not.
-    fn fanout_blueprint_with_escape(
-        config: FanOutConfig,
-        condition: leviath_core::blueprint::TransitionCondition,
-    ) -> Blueprint {
-        let mut bp = fanout_blueprint(config);
-        bp.stages[0].transitions = Some(std::collections::HashMap::from([(
-            "merge".to_string(),
-            leviath_core::blueprint::TransitionEdge {
-                target: "merge".to_string(),
-                condition,
-                hint: None,
-                transform: leviath_core::blueprint::EdgeTransform::Direct,
-                gate: None,
-                stuck: None,
-            },
-        )]));
-        bp
-    }
-
     fn parent_state() -> AgentState {
         AgentState {
             agent_id: "parent".to_string(),
@@ -1332,6 +1264,63 @@ mod tests {
                 message: String::new()
             })
         );
+    }
+
+    fn conversation_text(world: &World, e: Entity) -> String {
+        world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .iter()
+            .map(|entry| entry.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Stand in for the dispatcher: take the work items the fixture put in the
+    /// parent's pending response and park it, exactly as an accepted `fan_out`
+    /// call does. Lets the collector's tests state their items as JSON, which is
+    /// how a model states them.
+    fn split(world: &mut World, e: Entity) {
+        let items: Vec<WorkItem> =
+            serde_json::from_str(&world.get::<InferenceResult>(e).unwrap().response)
+                .expect("the fixture's response is a work-item array");
+        let config = stage_config(world, e);
+        world
+            .entity_mut(e)
+            .remove::<ProcessResponse>()
+            .remove::<InferenceResult>();
+        begin_fan_out(world, e, config, items, FanOutOrigin::Stage);
+    }
+
+    /// The fan-out config off the fixture's blueprint.
+    ///
+    /// Walked in reverse so the fixture's ordinary `merge` stage is visited
+    /// first: the non-fan-out arm is then a branch the suite actually takes,
+    /// rather than one that only exists to satisfy the match.
+    fn stage_config(world: &World, e: Entity) -> FanOutConfig {
+        world
+            .get::<AgentBlueprint>(e)
+            .unwrap()
+            .0
+            .stages
+            .iter()
+            .rev()
+            .find_map(|stage| match &stage.mode {
+                StageMode::FanOut { config } => Some(config.clone()),
+                _ => None,
+            })
+            .expect("the fixture has a fan-out stage")
+    }
+
+    /// A work item with the given id and an empty context.
+    fn item(id: &str) -> WorkItem {
+        WorkItem {
+            id: id.to_string(),
+            context: serde_json::json!({}),
+        }
     }
 
     fn complete_worker(world: &mut World, worker: Entity, content: &str) {
@@ -1460,18 +1449,24 @@ mod tests {
         assert_eq!(convo, "");
     }
 
-    /// A successful split records what it handed out, which is what the next
+    /// Starting a fan-out records what it handed out, which is what the next
     /// round is framed with.
     #[test]
-    fn a_successful_split_records_its_work_item_ids() {
+    fn starting_a_fan_out_records_its_work_item_ids() {
         let mut world = World::new();
         let e = spawn_parent(
             &mut world,
             fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
-            r#"[{"id":"a"},{"id":"b"}]"#,
+            "",
         );
 
-        fan_out_split(&mut world);
+        begin_fan_out(
+            &mut world,
+            e,
+            cfg(None, 2, WorkerFailurePolicy::Continue),
+            vec![item("a"), item("b")],
+            FanOutOrigin::Stage,
+        );
 
         assert_eq!(
             world.get::<PreviousWorkItems>(e),
@@ -1479,319 +1474,202 @@ mod tests {
         );
     }
 
-    // ── fan_out_split ─────────────────────────────────────────────────────────
+    // ── parse_fan_out_call ────────────────────────────────────────────────────
 
+    /// The arguments came through a schema the provider enforced, so the reader
+    /// is strict: it takes the shape asked for and names anything else.
     #[test]
-    fn split_parks_a_fanout_stage_and_consumes_the_response() {
+    fn parse_fan_out_call_reads_the_whole_shape() {
+        let request = parse_fan_out_call(&serde_json::json!({
+            "agent": "researcher",
+            "max_workers": 4,
+            "items": [
+                {"id": "a", "context": {"question": "q1"}},
+                {"id": "b", "context": {"question": "q2"}}
+            ]
+        }))
+        .expect("parses");
+        assert_eq!(request.agent.as_deref(), Some("researcher"));
+        assert_eq!(request.max_workers, Some(4));
+        assert_eq!(request.items.len(), 2);
+        assert_eq!(request.items[1].context["question"], "q2");
+    }
+
+    /// An empty list is a real answer, not a malformed call: it means there is
+    /// nothing to hand out.
+    #[test]
+    fn parse_fan_out_call_accepts_an_empty_list() {
+        let request = parse_fan_out_call(&serde_json::json!({"items": []})).expect("parses");
+        assert!(request.items.is_empty());
+        assert_eq!(request.agent, None);
+        assert_eq!(request.max_workers, None);
+    }
+
+    /// A blank agent is the same as none: a fan-out stage names its worker in
+    /// the blueprint, and an empty string would otherwise override it with
+    /// nothing.
+    #[test]
+    fn parse_fan_out_call_ignores_a_blank_agent() {
+        let request =
+            parse_fan_out_call(&serde_json::json!({"agent": "  ", "items": []})).expect("parses");
+        assert_eq!(request.agent, None);
+    }
+
+    /// Every rejection names what was wrong, because the model reads it and
+    /// corrects on its next turn.
+    #[test]
+    fn parse_fan_out_call_names_what_was_wrong() {
+        let cases = [
+            (serde_json::json!("nope"), "must be an object"),
+            (serde_json::json!({}), "requires an `items` array"),
+            (serde_json::json!({"items": "all"}), "must be an array"),
+            (
+                serde_json::json!({"items": [{"id": 4}]}),
+                "not {id, context}",
+            ),
+        ];
+        for (args, expected) in cases {
+            let err = parse_fan_out_call(&args).unwrap_err();
+            assert!(err.contains(expected), "{args}: {err}");
+        }
+    }
+
+    // ── config_for ────────────────────────────────────────────────────────────
+
+    /// A call from an ordinary stage brings its own worker and takes engine
+    /// defaults for everything else.
+    #[test]
+    fn config_for_a_bare_call_names_its_worker_and_defaults_the_rest() {
+        let request = parse_fan_out_call(&serde_json::json!({
+            "agent": "researcher", "items": []
+        }))
+        .unwrap();
+
+        let config = config_for(&request, None);
+
+        assert_eq!(config.worker_agent.as_deref(), Some("researcher"));
+        assert_eq!(config.worker_stage, None);
+        assert_eq!(
+            config.max_workers,
+            leviath_core::blueprint::DEFAULT_MAX_WORKERS
+        );
+        assert_eq!(config.on_worker_failure, WorkerFailurePolicy::Continue);
+        assert_eq!(config.max_items, None);
+    }
+
+    /// Inside a fan-out stage the blueprint's keys are the starting point, so a
+    /// stage that set `max_items` or a failure policy still gets them.
+    #[test]
+    fn config_for_a_stage_call_keeps_the_blueprints_keys() {
+        let mut stage = cfg(Some("merge"), 3, WorkerFailurePolicy::FailAll);
+        stage.max_items = Some(5);
+        let request = parse_fan_out_call(&serde_json::json!({"items": []})).unwrap();
+
+        let config = config_for(&request, Some(&stage));
+
+        assert_eq!(config.merge_stage.as_deref(), Some("merge"));
+        assert_eq!(config.max_items, Some(5));
+        assert_eq!(config.on_worker_failure, WorkerFailurePolicy::FailAll);
+        assert_eq!(config.max_workers, 3);
+    }
+
+    /// A worker named in the call wins, and clears the blueprint's own worker so
+    /// the two cannot both be set.
+    #[test]
+    fn a_named_agent_overrides_the_stages_worker() {
+        let stage = cfg(None, 2, WorkerFailurePolicy::Continue);
+        assert!(
+            stage.worker_stage.is_some(),
+            "the fixture uses worker_stage"
+        );
+        let request =
+            parse_fan_out_call(&serde_json::json!({"agent": "other", "items": []})).unwrap();
+
+        let config = config_for(&request, Some(&stage));
+
+        assert_eq!(config.worker_agent.as_deref(), Some("other"));
+        assert_eq!(config.worker_stage, None);
+        assert_eq!(config.worker_query, None);
+    }
+
+    /// A per-call cap overrides the stage's.
+    #[test]
+    fn a_per_call_cap_overrides_the_stages() {
+        let stage = cfg(None, 2, WorkerFailurePolicy::Continue);
+        let request =
+            parse_fan_out_call(&serde_json::json!({"max_workers": 9, "items": []})).unwrap();
+
+        assert_eq!(config_for(&request, Some(&stage)).max_workers, 9);
+    }
+
+    // ── begin_fan_out / start_pending_fan_outs ────────────────────────────────
+
+    /// The one way in: the parent parks on its workers and records what it
+    /// handed out.
+    #[test]
+    fn begin_fan_out_parks_the_parent_on_its_workers() {
         let mut world = World::new();
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
-            r#"[{"id":"a"},{"id":"b"}]"#,
+            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            "",
         );
-        fan_out_split(&mut world);
-        assert!(world.get::<FanOutWaiting>(e).is_some());
+
+        begin_fan_out(
+            &mut world,
+            e,
+            cfg(None, 2, WorkerFailurePolicy::Continue),
+            vec![item("a"), item("b")],
+            FanOutOrigin::Stage,
+        );
+
         assert_eq!(status_of(&world, e), AgentStatus::Waiting);
-        // ProcessResponse + InferenceResult were consumed.
-        assert!(world.get::<ProcessResponse>(e).is_none());
-        assert!(world.get::<InferenceResult>(e).is_none());
-        let w = world.get::<FanOutWaiting>(e).unwrap();
-        assert_eq!(w.pending.len(), 2);
-    }
-
-    /// `max_items` is a ceiling on slices, not just on concurrency. A split that
-    /// returns five hundred items would otherwise spawn five hundred runs, and
-    /// each worker's share of the results region is the region's budget divided
-    /// by how many there are: past some count every section is too small to say
-    /// anything.
-    #[test]
-    fn split_keeps_only_the_first_max_items() {
-        let mut world = World::new();
-        let mut config = cfg(Some("merge"), 2, WorkerFailurePolicy::Continue);
-        config.max_items = Some(3);
-        let items: Vec<String> = (0..10).map(|i| format!(r#"{{"id":"w{i}"}}"#)).collect();
-        let e = spawn_parent(
-            &mut world,
-            fanout_blueprint(config),
-            &format!("[{}]", items.join(",")),
-        );
-
-        fan_out_split(&mut world);
-
-        let w = world.get::<FanOutWaiting>(e).expect("parked");
-        assert_eq!(w.pending.len(), 3, "kept the cap, not the ten produced");
-        let kept: Vec<&str> = w.pending.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(kept, ["w0", "w1", "w2"], "and kept the first of them");
-    }
-
-    /// Under the cap nothing is dropped, so a fan-out that sets one does not pay
-    /// for it on every ordinary split.
-    #[test]
-    fn split_keeps_everything_under_the_cap() {
-        let mut world = World::new();
-        let mut config = cfg(Some("merge"), 2, WorkerFailurePolicy::Continue);
-        config.max_items = Some(9);
-        let e = spawn_parent(
-            &mut world,
-            fanout_blueprint(config),
-            r#"[{"id":"a"},{"id":"b"}]"#,
-        );
-
-        fan_out_split(&mut world);
-
         assert_eq!(
             world.get::<FanOutWaiting>(e).expect("parked").pending.len(),
             2
         );
-    }
-
-    /// A split that never parses, from a stage that declares no escape at all,
-    /// carries on with an empty fan-out. Nothing about an unusable split ends a
-    /// run any more: the parent has usually already done most of the work by the
-    /// time the split runs, and throwing that away is the failure this whole
-    /// path exists to prevent.
-    #[test]
-    fn an_unusable_split_never_ends_the_run() {
-        let mut world = World::new();
-        let e = spawn_parent(
-            &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
-            "definitely not a json array",
-        );
-        for _ in 0..=MAX_SPLIT_RETRIES {
-            fan_out_split(&mut world);
-            redrive_split(&mut world, e, "definitely not a json array");
-        }
-        assert!(world.get::<FanOutWaiting>(e).is_none());
-        assert_eq!(status_of(&world, e), AgentStatus::Active, "still running");
-        assert!(
-            world.get::<ResolveTransition>(e).is_some(),
-            "and moving on out of the fan-out stage"
-        );
-        let convo = conversation_text(&world, e);
-        assert!(
-            convo.contains("could not be used") && convo.contains("No workers ran"),
-            "the next stage is told the fan-out produced nothing: {convo}"
-        );
-    }
-
-    /// The escape the author declared is the one that is taken: an `error` edge
-    /// off the fan-out stage routes the parent there instead of degrading.
-    #[test]
-    fn an_unusable_split_takes_the_stages_error_edge() {
-        let mut world = World::new();
-        let e = spawn_parent(
-            &mut world,
-            fanout_blueprint_with_escape(
-                cfg(None, 2, WorkerFailurePolicy::Continue),
-                leviath_core::blueprint::TransitionCondition::Error,
-            ),
-            "definitely not a json array",
-        );
-        for _ in 0..=MAX_SPLIT_RETRIES {
-            fan_out_split(&mut world);
-            redrive_split(&mut world, e, "definitely not a json array");
-        }
-        assert_errored(&world, e);
-        assert!(
-            world.get::<ResolveTransition>(e).is_some(),
-            "handed to the transition system rather than left terminal"
-        );
-        // Compared through Debug: an arm a passing run does not take reads to
-        // llvm-cov as an uncovered region.
-        let outcome = format!("{:?}", world.get::<crate::pipeline::StageOutcome>(e));
-        assert!(outcome.contains("Errored"), "{outcome}");
-        assert!(
-            outcome.contains("correction(s)"),
-            "and it carries the message: {outcome}"
-        );
-    }
-
-    /// A `dead_end` edge counts too. An author who declared only that escape
-    /// meant "this stage may not be able to go on", which is exactly what an
-    /// unusable split is.
-    #[test]
-    fn an_unusable_split_takes_a_dead_end_edge() {
-        let mut world = World::new();
-        let e = spawn_parent(
-            &mut world,
-            fanout_blueprint_with_escape(
-                cfg(None, 2, WorkerFailurePolicy::Continue),
-                leviath_core::blueprint::TransitionCondition::DeadEnd,
-            ),
-            "definitely not a json array",
-        );
-        for _ in 0..=MAX_SPLIT_RETRIES {
-            fan_out_split(&mut world);
-            redrive_split(&mut world, e, "definitely not a json array");
-        }
-        assert_errored(&world, e);
-        assert!(world.get::<ResolveTransition>(e).is_some());
-    }
-
-    /// A degraded split is recorded on the run record, so "the merge stage ran
-    /// with nothing" is visible after the fact rather than only in the log.
-    #[test]
-    fn a_degraded_split_is_recorded_on_the_run_flags() {
-        let mut world = World::new();
-        let e = spawn_parent(
-            &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
-            "definitely not a json array",
-        );
-        world
-            .entity_mut(e)
-            .insert(crate::persistence::RunOutcomeFlags::default());
-        for _ in 0..=MAX_SPLIT_RETRIES {
-            fan_out_split(&mut world);
-            redrive_split(&mut world, e, "definitely not a json array");
-        }
+        assert!(world.get::<FannedOut>(e).is_some());
         assert_eq!(
-            world
-                .get::<crate::persistence::RunOutcomeFlags>(e)
-                .unwrap()
-                .0
-                .splits_degraded,
-            1
+            world.get::<PreviousWorkItems>(e),
+            Some(&PreviousWorkItems(vec!["a".to_string(), "b".to_string()]))
         );
     }
 
-    /// Put the parent back where a fresh inference would leave it, so the split
-    /// can be driven a second and third time without a real provider.
-    fn redrive_split(world: &mut World, e: Entity, response: &str) {
-        world
-            .entity_mut(e)
-            .remove::<crate::pipeline::ReadyToInfer>()
-            .insert(InferenceResult {
-                response: response.to_string(),
-                tool_calls: vec![],
-                tokens_used: 0,
-                timestamp: 0,
-            })
-            .insert(ProcessResponse);
-    }
-
-    fn conversation_text(world: &World, e: Entity) -> String {
-        world
-            .get::<ContextWindow>(e)
-            .unwrap()
-            .get_region("conversation")
-            .unwrap()
-            .content
-            .iter()
-            .map(|entry| entry.content.clone())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    /// The fix for the deep-researcher report: a split that comes back as prose
-    /// is a formatting miss, and the run gets to correct it instead of dying.
+    /// `max_items` is a ceiling on the work, not just on concurrency.
     #[test]
-    fn a_split_that_is_not_an_array_is_corrected_rather_than_fatal() {
+    fn begin_fan_out_keeps_only_the_first_max_items() {
         let mut world = World::new();
-        let e = spawn_parent(
-            &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
-            "Sure! I will research these topics for you.",
-        );
+        let mut config = cfg(None, 2, WorkerFailurePolicy::Continue);
+        config.max_items = Some(3);
+        let e = spawn_parent(&mut world, fanout_blueprint(config.clone()), "");
 
-        fan_out_split(&mut world);
-
-        assert_eq!(status_of(&world, e), AgentStatus::Active, "still running");
-        assert_eq!(world.get::<SplitAttempts>(e), Some(&SplitAttempts(1)));
-        assert!(
-            world.get::<crate::pipeline::ReadyToInfer>(e).is_some(),
-            "the parent is queued for another attempt"
-        );
-        assert!(world.get::<FanOutWaiting>(e).is_none());
-        let convo = conversation_text(&world, e);
-        assert!(
-            convo.contains("Sure! I will research"),
-            "the model sees its own answer: {convo}"
-        );
-        assert!(
-            convo.contains("[System]") && convo.contains("start with `[`"),
-            "and the correction: {convo}"
-        );
-    }
-
-    /// A correction that works is the whole point: the second answer parses and
-    /// the run carries on into its fan-out.
-    #[test]
-    fn a_corrected_split_proceeds_to_the_fan_out() {
-        let mut world = World::new();
-        let e = spawn_parent(
-            &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
-            "no array here",
-        );
-        fan_out_split(&mut world);
-        redrive_split(&mut world, e, r#"[{"id":"a","context":{}}]"#);
-
-        fan_out_split(&mut world);
-
-        assert!(world.get::<FanOutWaiting>(e).is_some(), "the split took");
-        assert_eq!(status_of(&world, e), AgentStatus::Waiting);
-    }
-
-    /// Put the parent back with a `submit_work_items` call instead of text, the
-    /// way a model that uses the tool leaves it.
-    fn spawn_parent_calling_the_tool(
-        world: &mut World,
-        bp: Blueprint,
-        arguments: serde_json::Value,
-    ) -> Entity {
-        let e = spawn_parent(world, bp, "");
-        world.entity_mut(e).insert(InferenceResult {
-            response: String::new(),
-            tool_calls: vec![crate::components::ToolCall {
-                tool_id: "call-1".to_string(),
-                name: leviath_core::blueprint::SUBMIT_WORK_ITEMS_TOOL.to_string(),
-                arguments,
-                thought_signature: None,
-            }],
-            tokens_used: 0,
-            timestamp: 0,
-        });
-        e
-    }
-
-    /// The reliable path: the split answers with a tool call and the arguments
-    /// are already the shape the schema asked for, so no text is scanned.
-    #[test]
-    fn a_split_tool_call_is_the_split() {
-        let mut world = World::new();
-        let e = spawn_parent_calling_the_tool(
-            &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
-            serde_json::json!({"items": [
-                {"id": "a", "context": {"question": "q1"}},
-                {"id": "b", "context": {"question": "q2"}}
-            ]}),
-        );
-
-        fan_out_split(&mut world);
+        let items: Vec<WorkItem> = (0..10).map(|i| item(&format!("w{i}"))).collect();
+        begin_fan_out(&mut world, e, config, items, FanOutOrigin::Stage);
 
         let w = world.get::<FanOutWaiting>(e).expect("parked");
-        assert_eq!(w.pending.len(), 2);
-        assert_eq!(w.pending[0].id, "a");
-        assert_eq!(w.pending[0].context["question"], "q1");
+        let kept: Vec<&str> = w.pending.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(kept, ["w0", "w1", "w2"]);
     }
 
-    /// An empty list is a real answer: nothing left to hand out, so the stage
-    /// finishes and the run moves on rather than failing.
+    /// An empty fan-out is not a special case: it parks with nothing pending and
+    /// the collector finishes it on the next tick.
     #[test]
-    fn an_empty_work_item_list_is_a_valid_split() {
+    fn an_empty_fan_out_finishes_through_the_ordinary_path() {
         let mut world = World::new();
         install(&mut world, TestSpawner::ok());
-        let e = spawn_parent_calling_the_tool(
+        let e = spawn_parent(
             &mut world,
             fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
-            serde_json::json!({"items": []}),
+            "",
         );
 
-        fan_out_split(&mut world);
-        assert!(world.get::<FanOutWaiting>(e).is_some(), "parked with none");
+        begin_fan_out(
+            &mut world,
+            e,
+            cfg(Some("merge"), 2, WorkerFailurePolicy::Continue),
+            Vec::new(),
+            FanOutOrigin::Stage,
+        );
         fan_out_collect(&mut world);
 
         assert_eq!(status_of(&world, e), AgentStatus::Active);
@@ -1802,236 +1680,173 @@ mod tests {
         );
     }
 
-    /// A tool call whose arguments are the wrong shape is corrected like any
-    /// other miss, and the correction names the tool rather than telling a model
-    /// that just used it to reply in prose.
+    /// The dispatcher hands the call over as a component; this is the tick that
+    /// turns it into running workers.
     #[test]
-    fn a_malformed_tool_call_is_corrected_in_the_tools_own_terms() {
+    fn start_pending_fan_outs_starts_what_the_dispatcher_accepted() {
         let mut world = World::new();
-        let e = spawn_parent_calling_the_tool(
+        install(&mut world, TestSpawner::ok());
+        let e = spawn_parent(
             &mut world,
             fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
-            serde_json::json!({"items": "all of them"}),
+            "",
+        );
+        world.entity_mut(e).insert(PendingFanOut {
+            call_id: "call-1".to_string(),
+            request: parse_fan_out_call(&serde_json::json!({
+                "agent": "researcher",
+                "items": [{"id": "a", "context": {}}]
+            }))
+            .unwrap(),
+        });
+
+        start_pending_fan_outs(&mut world);
+
+        assert!(world.get::<PendingFanOut>(e).is_none(), "consumed");
+        let w = world.get::<FanOutWaiting>(e).expect("parked");
+        assert_eq!(w.pending.len(), 1);
+        assert_eq!(
+            w.origin,
+            FanOutOrigin::Tool {
+                call_id: "call-1".to_string()
+            }
+        );
+        assert_eq!(
+            w.config.worker_agent.as_deref(),
+            Some("researcher"),
+            "the call named its worker"
+        );
+    }
+
+    /// A tool call made inside a fan-out stage still picks up that stage's own
+    /// keys, so `mode = \"fan_out\"` really is sugar over the same engine.
+    #[test]
+    fn a_call_inside_a_fan_out_stage_inherits_the_stages_keys() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let mut config = cfg(Some("merge"), 7, WorkerFailurePolicy::Continue);
+        config.max_items = Some(2);
+        let e = spawn_parent(&mut world, fanout_blueprint(config), "");
+        world.entity_mut(e).insert(PendingFanOut {
+            call_id: "call-1".to_string(),
+            request: parse_fan_out_call(&serde_json::json!({
+                "items": [{"id": "a", "context": {}}]
+            }))
+            .unwrap(),
+        });
+
+        start_pending_fan_outs(&mut world);
+
+        let w = world.get::<FanOutWaiting>(e).expect("parked");
+        assert_eq!(w.config.merge_stage.as_deref(), Some("merge"));
+        assert_eq!(w.config.max_items, Some(2));
+        assert_eq!(w.max_workers, 7);
+    }
+
+    // ── the tool origin's delivery ────────────────────────────────────────────
+
+    /// A fan-out started by a tool call comes back as that call's result and the
+    /// agent picks its stage up where it left off - it does not transition.
+    #[test]
+    fn a_tool_fan_out_returns_its_report_as_the_calls_result() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
+            "",
+        );
+        begin_fan_out(
+            &mut world,
+            e,
+            cfg(Some("merge"), 2, WorkerFailurePolicy::Continue),
+            vec![item("a")],
+            FanOutOrigin::Tool {
+                call_id: "call-1".to_string(),
+            },
         );
 
-        fan_out_split(&mut world);
+        fan_out_collect(&mut world); // starts the worker
+        let worker = world.get::<SubAgentChildren>(e).expect("linked").children[0];
+        complete_worker(&mut world, worker, "what the worker found");
+        fan_out_collect(&mut world); // reaps and delivers
 
         assert_eq!(status_of(&world, e), AgentStatus::Active);
-        assert_eq!(world.get::<SplitAttempts>(e), Some(&SplitAttempts(1)));
-        let convo = conversation_text(&world, e);
         assert!(
-            convo.contains("[called submit_work_items]"),
-            "the model sees the call it made: {convo}"
+            world.get::<crate::pipeline::ReadyToInfer>(e).is_some(),
+            "back in front of the model, not transitioning"
         );
-        assert!(
-            convo.contains("`submit_work_items` call could not be used"),
-            "and a correction in the tool's terms: {convo}"
-        );
-    }
-
-    /// The text fallback's correction points at the tool and says an empty list
-    /// is available, because "the work is already done" answered in prose is
-    /// what ends a re-entered fan-out stage.
-    #[test]
-    fn the_text_correction_points_at_the_tool_and_offers_an_empty_list() {
-        let mut world = World::new();
-        let e = spawn_parent(
-            &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
-            "I have completed the research.",
-        );
-
-        fan_out_split(&mut world);
-
-        let convo = conversation_text(&world, e);
-        assert!(convo.contains("submit_work_items"), "{convo}");
-        assert!(convo.contains("empty `items` array"), "{convo}");
-    }
-
-    /// The correction budget belongs to one split, not to the whole run. A stage
-    /// re-entered later gets its full budget back.
-    ///
-    /// This is the fault that turned a prompt problem into a dead run: a
-    /// `deep-researcher` split needed one correction on its first pass, the
-    /// counter stayed at 1, and when `analyze` routed back through `gather` into
-    /// the same fan-out stage the second split got a single correction before
-    /// the stage failed.
-    #[test]
-    fn a_successful_split_clears_the_correction_budget() {
-        let mut world = World::new();
-        let e = spawn_parent(
-            &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
-            "no array here",
-        );
-
-        fan_out_split(&mut world);
         assert_eq!(
-            world.get::<SplitAttempts>(e),
-            Some(&SplitAttempts(1)),
-            "the first miss spends one"
+            world.get::<StageCursor>(e).map(|c| c.index),
+            Some(0),
+            "still in the stage that called it"
         );
-        redrive_split(&mut world, e, r#"[{"id":"a","context":{}}]"#);
-        fan_out_split(&mut world);
-
-        assert!(world.get::<FanOutWaiting>(e).is_some(), "the split took");
-        assert!(
-            world.get::<SplitAttempts>(e).is_none(),
-            "and the budget it spent is handed back for the next split"
-        );
+        let convo = conversation_text(&world, e);
+        assert!(convo.contains("what the worker found"), "{convo}");
     }
 
-    /// Once the corrections are spent the stage does end, and the message names
-    /// what came back rather than only the rule it broke. Read off a blueprint
-    /// with an `error` edge, because that is where the message now lives.
+    /// The report is routed like any other tool result, so a blueprint that
+    /// sends `fan_out` somewhere of its own gets it there.
     #[test]
-    fn the_failure_message_quotes_what_the_model_actually_said() {
+    fn a_tool_fan_outs_report_follows_the_stages_routing() {
         let mut world = World::new();
-        let e = spawn_parent(
-            &mut world,
-            fanout_blueprint_with_escape(
-                cfg(None, 2, WorkerFailurePolicy::Continue),
-                leviath_core::blueprint::TransitionCondition::Error,
-            ),
-            "I cannot help with that request.",
-        );
-        for _ in 0..=MAX_SPLIT_RETRIES {
-            fan_out_split(&mut world);
-            redrive_split(&mut world, e, "I cannot help with that request.");
-        }
-        // Read through Debug rather than a pattern: the arm a passing run does
-        // not take reads to llvm-cov as an uncovered region.
-        let status = format!("{:?}", status_of(&world, e));
-        assert!(status.contains("Error"), "{status}");
-        assert!(status.contains("I cannot help with that"), "{status}");
-        assert!(status.contains("correction(s)"), "{status}");
-    }
-
-    /// The two degradations at once: nothing to correct with, and nothing to
-    /// route to. The run still moves on rather than ending, and the note simply
-    /// has nowhere to go.
-    #[test]
-    fn a_split_with_no_window_and_no_escape_still_moves_on() {
-        let mut world = World::new();
-        let e = world
-            .spawn((
-                AgentBlueprint(fanout_blueprint(cfg(
-                    None,
-                    2,
-                    WorkerFailurePolicy::Continue,
-                ))),
-                StageCursor { index: 0 },
-                parent_state(),
-                StageProgress::default(),
-                StageInferences(vec![stage_inf(), stage_inf()]),
-                StageSetups(vec![setup(), setup()]),
-                VisitCounts::default(),
-                InferenceResult {
-                    response: "not an array".to_string(),
-                    tool_calls: vec![],
-                    tokens_used: 0,
-                    timestamp: 0,
-                },
-                ProcessResponse,
-            ))
-            .id();
-
-        fan_out_split(&mut world);
-
-        assert_eq!(status_of(&world, e), AgentStatus::Active, "still running");
-        assert!(world.get::<ResolveTransition>(e).is_some());
-    }
-
-    /// No context window means nowhere to put a correction, so the stage ends on
-    /// the first malformed split rather than looping while being told nothing.
-    #[test]
-    fn a_split_with_nowhere_to_put_a_correction_fails_at_once() {
-        let mut world = World::new();
-        let e = world
-            .spawn((
-                AgentBlueprint(fanout_blueprint_with_escape(
-                    cfg(None, 2, WorkerFailurePolicy::Continue),
-                    leviath_core::blueprint::TransitionCondition::Error,
-                )),
-                StageCursor { index: 0 },
-                parent_state(),
-                StageProgress::default(),
-                StageInferences(vec![stage_inf(), stage_inf()]),
-                StageSetups(vec![setup(), setup()]),
-                VisitCounts::default(),
-                InferenceResult {
-                    response: "not an array".to_string(),
-                    tool_calls: vec![],
-                    tokens_used: 0,
-                    timestamp: 0,
-                },
-                ProcessResponse,
-            ))
-            .id();
-
-        fan_out_split(&mut world);
-
-        assert_errored(&world, e);
-        assert!(world.get::<SplitAttempts>(e).is_none());
-    }
-
-    #[test]
-    fn the_snippet_reports_an_empty_response_as_empty() {
-        assert_eq!(response_snippet("   \n "), "the response was empty");
-    }
-
-    #[test]
-    fn the_snippet_quotes_a_short_response_whole() {
-        assert_eq!(response_snippet("  nope  "), "the response was: nope");
-    }
-
-    #[test]
-    fn the_snippet_truncates_a_long_response_on_a_character_boundary() {
-        // Three bytes per character on purpose: cutting model output at a byte
-        // offset is how a panic gets shipped, so the ceiling counts characters
-        // and this proves no character was split.
-        let long = "€".repeat(MAX_SPLIT_SNIPPET + 10);
-        let snippet = response_snippet(&long);
-        assert!(snippet.starts_with("the response began: "), "{snippet}");
-        assert!(snippet.ends_with('…'), "{snippet}");
-        let kept = snippet
-            .trim_start_matches("the response began: ")
-            .trim_end_matches('…');
-        assert_eq!(kept.chars().count(), MAX_SPLIT_SNIPPET);
-        assert!(kept.chars().all(|c| c == '€'), "no character was split");
-    }
-
-    #[test]
-    fn split_skips_non_active_and_non_fanout_agents() {
-        // Non-Active fan-out agent: left untouched.
-        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
             fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
-            "[]",
+            "",
         );
-        set_status(&mut world, e, AgentStatus::Idle);
-        fan_out_split(&mut world);
-        assert!(world.get::<ProcessResponse>(e).is_some());
-        assert!(world.get::<FanOutWaiting>(e).is_none());
-
-        // Non-fan-out stage: not a candidate at all.
-        let layout = ContextLayout::new(
-            vec![RegionDefinition::new(
-                "conversation".to_string(),
+        // The region the routing points at has to exist for the result to land
+        // in it; a routing rule to a region the stage does not carry is a
+        // blueprint `lev validate` refuses.
+        world
+            .get_mut::<ContextWindow>(e)
+            .unwrap()
+            .add_region(Region::new(
+                "findings".to_string(),
                 RegionKind::Clearable,
-                10_000,
-            )],
-            12_000,
+                4_000,
+            ));
+        world
+            .entity_mut(e)
+            .insert(crate::components::ToolResultRoutingComponent {
+                routing: leviath_core::ToolResultRouting {
+                    default_region: "conversation".to_string(),
+                    tool_overrides: std::collections::HashMap::from([(
+                        "fan_out".to_string(),
+                        "findings".to_string(),
+                    )]),
+                    max_result_tokens: None,
+                    tool_max_result_tokens: std::collections::HashMap::new(),
+                    persist: true,
+                },
+            });
+        begin_fan_out(
+            &mut world,
+            e,
+            cfg(None, 2, WorkerFailurePolicy::Continue),
+            vec![item("a")],
+            FanOutOrigin::Tool {
+                call_id: "call-1".to_string(),
+            },
         );
-        let s = Stage::new(
-            "plain".to_string(),
-            ModelConfig::new("script".to_string(), "m".to_string()),
-        );
-        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
-        let e2 = spawn_parent(&mut world, bp, "[]");
-        fan_out_split(&mut world);
-        assert!(world.get::<ProcessResponse>(e2).is_some());
+
+        fan_out_collect(&mut world);
+        let worker = world.get::<SubAgentChildren>(e).expect("linked").children[0];
+        complete_worker(&mut world, worker, "routed finding");
+        fan_out_collect(&mut world);
+
+        let findings = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("findings")
+            .expect("the routed region")
+            .content
+            .iter()
+            .map(|entry| entry.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(findings.contains("routed finding"), "{findings}");
     }
 
     // ── fan_out_collect: worker lifecycle + merge ─────────────────────────────
@@ -2050,9 +1865,15 @@ mod tests {
         let e = spawn_parent(
             &mut world,
             fanout_blueprint(cfg(Some("merge"), 1, WorkerFailurePolicy::Continue)),
-            r#"[{"id":"a"},{"id":"b"},{"id":"c"}]"#,
+            "",
         );
-        fan_out_split(&mut world);
+        begin_fan_out(
+            &mut world,
+            e,
+            cfg(Some("merge"), 1, WorkerFailurePolicy::Continue),
+            vec![item("a"), item("b"), item("c")],
+            FanOutOrigin::Stage,
+        );
         fan_out_collect(&mut world);
         assert_eq!(
             world.get::<SubAgentChildren>(e).unwrap().children.len(),
@@ -2107,7 +1928,7 @@ mod tests {
             fanout_blueprint(cfg(Some("merge"), 1, WorkerFailurePolicy::Continue)),
             r#"[{"id":"a"},{"id":"b"}]"#,
         );
-        fan_out_split(&mut world);
+        split(&mut world, e);
         world
             .get_mut::<FanOutWaiting>(e)
             .expect("parked")
@@ -2132,7 +1953,7 @@ mod tests {
             fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
             r#"[{"id":"a"},{"id":"b"}]"#,
         );
-        fan_out_split(&mut world);
+        split(&mut world, e);
         fan_out_collect(&mut world);
         // Two workers started and tracked.
         let kids = world.get::<SubAgentChildren>(e).unwrap().children.clone();
@@ -2184,7 +2005,7 @@ mod tests {
             fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
             r#"[{"id":"a"}]"#,
         );
-        fan_out_split(&mut world);
+        split(&mut world, e);
         fan_out_collect(&mut world);
         let worker = world.get::<SubAgentChildren>(e).unwrap().children[0];
         // Give the worker a context window so there is something to shed.
@@ -2223,7 +2044,7 @@ mod tests {
             fanout_blueprint(cfg(Some("merge"), 1, WorkerFailurePolicy::Continue)),
             r#"[{"id":"a"},{"id":"b"}]"#,
         );
-        fan_out_split(&mut world);
+        split(&mut world, e);
         fan_out_collect(&mut world);
         // Only one worker at a time.
         assert_eq!(world.get::<SubAgentChildren>(e).unwrap().children.len(), 1);
@@ -2256,7 +2077,7 @@ mod tests {
             fanout_blueprint(cfg(Some("merge"), 0, WorkerFailurePolicy::Continue)),
             r#"[{"id":"a"},{"id":"b"},{"id":"c"},{"id":"d"},{"id":"e"}]"#,
         );
-        fan_out_split(&mut world);
+        split(&mut world, e);
         fan_out_collect(&mut world);
         assert_eq!(world.get::<SubAgentChildren>(e).unwrap().children.len(), 5);
         let state = world.get::<FanOutWaiting>(e).unwrap().to_state();
@@ -2276,7 +2097,7 @@ mod tests {
             fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
             r#"[{"id":"a"},{"id":"b"}]"#,
         );
-        fan_out_split(&mut world);
+        split(&mut world, e);
         fan_out_collect(&mut world); // starts both workers → active
 
         // Projecting to the serializable state captures each worker's run-id.
@@ -2328,7 +2149,7 @@ mod tests {
             fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::FailAll)),
             r#"[{"id":"a"}]"#,
         );
-        fan_out_split(&mut world);
+        split(&mut world, e);
         fan_out_collect(&mut world);
         let worker = world.get::<SubAgentChildren>(e).unwrap().children[0];
         set_status(
@@ -2353,7 +2174,7 @@ mod tests {
             fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
             r#"[{"id":"a"},{"id":"b"}]"#,
         );
-        fan_out_split(&mut world);
+        split(&mut world, e);
         fan_out_collect(&mut world);
         let kids = world.get::<SubAgentChildren>(e).unwrap().children.clone();
         set_status(
@@ -2379,7 +2200,7 @@ mod tests {
             fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
             "[]",
         );
-        fan_out_split(&mut world);
+        split(&mut world, e);
         fan_out_collect(&mut world);
         // No workers; straight to merge.
         assert!(world.get::<SubAgentChildren>(e).is_none());
@@ -2396,7 +2217,7 @@ mod tests {
             fanout_blueprint(cfg(Some("ghost"), 2, WorkerFailurePolicy::Continue)),
             "[]",
         );
-        fan_out_split(&mut world);
+        split(&mut world, e);
         fan_out_collect(&mut world);
         // Unknown merge stage ⇒ ResolveTransition, no stage jump.
         assert!(world.get::<crate::pipeline::ResolveTransition>(e).is_some());
@@ -2412,7 +2233,7 @@ mod tests {
             fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
             r#"[{"id":"a"}]"#,
         );
-        fan_out_split(&mut world);
+        split(&mut world, e);
         set_status(&mut world, e, AgentStatus::Cancelled);
         fan_out_collect(&mut world);
         assert!(world.get::<FanOutWaiting>(e).is_none());
@@ -2428,7 +2249,7 @@ mod tests {
             fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
             r#"[{"id":"a"}]"#,
         );
-        fan_out_split(&mut world);
+        split(&mut world, e);
         fan_out_collect(&mut world);
         // Item failed to start, Continue policy ⇒ still transitions to merge.
         assert!(world.get::<FanOutWaiting>(e).is_none());
@@ -2444,7 +2265,7 @@ mod tests {
             fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::FailAll)),
             r#"[{"id":"a"}]"#,
         );
-        fan_out_split(&mut world);
+        split(&mut world, e);
         fan_out_collect(&mut world);
         // Spawn refused + FailAll ⇒ parent errors.
         assert_errored(&world, e);
@@ -2466,7 +2287,7 @@ mod tests {
             parent_agent_id: "root".to_string(),
             depth: 3,
         });
-        fan_out_split(&mut world);
+        split(&mut world, e);
         fan_out_collect(&mut world);
         // No worker spawned (depth cap hit before any container is created).
         assert!(world.get::<SubAgentChildren>(e).is_none());
@@ -2490,7 +2311,7 @@ mod tests {
             ],
             max_child_depth: 9,
         });
-        fan_out_split(&mut world);
+        split(&mut world, e);
         fan_out_collect(&mut world);
         let kids = world.get::<SubAgentChildren>(e).unwrap();
         assert_eq!(kids.max_child_depth, 9);

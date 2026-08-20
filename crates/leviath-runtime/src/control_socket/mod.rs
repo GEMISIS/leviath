@@ -892,6 +892,7 @@ mod tests {
     /// expected response can't drift apart.
     fn listing_entry() -> RunListEntry {
         RunListEntry {
+            splits_degraded: 0,
             run_id: "run-a".to_string(),
             title: None,
             status: AgentStatus::Active,

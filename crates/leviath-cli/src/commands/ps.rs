@@ -147,6 +147,8 @@ pub struct OfflineRun {
     /// Whether the run finished having modified nothing, when it could have.
     #[serde(default)]
     pub empty_output: bool,
+    /// Fan-outs that handed out no work. See `RunFlags::splits_degraded`.
+    pub splits_degraded: usize,
     /// Whether the run submitted a final output. The flag only; read the answer
     /// itself with `lev result <run-id>`.
     #[serde(default)]
@@ -180,6 +182,7 @@ pub fn offline_runs(
             updated_at: m.updated_at,
             last_progress_at: m.last_progress_at,
             empty_output: m.flags.empty_output,
+            splits_degraded: m.flags.splits_degraded,
             has_final_output: m.final_output.is_some(),
         })
         .collect()
@@ -192,8 +195,11 @@ fn offline_status_cell(run: &OfflineRun) -> String {
     if run.abandoned {
         return format!("{status} (abandoned)");
     }
-    match run.empty_output {
-        true => format!("{status} (no output)"),
+    if run.empty_output {
+        return format!("{status} (no output)");
+    }
+    match run.splits_degraded > 0 {
+        true => format!("{status} (fan-out empty)"),
         false => status,
     }
 }
@@ -263,6 +269,10 @@ fn status_cell(entry: &RunListEntry) -> String {
         // reads as a deliberate pause somebody can undo whenever they like.
         (AgentStatus::Paused, Some(reason)) => format!("paused: {reason}"),
         (status, _) if entry.empty_output => format!("{status} (no output)"),
+        // A fan-out that handed out no work is the same class of quiet failure:
+        // the run finished, and a stage whose whole job was to start workers
+        // started none, so whatever merged them merged nothing.
+        (status, _) if entry.splits_degraded > 0 => format!("{status} (fan-out empty)"),
         (status, _) => status.to_string(),
     }
 }

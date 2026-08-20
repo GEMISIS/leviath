@@ -55,22 +55,28 @@ pub fn submit_output_description(described: &str) -> String {
     }
 }
 
-/// What a fan-out split is told about handing back its work items.
+/// What an agent is told about fanning out.
 ///
-/// Says the two things a split gets wrong. One: each item is all its worker
-/// gets, because a worker is a separate agent with its own clean context - a
-/// reference to "the topic above" reaches nobody. Two: an empty list is a real
-/// answer, which matters most on a stage the run has entered before, where the
-/// honest reply is that the work is already done. A split that could not say
-/// that answered in prose instead, and prose is what used to end the run.
-const SUBMIT_WORK_ITEMS_DESCRIPTION: &str = "Hand back the work items for this fan-out. Each item starts one worker, and they all \
-     run at the same time.\n\nA worker is a separate agent with a clean context: it never \
-     sees this conversation, so everything it needs has to be inside its own `context`. \
-     Name each item precisely enough that two workers cannot end up answering the same \
-     question.\n\nIf there is nothing left to hand out - the work is already done, or \
-     everything this stage would split has been covered - call this with an empty `items` \
-     array. That is a valid answer and the run moves on to the next stage. Do not explain \
-     that in prose instead; this tool is the only reply that is read.";
+/// Says the three things that go wrong. One: each item is all its worker gets,
+/// because a worker is a separate agent with its own clean context - a reference
+/// to "the topic above" reaches nobody. Two: put all the work in one call, since
+/// the engine paces the concurrency itself and a second call would only wait for
+/// the first. Three: an empty list is a real answer, which matters most on a
+/// stage the run has entered before, where the honest reply is that the work is
+/// already done.
+const FAN_OUT_DESCRIPTION: &str = "Run many sub-agents at once, one per item, and get their results back \
+     together. Use it when the work splits into parts that do not depend on each \
+     other - separate topics to research, separate files to change, separate \
+     questions to answer.\n\nEach worker is a separate agent with a clean \
+     context window: it never sees this conversation, so everything it needs has \
+     to be inside its own `context`. Name each item precisely enough that two \
+     workers cannot end up doing the same thing.\n\nPut all the work in ONE \
+     call, however many items that is - they are paced for you, and a second \
+     call would just wait for the first to finish. This call blocks until every \
+     worker is done; their results come back as its result.\n\nIf there is \
+     nothing to hand out, call it with an empty `items` array. That is a valid \
+     answer and the run moves on. Do not say so in prose instead.\n\nFor a \
+     single sub-agent, use `spawn_agent` rather than a fan-out of one.";
 
 /// [`shell_tool_description`] for the resolved shell, computed once.
 ///
@@ -450,32 +456,39 @@ impl BuiltinTools {
                 }),
             },
             Tool {
-                // The one structured answer the framework asks for that used to
-                // be scraped out of prose. Offered by every `fan_out` stage; the
-                // free-text parse stays as the fallback for models that ignore
-                // it.
-                name: crate::SUBMIT_WORK_ITEMS_TOOL.to_string(),
-                description: SUBMIT_WORK_ITEMS_DESCRIPTION.to_string(),
+                // The single entry point to the fan-out engine. A `fan_out`
+                // stage grants it as sugar; any other stage can grant it
+                // directly and fan out mid-work.
+                name: crate::FAN_OUT_TOOL.to_string(),
+                description: FAN_OUT_DESCRIPTION.to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
+                        "agent": {
+                            "type": "string",
+                            "description": "Name of the installed agent to run for every item. Omit only inside a fan_out stage, which names its worker in the blueprint."
+                        },
                         "items": {
                             "type": "array",
-                            "description": "One entry per unit of work. An empty array means there is nothing left to hand out.",
+                            "description": "One entry per unit of work. They all run at the same time. An empty array means there is nothing to hand out, which is a valid answer.",
                             "items": {
                                 "type": "object",
                                 "properties": {
                                     "id": {
                                         "type": "string",
-                                        "description": "Short slug identifying this work item. Labels the worker in the consolidated report, so make it distinct and readable."
+                                        "description": "Short slug identifying this item. Labels its worker in the merged report, so make it distinct and readable."
                                     },
                                     "context": {
                                         "type": "object",
-                                        "description": "Everything the worker gets. It runs as a separate agent with a clean context and does not share yours, so this has to stand alone."
+                                        "description": "Everything the worker gets. It runs as a separate agent with a clean context and never sees yours, so this has to stand alone."
                                     }
                                 },
                                 "required": ["id", "context"]
                             }
+                        },
+                        "max_workers": {
+                            "type": "integer",
+                            "description": "How many run at once. Optional; the rest queue and start as slots free up."
                         }
                     },
                     "required": ["items"]
@@ -701,7 +714,7 @@ impl BuiltinTools {
             "which_command",
             "runtime_info",
             crate::SUBMIT_OUTPUT_TOOL,
-            crate::SUBMIT_WORK_ITEMS_TOOL,
+            crate::FAN_OUT_TOOL,
         ]
         .iter()
         // Drop any canonical built-in the current platform can't provide, so a

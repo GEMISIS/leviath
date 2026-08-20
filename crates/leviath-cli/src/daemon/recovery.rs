@@ -1699,6 +1699,7 @@ mod tests {
             None,
         );
         let state = FanOutState {
+            origin: leviath_runtime::fanout::FanOutOrigin::Stage,
             config: FanOutConfig {
                 worker_agent: None,
                 worker_stage: Some("w".to_string()),

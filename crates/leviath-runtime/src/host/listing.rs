@@ -112,6 +112,9 @@ impl WorldHost {
                 .get::<crate::pipeline::PersistWatermark>(entity)
                 .and_then(|w| w.last_progress_at()),
             unattended: metadata.is_some_and(|m| m.unattended),
+            splits_degraded: world
+                .get::<crate::persistence::RunOutcomeFlags>(entity)
+                .map_or(0, |f| f.0.splits_degraded),
             empty_output: world
                 .get::<crate::persistence::RunOutcomeFlags>(entity)
                 .is_some_and(|f| {

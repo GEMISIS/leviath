@@ -222,22 +222,23 @@ pub const MODIFYING_TOOLS: &[&str] = &["write_file", "edit_file"];
 /// tools crate.
 pub const SUBMIT_OUTPUT_TOOL: &str = "submit_output";
 
-/// The tool a `fan_out` stage's split calls to hand back its work items.
+/// The tool that starts a fan-out: one worker per item, all at once.
 ///
-/// The split used to be free text that the runtime scraped a JSON array out of,
-/// which is the one place in the framework where a structured answer was asked
-/// for in prose and parsed by hand. A model that answered with a report, an
-/// apology, or its own text-protocol tool-call syntax cost a correction round
-/// each time, and a `deep-researcher` run spent its whole budget that way.
+/// The single entry point to the fan-out engine. A `mode = "fan_out"` stage is
+/// sugar that grants this tool and transitions to its `merge_stage` once the
+/// call returns; any other stage can grant it directly and fan out in the
+/// middle of its own work, as many times as it needs.
 ///
-/// Offered implicitly by every fan-out stage - the free-text parse stays as the
-/// fallback, because a stage's model is chosen by the blueprint and not every
-/// model uses tools well.
+/// It replaced a design where a fan-out stage's raw text output *was* the work
+/// item list, parsed out of prose by the runtime. That was the one structured
+/// answer the framework asked for without a tool to carry it, and it is what
+/// killed a `deep-researcher` run that answered, accurately, "I have completed
+/// the research."
 ///
 /// Named here for the same reason [`SUBMIT_OUTPUT_TOOL`] is: the manifest parser
 /// and the blueprint validator both need it and neither may depend on the tools
 /// crate.
-pub const SUBMIT_WORK_ITEMS_TOOL: &str = "submit_work_items";
+pub const FAN_OUT_TOOL: &str = "fan_out";
 
 /// Times a stage is re-run for a missing final output before the gate gives up
 /// and lets it through with the run's `output_forced` flag set. Matches

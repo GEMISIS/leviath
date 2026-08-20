@@ -1,6 +1,6 @@
 [agent]
 name = "deep-researcher"
-version = "0.2.3"
+version = "0.3.0"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 entry_stage = "gather"
 
@@ -128,10 +128,9 @@ Split the topic in `query` into sub-questions that can be researched
 independently, one work item each, using what `sources` has already turned up to
 decide where the real questions are.
 
-Output ONLY a JSON array, starting with '[' and ending with ']'. No prose, no
-markdown fences. Each item:
+Call `fan_out` with one entry in `items` per work item:
 
-[{"id": "<short-slug>", "context": {"question": "<the sub-question>", "why": "<what this settles for the wider topic>"}}]
+  items: [{"id": "<short-slug>", "context": {"question": "<the sub-question>", "why": "<what this settles for the wider topic>"}}]
 
 Every item MUST carry enough to work from alone: a worker is a separate agent
 and does not share this run's context, so the work item is all it gets. Name the

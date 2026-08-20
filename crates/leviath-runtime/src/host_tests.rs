@@ -2846,6 +2846,7 @@ async fn a_zero_window_keeps_nothing() {
 async fn a_run_is_listed_once_however_often_it_is_recorded() {
     let mut host = host_with(vec![]);
     let entry = |status| RunListEntry {
+        splits_degraded: 0,
         run_id: "worker-1".to_string(),
         title: None,
         status,
@@ -2877,6 +2878,7 @@ async fn the_listing_of_finished_runs_is_capped() {
     for i in 0..=MAX_RETAINED_FINISHED {
         host.record_finished(
             RunListEntry {
+                splits_degraded: 0,
                 run_id: format!("worker-{i}"),
                 title: None,
                 status: AgentStatus::Complete,
@@ -3404,6 +3406,7 @@ async fn pausing_a_fan_out_parent_holds_its_worker_queue() {
             world,
             parent.entity(),
             crate::fanout::FanOutState {
+                origin: crate::fanout::FanOutOrigin::Stage,
                 config: leviath_core::blueprint::FanOutConfig {
                     worker_agent: None,
                     worker_stage: Some("work".to_string()),
@@ -3484,6 +3487,7 @@ async fn wait_reason_counts_outstanding_fan_out_workers() {
             world,
             parent.entity(),
             crate::fanout::FanOutState {
+                origin: crate::fanout::FanOutOrigin::Stage,
                 config: leviath_core::blueprint::FanOutConfig {
                     worker_agent: None,
                     worker_stage: Some("work".to_string()),
