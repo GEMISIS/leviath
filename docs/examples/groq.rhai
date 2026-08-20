@@ -6,7 +6,7 @@
 // @max_output_tokens 32768
 //
 // Drop this into ~/.leviath/providers/groq.rhai and set GROQ_API_KEY, then point
-// an agent stage at `provider = "groq"`. See docs/rhai-providers.md.
+// an agent stage at `provider = "groq"`. See docs/content/rhai-providers.md.
 
 fn initialize(config) {
     let api_key = config.api_key ?? env_var("GROQ_API_KEY");

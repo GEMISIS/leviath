@@ -213,6 +213,51 @@ fn print_and_debug_are_silenced() {
     engine.run(r#"print("hello"); debug("world");"#).unwrap();
 }
 
+/// A map carrying non-printable characters must come back as JSON, not as
+/// Rhai's `Debug`-escaped lookalike.
+///
+/// Rhai's `map_basic` package registers `to_json(&mut Map)`, and that
+/// signature used to beat ours, so every request body a provider script built
+/// went through `format_map_as_json`. That writes strings with `Debug`, which
+/// spells a narrow no-break space `\u{202f}`. JSON has no such escape, so the
+/// API refused the whole request and named the offset it choked on.
+///
+/// The characters are named as Rust escapes and interpolated into the script
+/// source, because pasting them in literally leaves an invisible test.
+#[test]
+fn to_json_on_a_map_is_valid_json_for_non_printable_characters() {
+    let engine = build_init_engine(no_env_allowlist());
+    // Narrow no-break space, zero-width space and a BOM are non-printable, so
+    // `Debug` escapes them. A non-breaking hyphen is printable and never was.
+    let text = "NASDAQ:\u{202f}CBRS\u{200b} wafer\u{2011}scale\u{feff}";
+    let out: String = engine
+        .eval(&format!("to_json(#{{ content: \"{text}\" }})"))
+        .expect("to_json");
+    assert!(
+        !out.contains("\\u{"),
+        "Rhai's Debug-escaped formatter answered: {out}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("body must be JSON");
+    assert_eq!(
+        parsed["content"],
+        serde_json::Value::String(text.to_string())
+    );
+}
+
+/// The same guarantee for the shapes that never reached Rhai's overload: a
+/// bare string, an array, and a map nested inside one.
+#[test]
+fn to_json_is_valid_json_for_nested_and_scalar_shapes() {
+    let engine = build_init_engine(no_env_allowlist());
+    let out: String = engine
+        .eval("to_json([#{ a: \"x\u{202f}y\" }, \"b\u{200b}c\", 1])")
+        .expect("to_json");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out).expect("JSON"),
+        serde_json::json!([{ "a": "x\u{202f}y" }, "b\u{200b}c", 1])
+    );
+}
+
 #[test]
 fn encode_uri_passes_unreserved_and_encodes_rest() {
     let engine = build_init_engine(no_env_allowlist());
