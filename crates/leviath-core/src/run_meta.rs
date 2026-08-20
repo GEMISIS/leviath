@@ -551,6 +551,18 @@ pub struct RunFlags {
     /// says the answer it hands back may be missing.
     #[serde(default)]
     pub output_forced: usize,
+    /// How many fan-out splits were unusable and were degraded to an empty
+    /// fan-out because the blueprint declared no `error` and no `dead_end`
+    /// escape from the stage.
+    ///
+    /// A split that cannot be parsed used to end the run outright, which threw
+    /// away everything the parent had already done - a `deep-researcher` run
+    /// died that way with its workers finished and three stages still pending.
+    /// It now always moves on, and this is what says the fan-out it moved on
+    /// from produced nothing. Non-zero means the merge stage worked from less
+    /// than it was meant to.
+    #[serde(default)]
+    pub splits_degraded: usize,
 }
 
 /// How many distinct modified paths [`RunFlags`] records before it stops

@@ -465,6 +465,60 @@ pub(crate) fn hold_for_gate(
         .insert(ReadyToInfer);
 }
 
+/// End a stage in failure the way its blueprint asked for.
+///
+/// Two things have to happen together and this is the only place that promises
+/// both: the status carries the message for the terminal case, and
+/// [`StageOutcome::Errored`] plus [`ResolveTransition`] hand the agent to
+/// [`resolve_transition`], which follows the stage's `error`-conditioned edge
+/// when one has revisits left.
+///
+/// Writing the status on its own is what several call sites used to do, and it
+/// silently discards the recovery the author declared. A `deep-researcher` run
+/// died that way with an `error_recovery` stage sitting unused in its graph and
+/// three stages still pending: a fan-out split that would not parse set
+/// `AgentStatus::Error` directly, and nothing ever consulted the edge. The
+/// distinction is invisible at the call site - both spellings "fail the run" -
+/// so the fix is one helper rather than a rule to remember.
+///
+/// Not for conditions that are terminal by nature (a cancel, a completed run).
+/// This is for "this stage could not go on", which is exactly what an
+/// `error` edge exists to answer.
+pub fn fail_stage(
+    commands: &mut Commands,
+    entity: Entity,
+    state: &mut AgentState,
+    message: String,
+) {
+    state.status = AgentStatus::Error {
+        message: message.clone(),
+    };
+    commands
+        .entity(entity)
+        .insert(StageOutcome::Errored(message))
+        .insert(ResolveTransition);
+}
+
+/// [`fail_stage`] for an exclusive system, which has a `&mut World` and no
+/// `Commands`.
+///
+/// A no-op for an entity that has already despawned, matching the rest of the
+/// exclusive-system helpers: a run that went away mid-tick has nothing left to
+/// route.
+pub fn fail_stage_world(world: &mut World, entity: Entity, message: String) {
+    let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+        return;
+    };
+    if let Some(mut state) = entity_mut.get_mut::<AgentState>() {
+        state.status = AgentStatus::Error {
+            message: message.clone(),
+        };
+    }
+    entity_mut
+        .insert(StageOutcome::Errored(message))
+        .insert(ResolveTransition);
+}
+
 /// What `resolve_transition` selects.
 ///
 /// `&'static` is bevy's `WorldQuery` convention, not a claim about
@@ -528,7 +582,22 @@ pub fn resolve_transition(
             // failed, and holding it back to demand file changes would strand a
             // run that can't make any.
             Some(StageOutcome::Errored(message)) => {
-                match find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::Error) {
+                // `error` first, then `dead_end`. Both are declarations that this
+                // stage may not be able to go on, and the dead-end arm below
+                // already falls back the other way; a run whose author wrote only
+                // the `dead_end` escape should not die because the thing that
+                // went wrong was spelled "error".
+                let escape =
+                    find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::Error)
+                        .or_else(|| {
+                            find_conditioned_edge(
+                                &bp.0,
+                                stage,
+                                &visits.0,
+                                TransitionCondition::DeadEnd,
+                            )
+                        });
+                match escape {
                     Some((i, t)) => {
                         // Put the error where the recovery stage will read it;
                         // without an error edge the run terminates and the
@@ -941,6 +1010,12 @@ pub(crate) fn attach_stage_components(
         .remove::<crate::interaction_points::InteractionPointRounds>()
         .remove::<RequiredReentries>()
         .remove::<OutputReentries>()
+        // The fan-out split's correction budget is one of those. Left standing,
+        // it is a per-run budget rather than a per-entry one: a split that
+        // needed one correction the first time through left the counter at 1,
+        // and the second entry into the same stage got a single correction
+        // before the stage failed. That is how a `deep-researcher` run ended.
+        .remove::<crate::fanout::SplitAttempts>()
         .insert(ReadyToInfer);
     match &setup.routing {
         Some(routing) => {

@@ -217,8 +217,11 @@ pub fn fail_wedged_runs(
         if let Some(mut buffer) = buffer {
             buffer.logs.push((0, format!("[wedged] {message}")));
         }
-        state.status = AgentStatus::Error { message };
         commands.entity(entity).remove::<Wedged>();
+        // Routing it is also what un-wedges it: `ResolveTransition` is a marker a
+        // system acts on, so a run whose blueprint declares an `error` edge gets
+        // driven into that stage instead of ending here.
+        crate::pipeline::fail_stage(&mut commands, entity, &mut state, message);
     }
 }
 

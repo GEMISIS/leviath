@@ -318,12 +318,18 @@ pub fn collect_transition_choice(
         let response = match outcome.result {
             Ok(response) => response,
             Err(err) => {
-                state.status = AgentStatus::Error {
-                    message: err.to_string(),
-                };
                 commands
                     .entity(outcome.entity)
                     .remove::<AwaitingTransitionResponse>();
+                // The routing call failed, not the stage's work. Fail it through
+                // the stage's own `error` edge: `resolve_transition` reads an
+                // errored outcome and never comes back here for a second choice.
+                crate::pipeline::fail_stage(
+                    &mut commands,
+                    outcome.entity,
+                    &mut state,
+                    err.to_string(),
+                );
                 continue;
             }
         };
@@ -432,10 +438,15 @@ pub fn collect_transition_choice(
                         }
                     }
                     Err(message) => {
-                        state.status = AgentStatus::Error { message };
                         commands
                             .entity(outcome.entity)
                             .remove::<AwaitingTransitionResponse>();
+                        crate::pipeline::fail_stage(
+                            &mut commands,
+                            outcome.entity,
+                            &mut state,
+                            message,
+                        );
                     }
                 }
             }
