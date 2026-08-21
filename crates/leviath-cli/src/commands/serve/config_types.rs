@@ -39,10 +39,25 @@ pub(super) struct RedactedConfig {
     pub(super) limits: ApiLimits,
 }
 
-/// The API contract version. Held equal to the OpenAPI spec's `info.version` by
-/// a test, because a version that can silently disagree with the document it
-/// names is worse than no version at all.
-pub(super) const API_VERSION: &str = "0.4.0";
+/// The API contract version: this build's own version, and nothing to keep in
+/// step by hand.
+///
+/// It was a literal, held equal to the OpenAPI spec's `info.version` by a test
+/// and to the crates by nobody. The two agreed only because somebody had last
+/// set both to the same string, and `cargo xtask version` writes neither - so
+/// the first release after any bump would have served a version that named a
+/// build it was not, silently, with the suite green.
+///
+/// Derived, the test that guarded the spec now guards the release: bump the
+/// crates without regenerating `docs/schema/openapi.json` and it fails, which
+/// is the reminder rather than the trap. `leviath-cli` takes
+/// `version.workspace = true`, so this is the workspace version.
+///
+/// The cost is that it moves on every release, including ones no client can
+/// observe. That is the right trade while `capabilities` is what a client
+/// actually feature-detects on: a version that is always honest about the
+/// build beats one that is occasionally wrong about the contract.
+pub(super) const API_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Every capability a client may check for.
 pub(super) const API_CAPABILITIES: &[&str] = &[
