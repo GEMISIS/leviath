@@ -355,9 +355,9 @@ impl Dashboard {
         }
     }
 
-    /// Enter/Space in the Context view: fold or unfold the row under the
-    /// tree cursor.
-    fn toggle_context_row(&mut self) {
+    /// Enter/Space in the Context view (or a click on the row): fold or unfold
+    /// the row under the tree cursor.
+    pub(super) fn toggle_context_row(&mut self) {
         use super::context_tree::TreeRow;
         let rows = self.context_tree_rows();
         match rows.get(self.context_tree.cursor) {
@@ -379,6 +379,25 @@ impl Dashboard {
             None => {}
         }
         self.context_tree.follow_cursor = true;
+    }
+
+    /// Show stage tab `idx`, from a number key or a click on the tab. Out of
+    /// range does nothing: the run has no such stage to show.
+    pub(super) fn select_stage_tab(&mut self, idx: usize) {
+        let max_stage = self
+            .selected_agent()
+            .map(|a| a.num_stages.saturating_sub(1))
+            .unwrap_or(0);
+        if idx > max_stage {
+            return;
+        }
+        self.selected_stage = idx;
+        self.detail_scroll = 0;
+        self.review_scroll = 0;
+        self.search_mode = false;
+        self.search_query.clear();
+        self.search_match_idx = 0;
+        self.band_select_tab(idx);
     }
 
     /// Move the Context view's tree cursor, clamped, and scroll to it.
@@ -454,20 +473,7 @@ impl Dashboard {
             }
             // Number keys 1-9: jump to stage tab
             KeyCode::Char(c @ '1'..='9') => {
-                let idx = (c as usize) - ('1' as usize);
-                let max_stage = self
-                    .selected_agent()
-                    .map(|a| a.num_stages.saturating_sub(1))
-                    .unwrap_or(0);
-                if idx <= max_stage {
-                    self.selected_stage = idx;
-                    self.detail_scroll = 0;
-                    self.review_scroll = 0;
-                    self.search_mode = false;
-                    self.search_query.clear();
-                    self.search_match_idx = 0;
-                    self.band_select_tab(idx);
-                }
+                self.select_stage_tab((c as usize) - ('1' as usize));
             }
             // Content mode toggle
             KeyCode::Char('l') => {
@@ -748,6 +754,12 @@ impl Dashboard {
                     self.table_state.select(Some(self.selected));
                 }
             }
+            // ← and → work the sub-agent tree. On a run with workers they
+            // fold and unfold it; on a row that cannot fold, ← climbs to the
+            // parent and → steps into the first child, so the arrows always
+            // do something rather than dying on a leaf.
+            KeyCode::Left => self.collapse_or_climb(),
+            KeyCode::Right => self.expand_or_descend(),
             KeyCode::Tab | KeyCode::BackTab => {
                 self.main_focus = MainPane::LogPane;
             }
@@ -786,6 +798,76 @@ impl Dashboard {
             KeyCode::Char('a') => self.open_agents_screen(),
             _ => {}
         }
+    }
+
+    /// Fold or unfold the sub-agents of the run on row `pos`, and leave the
+    /// highlight on that row. A row with no sub-agents has nothing to fold.
+    pub(super) fn toggle_run_fold_at(&mut self, pos: usize) {
+        let Some(id) = self
+            .display_indices
+            .get(pos)
+            .and_then(|&i| self.agents.get(i))
+            .map(|a| a.id.clone())
+        else {
+            return;
+        };
+        if !self.collapsed_runs.remove(&id) {
+            // Only a run with sub-agents folds; folding a leaf would draw an
+            // arrow on it that does nothing.
+            if !self.tree_rows.get(pos).is_some_and(|r| r.expandable) {
+                return;
+            }
+            self.collapsed_runs.insert(id.clone());
+        }
+        self.update_display_indices();
+        // The run just folded is still on screen - it is the row the fold
+        // happened on - so this lands back on it.
+        let row = self.row_of_run(&id).unwrap_or(self.selected);
+        self.selected = row;
+        self.table_state.select(Some(row));
+    }
+
+    /// `←` on the run list: fold the selected run's sub-agents, or - when
+    /// there is nothing to fold - move up to its parent.
+    fn collapse_or_climb(&mut self) {
+        let Some(row) = self.tree_rows.get(self.selected).cloned() else {
+            return;
+        };
+        if row.expandable && !row.collapsed {
+            self.toggle_run_fold_at(self.selected);
+            return;
+        }
+        // The parent is the nearest row above with a shorter prefix: rows are
+        // in depth-first order, so that is the run this one hangs under.
+        let width = row.prefix.chars().count();
+        if let Some(parent) = self.tree_rows[..self.selected]
+            .iter()
+            .rposition(|r| r.prefix.chars().count() < width)
+        {
+            self.selected = parent;
+            self.table_state.select(Some(parent));
+        }
+    }
+
+    /// `→` on the run list: unfold the selected run's sub-agents, or - when
+    /// they are already showing - step down into the first of them.
+    fn expand_or_descend(&mut self) {
+        let Some(row) = self.tree_rows.get(self.selected).cloned() else {
+            return;
+        };
+        if !row.expandable {
+            return;
+        }
+        if row.collapsed {
+            self.toggle_run_fold_at(self.selected);
+            return;
+        }
+        // Depth-first order puts the first child immediately below, and an
+        // unfolded run with sub-agents always has one; the clamp is only so a
+        // stale row index cannot point past the list.
+        let child = (self.selected + 1).min(self.display_indices.len().saturating_sub(1));
+        self.selected = child;
+        self.table_state.select(Some(child));
     }
 
     /// Keys handled while the MCP management screen is open.
@@ -1946,6 +2028,93 @@ mod tests {
     }
 
     // ─── kill via x + confirmation ────────────────────────────────────────
+
+    // ─── ← / → on the run list: the sub-agent tree ───────────────────────
+
+    /// A parent with two sub-agents, selected on its own row.
+    fn dash_with_a_subtree() -> Dashboard {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("parent", AgentDisplayStatus::Active));
+        for id in ["worker-a", "worker-b"] {
+            let mut child = make_test_agent(id, AgentDisplayStatus::Active);
+            child.parent_id = Some("parent".to_string());
+            dash.agents.push(child);
+        }
+        dash.update_display_indices();
+        dash.selected = dash.row_of_run("parent").expect("the parent is a row");
+        dash
+    }
+
+    #[test]
+    fn left_and_right_fold_and_unfold_a_run_s_sub_agents() {
+        let mut dash = dash_with_a_subtree();
+        assert_eq!(dash.display_indices.len(), 3);
+
+        dash.handle_key(key(KeyCode::Left));
+        assert_eq!(dash.display_indices.len(), 1, "the workers folded away");
+        assert!(dash.tree_rows[0].collapsed);
+        assert_eq!(dash.selected, 0, "the highlight stayed on the parent");
+
+        dash.handle_key(key(KeyCode::Right));
+        assert_eq!(dash.display_indices.len(), 3, "and unfolded again");
+        assert!(!dash.tree_rows[0].collapsed);
+        assert_eq!(dash.selected, 0);
+    }
+
+    /// With nothing left to fold the arrows walk the tree instead of dying:
+    /// → steps into the first worker, ← climbs back to the parent.
+    #[test]
+    fn the_arrows_walk_the_tree_when_there_is_nothing_to_fold() {
+        let mut dash = dash_with_a_subtree();
+        dash.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            dash.selected_agent().map(|a| a.id.as_str()),
+            Some("worker-a"),
+            "an unfolded parent steps down to its first worker"
+        );
+        // A worker has no sub-agents of its own, so → does nothing at all…
+        dash.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            dash.selected_agent().map(|a| a.id.as_str()),
+            Some("worker-a")
+        );
+        // …and ← climbs out of the subtree.
+        dash.handle_key(key(KeyCode::Left));
+        assert_eq!(dash.selected_agent().map(|a| a.id.as_str()), Some("parent"));
+    }
+
+    /// ← on a run that is nobody's child, and the arrows on an empty list,
+    /// both leave the selection where it is rather than panicking.
+    #[test]
+    fn the_arrows_are_harmless_with_no_tree_to_walk() {
+        let mut dash = make_test_dashboard();
+        dash.handle_key(key(KeyCode::Left));
+        dash.handle_key(key(KeyCode::Right));
+        assert_eq!(dash.selected, 0);
+
+        dash.agents
+            .push(make_test_agent("lonely", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Left));
+        assert_eq!(dash.selected, 0, "a root leaf has no parent to climb to");
+        assert!(dash.collapsed_runs.is_empty(), "and nothing folded");
+    }
+
+    /// Folding is keyed by run, so a row index that no longer names one (or a
+    /// run with no sub-agents) is a no-op rather than a phantom fold.
+    #[test]
+    fn folding_an_unfoldable_row_changes_nothing() {
+        let mut dash = dash_with_a_subtree();
+        dash.toggle_run_fold_at(99);
+        assert!(dash.collapsed_runs.is_empty(), "no such row");
+        let worker_row = dash.row_of_run("worker-a").unwrap();
+        dash.toggle_run_fold_at(worker_row);
+        assert!(
+            dash.collapsed_runs.is_empty(),
+            "a worker has nothing to fold"
+        );
+    }
 
     /// `c` no longer cancels from the list (it was an unconfirmed kill by
     /// another name); it is simply unbound there.

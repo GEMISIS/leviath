@@ -48,6 +48,17 @@ pub(crate) struct Dashboard {
     /// The graph pane holding the mouse between a left press and its
     /// release, so a pan that leaves the canvas keeps panning.
     pub(super) mouse_capture: Option<PaneId>,
+    /// What a left click acts on, re-registered by each renderer every frame
+    /// (see [`ClickTarget`]). Hit-tested last-match-first, so a target drawn
+    /// inside another wins.
+    pub(super) click_targets: Vec<(ratatui::layout::Rect, ClickTarget)>,
+    /// The cell and time of the last plain click, so a second click on the
+    /// same cell inside [`DOUBLE_CLICK_MS`](super::click::DOUBLE_CLICK_MS)
+    /// reads as a double click.
+    pub(super) last_click: Option<((u16, u16), u64)>,
+    /// Monotonic milliseconds, injected so double-click detection is testable
+    /// without sleeping (mirroring `clock`/`yank_fn`).
+    pub(super) mouse_clock: fn() -> u64,
     /// The detail view's graph band, kept between frames; rebuilt when the
     /// selected run changes.
     pub(super) detail_band: Option<super::detail_band::DetailBand>,
@@ -114,10 +125,14 @@ pub(crate) struct Dashboard {
     pub(super) list_search_query: String,
     /// Sorted + filtered indices into self.agents (drives both display and selection).
     pub(super) display_indices: Vec<usize>,
-    /// Tree-connector prefix for each `display_indices` row (parent → child
-    /// nesting), parallel to `display_indices`. Empty strings when filtering (the
-    /// list is flat then).
-    pub(super) tree_prefixes: Vec<String>,
+    /// Parent → child tree shape for each `display_indices` row (connector
+    /// prefix, whether it folds, whether it is folded), parallel to
+    /// `display_indices`. Default rows when filtering (the list is flat then).
+    pub(super) tree_rows: Vec<RunTreeRow>,
+    /// Runs whose sub-agents are folded away (`←` on the row, or a click on
+    /// its arrow). Keyed by run id rather than row position so a fold survives
+    /// re-sorting, filtering, and rows arriving above it.
+    pub(super) collapsed_runs: std::collections::HashSet<String>,
     /// Filesystem path this dashboard appends its activity log to. Production
     /// construction resolves the real [`runstate::dashboard_log_path`]; tests
     /// (`make_test_dashboard`) inject a temp path so no test ever writes to the
@@ -337,7 +352,7 @@ impl Dashboard {
         // With no filter, re-order into a parent → child tree so sub-agents and
         // fan-out workers nest under their parent (roots keep their recency order);
         // a filter keeps the flat sorted list (a partial match can't form a tree).
-        let prefixes: Vec<String> = if query.is_empty() {
+        let tree_rows: Vec<RunTreeRow> = if query.is_empty() {
             // Roots keep the status-sorted order; an agent whose parent is absent
             // is treated as a root so it can't disappear from the list.
             let present: std::collections::HashSet<&str> =
@@ -354,9 +369,9 @@ impl Dashboard {
                 .collect();
             let tree = self.build_tree_order(&roots);
             indices = tree.iter().map(|(i, _)| *i).collect();
-            tree.into_iter().map(|(_, prefix)| prefix).collect()
+            tree.into_iter().map(|(_, row)| row).collect()
         } else {
-            vec![String::new(); indices.len()]
+            vec![RunTreeRow::default(); indices.len()]
         };
         // Preserve selection: try to keep the same agent highlighted after recompute
         let prev_id = self
@@ -365,17 +380,20 @@ impl Dashboard {
             .and_then(|&i| self.agents.get(i))
             .map(|a| a.id.clone());
         self.display_indices = indices;
-        self.tree_prefixes = prefixes;
+        self.tree_rows = tree_rows;
+        // A fold whose parent has gone stops meaning anything; keeping it
+        // would silently re-fold a run that later reuses the id.
+        let agents = &self.agents;
+        self.collapsed_runs
+            .retain(|id| agents.iter().any(|a| a.id == *id));
         if let Some(id) = prev_id {
-            if let Some(pos) = self
-                .display_indices
-                .iter()
-                .position(|&i| self.agents.get(i).map(|a| a.id == id).unwrap_or(false))
-            {
-                self.selected = pos;
-            } else {
-                self.selected = 0;
-            }
+            // A fold can take the highlighted row off screen. Landing on the
+            // ancestor that swallowed it keeps the eye where it was; row 0 is
+            // a jump to the top of an unrelated run.
+            self.selected = self
+                .row_of_run(&id)
+                .or_else(|| self.visible_ancestor_row(&id))
+                .unwrap_or(0);
         }
         if self.display_indices.is_empty() {
             self.selected = 0;
@@ -994,12 +1012,14 @@ impl Dashboard {
         self.selected_stage == input_stage_idx
     }
 
-    /// Build a tree-ordered list of agent indices with tree connector prefixes.
+    /// Build a tree-ordered list of agent indices with their row shape.
     ///
     /// Depth-first tree order over the given root agent indices (in the order
-    /// supplied - the caller sorts them), nesting each root's children beneath it.
-    /// Returns `Vec<(original_index, tree_prefix)>`.
-    pub(super) fn build_tree_order(&self, root_order: &[usize]) -> Vec<(usize, String)> {
+    /// supplied - the caller sorts them), nesting each root's children beneath
+    /// it. A run in `collapsed_runs` still gets its own row, carrying the
+    /// number of descendants the fold hides; none of them are emitted.
+    /// Returns `Vec<(original_index, row)>`.
+    pub(super) fn build_tree_order(&self, root_order: &[usize]) -> Vec<(usize, RunTreeRow)> {
         let mut result = Vec::new();
         for &idx in root_order {
             self.collect_tree_children(idx, "", &mut result, true);
@@ -1007,28 +1027,56 @@ impl Dashboard {
         result
     }
 
-    fn collect_tree_children(
-        &self,
-        idx: usize,
-        prefix: &str,
-        result: &mut Vec<(usize, String)>,
-        is_root: bool,
-    ) {
-        let display_prefix = if is_root {
-            String::new()
-        } else {
-            prefix.to_string()
-        };
-        result.push((idx, display_prefix));
-
+    /// The agent indices whose `parent_id` is `idx`'s id.
+    fn children_of(&self, idx: usize) -> Vec<usize> {
         let agent_id = &self.agents[idx].id;
-        let children: Vec<usize> = self
-            .agents
+        self.agents
             .iter()
             .enumerate()
             .filter(|(_, a)| a.parent_id.as_deref() == Some(agent_id))
             .map(|(i, _)| i)
-            .collect();
+            .collect()
+    }
+
+    /// How many rows a fold on `idx` hides: its children, their children, and
+    /// so on, whatever their own fold state (the number is what the row shows,
+    /// and "4 hidden" that is really 9 would be a lie).
+    fn descendant_count(&self, idx: usize) -> usize {
+        self.children_of(idx)
+            .into_iter()
+            .map(|c| 1 + self.descendant_count(c))
+            .sum()
+    }
+
+    fn collect_tree_children(
+        &self,
+        idx: usize,
+        prefix: &str,
+        result: &mut Vec<(usize, RunTreeRow)>,
+        is_root: bool,
+    ) {
+        let children = self.children_of(idx);
+        let collapsed = self.collapsed_runs.contains(&self.agents[idx].id);
+        result.push((
+            idx,
+            RunTreeRow {
+                prefix: if is_root {
+                    String::new()
+                } else {
+                    prefix.to_string()
+                },
+                expandable: !children.is_empty(),
+                collapsed: collapsed && !children.is_empty(),
+                hidden: if collapsed {
+                    self.descendant_count(idx)
+                } else {
+                    0
+                },
+            },
+        ));
+        if collapsed {
+            return;
+        }
 
         for (ci, &child_idx) in children.iter().enumerate() {
             let is_last = ci == children.len() - 1;
@@ -1042,6 +1090,35 @@ impl Dashboard {
 
             self.collect_tree_children(child_idx, &child_prefix, result, false);
         }
+    }
+
+    /// The `display_indices` position of the row holding `run_id`, if it is
+    /// on screen (a folded-away child is not).
+    pub(super) fn row_of_run(&self, run_id: &str) -> Option<usize> {
+        self.display_indices
+            .iter()
+            .position(|&i| self.agents.get(i).is_some_and(|a| a.id == run_id))
+    }
+
+    /// Walking up from `run_id`, the row of the first ancestor that is on
+    /// screen - where a run that a fold just hid went.
+    fn visible_ancestor_row(&self, run_id: &str) -> Option<usize> {
+        let mut current = run_id.to_string();
+        // Bounded by the agent count: a `parent_id` chain longer than that has
+        // a cycle in it, and walking one forever would hang the draw loop.
+        for _ in 0..self.agents.len() {
+            let parent = self
+                .agents
+                .iter()
+                .find(|a| a.id == current)?
+                .parent_id
+                .clone()?;
+            if let Some(row) = self.row_of_run(&parent) {
+                return Some(row);
+            }
+            current = parent;
+        }
+        None
     }
 }
 
@@ -1523,8 +1600,88 @@ mod tests {
         assert_eq!(dash.display_indices.len(), 2);
         assert_eq!(dash.agents[dash.display_indices[0]].id, "parent");
         assert_eq!(dash.agents[dash.display_indices[1]].id, "child");
-        assert_eq!(dash.tree_prefixes[0], ""); // root: no prefix
-        assert!(dash.tree_prefixes[1].contains('─')); // child: tree connector
+        assert_eq!(dash.tree_rows[0].prefix, ""); // root: no prefix
+        assert!(dash.tree_rows[1].prefix.contains('─')); // child: tree connector
+    }
+
+    /// A grandparent's fold hides the whole subtree, and says how much of it.
+    #[test]
+    fn a_folded_run_hides_its_whole_subtree_and_counts_it() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("root", AgentDisplayStatus::Active));
+        let mut child = make_test_agent("child", AgentDisplayStatus::Active);
+        child.parent_id = Some("root".to_string());
+        dash.agents.push(child);
+        let mut grandchild = make_test_agent("grandchild", AgentDisplayStatus::Active);
+        grandchild.parent_id = Some("child".to_string());
+        dash.agents.push(grandchild);
+        dash.update_display_indices();
+        assert_eq!(dash.display_indices.len(), 3);
+        assert!(dash.tree_rows[0].expandable);
+        assert!(!dash.tree_rows[0].collapsed);
+        assert!(!dash.tree_rows[2].expandable, "the leaf cannot fold");
+
+        dash.collapsed_runs.insert("root".to_string());
+        dash.update_display_indices();
+        assert_eq!(dash.display_indices.len(), 1, "only the root is left");
+        assert!(dash.tree_rows[0].collapsed);
+        assert_eq!(
+            dash.tree_rows[0].hidden, 2,
+            "both descendants, not just the direct child"
+        );
+    }
+
+    /// Folding the run the highlight was inside moves it to the fold, not to
+    /// the top of the list.
+    #[test]
+    fn folding_a_parent_moves_the_highlight_onto_it() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("other", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("root", AgentDisplayStatus::Active));
+        let mut child = make_test_agent("child", AgentDisplayStatus::Active);
+        child.parent_id = Some("root".to_string());
+        dash.agents.push(child);
+        dash.update_display_indices();
+        let child_row = dash.row_of_run("child").expect("the child is on screen");
+        dash.selected = child_row;
+
+        dash.collapsed_runs.insert("root".to_string());
+        dash.update_display_indices();
+        assert_eq!(dash.row_of_run("child"), None, "the child is folded away");
+        assert_eq!(
+            dash.selected,
+            dash.row_of_run("root").unwrap(),
+            "the highlight followed the fold that swallowed it"
+        );
+    }
+
+    /// A `parent_id` cycle is walked at most once per run rather than forever.
+    #[test]
+    fn a_parent_cycle_does_not_hang_the_ancestor_walk() {
+        let mut dash = make_test_dashboard();
+        let mut a = make_test_agent("a", AgentDisplayStatus::Active);
+        a.parent_id = Some("b".to_string());
+        let mut b = make_test_agent("b", AgentDisplayStatus::Active);
+        b.parent_id = Some("a".to_string());
+        dash.agents.push(a);
+        dash.agents.push(b);
+        dash.update_display_indices();
+        assert_eq!(dash.visible_ancestor_row("a"), None);
+        // A parent that is not a run at all ends the walk too.
+        assert_eq!(dash.visible_ancestor_row("nobody"), None);
+    }
+
+    /// A fold on a run that later disappears is dropped, so a run that reuses
+    /// the id does not come back folded.
+    #[test]
+    fn a_fold_on_a_vanished_run_is_forgotten() {
+        let mut dash = make_test_dashboard();
+        dash.collapsed_runs.insert("ghost".to_string());
+        dash.update_display_indices();
+        assert!(dash.collapsed_runs.is_empty());
     }
 
     #[test]
@@ -1538,7 +1695,7 @@ mod tests {
         // A child whose parent is absent is treated as a root, not dropped.
         assert_eq!(dash.display_indices.len(), 1);
         assert_eq!(dash.agents[dash.display_indices[0]].id, "orphan");
-        assert_eq!(dash.tree_prefixes[0], "");
+        assert_eq!(dash.tree_rows[0].prefix, "");
     }
 
     #[test]
@@ -1687,7 +1844,7 @@ mod tests {
         let tree = dash.build_tree_order(&roots_of(&dash));
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].0, 0);
-        assert!(tree[0].1.is_empty()); // root has no prefix
+        assert!(tree[0].1.prefix.is_empty()); // root has no prefix
     }
 
     #[test]
@@ -1702,7 +1859,7 @@ mod tests {
         assert_eq!(tree.len(), 2);
         assert_eq!(tree[0].0, 0); // parent
         assert_eq!(tree[1].0, 1); // child
-        assert!(tree[1].1.contains("└─")); // last child connector
+        assert!(tree[1].1.prefix.contains("└─")); // last child connector
     }
 
     #[test]
@@ -1798,13 +1955,13 @@ mod tests {
         let tree = dash.build_tree_order(&roots_of(&dash));
         assert_eq!(tree.len(), 3);
         assert_eq!(tree[0].0, 0); // parent
-        assert!(tree[0].1.is_empty()); // root has no prefix
+        assert!(tree[0].1.prefix.is_empty()); // root has no prefix
         // First child
         assert_eq!(tree[1].0, 1);
-        assert!(tree[1].1.contains("├─")); // not last child
+        assert!(tree[1].1.prefix.contains("├─")); // not last child
         // Second child (last)
         assert_eq!(tree[2].0, 2);
-        assert!(tree[2].1.contains("└─")); // last child
+        assert!(tree[2].1.prefix.contains("└─")); // last child
     }
 
     #[test]
@@ -1917,14 +2074,14 @@ mod tests {
         let tree = dash.build_tree_order(&roots_of(&dash));
         assert_eq!(tree.len(), 4);
         assert_eq!(tree[0].0, 0); // root
-        assert!(tree[0].1.is_empty()); // root has no prefix
+        assert!(tree[0].1.prefix.is_empty()); // root has no prefix
         assert_eq!(tree[1].0, 1); // child1
-        assert!(tree[1].1.contains("├─")); // not last child
+        assert!(tree[1].1.prefix.contains("├─")); // not last child
         assert_eq!(tree[2].0, 3); // grandchild (under child1)
         // grandchild should have deeper connector
-        assert!(tree[2].1.len() > tree[1].1.len());
+        assert!(tree[2].1.prefix.len() > tree[1].1.prefix.len());
         assert_eq!(tree[3].0, 2); // child2
-        assert!(tree[3].1.contains("└─")); // last child
+        assert!(tree[3].1.prefix.contains("└─")); // last child
     }
 
     // ─── build_tree_order with multiple roots ─────────────────────────────

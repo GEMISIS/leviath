@@ -32,7 +32,7 @@ impl Dashboard {
         self.draw_linear_tabs(frame, tabs_area, agent);
     }
 
-    fn draw_linear_tabs(&self, frame: &mut Frame, tabs_area: Rect, agent: &DashboardAgent) {
+    fn draw_linear_tabs(&mut self, frame: &mut Frame, tabs_area: Rect, agent: &DashboardAgent) {
         // Build tab titles with status glyphs
         let tab_titles: Vec<Line> = if agent.stages.is_empty() {
             // Fallback: synthesize stage names from RunMeta info
@@ -113,6 +113,28 @@ impl Dashboard {
         };
         if agent.graph.is_some() {
             tab_nav.push_str("  ·  [g] graph");
+        }
+
+        // Where each tab lands, so clicking one opens it. `Tabs` lays them out
+        // as (one space, title, one space) joined by the divider, from the
+        // inside edge of the block - the same walk it does when it renders.
+        let mut column = tabs_area.x.saturating_add(1);
+        let right = tabs_area.x.saturating_add(tabs_area.width);
+        for (i, title) in tab_titles.iter().enumerate() {
+            let width = title.width() as u16 + 2;
+            if column >= right {
+                break;
+            }
+            self.register_click(
+                Rect::new(
+                    column,
+                    tabs_area.y.saturating_add(1),
+                    width.min(right - column),
+                    1,
+                ),
+                ClickTarget::StageTab(i),
+            );
+            column = column.saturating_add(width).saturating_add(3);
         }
 
         let tabs_widget = Tabs::new(tab_titles)
@@ -337,7 +359,7 @@ mod tests {
     fn draw_linear_tabs_various_statuses() {
         let backend = TestBackend::new(120, 10);
         let mut terminal = Terminal::new(backend).unwrap();
-        let dash = make_test_dashboard();
+        let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-vs", AgentDisplayStatus::Active);
         agent.stages = vec![
             make_stage_record("s1", StageRunStatus::Complete),
@@ -363,6 +385,59 @@ mod tests {
         assert!(buf.contains("s3"), "{buf}");
         assert!(buf.contains("s4"), "{buf}");
         assert!(buf.contains("s5"), "{buf}");
+    }
+
+    /// Each tab is registered over the columns it was drawn on, and a strip
+    /// too narrow to hold them all stops registering rather than putting
+    /// buttons past the edge.
+    #[test]
+    fn the_stage_tabs_register_where_they_were_drawn() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-tabs", AgentDisplayStatus::Active);
+        agent.stages = vec![
+            make_stage_record("plan", StageRunStatus::Complete),
+            make_stage_record("implement", StageRunStatus::Active),
+            make_stage_record("review", StageRunStatus::Pending),
+        ];
+        agent.num_stages = 3;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
+        terminal
+            .draw(|f| dash.draw_linear_tabs(f, Rect::new(0, 0, 120, 3), &agent))
+            .unwrap();
+        let tabs: Vec<_> = dash
+            .click_targets
+            .iter()
+            .filter(|(_, t)| matches!(t, ClickTarget::StageTab(_)))
+            .collect();
+        assert_eq!(tabs.len(), 3, "one target per tab");
+        // "plan" is drawn inside the first tab's rect.
+        let first = tabs[0].0;
+        let buf = rendered_buffer(&terminal);
+        let width = 120usize;
+        let row: String = buf
+            .chars()
+            .skip(width * (first.y as usize))
+            .take(width)
+            .collect();
+        let at = row.find("plan").expect("the first tab is drawn");
+        assert!(
+            (first.x as usize..(first.x + first.width) as usize).contains(&at),
+            "the rect covers the tab's text: {first:?} vs column {at}"
+        );
+
+        // Narrow enough that the later tabs never make it onto the strip.
+        dash.click_targets.clear();
+        let mut terminal = Terminal::new(TestBackend::new(14, 10)).unwrap();
+        terminal
+            .draw(|f| dash.draw_linear_tabs(f, Rect::new(0, 0, 14, 3), &agent))
+            .unwrap();
+        let narrow = dash
+            .click_targets
+            .iter()
+            .filter(|(_, t)| matches!(t, ClickTarget::StageTab(_)))
+            .count();
+        assert!(narrow < 3, "the strip ran out of room: {narrow} tabs");
     }
 
     #[test]

@@ -44,8 +44,11 @@ panel and answer. `lev respond` does the same from the shell.
 - **Agents**: the catalog of agents this machine can run (`a`), and an editor that builds one on
   the same graph canvas: stages as boxes, paths drawn between them, an inspector for whatever is
   selected. The same editor The Lair has, in the terminal.
-- **Mouse support**: wheel scroll, click-drag select with copy-on-release, OSC52 copy over SSH,
-  `y` to yank a pane, Shift+drag for native selection.
+- **Mouse support**: click a run to select it and again to open it, click the `▸`/`▾` arrow to fold
+  a run's sub-agents, click a stage tab or a content-pane chip (`[l]`, `[o]`, `[c]`) to switch to
+  it, click a Context row to fold or unfold it, click the log panel to move the keys there. Wheel
+  scroll, click-drag select with copy-on-release, OSC52 copy over SSH, `y` to yank a pane,
+  Shift+drag for native selection.
 - **`m`** opens the MCP management screen without leaving the dashboard.
 - **The daemon link**: the dashboard polls the [daemon](/docs/daemon) ten times a second, so a
   daemon restart costs it nothing but a moment. It says so in the log pane and a toast when the
@@ -70,6 +73,7 @@ the detail view).
 | `↑` / `↓` (or `k` / `j`) | Select a run |
 | `Home` / `End` (or `g` / `G`) | Jump to the first / last run |
 | `Enter` | Open detail view |
+| `←` / `→` | Fold / unfold the selected run's sub-agents. On a run that has none, `←` moves up to its parent and `→` down to its first worker |
 | `n` | Start a run: pick an agent, write the task, press Enter |
 | `Tab` / `Shift-Tab` | Focus the log panel (keys below) |
 | `/` | Filter runs by name or status |
@@ -85,6 +89,12 @@ the detail view).
 
 By default runs are listed newest first and keep their row for their whole life, so nothing jumps
 around when a run finishes. The sort indicator sits in the table's top-right corner.
+
+A run that spawned sub-agents (a fan-out, or the sub-agent tool) shows them nested under it, each
+row wearing a `▾` while its workers are showing and a `▸` once they are folded, with `+N` for how
+many the fold is hiding. `←` and `→` work the tree, and clicking the arrow does the same. A fold is
+remembered by run, so it survives sorting, filtering and new rows arriving above it, and folding
+the run you were inside moves the highlight onto the fold rather than back to the top.
 
 Marking selects several runs at once: press `Space` on each run, then `x` or `d` acts on all of
 them behind one confirmation. Marked rows show a check mark, the pane title counts them, and marks
@@ -175,7 +185,7 @@ activates it, and a stray keypress does nothing. The safe answer holds focus to 
 
 The Context view is a tree, not one long scroll. Each region is a header row with its token bar;
 its entries are one-line stubs with a preview. Move with `↑`/`↓`, fold or unfold with `Enter` or
-Space, and jump between regions with `[` and `]`. While a search (`/`) is active everything is
+Space (or by clicking the row), and jump between regions with `[` and `]`. While a search (`/`) is active everything is
 temporarily unfolded so matches inside entries stay reachable. Browsing history with `,`/`.` keeps
 your scroll position and fold state, and the context card's title shows which archived point you
 are on, in which stage, recorded when.
@@ -190,7 +200,8 @@ chain; a graph blueprint is a graph):
   does (`r` turns it by hand); boxes are never shrunk to make a graph fit, the canvas pans instead,
   with a minimap in the corner when there is more graph than screen. The stage the run is in
   spins in the run's colour, stages it has been through show a visit count (`×2`) and the time of
-  their last visit, the last transition it took is animated, and revisit loops run along a lane
+  their last visit, the last transition it took is animated while the run is still going, and
+  revisit loops run along a lane
   beside the boxes. While a run is on the canvas the picture is the path and the options: the
   stages the run has been through and the one it is in, the transitions between them, and the
   transitions it can take from where it is with the stages they lead to. Everything else waits

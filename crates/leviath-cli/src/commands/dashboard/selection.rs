@@ -155,7 +155,13 @@ impl Dashboard {
                 self.selection_drag(event.column, event.row);
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                self.selection_release(event.column, event.row);
+                // A release with no motion behind it is a click, not a
+                // selection: it goes to whatever was drawn under it (see
+                // `click.rs`). A drag stays a copy highlight.
+                let plain_click = self.selection_release(event.column, event.row);
+                if plain_click {
+                    self.handle_click(event.column, event.row);
+                }
             }
             _ => {}
         }
@@ -222,16 +228,24 @@ impl Dashboard {
     /// Release ends the drag: with motion it schedules the copy for the next
     /// draw (extraction needs the drawn buffer), without motion it was a plain
     /// click and clears.
-    fn selection_release(&mut self, column: u16, row: u16) {
+    ///
+    /// Returns whether this was a plain click, so the caller can hand it to
+    /// the click targets. A release with no drag behind it at all (the press
+    /// landed outside every selectable region) counts as one too - the frame
+    /// is one selection region, so in practice this is a release the graph
+    /// canvases let through.
+    fn selection_release(&mut self, column: u16, row: u16) -> bool {
         let Some(sel) = self.selection.as_mut().filter(|s| s.dragging) else {
-            return;
+            return true;
         };
         sel.cursor = clamp_to_region(sel.region, column, row);
         sel.dragging = false;
         if sel.moved {
             sel.pending_copy = true;
+            false
         } else {
             self.selection = None;
+            true
         }
     }
 

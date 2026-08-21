@@ -748,6 +748,28 @@ condition = "llm_choice"
         );
         assert!(view.edge_animated("review", "implement"));
 
+        // The same run once it finishes: the path it took is still drawn, but
+        // nothing on it moves any more. A pulse into the last stage of a run
+        // that is over reads as a run still going.
+        dash.agents[0].status = AgentDisplayStatus::Complete;
+        draw(&mut dash);
+        let view = &dash.stage_explorer.as_ref().unwrap().view;
+        assert!(
+            !view.edge_animated("review", "implement"),
+            "a finished run is not travelling anything"
+        );
+        assert!(!view.edge_hidden("review", "implement"), "still drawn");
+        dash.agents[0].status = AgentDisplayStatus::Active;
+        draw(&mut dash);
+        assert!(
+            dash.stage_explorer
+                .as_ref()
+                .unwrap()
+                .view
+                .edge_animated("review", "implement"),
+            "and it moves again while the run does"
+        );
+
         // A run with no history, no ledger and no stage name: nothing current,
         // no workers, no transitions.
         let mut bare = agent("run-9", AgentDisplayStatus::Idle);

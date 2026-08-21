@@ -29,6 +29,9 @@ impl Dashboard {
         // Wheel hit-testing rects are also per-frame: each pane's renderer
         // registers where it actually drew.
         self.pane_rects.clear();
+        // …and so is what a click acts on, for the same reason: a target left
+        // over from a previous layout is a click on the wrong thing.
+        self.click_targets.clear();
 
         if self.agent_builder.is_some() {
             self.draw_agents_screen(frame, frame.area());

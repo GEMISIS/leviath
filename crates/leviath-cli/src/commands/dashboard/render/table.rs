@@ -5,6 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table};
+use unicode_width::UnicodeWidthStr;
 
 use crate::commands::dashboard::helpers::{format_tokens, relative_time, truncate};
 use crate::commands::dashboard::state::Dashboard;
@@ -59,8 +60,8 @@ impl Dashboard {
             .enumerate()
             .map(|(pos, &idx)| {
                 let agent = &self.agents[idx];
-                // Tree-connector prefix (parent → child nesting); empty when flat.
-                let tree_prefix = self.tree_prefixes.get(pos).cloned().unwrap_or_default();
+                // Tree shape (parent → child nesting); default when flat.
+                let tree = self.tree_rows.get(pos).cloned().unwrap_or_default();
                 // A parked run only wears the attention colour when a person is
                 // actually needed. A parent whose workers are still running is
                 // healthy, and colouring it like a question is what taught
@@ -122,12 +123,35 @@ impl Dashboard {
                         title_spans.push(Span::raw("  "));
                     }
                 }
-                title_spans.push(Span::styled(tree_prefix, Style::default().fg(C_DIM)));
+                title_spans.push(Span::styled(
+                    tree.prefix.clone(),
+                    Style::default().fg(C_DIM),
+                ));
+                // The fold arrow, on runs that have sub-agents. Leaves get the
+                // same two columns of blank so every title still lines up.
+                title_spans.push(Span::styled(
+                    if !tree.expandable {
+                        "  "
+                    } else if tree.collapsed {
+                        "▸ "
+                    } else {
+                        "▾ "
+                    },
+                    Style::default().fg(C_ACCENT),
+                ));
                 title_spans.push(Span::styled(title_str, Style::default().fg(C_WHITE)));
                 title_spans.push(Span::styled(
                     format!(" #{}", short_id),
                     Style::default().fg(C_DIM),
                 ));
+                // A fold has to say what it swallowed, or the run simply looks
+                // like it has no workers.
+                if tree.collapsed {
+                    title_spans.push(Span::styled(
+                        format!(" +{}", tree.hidden),
+                        Style::default().fg(C_ACCENT),
+                    ));
+                }
                 let title_cell = Cell::from(Line::from(title_spans));
                 Row::new(vec![
                     title_cell,
@@ -227,10 +251,49 @@ impl Dashboard {
         );
 
         frame.render_stateful_widget(table, area, &mut self.table_state);
+        self.register_run_row_clicks(area, any_marked);
+    }
+
+    /// Register a click target per visible run row, and a second one over its
+    /// fold arrow.
+    ///
+    /// Runs after the table renders because that is when `TableState` knows
+    /// how far it scrolled; deriving the offset ourselves would be a second
+    /// implementation of the widget's own scrolling, free to disagree with it.
+    fn register_run_row_clicks(&mut self, area: Rect, any_marked: bool) {
+        // Inside the border, below the one-row header.
+        let first_row_y = area.y.saturating_add(2);
+        let visible = area.height.saturating_sub(3);
+        let offset = self.table_state.offset();
+        let title_x = area.x.saturating_add(1);
+        // The tick column, present only while something is marked.
+        let mark_w = if any_marked { 2u16 } else { 0 };
+        for screen in 0..visible {
+            let pos = offset + screen as usize;
+            if pos >= self.display_indices.len() {
+                break;
+            }
+            let y = first_row_y + screen;
+            self.register_click(
+                Rect::new(area.x, y, area.width, 1),
+                ClickTarget::RunRow(pos),
+            );
+            let tree = self.tree_rows.get(pos).cloned().unwrap_or_default();
+            if !tree.expandable {
+                continue;
+            }
+            let prefix_w = UnicodeWidthStr::width(tree.prefix.as_str()) as u16;
+            let arrow_x = title_x.saturating_add(mark_w).saturating_add(prefix_w);
+            if arrow_x + 2 <= area.x + area.width {
+                self.register_click(Rect::new(arrow_x, y, 2, 1), ClickTarget::RunToggle(pos));
+            }
+        }
     }
 
     pub(in crate::commands::dashboard) fn draw_log_panel(&mut self, frame: &mut Frame, area: Rect) {
         self.pane_rects.push((PaneId::LogPanel, area));
+        // Clicking the panel is the mouse's Tab: it moves the keyboard here.
+        self.register_click(area, ClickTarget::LogPanel);
         let viewport = area.height.saturating_sub(2) as usize;
         self.log_viewport = viewport;
         let window = self.log_scroll.window(self.log.len(), viewport);
@@ -565,6 +628,17 @@ impl Dashboard {
                 Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
             ),
             Span::raw(" detail  "),
+        ];
+        // Only worth a slot on the bar when there is a tree to work: on a list
+        // of plain runs the arrows have nothing to fold.
+        if self.tree_rows.iter().any(|r| r.expandable) {
+            spans.push(Span::styled(
+                "[←/→]",
+                Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" fold sub-agents  "));
+        }
+        spans.extend([
             Span::styled(
                 "[n]",
                 Style::default().fg(C_SUCCESS).add_modifier(Modifier::BOLD),
@@ -593,7 +667,7 @@ impl Dashboard {
             Span::raw(" mark  "),
             Span::styled("[m]", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" mcp  "),
-        ];
+        ]);
         if can_kill {
             spans.push(Span::styled(
                 "[x]",
@@ -1467,10 +1541,121 @@ mod tests {
             })
             .unwrap();
         let buf = rendered_buffer(&terminal);
-        assert!(buf.contains("✓ My Test #1"), "{buf}");
-        assert!(!buf.contains("✓ My Test #2"), "{buf}");
+        // The two columns between the tick and the title are the fold-arrow
+        // gutter, blank on a run with no sub-agents so titles stay aligned.
+        assert!(buf.contains("✓   My Test #1"), "{buf}");
+        assert!(!buf.contains("✓   My Test #2"), "{buf}");
         assert!(buf.contains("My Test #2"), "the unmarked row still renders");
         assert!(buf.contains("1 marked"), "{buf}");
+    }
+
+    // ── The sub-agent fold ────────────────────────────────────────────────
+
+    /// A parent with one worker, the shape the run list draws as a tree.
+    fn dash_with_a_worker() -> crate::commands::dashboard::state::Dashboard {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("parent", AgentDisplayStatus::Active));
+        let mut child = make_test_agent("worker", AgentDisplayStatus::Active);
+        child.parent_id = Some("parent".to_string());
+        dash.agents.push(child);
+        dash.update_display_indices();
+        dash
+    }
+
+    /// The arrow says which way the fold goes, and a folded row says how many
+    /// runs are behind it.
+    #[test]
+    fn the_fold_arrow_and_its_hidden_count_are_drawn() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = dash_with_a_worker();
+        terminal
+            .draw(|f| dash.draw_agent_table(f, f.area()))
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("▾ My Test"), "an unfolded parent: {buf}");
+        assert!(!buf.contains("▸ "), "nothing is folded yet: {buf}");
+
+        dash.collapsed_runs.insert("parent".to_string());
+        dash.update_display_indices();
+        terminal
+            .draw(|f| dash.draw_agent_table(f, f.area()))
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("▸ My Test"), "a folded parent: {buf}");
+        assert!(buf.contains("+1"), "and what it hides: {buf}");
+    }
+
+    /// The arrow's rect is registered where the arrow was actually drawn, and
+    /// only for rows that have one.
+    #[test]
+    fn only_a_foldable_row_registers_a_fold_arrow() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = dash_with_a_worker();
+        terminal
+            .draw(|f| dash.draw_agent_table(f, f.area()))
+            .unwrap();
+        let toggles: Vec<_> = dash
+            .click_targets
+            .iter()
+            .filter(|(_, t)| matches!(t, ClickTarget::RunToggle(_)))
+            .collect();
+        assert_eq!(toggles.len(), 1, "the parent only, not the worker");
+        assert_eq!(toggles[0].1, ClickTarget::RunToggle(0));
+        let rows = dash
+            .click_targets
+            .iter()
+            .filter(|(_, t)| matches!(t, ClickTarget::RunRow(_)))
+            .count();
+        assert_eq!(rows, 2, "both rows are clickable");
+    }
+
+    /// A table too narrow to hold the arrow registers the row but no arrow,
+    /// rather than a rect hanging off the right edge.
+    #[test]
+    fn a_table_narrower_than_the_arrow_registers_no_arrow() {
+        let backend = TestBackend::new(2, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = dash_with_a_worker();
+        terminal
+            .draw(|f| dash.draw_agent_table(f, f.area()))
+            .unwrap();
+        assert!(
+            !dash
+                .click_targets
+                .iter()
+                .any(|(_, t)| matches!(t, ClickTarget::RunToggle(_))),
+            "no room for an arrow to click"
+        );
+    }
+
+    /// The fold hint earns its place on the bar only when there is a tree.
+    #[test]
+    fn the_fold_hint_appears_only_with_sub_agents() {
+        let backend = TestBackend::new(200, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("solo", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        terminal
+            .draw(|f| dash.draw_help_bar(f, Rect::new(0, 0, 200, 1)))
+            .unwrap();
+        assert!(
+            !rendered_buffer(&terminal).contains("fold sub-agents"),
+            "no tree, no hint"
+        );
+
+        let dash = dash_with_a_worker();
+        terminal
+            .draw(|f| dash.draw_help_bar(f, Rect::new(0, 0, 200, 1)))
+            .unwrap();
+        assert!(
+            rendered_buffer(&terminal).contains("fold sub-agents"),
+            "the hint shows once a run has workers"
+        );
     }
 
     #[test]

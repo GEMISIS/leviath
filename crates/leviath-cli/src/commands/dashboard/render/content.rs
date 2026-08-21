@@ -206,17 +206,16 @@ impl Dashboard {
         // Build content lines. `showing_final_output` records whether the
         // Output pane fell back to the run's final answer, so the file-path
         // hint below can point at the file actually being shown.
-        let (all_lines, context_cursor_line, showing_final_output): (
-            Vec<Line>,
-            Option<usize>,
-            bool,
-        ) = if is_context {
-            let (lines, cursor) = self.build_context_lines(agent, render_width);
-            (lines, cursor, false)
-        } else {
-            let (lines, showing_final) = self.build_output_lines(agent, is_output, render_width);
-            (lines, None, showing_final)
-        };
+        let (all_lines, context_row_lines, showing_final_output): (Vec<Line>, Vec<usize>, bool) =
+            if is_context {
+                let (lines, rows) = self.build_context_lines(agent, render_width);
+                (lines, rows, false)
+            } else {
+                let (lines, showing_final) =
+                    self.build_output_lines(agent, is_output, render_width);
+                (lines, Vec::new(), showing_final)
+            };
+        let context_cursor_line = context_row_lines.get(self.context_tree.cursor).copied();
 
         // ── Error / Cancelled banner ─────────────────────────────────────
         let mut all_lines = all_lines;
@@ -274,6 +273,26 @@ impl Dashboard {
         // the wrapped tail clipped past the pane bottom. `line_count` measures
         // exactly what `Paragraph` will render at this width.
         let total_rows = wrapped_rows(&all_lines, render_width);
+
+        // Which display row each interactive tree row starts on, so a click
+        // can be turned back into the row it landed on. One cumulative pass
+        // over the document; counting from the top per row would be quadratic
+        // in the size of a context window, ten times a second.
+        let context_row_offsets: Vec<usize> = if context_row_lines.is_empty() {
+            Vec::new()
+        } else {
+            let mut cumulative = Vec::with_capacity(all_lines.len() + 1);
+            let mut acc = 0usize;
+            cumulative.push(0);
+            for line in &all_lines {
+                acc += wrapped_rows(std::slice::from_ref(line), render_width);
+                cumulative.push(acc);
+            }
+            context_row_lines
+                .iter()
+                .map(|&line| cumulative[line.min(all_lines.len())])
+                .collect()
+        };
 
         // Clamp search_match_idx and jump to current match (centred by the
         // match's display row, since that is what the viewport scrolls by).
@@ -441,11 +460,18 @@ impl Dashboard {
             format!(" {} ", shortened)
         };
 
+        // The mode chips in the title are buttons: `[l] logs` and friends do
+        // by click exactly what their letter does by key.
+        self.register_mode_chip_clicks(content_area, &mode_label);
+
         let content_block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(C_BORDER_FOCUS))
-            .title(Span::styled(mode_label, Style::default().fg(C_ACCENT)))
+            .title(Span::styled(
+                mode_label.clone(),
+                Style::default().fg(C_ACCENT),
+            ))
             .title_bottom(
                 Line::from(Span::styled(file_path_hint, Style::default().fg(C_DIM))).left_aligned(),
             )
@@ -475,15 +501,71 @@ impl Dashboard {
                 &mut sb_state,
             );
         }
+
+        // Every tree row the viewport is actually showing becomes clickable,
+        // on the row it was drawn on. Rows scrolled off screen register
+        // nothing: a click cannot land on them.
+        for (idx, &offset) in context_row_offsets.iter().enumerate() {
+            let Some(y) = offset.checked_sub(scroll_y).filter(|y| *y < inner_h) else {
+                continue;
+            };
+            self.register_click(
+                Rect::new(
+                    content_area.x + 1,
+                    content_area.y + 1 + y as u16,
+                    render_width,
+                    1,
+                ),
+                ClickTarget::ContextRow(idx),
+            );
+        }
     }
 
-    /// The Context view's lines, plus the line index of the tree cursor's row
-    /// (for scroll-follow), when a snapshot exists.
+    /// Make the content pane's title chips (`[l] logs`, `[o] output`,
+    /// `[c] ctx`) clickable, over the exact columns they were drawn on.
+    ///
+    /// The title renders inside the top border, starting one cell in, so the
+    /// character offsets in the label are the screen columns. Only the chips
+    /// actually in this label are registered - the current mode has no chip of
+    /// its own, and registering a rect for text that is not there would put a
+    /// button over the run's search indicator.
+    fn register_mode_chip_clicks(&mut self, content_area: Rect, mode_label: &str) {
+        if content_area.width < 2 {
+            return;
+        }
+        for (chip, mode) in [
+            ("[l] logs", StageContentMode::Logs),
+            ("[o] output", StageContentMode::Output),
+            ("[c] ctx", StageContentMode::Context),
+        ] {
+            let Some(byte) = mode_label.find(chip) else {
+                continue;
+            };
+            // Characters, not bytes: the label carries a search indicator that
+            // can hold anything the user typed.
+            let before = mode_label
+                .char_indices()
+                .take_while(|(at, _)| *at < byte)
+                .count() as u16;
+            let column = content_area.x + 1 + before;
+            let width = chip.chars().count() as u16;
+            if column + width <= content_area.x + content_area.width {
+                self.register_click(
+                    Rect::new(column, content_area.y, width, 1),
+                    ClickTarget::ContentMode(mode),
+                );
+            }
+        }
+    }
+
+    /// The Context view's lines, plus the line each interactive tree row
+    /// (region header, entry stub) starts on - what the renderer needs to
+    /// scroll to the cursor and to hand a click the row it landed on.
     fn build_context_lines(
         &self,
         agent: &DashboardAgent,
         render_width: u16,
-    ) -> (Vec<Line<'static>>, Option<usize>) {
+    ) -> (Vec<Line<'static>>, Vec<usize>) {
         // When browsing the run's archived context history, show that point's
         // window; otherwise the live current window for the selected stage.
         let snap_opt = self
@@ -639,19 +721,17 @@ impl Dashboard {
                 searching,
                 render_width,
             );
-            let cursor_line = flat
-                .cursor_lines
-                .get(self.context_tree.cursor)
-                .map(|line| lines.len() + line);
+            let base = lines.len();
+            let row_lines = flat.cursor_lines.iter().map(|line| base + line).collect();
             lines.extend(flat.lines);
-            (lines, cursor_line)
+            (lines, row_lines)
         } else {
             (
                 vec![Line::from(Span::styled(
                     " no context snapshot available for this stage",
                     Style::default().fg(C_DIM),
                 ))],
-                None,
+                Vec::new(),
             )
         }
     }
@@ -1591,7 +1671,7 @@ mod tests {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-bcl", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
 
@@ -1599,7 +1679,7 @@ mod tests {
     fn build_context_lines_without_snapshot() {
         let dash = make_test_dashboard();
         let agent = make_test_agent("run-bcl2", AgentDisplayStatus::Active);
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty()); // should show "no context snapshot" message
     }
 
@@ -1642,7 +1722,7 @@ hint = "after plan"
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ended_at: None,
         }];
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1668,7 +1748,7 @@ name = "g"
         );
         agent.stages = vec![]; // no stage records at all -> .get(0) is None
 
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1701,7 +1781,7 @@ name = "g"
         };
         agent.stages = vec![rec.clone(), rec];
 
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1740,7 +1820,7 @@ condition = "error"
             ended_at: None,
         }];
 
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1783,7 +1863,7 @@ condition = "error"
                 description: None,
             }],
         }));
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1809,7 +1889,7 @@ condition = "error"
                 description: None,
             }],
         }));
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1851,7 +1931,7 @@ transform = "clear"
             ended_at: None,
         }];
         // selected_stage = 0, so we look up index 0 in stages which is "implement"
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1886,7 +1966,7 @@ transform = "clear"
             started_at: Some(chrono::Utc::now().timestamp() - 60),
             ended_at: Some(chrono::Utc::now().timestamp() - 10),
         }];
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1917,7 +1997,7 @@ transform = "clear"
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ended_at: None,
         }];
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1995,7 +2075,7 @@ transform = "clear"
                 },
             ],
         }));
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
 
@@ -2018,7 +2098,7 @@ transform = "clear"
                 description: None,
             }],
         }));
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
 
@@ -2041,7 +2121,7 @@ transform = "clear"
                 description: None,
             }],
         }));
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
 
@@ -2064,7 +2144,7 @@ transform = "clear"
                 description: None,
             }],
         }));
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
 
@@ -2534,9 +2614,114 @@ transform = "clear"
             }),
         );
         dash.context_history_idx = Some(0);
-        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines.iter().map(|l| format!("{l:?}")).collect::<String>();
         assert!(text.contains("hist-region"), "browsed region rendered");
+    }
+
+    // ─── Clickable chips and tree rows ────────────────────────────────────
+
+    /// A context window with more rows than a short pane can show.
+    fn tall_context_agent(id: &str) -> DashboardAgent {
+        let entry = |text: &str| runstate::RegionEntrySnapshot {
+            content: text.to_string(),
+            tokens: 5,
+            kind: Default::default(),
+            metadata: None,
+            key: None,
+            taint: Default::default(),
+        };
+        let mut agent = make_test_agent(id, AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(std::sync::Arc::new(runstate::ContextSnapshot {
+            stage_name: "main".to_string(),
+            total_tokens: 40,
+            max_tokens: 100,
+            regions: (0..4)
+                .map(|i| runstate::RegionSnapshot {
+                    name: format!("region{i}"),
+                    kind: "pinned".to_string(),
+                    current_tokens: 10,
+                    max_tokens: 25,
+                    entries: vec![entry("alpha"), entry("beta")],
+                    description: None,
+                })
+                .collect(),
+        }));
+        agent
+    }
+
+    /// Only the rows the viewport is showing become clickable; the ones
+    /// scrolled past the bottom register nothing, so a click cannot land on a
+    /// row that is not there.
+    #[test]
+    fn only_the_visible_context_rows_are_clickable() {
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Context;
+        let agent = tall_context_agent("run-ctx-click");
+        terminal
+            .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 100, 10), &agent, 100))
+            .unwrap();
+        let rows: Vec<usize> = dash
+            .click_targets
+            .iter()
+            .filter_map(|(_, t)| match t {
+                ClickTarget::ContextRow(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        assert!(!rows.is_empty(), "some rows are on screen");
+        assert!(
+            rows.len() < 12,
+            "four regions with two entries each do not fit in eight rows: {rows:?}"
+        );
+        // Every registered row sits inside the pane's inner area.
+        for (rect, target) in &dash.click_targets {
+            if matches!(target, ClickTarget::ContextRow(_)) {
+                assert!((1..9).contains(&rect.y), "{rect:?}");
+            }
+        }
+    }
+
+    /// The chips are registered only for the modes the label actually offers,
+    /// and only when there is room to draw them.
+    #[test]
+    fn the_mode_chips_registered_match_the_label() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let agent = make_test_agent("run-chips", AgentDisplayStatus::Active);
+        dash.stage_content_mode = StageContentMode::Output;
+        terminal
+            .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 100, 20), &agent, 100))
+            .unwrap();
+        // The pane registers nothing else here (no snapshot, so no tree rows),
+        // so the whole registry is the chips.
+        let chips: Vec<ClickTarget> = dash.click_targets.iter().map(|(_, t)| *t).collect();
+        assert!(chips.contains(&ClickTarget::ContentMode(StageContentMode::Logs)));
+        assert!(chips.contains(&ClickTarget::ContentMode(StageContentMode::Context)));
+        assert!(
+            !chips.contains(&ClickTarget::ContentMode(StageContentMode::Output)),
+            "the mode already showing has no chip of its own"
+        );
+
+        // A pane too narrow for the title registers nothing rather than
+        // buttons over columns that were never drawn. (`draw` clears the
+        // registry each frame; this test drives one pane at a time.)
+        dash.click_targets.clear();
+        let backend = TestBackend::new(6, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 6, 6), &agent, 6))
+            .unwrap();
+        assert!(dash.click_targets.is_empty(), "no room for a chip");
+        // …and neither does a pane with no width at all.
+        dash.click_targets.clear();
+        terminal
+            .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 1, 6), &agent, 1))
+            .unwrap();
+        assert!(dash.click_targets.is_empty());
     }
 
     // ─── render_content_pane: Context mode with is_run_state (disk fallback)
