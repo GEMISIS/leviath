@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.3.2"
+version = "0.3.3"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 entry_stage = "survey"
 
@@ -18,7 +18,10 @@ bash       = "ask"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Survey the landscape across multiple sub-topics"
-available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time", "context_read"]
+available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time", "context_read", "ask_user_text", "ask_user_choice"]
+# The ask tools block on a person, which is the point: this stage decides what
+# the whole fan-out investigates. An unattended run is never offered them.
+allow_blocking_tools = true
 max_iterations = 25
 max_revisits = 2
 system_prompt = """
@@ -46,6 +49,11 @@ leaderboard, release feed) before you settle the list of threads. A landscape
 recalled rather than gathered is by construction the landscape from before your
 cutoff, and this stage decides what the whole fan-out investigates.
 
+A "which one should I use" question has an index too, even when it names none:
+the model cards, the leaderboard, the vendor's own docs, the package registry.
+Searching the question as asked returns roundups and listicles; go to the
+artifact itself for anything you are going to state as a number.
+
 Today's date is in the `environment` region. Treat it as authoritative over
 anything you remember: your training has a cutoff and this run does not. Judge
 "recent", "current", "active" and "state of the art" against it, and note how
@@ -57,6 +65,17 @@ an engine error, or an encyclopedia fallback - then this run cannot see the web.
 Record that in `sources_index` and do NOT close the gap from memory. A landscape
 reported as unmapped is a usable result; one assembled from recall is not, and a
 reader cannot tell the two apart after the fact.
+
+If the task is ambiguous in a way that would change what you survey - a term with
+two common meanings, a constraint you cannot infer, a scope that could be read
+narrow or wide - ask before you spend the run on a guess. `ask_user_text` takes a
+free-text answer and `ask_user_choice` offers options; one good question here is
+worth more than a thorough survey of the wrong field, and this stage decides what
+the whole fan-out investigates.
+
+Ask once, early, and only when the answer changes what you would do. If nobody is
+attached to this run the tools are not offered at all - carry on, state the
+reading you chose, and say what you would have asked.
 """
 
 [stages.survey.tool_routing]
@@ -281,6 +300,13 @@ reader can click through from the claim.
 Write concisely - the reader wants the lay of the land quickly. Cite sources for
 non-obvious claims.
 
+A qualifier travels with the claim it qualifies. If the evidence says "yes, with
+offload" or "tight", or the figure came from one uncorroborated page, the
+recommendation says so too - a reader acting on your summary never sees the table
+it came from. A run recommending a local model carried "yes, with offload" and
+"~22 tok/s" in its comparison table and dropped both from the recommendation,
+which is the one place the tradeoff mattered.
+
 The bibliography is the deliverable as much as the prose is: a survey is a
 reading list, and `[n]` markers over a source list with no URLs send the reader
 back to a search engine to find what this run already found. Carry the URL on
@@ -363,7 +389,7 @@ environment        = { kind = "pinned", budget = "1%", seed = { tools = ["curren
 # that can write context and no-ops for the ones that cannot, so it can never
 # deadlock the deliverable.
 sources_index      = { kind = "pinned", budget = "3%", volatility = "grows", required = true, required_message = "You have not recorded a single source in `sources_index`. Append one bibliography line per source you actually read (context_append, region=\"sources_index\"): `[n] <title> - <url or path> - credibility: <high/med/low + why>`. If the searches came back empty or unavailable, record THAT as the finding - do not proceed as though sources were gathered." }
-format             = { kind = "pinned", budget = "1%", seed = { literal = "Cite non-obvious claims as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Write every marker as a link to the source it cites - `[[n]](<url>)`, which renders as [n] and clicks through - so a reader can check a claim without scrolling to the bibliography and pasting a URL by hand. Use the URL from that source's `sources_index` line; a source that has a local path instead of a URL stays a bare [n]. The bibliography entry keeps its full URL either way. Prefer comparison tables where they clarify tradeoffs. A claim about something the task names only as a comparison rests on what THIS run read about it, not on the credibility of your own topic's sources: grade it on that, and when a figure reaches you through a source that mentions a study rather than one that reports it, say so and grade it down." }, volatility = "stable" }
+format             = { kind = "pinned", budget = "1%", seed = { literal = "Cite non-obvious claims as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Write every marker as a link to the source it cites - `[[n]](<url>)`, which renders as [n] and clicks through - so a reader can check a claim without scrolling to the bibliography and pasting a URL by hand. Use the URL from that source's `sources_index` line; a source that has a local path instead of a URL stays a bare [n]. The bibliography entry keeps its full URL either way. Prefer comparison tables where they clarify tradeoffs. Credibility is about what a source IS, not how authoritative it sounds: only the primary artifact - the paper, the spec, the model card, the official docs, the registry or leaderboard - can be high for a factual claim about that artifact. A roundup, listicle or vendor blog is medium at best however confident its title, and a number that appears in exactly one such page with nothing corroborating it is low and says so. A claim about something the task names only as a comparison rests on what THIS run read about it, not on the credibility of your own topic's sources: grade it on that, and when a figure reaches you through a source that mentions a study rather than one that reports it, say so and grade it down." }, volatility = "stable" }
 
 landscape          = { kind = "temporary",      budget = "30%" }
 deep_dives         = { kind = "sliding_window", max_items = 15, budget = "8%" }
