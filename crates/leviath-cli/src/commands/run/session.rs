@@ -349,8 +349,12 @@ mod tests {
     #[test]
     fn build_provider_registry_with_empty_config() {
         let config = Config::default();
-        let registry =
-            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
+        let registry = build_provider_registry_from_config_probing(
+            &config,
+            &leviath_providers::provider::build_http_client,
+            &|_| true,
+        )
+        .expect("an HTTPS client builds in tests");
         // Ollama needs no key and is always on.
         assert!(registry.has("ollama"));
         // Claude Code needs no key either, but is opt-in - a default config
@@ -481,8 +485,12 @@ mod tests {
             openrouter_api_key: Some("sk-or-test-12345".to_string()),
             ..Config::default()
         };
-        let registry =
-            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
+        let registry = build_provider_registry_from_config_probing(
+            &config,
+            &leviath_providers::provider::build_http_client,
+            &|_| true,
+        )
+        .expect("an HTTPS client builds in tests");
         assert!(registry.has("openrouter"));
     }
 
@@ -801,8 +809,12 @@ mod tests {
     #[test]
     fn build_provider_registry_defaults_have_ollama_only() {
         let config = Config::default();
-        let registry =
-            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
+        let registry = build_provider_registry_from_config_probing(
+            &config,
+            &leviath_providers::provider::build_http_client,
+            &|_| true,
+        )
+        .expect("an HTTPS client builds in tests");
         // Ollama is present regardless of key configuration; claude-code is not,
         // until the user opts in.
         assert!(registry.has("ollama"));
@@ -898,8 +910,12 @@ mod tests {
             },
             ..crate::config::Config::default()
         };
-        let registry =
-            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
+        let registry = build_provider_registry_from_config_probing(
+            &config,
+            &leviath_providers::provider::build_http_client,
+            &|_| true,
+        )
+        .expect("an HTTPS client builds in tests");
         // Verify anthropic provider was registered
         assert!(registry.has("anthropic"));
         // Verify ollama always registered

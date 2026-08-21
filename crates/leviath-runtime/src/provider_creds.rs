@@ -613,7 +613,11 @@ mod tests {
         for name in ["anthropic", "openai", "google", "openrouter", "ollama"] {
             let mut cred = ProviderCreds::simple(name);
             cred.api_key = Some("k".to_string());
-            let err = build_provider_registry_with(&[cred], &failing_client)
+            // Ollama's arm is only reached when something answers at its
+            // address, so the probe is injected rather than left to depend on
+            // whether the machine running the suite has Ollama up. It does not
+            // on CI, and the arm returned before ever asking for a client.
+            let err = build_provider_registry_probing(&[cred], &failing_client, &|_| true)
                 .err()
                 .expect("a failing client factory should fail the registry");
             // Discriminant rather than `matches!`: the macro expands to a
