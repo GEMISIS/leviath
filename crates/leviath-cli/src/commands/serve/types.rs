@@ -959,6 +959,30 @@ pub(super) struct DirEntry {
     pub(super) path: String,
 }
 
+/// Body of `POST /api/fs/dirs`: make one directory inside another.
+///
+/// The parent and the new segment are separate fields rather than one joined
+/// path, so the `--workdir-root` check runs on ground the caller has already
+/// proved it can list, and a `name` carrying separators is malformed input
+/// instead of something the fence has to catch.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct MkdirReq {
+    /// The absolute directory to create it in. Must already exist.
+    pub(super) path: String,
+    /// The new directory's name: one segment, no separators, not `.` or `..`.
+    pub(super) name: String,
+}
+
+/// Response of `POST /api/fs/dirs`: where the new directory landed.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct MkdirResp {
+    /// The absolute path of the directory just created.
+    pub(super) path: String,
+    /// The directory it was created in, so a picker can re-list without
+    /// re-deriving it from the path it was handed.
+    pub(super) parent: String,
+}
+
 // ─── Tree types ─────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
