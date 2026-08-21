@@ -131,6 +131,13 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // offered the kind anyway would put an editor in front of a 400.
     "scripts.providers",
     "config.gateways",
+    // `POST /api/fs/dirs`. The browser cannot open a native OS dialog onto the
+    // serving machine, so the console's folder picker has to offer its own
+    // "New Folder" - and one console serves every daemon version, so it needs
+    // to know whether to offer the button at all rather than offering one that
+    // 404s. The `GET` half is deliberately not announced: it shipped
+    // unannounced, so its absence from this list proves nothing.
+    "fs.mkdir",
 ];
 
 /// The server's numeric limits.

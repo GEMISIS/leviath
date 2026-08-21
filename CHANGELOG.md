@@ -13,6 +13,18 @@ same list.
 
 ## Unreleased
 
+- Added: `POST /api/fs/dirs` makes one directory, so the console's folder
+  picker can offer the "New Folder" a browser cannot get from a native dialog.
+  `GET /api/fs/dirs` let somebody choose an agent workdir without typing a path
+  blind, but there was no way to make one: noticing the folder you wanted did
+  not exist meant leaving the console, opening a terminal on the serving
+  machine, `mkdir`, and coming back. The body names the parent and one new
+  segment separately, so the `--workdir-root` check runs on ground the caller
+  has already proved it can list and a `name` carrying separators is malformed
+  input rather than something the fence has to catch. Every other guard mirrors
+  the listing route, an existing target is a `409` rather than a silent success,
+  and it is announced as `fs.mkdir` so one console can tell which daemons have
+  it.
 - Added: the dashboard's sub-agent tree folds. `←` folds the selected run's
   workers away and `→` puts them back; on a run without any, `←` moves up to its
   parent and `→` down into the first worker. A foldable row wears a `▸`/`▾`

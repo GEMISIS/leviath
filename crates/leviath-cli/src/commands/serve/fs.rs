@@ -1,12 +1,21 @@
-//! `GET /api/fs/dirs` - directory browsing for the console's folder picker.
+//! `/api/fs/dirs` - the directory surface behind the console's folder picker.
 //!
-//! Read-only metadata about the host filesystem: one directory level per
-//! request, subdirectory names only, so the browser can let the user *choose*
-//! an agent workdir without typing a path blind. The spawn endpoint already
-//! accepts arbitrary workdirs subject to `--workdir-root`; this route shows
-//! exactly the directories that endpoint would accept, under the same fence.
+//! `GET` is read-only metadata about the host filesystem: one directory level
+//! per request, subdirectory names only, so the browser can let the user
+//! *choose* an agent workdir without typing a path blind. The spawn endpoint
+//! already accepts arbitrary workdirs subject to `--workdir-root`; this route
+//! shows exactly the directories that endpoint would accept, under the same
+//! fence.
+//!
+//! `POST` makes one. A browser cannot open a native OS dialog onto the serving
+//! machine, so the "New Folder" button every file dialog has had for thirty
+//! years has nowhere to come from - without it, "start this agent in a fresh
+//! directory" means leaving the console for a terminal, `mkdir`, and coming
+//! back. It adds no reach the API does not already grant: it creates one empty
+//! directory in a place the caller has already proved it can list and could
+//! already have pointed a run at.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -131,6 +140,115 @@ pub(super) async fn list_dirs(
     }))
 }
 
+/// `POST /api/fs/dirs`: create one empty directory inside a directory the
+/// caller can already list.
+///
+/// The body names the parent and a single new segment rather than one joined
+/// path, so the containment check runs on ground the caller has already proved
+/// it can reach and a `name` carrying separators is malformed input rather
+/// than something the fence has to catch. Every guard mirrors
+/// [`list_dirs`]: absolute parent, inside `--workdir-root` when one is set,
+/// the parent must exist and be a directory. One level, `create_dir` rather
+/// than `create_dir_all`, matching the listing route's one-directory-level
+/// shape - and an existing target is a 409 rather than a silent success, so a
+/// picker can tell "I made it" from "it was already there".
+pub(super) async fn create_dir(
+    State(state): State<AppState>,
+    Json(req): Json<MkdirReq>,
+) -> Result<(StatusCode, Json<MkdirResp>), (StatusCode, Json<ErrorResponse>)> {
+    let parent = PathBuf::from(&req.path);
+    if !parent.is_absolute() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "path must be absolute".to_string(),
+        ));
+    }
+    if let Some(root) = state.limits.workdir_root.as_deref()
+        && !leviath_core::resolves_within(&parent, root)
+    {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            format!(
+                "path '{}' is outside the configured --workdir-root",
+                req.path
+            ),
+        ));
+    }
+    match std::fs::metadata(&parent) {
+        Ok(m) if !m.is_dir() => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!("'{}' is a file, not a directory", parent.display()),
+            ));
+        }
+        Ok(_) => {}
+        Err(_) => {
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                format!("directory '{}' not found", parent.display()),
+            ));
+        }
+    }
+    if !is_one_segment(&req.name) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            format!("name '{}' must be a single directory name", req.name),
+        ));
+    }
+
+    let target = parent.join(&req.name);
+    // `create_dir` already fails on an existing path, but its error does not
+    // say *which* failure it was, and "already there" is the one a picker has
+    // to render differently from "the machine said no".
+    //
+    // `symlink_metadata`, not `exists`: a dangling symlink is something at that
+    // name too. `exists` follows the link, finds nothing, and would send this
+    // to `create_dir` for an `EEXIST` reported as a 500.
+    if target.symlink_metadata().is_ok() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!("'{}' already exists", target.display()),
+        ));
+    }
+    std::fs::create_dir(&target).map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not create '{}': {e}", target.display()),
+        )
+    })?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(MkdirResp {
+            path: target.to_string_lossy().into_owned(),
+            parent: parent.to_string_lossy().into_owned(),
+        }),
+    ))
+}
+
+/// Whether `name` is one ordinary directory name rather than a path.
+///
+/// Deliberately not [`leviath_core::is_safe_path_component`], whose
+/// `[A-Za-z0-9._-]` allowlist is right for a name that becomes a *Leviath*
+/// identifier (a blueprint name, a run id) and wrong for one the user is
+/// simply typing into a folder picker: `My Project` and `notas-españolas` are
+/// ordinary directory names, and refusing them would be a surprise rather than
+/// a safety property.
+///
+/// What matters here is only that `parent.join(name)` cannot leave `parent`,
+/// which a single `Normal` component cannot: separators, `.`, `..`, a leading
+/// `/`, and a Windows drive prefix all parse as something other than one
+/// `Normal`. A backslash is rejected explicitly because Unix parses it as an
+/// ordinary character, and a directory named `a\b` is a path on the next
+/// machine that reads it.
+fn is_one_segment(name: &str) -> bool {
+    !name.contains('\\')
+        && matches!(
+            Path::new(name).components().collect::<Vec<_>>().as_slice(),
+            [Component::Normal(only)] if *only == std::ffi::OsStr::new(name)
+        )
+}
+
 /// The filesystem root when a well-known directory (cwd, home) cannot be
 /// determined - the picker always has *somewhere* real to stand.
 fn known_dir_or_fs_root(dir: Option<PathBuf>) -> PathBuf {
@@ -174,8 +292,29 @@ mod tests {
             }),
         };
         Router::new()
-            .route("/api/fs/dirs", get(list_dirs))
+            .route("/api/fs/dirs", get(list_dirs).post(create_dir))
             .with_state(state)
+    }
+
+    /// POST `/api/fs/dirs` with `{path, name}`, returning status and body.
+    async fn post_dir(app: Router, path: &str, name: &str) -> (StatusCode, Vec<u8>) {
+        let body = serde_json::json!({ "path": path, "name": name }).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/fs/dirs")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, body.to_vec())
+    }
+
+    fn made_of(body: &[u8]) -> MkdirResp {
+        serde_json::from_slice(body).unwrap()
     }
 
     /// GET `/api/fs/dirs[?path=<path>]`, returning status and body. (`path`
@@ -425,6 +564,163 @@ mod tests {
         assert!(msg.starts_with(&expected), "{msg}");
 
         let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+    }
+
+    // ─── POST /api/fs/dirs ────────────────────────────────────────────────
+
+    /// The whole point of the route: a directory that was not there is, and
+    /// the listing the picker re-runs afterwards shows it.
+    #[tokio::test]
+    async fn create_dir_makes_the_directory_and_says_where() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().to_string_lossy().into_owned();
+        let (status, body) = post_dir(app_with_root(None), &parent, "new-thing").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let made = made_of(&body);
+        assert_eq!(made.parent, parent);
+        assert_eq!(made.path, dir.path().join("new-thing").to_string_lossy());
+        assert!(dir.path().join("new-thing").is_dir(), "it is really there");
+
+        let (status, body) = get_dirs(app_with_root(None), Some(&parent)).await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<String> = listing_of(&body).dirs.into_iter().map(|d| d.name).collect();
+        assert_eq!(names, ["new-thing"]);
+    }
+
+    /// A folder picker's New Folder has to accept the names people give
+    /// folders. A dotted one is allowed too: `hidden=true` already lists them,
+    /// so refusing to make one would be an inconsistency, not a guard.
+    #[tokio::test]
+    async fn create_dir_accepts_ordinary_folder_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().to_string_lossy().into_owned();
+        for name in ["My Project", "notas-españolas", ".hidden", "v1.2.3"] {
+            let (status, _) = post_dir(app_with_root(None), &parent, name).await;
+            assert_eq!(status, StatusCode::CREATED, "{name}");
+            assert!(dir.path().join(name).is_dir(), "{name}");
+        }
+    }
+
+    /// A `name` that is a path, not a name, is malformed input - caught here
+    /// rather than left for the containment fence, which is why the body takes
+    /// the parent and the segment separately.
+    #[tokio::test]
+    async fn create_dir_refuses_a_name_that_is_a_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().to_string_lossy().into_owned();
+        for name in ["a/b", "..", ".", "", "/abs", "../escape", "a\\b"] {
+            let (status, body) = post_dir(app_with_root(None), &parent, name).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{name:?}");
+            assert_eq!(
+                error_of(&body),
+                format!("name '{name}' must be a single directory name")
+            );
+        }
+        // Nothing was created on the way past the guard.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn create_dir_relative_parent_returns_400() {
+        let (status, body) = post_dir(app_with_root(None), "some/relative", "x").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_of(&body), "path must be absolute");
+    }
+
+    #[tokio::test]
+    async fn create_dir_missing_parent_returns_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        let (status, body) = post_dir(app_with_root(None), &missing.to_string_lossy(), "x").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            error_of(&body),
+            format!("directory '{}' not found", missing.display())
+        );
+    }
+
+    #[tokio::test]
+    async fn create_dir_parent_that_is_a_file_returns_400() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("plain.txt");
+        std::fs::write(&file, "not a directory").unwrap();
+        let (status, body) = post_dir(app_with_root(None), &file.to_string_lossy(), "x").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error_of(&body),
+            format!("'{}' is a file, not a directory", file.display())
+        );
+    }
+
+    /// The same fence as the listing: a parent the `GET` refuses to show is a
+    /// parent the `POST` refuses to write into.
+    #[tokio::test]
+    async fn create_dir_refuses_a_parent_outside_the_workdir_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let app = app_with_root(Some(root.path().to_path_buf()));
+        let (status, body) = post_dir(app, &outside.path().to_string_lossy(), "x").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error_of(&body),
+            format!(
+                "path '{}' is outside the configured --workdir-root",
+                outside.path().display()
+            )
+        );
+        assert!(!outside.path().join("x").exists());
+
+        // The control: inside the fence the same request succeeds, so the 403
+        // is the fence and not something else about the request.
+        let app = app_with_root(Some(root.path().to_path_buf()));
+        let (status, _) = post_dir(app, &root.path().to_string_lossy(), "x").await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    /// "It was already there" is a different answer from "I made it", and a
+    /// picker renders them differently.
+    #[tokio::test]
+    async fn create_dir_on_an_existing_name_returns_409() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().to_string_lossy().into_owned();
+        std::fs::create_dir(dir.path().join("taken")).unwrap();
+        let (status, body) = post_dir(app_with_root(None), &parent, "taken").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            error_of(&body),
+            format!("'{}' already exists", dir.path().join("taken").display())
+        );
+
+        // A file of that name is taken too - `create_dir` would fail anyway,
+        // and 409 says why better than the OS error would.
+        std::fs::write(dir.path().join("afile"), "x").unwrap();
+        let (status, _) = post_dir(app_with_root(None), &parent, "afile").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    /// The machine refusing is neither a bad request nor a missing one: a name
+    /// past the filesystem's per-component limit comes back as a 500 carrying
+    /// what the OS said.
+    #[tokio::test]
+    async fn create_dir_reports_what_the_filesystem_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().to_string_lossy().into_owned();
+        let too_long = "n".repeat(300);
+        let (status, body) = post_dir(app_with_root(None), &parent, &too_long).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let msg = error_of(&body);
+        let expected = format!("could not create '{}", dir.path().display());
+        assert!(msg.starts_with(&expected), "{msg}");
+    }
+
+    /// One level, like the listing route: the parent has to exist already.
+    #[tokio::test]
+    async fn create_dir_does_not_make_intermediate_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let two_deep = dir.path().join("a");
+        let (status, _) = post_dir(app_with_root(None), &two_deep.to_string_lossy(), "b").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(!dir.path().join("a").exists(), "nothing was created");
     }
 
     /// The cwd/home fallback: a known directory passes through untouched, an

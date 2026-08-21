@@ -401,6 +401,10 @@ mod tests {
             "blueprints.envelope",
             "blueprints.fan_outs",
             "context.history.page",
+            // The console decides whether to draw its "New Folder" button on
+            // this string, so a build that serves `POST /api/fs/dirs` without
+            // saying so is a button nobody gets.
+            "fs.mkdir",
         ] {
             assert!(
                 config.capabilities.iter().any(|c| c == expected),

@@ -130,8 +130,9 @@ fn api_router() -> Router<AppState> {
         .route("/api/mcp/servers/{name}/test", post(mcp::test_server))
         // Doctor - the same checks `lev doctor` runs, returned as data.
         .route("/api/doctor", get(doctor::run_doctor))
-        // Filesystem - directory browsing for the console's folder picker.
-        .route("/api/fs/dirs", get(fs::list_dirs))
+        // Filesystem - directory browsing for the console's folder picker,
+        // and the "New Folder" a browser cannot get from a native dialog.
+        .route("/api/fs/dirs", get(fs::list_dirs).post(fs::create_dir))
         // Tools - what an agent on this machine can actually call. Read-only:
         // there is nothing to write, since a tool is either built in or a file
         // the scripts routes below own.

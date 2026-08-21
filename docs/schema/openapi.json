@@ -1059,6 +1059,41 @@
             "$ref": "#/components/responses/Ok"
           }
         }
+      },
+      "post": {
+        "tags": [
+          "diagnostics"
+        ],
+        "summary": "Create one directory, for a folder picker's New Folder",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "path",
+                  "name"
+                ],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "description": "Absolute parent directory. Must exist, and lie inside --workdir-root when one is set."
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "The new directory's name: one segment, no separators, not . or .."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/config": {
