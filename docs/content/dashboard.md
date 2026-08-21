@@ -96,10 +96,15 @@ many the fold is hiding. `←` and `→` work the tree, and clicking the arrow d
 remembered by run, so it survives sorting, filtering and new rows arriving above it, and folding
 the run you were inside moves the highlight onto the fold rather than back to the top.
 
-Folds also outlive the dashboard. They are written to `dash/ui-state.json` under the data
-directory as you make them, not on the way out, so a session that ends with the terminal window
-keeps them all the same. A run list starts fully expanded until you fold something; a fold whose
-run is later deleted is forgotten the next time the dashboard can see the run list.
+Folds also outlive the dashboard. They are written to `ui-state.json` under the data directory as
+you make them, not on the way out, so a session that ends with the terminal window keeps them all
+the same. A run list starts fully expanded until you fold something; a fold whose run is later
+deleted is forgotten the next time the dashboard can see the run list.
+
+Two other choices live in that same file: the sort order `s` cycles, and the agent the new-run
+screen opens on, which is whichever one you last launched. Nothing transient joins them - a
+filter, a search and the marks are all gone when you come back, and unattended (`Ctrl-Y`) is
+deliberately off every time the new-run screen opens.
 
 Marking selects several runs at once: press `Space` on each run, then `x` or `d` acts on all of
 them behind one confirmation. Marked rows show a check mark, the pane title counts them, and marks

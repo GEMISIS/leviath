@@ -266,7 +266,7 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
     // …and the run list keeps its folds beside them, restored before the first
     // sync so the list is drawn the way it was left rather than unfolding for a
     // frame first.
-    dashboard.ui_state_path = ui_state::default_path();
+    dashboard.ui_state_path = crate::ui_state::default_path();
     dashboard.load_ui_state();
 
     // Forward the dashboard's control commands to the daemon, and report each

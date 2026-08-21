@@ -163,6 +163,7 @@ impl Dashboard {
             tree_rows: Vec::new(),
             collapsed_runs: std::collections::HashSet::new(),
             ui_state_path: None,
+            last_launched_agent: None,
             mcp_screen: false,
             mcp_add_mode: false,
             mcp_add_input: String::new(),

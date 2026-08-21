@@ -401,6 +401,7 @@ fn enter_on_agent_and_mcp_rows_toggles_like_space() {
         Vec::new(),
         dir.path(),
         std::sync::Arc::new(|_| true),
+        Default::default(),
     );
 
     w.enter(Step::Agents);
@@ -432,6 +433,7 @@ fn space_toggles_agents_and_mcp_rows_and_booleans() {
         Vec::new(),
         dir.path(),
         std::sync::Arc::new(|_| true),
+        Default::default(),
     );
 
     w.enter(Step::Agents);
@@ -852,6 +854,7 @@ fn o_opens_the_signup_page_from_both_provider_screens() {
             sink.lock().expect("not poisoned").push(url.to_string());
             true
         }),
+        Default::default(),
     );
 
     w.enter(Step::Providers);
@@ -883,6 +886,7 @@ fn a_browser_that_will_not_open_prints_the_url_instead() {
         Vec::new(),
         dir.path(),
         std::sync::Arc::new(|_| false),
+        Default::default(),
     );
     w.enter(Step::Providers);
 
@@ -1504,6 +1508,7 @@ fn a_configured_provider_outside_the_catalog_still_describes_itself() {
         Vec::new(),
         dir.path(),
         std::sync::Arc::new(|_| true),
+        Default::default(),
     );
     w.enter(Step::Defaults);
 

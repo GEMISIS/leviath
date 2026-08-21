@@ -134,10 +134,14 @@ pub(crate) struct Dashboard {
     /// re-sorting, filtering, and rows arriving above it - and, through
     /// `ui_state_path`, closing the dashboard.
     pub(super) collapsed_runs: std::collections::HashSet<String>,
-    /// Where `collapsed_runs` is kept between sessions (see `ui_state.rs`).
-    /// `None` in tests and on a home with no data dir: nothing is read or
-    /// written then, so no test can reach the user's real file.
+    /// Where the remembered view state is kept between sessions (see
+    /// `ui_state.rs`). `None` in tests and on a home with no data dir: nothing
+    /// is read or written then, so no test can reach the user's real file.
     pub(super) ui_state_path: Option<std::path::PathBuf>,
+    /// The agent the new-run screen opens on: the last one actually launched
+    /// from here. `None` until somebody starts a run, and dropped back to the
+    /// top of the list when that agent is no longer offered.
+    pub(super) last_launched_agent: Option<String>,
     /// Filesystem path this dashboard appends its activity log to. Production
     /// construction resolves the real [`runstate::dashboard_log_path`]; tests
     /// (`make_test_dashboard`) inject a temp path so no test ever writes to the
@@ -966,9 +970,13 @@ impl Dashboard {
     }
 
     /// Cycle the run-list sort mode and say so in the log.
+    ///
+    /// Kept between sessions: somebody who works by status has said so, and
+    /// saying it again at every launch is the setting failing to be one.
     pub(super) fn cycle_sort_mode(&mut self) {
         self.sort_mode = self.sort_mode.next();
         self.add_log(format!("Sort: {}", self.sort_mode.label()));
+        self.save_ui_state();
         self.update_display_indices();
     }
 
