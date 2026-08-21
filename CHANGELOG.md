@@ -13,6 +13,16 @@ same list.
 
 ## Unreleased
 
+- Added: a run's rename now reaches a websocket subscriber. A run is created
+  untitled and named a moment later, once a model has shortened its prompt into
+  a title, and nothing on the wire said so - a console showed the prompt's first
+  line until an unrelated re-read or the next thirty-second poll replaced it,
+  which is the window where somebody is actually looking at the run they just
+  started. There is a `run_renamed` frame for the moment, and `title` on every
+  `agent_status` frame after it so a client that connected or reconnected in
+  between reads the name off the next status instead of fetching the run.
+  Announced as the `events.title` capability, so a console can drop that poll
+  where the daemon has it and keep it where it does not.
 - Added: `fan_out`, a tool any stage can grant to run many sub-agents at once and
   get their results back together. There were two ways to start sub-agents and
   they shared nothing: `spawn_agent` was a tool an agent called mid-work, while

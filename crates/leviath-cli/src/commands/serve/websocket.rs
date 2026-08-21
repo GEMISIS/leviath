@@ -705,6 +705,12 @@ mod tests {
                 tool_calls: 0,
                 accepts_messages: true,
                 wait_reason: None,
+                title: None,
+            },
+            ServerEvent::RunRenamed {
+                agent_id: "a".to_string(),
+                run_id: "run-match".to_string(),
+                title: "A short name".to_string(),
             },
             ServerEvent::ContextUpdate {
                 agent_id: "a".to_string(),
@@ -1117,6 +1123,7 @@ mod tests {
             tool_calls: 0,
             accepts_messages: true,
             wait_reason: None,
+            title: None,
         };
         assert_eq!(ev.run_id(), "run-123");
     }
@@ -1200,6 +1207,7 @@ mod tests {
             tool_calls: 0,
             accepts_messages: true,
             wait_reason: None,
+            title: None,
         };
         let non_matching = ServerEvent::AgentStatus {
             agent_id: "a".to_string(),
@@ -1210,6 +1218,7 @@ mod tests {
             tool_calls: 0,
             accepts_messages: true,
             wait_reason: None,
+            title: None,
         };
 
         assert_eq!(matching.run_id(), filter);
@@ -1227,6 +1236,7 @@ mod tests {
             tool_calls: 0,
             accepts_messages: false,
             wait_reason: None,
+            title: None,
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert!(json.contains("\"type\":\"agent_status\""));

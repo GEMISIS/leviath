@@ -15,8 +15,9 @@ use leviath_core::interaction::InteractionRequest;
 
 /// A change in the world, broadcast to subscribers (the HTTP/WS gateway and
 /// in-process embedders) so they get pushed updates instead of polling. The
-/// coarse per-run variants (`Spawned`/`Status`/`Tokens`/`Context`/`Completed`)
-/// are emitted by the host's change-detection pass as it drives the world;
+/// coarse per-run variants
+/// (`Spawned`/`Status`/`Renamed`/`Tokens`/`Context`/`Completed`) are emitted by
+/// the host's change-detection pass as it drives the world;
 /// `StageTransition`/`ToolCallStarted`/`ToolCallFinished`/`Log` are pushed at
 /// the source by pipeline systems through [`WorldEventSink`]. Streamed over the
 /// control transport via `ControlRequest::Subscribe`.
@@ -70,6 +71,29 @@ pub enum WorldEvent {
         /// and answer something" or "its workers are still going" - which is
         /// the guess this vocabulary exists to remove.
         wait_reason: Option<leviath_core::run_meta::WaitReason>,
+        /// The run's generated title, once it has one.
+        ///
+        /// Carried on every status frame rather than only on the one that
+        /// announced it: [`Renamed`](Self::Renamed) is the moment, this is the
+        /// fact, and a subscriber that joined or reconnected after the moment
+        /// picks the name up from the next status without a fetch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    /// A run acquired a title, or had the one it was showing replaced.
+    ///
+    /// A run starts untitled and is named a moment later, once the one-shot
+    /// titling call comes back. That rename is the one field guaranteed to
+    /// change shortly after a run starts and then never again, so without an
+    /// event for it every client either polls each new run or shows the wrong
+    /// name until something unrelated makes it re-read.
+    Renamed {
+        /// The run id.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// The title the run now goes by.
+        title: String,
     },
     /// A run's token totals changed.
     Tokens {
@@ -190,6 +214,7 @@ impl WorldEvent {
         match self {
             WorldEvent::Spawned { run_id, .. }
             | WorldEvent::Status { run_id, .. }
+            | WorldEvent::Renamed { run_id, .. }
             | WorldEvent::Tokens { run_id, .. }
             | WorldEvent::Context { run_id, .. }
             | WorldEvent::Interaction { run_id, .. }
@@ -235,4 +260,12 @@ pub(super) struct Emitted {
     /// Why the run is parked, so a change of reason counts as a change worth
     /// telling subscribers about.
     pub(super) wait_reason: Option<leviath_core::run_meta::WaitReason>,
+    /// The run's title as of the last pass, so the pass that first sees one can
+    /// announce the rename.
+    ///
+    /// Deliberately *not* part of the status change key: a rename is not a move
+    /// in execution state, and a status frame that repeated the stage and
+    /// iteration it already sent would say nothing new. The title rides the
+    /// next status frame that fires on its own.
+    pub(super) title: Option<String>,
 }

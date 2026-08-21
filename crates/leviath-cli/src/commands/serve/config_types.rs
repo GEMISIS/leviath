@@ -83,6 +83,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // a console can place a fan-out worker in the tree the moment it starts
     // instead of fetching every new run to find out where it hangs.
     "events.spawn_parent",
+    // The `run_renamed` frame, plus `title` on `agent_status`. A run is named a
+    // moment after it starts and never again, so a client without this either
+    // polls every new run for its title or shows the prompt's first line until
+    // something unrelated makes it re-read. Announced so a console can drop
+    // that poll where the daemon has it and keep it where it does not.
+    "events.title",
     "blueprints.envelope",
     "blueprints.query",
     "blueprints.manifest",

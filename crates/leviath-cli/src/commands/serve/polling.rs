@@ -174,6 +174,7 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             tool_calls,
             accepts_messages,
             wait_reason,
+            title,
         } => ServerEvent::AgentStatus {
             agent_id,
             run_id,
@@ -183,6 +184,16 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             tool_calls,
             accepts_messages,
             wait_reason,
+            title,
+        },
+        WorldEvent::Renamed {
+            run_id,
+            agent_id,
+            title,
+        } => ServerEvent::RunRenamed {
+            agent_id,
+            run_id,
+            title,
         },
         WorldEvent::Tokens {
             run_id,
@@ -547,8 +558,17 @@ mod tests {
                 tool_calls: 0,
                 accepts_messages: true,
                 wait_reason: None,
+                title: None,
             }),
             "agent_status"
+        );
+        assert_eq!(
+            mapped_tag(WorldEvent::Renamed {
+                run_id: "r".into(),
+                agent_id: "a".into(),
+                title: "A short name".into(),
+            }),
+            "run_renamed"
         );
         assert_eq!(
             mapped_tag(WorldEvent::Tokens {
@@ -627,6 +647,47 @@ mod tests {
             }),
             "tool_call_finished"
         );
+    }
+
+    /// A run is named a moment after it starts, and nothing on the wire used
+    /// to say so. Both halves of the fix are asserted by name: the frame that
+    /// announces the rename, and the same title riding the status frames that
+    /// follow it, which is what a client that reconnected after the moment
+    /// reads instead of fetching the run.
+    #[test]
+    fn a_rename_is_announced_and_then_carried_on_status() {
+        let renamed = serde_json::to_value(to_server_event(WorldEvent::Renamed {
+            run_id: "run-1".into(),
+            agent_id: "a".into(),
+            title: "Fix the rename gap".into(),
+        }))
+        .unwrap();
+        assert_eq!(renamed["type"], "run_renamed");
+        assert_eq!(renamed["run_id"], "run-1");
+        assert_eq!(renamed["agent_id"], "a");
+        assert_eq!(renamed["title"], "Fix the rename gap");
+
+        let status = |title: Option<&str>| {
+            serde_json::to_value(to_server_event(WorldEvent::Status {
+                run_id: "run-1".into(),
+                agent_id: "a".into(),
+                status: "active".into(),
+                stage: "implement".into(),
+                iteration: 1,
+                tool_calls: 0,
+                accepts_messages: true,
+                wait_reason: None,
+                title: title.map(str::to_string),
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            status(Some("Fix the rename gap"))["title"],
+            "Fix the rename gap"
+        );
+        // An untitled run says nothing rather than sending a null a client
+        // would have to tell apart from a title it cleared.
+        assert!(status(None).get("title").is_none());
     }
 
     /// The fine-grained events used to arrive wrapped as `{"type":"world",
@@ -722,6 +783,7 @@ mod tests {
                 tool_calls: 0,
                 accepts_messages: true,
                 wait_reason: None,
+                title: None,
             },
         );
         assert_eq!(tag(&rx.try_recv().unwrap()), "agent_status");
@@ -747,6 +809,7 @@ mod tests {
                 tool_calls: 0,
                 accepts_messages: false,
                 wait_reason: Some(WaitReason::FanOutWorkers { outstanding: 3 }),
+                title: None,
             },
         );
         // Asserted on the serialized form rather than by destructuring, because
@@ -1116,6 +1179,7 @@ mod tests {
                 tool_calls: 0,
                 accepts_messages: true,
                 wait_reason: None,
+                title: None,
             }],
         );
         let (state, mut rx) = state_with(control);
@@ -1159,6 +1223,7 @@ mod tests {
                     tool_calls: 0,
                     accepts_messages: true,
                     wait_reason: None,
+                    title: None,
                 })
                 .unwrap();
                 line.push('\n');
@@ -1264,6 +1329,7 @@ mod tests {
                 tool_calls: 0,
                 accepts_messages: true,
                 wait_reason: None,
+                title: None,
             });
             tokio::time::sleep(Duration::from_millis(50)).await;
             drop(events);
