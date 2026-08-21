@@ -131,8 +131,13 @@ pub(crate) struct Dashboard {
     pub(super) tree_rows: Vec<RunTreeRow>,
     /// Runs whose sub-agents are folded away (`←` on the row, or a click on
     /// its arrow). Keyed by run id rather than row position so a fold survives
-    /// re-sorting, filtering, and rows arriving above it.
+    /// re-sorting, filtering, and rows arriving above it - and, through
+    /// `ui_state_path`, closing the dashboard.
     pub(super) collapsed_runs: std::collections::HashSet<String>,
+    /// Where `collapsed_runs` is kept between sessions (see `ui_state.rs`).
+    /// `None` in tests and on a home with no data dir: nothing is read or
+    /// written then, so no test can reach the user's real file.
+    pub(super) ui_state_path: Option<std::path::PathBuf>,
     /// Filesystem path this dashboard appends its activity log to. Production
     /// construction resolves the real [`runstate::dashboard_log_path`]; tests
     /// (`make_test_dashboard`) inject a temp path so no test ever writes to the
@@ -381,11 +386,7 @@ impl Dashboard {
             .map(|a| a.id.clone());
         self.display_indices = indices;
         self.tree_rows = tree_rows;
-        // A fold whose parent has gone stops meaning anything; keeping it
-        // would silently re-fold a run that later reuses the id.
-        let agents = &self.agents;
-        self.collapsed_runs
-            .retain(|id| agents.iter().any(|a| a.id == *id));
+        self.forget_folds_for_vanished_runs();
         if let Some(id) = prev_id {
             // A fold can take the highlighted row off screen. Landing on the
             // ancestor that swallowed it keeps the eye where it was; row 0 is
@@ -1092,6 +1093,29 @@ impl Dashboard {
         }
     }
 
+    /// Drop folds naming runs that no longer exist, and write the store when
+    /// that changed anything.
+    ///
+    /// ⚠️ Skipped while the run list is empty. Folds outlive the process now,
+    /// and "no runs" is also what the very first tick sees, and what a runs
+    /// directory that could not be read for a moment sees - pruning against
+    /// that would delete every remembered fold on startup. An empty list has
+    /// nothing to draw, so keeping the folds through it costs nothing; the
+    /// first sync that can actually see runs does the pruning.
+    fn forget_folds_for_vanished_runs(&mut self) {
+        if self.agents.is_empty() {
+            return;
+        }
+        let before = self.collapsed_runs.len();
+        let agents = &self.agents;
+        self.collapsed_runs
+            .retain(|id| agents.iter().any(|a| a.id == *id));
+        // Only on the tick a run actually disappears, not ten times a second.
+        if self.collapsed_runs.len() != before {
+            self.save_ui_state();
+        }
+    }
+
     /// The `display_indices` position of the row holding `run_id`, if it is
     /// on screen (a folded-away child is not).
     pub(super) fn row_of_run(&self, run_id: &str) -> Option<usize> {
@@ -1675,13 +1699,43 @@ mod tests {
     }
 
     /// A fold on a run that later disappears is dropped, so a run that reuses
-    /// the id does not come back folded.
+    /// the id does not come back folded - but only once there is a run list to
+    /// compare against. Folds outlive the process, and an empty list is also
+    /// what the first tick and an unreadable runs dir look like.
     #[test]
-    fn a_fold_on_a_vanished_run_is_forgotten() {
+    fn a_fold_is_forgotten_when_its_run_goes_but_not_while_the_list_is_empty() {
         let mut dash = make_test_dashboard();
         dash.collapsed_runs.insert("ghost".to_string());
+
+        dash.update_display_indices();
+        assert!(
+            dash.collapsed_runs.contains("ghost"),
+            "nothing to prune against yet"
+        );
+
+        // A list that exists and does not contain it: now it is really gone.
+        dash.agents
+            .push(make_test_agent("someone-else", AgentDisplayStatus::Active));
         dash.update_display_indices();
         assert!(dash.collapsed_runs.is_empty());
+    }
+
+    /// The prune writes the store, so a run deleted in one session does not
+    /// come back folded in the next.
+    #[test]
+    fn forgetting_a_fold_rewrites_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ui-state.json");
+        let mut dash = make_test_dashboard();
+        dash.ui_state_path = Some(path.clone());
+        dash.collapsed_runs.insert("ghost".to_string());
+        dash.save_ui_state();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("ghost"));
+
+        dash.agents
+            .push(make_test_agent("someone-else", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("ghost"));
     }
 
     #[test]

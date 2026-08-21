@@ -20,6 +20,7 @@ mod state;
 #[cfg(test)]
 mod test_support;
 mod types;
+mod ui_state;
 
 /// The palette lives in the crate-level [`crate::tui`] module, shared with the
 /// `lev setup` wizard and the markdown renderer. Aliased here so the existing
@@ -259,6 +260,11 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
     );
     // The agent editor keeps its canvas arrangements under the data dir.
     dashboard.layout_store_path = crate::blueprint_edit::LayoutStore::default_path();
+    // …and the run list keeps its folds beside them, restored before the first
+    // sync so the list is drawn the way it was left rather than unfolding for a
+    // frame first.
+    dashboard.ui_state_path = ui_state::default_path();
+    dashboard.load_ui_state();
 
     // Forward the dashboard's control commands to the daemon, and report each
     // result back so a refused command is surfaced rather than swallowed. A

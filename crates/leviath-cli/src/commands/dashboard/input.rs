@@ -819,6 +819,10 @@ impl Dashboard {
             }
             self.collapsed_runs.insert(id.clone());
         }
+        // Written on the keystroke rather than on the way out: a dashboard is
+        // left running for days and closed by whatever closes the terminal, so
+        // "save on quit" is a save that often never happens.
+        self.save_ui_state();
         self.update_display_indices();
         // The run just folded is still on screen - it is the row the fold
         // happened on - so this lands back on it.
@@ -2099,6 +2103,29 @@ mod tests {
         dash.handle_key(key(KeyCode::Left));
         assert_eq!(dash.selected, 0, "a root leaf has no parent to climb to");
         assert!(dash.collapsed_runs.is_empty(), "and nothing folded");
+    }
+
+    /// The fold reaches disk on the keystroke that makes it, and the unfold
+    /// reaches disk too - a store that only ever grew would re-fold a run the
+    /// user had deliberately opened.
+    #[test]
+    fn folding_and_unfolding_both_reach_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ui-state.json");
+        let mut dash = dash_with_a_subtree();
+        dash.ui_state_path = Some(path.clone());
+
+        dash.handle_key(key(KeyCode::Left));
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("parent"),
+            "the fold was written without waiting for a quit"
+        );
+
+        dash.handle_key(key(KeyCode::Right));
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("parent"),
+            "and so was the unfold"
+        );
     }
 
     /// Folding is keyed by run, so a row index that no longer names one (or a

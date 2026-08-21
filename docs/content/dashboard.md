@@ -96,6 +96,11 @@ many the fold is hiding. `←` and `→` work the tree, and clicking the arrow d
 remembered by run, so it survives sorting, filtering and new rows arriving above it, and folding
 the run you were inside moves the highlight onto the fold rather than back to the top.
 
+Folds also outlive the dashboard. They are written to `dash/ui-state.json` under the data
+directory as you make them, not on the way out, so a session that ends with the terminal window
+keeps them all the same. A run list starts fully expanded until you fold something; a fold whose
+run is later deleted is forgotten the next time the dashboard can see the run list.
+
 Marking selects several runs at once: press `Space` on each run, then `x` or `d` acts on all of
 them behind one confirmation. Marked rows show a check mark, the pane title counts them, and marks
 follow the run rather than the row, so sorting or filtering never changes what is marked. A kill
