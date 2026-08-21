@@ -199,20 +199,24 @@ pub(super) fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFindin
         .collect()
 }
 
-/// A fan-out stage with no escape from a split that cannot be used.
+/// A `fail_all` fan-out stage with nowhere to go when a worker fails.
 ///
-/// The split asks a model for a structured answer, and a model can decline, run
-/// out of room, or answer the question it thinks it was asked. The runtime no
-/// longer ends the run over it - the chain is the stage's `error` edge, then its
-/// `dead_end` edge, then an empty fan-out into the merge stage - but that last
-/// step is a degradation: the workers never run and whatever comes next works
-/// from less than the blueprint intended.
+/// `on_worker_failure = "fail_all"` means one failed worker ends the stage. That
+/// is a deliberate choice - a merge that cannot be trusted with a partial set
+/// should not run on one - but it only reads as that choice when the blueprint
+/// says where to go instead. Without an edge the run simply stops, and a single
+/// flaky worker takes the whole thing down.
 ///
-/// A warning rather than an error, because the run does finish either way. What
-/// it buys is the difference between a stage the author routed somewhere on
-/// failure and one that silently produces nothing.
+/// The default, `continue`, needs none of this: it merges what succeeded and
+/// reports the rest, so there is nothing to escape from.
+///
+/// A warning rather than an error, because a run that ends loudly on a failed
+/// worker is a defensible design, just rarely the intended one.
 pub(super) fn lint_fanout_escape(stage: &leviath_core::Stage) -> Vec<LintFinding> {
-    if !matches!(stage.mode, StageMode::FanOut { .. }) {
+    let StageMode::FanOut { config } = &stage.mode else {
+        return Vec::new();
+    };
+    if config.on_worker_failure != leviath_core::blueprint::WorkerFailurePolicy::FailAll {
         return Vec::new();
     }
     let escapes = stage
@@ -233,12 +237,16 @@ pub(super) fn lint_fanout_escape(stage: &leviath_core::Stage) -> Vec<LintFinding
         LintFinding::new(
             LintSeverity::Warning,
             "fanout-no-escape",
-            "is a fan_out stage with no 'error' or 'dead_end' transition, so a split the \
-             runtime cannot use degrades to an empty fan-out and the workers never run"
+            "sets on_worker_failure = \"fail_all\" but declares no 'error' or 'dead_end' \
+             transition, so one failed worker ends the run with nowhere to go"
                 .to_string(),
         )
         .in_stage(&stage.name)
-        .with_fix("add a transition with condition = \"error\" to a recovery stage".to_string()),
+        .with_fix(
+            "add a transition with condition = \"error\" to a recovery stage, or use the \
+             default on_worker_failure = \"continue\""
+                .to_string(),
+        ),
     ]
 }
 

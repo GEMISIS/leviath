@@ -4156,6 +4156,135 @@ fn infer_with(
     )
 }
 
+/// Spawn an agent whose pending inference made `calls`, ready for dispatch.
+fn ready_for_tools(world: &mut World, calls: Vec<crate::components::ToolCall>) -> Entity {
+    let (offers, result) = infer_with(calls);
+    world
+        .spawn((
+            agent_state(),
+            run_metadata(),
+            offers,
+            result,
+            conv_window(),
+            StageCursor { index: 0 },
+            ReadyForTools,
+        ))
+        .id()
+}
+
+/// A world with a tool lane whose queue the test can inspect.
+fn world_with_lane() -> (World, mpsc::UnboundedReceiver<crate::pipeline::ToolJob>) {
+    let mut world = World::new();
+    let (jtx, jrx) = mpsc::unbounded_channel();
+    world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    (world, jrx)
+}
+
+/// A `fan_out` call is read here and never handed to the lane, where the builtin
+/// executor would refuse it. It leaves as `PendingFanOut` for the world tick
+/// that starts the workers.
+#[test]
+fn a_fan_out_call_is_read_inline_and_never_reaches_the_lane() {
+    let (mut world, mut jrx) = world_with_lane();
+    let mut call = tc("c1", "fan_out");
+    call.arguments = serde_json::json!({
+        "agent": "researcher",
+        "items": [{"id": "a", "context": {"question": "q"}}]
+    });
+    let e = ready_for_tools(&mut world, vec![call]);
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    assert!(jrx.try_recv().is_err(), "must not reach the tool lane");
+    let pending = world
+        .get::<crate::fanout::PendingFanOut>(e)
+        .expect("handed over to the world tick");
+    assert_eq!(pending.call_id, "c1");
+    assert_eq!(pending.request.items.len(), 1);
+    assert!(world.get::<ReadyForTools>(e).is_none(), "dispatch is done");
+    assert!(
+        world.get::<ReadyToInfer>(e).is_none(),
+        "and it is not looping back to the model - it is waiting on workers"
+    );
+}
+
+/// Arguments that do not fit are refused as an `[error]` result, which the model
+/// corrects on its next turn like any other refusal.
+#[test]
+fn a_malformed_fan_out_call_is_refused_and_the_agent_carries_on() {
+    let (mut world, _jrx) = world_with_lane();
+    let mut call = tc("c1", "fan_out");
+    call.arguments = serde_json::json!({"items": "all of them"});
+    let e = ready_for_tools(&mut world, vec![call]);
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    assert!(world.get::<crate::fanout::PendingFanOut>(e).is_none());
+    assert!(world.get::<ReadyToInfer>(e).is_some(), "back to the model");
+    let convo = conversation_text(&world, e);
+    assert!(
+        convo.contains("[error]") && convo.contains("must be an array"),
+        "{convo}"
+    );
+}
+
+/// Two in one turn would need two parked states on one agent, and there is no
+/// work the second could do that adding its items to the first would not. The
+/// first is honoured and the second told why it was dropped, so the turn is not
+/// wasted entirely.
+#[test]
+fn a_second_fan_out_call_in_one_turn_is_refused() {
+    let (mut world, _jrx) = world_with_lane();
+    let args = serde_json::json!({"agent": "researcher", "items": []});
+    let mut first = tc("c1", "fan_out");
+    first.arguments = args.clone();
+    let mut second = tc("c2", "fan_out");
+    second.arguments = args;
+    let e = ready_for_tools(&mut world, vec![first, second]);
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    assert_eq!(
+        world
+            .get::<crate::fanout::PendingFanOut>(e)
+            .expect("the first call is honoured")
+            .call_id,
+        "c1"
+    );
+    let convo = conversation_text(&world, e);
+    assert!(convo.contains("only one fan_out call per turn"), "{convo}");
+}
+
+/// A fan-out parks the agent, so it cannot share a turn with lane calls that
+/// would still be running when it does.
+#[test]
+fn a_fan_out_call_sharing_a_turn_with_lane_work_is_refused() {
+    let (mut world, mut jrx) = world_with_lane();
+    let mut call = tc("c1", "fan_out");
+    call.arguments = serde_json::json!({"agent": "researcher", "items": []});
+    let e = ready_for_tools(&mut world, vec![call, tc("c2", "read_file")]);
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    assert!(
+        world.get::<crate::fanout::PendingFanOut>(e).is_none(),
+        "the fan-out does not start while lane work is in flight"
+    );
+    assert!(
+        jrx.try_recv().is_ok(),
+        "and the lane work it shared a turn with still runs"
+    );
+}
+
 /// `runtime_info` is advertised by `leviath-tools` but answered here, because
 /// the stage, the iteration counts and the window occupancy exist only in the
 /// world. The failure this guards is the tool reaching the async lane, where
@@ -12470,7 +12599,7 @@ fn a_fan_out_stage_is_let_through_once_its_budget_is_spent() {
     );
     let convo = conversation_text(&world, e);
     assert!(
-        convo.contains("could not be used") && convo.contains("No workers ran"),
+        convo.contains("started no workers") && convo.contains("no sub-findings"),
         "the merge stage is told it is working from nothing: {convo}"
     );
 }

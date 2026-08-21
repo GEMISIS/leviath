@@ -236,20 +236,26 @@ pub(crate) fn note_error(window: &mut ContextWindow, stage: &str, message: &str)
     );
 }
 
-/// Write a note saying a fan-out split could not be used, so the stage that
-/// runs next knows the workers never ran.
+/// Write a note saying a fan-out started no workers, so whatever runs next knows
+/// there are no sub-findings coming.
 ///
-/// Distinct from [`note_error`] because it is not an inference error and the
-/// advice differs: nothing failed to reach the provider, the model answered
-/// with something that is not a work-item list, and whatever runs next has to
-/// work from the material already in context rather than from findings that
-/// were never gathered.
+/// Distinct from [`note_error`] because nothing failed to reach a provider and
+/// the advice differs: the stage simply never handed any work out, and the merge
+/// that follows has to work from what is already in context.
+///
+/// Assembled from parts rather than one long literal: rustfmt collapses a
+/// `\`-continued string onto one line when it fits, and bakes the continuation's
+/// indentation into the text. The run that proved this read
+/// "No workers ran,              so there are no sub-findings".
 pub(crate) fn note_unusable_split(window: &mut ContextWindow, stage: &str, message: &str) {
+    let advice = concat!(
+        " No workers ran, so there are no sub-findings from this stage.",
+        " Work from what is already in context and say plainly which parts",
+        " are unsupported because of it."
+    );
     note_abnormal_ending(
         window,
-        format!(
-            "[Fan-out split in stage '{stage}' could not be used] {message}. No workers ran,              so there are no sub-findings from this stage. Work from what is already in              context and say plainly which parts are unsupported because of it."
-        ),
+        format!("[Fan-out in stage '{stage}' started no workers] {message}.{advice}"),
     );
 }
 
