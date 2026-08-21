@@ -1364,15 +1364,20 @@ mod tests {
         assert!(result.contains("Failed to create directories"));
     }
 
+    /// A directory is the wrong tool, not a malformed path, so the refusal names
+    /// the right one. `read_file(".")` was the most common failed call across
+    /// four research runs, and the raw OS message ("Is a directory (os error
+    /// 21)") named the problem without naming the fix.
     #[tokio::test]
-    async fn read_file_fails_when_path_is_a_directory() {
+    async fn read_file_on_a_directory_points_at_list_dir() {
         let dir = tempfile::tempdir().unwrap();
         let tools = make_tools(dir.path());
         fs::create_dir(dir.path().join("adir")).unwrap();
 
         let result = tools.execute("read_file", json!({"path": "adir"})).await;
-        assert!(result.contains("[error]"));
-        assert!(result.contains("Failed to read"));
+        assert!(result.contains("[error]"), "{result}");
+        assert!(result.contains("is a directory, not a file"), "{result}");
+        assert!(result.contains("list_dir"), "{result}");
     }
 
     #[tokio::test]

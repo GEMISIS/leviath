@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.3.0"
+version = "0.3.1"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 entry_stage = "survey"
 
@@ -171,13 +171,20 @@ Decide the next move:
 - You've covered enough ground to write a useful overview → respond with: summarize
 """
 system_prompt = """
-Compare across the `landscape`, organizing by THEME not by source:
+Compare across the `landscape` and `thread_findings`, organizing by THEME not by
+source:
 - Patterns; where approaches converge or diverge
 - The tradeoffs each approach makes
 - What's overhyped vs underappreciated
 Record the key comparative judgments in `comparisons` (context_write) and any
 source disagreements you notice. Flag threads that deserve a deep_dive before you
 can rank them fairly. Help the reader see the shape of the field.
+
+The workers' findings are already here: the fan-out wrote them into
+`thread_findings`, which is rendered into this prompt under its own `## thread_findings`
+heading. They are not files. A work item's name is not a filename, and
+`read_file` on one finds nothing - the whole point of the fan-out is that the
+answers came back to you.
 
 If `error_report` says a previous stage hit its iteration cap, that stage was cut
 off before finishing - treat its coverage as incomplete when judging the field.
@@ -260,9 +267,19 @@ citing `sources_index` per the rules in `format`. Include:
 - Notable projects/implementations worth watching (draw on deep_dives)
 - Trends and trajectory
 - Recommendations (what to look at first, by goal)
+- Sources - the numbered bibliography from `sources_index`, every line carrying
+  its URL
+
+Every `[n]` in the prose is a link to its source - `[[n]](<url>)` - so the
+reader can click through from the claim.
 
 Write concisely - the reader wants the lay of the land quickly. Cite sources for
 non-obvious claims.
+
+The bibliography is the deliverable as much as the prose is: a survey is a
+reading list, and `[n]` markers over a source list with no URLs send the reader
+back to a search engine to find what this run already found. Carry the URL on
+every line, even when the title looks searchable.
 
 Citations are load-bearing, so two rules bind absolutely:
 
@@ -341,7 +358,7 @@ environment        = { kind = "pinned", budget = "1%", seed = { tools = ["curren
 # that can write context and no-ops for the ones that cannot, so it can never
 # deadlock the deliverable.
 sources_index      = { kind = "pinned", budget = "3%", volatility = "grows", required = true, required_message = "You have not recorded a single source in `sources_index`. Append one bibliography line per source you actually read (context_append, region=\"sources_index\"): `[n] <title> - <url or path> - credibility: <high/med/low + why>`. If the searches came back empty or unavailable, record THAT as the finding - do not proceed as though sources were gathered." }
-format             = { kind = "pinned", budget = "1%", seed = { literal = "Cite non-obvious claims as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Prefer comparison tables where they clarify tradeoffs." }, volatility = "stable" }
+format             = { kind = "pinned", budget = "1%", seed = { literal = "Cite non-obvious claims as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Write every marker as a link to the source it cites - `[[n]](<url>)`, which renders as [n] and clicks through - so a reader can check a claim without scrolling to the bibliography and pasting a URL by hand. Use the URL from that source's `sources_index` line; a source that has a local path instead of a URL stays a bare [n]. The bibliography entry keeps its full URL either way. Prefer comparison tables where they clarify tradeoffs. A claim about something the task names only as a comparison rests on what THIS run read about it, not on the credibility of your own topic's sources: grade it on that, and when a figure reaches you through a source that mentions a study rather than one that reports it, say so and grade it down." }, volatility = "stable" }
 
 landscape          = { kind = "temporary",      budget = "30%" }
 deep_dives         = { kind = "sliding_window", max_items = 15, budget = "8%" }
