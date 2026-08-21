@@ -16,7 +16,7 @@ use ratatui::style::Color;
 pub struct DashboardArgs {}
 
 /// Whether the detail content pane shows Output or Logs.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StageContentMode {
     Output,
     Logs,
@@ -130,6 +130,49 @@ impl ExplorerState {
             view,
         }
     }
+}
+
+/// One row of the run list's parent → child tree: the connector prefix drawn
+/// before the title, plus whether the row can fold and whether it is folded.
+///
+/// Parallel to `display_indices`, rebuilt by `update_display_indices`. It is
+/// one vector rather than three because every consumer (the renderer, the
+/// arrow keys, the click hit-test) needs all three facts about the same row,
+/// and parallel vectors that can disagree about their length are how a row
+/// ends up drawn with another row's connector.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct RunTreeRow {
+    /// Tree connectors drawn before the title (empty for a root).
+    pub(super) prefix: String,
+    /// True when the run has sub-agents, so the row can fold.
+    pub(super) expandable: bool,
+    /// True when its sub-agents are folded away.
+    pub(super) collapsed: bool,
+    /// How many descendants the fold is hiding (0 unless collapsed).
+    pub(super) hidden: usize,
+}
+
+/// Something on screen a left click acts on, registered with its rect by the
+/// renderer that drew it.
+///
+/// Hit-testing runs over the rects registered this frame, last match wins, so
+/// a target drawn inside another (a fold arrow inside its row) takes the
+/// click. The alternative - each handler re-deriving where its widget landed -
+/// is how a click ends up acting on the row above the one under the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClickTarget {
+    /// A run row in the main list, by its `display_indices` position.
+    RunRow(usize),
+    /// The fold arrow of a run row, by its `display_indices` position.
+    RunToggle(usize),
+    /// The log panel: clicking it moves the keyboard there.
+    LogPanel,
+    /// A stage tab in the detail view, by stage index.
+    StageTab(usize),
+    /// One of the content pane's mode chips (`[l] logs` and friends).
+    ContentMode(StageContentMode),
+    /// A row of the Context view's tree, by interactive-row index.
+    ContextRow(usize),
 }
 
 /// Cursor + expansion state of the structured Context view.

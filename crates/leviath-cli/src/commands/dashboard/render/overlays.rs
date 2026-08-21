@@ -250,6 +250,14 @@ fn run_list_sections() -> Vec<HelpSection> {
             ("↑ ↓ / k j", "select a run"),
             ("home / end (g / G)", "first / last run"),
             ("enter", "open the detail view"),
+            (
+                "← →",
+                "fold / unfold a run's sub-agents (the ▸ ▾ arrow is clickable too)",
+            ),
+            (
+                "",
+                "on a run with none: ← goes up to the parent, → down to the first child",
+            ),
             ("n", "start a new run"),
             ("tab / shift-tab", "focus the log panel"),
             ("/", "filter runs; enter keeps it, esc clears it"),
@@ -312,6 +320,7 @@ fn detail_sections() -> Vec<HelpSection> {
             entries: vec![
                 ("↑ ↓ / k j", "move the tree cursor, not the scroll"),
                 ("enter / space", "fold or unfold a row"),
+                ("click", "the same, on the row under the pointer"),
                 ("[ / ]", "previous / next region"),
             ],
         },
@@ -465,7 +474,18 @@ fn shared_sections() -> Vec<HelpSection> {
                 ("wheel", "scrolls whichever pane is under the pointer"),
                 ("wheel on the run list", "moves the selection"),
                 ("drag", "select text; releasing copies it"),
-                ("click", "clears a selection; it does not open a run"),
+                (
+                    "click a run",
+                    "select it; the ▸ ▾ arrow folds its sub-agents",
+                ),
+                ("double click a run", "open its detail view"),
+                ("click the log panel", "move the keyboard there, like tab"),
+                ("click a stage tab", "open that stage"),
+                (
+                    "click [l] [o] [c]",
+                    "switch the content pane, like the letter",
+                ),
+                ("click a context row", "fold or unfold it"),
             ],
         },
         HelpSection {

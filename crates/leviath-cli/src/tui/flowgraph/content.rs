@@ -52,6 +52,22 @@ impl RunPhase {
         }
     }
 
+    /// Whether the run has stopped for good, so nothing about it can move
+    /// again.
+    ///
+    /// The animated edge means "the run is travelling this path". On a run
+    /// that has finished it was still pulsing into the last node it reached,
+    /// which reads as a run still going - the one thing the graph is there to
+    /// tell you at a glance. A parked run (waiting, paused, idle, stale) keeps
+    /// the animation: it has not finished, and the pulse is what says where it
+    /// stopped.
+    pub(crate) fn is_finished(self) -> bool {
+        matches!(
+            self,
+            RunPhase::Complete | RunPhase::Error | RunPhase::Cancelled
+        )
+    }
+
     /// The word the node shows for the phase; the spinner says "running"
     /// on its own, so `Active` has none.
     fn word(self) -> Option<&'static str> {

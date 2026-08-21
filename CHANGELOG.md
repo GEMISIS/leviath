@@ -13,6 +13,25 @@ same list.
 
 ## Unreleased
 
+- Added: the dashboard's sub-agent tree folds. `←` folds the selected run's
+  workers away and `→` puts them back; on a run without any, `←` moves up to its
+  parent and `→` down into the first worker. A foldable row wears a `▸`/`▾`
+  arrow, a folded one says how many runs it is hiding, and the help bar offers
+  the keys only when there is a tree to work. Folds are keyed by run, so they
+  survive sorting, filtering and new rows, and folding the run you were inside
+  leaves the highlight on the fold rather than at the top of the list.
+- Added: the dashboard answers the mouse. Click a run to select it and again to
+  open it, click its `▸`/`▾` arrow to fold its workers, click a stage tab or one
+  of the content pane's `[l]` / `[o]` / `[c]` chips to switch to it, click a row
+  of the Context tree to fold or unfold it, click the log panel to move the keys
+  there. Every renderer registers what it drew and where, so a click acts on
+  what is under the pointer rather than on a position derived twice. Drag still
+  selects text and copies it on release.
+- Fixed: a finished run's last transition no longer animates on the stage graph.
+  The pulse means "the run is travelling this path", and it kept running into
+  the final stage of a run that had completed, errored or been cancelled. A run
+  that is merely parked keeps it: it has not finished, and the pulse is what
+  says where it stopped.
 - Added: `deep-researcher` and `wide-researcher` can ask a clarifying question
   before they commit the run to a reading of the task. Granted only on the first
   stage, where a wrong reading costs everything downstream; an unattended run is
@@ -46,7 +65,6 @@ same list.
   fetched twenty sources, wrote the whole bibliography out as prose at the end of
   `gather`, and left `sources_index` empty; the region is what the next stage
   reads, not the message.
-
 - Fixed: a `mode = "fan_out"` stage's own call is delivered as a stage fan-out
   again, so `results_region` and `merge_stage` mean something. Making the stage
   grant the `fan_out` tool left every call looking like a tool call, and the

@@ -24,6 +24,17 @@ fn system_now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Production clock for double-click detection: milliseconds since the epoch.
+/// Separate from [`system_now_secs`] because a second is far too coarse to
+/// tell one click from two, and injected for the same reason - a test that
+/// has to sleep to prove a double click is a test that fails on a busy CI box.
+fn system_now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 impl Dashboard {
     /// Default/test constructor: points the activity log at a shared temp file
     /// and uses a no-op clipboard, so unit tests never touch the real
@@ -116,6 +127,9 @@ impl Dashboard {
             log_scroll: crate::tui::widgets::scroll::ScrollState::default(),
             pane_rects: Vec::new(),
             mouse_capture: None,
+            click_targets: Vec::new(),
+            last_click: None,
+            mouse_clock: system_now_millis,
             detail_band: None,
             explorer_cache: None,
             new_run_preview: None,
@@ -143,7 +157,8 @@ impl Dashboard {
             list_search_mode: false,
             list_search_query: String::new(),
             display_indices: Vec::new(),
-            tree_prefixes: Vec::new(),
+            tree_rows: Vec::new(),
+            collapsed_runs: std::collections::HashSet::new(),
             mcp_screen: false,
             mcp_add_mode: false,
             mcp_add_input: String::new(),
@@ -263,6 +278,16 @@ mod tests {
         // Well after 2020 and before 2100 - i.e. a real epoch second.
         let now = system_now_secs();
         assert!(now > 1_577_836_800 && now < 4_102_444_800, "got {now}");
+    }
+
+    /// The double-click clock reports the same instant in milliseconds (tests
+    /// inject a frozen one, so this is the only place it runs).
+    #[test]
+    fn the_millisecond_clock_agrees_with_the_second_one() {
+        let millis = system_now_millis();
+        let secs = system_now_secs() as u64;
+        assert!(millis / 1000 >= secs.saturating_sub(2), "got {millis}");
+        assert!(millis / 1000 <= secs + 2, "got {millis}");
     }
 
     // ─── load_log_seed: exercises the parsing code ───────────────────────

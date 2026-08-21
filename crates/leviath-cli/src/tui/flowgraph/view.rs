@@ -864,9 +864,14 @@ impl FlowView {
             .collect();
         self.taken = live.taken.iter().cloned().collect();
         self.current = live.current.clone();
+        // The pulse on the newest transition means the run is travelling that
+        // path. A run that has finished is not, so its last edge is drawn as
+        // taken and still - see `RunPhase::is_finished`.
+        let finished = live.run.is_some_and(|phase| phase.is_finished());
         let last = live
             .last_transition
             .as_ref()
+            .filter(|_| !finished)
             .map(|(f, t)| (f.as_str(), t.as_str()));
         for meta in &self.edges {
             let key = (meta.edge.from.as_str(), meta.edge.to.as_str());
@@ -1304,6 +1309,37 @@ mode = "output"
                 errored: false
             })
         );
+        // …and it does not still pulse along the path it arrived by: the
+        // animation means "travelling", and this run has stopped.
+        assert!(
+            !v.edge_animated("implement", "review"),
+            "a finished run is not moving"
+        );
+        assert!(
+            !v.edge_hidden("implement", "review"),
+            "the path it took is still drawn, just still"
+        );
+        // Every terminal phase, not only the happy one.
+        for phase in [RunPhase::Error, RunPhase::Cancelled] {
+            let mut stopped = next.clone();
+            stopped.run = Some(phase);
+            v.apply_live(&stopped);
+            assert!(!v.edge_animated("implement", "review"), "{phase:?}");
+        }
+        // A run that is merely parked has not finished, and the pulse is what
+        // says where it stopped.
+        for phase in [
+            RunPhase::Waiting,
+            RunPhase::Paused,
+            RunPhase::Idle,
+            RunPhase::Stale,
+        ] {
+            let mut parked = next.clone();
+            parked.run = Some(phase);
+            v.apply_live(&parked);
+            assert!(v.edge_animated("implement", "review"), "{phase:?}");
+        }
+
         // Same current again: no new reveal.
         v.apply_live(&next);
         assert!(v.reveal.is_none());
