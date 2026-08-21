@@ -136,6 +136,7 @@ impl Wizard {
         scan_errors: Vec<String>,
         agents_dir: &std::path::Path,
         opener: leviath_mcp::BrowserOpener,
+        remembered: crate::ui_state::SetupUi,
     ) -> Self {
         let env_only = env_credentials(env_lookup);
 
@@ -161,30 +162,45 @@ impl Wizard {
         let agents = crate::bundled::plan_agent_actions(agents_dir)
             .into_iter()
             .map(|(agent, action)| AgentRow {
-                selected: action.preselect(),
+                // Still offered, just not pre-checked, when this exact version
+                // was turned down before. Keyed by version so a newer bundled
+                // blueprint is a fresh offer rather than something an old "no
+                // thanks" keeps hidden.
+                selected: action.preselect()
+                    && remembered
+                        .declined_agents
+                        .get(agent.name)
+                        .map(String::as_str)
+                        != Some(agent.version),
                 agent,
                 action,
             })
             .collect();
 
-        let mcp = candidates
-            .into_iter()
-            .map(|(source, candidate)| {
-                let collides =
-                    import::already_configured(&base.mcp_servers, &candidate.config.name);
-                let name = import::dedup_name(&base.mcp_servers, &candidate.config.name);
-                McpRow {
-                    // A server already configured under this name is offered
-                    // unchecked: the user has it, and silently adding a second
-                    // copy under a suffixed name is not what "import" means.
-                    selected: !collides,
-                    source,
-                    collides,
-                    name,
-                    candidate,
-                }
-            })
-            .collect();
+        let mcp =
+            candidates
+                .into_iter()
+                .map(|(source, candidate)| {
+                    let collides =
+                        import::already_configured(&base.mcp_servers, &candidate.config.name);
+                    let name = import::dedup_name(&base.mcp_servers, &candidate.config.name);
+                    McpRow {
+                        // A server already configured under this name is offered
+                        // unchecked: the user has it, and silently adding a second
+                        // copy under a suffixed name is not what "import" means.
+                        // So is one they have already said no to - still listed, so
+                        // they can change their mind, but not proposed again.
+                        selected: !collides
+                            && !remembered.declined_mcp.contains(
+                                &crate::ui_state::mcp_decline_key(&source, &candidate.config.name),
+                            ),
+                        source,
+                        collides,
+                        name,
+                        candidate,
+                    }
+                })
+                .collect();
 
         let (verify_tx, verify_rx) = mpsc::unbounded_channel();
         let (reply_tx, reply_rx) = mpsc::unbounded_channel();
@@ -1014,6 +1030,33 @@ impl Wizard {
                 .filter(|r| r.selected)
                 .map(|r| r.agent)
                 .collect(),
+            declined: self.declined(),
+        }
+    }
+
+    /// What was offered as a change and left unchecked.
+    ///
+    /// Only rows that were a real offer count. An MCP server that collides with
+    /// one already configured, and a blueprint that is up to date or locally
+    /// edited, are unchecked because *we* made them so - reading that back as
+    /// the user's refusal would mean an up-to-date blueprint stayed unchecked
+    /// forever once its next version arrived.
+    fn declined(&self) -> crate::ui_state::SetupUi {
+        crate::ui_state::SetupUi {
+            declined_mcp: self
+                .mcp
+                .iter()
+                .filter(|row| !row.selected && !row.collides)
+                .map(|row| {
+                    crate::ui_state::mcp_decline_key(&row.source, &row.candidate.config.name)
+                })
+                .collect(),
+            declined_agents: self
+                .agents
+                .iter()
+                .filter(|row| !row.selected && row.action.preselect())
+                .map(|row| (row.agent.name.to_string(), row.agent.version.to_string()))
+                .collect(),
         }
     }
 
@@ -1085,7 +1128,141 @@ pub(super) mod tests {
             Vec::new(),
             agents_dir,
             std::sync::Arc::new(|_| true),
+            Default::default(),
         )
+    }
+
+    // ─── remembering what was turned down ─────────────────────────────────
+
+    /// A wizard offered one importable server, with `remembered` as whatever
+    /// the last run recorded.
+    fn wizard_offering_mcp(
+        agents_dir: &std::path::Path,
+        remembered: crate::ui_state::SetupUi,
+    ) -> Wizard {
+        Wizard::new(
+            Config::default(),
+            &|_| None,
+            vec![("cursor".to_string(), candidate("linear"))],
+            Vec::new(),
+            agents_dir,
+            std::sync::Arc::new(|_| true),
+            remembered,
+        )
+    }
+
+    /// The whole point: a server turned down last time is still listed, and
+    /// still unchecked.
+    #[test]
+    fn a_declined_mcp_server_is_offered_again_but_not_preselected() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let fresh = wizard_offering_mcp(dir.path(), Default::default());
+        assert_eq!(fresh.mcp.len(), 1);
+        assert!(fresh.mcp[0].selected, "a first-time offer is pre-checked");
+
+        let mut remembered = crate::ui_state::SetupUi::default();
+        remembered
+            .declined_mcp
+            .insert(crate::ui_state::mcp_decline_key("cursor", "linear"));
+        let second = wizard_offering_mcp(dir.path(), remembered);
+        assert_eq!(
+            second.mcp.len(),
+            1,
+            "still shown, so it can be reconsidered"
+        );
+        assert!(!second.mcp[0].selected, "but not proposed again");
+    }
+
+    /// A decline recorded against a *different* source or name is not this
+    /// server's decline.
+    #[test]
+    fn a_decline_is_scoped_to_the_source_it_came_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut remembered = crate::ui_state::SetupUi::default();
+        remembered
+            .declined_mcp
+            .insert(crate::ui_state::mcp_decline_key("claude-code", "linear"));
+        let w = wizard_offering_mcp(dir.path(), remembered);
+        assert!(
+            w.mcp[0].selected,
+            "the same name from another harness is a different offer"
+        );
+    }
+
+    /// Leaving an offered row unchecked is what gets recorded; a row that was
+    /// never a real offer is not.
+    #[test]
+    fn the_plan_records_only_rows_that_were_genuinely_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = wizard_offering_mcp(dir.path(), Default::default());
+        w.mcp[0].selected = false;
+        assert!(
+            w.build_plan()
+                .declined
+                .declined_mcp
+                .contains(&crate::ui_state::mcp_decline_key("cursor", "linear")),
+            "unchecked and importable: a refusal"
+        );
+
+        // Unchecked because it collides with one already configured is our
+        // doing, not the user's, and must not read as a refusal.
+        w.mcp[0].collides = true;
+        assert!(w.build_plan().declined.declined_mcp.is_empty());
+    }
+
+    /// A blueprint turned down stays unchecked - until a newer version makes
+    /// it a different offer.
+    #[test]
+    fn a_declined_blueprint_is_re_offered_when_its_version_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents_dir = dir.path();
+        let offered = &BUNDLED_AGENTS[0];
+
+        let mut remembered = crate::ui_state::SetupUi::default();
+        remembered
+            .declined_agents
+            .insert(offered.name.to_string(), offered.version.to_string());
+        let w = Wizard::new(
+            Config::default(),
+            &|_| None,
+            Vec::new(),
+            Vec::new(),
+            agents_dir,
+            std::sync::Arc::new(|_| true),
+            remembered,
+        );
+        let row = w
+            .agents
+            .iter()
+            .find(|r| r.agent.name == offered.name)
+            .expect("the bundled agent is offered");
+        assert!(
+            row.action.preselect(),
+            "nothing installed, so it is an offer"
+        );
+        assert!(!row.selected, "and it was turned down at this version");
+
+        // A different version is a different offer.
+        let mut moved_on = crate::ui_state::SetupUi::default();
+        moved_on
+            .declined_agents
+            .insert(offered.name.to_string(), "0.0.0-ancient".to_string());
+        let w = Wizard::new(
+            Config::default(),
+            &|_| None,
+            Vec::new(),
+            Vec::new(),
+            agents_dir,
+            std::sync::Arc::new(|_| true),
+            moved_on,
+        );
+        let row = w
+            .agents
+            .iter()
+            .find(|r| r.agent.name == offered.name)
+            .expect("still offered");
+        assert!(row.selected, "a newer version is asked about again");
     }
 
     fn candidate(name: &str) -> Candidate {
@@ -1162,6 +1339,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
 
         let row = wizard
@@ -1189,6 +1367,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
 
         let row = wizard
@@ -1227,6 +1406,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
 
         let row = &wizard.providers[0];
@@ -1245,6 +1425,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
 
         assert!(wizard.env_only.is_empty());
@@ -1264,6 +1445,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
 
         assert_eq!(wizard.mcp.len(), 1);
@@ -1290,6 +1472,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
 
         assert!(!wizard.mcp[0].selected);
@@ -1318,6 +1501,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
         wizard.mcp[1].selected = false;
         wizard.mcp[0].name = "renamed".to_string();
@@ -1344,6 +1528,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
 
         assert_eq!(wizard.selected_inline_secrets(), vec!["leaky: API_TOKEN"]);
@@ -1455,6 +1640,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
 
         wizard.enter(Step::Agents);
@@ -1475,6 +1661,7 @@ pub(super) mod tests {
             vec!["Zed: unreadable".to_string()],
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
 
         wizard.enter(Step::Agents);
@@ -1573,6 +1760,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
         let (mut requests, _replies) = wizard.take_verify_ends().expect("first take");
 
@@ -1794,6 +1982,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
         wizard.providers[0].selected = true;
         wizard.providers[0].outcome = Outcome::Reachable {
@@ -1995,6 +2184,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
         assert!(wizard.providers[0].from_env.is_some());
         wizard.edit = Some(Edit {
@@ -2081,6 +2271,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
         wizard.providers[0].selected = true;
 
@@ -2128,6 +2319,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
         wizard.edit = Some(Edit {
             target: EditTarget::Credential(0),
@@ -2214,6 +2406,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
 
         wizard.providers[0].selected = false;
@@ -2302,6 +2495,7 @@ pub(super) mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
 
         let index = wizard

@@ -55,6 +55,18 @@ impl SortMode {
             Self::StatusGrouped => "status",
         }
     }
+
+    /// The mode a saved [`label`](Self::label) names, if this build has one.
+    ///
+    /// The remembered sort is stored as its label rather than an index, so
+    /// adding or reordering modes cannot silently turn a saved file into a
+    /// different choice. `None` for a label this build does not know, which
+    /// the caller treats as "no memory" rather than an error.
+    pub(super) fn from_label(label: &str) -> Option<Self> {
+        [Self::StartedAt, Self::RecentActivity, Self::StatusGrouped]
+            .into_iter()
+            .find(|mode| mode.label() == label)
+    }
 }
 
 /// Which pane of the main screen holds keyboard focus.

@@ -51,6 +51,8 @@ impl Dashboard {
         self.new_run_focus = NewRunPane::Agents;
         self.new_run_filter.clear();
         self.new_run_selected = 0;
+        // Filled in below, once the catalog is built: the list has to exist
+        // before a name can be found in it.
         self.new_run_task = ratatui_textarea::TextArea::default();
         // Unattended is off every time the screen opens. It is a consequential
         // setting, and one that survived out of sight is one somebody can
@@ -58,7 +60,23 @@ impl Dashboard {
         self.new_run_yolo = false;
         self.close_file_ref();
         self.refresh_new_run_agents();
+        self.select_last_launched_agent();
         self.new_run_files = collect_workdir_files(&self.new_run_ctx.workdir, FILE_CANDIDATE_CAP);
+    }
+
+    /// Open on the agent last launched from here, when it is still offered.
+    ///
+    /// The cursor, not a filter: the whole catalog stays visible and one press
+    /// of `↑` reaches everything above it. An agent that has since been removed
+    /// or renamed simply is not found, and the list opens at the top as it
+    /// always did.
+    fn select_last_launched_agent(&mut self) {
+        let Some(name) = self.last_launched_agent.as_deref() else {
+            return;
+        };
+        if let Some(index) = self.new_run_agents.iter().position(|a| a.name == name) {
+            self.new_run_selected = index;
+        }
     }
 
     /// Close the screen, discarding whatever was typed.
@@ -160,6 +178,11 @@ impl Dashboard {
         };
         self.toast(format!("Starting '{}'{how}…", agent.name), ToastLevel::Info);
         self.add_log(format!("run requested: {}", agent.name));
+        // Recorded on the launch rather than on the selection: moving the
+        // cursor down the list to read a blueprint's preview is not a choice
+        // of agent, and starting a run is.
+        self.last_launched_agent = Some(agent.name.clone());
+        self.save_ui_state();
         self.close_new_run_screen();
     }
 
@@ -611,6 +634,65 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    // ─── the agent the screen opens on ────────────────────────────────────
+
+    /// Someone who launches the same agent all day should find the cursor on
+    /// it, not scroll past everything alphabetically ahead of it.
+    #[test]
+    fn the_screen_opens_on_the_agent_last_launched() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents").join("alpha"), "alpha", "first");
+        write_agent(&dir.path().join("agents").join("zulu"), "zulu", "last");
+        let mut dash = dash_at(dir.path());
+
+        dash.open_new_run_screen();
+        assert_eq!(
+            dash.new_run_selected_agent().map(|a| a.name.as_str()),
+            Some("alpha"),
+            "with no memory the list opens at the top"
+        );
+
+        dash.last_launched_agent = Some("zulu".to_string());
+        dash.open_new_run_screen();
+        assert_eq!(
+            dash.new_run_selected_agent().map(|a| a.name.as_str()),
+            Some("zulu")
+        );
+
+        // An agent that has since been removed is simply not found, and the
+        // list opens where it always did rather than on nothing.
+        dash.last_launched_agent = Some("deleted-since".to_string());
+        dash.open_new_run_screen();
+        assert_eq!(
+            dash.new_run_selected_agent().map(|a| a.name.as_str()),
+            Some("alpha")
+        );
+    }
+
+    /// Recorded on the launch, not on the browse: moving the cursor to read a
+    /// blueprint's preview is not choosing it.
+    #[test]
+    fn the_last_agent_is_recorded_when_a_run_actually_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents").join("alpha"), "alpha", "first");
+        write_agent(&dir.path().join("agents").join("zulu"), "zulu", "last");
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+
+        // By position, found rather than assumed: the catalog carries the
+        // bundled blueprints too, so the index of a written one is not 1.
+        dash.new_run_selected = dash
+            .new_run_agents
+            .iter()
+            .position(|a| a.name == "zulu")
+            .expect("the written agent is in the catalog");
+        assert_eq!(dash.last_launched_agent, None, "browsing decides nothing");
+
+        dash.new_run_task.insert_str("do the thing");
+        dash.submit_new_run();
+        assert_eq!(dash.last_launched_agent.as_deref(), Some("zulu"));
     }
 
     // ─── catalog ──────────────────────────────────────────────────────────

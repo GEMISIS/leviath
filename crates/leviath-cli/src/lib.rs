@@ -31,4 +31,5 @@ mod test_support;
 pub mod tool_inventory;
 pub mod tools;
 pub mod tui;
+pub mod ui_state;
 pub mod workdir_guard;

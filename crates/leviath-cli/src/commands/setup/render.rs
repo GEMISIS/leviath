@@ -1387,6 +1387,7 @@ mod tests {
             vec!["Zed: unreadable".to_string()],
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
         w.providers[0].selected = true;
 
@@ -1430,6 +1431,7 @@ mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
         w.providers[1].selected = true;
         w.providers[1].value = "sk-oai".to_string();
@@ -1715,6 +1717,7 @@ mod tests {
             vec!["Zed: couldn't parse this".to_string()],
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
         w.enter(Step::Mcp);
 
@@ -1745,6 +1748,7 @@ mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
         w.enter(Step::Mcp);
 
@@ -1768,6 +1772,7 @@ mod tests {
             Vec::new(),
             dir.path(),
             std::sync::Arc::new(|_| true),
+            Default::default(),
         );
         w.providers[0].selected = true;
         w.providers[0].value = "sk-ant-x".to_string();

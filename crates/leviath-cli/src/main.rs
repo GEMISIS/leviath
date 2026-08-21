@@ -791,6 +791,9 @@ async fn real_setup(args: commands::setup::SetupArgs) -> anyhow::Result<()> {
         ),
         env_lookup: Box::new(|name| std::env::var(name).ok()),
         opener: std::sync::Arc::new(leviath_sys::open_url),
+        // Shared with the dashboard, so an import somebody has already turned
+        // down is not proposed again the next time they run setup.
+        ui_state_path: leviath_cli::ui_state::default_path(),
     };
     if args.non_interactive {
         return commands::setup::run_non_interactive(&args, &env);

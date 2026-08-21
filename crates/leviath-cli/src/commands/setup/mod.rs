@@ -119,6 +119,10 @@ pub struct SetupEnv {
     pub env_lookup: EnvLookup,
     /// Opens a URL in a browser.
     pub opener: leviath_mcp::BrowserOpener,
+    /// Where the offers this user has already turned down are remembered (see
+    /// [`crate::ui_state`]). `None` reads and writes nothing, which is what
+    /// every test gets, so no test can reach the real file.
+    pub ui_state_path: Option<PathBuf>,
 }
 
 // The real `SetupEnv` - the user's actual home, a real `std::env` lookup, and
@@ -146,9 +150,17 @@ pub fn run_non_interactive(args: &SetupArgs, env: &SetupEnv) -> anyhow::Result<(
     };
 
     let applied = plan::apply(
-        &plan::SetupPlan { config, agents },
+        // Nothing was offered here, so nothing was declined: the headless arm
+        // takes its answer from flags and must not rewrite what the wizard
+        // remembered about a person's choices.
+        &plan::SetupPlan {
+            config,
+            agents,
+            declined: Default::default(),
+        },
         &env.config_path,
         &env.agents_dir,
+        None,
     )?;
     report(&applied);
     Ok(())
@@ -249,6 +261,11 @@ fn retarget_default_provider(config: &mut Config) {
 pub fn build_wizard(env: &SetupEnv) -> Wizard {
     let base = Config::load_from_path_public(&env.config_path).unwrap_or_default();
     let (candidates, errors) = state::candidates_from_scans(import::scan(&env.roots));
+    let remembered = env
+        .ui_state_path
+        .as_deref()
+        .map(|p| crate::ui_state::load(p).setup)
+        .unwrap_or_default();
     Wizard::new(
         base,
         &env.env_lookup,
@@ -256,6 +273,7 @@ pub fn build_wizard(env: &SetupEnv) -> Wizard {
         errors,
         &env.agents_dir,
         env.opener.clone(),
+        remembered,
     )
 }
 
@@ -353,7 +371,12 @@ pub async fn execute_core<S: TerminalSetup, E: EventSource>(
 
     match result? {
         Some(plan) => {
-            let applied = plan::apply(&plan, &env.config_path, &env.agents_dir)?;
+            let applied = plan::apply(
+                &plan,
+                &env.config_path,
+                &env.agents_dir,
+                env.ui_state_path.as_deref(),
+            )?;
             report(&applied);
             print_next_steps(&applied);
         }
@@ -441,6 +464,9 @@ mod tests {
             },
             env_lookup: Box::new(|_| None),
             opener: std::sync::Arc::new(|_| true),
+            // Inside the tempdir like everything else, so a test that applies
+            // a plan writes its declines here and never to the real file.
+            ui_state_path: Some(dir.join("ui-state.json")),
         }
     }
 

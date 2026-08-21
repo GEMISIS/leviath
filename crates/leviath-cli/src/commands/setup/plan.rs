@@ -22,6 +22,11 @@ pub struct SetupPlan {
     pub config: Config,
     /// Blueprints to install or update.
     pub agents: Vec<&'static BundledAgent>,
+    /// What was offered and turned down, so the next run does not propose it
+    /// again (see [`crate::ui_state`]). Part of the plan rather than something
+    /// the caller works out afterwards, because it is a thing the user decided
+    /// and this struct is where those live.
+    pub declined: crate::ui_state::SetupUi,
 }
 
 /// What actually happened, for the closing summary.
@@ -41,8 +46,22 @@ pub struct Applied {
 /// fails to install is reported as a warning rather than aborting, because a
 /// written config plus nine of ten agents is a far better place to leave
 /// someone than an abandoned run with nothing saved.
-pub fn apply(plan: &SetupPlan, config_path: &Path, agents_dir: &Path) -> anyhow::Result<Applied> {
+pub fn apply(
+    plan: &SetupPlan,
+    config_path: &Path,
+    agents_dir: &Path,
+    ui_state_path: Option<&Path>,
+) -> anyhow::Result<Applied> {
     plan.config.save_to_path_public(config_path)?;
+
+    // Recorded here rather than as the user toggles, so a wizard abandoned
+    // half-way remembers nothing: the decisions that count are the ones they
+    // finished with. Read-modify-write, since the dashboard keeps its own
+    // memory in the same file.
+    if let Some(path) = ui_state_path {
+        let declined = plan.declined.clone();
+        crate::ui_state::update(path, |state| state.setup = declined);
+    }
 
     let mut agents_installed = Vec::new();
     let mut warnings = Vec::new();
@@ -208,6 +227,7 @@ mod tests {
         SetupPlan {
             config,
             agents: Vec::new(),
+            declined: Default::default(),
         }
     }
 
@@ -223,9 +243,10 @@ mod tests {
         let plan = SetupPlan {
             config,
             agents: vec![&BUNDLED_AGENTS[0]],
+            declined: Default::default(),
         };
 
-        let applied = apply(&plan, &config_path, &agents_dir).unwrap();
+        let applied = apply(&plan, &config_path, &agents_dir, None).unwrap();
 
         assert_eq!(applied.config_path, config_path);
         assert_eq!(applied.agents_installed, vec![BUNDLED_AGENTS[0].name]);
@@ -243,6 +264,64 @@ mod tests {
         );
     }
 
+    /// Applying is what records the refusals, and it must not tread on the
+    /// dashboard's memory in the same file.
+    #[test]
+    fn apply_writes_the_declines_without_disturbing_the_dashboard() {
+        let dir = tempfile::tempdir().unwrap();
+        let ui_state = dir.path().join("ui-state.json");
+        crate::ui_state::update(&ui_state, |s| {
+            s.dashboard.collapsed_runs.insert("run-1".to_string());
+        });
+
+        let mut declined = crate::ui_state::SetupUi::default();
+        declined
+            .declined_mcp
+            .insert(crate::ui_state::mcp_decline_key("cursor", "linear"));
+        let plan = SetupPlan {
+            config: Config::default(),
+            agents: Vec::new(),
+            declined,
+        };
+
+        apply(
+            &plan,
+            &dir.path().join("config.toml"),
+            &dir.path().join("agents"),
+            Some(&ui_state),
+        )
+        .unwrap();
+
+        let saved = crate::ui_state::load(&ui_state);
+        assert!(saved.setup.declined_mcp.contains("cursor:linear"));
+        assert!(
+            saved.dashboard.collapsed_runs.contains("run-1"),
+            "setup must not forget what the dashboard remembered"
+        );
+    }
+
+    /// Without a store - the headless arm, and every test that does not ask
+    /// for one - nothing is written anywhere.
+    #[test]
+    fn apply_without_a_store_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut declined = crate::ui_state::SetupUi::default();
+        declined.declined_mcp.insert("cursor:linear".to_string());
+        let plan = SetupPlan {
+            config: Config::default(),
+            agents: Vec::new(),
+            declined,
+        };
+        apply(
+            &plan,
+            &dir.path().join("config.toml"),
+            &dir.path().join("agents"),
+            None,
+        )
+        .unwrap();
+        assert!(!dir.path().join("ui-state.json").exists());
+    }
+
     #[test]
     fn apply_with_nothing_to_install_still_writes_the_config() {
         let dir = tempfile::tempdir().unwrap();
@@ -252,6 +331,7 @@ mod tests {
             &plan_of(Config::default()),
             &config_path,
             &dir.path().join("agents"),
+            None,
         )
         .unwrap();
 
@@ -271,9 +351,10 @@ mod tests {
         let plan = SetupPlan {
             config: Config::default(),
             agents: vec![&BUNDLED_AGENTS[0]],
+            declined: Default::default(),
         };
 
-        let applied = apply(&plan, &config_path, &agents_dir).unwrap();
+        let applied = apply(&plan, &config_path, &agents_dir, None).unwrap();
 
         assert!(applied.agents_installed.is_empty());
         assert_eq!(applied.warnings.len(), 1);
@@ -292,6 +373,7 @@ mod tests {
             &plan_of(Config::default()),
             &blocked.join("config.toml"),
             &dir.path().join("agents"),
+            None,
         );
 
         assert!(result.is_err());
@@ -385,6 +467,7 @@ mod tests {
         let plan = SetupPlan {
             config: after,
             agents: vec![&BUNDLED_AGENTS[0], &BUNDLED_AGENTS[1]],
+            declined: Default::default(),
         };
 
         let lines = changes(&before, &plan);

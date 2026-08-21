@@ -640,6 +640,15 @@ first and would take your edits with it.
 `lev run` says the same thing at the moment it matters: a run starting on an installed bundled
 blueprint that this build ships a different version of prints a one-line note before it spawns.
 
+Setup remembers what you turned down. An MCP server you left unchecked, or a blueprint you chose
+not to install, is still listed the next time you run `lev setup` - so you can change your mind -
+but it is no longer pre-selected, and finishing the wizard again will not quietly bring it in.
+Only refusals are remembered, and only from a run you finished: accepting needs no memory, because
+the server lands in your config and the blueprint lands on disk. A blueprint's refusal is recorded
+against the version that was offered, so a newer bundled version is a fresh offer and gets asked
+about again rather than being hidden by an old "no thanks". This lives in `ui-state.json` under the
+data directory, alongside what the dashboard remembers, and never in `config.toml`.
+
 Inside the wizard, the keys work the same way on every screen:
 
 | Key | Meaning |

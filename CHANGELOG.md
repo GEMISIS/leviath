@@ -13,6 +13,25 @@ same list.
 
 ## Unreleased
 
+- Added: the terminal UIs remember the choices you have already made, in one
+  `ui-state.json` under the data directory rather than each surface inventing
+  its own answer. `lev setup` no longer re-proposes an MCP server or a bundled
+  blueprint you turned down: it is still listed, so you can change your mind,
+  but it is not pre-selected and finishing the wizard again will not quietly
+  bring it in. Only refusals are kept, and only from a run you finished -
+  accepting needs no memory, since the server lands in your config and the
+  blueprint on disk. A blueprint's refusal is recorded against the version that
+  was offered, so a newer one is a fresh offer rather than something an old "no
+  thanks" hides. The dashboard joins it with two more: the sort order `s`
+  cycles, and the agent the new-run screen opens on, which is whichever you last
+  launched.
+- Changed: nothing transient or consequential is remembered, deliberately. A
+  filter, a search and the run marks are gone when you come back, because
+  reopening with yesterday's filter silently applied is a bug rather than a
+  convenience; and unattended (`Ctrl-Y`) stays off every time the new-run screen
+  opens, because a setting that runs tools without asking is the last one
+  anybody should inherit from last week out of sight.
+
 - Fixed: the MCP handshake deadline is settable, so a stalled CI runner stops
   failing the suite. `MCPClient::connect` gave the `initialize` handshake a
   hardcoded 30 seconds - the right answer to "how long should a person's agent
@@ -50,7 +69,7 @@ same list.
 - Added: the run list's folds outlive the dashboard. Folding four finished
   fan-outs to see the two live ones is a decision, and having to make it again
   every time you open `lev dash` is the feature failing to be one. They are kept
-  in `dash/ui-state.json` under the data directory, beside the agent editor's
+  in `ui-state.json` under the data directory, beside the agent editor's
   canvas arrangements, and written on the keystroke that makes them rather than
   on the way out - a dashboard is usually closed by whatever closes the
   terminal, so "save on quit" is a save that often never happens. A list still
