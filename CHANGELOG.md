@@ -13,6 +13,20 @@ same list.
 
 ## Unreleased
 
+- Fixed: a `required` region an earlier stage gave up on and a later stage filled
+  is no longer reported as missing. The flag recorded a moment and consumers read
+  it as a present-tense fact, so a `deep-researcher` run that abandoned
+  `sources_index` in `gather`, had `analyze` write it, and finished with a
+  fifty-citation bibliography still warned that later stages had worked from an
+  artifact that was never written. The moment stays in the log; the flag now
+  answers "what is actually missing", checked at every stage boundary.
+- Changed: the research agents are told to append each bibliography line in the
+  same turn they read the source, and that writing the bibliography into their
+  reply does not count - it has to be a `context_append` call. One run in three
+  fetched twenty sources, wrote the whole bibliography out as prose at the end of
+  `gather`, and left `sources_index` empty; the region is what the next stage
+  reads, not the message.
+
 - Fixed: a `mode = "fan_out"` stage's own call is delivered as a stage fan-out
   again, so `results_region` and `merge_stage` mean something. Making the stage
   grant the `fan_out` tool left every call looking like a tool call, and the

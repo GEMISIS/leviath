@@ -1,6 +1,6 @@
 [agent]
 name = "researcher"
-version = "0.1.4"
+version = "0.1.5"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 entry_stage = "gather"
 
@@ -40,6 +40,12 @@ Be efficient - do not search exhaustively:
 3. As you go, append one bibliography line per source you actually use to the
    `sources_index` region with context_append:
    `[n] <title> - <url or path> - credibility: <high/med/low + why>`.
+
+   Append it in the SAME turn you read the source, not at the end of the stage. It
+   has to be a `context_append` call: a bibliography written out in your reply is
+   not stored anywhere, and the stage after this one reads the region, not your
+   message. Batching the whole list for later is how a stage ends with twenty
+   sources fetched and an empty `sources_index`.
 
 
 Today's date is in the `environment` region. Treat it as authoritative over

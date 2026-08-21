@@ -520,8 +520,8 @@ pub struct RunFlags {
     /// gate's re-run budget ran out.
     #[serde(default)]
     pub gates_forced: usize,
-    /// Regions declared `required` that were still empty when the stage that
-    /// owed them gave up and moved on, in the order they were abandoned.
+    /// Regions declared `required` that a stage gave up on and that are **still
+    /// empty**, in the order they were abandoned.
     ///
     /// The mechanism re-runs the stage a bounded number of times and then
     /// proceeds with a log line, which nothing downstream reads: a run whose
@@ -530,6 +530,15 @@ pub struct RunFlags {
     /// later stage's prompt says to work from (#371). Names rather than a count
     /// because knowing *which* region was abandoned is what makes it
     /// actionable, and a run cannot abandon many.
+    ///
+    /// A later stage can fill a region an earlier one gave up on, and when that
+    /// happens the name is dropped from here - the artifact exists, so a reader
+    /// told it is missing would be told something false. A `deep-researcher` run
+    /// abandoned `sources_index` in `gather`, `analyze` wrote it, and the run
+    /// finished with a fifty-citation bibliography while still reporting the
+    /// region as never written. The moment is kept in the log; this field
+    /// answers "what is actually missing", which is the question a consumer is
+    /// asking when it renders a warning.
     #[serde(default)]
     pub required_regions_abandoned: Vec<String>,
     /// The working directory disappeared mid-run.
