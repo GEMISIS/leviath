@@ -101,6 +101,40 @@ fn status_cell_falls_back_to_the_bare_status() {
     );
 }
 
+/// Same question one level down. A stage whose whole job was to start workers
+/// and started none leaves its merge stage working from nothing, and that is
+/// invisible from the far side without saying so here.
+#[test]
+fn status_cell_marks_a_run_whose_fan_out_handed_out_nothing() {
+    let mut e = entry("r", AgentStatus::Complete);
+    e.splits_degraded = 1;
+    assert_eq!(status_cell(&e), "complete (fan-out empty)");
+    // Producing no output at all is the worse of the two, so it wins.
+    e.empty_output = true;
+    assert_eq!(status_cell(&e), "complete (no output)");
+}
+
+/// The offline table says the same thing, from `meta.json` rather than the live
+/// listing - the two surfaces answering differently is the drift this pair of
+/// cells exists to prevent.
+#[test]
+fn the_offline_cell_marks_a_degraded_fan_out_too() {
+    let mut meta = on_disk("r", RunStatus::Complete, 1_000);
+    meta.flags.splits_degraded = 1;
+    let run = &offline_runs(vec![meta], Some(&live_set(&[])), 2_000)[0];
+    assert_eq!(offline_status_cell(run), "complete (fan-out empty)");
+
+    let mut meta = on_disk("r", RunStatus::Complete, 1_000);
+    meta.flags.splits_degraded = 1;
+    meta.flags.empty_output = true;
+    let worse = &offline_runs(vec![meta], Some(&live_set(&[])), 2_000)[0];
+    assert_eq!(
+        offline_status_cell(worse),
+        "complete (no output)",
+        "producing nothing at all is the worse of the two"
+    );
+}
+
 /// A run that finished with nothing to show for it reads that way, instead of
 /// being indistinguishable from one that did the work (issue #192).
 #[test]

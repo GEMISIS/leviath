@@ -23,14 +23,84 @@ Five bundled agents work this way: `data-analyst` gathers one slice of a subject
 Sub-agents cost very little here. They are more entities in the same [world](/docs/engine), so there
 are no extra processes to start and nothing has to be serialized between a parent and its children.
 
+## Two tools, one for each shape of the job
+
+| Want | Tool | What you get back |
+|---|---|---|
+| One sub-agent | [`spawn_agent`](#one-sub-agent) | Its answer, or its id if you did not wait |
+| Many at once | [`fan_out`](#fan-out) | One merged report covering all of them |
+
+Both are ordinary tools: a stage grants them in `available_tools` and the agent calls them when it
+decides it needs help. `fan_out` is also what a `mode = "fan_out"` stage runs, which is covered
+below - the stage is sugar over the same tool, not a separate mechanism.
+
+## One sub-agent
+
+```jsonc
+spawn_agent({
+  "blueprint": "researcher",
+  "task": "What does the FLOW trial say about kidney outcomes?",
+  "wait": true            // block until it finishes and return its answer
+})
+```
+
+With `wait: false` you get the child's id straight back and check on it yourself with
+`check_agent`, or block later with `wait_for_agent`. `send_to_agent` passes it a message mid-run and
+`kill_agent` stops it.
+
+Waiting does not hold a slot on the tool lane, so a parent waiting on a child cannot starve the
+child of the capacity it needs to finish.
+
+`seed_context` injects starting material into the child's first pinned region, and
+`output_format` / `output_instructions` ask it for a particular shape of answer, overriding its
+blueprint's.
+
 ## Fan-out
 
-A fan-out stage splits a task into work items, runs one sub-agent per item (up to `max_workers` at a
-time), and merges the results back into the parent:
+```jsonc
+fan_out({
+  "agent": "researcher",
+  "items": [
+    {"id": "half-life",      "context": {"question": "How long does semaglutide stay active?"}},
+    {"id": "after-stopping", "context": {"question": "What happens when someone stops?"}}
+  ]
+})
+```
+
+Every item starts one worker, they all run at once, and the call returns a single report covering
+all of them. Three things are worth knowing:
+
+**Each item's `context` is everything its worker gets.** A worker is a separate agent with a clean
+context window and never sees the caller's conversation, so a reference to "the topic above"
+reaches nobody.
+
+**Put all the work in one call.** The engine paces the concurrency itself (`max_workers`, default
+30), so a hundred items in one call is fine and a second call would only wait for the first. One
+`fan_out` call per turn is the rule - it has to be the only tool call in its turn, because it waits
+for its workers.
+
+**An empty `items` array is a real answer.** It means there is nothing to hand out, and the run
+moves on. That matters most in a stage a run enters more than once, where the honest answer the
+second time is often that the work is already done.
+
+The result is routed like any other tool result, so `[stages.<name>.tool_routing]` decides where it
+lands - a region of its own, the conversation, or a cheap drop for a blueprint whose workers write
+files and whose parent does not need their prose:
+
+```toml
+[stages.investigate.tool_routing.overrides]
+fan_out = "sub_findings"
+```
+
+## The fan-out stage
+
+`mode = "fan_out"` is a stage whose whole job is one `fan_out` call. It grants the tool
+automatically, takes its worker and caps from the blueprint rather than from the call, and moves to
+`merge_stage` once the workers are done:
 
 ```mermaid
 flowchart TB
-  P["Parent fan-out stage"] --> Q{"split_prompt<br/>→ work items"}
+  P["Parent fan-out stage"] --> Q{"split_prompt<br/>→ fan_out(items)"}
   Q --> W1["worker 1"]
   Q --> W2["worker 2"]
   Q --> W3["worker 3"]
@@ -38,11 +108,15 @@ flowchart TB
   M --> P2["Parent continues"]
 ```
 
+Reach for the stage when the fan-out *is* a phase of the work and something specific should happen
+after it. Reach for the bare tool when an agent needs helpers in the middle of doing something else,
+and should carry on afterwards with what they found.
+
 ```toml
 [stages.fix]
 mode         = "fan_out"
 worker_stage = "fix_one"    # which worker to run, see below
-split_prompt = "..."        # prompt that produces the JSON array of work items
+split_prompt = "..."        # tells the stage what to split the work into
 merge_stage  = "verify"     # stage the parent resumes at once workers finish
 max_workers  = 8            # how many run at once, default 30; 0 is unlimited
 on_worker_failure = "continue"
@@ -60,56 +134,32 @@ Those keys sit directly on the stage next to `mode = "fan_out"`, not in a sub-ta
 | `max_items` | unset | Most work items the split may produce. `0` or unset means however many it produces |
 | `max_workers` | `30` | How many workers run at once. `0` means unlimited |
 | `on_worker_failure` | `"continue"` | `continue` merges what succeeded. `fail_all` fails the whole fan-out if any worker fails |
-| `split_prompt` | `""` | Added to the stage's system prompt. It asks for the work items; see below |
+| `split_prompt` | `""` | Added to the stage's system prompt. It says what to split the work into; the stage answers with a `fan_out` call |
 
 Set exactly one of `worker_agent`, `worker_stage`, or `worker_query`. `lev validate` checks that,
 and checks that a named `worker_stage` exists and has opted in with `allow_as_worker`.
 
-### How the split answers
+### If the stage never fans out
 
-The stage's single inference is the split. It carries `split_prompt` in its system prompt, and it
-is offered one tool, `submit_work_items`, which every fan-out stage gets whether or not it lists
-any `available_tools`:
+The one thing a fan-out stage owes is a `fan_out` call. A model that answers in prose instead is
+asked again a few times, and then let through - a run is never stranded over a thing the model
+would not do. What it is not allowed to do is pass for success: the stage's `splits_degraded` count
+goes up, a note goes into `error_report` so the merge stage knows it is working from nothing, and
+`lev ps` renders the run as `complete (fan-out empty)`.
 
-```json
-{"items": [
-  {"id": "half-life", "context": {"question": "How long does semaglutide stay active?"}},
-  {"id": "after-stopping", "context": {"question": "What happens when someone stops?"}}
-]}
-```
+That count is worth watching in a batch. A merge stage running on nothing and one running on a
+genuinely empty fan-out look identical from the far side, and this is the only thing that tells
+them apart.
 
-Each item's `context` is everything its worker gets. A worker is a separate agent with a clean
-context window and never sees the parent's conversation, so a reference to "the topic above"
-reaches nobody.
+### Entering the same stage twice
 
-A model that ignores the tool and replies in text is still understood. The reply is read as JSON,
-and an `{"items": [...]}` envelope, a single bare object, or a plain array of question strings are
-all accepted. A reply that cannot be read at all is handed back with a correction and asked again,
-twice, before the stage gives up.
+A stage a run comes back to is told so. On its second and later entries the split is given the
+round number and the ids the previous round already handed out, and asked for only what is still
+unanswered - with an empty `items` array available if that is nothing.
 
-**An empty list is a real answer.** `submit_work_items` with `items: []` means there is nothing to
-hand out, and the run moves on to `merge_stage`. That matters most on a stage a run enters more
-than once: the second time through, the honest answer is often that the work is already done, and
-without a way to say it the split answers in prose instead. A re-entered fan-out stage is told
-which round it is on and what the previous round already covered.
-
-### When a split cannot be used
-
-A split that is still unusable after its corrections never ends the run. It takes, in order:
-
-1. the stage's `error` transition, if it declares one;
-2. its `dead_end` transition, if it declares one;
-3. failing both, an empty fan-out into `merge_stage`, with the reason written into `error_report`
-   and counted in the run's `splits_degraded` flag.
-
-The third is a degradation - the workers never ran, and whatever comes next works from less than
-the blueprint intended - so `lev validate` warns (`fanout-no-escape`) about a fan-out stage that
-declares neither escape.
-
-```toml
-[stages.investigate.transitions.error_recovery]
-condition = "error"
-```
+Without it the model sees a prompt it has already answered, over a context holding the findings it
+answered with, and reasonably reports that the work is done. That is not a hypothetical: it is what
+ended a `deep-researcher` run whose four workers had already finished.
 
 ### A worker that is a whole other agent
 

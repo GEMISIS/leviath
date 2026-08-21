@@ -12346,6 +12346,200 @@ fn submitted_in(stage: &str) -> crate::persistence::FinalOutput {
     ))
 }
 
+/// A blueprint whose stage 0 is a fan-out, for `require_fan_out`.
+fn fanning_bp() -> AgentBlueprint {
+    let mut stage = stage_named("investigate", None, false, None);
+    stage.mode = leviath_core::blueprint::StageMode::FanOut {
+        config: leviath_core::blueprint::FanOutConfig {
+            worker_agent: Some("researcher".to_string()),
+            worker_stage: None,
+            worker_query: None,
+            merge_stage: None,
+            max_workers: 4,
+            on_worker_failure: leviath_core::blueprint::WorkerFailurePolicy::Continue,
+            split_prompt: "split it".to_string(),
+            results_region: None,
+            max_items: None,
+        },
+    };
+    AgentBlueprint(blueprint(vec![stage]))
+}
+
+fn run_require_fan_out(world: &mut World) {
+    let mut s = Schedule::default();
+    s.add_systems(require_fan_out);
+    s.run(world);
+}
+
+/// Starting the workers is the whole job of a fan-out stage, so a stage trying
+/// to leave without having done it is sent back.
+#[test]
+fn a_fan_out_stage_that_started_no_workers_is_nudged_and_re_run() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            fanning_bp(),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+        ))
+        .id();
+
+    run_require_fan_out(&mut world);
+
+    assert!(world.get::<ReadyToInfer>(e).is_some(), "sent back to work");
+    assert!(world.get::<ResolveTransition>(e).is_none(), "not advancing");
+    assert_eq!(world.get::<FanOutReentries>(e).expect("counted").0, 1);
+    let convo = conversation_text(&world, e);
+    assert!(
+        convo.contains("fan_out"),
+        "the nudge names the tool: {convo}"
+    );
+}
+
+/// A stage that did fan out passes straight through.
+#[test]
+fn a_fan_out_stage_that_started_workers_transitions_untouched() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            fanning_bp(),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+            crate::fanout::FannedOut,
+        ))
+        .id();
+
+    run_require_fan_out(&mut world);
+
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    assert!(world.get::<FanOutReentries>(e).is_none());
+}
+
+/// Every other kind of stage is none of this system's business.
+#[test]
+fn an_ordinary_stage_is_not_asked_to_fan_out() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            owing_bp(None),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+        ))
+        .id();
+
+    run_require_fan_out(&mut world);
+
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    assert!(world.get::<FanOutReentries>(e).is_none());
+}
+
+/// The budget is bounded: a model that will not call the tool is let through
+/// rather than stranded, and the run records that its merge worked from nothing.
+#[test]
+fn a_fan_out_stage_is_let_through_once_its_budget_is_spent() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            fanning_bp(),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+            FanOutReentries(9),
+            crate::persistence::RunOutcomeFlags::default(),
+        ))
+        .id();
+
+    run_require_fan_out(&mut world);
+
+    assert!(world.get::<ResolveTransition>(e).is_some(), "let through");
+    assert!(world.get::<ReadyToInfer>(e).is_none());
+    assert_eq!(
+        world
+            .get::<crate::persistence::RunOutcomeFlags>(e)
+            .unwrap()
+            .0
+            .splits_degraded,
+        1
+    );
+    let convo = conversation_text(&world, e);
+    assert!(
+        convo.contains("could not be used") && convo.contains("No workers ran"),
+        "the merge stage is told it is working from nothing: {convo}"
+    );
+}
+
+/// A stage already ending on an error is not held here - that transition wins -
+/// but the flag still has to be honest about what came out of the stage.
+#[test]
+fn an_errored_fan_out_stage_records_the_flag_without_nudging() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            fanning_bp(),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+            StageOutcome::Errored("boom".to_string()),
+            crate::persistence::RunOutcomeFlags::default(),
+        ))
+        .id();
+
+    run_require_fan_out(&mut world);
+
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    assert!(world.get::<ReadyToInfer>(e).is_none(), "not sent back");
+    assert_eq!(
+        world
+            .get::<crate::persistence::RunOutcomeFlags>(e)
+            .unwrap()
+            .0
+            .splits_degraded,
+        1
+    );
+}
+
+/// A run with no flags component - a test agent, an unpersisted one - is still
+/// let through rather than panicking on the record it has nowhere to write.
+#[test]
+fn a_fan_out_stage_without_flags_is_still_let_through() {
+    let mut world = World::new();
+    let spent = world
+        .spawn((
+            fanning_bp(),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+            FanOutReentries(9),
+        ))
+        .id();
+    let errored = world
+        .spawn((
+            fanning_bp(),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+            StageOutcome::Errored("boom".to_string()),
+        ))
+        .id();
+
+    run_require_fan_out(&mut world);
+
+    for e in [spent, errored] {
+        assert!(world.get::<ResolveTransition>(e).is_some());
+        assert!(world.get::<ReadyToInfer>(e).is_none());
+    }
+}
+
 fn run_require_output(world: &mut World) {
     let mut s = Schedule::default();
     s.add_systems(require_final_output);
