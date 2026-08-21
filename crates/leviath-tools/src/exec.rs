@@ -259,6 +259,16 @@ impl BuiltinTools {
 
         match std::fs::read_to_string(&path) {
             Ok(content) => cap_file_content(&content, MAX_READ_FILE_BYTES),
+            // A directory is not a malformed path, it is the wrong tool: the
+            // model wanted to see what is in there. Measured across four
+            // research runs, `read_file(".")` was the single most common failed
+            // call, and the raw OS message ("Is a directory (os error 21)")
+            // names the problem without naming the fix, so the next call was
+            // usually another guess.
+            Err(_) if path.is_dir() => format!(
+                "[error] '{path_str}' is a directory, not a file. Use list_dir to see what \
+                 is in it, then read_file on one of the entries."
+            ),
             Err(e) => format!("[error] Failed to read '{}': {}", path_str, e),
         }
     }

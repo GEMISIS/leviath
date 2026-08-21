@@ -23,6 +23,35 @@ same list.
   between reads the name off the next status instead of fetching the run.
   Announced as the `events.title` capability, so a console can drop that poll
   where the daemon has it and keep it where it does not.
+- Changed: the research agents cite with linked markers - `[[n]](<url>)`, which
+  renders as `[n]` and clicks through to the source - so checking a claim no
+  longer means scrolling to the bibliography and pasting a URL by hand. A source
+  with a local path instead of a URL stays a bare `[n]`.
+- Fixed: `wide-researcher` never asked for a bibliography section, so one run
+  produced a source table of titles and credibility grades with no URLs at all -
+  for a task whose whole point was a reading list. It now asks for the numbered
+  bibliography from `sources_index` with the URL on every line, as
+  `deep-researcher` already did.
+- Fixed: `deep-researcher` and `wide-researcher` never told their merge stage
+  where the fan-out results land. The workers' findings sat in a pinned region
+  the stage had not been pointed at, so it went looking for files named after the
+  work items - the same shape as the region-as-a-path misfire, one layer up. Both
+  now name the region and say plainly that the findings are not files.
+- Fixed: `researcher` was told to write its report and not where, so workers
+  invented plausible absolute paths (`/research/...`, `/home/user/output/...`)
+  that the workspace guard refused, losing the artifact. It now asks for a plain
+  relative filename and says the findings reach the caller either way.
+- Changed: a claim about something a task names only as a comparison is graded on
+  what that run actually read about it. Two mirrored runs - one researching
+  GLP-1s "like creatine", one researching creatine "like Ozempic" - agreed on the
+  substance, but the creatine run sourced a GLP-1 trial figure to a supplement
+  blog and graded it HIGH, while the run that read the trials reported a
+  different number and flagged the disagreement.
+- Changed: `read_file` on a directory now names `list_dir` instead of returning
+  the raw OS error. `read_file(".")` was the single most common failed tool call
+  across four research runs, and "Is a directory (os error 21)" names the problem
+  without naming the fix.
+
 - Added: `fan_out`, a tool any stage can grant to run many sub-agents at once and
   get their results back together. There were two ways to start sub-agents and
   they shared nothing: `spawn_agent` was a tool an agent called mid-work, while
