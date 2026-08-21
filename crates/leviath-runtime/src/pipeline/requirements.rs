@@ -182,8 +182,27 @@ pub fn require_context_regions(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, bp, cursor, mut window, reentries, outcome, flags) in agents.iter_mut() {
+    for (entity, bp, cursor, mut window, reentries, outcome, mut flags) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
+        // A stage that gave up is not the last word: `sources_index` abandoned in
+        // `gather` can be written by `analyze`, and then the artifact exists.
+        // Reported as still missing, it tells a reader something false - one run
+        // finished with a fifty-citation bibliography while warning that the
+        // region had never been written. The moment stays in the log; this list
+        // is what is actually missing, checked at every stage boundary.
+        // A stage that gave up is not the last word: `sources_index` abandoned in
+        // `gather` can be written by `analyze`, and then the artifact exists.
+        // Reported as still missing, it tells a reader something false - one run
+        // finished with a fifty-citation bibliography while warning that the
+        // region had never been written. The moment stays in the log; this list
+        // is what is actually missing, checked at every stage boundary.
+        if let Some(flags) = flags.as_mut() {
+            flags.0.required_regions_abandoned.retain(|name| {
+                window
+                    .get_region(name)
+                    .is_none_or(|region| region.content.is_empty())
+            });
+        }
         if outcome.is_some() {
             continue; // error / max-iterations transition takes precedence
         }

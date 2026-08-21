@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.3.1"
+version = "0.3.2"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 entry_stage = "survey"
 
@@ -32,6 +32,11 @@ per facet, read_file for local material. Landscape material lands in `landscape`
 Issue a round's searches, and then that round's fetches, as ONE response each: a batch runs in parallel, so eight fetches cost about what one costs, while the inference call between two responses costs tens of seconds.
 For each source you use, append a bibliography line to `sources_index`
 (context_append): `[n] <title> - <url/path> - credibility: <high/med/low>`.
+Append it in the SAME turn you read the source, not at the end of the stage. It
+has to be a `context_append` call: a bibliography written out in your reply is
+not stored anywhere, and the stage after this one reads the region, not your
+message. Batching the whole list for later is how a stage ends with twenty
+sources fetched and an empty `sources_index`.
 Note interesting threads worth pulling on later. If sent back, focus on the named
 coverage gap.
 

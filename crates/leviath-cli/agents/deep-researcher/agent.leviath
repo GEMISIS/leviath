@@ -1,6 +1,6 @@
 [agent]
 name = "deep-researcher"
-version = "0.3.1"
+version = "0.3.2"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 entry_stage = "gather"
 
@@ -59,6 +59,12 @@ authoritative references, not a broad skim.
 - For every source you actually use, append one bibliography line to
   `sources_index` (context_append): `[n] <title> - <url/path> - <date> -
   credibility: <high/med/low + why>`.
+  Append it in the SAME turn you read the source, not at the end of the stage.
+  It has to be a `context_append` call: a bibliography written out in your reply
+  is not stored anywhere, and the stage after this one reads the region, not
+  your message. Batching the whole list for later is how a stage ends with
+  twenty sources fetched and an empty `sources_index` - which happened, and cost
+  the run its bibliography until a later stage rebuilt it.
 - Note citations worth chasing - the analyze stage can send you to follow them.
 
 Once you have solid primary coverage of the core facets, hand off to analyze.

@@ -15455,6 +15455,43 @@ fn abandoning_a_required_region_is_recorded_in_the_run() {
     assert!(world.get::<ResolveTransition>(capped).is_some());
 }
 
+/// A region an earlier stage gave up on and a later stage filled is no longer
+/// missing, so it stops being reported as missing.
+///
+/// The run that earned this abandoned `sources_index` in `gather`, had `analyze`
+/// write it, and finished with a fifty-citation bibliography - while still
+/// reporting that later stages had worked from an artifact that was never
+/// written. The moment stays in the log; this field answers "what is actually
+/// missing".
+#[test]
+fn a_required_region_a_later_stage_filled_stops_being_reported_missing() {
+    let mut world = World::new();
+    let mut flags = crate::persistence::RunOutcomeFlags::default();
+    flags.0.required_regions_abandoned = vec!["plan".to_string(), "gone".to_string()];
+    let e = world
+        .spawn((
+            required_bp(&["context_write"], None),
+            StageCursor { index: 0 },
+            // `plan` now has content; `gone` is not a region this window has.
+            window_with_plan(true),
+            flags,
+            ResolveTransition,
+        ))
+        .id();
+
+    run_require(&mut world);
+
+    assert_eq!(
+        world
+            .get::<crate::persistence::RunOutcomeFlags>(e)
+            .expect("flags")
+            .0
+            .required_regions_abandoned,
+        vec!["gone".to_string()],
+        "the filled region is dropped; one nobody filled is kept"
+    );
+}
+
 /// A stage that satisfies its required regions records nothing, or the field
 /// would be noise rather than a signal.
 #[test]
