@@ -190,9 +190,9 @@ order, prints that order underneath so the substitution is visible:
 
 ```
 Models this install would use:
-  gather           openrouter/deepseek/deepseek-v4-flash
+  gather           openrouter/anthropic/claude-sonnet-5
                      blueprint order: anthropic/claude-sonnet-5, openai/gpt-5.4-mini, ...
-  analyze          openrouter/deepseek/deepseek-v4-pro
+  analyze          openrouter/anthropic/claude-opus-5
                      blueprint order: anthropic/claude-opus-5, openai/gpt-5.5, ...
   default_provider = openrouter, default_model = (unset)
 ```
@@ -203,6 +203,22 @@ Models this install would use:
 (`lev doctor` names the reading when it happens). The slash in an OpenRouter id such as
 `deepseek/deepseek-v4-flash` is part of the model id itself, and OpenRouter's own
 `openrouter/auto`-style ids are left as written.
+
+### A gateway is a route, not a model
+
+`default_provider` picks among the entries a stage lists, so what that provider's entry *names*
+decides what you get. This matters most for OpenRouter, which serves models from every vendor: an
+entry naming a different model there is not a different route to the same answer, it is a different
+answer.
+
+The bundled agents therefore name the same model in their OpenRouter slot as in their first entry -
+`anthropic/claude-sonnet-5` on OpenRouter where the blueprint's first choice is `claude-sonnet-5` on
+Anthropic. Preferring the gateway changes who bills you and nothing else. They used to name a much
+cheaper model there, so `default_provider = "openrouter"` quietly meant "run every stage on the
+cheapest model this blueprint mentions", which is not what preferring a provider should mean.
+
+Write your own blueprint's OpenRouter entry the same way unless you mean the substitution: name the
+model you actually want, prefixed by its vendor, because that is how OpenRouter ids are spelled.
 
 ### Running the bundled agents on your provider
 

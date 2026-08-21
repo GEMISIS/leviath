@@ -303,6 +303,30 @@ fn builtin_table() -> Vec<BuiltinEntry> {
             ctx = 1_048_576,
             out = 65_535
         ),
+        // ── OpenRouter: Anthropic ─────────────────────────────────────────────
+        // The same models as the `anthropic` entries above, reached through the
+        // gateway instead of directly. Listed because a gateway is a route, not
+        // a model family: someone who prefers OpenRouter should be able to run
+        // the model a blueprint actually asks for, rather than whichever model
+        // that blueprint happened to put in its OpenRouter slot. Capabilities
+        // mirror the direct entries - `temp = false` in particular, since the
+        // default for an unlisted model is `true` and these do not take one.
+        entry!(
+            "openrouter",
+            "anthropic/claude-opus-5",
+            "Claude Opus 5 (via OpenRouter)",
+            temp = false,
+            ctx = 1_000_000,
+            out = 128_000
+        ),
+        entry!(
+            "openrouter",
+            "anthropic/claude-sonnet-5",
+            "Claude Sonnet 5 (via OpenRouter)",
+            temp = false,
+            ctx = 1_000_000,
+            out = 128_000
+        ),
         // ── OpenRouter: Google Gemini ──────────────────────────────────────────
         entry!(
             "openrouter",

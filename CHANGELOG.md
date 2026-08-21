@@ -32,6 +32,20 @@ same list.
   opens, because a setting that runs tools without asking is the last one
   anybody should inherit from last week out of sight.
 
+- Fixed: the bundled agents' OpenRouter entry named a much cheaper model than
+  the rest of their list, so `default_provider = "openrouter"` quietly meant "run
+  every stage on the cheapest model this blueprint mentions". OpenRouter is a
+  gateway rather than a model family and serves the same models the other entries
+  name, so each blueprint's OpenRouter slot now names its own first choice -
+  `anthropic/claude-sonnet-5` where the first entry is `claude-sonnet-5` on
+  Anthropic, `anthropic/claude-opus-5` where it is `claude-opus-5`. Preferring
+  the gateway now changes who bills you and nothing else. Seven blueprints,
+  forty-nine stages.
+- Added: `anthropic/claude-sonnet-5` and `anthropic/claude-opus-5` to the
+  OpenRouter model catalog, so `lev models list` shows them and their
+  capabilities are the direct entries' rather than the defaults an unlisted model
+  would get - `supports_temperature = false` in particular, which defaults the
+  other way.
 - Fixed: the MCP handshake deadline is settable, so a stalled CI runner stops
   failing the suite. `MCPClient::connect` gave the `initialize` handshake a
   hardcoded 30 seconds - the right answer to "how long should a person's agent
