@@ -471,14 +471,32 @@ pub fn start_pending_fan_outs(world: &mut World) {
                 })
             })
             .flatten();
+        // Which door this came through, and so how its report is delivered. A
+        // `mode = "fan_out"` stage answers with the same tool call as anybody
+        // else, so the call cannot tell us - only the stage can.
+        //
+        // Getting this wrong made `results_region` and `merge_stage` dead
+        // config: a live `deep-researcher` fan-out delivered three workers'
+        // findings into `conversation` as a tool result and resumed the split
+        // stage, instead of writing `sub_findings` and moving to `analyze`. The
+        // unit tests passed throughout, because they build the origin directly
+        // and never went through this decision.
+        // Which door this came through, and so how its report is delivered. A
+        // `mode = "fan_out"` stage answers with the same tool call as anybody
+        // else, so the call cannot tell us - only the stage can.
+        //
+        // Getting this wrong made `results_region` and `merge_stage` dead
+        // config: a live `deep-researcher` fan-out delivered three workers'
+        // findings into `conversation` as a tool result and resumed the split
+        // stage, instead of writing `sub_findings` and moving to `analyze`. The
+        // unit tests passed throughout, because they build the origin directly
+        // and never went through this decision.
+        let origin = match stage_config.is_some() {
+            true => FanOutOrigin::Stage,
+            false => FanOutOrigin::Tool { call_id },
+        };
         let config = config_for(&request, stage_config.as_ref());
-        begin_fan_out(
-            world,
-            entity,
-            config,
-            request.items,
-            FanOutOrigin::Tool { call_id },
-        );
+        begin_fan_out(world, entity, config, request.items, origin);
     }
 }
 
@@ -1688,11 +1706,11 @@ mod tests {
     fn start_pending_fan_outs_starts_what_the_dispatcher_accepted() {
         let mut world = World::new();
         install(&mut world, TestSpawner::ok());
-        let e = spawn_parent(
-            &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
-            "",
-        );
+        // An ordinary stage, so this is the tool door: a fan-out stage's own
+        // call is a stage fan-out and is covered separately.
+        let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue));
+        bp.stages[0].mode = StageMode::Autonomous;
+        let e = spawn_parent(&mut world, bp, "");
         world.entity_mut(e).insert(PendingFanOut {
             call_id: "call-1".to_string(),
             request: parse_fan_out_call(&serde_json::json!({
@@ -1717,6 +1735,73 @@ mod tests {
             w.config.worker_agent.as_deref(),
             Some("researcher"),
             "the call named its worker"
+        );
+    }
+
+    /// A `mode = "fan_out"` stage's call comes back through the STAGE door, not
+    /// the tool one: its report goes to `results_region` and it moves on to
+    /// `merge_stage`.
+    ///
+    /// The call itself is identical either way, so only the stage can say which
+    /// this is - and getting it wrong made `results_region` and `merge_stage`
+    /// dead config. A live `deep-researcher` fan-out delivered three workers'
+    /// findings into `conversation` as a tool result and resumed the split stage
+    /// instead of writing `sub_findings` and moving to `analyze`. Every unit test
+    /// passed, because they all built the origin by hand and never came through
+    /// `start_pending_fan_outs`.
+    #[test]
+    fn a_fan_out_stages_call_is_delivered_as_a_stage_not_a_tool_result() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let mut config = cfg(Some("merge"), 2, WorkerFailurePolicy::Continue);
+        config.results_region = Some("sub_findings".to_string());
+        let e = spawn_parent(&mut world, fanout_blueprint(config), "");
+        world
+            .get_mut::<ContextWindow>(e)
+            .unwrap()
+            .add_region(Region::new(
+                "sub_findings".to_string(),
+                RegionKind::Pinned,
+                4_000,
+            ));
+        world.entity_mut(e).insert(PendingFanOut {
+            call_id: "call-1".to_string(),
+            request: parse_fan_out_call(&serde_json::json!({
+                "items": [{"id": "a", "context": {}}]
+            }))
+            .unwrap(),
+        });
+
+        start_pending_fan_outs(&mut world);
+        assert_eq!(
+            world.get::<FanOutWaiting>(e).expect("parked").origin,
+            FanOutOrigin::Stage,
+            "a fan-out stage's own call is a stage fan-out"
+        );
+
+        fan_out_collect(&mut world);
+        let worker = world.get::<SubAgentChildren>(e).expect("linked").children[0];
+        complete_worker(&mut world, worker, "what the worker found");
+        fan_out_collect(&mut world);
+
+        let findings = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("sub_findings")
+            .expect("the results region")
+            .content
+            .iter()
+            .map(|entry| entry.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            findings.contains("what the worker found"),
+            "the report goes to results_region: {findings}"
+        );
+        assert_eq!(
+            world.get::<StageCursor>(e).map(|c| c.index),
+            Some(1),
+            "and the stage moves on to its merge stage"
         );
     }
 
@@ -1780,6 +1865,89 @@ mod tests {
         assert_eq!(
             w.config.merge_stage, None,
             "an ordinary stage has no merge stage to fall into"
+        );
+    }
+
+    /// A stage that names a `results_region` gets its report there, not in the
+    /// conversation. This is the region the merge stage is told to read, so a
+    /// report that misses it is a fan-out whose findings nobody sees.
+    #[test]
+    fn a_stage_fan_out_writes_to_its_results_region() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let mut config = cfg(Some("merge"), 2, WorkerFailurePolicy::Continue);
+        config.results_region = Some("sub_findings".to_string());
+        let e = spawn_parent(&mut world, fanout_blueprint(config.clone()), "");
+        world
+            .get_mut::<ContextWindow>(e)
+            .unwrap()
+            .add_region(Region::new(
+                "sub_findings".to_string(),
+                RegionKind::Pinned,
+                4_000,
+            ));
+        begin_fan_out(&mut world, e, config, vec![item("a")], FanOutOrigin::Stage);
+
+        fan_out_collect(&mut world);
+        let worker = world.get::<SubAgentChildren>(e).expect("linked").children[0];
+        complete_worker(&mut world, worker, "what the worker found");
+        fan_out_collect(&mut world);
+
+        let region = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("sub_findings")
+            .expect("the results region")
+            .content
+            .iter()
+            .map(|entry| entry.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(region.contains("what the worker found"), "{region}");
+    }
+
+    /// A fan-out whose stage has already spent its `max_iterations` must still
+    /// deliver. The nudges that get a reluctant model to call the tool are
+    /// inferences, so they spend the stage's budget: `deep-researcher` allows
+    /// `investigate` four, a live run spent three answering in prose and the
+    /// fourth calling `fan_out`, and three workers then researched for thirteen
+    /// minutes. Discarding that because the split took four tries is the same
+    /// failure - finished work thrown away - that this whole path exists to stop.
+    #[test]
+    fn a_fan_out_still_merges_when_its_stage_is_out_of_iterations() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let mut bp = fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue));
+        bp.stages[0].max_iterations = Some(4);
+        let e = spawn_parent(&mut world, bp, "");
+        // The stage is at its cap, exactly as it is when the fan-out starts on
+        // the last iteration the stage had.
+        world.entity_mut(e).insert(StageProgress {
+            iterations: 4,
+            ..Default::default()
+        });
+        begin_fan_out(
+            &mut world,
+            e,
+            cfg(Some("merge"), 2, WorkerFailurePolicy::Continue),
+            vec![item("a")],
+            FanOutOrigin::Stage,
+        );
+
+        fan_out_collect(&mut world); // starts the worker
+        let worker = world.get::<SubAgentChildren>(e).expect("linked").children[0];
+        complete_worker(&mut world, worker, "what the worker found");
+        fan_out_collect(&mut world); // reaps and merges
+
+        assert_eq!(
+            world.get::<StageCursor>(e).map(|c| c.index),
+            Some(1),
+            "the merge stage is entered, not skipped"
+        );
+        let convo = conversation_text(&world, e);
+        assert!(
+            convo.contains("what the worker found"),
+            "and the findings survive: {convo}"
         );
     }
 

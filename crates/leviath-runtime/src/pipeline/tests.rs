@@ -8247,6 +8247,53 @@ fn enforce_max_iterations_caps_at_the_limit() {
     );
 }
 
+/// A fan-out stage is bounded by `max_attempts`, not by iterations, so the cap
+/// must not fire on one.
+///
+/// The failure this guards: `deep-researcher` allows `investigate` four
+/// iterations. A live run spent three of them answering in prose - each one a
+/// `require_fan_out` nudge - and called `fan_out` on the fourth. Three workers
+/// then researched for thirteen minutes, and the stage was already at its cap
+/// when they came back, so all of it was discarded. Two budgets bounding one
+/// loop, and the iteration cap won because it fires first.
+#[test]
+fn enforce_max_iterations_leaves_a_fan_out_stage_alone() {
+    let mut world = World::new();
+    let e = spawn_ready_agent(&mut world, Some(4), 4, AgentStatus::Active);
+    // Same agent, same spent budget - only the mode differs.
+    let capped = spawn_ready_agent(&mut world, Some(4), 4, AgentStatus::Active);
+    let mut bp = world.get::<AgentBlueprint>(e).unwrap().0.clone();
+    bp.stages[0].mode = leviath_core::blueprint::StageMode::FanOut {
+        config: leviath_core::blueprint::FanOutConfig {
+            worker_agent: Some("w".to_string()),
+            worker_stage: None,
+            worker_query: None,
+            merge_stage: None,
+            max_workers: 4,
+            on_worker_failure: leviath_core::blueprint::WorkerFailurePolicy::Continue,
+            split_prompt: "split".to_string(),
+            results_region: None,
+            max_items: None,
+            max_attempts: None,
+        },
+    };
+    world.entity_mut(e).insert(AgentBlueprint(bp));
+
+    run_enforce(&mut world);
+
+    assert!(
+        world.get::<ReadyToInfer>(e).is_some(),
+        "the fan-out stage is still allowed to make its call"
+    );
+    assert!(world.get::<StageOutcome>(e).is_none(), "and is not cut off");
+    // The control: an ordinary stage in exactly the same position IS capped, so
+    // this is the mode doing the work rather than the cap silently not applying.
+    assert_eq!(
+        world.get::<StageOutcome>(capped).unwrap(),
+        &StageOutcome::MaxIterations
+    );
+}
+
 #[test]
 fn enforce_max_iterations_below_limit_or_unlimited_or_paused_is_noop() {
     let mut world = World::new();

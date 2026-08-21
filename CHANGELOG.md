@@ -13,6 +13,24 @@ same list.
 
 ## Unreleased
 
+- Fixed: a `mode = "fan_out"` stage's own call is delivered as a stage fan-out
+  again, so `results_region` and `merge_stage` mean something. Making the stage
+  grant the `fan_out` tool left every call looking like a tool call, and the
+  stage door was wired to the tool exit: a live `deep-researcher` fan-out put
+  three workers' findings into `conversation` as a tool result and resumed the
+  split stage, instead of writing `sub_findings` and moving on to `analyze`. The
+  run then ended with nothing. `FanOutOrigin::Stage` had become unreachable
+  outside the tests that built it by hand, which is why nothing caught it.
+- Fixed: a fan-out stage no longer has two budgets fighting over the same loop.
+  `max_attempts` bounds how many times the stage is asked to call `fan_out`;
+  `max_iterations` was also counting those asks, and firing first. A live
+  `deep-researcher` run spent three of `investigate`'s four iterations answering
+  in prose, called `fan_out` on the fourth, and three workers then researched for
+  thirteen minutes - all of which was discarded, because the stage was already at
+  its cap when they came back. `lev validate` has always held that a fan_out
+  stage needs no `max_iterations`; the runtime was enforcing one anyway, and now
+  does not.
+
 - Added: a run's rename now reaches a websocket subscriber. A run is created
   untitled and named a moment later, once a model has shortened its prompt into
   a title, and nothing on the wire said so - a console showed the prompt's first

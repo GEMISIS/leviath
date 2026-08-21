@@ -160,6 +160,12 @@ many times may the graph re-enter this stage" and "how many times do we ask a mo
 done what the stage is for" - and each retry re-sends the whole stage context, so borrowing the
 first for the second is how a routing setting quietly multiplies an inference bill.
 
+`max_attempts` is also the *only* thing bounding those asks: **`max_iterations` does not apply to a
+fan-out stage**. It once did, and the two budgets fought - a run that spent three of its four
+iterations being asked, then called `fan_out` on the fourth, was already at its cap when the workers
+came back, and thirteen minutes of finished research was discarded. Setting `max_iterations` on a
+fan-out stage is harmless and does nothing.
+
 That count is worth watching in a batch. A merge stage running on nothing and one running on a
 genuinely empty fan-out look identical from the far side, and this is the only thing that tells
 them apart.
