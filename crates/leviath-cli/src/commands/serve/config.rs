@@ -296,11 +296,24 @@ mod tests {
     /// leviath-cli` fail locally while passing in CI, where nothing is
     /// listening. Port 1 is reserved and never bound, so the result stops
     /// depending on what happens to be running on the developer's machine.
+    /// A registered provider whose `list_models` cannot succeed, which is the
+    /// `Err` arm of the handler's `if let Ok(list)`.
+    ///
+    /// It used to be Ollama pointed at a dead port, but Ollama now registers
+    /// only when something answers there - so a dead address means no provider
+    /// at all, and the arm went unrun. A keyed provider is the reliable way to
+    /// put something in the registry that will then fail to list: the key
+    /// registers it, and nothing is listening at the address it calls.
     fn state_without_a_reachable_ollama() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
             config: crate::commands::serve::testutil::fixed_config(Config {
                 ollama_base_url: Some("http://127.0.0.1:1".to_string()),
+                providers: crate::config::ProviderConfig {
+                    anthropic_api_key: Some("test-key".to_string()),
+                    anthropic_base_url: Some("http://127.0.0.1:1".to_string()),
+                    ..Config::default().providers
+                },
                 ..Config::default()
             }),
             event_tx: tx,

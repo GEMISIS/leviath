@@ -25,6 +25,28 @@ same list.
   been given a chance to answer. Production keeps the 30s; the tests pass five
   minutes, bounded so a genuinely wedged server still fails rather than hanging
   CI.
+- Fixed: Ollama no longer registers as a usable provider when nothing is
+  listening for it. Every other provider registers only when it has an API key;
+  Ollama needs none, so it registered unconditionally and an install with no
+  local server still advertised a working provider. That is the reason
+  `default_provider` promotes its own entries to the front of a stage's model
+  list, which in turn is why an install with keys for four providers could send
+  every stage to the fallback its blueprint listed fourth.
+- Fixed: `lev doctor` no longer reports that a configured `default_provider`
+  with no `default_model` "is never chosen". That is true only of doctor's own
+  check, which resolves no blueprint. A real run promotes every entry on that
+  provider to the front, so the setting decides where every stage goes. The note
+  now says both, because reading the old one during an investigation of a
+  downgraded run sent it in the wrong direction.
+- Added: `lev validate` prints the model each stage would actually use on this
+  machine, and the blueprint's own order underneath when the two differ. A
+  config line could silently move every stage onto a fallback model, and the
+  only evidence was in a finished run's metadata.
+- Changed: the provider docs described `default_provider` on its own as buying
+  nothing. It buys the whole ordering. They now also say what `default_model`
+  costs: a blueprint chooses per stage on purpose, and pinning one model
+  flattens that, so cheap stages start paying top-tier prices while the stage
+  that decides things loses the model its author picked for it.
 - Added: the run list's folds outlive the dashboard. Folding four finished
   fan-outs to see the two live ones is a decision, and having to make it again
   every time you open `lev dash` is the feature failing to be one. They are kept

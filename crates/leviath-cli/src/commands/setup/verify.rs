@@ -109,9 +109,17 @@ pub async fn verify_via_registry_with(
 ) -> Outcome {
     // A registry that cannot be built is exactly the failure this command
     // exists to report, so it is an outcome rather than a panic.
-    let registry = match leviath_runtime::provider_creds::build_provider_registry_with(
+    //
+    // The Ollama reachability probe is deliberately answered `true` here: this
+    // function's entire job is to find out whether the address answers and to
+    // say why when it does not. Gating registration on a probe would turn
+    // "nothing is listening" into "no such provider", which is the one message
+    // that does not help. It also keeps verification to a single connection,
+    // which is what the caller is measuring.
+    let registry = match leviath_runtime::provider_creds::build_provider_registry_probing(
         std::slice::from_ref(creds),
         build_client,
+        &|_| true,
     ) {
         Ok(registry) => registry,
         Err(e) => {

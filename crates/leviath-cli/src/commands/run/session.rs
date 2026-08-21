@@ -161,9 +161,29 @@ pub fn build_provider_registry_from_config_with(
     config: &Config,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
-    let registry = leviath_runtime::provider_creds::build_provider_registry_with(
+    build_provider_registry_from_config_probing(
+        config,
+        build_client,
+        &leviath_runtime::provider_creds::tcp_reachable,
+    )
+}
+
+/// [`build_provider_registry_from_config_with`], with the Ollama reachability
+/// probe injected too.
+///
+/// Ollama registers on something answering at its address rather than on a
+/// key, so a test that wants it registered has to say so: the address in a
+/// test config resolves nowhere, and whether the machine running the suite
+/// happens to have Ollama up is not something a test should depend on.
+pub fn build_provider_registry_from_config_probing(
+    config: &Config,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+    reachable: &dyn Fn(&str) -> bool,
+) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
+    let registry = leviath_runtime::provider_creds::build_provider_registry_probing(
         &provider_creds_from_config(config),
         build_client,
+        reachable,
     )?;
     Ok(attach_script_layer(
         registry,
@@ -410,8 +430,12 @@ mod tests {
             },
             ..Config::default()
         };
-        let registry =
-            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
+        let registry = build_provider_registry_from_config_probing(
+            &config,
+            &leviath_providers::provider::build_http_client,
+            &|_| true,
+        )
+        .expect("an HTTPS client builds in tests");
         assert!(registry.has("anthropic"));
     }
 
@@ -468,8 +492,12 @@ mod tests {
             ollama_base_url: Some("http://my-server:11434".to_string()),
             ..Config::default()
         };
-        let registry =
-            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
+        let registry = build_provider_registry_from_config_probing(
+            &config,
+            &leviath_providers::provider::build_http_client,
+            &|_| true,
+        )
+        .expect("an HTTPS client builds in tests");
         assert!(registry.has("ollama"));
     }
 
@@ -620,8 +648,12 @@ mod tests {
             ollama_base_url: Some("http://custom:11434".to_string()),
             ..Config::default()
         };
-        let registry =
-            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
+        let registry = build_provider_registry_from_config_probing(
+            &config,
+            &leviath_providers::provider::build_http_client,
+            &|_| true,
+        )
+        .expect("an HTTPS client builds in tests");
         assert!(registry.has("anthropic"));
         assert!(registry.has("openai"));
         assert!(registry.has("google"));
@@ -897,8 +929,12 @@ mod tests {
             model_capabilities: caps,
             ..crate::config::Config::default()
         };
-        let registry =
-            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
+        let registry = build_provider_registry_from_config_probing(
+            &config,
+            &leviath_providers::provider::build_http_client,
+            &|_| true,
+        )
+        .expect("an HTTPS client builds in tests");
         assert!(registry.has("ollama"));
     }
 

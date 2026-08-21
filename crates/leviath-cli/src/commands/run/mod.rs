@@ -17,7 +17,7 @@ use clap::Args;
 // Re-export the provider-registry builders used by the daemon setup.
 pub use session::{
     ProviderCreds, build_provider_registry, build_provider_registry_from_config,
-    provider_creds_from_config,
+    build_provider_registry_from_config_probing, provider_creds_from_config,
 };
 
 /// Arguments for `lev run`.

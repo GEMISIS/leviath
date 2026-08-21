@@ -160,23 +160,42 @@ In order:
    [fan-out](/docs/sub-agents#fan-out) worker, and every sub-agent spawned with `spawn_agent`. A
    worker's own blueprint may list different models; they are its failover candidates when the run
    names no model, and are not consulted when it does.
-2. Your `default_provider` / `default_model` from `config.toml`, when `default_model` is set, the
-   provider is configured, and the stage did not set `allow_user_default = false`. It leads even
-   when the blueprint lists that same provider with a different model: `default_provider = "ollama"`
-   with `default_model = "qwen3.8:latest"` runs on `qwen3.8:latest`, and the blueprint's own
+2. Your `default_provider` from `config.toml`, when that provider is configured and the stage did
+   not set `allow_user_default = false`. Every entry in the stage's `models` on that provider moves
+   to the front, keeping the blueprint's order among them. This is what a preference means: your
+   provider first, then whatever the blueprint asked for.
+3. Your `default_model`, when it is set, first among the entries from step 2. It leads even when the
+   blueprint lists that same provider with a different model: `default_provider = "ollama"` with
+   `default_model = "qwen3.8:latest"` runs on `qwen3.8:latest`, and the blueprint's own
    `qwen3.5:9b` becomes the failover.
-3. The first entry in `models` whose provider is configured.
-4. The host-wide `fallback_order`, for the stages that got past everything above with nothing left.
-5. The first entry in the list, whether or not its provider exists. If it does not, the run fails at
+4. The first entry in `models` whose provider is configured.
+5. The host-wide `fallback_order`, for the stages that got past everything above with nothing left.
+6. The first entry in the list, whether or not its provider exists. If it does not, the run fails at
    spawn with `stage '<name>' has no usable provider`.
 
 Everything below the first line is the failover chain, in that same order, so a stage that starts on
 your default still has the blueprint's own entries to fall back to.
 
 > [!IMPORTANT]
-> `default_provider` on its own buys nothing. The resolver needs a model to send and has none, so it
-> falls through to whatever the blueprint listed. Set `default_model` alongside it. `lev doctor`
-> says so when you have not.
+> `default_model` pins **one** model across every stage, which is usually not what you want. A
+> blueprint picks per stage on purpose: `deep-researcher` gathers on a mid-tier model and analyses
+> on a top one. Setting `default_provider` alone keeps that shape and just moves it onto your
+> provider - gathering on that provider's mid-tier entry, analysing on its top one. Setting
+> `default_model` too flattens it, and the cheap stages start paying top-tier prices while the
+> deciding stage loses the model the author chose for it.
+
+Run `lev validate <agent>` to see the result before you spend anything on it. It prints the model
+each stage would actually use on this machine, and, where that differs from the blueprint's own
+order, prints that order underneath so the substitution is visible:
+
+```
+Models this install would use:
+  gather           openrouter/deepseek/deepseek-v4-flash
+                     blueprint order: anthropic/claude-sonnet-5, openai/gpt-5.4-mini, ...
+  analyze          openrouter/deepseek/deepseek-v4-pro
+                     blueprint order: anthropic/claude-opus-5, openai/gpt-5.5, ...
+  default_provider = openrouter, default_model = (unset)
+```
 
 `default_model` is a bare model id: `qwen3.8:latest`, not `ollama/qwen3.8:latest`. The provider is
 `default_provider`. That differs from `--model` and `[providers] fallback_order`, which take
@@ -193,12 +212,13 @@ provider is never on the list. Naming yours as the default is what puts it in fr
 
 ```toml
 default_provider = "openrouter"
-default_model = "deepseek/deepseek-v4-flash"
 openrouter_api_key = "sk-or-..."
 ```
 
-Every stage now starts on OpenRouter and keeps the blueprint's own list behind it. A stage that must
-stay on the provider its author picked opts out with `allow_user_default = false`.
+Every stage now starts on OpenRouter and keeps the blueprint's own list behind it, each stage still
+on the OpenRouter model its author picked for that stage. Add `default_model` only when you want one
+model everywhere regardless of stage. A stage that must stay on the provider its author picked opts
+out with `allow_user_default = false`.
 
 Two other ways in. A full override, for one run:
 

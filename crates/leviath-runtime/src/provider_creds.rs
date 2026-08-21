@@ -115,6 +115,74 @@ pub fn build_provider_registry(
     build_provider_registry_with(creds, &leviath_providers::provider::build_http_client)
 }
 
+/// Ollama's own default port, used when a base URL names no port.
+const OLLAMA_DEFAULT_PORT: u16 = 11434;
+
+/// Whether something is listening at `base_url`, as a short TCP connect.
+///
+/// Ollama is the one provider with nothing to check: every other entry
+/// registers only when it has an API key, and a key is a cheap stand-in for
+/// "the user configured this". Ollama needs no key, so it used to register
+/// unconditionally, and an install with no local server still advertised a
+/// working provider. Blueprint order then sent stages to a localhost port
+/// nothing answered on.
+///
+/// A connect is the equivalent cheap stand-in: it does not prove Ollama is
+/// there, only that the address is not dead, which is exactly the case that
+/// was misreporting. The timeout is deliberately short - this runs while the
+/// daemon is starting, and a loopback address either answers immediately or
+/// is not there at all.
+pub fn tcp_reachable(base_url: &str) -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let Some((host, port)) = host_and_port(base_url) else {
+        return false;
+    };
+    let timeout = std::time::Duration::from_millis(300);
+    // A name that does not resolve and an address that does not answer are
+    // the same answer here, so they share one expression rather than an arm
+    // each.
+    (host.as_str(), port).to_socket_addrs().is_ok_and(|addrs| {
+        addrs
+            .into_iter()
+            .any(|addr| TcpStream::connect_timeout(&addr, timeout).is_ok())
+    })
+}
+
+/// The host and port of an `http://host:port/path` base URL.
+///
+/// Hand-rolled because this crate does not depend on an HTTP client and one
+/// address is not worth taking one on. Anything without a recognisable host is
+/// `None`, which the caller reads as "not reachable" - the conservative answer
+/// for a provider that registers on reachability alone.
+fn host_and_port(base_url: &str) -> Option<(String, u16)> {
+    let rest = base_url
+        .split_once("://")
+        .map_or(base_url, |(scheme, rest)| {
+            let _ = scheme;
+            rest
+        });
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, a)| a);
+    if authority.is_empty() {
+        return None;
+    }
+    // `[::1]:11434` - the brackets delimit the address, so the port is
+    // whatever follows the closing one and the colons inside are not
+    // separators.
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, after) = rest.split_once(']')?;
+        let port = match after.strip_prefix(':') {
+            Some(p) => p.parse().ok()?,
+            None => OLLAMA_DEFAULT_PORT,
+        };
+        return Some((host.to_string(), port));
+    }
+    match authority.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() => Some((h.to_string(), p.parse().ok()?)),
+        _ => Some((authority.to_string(), OLLAMA_DEFAULT_PORT)),
+    }
+}
+
 /// [`build_provider_registry`], with client construction injected.
 ///
 /// One client per distinct request timeout, shared by every provider that wants
@@ -126,6 +194,16 @@ pub fn build_provider_registry(
 pub fn build_provider_registry_with(
     creds: &[ProviderCreds],
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
+    build_provider_registry_probing(creds, build_client, &tcp_reachable)
+}
+
+/// [`build_provider_registry_with`], with the Ollama reachability probe
+/// injected so a test can decide the answer instead of opening a socket.
+pub fn build_provider_registry_probing(
+    creds: &[ProviderCreds],
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+    reachable: &dyn Fn(&str) -> bool,
 ) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
     let mut registry = ProviderRegistry::new();
     // One client per distinct timeout, built on first use. Lazy because
@@ -218,14 +296,27 @@ pub fn build_provider_registry_with(
                     .base_url
                     .clone()
                     .unwrap_or_else(|| "http://localhost:11434".to_string());
-                registry.register(
-                    "ollama".to_string(),
-                    Arc::new(leviath_providers::OllamaProvider::with_overrides(
-                        clients.get_or_build(timeout, build_client)?,
-                        url,
-                        caps,
-                    )),
-                );
+                // The only provider that registers on something other than a
+                // key, because it has no key to register on. See
+                // [`tcp_reachable`]: an address nothing answers on is not a
+                // usable provider, and pretending otherwise put it ahead of
+                // providers that were actually configured.
+                if reachable(&url) {
+                    registry.register(
+                        "ollama".to_string(),
+                        Arc::new(leviath_providers::OllamaProvider::with_overrides(
+                            clients.get_or_build(timeout, build_client)?,
+                            url,
+                            caps,
+                        )),
+                    );
+                } else {
+                    tracing::info!(
+                        base_url = %url,
+                        "nothing is listening for ollama; not registering it. Start \
+                         ollama and reload the config to use it."
+                    );
+                }
             }
             "claude-code" => {
                 // Opt-in: the CLI puts the user's account email address into
@@ -367,7 +458,14 @@ mod tests {
                 options: Default::default(),
             },
         ];
-        let registry = build_provider_registry(&creds).expect("an HTTPS client builds in tests");
+        // The probe is injected: whether this machine happens to be running
+        // Ollama is not something the test should depend on.
+        let registry = build_provider_registry_probing(
+            &creds,
+            &leviath_providers::provider::build_http_client,
+            &|_| true,
+        )
+        .expect("an HTTPS client builds in tests");
         assert!(registry.has("anthropic"));
         assert!(registry.has("openai"));
         assert!(registry.has("google"));
@@ -375,6 +473,57 @@ mod tests {
         assert!(registry.has("ollama"));
         assert!(registry.has("claude-code"));
         assert!(!registry.has("totally-unknown"));
+    }
+
+    /// Ollama is the one provider with no key to gate on, so it gates on
+    /// something answering at its address instead. Registering it regardless
+    /// is what put a dead localhost port ahead of providers that were
+    /// actually configured.
+    #[test]
+    fn ollama_registers_only_when_something_answers() {
+        let creds = vec![ProviderCreds::simple("ollama")];
+        for reachable in [true, false] {
+            let registry = build_provider_registry_probing(
+                &creds,
+                &leviath_providers::provider::build_http_client,
+                &|_| reachable,
+            )
+            .expect("an HTTPS client builds in tests");
+            assert_eq!(registry.has("ollama"), reachable);
+        }
+    }
+
+    /// The probe reads an address out of a base URL without an HTTP client.
+    /// The bracketed form is the one worth pinning: the colons inside an IPv6
+    /// address are not port separators.
+    #[test]
+    fn a_base_url_yields_its_host_and_port() {
+        for (url, want) in [
+            ("http://localhost:11434", Some(("localhost", 11434))),
+            ("http://127.0.0.1:1", Some(("127.0.0.1", 1))),
+            ("http://example.com", Some(("example.com", 11434))),
+            ("http://example.com/v1/path", Some(("example.com", 11434))),
+            ("http://user:pw@host:9999/x", Some(("host", 9999))),
+            ("[::1]:11434", Some(("::1", 11434))),
+            ("http://[::1]", Some(("::1", 11434))),
+            ("bare-host", Some(("bare-host", 11434))),
+            ("http://host:notaport", None),
+            ("http://[::1]:notaport", None),
+            ("http://[::1", None),
+            ("http://", None),
+        ] {
+            let got = host_and_port(url);
+            let got = got.as_ref().map(|(h, p)| (h.as_str(), *p));
+            assert_eq!(got, want, "for {url}");
+        }
+    }
+
+    /// Nothing listens on port 1, and a name that does not resolve cannot be
+    /// connected to either. Both are the "not reachable" answer.
+    #[test]
+    fn tcp_reachable_says_no_to_a_dead_address() {
+        assert!(!tcp_reachable("http://127.0.0.1:1"));
+        assert!(!tcp_reachable("http://"));
     }
 
     #[test]
