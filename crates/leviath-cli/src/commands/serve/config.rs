@@ -1162,7 +1162,26 @@ mod tests {
 
     #[tokio::test]
     async fn the_models_endpoint_is_empty_when_no_https_client_can_be_built() {
-        let state = test_state();
+        // A keyed provider, so something actually asks for a client and the
+        // failing factory has a request to fail. Ollama used to be that
+        // something - it needed no key and so always reached the client cache -
+        // but it now registers only when its address answers, and on a machine
+        // without it nothing requested a client, no error was produced, and
+        // this test passed while exercising none of what it is named for.
+        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        let state = AppState {
+            config: crate::commands::serve::testutil::fixed_config(Config {
+                providers: crate::config::ProviderConfig {
+                    anthropic_api_key: Some("test-key".to_string()),
+                    ..Config::default().providers
+                },
+                ..Config::default()
+            }),
+            event_tx: tx,
+            control: crate::commands::serve::testutil::no_daemon_client(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
+        };
         let Json(models) = super::models_with(&state, &|_t| {
             Err(leviath_providers::provider::malformed_url_error())
         })
