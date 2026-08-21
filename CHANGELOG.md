@@ -13,6 +13,21 @@ same list.
 
 ## Unreleased
 
+- Fixed: a research agent no longer concludes that something is missing because a
+  page it read did not mention it. An overnight run investigating an agent runtime
+  fetched the project's landing page, never opened the docs tree linked in the nav
+  of the very HTML it received, and then marked OpenTelemetry, MCP, provider
+  abstraction, sub-agents, scriptable tools and human-in-the-loop as absent - each
+  one has its own documentation page. It proposed building them as priority work.
+  Absence is now a claim that needs its own evidence: search the subject's own
+  docs for the thing by name, and if you cannot, write "not found in <what you
+  read>" rather than "does not have it".
+- Changed: a front page is not the source. When a research agent fetches a landing
+  page, a repository root or a product site, it reads the navigation and follows
+  what bears on the question before concluding anything. A project's own docs and
+  its own source outrank every write-up about it.
+- Fixed: `wide-researcher`'s survey prompt had a sentence cut in half by the
+  coverage check added in the previous release.
 - Added: `POST /api/fs/dirs` makes one directory, so the console's folder
   picker can offer the "New Folder" a browser cannot get from a native dialog.
   `GET /api/fs/dirs` let somebody choose an agent workdir without typing a path

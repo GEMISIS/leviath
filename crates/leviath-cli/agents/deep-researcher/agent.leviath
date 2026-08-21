@@ -1,6 +1,6 @@
 [agent]
 name = "deep-researcher"
-version = "0.3.4"
+version = "0.3.5"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 entry_stage = "gather"
 
@@ -87,6 +87,22 @@ at the start is worth more than a thorough answer to the wrong question.
 Ask once, early, and only when the answer changes what you would do. If nobody
 is attached to this run the tools are not offered at all - carry on, state the
 reading you chose, and say what you would have asked.
+
+A front page is not the source. A docs site, a repository, a product site: the
+page you land on says what a project wants to be known for, and the thing you
+need is one hop further in, behind the nav. When you fetch a landing page, read
+its navigation and follow the entries that bear on your question before you
+conclude anything about the subject. A project's own docs and its own source
+outrank every write-up about it.
+
+Absence is a claim and it needs its own evidence. You may not write that
+something lacks a capability because a page you read did not mention it - pitch
+pages, READMEs and comparison posts are selective by design, and the feature you
+are looking for is very often on a page you did not open. Before stating that
+something is missing, search the subject's own documentation for it by name. If
+you cannot, write "not found in <what you actually read>" and grade it low.
+"Does not have it" and "I did not find it" are different claims and only one of
+them is yours to make.
 
 Before you hand off, read back what you gathered and ask one question of it: for
 every figure the report will state, is there a source that MEASURED it, or only
@@ -216,6 +232,9 @@ Decide the next move:
 - A figure or recommendation the report will state rests only on roundups, or on
   a single page nothing corroborates, and the primary artifact was never fetched
   → respond with: gather, naming the artifact to go and get
+- The report is going to say a subject LACKS something, and `sources_index` shows
+  only that subject's front page or write-ups about it, never its own docs or its
+  own source → respond with: gather, naming the page to go and open
 - A specific cited source you should pull and read before concluding →
   respond with: follow_citations
 - Enough well-supported evidence to write the report → respond with: synthesize

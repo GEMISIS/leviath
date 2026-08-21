@@ -1,6 +1,6 @@
 [agent]
 name = "researcher"
-version = "0.1.7"
+version = "0.1.8"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 entry_stage = "gather"
 
@@ -51,6 +51,22 @@ Be efficient - do not search exhaustively:
    message. Batching the whole list for later is how a stage ends with twenty
    sources fetched and an empty `sources_index`.
 
+
+A front page is not the source. A docs site, a repository, a product site: the
+page you land on says what a project wants to be known for, and the thing you
+need is one hop further in, behind the nav. When you fetch a landing page, read
+its navigation and follow the entries that bear on your question before you
+conclude anything about the subject. A project's own docs and its own source
+outrank every write-up about it.
+
+Absence is a claim and it needs its own evidence. You may not write that
+something lacks a capability because a page you read did not mention it - pitch
+pages, READMEs and comparison posts are selective by design, and the feature you
+are looking for is very often on a page you did not open. Before stating that
+something is missing, search the subject's own documentation for it by name. If
+you cannot, write "not found in <what you actually read>" and grade it low.
+"Does not have it" and "I did not find it" are different claims and only one of
+them is yours to make.
 
 Before you hand off, read back what you gathered and ask one question of it: for
 every figure the report will state, is there a source that MEASURED it, or only
