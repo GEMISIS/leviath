@@ -39,6 +39,11 @@ same list.
   from the far side; this is what tells them apart.
 - Changed: the five bundled fan-out agents ask for a `fan_out` call rather than
   a JSON array, and `spawn_agent` is documented for the first time.
+- Changed: `lev validate`'s `fanout-no-escape` now warns only where the risk is
+  still real - `on_worker_failure = "fail_all"` with no `error` or `dead_end`
+  edge, where one flaky worker ends the run with nowhere to go. The default
+  policy merges what succeeded and is no longer nagged about an escape it does
+  not need.
 
 - Fixed: a runtime-detected failure no longer ends a run that declared a
   recovery stage. A fan-out split that could not be parsed, a routing call that
