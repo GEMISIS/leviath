@@ -119,6 +119,13 @@ pub struct McpEnv {
     /// `[security] allow_env_vars`: which credential-shaped variables an MCP
     /// server's `${VAR}` headers may interpolate.
     pub allow_env_vars: Vec<String>,
+    /// How long `lev mcp test` waits for the `initialize` handshake.
+    ///
+    /// Production passes [`leviath_mcp::DEFAULT_CONNECT_TIMEOUT`]; the tests
+    /// pass a far longer one, because their clock is a CI runner's rather than
+    /// a person's. See [`leviath_mcp::MCPClient::with_connect_timeout`] for
+    /// the freeze that made this worth a field.
+    pub connect_timeout: std::time::Duration,
 }
 
 /// Run a `lev mcp` subcommand against the injected environment.
@@ -273,8 +280,9 @@ async fn test(name: &str, env: &McpEnv) -> anyhow::Result<()> {
     let auth_header = OAuthClient::new()
         .authorization_header(name, &env.store_path, env.now)
         .await?;
-    let mut client =
-        MCPClient::from_config_with_auth(server, auth_header, &env.allow_env_vars).await?;
+    let mut client = MCPClient::from_config_with_auth(server, auth_header, &env.allow_env_vars)
+        .await?
+        .with_connect_timeout(env.connect_timeout);
     client.connect().await?;
     let tools = client.list_tools().await?;
     println!("✓ '{name}' connected · {} tool(s):", tools.len());
@@ -427,8 +435,26 @@ mod tests {
             tools_dir: None,
             credential_store: None,
             allow_env_vars: Vec::new(),
+            connect_timeout: TEST_CONNECT_TIMEOUT,
         }
     }
+
+    /// The handshake deadline for tests: long enough that only a real hang
+    /// trips it.
+    ///
+    /// Production's 30s asks "how long should a person's agent startup hang on
+    /// a broken server". A test asks something else, and answering it with a
+    /// person's number means the suite fails when the *machine* stalls rather
+    /// than when the server does. One did: a `windows-latest` job froze for
+    /// 159 seconds on 2026-08-21 - zero tests completed, the binary took 241s
+    /// against a normal 40s - and this deadline was the only casualty, its
+    /// panic reported the instant the process was scheduled again. The stub
+    /// had answered nothing because nothing was running.
+    ///
+    /// Five minutes is not a guess at how slow a runner gets; it is "longer
+    /// than any stall we have seen, and still bounded", so a genuinely wedged
+    /// server still fails the test rather than hanging CI forever.
+    const TEST_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
     fn never_opens(_: &str) -> bool {
         false
@@ -1122,6 +1148,7 @@ for line in sys.stdin:
             tools_dir: None,
             credential_store: None,
             allow_env_vars: Vec::new(),
+            connect_timeout: TEST_CONNECT_TIMEOUT,
         }
     }
 
@@ -1201,6 +1228,7 @@ for line in sys.stdin:
             tools_dir: None,
             credential_store: None,
             allow_env_vars: Vec::new(),
+            connect_timeout: TEST_CONNECT_TIMEOUT,
         };
         assert!(
             execute_with(

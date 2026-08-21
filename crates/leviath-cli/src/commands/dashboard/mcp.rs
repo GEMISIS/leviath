@@ -312,7 +312,7 @@ async fn run_test(ctx: &McpContext, name: &str) -> McpOutcome {
         Ok(header) => header,
         Err(e) => return fail(format!("Auth failed for '{name}': {e}")),
     };
-    match connect_and_count(&server, auth_header, &allow_env).await {
+    match connect_and_count(&server, auth_header, &allow_env, ctx.connect_timeout).await {
         Ok(count) => ok(format!("'{name}' connected · {count} tool(s)")),
         Err(e) => fail(format!("'{name}' failed: {e}")),
     }
@@ -323,8 +323,11 @@ async fn connect_and_count(
     server: &MCPServerConfig,
     auth_header: Option<(String, String)>,
     allow_env: &[String],
+    connect_timeout: std::time::Duration,
 ) -> anyhow::Result<usize> {
-    let mut client = MCPClient::from_config_with_auth(server, auth_header, allow_env).await?;
+    let mut client = MCPClient::from_config_with_auth(server, auth_header, allow_env)
+        .await?
+        .with_connect_timeout(connect_timeout);
     client.connect().await?;
     let tools = client.list_tools().await?;
     let _ = client.shutdown().await;
@@ -648,8 +651,21 @@ mod tests {
             store_path: dir.join("mcp-auth.json"),
             opener: std::sync::Arc::new(opener),
             clock: || 1_000,
+            connect_timeout: TEST_CONNECT_TIMEOUT,
         }
     }
+
+    /// The handshake deadline these tests use, and why it is not the 30s a
+    /// person gets.
+    ///
+    /// The warm-up below removes the interpreter's cold start; this removes
+    /// the machine. On 2026-08-21 a `windows-latest` job stopped executing for
+    /// 159 seconds - zero tests completed, the binary took 241s against a
+    /// normal 40s - with all four of this suite's subprocess tests in flight.
+    /// A wall-clock deadline inside a process that is not running measures the
+    /// runner, not the server. Bounded rather than removed, so a genuinely
+    /// wedged server still fails instead of hanging CI.
+    const TEST_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
     fn no_browser(_: &str) -> bool {
         false

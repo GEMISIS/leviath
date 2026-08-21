@@ -24,3 +24,7 @@ pub use auth::{
 pub use client::{EmbeddedResource, MCPClient, ToolResult};
 pub use discovery::{MCPServerConfig, MCPTransport, ResolvedTransport, ToolDiscovery};
 pub use execution::ToolExecutor;
+/// The handshake deadline a caller with a person waiting should use. Exported
+/// so a caller that overrides it (a test) still names the production value in
+/// the one place it does not.
+pub use transport::DEFAULT_CONNECT_TIMEOUT;

@@ -58,6 +58,9 @@ impl Dashboard {
                 .join("mcp-auth.json"),
             opener: std::sync::Arc::new(|_| false),
             clock: || 1_000,
+            // No test built this way reaches a real handshake; the production
+            // value keeps the fixture honest about what it stands in for.
+            connect_timeout: leviath_mcp::DEFAULT_CONNECT_TIMEOUT,
         };
         // A test new-run context: an empty temp tree, so the agent picker and
         // the `@` completion never read the real agents dir or working

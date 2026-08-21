@@ -488,6 +488,11 @@ pub(super) struct McpContext {
     pub(super) store_path: std::path::PathBuf,
     pub(super) opener: leviath_mcp::BrowserOpener,
     pub(super) clock: fn() -> u64,
+    /// How long the MCP screen's `test` waits for the `initialize` handshake.
+    /// Production uses [`leviath_mcp::DEFAULT_CONNECT_TIMEOUT`]; the tests use
+    /// a far longer one, for the reason
+    /// [`leviath_mcp::MCPClient::with_connect_timeout`] records.
+    pub(super) connect_timeout: std::time::Duration,
 }
 
 /// Which pane of the new-run screen holds keyboard focus (Tab toggles).
