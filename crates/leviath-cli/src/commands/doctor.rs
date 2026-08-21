@@ -463,13 +463,18 @@ fn resolve_check(
 /// The note appended when the resolved provider is not the one the user named
 /// as their default.
 ///
-/// `default_provider` without a `default_model` is a half-configuration that
-/// silently does nothing: the resolver needs a model to send and has none, so
-/// it falls through to the hard-coded last resort. Someone who set
-/// `default_provider = "openrouter"`, pasted their key, and watched every run
-/// go to Anthropic (or, with no Anthropic key either, to a localhost Ollama
-/// that was not running) had no way to see that from here - the check said
-/// `resolve OK` and printed a provider they never asked for.
+/// This check resolves an empty `ModelConfig`, so `default_provider` really
+/// does lose here without a `default_model`: there is no blueprint entry to
+/// promote and no model to send. A real run is the opposite case, and the note
+/// used to describe only the first one - it said the default provider "is never
+/// chosen", which someone reasonably read as a statement about their runs.
+///
+/// It is not. `resolve_stage_candidates` moves every registered candidate on
+/// the default provider to the front of the blueprint's list, so
+/// `default_provider = "openrouter"` sends every stage of every bundled
+/// blueprint to that blueprint's OpenRouter entry. A run that had been quietly
+/// executing on a fallback model for weeks looked, from here, like a config
+/// line that did nothing at all.
 ///
 /// Not a failure: the resolution is legitimate and the run will work. It is
 /// only worth saying because it is not what the config appears to ask for.
@@ -493,8 +498,12 @@ fn default_provider_note(
     }
     let named = &config.default_provider;
     format!(
-        "  (note: default_provider is '{named}' but no default_model is set, \
-         so it is never chosen - add `default_model` to config.toml)"
+        "  (note: this check resolves no blueprint, so with no `default_model` \
+         set there is nothing to send to '{named}' and it loses here. A real run \
+         is different: a blueprint that lists '{named}' has that entry moved to \
+         the front, so your runs use '{named}' with whatever model the blueprint \
+         names for each stage. Set `default_model` only to pin one model across \
+         every stage, which overrides the per-stage choices a blueprint makes.)"
     )
 }
 

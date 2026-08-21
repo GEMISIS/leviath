@@ -496,10 +496,13 @@ fn resolve_check_reports_an_unconfigured_provider_and_what_was_tried() {
 
 #[test]
 fn resolve_check_says_so_when_the_configured_default_never_wins() {
-    // `default_provider = "openrouter"` with no `default_model`: the resolver
-    // has no model to send, falls through to its hard-coded last resort, and
-    // used to report `resolve OK anthropic / claude-sonnet-4-6` with nothing
-    // anywhere saying the configured provider had been passed over.
+    // `default_provider = "openrouter"` with no `default_model`: this check
+    // resolves no blueprint, so there is no model to send and the configured
+    // provider loses here. The note has to say that WITHOUT implying it holds
+    // for real runs, where a blueprint listing openrouter has that entry
+    // promoted and every stage goes there. The old wording said the provider
+    // "is never chosen", which read as a statement about the user's runs and
+    // sent an investigation of a downgraded run in the wrong direction.
     let config = Config {
         default_provider: "openrouter".to_string(),
         default_model: None,
@@ -510,8 +513,18 @@ fn resolve_check_says_so_when_the_configured_default_never_wins() {
     let (check, _) = resolve_check(&config, None, &registry);
     assert_eq!(check.status, CheckStatus::Ok);
     assert!(
-        check.detail.contains("no default_model"),
-        "{}",
+        check.detail.contains("no blueprint"),
+        "the note must scope itself to this check: {}",
+        check.detail
+    );
+    assert!(
+        check.detail.contains("A real run is different"),
+        "the note must say what real runs do: {}",
+        check.detail
+    );
+    assert!(
+        !check.detail.contains("never chosen"),
+        "the claim that started this: {}",
         check.detail
     );
     assert!(check.detail.contains("openrouter"), "{}", check.detail);

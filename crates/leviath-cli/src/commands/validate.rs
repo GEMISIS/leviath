@@ -421,6 +421,9 @@ fn execute_reporting_outcome(
         // would default to, so it is what relative `[read_paths]` entries
         // resolve against.
         let workdir = crate::commands::resolve_cwd().unwrap_or_default();
+        if !args.json {
+            print_model_resolution(&checked.blueprint, config);
+        }
         env = env
             .with_providers(&checked.blueprint, config)
             .with_read_paths(&checked.blueprint, config, &workdir);
@@ -439,6 +442,71 @@ fn execute_reporting_outcome(
         return Ok(ValidateOutcome::LintFailed { errors, warnings });
     }
     Ok(ValidateOutcome::Success)
+}
+
+/// What each stage would actually dispatch to on this machine, and why.
+///
+/// A blueprint lists an ordered set of models per stage, and the resolver
+/// reorders it: registered candidates on `default_provider` move to the front,
+/// `default_model` first among them. Nothing surfaced the result, so a config
+/// line could silently move every stage onto a fallback model and the only
+/// evidence was in a finished run's metadata. The line under each stage is the
+/// blueprint's own order, so the promotion is visible as a difference rather
+/// than something to take on trust.
+fn print_model_resolution(blueprint: &leviath_core::Blueprint, config: &crate::config::Config) {
+    // A registry that will not build says nothing here rather than failing the
+    // validation: this block is extra information about an install, and the
+    // lint below has its own thing to say about unreachable providers.
+    let lines = crate::commands::run::build_provider_registry_from_config(config)
+        .map(|registry| model_resolution_lines(blueprint, config, &registry))
+        .unwrap_or_default();
+    for line in lines {
+        println!("{line}");
+    }
+}
+
+/// The lines [`print_model_resolution`] prints, so they can be asserted
+/// without capturing stdout.
+fn model_resolution_lines(
+    blueprint: &leviath_core::Blueprint,
+    config: &crate::config::Config,
+    registry: &leviath_runtime::ProviderRegistry,
+) -> Vec<String> {
+    let defaults = crate::daemon::spawn::model_defaults(config);
+    let mut lines = vec![String::new(), "Models this install would use:".to_string()];
+    for stage in &blueprint.stages {
+        // `resolve_stage_model` rather than the candidate list: it carries the
+        // "always at least one entry" invariant, so there is no empty case to
+        // write a branch for and then never reach.
+        let (provider, model) =
+            leviath_runtime::pipeline::resolve_stage_model(&stage.model, None, &defaults, registry);
+        let head = format!("{provider}/{model}");
+        lines.push(format!("  {:<16} {head}", stage.name));
+        let listed: Vec<String> = stage
+            .model
+            .models
+            .iter()
+            .map(|e| format!("{}/{}", e.provider, e.model))
+            .collect();
+        // Only when the install disagrees with the blueprint: printing the
+        // list under every stage that already got its first choice is noise,
+        // and the point of the line is to make a substitution visible.
+        if listed.first().is_some_and(|first| *first != head) {
+            lines.push(format!(
+                "  {:<16}   blueprint order: {}",
+                "",
+                listed.join(", ")
+            ));
+        }
+    }
+    if !config.default_provider.is_empty() {
+        let model = config.default_model.as_deref().unwrap_or("(unset)");
+        lines.push(format!(
+            "  default_provider = {}, default_model = {model}",
+            config.default_provider
+        ));
+    }
+    lines
 }
 
 /// The stage graph as text, the way the dashboard's stage explorer draws it
@@ -537,6 +605,118 @@ mod tests {
     use super::*;
     use crate::test_support::write_test_agent;
 
+    /// The line that would have answered "why is this run on deepseek".
+    ///
+    /// `default_provider` moves its registered candidates to the front of a
+    /// stage's list, so an install can dispatch somewhere the blueprint did
+    /// not ask for first. Nothing surfaced that, so the substitution is shown
+    /// against the blueprint's own order - and only when they differ, because
+    /// repeating the list under a stage that got its first choice is noise.
+    #[test]
+    fn model_resolution_shows_where_the_install_overrides_the_blueprint() {
+        let manifest = r#"
+[agent]
+name = "m"
+version = "0.1.0"
+entry_stage = "one"
+
+[stages.one]
+model = { models = [
+  { provider = "anthropic", model = "claude-sonnet-5" },
+  { provider = "openrouter", model = "deepseek/deepseek-v4-flash" },
+] }
+system_prompt = "hi"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_agent(dir.path(), manifest);
+        let checked = check_manifest(&path).expect("the manifest parses");
+        let blueprint = &checked.blueprint;
+
+        // A key is all it takes to register, and registration is all the
+        // resolver asks about - so the real providers stand in for themselves
+        // rather than a fake that would need a whole trait impl to answer one
+        // question. Ollama is probed away: whether this machine is running it
+        // is not part of what the test is about.
+        let with_keys = |default_provider: &str| crate::config::Config {
+            default_provider: default_provider.to_string(),
+            default_model: None,
+            openrouter_api_key: Some("test-key".to_string()),
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("test-key".to_string()),
+                ..Default::default()
+            },
+            ..crate::config::Config::default()
+        };
+        let registry_for = |config: &crate::config::Config| {
+            crate::commands::run::build_provider_registry_from_config_probing(
+                config,
+                &leviath_providers::provider::build_http_client,
+                &|_| false,
+            )
+            .expect("an HTTPS client builds in tests")
+        };
+
+        // Preferring anthropic: the blueprint already leads with it, so there
+        // is nothing to report and no second line.
+        let anthropic_first = with_keys("anthropic");
+        let registry = registry_for(&anthropic_first);
+        let lines = model_resolution_lines(blueprint, &anthropic_first, &registry);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("anthropic/claude-sonnet-5")),
+            "{lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("blueprint order")),
+            "no substitution, so nothing to explain: {lines:#?}"
+        );
+
+        // Preferring openrouter: the second-listed entry is promoted over the
+        // blueprint's first choice, and the run silently goes there.
+        let openrouter_first = with_keys("openrouter");
+        let registry = registry_for(&openrouter_first);
+        let lines = model_resolution_lines(blueprint, &openrouter_first, &registry);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("openrouter/deepseek/deepseek-v4-flash")),
+            "{lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("blueprint order") && l.contains("anthropic/claude-sonnet-5")),
+            "the override has to be visible against what the blueprint asked for: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("default_provider = openrouter")
+                    && l.contains("default_model = (unset)")),
+            "and the setting responsible has to be named: {lines:#?}"
+        );
+
+        // No preference expressed: blueprint order stands on its own and
+        // there is no setting to name, so the trailing line is omitted.
+        let no_preference = crate::config::Config {
+            default_provider: String::new(),
+            ..with_keys("anthropic")
+        };
+        let registry = registry_for(&no_preference);
+        let lines = model_resolution_lines(blueprint, &no_preference, &registry);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("anthropic/claude-sonnet-5")),
+            "{lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("default_provider =")),
+            "nothing to name: {lines:#?}"
+        );
+    }
+
     /// A minimal manifest that lints clean, so a test can add exactly the one
     /// defect it is about.
     ///
@@ -612,6 +792,36 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             ..args_for(dir.path())
         };
         assert!(execute_reporting_outcome(&args, None).unwrap().is_success());
+    }
+
+    /// With a config in hand, the report also says which model each stage
+    /// would actually go to. Driven through the command so the `--json` guard
+    /// is exercised: the resolution block is prose, and a caller parsing JSON
+    /// must not find it spliced into the document.
+    #[test]
+    fn a_config_adds_the_model_resolution_to_the_prose_report() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), CLEAN_MANIFEST);
+        let config = crate::config::Config {
+            default_provider: "anthropic".to_string(),
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("test-key".to_string()),
+                ..Default::default()
+            },
+            ..crate::config::Config::default()
+        };
+        assert!(
+            execute_reporting_outcome(&args_for(dir.path()), Some(&config))
+                .unwrap()
+                .is_success()
+        );
+        // The same run as JSON: the block is suppressed, and the outcome is
+        // the same either way.
+        assert!(
+            execute_reporting_outcome(&json_args_for(dir.path()), Some(&config))
+                .unwrap()
+                .is_success()
+        );
     }
 
     // ─── print_success ───────────────────────────────────────────────────
