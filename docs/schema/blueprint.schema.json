@@ -300,6 +300,12 @@
           "type": "integer",
           "minimum": 0,
           "description": "Most work items the split may produce. 0 (or no key) means however many it produces. Distinct from max_workers, which caps how many run at once. This caps how many exist at all, bounding both the run's cost and each worker's share of the results region."
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 3,
+          "description": "How many times this stage is asked again when it ends without having called the fan_out tool, before it is let through without workers. Raise it for a small or local model that needs more than a nudge; 0 lets the stage through on its first refusal. Separate from max_revisits, which bounds how often the graph may re-enter the stage."
         }
       }
     },

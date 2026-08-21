@@ -2387,6 +2387,7 @@ fn dispatch_persistence_serializes_fan_out_waiting() {
                 split_prompt: "s".to_string(),
                 results_region: None,
                 max_items: None,
+                max_attempts: None,
             },
             max_workers: 1,
             pending: vec![],
@@ -7363,6 +7364,7 @@ fn stage_setup_from_folds_fanout_split_prompt() {
             split_prompt: split.to_string(),
             results_region: None,
             max_items: None,
+            max_attempts: None,
         },
     };
 
@@ -12477,6 +12479,11 @@ fn submitted_in(stage: &str) -> crate::persistence::FinalOutput {
 
 /// A blueprint whose stage 0 is a fan-out, for `require_fan_out`.
 fn fanning_bp() -> AgentBlueprint {
+    fanning_bp_with(None)
+}
+
+/// The same, with an explicit `max_attempts`.
+fn fanning_bp_with(max_attempts: Option<usize>) -> AgentBlueprint {
     let mut stage = stage_named("investigate", None, false, None);
     stage.mode = leviath_core::blueprint::StageMode::FanOut {
         config: leviath_core::blueprint::FanOutConfig {
@@ -12489,6 +12496,7 @@ fn fanning_bp() -> AgentBlueprint {
             split_prompt: "split it".to_string(),
             results_region: None,
             max_items: None,
+            max_attempts,
         },
     };
     AgentBlueprint(blueprint(vec![stage]))
@@ -12632,6 +12640,63 @@ fn an_errored_fan_out_stage_records_the_flag_without_nudging() {
             .0
             .splits_degraded,
         1
+    );
+}
+
+/// The budget is the stage's when it sets one. A small or local model may need
+/// more than the default's worth of asking.
+#[test]
+fn a_fan_out_stage_uses_its_own_max_attempts() {
+    let mut world = World::new();
+    // One past the framework default, which the stage raised.
+    let e = world
+        .spawn((
+            fanning_bp_with(Some(9)),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+            FanOutReentries(leviath_core::blueprint::DEFAULT_FAN_OUT_ATTEMPTS + 1),
+        ))
+        .id();
+
+    run_require_fan_out(&mut world);
+
+    assert!(
+        world.get::<ReadyToInfer>(e).is_some(),
+        "still within the stage's own budget"
+    );
+}
+
+/// `max_attempts = 0` lets the stage through on its first refusal, for a
+/// blueprint where an empty fan-out is acceptable and the retries are not worth
+/// their prompts.
+#[test]
+fn a_zero_max_attempts_lets_the_stage_through_at_once() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            fanning_bp_with(Some(0)),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+            crate::persistence::RunOutcomeFlags::default(),
+        ))
+        .id();
+
+    run_require_fan_out(&mut world);
+
+    assert!(world.get::<ResolveTransition>(e).is_some(), "let through");
+    assert!(world.get::<ReadyToInfer>(e).is_none(), "never asked again");
+    assert_eq!(
+        world
+            .get::<crate::persistence::RunOutcomeFlags>(e)
+            .unwrap()
+            .0
+            .splits_degraded,
+        1,
+        "and it is still recorded as a fan-out that produced nothing"
     );
 }
 

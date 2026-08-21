@@ -415,6 +415,7 @@ pub fn config_for(request: &FanOutRequest, stage: Option<&FanOutConfig>) -> FanO
         split_prompt: String::new(),
         results_region: None,
         max_items: None,
+        max_attempts: None,
     });
     // A named agent wins over the blueprint's worker: an ordinary stage has no
     // worker to inherit, and a fan-out stage that names one in the call meant it.
@@ -1147,6 +1148,7 @@ mod tests {
             split_prompt: "split".to_string(),
             results_region: None,
             max_items: None,
+            max_attempts: None,
         }
     }
 

@@ -39,6 +39,14 @@ same list.
   from the far side; this is what tells them apart.
 - Changed: the five bundled fan-out agents ask for a `fan_out` call rather than
   a JSON array, and `spawn_agent` is documented for the first time.
+- Added: `max_attempts` on a `fan_out` stage - how many times it is asked again
+  when it ends without having called the tool, before it is let through without
+  workers. Defaults to 3, as it was fixed at before. Raise it for a small or
+  local model that needs more than a nudge; `0` lets the stage through on its
+  first refusal, for a blueprint where an empty fan-out is an acceptable outcome
+  and the retries are not worth their prompts. Deliberately separate from
+  `max_revisits`: each retry re-sends the whole stage context, so borrowing a
+  routing budget for this one quietly multiplies an inference bill.
 - Changed: `lev validate`'s `fanout-no-escape` now warns only where the risk is
   still real - `on_worker_failure = "fail_all"` with no `error` or `dead_end`
   edge, where one flaky worker ends the run with nowhere to go. The default

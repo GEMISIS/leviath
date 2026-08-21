@@ -267,6 +267,7 @@ mod tests {
             split_prompt: "split".to_string(),
             results_region: None,
             max_items: None,
+            max_attempts: None,
         }
     }
 

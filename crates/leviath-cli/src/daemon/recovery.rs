@@ -1710,6 +1710,7 @@ mod tests {
                 split_prompt: "s".to_string(),
                 results_region: None,
                 max_items: None,
+                max_attempts: None,
             },
             max_workers: 1,
             pending: vec![],

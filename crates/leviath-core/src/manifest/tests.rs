@@ -2321,6 +2321,7 @@ mode = "autonomous"
             split_prompt: "split the work".to_string(),
             results_region: None,
             max_items: None,
+            max_attempts: None,
         },
     };
     assert_eq!(bp.find_stage("parallel").unwrap().mode, expected);
@@ -2352,6 +2353,7 @@ split_prompt = "go"
             split_prompt: "go".to_string(),
             results_region: None,
             max_items: None,
+            max_attempts: None,
         },
     };
     assert_eq!(bp.find_stage("parallel").unwrap().mode, expected);
@@ -2388,6 +2390,7 @@ max_items = 12
             split_prompt: "go".to_string(),
             results_region: Some("worker_rows".to_string()),
             max_items: Some(12),
+            max_attempts: None,
         },
     };
     assert_eq!(bp.find_stage("parallel").unwrap().mode, expected);
@@ -2422,6 +2425,7 @@ max_workers = 0
             split_prompt: "go".to_string(),
             results_region: None,
             max_items: None,
+            max_attempts: None,
         },
     };
     let stage = bp.find_stage("parallel").unwrap();
@@ -2806,6 +2810,63 @@ mode = "output"
     // And the grant survives validation, which would otherwise reject a
     // stage required to produce an output it cannot submit.
     bp.validate().expect("the auto-grant satisfies validation");
+}
+
+/// `max_attempts` is how many times a fan-out stage is asked again before it is
+/// let through without workers. Absent means the framework default; `0` means
+/// let it through on the first refusal.
+#[test]
+fn fan_out_max_attempts_is_read_from_the_stage() {
+    let with = |line: &str| {
+        let toml = format!(
+            r#"
+[agent]
+name = "attempts-test"
+
+[stages.split]
+mode = "fan_out"
+worker_stage = "work"
+split_prompt = "split it"
+{line}
+
+[stages.work]
+mode = "autonomous"
+allow_as_worker = true
+"#
+        );
+        let bp = parse_manifest(&toml).expect("parses");
+        match &bp.find_stage("split").expect("the stage exists").mode {
+            StageMode::FanOut { config } => config.max_attempts,
+            other => panic!("expected a fan-out stage, got {other:?}"),
+        }
+    };
+    assert_eq!(with(""), None, "absent leaves the default to the runtime");
+    assert_eq!(with("max_attempts = 7"), Some(7));
+    assert_eq!(with("max_attempts = 0"), Some(0), "zero is meaningful here");
+}
+
+/// A typo in the budget is refused rather than read as "no budget", and the
+/// message says what zero would have meant for this key rather than for the
+/// two caps that share the reader.
+#[test]
+fn a_bad_max_attempts_names_what_zero_means_here() {
+    let toml = r#"
+[agent]
+name = "attempts-test"
+
+[stages.split]
+mode = "fan_out"
+worker_stage = "work"
+split_prompt = "split it"
+max_attempts = "three"
+
+[stages.work]
+mode = "autonomous"
+allow_as_worker = true
+"#;
+    let err = parse_manifest(toml).expect_err("refused").to_string();
+    assert!(err.contains("max_attempts"), "{err}");
+    assert!(err.contains("do not ask again"), "{err}");
 }
 
 /// A `fan_out` stage is granted `fan_out` regardless of what it listed, and

@@ -3417,6 +3417,7 @@ async fn pausing_a_fan_out_parent_holds_its_worker_queue() {
                     split_prompt: String::new(),
                     results_region: None,
                     max_items: None,
+                    max_attempts: None,
                 },
                 max_workers: 1,
                 pending: vec![crate::fanout::WorkItem::default()],
@@ -3498,6 +3499,7 @@ async fn wait_reason_counts_outstanding_fan_out_workers() {
                     split_prompt: String::new(),
                     results_region: None,
                     max_items: None,
+                    max_attempts: None,
                 },
                 max_workers: 2,
                 pending: vec![
