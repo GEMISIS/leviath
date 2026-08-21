@@ -51,6 +51,14 @@ same list.
 - Changed: a qualifier travels with the claim it qualifies. The same run carried
   "yes, with offload" and "~22 tok/s" in its comparison table and dropped both
   from the recommendation - the one place the tradeoff mattered.
+- Changed: the research agents check their own coverage before they hand off and
+  the analysis stage can send them back for it. The question both ask is the same
+  one: for every figure the report will state, is there a source that measured
+  it, or only pages repeating it? A number that lives only in roundups sends the
+  run back to fetch the artifact. Re-running the weakest run we had on the old
+  prompts turned ten SEO listicles with four graded `high` into twenty sources
+  where every `high` is a model card, a vendor's own docs or a leaderboard, and
+  every roundup sits at `medium`. It costs roughly twice the tool calls.
 
 - Fixed: a `required` region an earlier stage gave up on and a later stage filled
   is no longer reported as missing. The flag recorded a moment and consumers read

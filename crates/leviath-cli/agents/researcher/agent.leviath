@@ -1,6 +1,6 @@
 [agent]
 name = "researcher"
-version = "0.1.6"
+version = "0.1.7"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 entry_stage = "gather"
 
@@ -51,6 +51,14 @@ Be efficient - do not search exhaustively:
    message. Batching the whole list for later is how a stage ends with twenty
    sources fetched and an empty `sources_index`.
 
+
+Before you hand off, read back what you gathered and ask one question of it: for
+every figure the report will state, is there a source that MEASURED it, or only
+pages that repeat it? If a number exists only in roundups, go and fetch the
+artifact - the paper, the model card, the spec, the vendor's own docs - before
+leaving this stage. Coming back for it later costs a whole extra pass, and going
+without means the report states a number on the authority of a page that was
+guessing.
 
 Today's date is in the `environment` region. Treat it as authoritative over
 anything you remember: your training has a cutoff and this run does not. Judge

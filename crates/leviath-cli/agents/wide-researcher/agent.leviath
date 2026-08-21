@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.3.3"
+version = "0.3.4"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 entry_stage = "survey"
 
@@ -75,6 +75,14 @@ the whole fan-out investigates.
 
 Ask once, early, and only when the answer changes what you would do. If nobody is
 attached to this run the tools are not offered at all - carry on, state the
+Before you hand off, read back what you gathered and ask one question of it: for
+every figure the report will state, is there a source that MEASURED it, or only
+pages that repeat it? If a number exists only in roundups, go and fetch the
+artifact - the paper, the model card, the spec, the vendor's own docs - before
+leaving this stage. Coming back for it later costs a whole extra pass, and going
+without means the report states a number on the authority of a page that was
+guessing.
+
 reading you chose, and say what you would have asked.
 """
 
@@ -190,6 +198,9 @@ max_revisits = 2
 transition_prompt = """
 Decide the next move:
 - Coverage gaps that need broader surveying → respond with: survey
+- A figure or ranking the overview will state rests only on roundups, or on a
+  single page nothing corroborates, and the primary artifact was never fetched
+  → respond with: survey, naming the artifact to go and get
 - One especially interesting/consequential thread worth a focused deep read
   before you can judge it fairly → respond with: deep_dive
 - You've covered enough ground to write a useful overview → respond with: summarize
