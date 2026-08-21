@@ -1,6 +1,6 @@
 [agent]
 name = "deep-researcher"
-version = "0.3.2"
+version = "0.3.3"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 entry_stage = "gather"
 
@@ -20,7 +20,11 @@ mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Gather primary sources and key references on the topic"
 # web_search / web_fetch are provided by this agent's tools/ (issue #97).
-available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time", "context_read"]
+available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time", "context_read", "ask_user_text", "ask_user_choice"]
+# The ask tools block on a person, which is the point: a wrong reading of the
+# question costs the whole run. An unattended run is never offered them (the
+# resolver drops a blocking tool when nobody is watching), so this is free there.
+allow_blocking_tools = true
 max_iterations = 25
 max_revisits = 3
 system_prompt = """
@@ -34,6 +38,13 @@ authoritative references, not a broad skim.
   the release feed, the standards list). Only then narrow. Skipping this step is
   how an investigation ends up thoroughly researching the answer from two years
   ago: every name you can recall is, by construction, older than your cutoff.
+  A "which one should I use" question has an authoritative index too, even when
+  it does not name one: the model cards, the leaderboard, the vendor's own docs,
+  the package registry. Searching the question as asked returns roundups and
+  listicles, which is what a run recommending local models came back with - ten
+  sources, not one of them a model card, and every hard number resting on a
+  single page nobody else corroborates. Go to the artifact itself for anything
+  you are going to state as a number.
 - Run a focused first round of web_search calls across the distinct facets of the
   question, then web_fetch the most authoritative results for detail. Prefer
   primary sources (papers, standards, official docs) over summaries. read_file for
@@ -66,6 +77,16 @@ authoritative references, not a broad skim.
   twenty sources fetched and an empty `sources_index` - which happened, and cost
   the run its bibliography until a later stage rebuilt it.
 - Note citations worth chasing - the analyze stage can send you to follow them.
+
+If the task is ambiguous in a way that would change what you research - a term
+with two common meanings, a constraint you cannot infer, a scope that could be
+read narrow or wide - ask before you spend the run on a guess. `ask_user_text`
+takes a free-text answer and `ask_user_choice` offers options; one good question
+at the start is worth more than a thorough answer to the wrong question.
+
+Ask once, early, and only when the answer changes what you would do. If nobody
+is attached to this run the tools are not offered at all - carry on, state the
+reading you chose, and say what you would have asked.
 
 Once you have solid primary coverage of the core facets, hand off to analyze.
 """
@@ -293,6 +314,13 @@ following the citation/confidence rules in `format`. Structure:
 
 Write for a technical audience. Be precise. Distinguish evidence from inference.
 
+A qualifier travels with the claim it qualifies. If the evidence says "yes, with
+offload" or "tight", or the figure came from one uncorroborated page, the
+recommendation says so too - a reader acting on your summary never sees the table
+it came from. A run recommending a local model carried "yes, with offload" and
+"~22 tok/s" in its comparison table and dropped both from the recommendation,
+which is the one place the tradeoff mattered.
+
 Citations are load-bearing, so two rules bind absolutely:
 
 1. Every `[n]` must resolve to a line already in `sources_index`. A reference is
@@ -376,7 +404,7 @@ environment    = { kind = "pinned", budget = "1%", seed = { tools = ["current_ti
 # the stages that can write context (gather, analyze, follow_citations) and
 # no-ops for the ones that cannot, so it can never deadlock the deliverable.
 sources_index  = { kind = "pinned", budget = "4%", volatility = "grows", required = true, required_message = "You have not recorded a single source in `sources_index`. Append one bibliography line per source you actually read (context_append, region=\"sources_index\"): `[n] <title> - <url/path> - <date> - credibility: <high/med/low + why>`. If the searches came back empty or unavailable, record THAT as the finding - do not proceed as though sources were gathered." }
-format         = { kind = "pinned", budget = "1%", seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the References bibliography (title + URL/path). Write every marker as a link to the source it cites - `[[n]](<url>)`, which renders as [n] and clicks through - so a reader can check a claim without scrolling to the bibliography and pasting a URL by hand. Use the URL from that source's `sources_index` line; a source that has a local path instead of a URL stays a bare [n]. The bibliography entry keeps its full URL either way. Mark each key finding's confidence as high / medium / low based on source count and credibility. A claim about something the task names only as a comparison rests on what THIS run read about it, not on the credibility of your own topic's sources: grade it on that, and when a figure reaches you through a source that mentions a study rather than one that reports it, say so and grade it down." }, volatility = "stable" }
+format         = { kind = "pinned", budget = "1%", seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the References bibliography (title + URL/path). Write every marker as a link to the source it cites - `[[n]](<url>)`, which renders as [n] and clicks through - so a reader can check a claim without scrolling to the bibliography and pasting a URL by hand. Use the URL from that source's `sources_index` line; a source that has a local path instead of a URL stays a bare [n]. The bibliography entry keeps its full URL either way. Mark each key finding's confidence as high / medium / low based on source count and credibility. Credibility is about what a source IS, not how authoritative it sounds: only the primary artifact - the paper, the spec, the model card, the official docs, the registry or leaderboard - can be high for a factual claim about that artifact. A roundup, listicle or vendor blog is medium at best however confident its title, and a number that appears in exactly one such page with nothing corroborating it is low and says so. A claim about something the task names only as a comparison rests on what THIS run read about it, not on the credibility of your own topic's sources: grade it on that, and when a figure reaches you through a source that mentions a study rather than one that reports it, say so and grade it down." }, volatility = "stable" }
 
 sources        = { kind = "temporary",      budget = "30%" }
 claims         = { kind = "sliding_window", max_items = 40, budget = "8%" }

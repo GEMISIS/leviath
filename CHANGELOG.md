@@ -13,6 +13,26 @@ same list.
 
 ## Unreleased
 
+- Added: `deep-researcher` and `wide-researcher` can ask a clarifying question
+  before they commit the run to a reading of the task. Granted only on the first
+  stage, where a wrong reading costs everything downstream; an unattended run is
+  never offered the tools at all (the resolver drops a blocking tool when nobody
+  is watching), so it costs `--yolo` nothing and cannot hang it.
+- Changed: credibility is about what a source IS, not how authoritative it
+  sounds. Only the primary artifact - the paper, spec, model card, official docs,
+  registry or leaderboard - can be high for a factual claim about that artifact,
+  and a number appearing in exactly one roundup with nothing corroborating it is
+  low. A run recommending local models graded an SEO listicle `high` and rested
+  every VRAM figure on it.
+- Changed: a "which one should I use" question has an authoritative index too,
+  even when it names none. Searching the question as asked returns roundups; the
+  research agents are now told to go to the model cards, the leaderboard or the
+  vendor's docs for anything they will state as a number. The same run fetched
+  ten sources and not one was a model card.
+- Changed: a qualifier travels with the claim it qualifies. The same run carried
+  "yes, with offload" and "~22 tok/s" in its comparison table and dropped both
+  from the recommendation - the one place the tradeoff mattered.
+
 - Fixed: a `required` region an earlier stage gave up on and a later stage filled
   is no longer reported as missing. The flag recorded a moment and consumers read
   it as a present-tense fact, so a `deep-researcher` run that abandoned
