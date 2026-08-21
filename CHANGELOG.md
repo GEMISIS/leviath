@@ -13,6 +13,33 @@ same list.
 
 ## Unreleased
 
+- Added: `fan_out`, a tool any stage can grant to run many sub-agents at once and
+  get their results back together. There were two ways to start sub-agents and
+  they shared nothing: `spawn_agent` was a tool an agent called mid-work, while
+  a fan-out was a whole stage whose raw text output the runtime parsed into a
+  work-item list. There is now one engine with two doors into it - the tool, and
+  `mode = "fan_out"` as sugar that grants it and transitions to `merge_stage`
+  when it returns. Both park the parent the same way, so both survive a daemon
+  restart, which only the stage did before. A fan-out started by a tool call
+  comes back as that call's result and is routed by the stage's `tool_routing`
+  like anything else, so where the report lands - a region, the conversation, or
+  nowhere - is a blueprint decision rather than a fan-out feature.
+- Removed: the free-text split. A fan-out stage's answer used to be prose that
+  the runtime scraped a JSON array out of, with a correction loop, a tolerant
+  parser and a degradation path behind it. All of that is gone: the stage calls
+  the tool, and a model that will not is nudged a bounded number of times and
+  then let through, the same shape a missing `submit_output` already had. The
+  short-lived `submit_work_items` tool is gone with it - it was a second tool
+  for the same act.
+- Changed: `splits_degraded` now counts fan-out stages that started no workers,
+  and is visible rather than only present in `meta.json`. `lev ps` renders such
+  a run as `complete (fan-out empty)` beside the existing `(no output)`, and the
+  serve API carries the count next to `empty_output`. A merge stage running on
+  nothing and one running on a genuinely empty fan-out are indistinguishable
+  from the far side; this is what tells them apart.
+- Changed: the five bundled fan-out agents ask for a `fan_out` call rather than
+  a JSON array, and `spawn_agent` is documented for the first time.
+
 - Fixed: a runtime-detected failure no longer ends a run that declared a
   recovery stage. A fan-out split that could not be parsed, a routing call that
   failed or answered with a stage that does not exist, `on_worker_failure =

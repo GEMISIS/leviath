@@ -1743,6 +1743,44 @@ mod tests {
         assert_eq!(w.max_workers, 7);
     }
 
+    /// The tool is recognised by name and nothing else is.
+    #[test]
+    fn the_fan_out_tool_is_recognised_by_name() {
+        assert!(is_fan_out_tool("fan_out"));
+        assert!(!is_fan_out_tool("spawn_agent"));
+    }
+
+    /// The headline case: an ordinary stage grants the tool and fans out in the
+    /// middle of its own work. There is no stage config to inherit, so the call
+    /// brings everything.
+    #[test]
+    fn an_ordinary_stage_can_fan_out_mid_work() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue));
+        bp.stages[0].mode = StageMode::Autonomous;
+        let e = spawn_parent(&mut world, bp, "");
+        world.entity_mut(e).insert(PendingFanOut {
+            call_id: "call-1".to_string(),
+            request: parse_fan_out_call(&serde_json::json!({
+                "agent": "researcher",
+                "max_workers": 3,
+                "items": [{"id": "a", "context": {}}]
+            }))
+            .unwrap(),
+        });
+
+        start_pending_fan_outs(&mut world);
+
+        let w = world.get::<FanOutWaiting>(e).expect("parked");
+        assert_eq!(w.config.worker_agent.as_deref(), Some("researcher"));
+        assert_eq!(w.max_workers, 3);
+        assert_eq!(
+            w.config.merge_stage, None,
+            "an ordinary stage has no merge stage to fall into"
+        );
+    }
+
     // ── the tool origin's delivery ────────────────────────────────────────────
 
     /// A fan-out started by a tool call comes back as that call's result and the
@@ -1785,6 +1823,113 @@ mod tests {
         assert!(convo.contains("what the worker found"), "{convo}");
     }
 
+    /// No context window means nowhere to put the report, and the agent is still
+    /// handed back to the model rather than left parked. The same shape
+    /// `inject_results` takes for the stage origin.
+    #[test]
+    fn a_tool_fan_out_without_a_window_still_resumes_the_agent() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let e = world
+            .spawn((
+                AgentBlueprint(fanout_blueprint(cfg(
+                    None,
+                    2,
+                    WorkerFailurePolicy::Continue,
+                ))),
+                StageCursor { index: 0 },
+                parent_state(),
+                StageProgress::default(),
+                StageInferences(vec![stage_inf(), stage_inf()]),
+                StageSetups(vec![setup(), setup()]),
+                VisitCounts::default(),
+            ))
+            .id();
+        begin_fan_out(
+            &mut world,
+            e,
+            cfg(None, 2, WorkerFailurePolicy::Continue),
+            Vec::new(),
+            FanOutOrigin::Tool {
+                call_id: "call-1".to_string(),
+            },
+        );
+
+        fan_out_collect(&mut world);
+
+        assert_eq!(status_of(&world, e), AgentStatus::Active);
+        assert!(world.get::<crate::pipeline::ReadyToInfer>(e).is_some());
+    }
+
+    /// Routing that says nothing about `fan_out` sends the report to whatever
+    /// the stage's default region is, like any other unlisted tool.
+    #[test]
+    fn a_tool_fan_out_falls_back_to_the_stages_default_region() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            "",
+        );
+        world
+            .get_mut::<ContextWindow>(e)
+            .unwrap()
+            .add_region(Region::new(
+                "notes".to_string(),
+                RegionKind::Clearable,
+                4_000,
+            ));
+        world
+            .entity_mut(e)
+            .insert(crate::components::ToolResultRoutingComponent {
+                routing: leviath_core::ToolResultRouting {
+                    default_region: "notes".to_string(),
+                    tool_overrides: std::collections::HashMap::from([(
+                        "read_file".to_string(),
+                        "sources".to_string(),
+                    )]),
+                    max_result_tokens: None,
+                    tool_max_result_tokens: std::collections::HashMap::new(),
+                    persist: true,
+                },
+            })
+            // A declared sensitivity travels with the result, as it does for
+            // every other tool.
+            .insert(crate::pipeline::ToolSensitivities(
+                std::collections::HashMap::from([(
+                    "fan_out".to_string(),
+                    leviath_core::TaintLevel::Public,
+                )]),
+            ));
+        begin_fan_out(
+            &mut world,
+            e,
+            cfg(None, 2, WorkerFailurePolicy::Continue),
+            vec![item("a")],
+            FanOutOrigin::Tool {
+                call_id: "call-1".to_string(),
+            },
+        );
+
+        fan_out_collect(&mut world);
+        let worker = world.get::<SubAgentChildren>(e).expect("linked").children[0];
+        complete_worker(&mut world, worker, "default-routed finding");
+        fan_out_collect(&mut world);
+
+        let notes = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("notes")
+            .expect("the default region")
+            .content
+            .iter()
+            .map(|entry| entry.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(notes.contains("default-routed finding"), "{notes}");
+    }
+
     /// The report is routed like any other tool result, so a blueprint that
     /// sends `fan_out` somewhere of its own gets it there.
     #[test]
@@ -1812,10 +1957,12 @@ mod tests {
             .insert(crate::components::ToolResultRoutingComponent {
                 routing: leviath_core::ToolResultRouting {
                     default_region: "conversation".to_string(),
-                    tool_overrides: std::collections::HashMap::from([(
-                        "fan_out".to_string(),
-                        "findings".to_string(),
-                    )]),
+                    // A second rule that does not match, so the lookup has
+                    // something to reject as well as something to find.
+                    tool_overrides: std::collections::HashMap::from([
+                        ("fan_out".to_string(), "findings".to_string()),
+                        ("read_file".to_string(), "sources".to_string()),
+                    ]),
                     max_result_tokens: None,
                     tool_max_result_tokens: std::collections::HashMap::new(),
                     persist: true,
