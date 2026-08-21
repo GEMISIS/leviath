@@ -40,6 +40,30 @@ pub enum ServerEvent {
         /// exists to remove.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wait_reason: Option<leviath_core::run_meta::WaitReason>,
+        /// The run's generated title, once it has one.
+        ///
+        /// [`RunRenamed`](Self::RunRenamed) is what announces the rename the
+        /// moment it happens; this is the same fact carried on every later
+        /// status frame, so a client that connected or reconnected after that
+        /// moment picks the name up without fetching the run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    /// The run acquired a title, or had the one it was showing replaced.
+    ///
+    /// A run is created untitled and named a moment later, once a model has
+    /// shortened its prompt into one. That is the one field guaranteed to
+    /// change shortly after a run starts and then never again, and the title is
+    /// the run's name in every list, notification and tab - so a client without
+    /// this frame either polls each new run or shows the wrong name until
+    /// something unrelated makes it re-read.
+    RunRenamed {
+        /// The agent's live id in the world.
+        agent_id: String,
+        /// The durable run id.
+        run_id: String,
+        /// The title the run now goes by.
+        title: String,
     },
     /// How full the run's context window is, after a turn changed it.
     ContextUpdate {
@@ -197,6 +221,7 @@ impl ServerEvent {
     pub fn run_id(&self) -> &str {
         match self {
             ServerEvent::AgentStatus { run_id, .. }
+            | ServerEvent::RunRenamed { run_id, .. }
             | ServerEvent::ContextUpdate { run_id, .. }
             | ServerEvent::Log { run_id, .. }
             | ServerEvent::InteractionNeeded { run_id, .. }
@@ -274,6 +299,7 @@ mod tests {
             tool_calls: 12,
             accepts_messages: true,
             wait_reason: None,
+            title: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"agent_status\""));
@@ -374,8 +400,17 @@ mod tests {
                     tool_calls: 0,
                     accepts_messages: false,
                     wait_reason: None,
+                    title: None,
                 },
                 "r1",
+            ),
+            (
+                ServerEvent::RunRenamed {
+                    agent_id: "a".to_string(),
+                    run_id: "r1b".to_string(),
+                    title: "A short name".to_string(),
+                },
+                "r1b",
             ),
             (
                 ServerEvent::ContextUpdate {

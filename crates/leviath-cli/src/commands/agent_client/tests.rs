@@ -237,6 +237,7 @@ fn status_event() -> WorldEvent {
         tool_calls: 0,
         accepts_messages: false,
         wait_reason: None,
+        title: None,
     }
 }
 

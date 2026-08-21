@@ -77,6 +77,11 @@ impl WorldHost {
                     context_tokens,
                     terminal,
                     wait_reason: self.wait_reason(agent),
+                    title: self
+                        .world
+                        .world()
+                        .get::<RunMetadata>(entity)
+                        .and_then(|m| m.title.clone()),
                 }
             };
             let max_tokens = self
@@ -96,6 +101,20 @@ impl WorldHost {
                     agent_id: agent_id.clone(),
                     blueprint,
                     parent_run_id,
+                });
+            }
+
+            // A run is created untitled and named a moment later, once the
+            // titling call lands. Nothing else on the wire said so, which left
+            // every client either polling each new run or showing the prompt's
+            // first line until unrelated traffic made it re-read.
+            if let Some(title) = cur.title.as_deref()
+                && prev.as_ref().and_then(|e| e.title.as_deref()) != Some(title)
+            {
+                let _ = self.events.send(WorldEvent::Renamed {
+                    run_id: run_id.clone(),
+                    agent_id: agent_id.clone(),
+                    title: title.to_string(),
                 });
             }
 
@@ -123,6 +142,7 @@ impl WorldHost {
                     tool_calls: cur.tool_calls,
                     accepts_messages: cur.accepts_messages,
                     wait_reason: cur.wait_reason.clone(),
+                    title: cur.title.clone(),
                 });
             }
 

@@ -542,7 +542,8 @@ Every frame is a JSON object with a `type`, and every frame except `daemon_link`
 | `type` | Sent when | Beyond `agent_id` and `run_id` |
 | --- | --- | --- |
 | `agent_spawned` | A run first appears | `blueprint`, and `parent_id` for a sub-agent |
-| `agent_status` | Status, stage, iteration or tool count moves | `status`, `stage`, `iteration`, `tool_calls`, `accepts_messages`, `wait_reason` |
+| `agent_status` | Status, stage, iteration or tool count moves | `status`, `stage`, `iteration`, `tool_calls`, `accepts_messages`, `wait_reason`, `title` |
+| `run_renamed` | The run acquires a generated title | `title` |
 | `tokens` | The run's token totals move | `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens` |
 | `context_update` | The context window's usage moves | `total_tokens`, `max_tokens` |
 | `stage_transition` | A new stage is entered | `from`, `to`, `iteration` |
@@ -552,6 +553,12 @@ Every frame is a JSON object with a `type`, and every frame except `daemon_link`
 | `interaction_needed` | The run is blocked on a person | `request` |
 | `agent_completed` | The run reaches a terminal status | `status`, `result` (its error), `final_output` |
 | `daemon_link` | This server's link to the daemon changes | `connected`, `daemon`, `restarted`, `restart_advised` |
+
+A run is created untitled and named a moment later, once a model has shortened its prompt into a
+title. `run_renamed` is that moment. The same `title` then rides every `agent_status` frame, so a
+client that connected or reconnected after the rename reads the name off the next status instead of
+fetching the run. Both are the `events.title` capability; without it a client has to poll each new
+run until it has a name. `title` is absent, not null, while a run has none.
 
 `wait_reason` is present only on a parked run, and says what it is parked on rather than making
 you fetch the run to find out. `ok` on `tool_call_finished` is `false` for a result the engine

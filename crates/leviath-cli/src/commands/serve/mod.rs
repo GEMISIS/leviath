@@ -1050,6 +1050,7 @@ model = "claude-sonnet-4-6"
             tool_calls: 0,
             accepts_messages: true,
             wait_reason: None,
+            title: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"agent_status\""));

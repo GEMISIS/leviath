@@ -2578,6 +2578,111 @@ async fn emit_events_broadcasts_agent_changes() {
     );
 }
 
+/// A run is created untitled and named a moment later, once the titling call
+/// lands. Nothing on the wire used to say so, so a subscriber showed the
+/// prompt's first line until an unrelated re-read replaced it. Both halves are
+/// asserted here: the `Renamed` frame that announces the moment, and the title
+/// riding the status frames that follow, which is what a subscriber that joined
+/// after the moment reads instead of fetching the run.
+#[tokio::test]
+async fn a_generated_title_is_announced_once_and_then_carried_on_status() {
+    let mut host = host_with(vec![text("done")]);
+    let mut rx = host.subscribe();
+    let entity = spawn(&mut host, "run-a", "agent-a");
+    host.world_mut()
+        .world_mut()
+        .entity_mut(entity.entity())
+        .insert(RunMetadata {
+            run_id: "run-a".to_string(),
+            agent_name: "coder".to_string(),
+            agent_path: "/a".to_string(),
+            task: "Do the thing, and then the other thing".to_string(),
+            model: None,
+            workdir: "/w".to_string(),
+            num_stages: 1,
+            started_at: 0,
+            parent_run_id: None,
+            metadata: std::collections::HashMap::new(),
+            callback_url: None,
+            callback_secret: None,
+            title: None,
+            unattended: false,
+            read_paths: None,
+            output_request: None,
+            model_override: None,
+        });
+
+    // Untitled: the first pass says nothing about a name, and the status frame
+    // it does send omits the field rather than sending an empty one.
+    host.emit_events();
+    let first: Vec<WorldEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        !first
+            .iter()
+            .any(|e| matches!(e, WorldEvent::Renamed { .. })),
+        "an untitled run has nothing to announce"
+    );
+    assert!(
+        first
+            .iter()
+            .any(|e| matches!(e, WorldEvent::Status { title: None, .. })),
+        "the status frame carries no title yet: {first:?}"
+    );
+
+    // The titling call lands, exactly as `collect_title` stores it.
+    host.world_mut()
+        .world_mut()
+        .entity_mut(entity.entity())
+        .get_mut::<RunMetadata>()
+        .unwrap()
+        .title = Some("Do the thing".to_string());
+
+    host.emit_events();
+    let renamed: Vec<WorldEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        renamed.iter().any(|e| matches!(
+            e,
+            WorldEvent::Renamed { run_id, agent_id, title }
+                if run_id == "run-a" && agent_id == "agent-a" && title == "Do the thing"
+        )),
+        "the rename should be announced: {renamed:?}"
+    );
+
+    // The rename alone is not a move in execution state, so it fires no status
+    // frame of its own. The next one that fires for its own reasons carries the
+    // name, which is what a subscriber that missed the announcement reads.
+    assert!(
+        !renamed
+            .iter()
+            .any(|e| matches!(e, WorldEvent::Status { .. })),
+        "a rename is not a status change: {renamed:?}"
+    );
+    {
+        let ecs = host.world_mut().world_mut();
+        ecs.entity_mut(entity.entity())
+            .get_mut::<AgentState>()
+            .unwrap()
+            .iteration = 7;
+    }
+    host.emit_events();
+    let after: Vec<WorldEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        after.iter().any(|e| matches!(
+            e,
+            WorldEvent::Status { title: Some(t), .. } if t == "Do the thing"
+        )),
+        "later status frames carry the name: {after:?}"
+    );
+
+    // Announced once. A title that has not moved is not news.
+    assert!(
+        !after
+            .iter()
+            .any(|e| matches!(e, WorldEvent::Renamed { .. })),
+        "an unchanged title should not re-announce: {after:?}"
+    );
+}
+
 /// A subscriber watching live gets the same vocabulary `lev ps` and the
 /// dashboard use, so it never has to fetch the run to find out whether a parked
 /// run needs a person. And because the reason is part of the change key, a
@@ -3677,6 +3782,12 @@ fn every_world_event_variant_carries_its_run_id() {
             tool_calls: 0,
             accepts_messages: false,
             wait_reason: None,
+            title: None,
+        },
+        WorldEvent::Renamed {
+            run_id: rid.clone(),
+            agent_id: aid.clone(),
+            title: "A short name".to_string(),
         },
         WorldEvent::Tokens {
             run_id: rid.clone(),
