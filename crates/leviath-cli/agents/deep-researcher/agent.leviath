@@ -1,6 +1,6 @@
 [agent]
 name = "deep-researcher"
-version = "0.3.3"
+version = "0.3.4"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 entry_stage = "gather"
 
@@ -87,6 +87,14 @@ at the start is worth more than a thorough answer to the wrong question.
 Ask once, early, and only when the answer changes what you would do. If nobody
 is attached to this run the tools are not offered at all - carry on, state the
 reading you chose, and say what you would have asked.
+
+Before you hand off, read back what you gathered and ask one question of it: for
+every figure the report will state, is there a source that MEASURED it, or only
+pages that repeat it? If a number exists only in roundups, go and fetch the
+artifact - the paper, the model card, the spec, the vendor's own docs - before
+leaving this stage. Coming back for it later costs a whole extra pass, and going
+without means the report states a number on the authority of a page that was
+guessing.
 
 Once you have solid primary coverage of the core facets, hand off to analyze.
 """
@@ -205,6 +213,9 @@ max_revisits = 3
 transition_prompt = """
 Decide the next move:
 - Broad gaps that need new sources on a sub-topic → respond with: gather
+- A figure or recommendation the report will state rests only on roundups, or on
+  a single page nothing corroborates, and the primary artifact was never fetched
+  → respond with: gather, naming the artifact to go and get
 - A specific cited source you should pull and read before concluding →
   respond with: follow_citations
 - Enough well-supported evidence to write the report → respond with: synthesize
