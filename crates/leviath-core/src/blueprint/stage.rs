@@ -208,6 +208,26 @@ pub struct FanOutConfig {
     /// every worker's contribution is a hundredth of the space.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_items: Option<usize>,
+
+    /// How many times this stage is asked again when it ends without having
+    /// called the fan-out tool, before it is let through without workers.
+    /// `None` means [`DEFAULT_FAN_OUT_ATTEMPTS`].
+    ///
+    /// Starting the workers is the whole job of a fan-out stage, so a model
+    /// that answers in prose instead is asked again. The budget is bounded
+    /// because a run must never be stranded over a thing the model will not do,
+    /// and it is separate from `max_revisits` because those are different
+    /// questions: "how many times may the graph re-enter this stage" and "how
+    /// many times do we ask a model that has not done what the stage is for".
+    /// Borrowing the first for the second is how a routing setting silently
+    /// multiplies an inference bill.
+    ///
+    /// Raise it for a small or local model that needs more than a nudge; `0`
+    /// lets the stage through on its first refusal, which is the right setting
+    /// when an empty fan-out is an acceptable outcome and the retries are not
+    /// worth their prompts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<usize>,
 }
 
 impl FanOutConfig {
@@ -221,6 +241,15 @@ impl FanOutConfig {
         (self.max_workers > 0).then_some(self.max_workers)
     }
 }
+
+/// Times a fan-out stage is asked again to start its workers before it is let
+/// through without them, when it sets no `max_attempts`.
+///
+/// Matches [`DEFAULT_GATE_ATTEMPTS`](crate::blueprint::DEFAULT_GATE_ATTEMPTS)
+/// and the missing-output budget, for the same reason all three are bounded: a
+/// model that cannot produce the one thing its stage is for should cost a fixed
+/// number of prompts, not an open-ended retry.
+pub const DEFAULT_FAN_OUT_ATTEMPTS: usize = 3;
 
 /// `max_workers` when a fan-out stage does not set one.
 ///

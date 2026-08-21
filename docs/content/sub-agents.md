@@ -120,6 +120,7 @@ split_prompt = "..."        # tells the stage what to split the work into
 merge_stage  = "verify"     # stage the parent resumes at once workers finish
 max_workers  = 8            # how many run at once, default 30; 0 is unlimited
 on_worker_failure = "continue"
+max_attempts = 3            # times to ask again if it never calls fan_out
 ```
 
 Those keys sit directly on the stage next to `mode = "fan_out"`, not in a sub-table.
@@ -135,6 +136,7 @@ Those keys sit directly on the stage next to `mode = "fan_out"`, not in a sub-ta
 | `max_workers` | `30` | How many workers run at once. `0` means unlimited |
 | `on_worker_failure` | `"continue"` | `continue` merges what succeeded. `fail_all` fails the whole fan-out if any worker fails |
 | `split_prompt` | `""` | Added to the stage's system prompt. It says what to split the work into; the stage answers with a `fan_out` call |
+| `max_attempts` | `3` | How many times the stage is asked again if it ends without calling `fan_out`. `0` lets it through on the first refusal |
 
 Set exactly one of `worker_agent`, `worker_stage`, or `worker_query`. `lev validate` checks that,
 and checks that a named `worker_stage` exists and has opted in with `allow_as_worker`.
@@ -142,10 +144,21 @@ and checks that a named `worker_stage` exists and has opted in with `allow_as_wo
 ### If the stage never fans out
 
 The one thing a fan-out stage owes is a `fan_out` call. A model that answers in prose instead is
-asked again a few times, and then let through - a run is never stranded over a thing the model
-would not do. What it is not allowed to do is pass for success: the stage's `splits_degraded` count
-goes up, a note goes into `error_report` so the merge stage knows it is working from nothing, and
-`lev ps` renders the run as `complete (fan-out empty)`.
+asked again - three times by default, or however many `max_attempts` says - and then let through. A
+run is never stranded over a thing the model would not do. What it is not allowed to do is pass for
+success: the stage's `splits_degraded` count goes up, a note goes into `error_report` so the merge
+stage knows it is working from nothing, and `lev ps` renders the run as `complete (fan-out empty)`.
+
+```toml
+[stages.investigate]
+max_attempts = 5   # a small local model may need more than a nudge
+# max_attempts = 0 # or none at all, when an empty fan-out is an acceptable outcome
+```
+
+The budget is deliberately separate from `max_revisits`. Those answer different questions - "how
+many times may the graph re-enter this stage" and "how many times do we ask a model that has not
+done what the stage is for" - and each retry re-sends the whole stage context, so borrowing the
+first for the second is how a routing setting quietly multiplies an inference bill.
 
 That count is worth watching in a batch. A merge stage running on nothing and one running on a
 genuinely empty fan-out look identical from the far side, and this is the only thing that tells

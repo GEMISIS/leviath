@@ -1922,6 +1922,7 @@ criteria = { kind = "pinned", max_tokens = 10, seed = "criteria" }"#,
             split_prompt: "split".to_string(),
             results_region: None,
             max_items: None,
+            max_attempts: None,
         }
     }
 

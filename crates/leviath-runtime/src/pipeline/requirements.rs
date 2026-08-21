@@ -348,14 +348,6 @@ const MISSING_FAN_OUT_NUDGE: &str = "This stage has not started its workers yet.
      downstream runs until you do. If there is genuinely nothing to hand out, \
      call it with an empty `items` array to say so.";
 
-/// How many times a fan-out stage is asked again before it is let through.
-///
-/// Matches [`leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP`] and exists for
-/// the same reason: a model that cannot produce the one thing its stage is for
-/// should cost a bounded number of prompts, not the stage's whole
-/// `max_revisits` budget.
-const FAN_OUT_REENTRY_CAP: usize = leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP;
-
 /// Times this stage has been asked again to fan out.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FanOutReentries(pub usize);
@@ -399,12 +391,15 @@ pub fn require_fan_out(
     {
         crate::tick_scope::enter(entity);
         let stage = &bp.0.stages[cursor.index];
-        if !matches!(
-            stage.mode,
-            leviath_core::blueprint::StageMode::FanOut { .. }
-        ) {
+        let leviath_core::blueprint::StageMode::FanOut { config } = &stage.mode else {
             continue;
-        }
+        };
+        // The stage's own budget when it set one; a small or local model may
+        // need more than a nudge, and `0` says to let it through on the first
+        // refusal rather than pay for retries that will not land.
+        let cap = config
+            .max_attempts
+            .unwrap_or(leviath_core::blueprint::DEFAULT_FAN_OUT_ATTEMPTS);
         // Set by every accepted call and cleared on stage entry, so its
         // presence means "this entry has already fanned out" rather than "this
         // run has, at some point".
@@ -422,10 +417,10 @@ pub fn require_fan_out(
             continue;
         }
         let round = reentries.map_or(0, |r| r.0);
-        if round >= FAN_OUT_REENTRY_CAP {
+        if round >= cap {
             tracing::warn!(
                 stage = %stage.name,
-                attempts = FAN_OUT_REENTRY_CAP,
+                attempts = cap,
                 "fan_out stage never started its workers; proceeding without them"
             );
             crate::pipeline::note_unusable_split(

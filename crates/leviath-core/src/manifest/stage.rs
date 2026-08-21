@@ -20,6 +20,7 @@ const STAGE_KEYS: &[&str] = &[
     "description",
     "hooks",
     "interaction_points",
+    "max_attempts",
     "max_items",
     "max_iterations",
     "max_revisits",
@@ -661,27 +662,31 @@ pub(super) fn parse_stage_model(stage_value: &toml::Value) -> ModelConfig {
     }
 }
 
-/// Read one of a fan-out stage's two caps, `max_workers` or `max_items`.
+/// Read a fan-out stage's `max_workers`, `max_items` or `max_attempts`.
 ///
 /// `Ok(None)` when the key is absent, so the caller picks the default;
-/// `Ok(Some(n))` for a non-negative integer, where `0` is the manifest's word
-/// for "unlimited" on both keys. Anything else is an error rather than a
-/// silent fallback: `max_workers = -1` used to wrap to the largest `usize` and
-/// so run unbounded, while `max_items = "twelve"` was read as no cap at all.
-/// Either mistake shows up as an unexpectedly wide fan-out, which is the wrong
-/// place to first hear about a typo.
-fn fan_out_cap(stage_value: &toml::Value, stage_name: &str, key: &str) -> Result<Option<usize>> {
+/// `Ok(Some(n))` for a non-negative integer. Anything else is an error rather
+/// than a silent fallback: `max_workers = -1` used to wrap to the largest
+/// `usize` and so run unbounded, while `max_items = "twelve"` read as no cap at
+/// all - both of which show up as an unexpectedly wide fan-out, the wrong place
+/// to first hear about a typo. `zero_means` is what `0` does, per key.
+fn fan_out_number(
+    stage_value: &toml::Value,
+    stage_name: &str,
+    key: &str,
+    zero_means: &str,
+) -> Result<Option<usize>> {
     let Some(value) = stage_value.get(key) else {
         return Ok(None);
     };
     let n = value.as_integer().ok_or_else(|| {
         Error::Other(format!(
-            "stage '{stage_name}': {key} must be a whole number (0 means unlimited)"
+            "stage '{stage_name}': {key} must be a whole number (0 means {zero_means})"
         ))
     })?;
     let n = usize::try_from(n).map_err(|_| {
         Error::Other(format!(
-            "stage '{stage_name}': {key} must not be negative (got {n}; 0 means unlimited)"
+            "stage '{stage_name}': {key} must not be negative (got {n}; 0 means {zero_means})"
         ))
     })?;
     Ok(Some(n))
@@ -853,12 +858,19 @@ pub(super) fn apply_stage_mode(
                 worker_stage: str_field("worker_stage"),
                 worker_query: str_field("worker_query"),
                 merge_stage: str_field("merge_stage"),
-                max_workers: fan_out_cap(stage_value, stage_name, "max_workers")?
+                max_workers: fan_out_number(stage_value, stage_name, "max_workers", "unlimited")?
                     .unwrap_or(crate::blueprint::DEFAULT_MAX_WORKERS),
                 on_worker_failure,
                 split_prompt: str_field("split_prompt").unwrap_or_default(),
                 results_region: str_field("results_region"),
-                max_items: fan_out_cap(stage_value, stage_name, "max_items")?.filter(|n| *n > 0),
+                max_items: fan_out_number(stage_value, stage_name, "max_items", "unlimited")?
+                    .filter(|n| *n > 0),
+                max_attempts: fan_out_number(
+                    stage_value,
+                    stage_name,
+                    "max_attempts",
+                    "do not ask again",
+                )?,
             };
             stage.with_mode(StageMode::FanOut { config })
         }
