@@ -13,6 +13,17 @@ same list.
 
 ## Unreleased
 
+- Added: the run list's folds outlive the dashboard. Folding four finished
+  fan-outs to see the two live ones is a decision, and having to make it again
+  every time you open `lev dash` is the feature failing to be one. They are kept
+  in `dash/ui-state.json` under the data directory, beside the agent editor's
+  canvas arrangements, and written on the keystroke that makes them rather than
+  on the way out - a dashboard is usually closed by whatever closes the
+  terminal, so "save on quit" is a save that often never happens. A list still
+  starts fully expanded until you fold something. A fold whose run is deleted is
+  forgotten, but only once the dashboard can actually see a run list: an empty
+  one is also what the first tick and an unreadable runs directory look like,
+  and pruning against that would wipe every remembered fold on startup.
 - Fixed: a research agent no longer concludes that something is missing because a
   page it read did not mention it. An overnight run investigating an agent runtime
   fetched the project's landing page, never opened the docs tree linked in the nav
