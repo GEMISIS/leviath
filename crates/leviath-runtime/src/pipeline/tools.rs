@@ -391,6 +391,9 @@ pub fn dispatch_tools(
         // A final output submitted in this batch, committed to the entity after
         // the loop (the loop holds borrows `commands` would conflict with).
         let mut submitted: Option<leviath_core::output::FinalOutput> = None;
+        // A `fan_out` call in this batch, started after the loop for the same
+        // reason: it parks the agent, which is a `commands` write.
+        let mut fan_out: Option<(String, crate::fanout::FanOutRequest)> = None;
         // (tool_id, name, taint, clearance) for blocked calls awaiting a prompt.
         let mut pending_prompts: Vec<(
             String,
@@ -494,6 +497,32 @@ pub fn dispatch_tools(
                     submitted = Some(output);
                 }
                 context_results.push((c.tool_id.clone(), text));
+                continue;
+            }
+            // Read inline, started after the loop. Like `submit_output` it needs
+            // world access the async lane does not have - it parks this agent on
+            // its workers - and like the context tools it is applied here rather
+            // than dispatched.
+            if crate::fanout::is_fan_out_tool(&c.name) {
+                let text = match crate::fanout::parse_fan_out_call(&c.arguments) {
+                    // One per batch. A second would need a second parked state
+                    // on one agent, and there is no work it could do that adding
+                    // its items to the first call would not: the engine paces
+                    // the concurrency either way.
+                    Ok(_) if fan_out.is_some() => Some(format!(
+                        "[error] only one {} call per turn - put all the work in \
+                         one call, the concurrency is paced for you",
+                        leviath_core::blueprint::FAN_OUT_TOOL
+                    )),
+                    Ok(request) => {
+                        fan_out = Some((c.tool_id.clone(), request));
+                        None
+                    }
+                    Err(e) => Some(format!("[error] {e}")),
+                };
+                if let Some(text) = text {
+                    context_results.push((c.tool_id.clone(), text));
+                }
                 continue;
             }
             // A call the user already resolved in a prior prompt round.
@@ -609,6 +638,42 @@ pub fn dispatch_tools(
         commands
             .entity(entity)
             .remove::<crate::gate_prompt::GateResolved>();
+
+        // A fan-out parks this agent, so it cannot share a batch with lane calls
+        // that would still be running when it does. Refused rather than
+        // serialized: "call it on its own" is a rule a model can follow, and a
+        // half-dispatched batch is not something it could reason about.
+        if let Some((call_id, _)) = &fan_out
+            && !lane_calls.is_empty()
+        {
+            context_results.push((
+                call_id.clone(),
+                format!(
+                    "[error] {} has to be the only tool call in its turn, because it \
+                     waits for its workers. Call it on its own.",
+                    leviath_core::blueprint::FAN_OUT_TOOL
+                ),
+            ));
+            fan_out = None;
+        }
+        if let Some((call_id, request)) = fan_out {
+            // Everything else in the batch lands now; the fan-out's own result
+            // arrives when its workers finish, as that call's tool result.
+            let merged = merge_in_call_order(&result.tool_calls, &context_results);
+            apply_tool_results(
+                &mut window,
+                &result.response,
+                &result.tool_calls,
+                &merged,
+                routing.map(|c| &c.routing),
+                sensitivities.map(|s| &s.0),
+            );
+            commands
+                .entity(entity)
+                .remove::<ReadyForTools>()
+                .insert(crate::fanout::PendingFanOut { call_id, request });
+            continue;
+        }
 
         if lane_calls.is_empty() {
             // Nothing async to run - apply the context results now and loop back.

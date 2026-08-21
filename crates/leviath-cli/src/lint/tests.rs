@@ -189,11 +189,32 @@ max_iterations = 5
     assert!(findings.is_empty(), "{:?}", codes(&findings));
 }
 
-/// A split the runtime cannot use no longer ends the run, but with no escape
-/// declared it degrades to an empty fan-out and the workers never run. The
-/// blueprint is the only place that can say where to go instead.
+/// `fail_all` with nowhere to go means one flaky worker ends the run.
 #[test]
-fn a_fan_out_stage_without_an_escape_is_warned_about() {
+fn a_fail_all_fan_out_without_an_escape_is_warned_about() {
+    let toml = manifest(
+        r#"
+[stages.split]
+mode = "fan_out"
+worker_stage = "work"
+on_worker_failure = "fail_all"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+
+[stages.work]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+allow_as_worker = true
+"#,
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    assert_eq!(codes(&findings), ["fanout-no-escape"]);
+}
+
+/// The default policy merges what succeeded, so there is nothing to escape from
+/// and nothing to say.
+#[test]
+fn a_continuing_fan_out_needs_no_escape() {
     let toml = manifest(
         r#"
 [stages.split]
@@ -209,7 +230,7 @@ allow_as_worker = true
 "#,
     );
     let findings = lint(&toml, &LintEnv::default());
-    assert_eq!(codes(&findings), ["fanout-no-escape"]);
+    assert!(findings.is_empty(), "{:?}", codes(&findings));
 }
 
 /// A `dead_end` edge answers the same question - "this stage may not be able to
@@ -221,6 +242,7 @@ fn a_dead_end_edge_satisfies_the_fan_out_escape_check() {
 [stages.split]
 mode = "fan_out"
 worker_stage = "work"
+on_worker_failure = "fail_all"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 [stages.split.transitions.recover]
 condition = "dead_end"
