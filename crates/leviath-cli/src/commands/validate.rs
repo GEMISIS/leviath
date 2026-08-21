@@ -1141,24 +1141,38 @@ system = { kind = "pinned", max_tokens = 1000 }
     /// is the difference between the two.
     #[tokio::test]
     async fn warnings_only_fail_when_denied() {
-        crate::config::with_isolated_config_path_async("validate-deny-warnings", |_| async {
-            let dir = tempfile::tempdir().unwrap();
-            // No max_iterations on the one stage: exactly one warning, no errors.
-            write_manifest(
-                dir.path(),
-                &CLEAN_MANIFEST.replace("max_iterations = 5", ""),
-            );
+        crate::config::with_isolated_config_path_async(
+            "validate-deny-warnings",
+            |cfg_dir| async move {
+                // A key, so the blueprint's Anthropic entry is a reachable
+                // provider. This used to ride on Ollama registering without a
+                // credential; it now registers only when something answers at its
+                // address, so on a machine with no local Ollama the manifest also
+                // warned that nothing in its list was reachable - and the count
+                // this test is about went from one to two.
+                std::fs::write(
+                    cfg_dir.join("config.toml"),
+                    "[providers]\nanthropic_api_key = \"test-key\"\n",
+                )
+                .unwrap();
+                let dir = tempfile::tempdir().unwrap();
+                // No max_iterations on the one stage: exactly one warning, no errors.
+                write_manifest(
+                    dir.path(),
+                    &CLEAN_MANIFEST.replace("max_iterations = 5", ""),
+                );
 
-            let mut args = args_for(dir.path());
-            assert!(execute_reporting_outcome(&args, None).unwrap().is_success());
+                let mut args = args_for(dir.path());
+                assert!(execute_reporting_outcome(&args, None).unwrap().is_success());
 
-            args.deny_warnings = true;
-            let err = execute(args).await.unwrap_err();
-            assert_eq!(
-                err.to_string(),
-                "✗ Blueprint has 1 warning (--deny-warnings)"
-            );
-        })
+                args.deny_warnings = true;
+                let err = execute(args).await.unwrap_err();
+                assert_eq!(
+                    err.to_string(),
+                    "✗ Blueprint has 1 warning (--deny-warnings)"
+                );
+            },
+        )
         .await;
     }
 
