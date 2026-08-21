@@ -250,6 +250,9 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
         store_path: leviath_mcp::AuthStore::default_path().unwrap_or_default(),
         opener: std::sync::Arc::new(leviath_sys::open_url),
         clock: mcp_system_now,
+        // Somebody is watching the MCP screen, so the handshake keeps the
+        // deadline that is right for a person.
+        connect_timeout: leviath_mcp::DEFAULT_CONNECT_TIMEOUT,
     };
     let mut dashboard = Dashboard::new_with_log_path(
         cmd_tx,

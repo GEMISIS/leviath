@@ -165,6 +165,11 @@ pub struct MCPClient {
     next_id: AtomicU64,
     /// How long to wait for a response to an ordinary request.
     request_timeout: Duration,
+    /// How long to wait for the `initialize` handshake. Separate from
+    /// `request_timeout` because it means something different (see
+    /// [`DEFAULT_CONNECT_TIMEOUT`]), and settable because a *test* suite is
+    /// not a user: see [`MCPClient::with_connect_timeout`].
+    connect_timeout: Duration,
     /// Server capabilities after initialization
     capabilities: Option<ServerCapabilities>,
     /// The protocol revision agreed during `initialize`.
@@ -180,10 +185,33 @@ impl MCPClient {
             transport,
             next_id: AtomicU64::new(1),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             capabilities: None,
             protocol_version: None,
             cached_tools: Vec::new(),
         }
+    }
+
+    /// Wait longer than [`DEFAULT_CONNECT_TIMEOUT`] for the handshake.
+    ///
+    /// For callers whose clock is not the user's. The 30s default answers
+    /// "how long should a person's agent startup hang on a broken server",
+    /// and a test suite is not a person: a CI runner that stalls for two
+    /// minutes fails a 30s deadline while proving nothing about the server.
+    ///
+    /// That is not hypothetical. On 2026-08-21 a `windows-latest` job froze
+    /// for 159 seconds - zero tests completed, the binary took 241s against a
+    /// normal 40s - and the one test carrying this deadline was the only
+    /// casualty, reported the instant the process was scheduled again. The
+    /// Python stub it was talking to had done nothing wrong; neither had the
+    /// transport.
+    ///
+    /// Production keeps the 30s: the trade this makes is only that a test may
+    /// wait a long time before failing, which costs a slow test rather than a
+    /// wrong one.
+    pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
     }
 
     /// Spawn an MCP server as a child process and talk to it over stdio.
@@ -272,7 +300,7 @@ impl MCPClient {
         // handshake in this long is broken, not busy, and it is holding up an
         // agent's startup.
         let result = self
-            .request_with_timeout("initialize", init_params, DEFAULT_CONNECT_TIMEOUT)
+            .request_with_timeout("initialize", init_params, self.connect_timeout)
             .await?;
 
         // Parse server capabilities
@@ -841,6 +869,41 @@ mod tests {
         MCPClient::spawn("python3", &["-c", script], &HashMap::new())
             .await
             .expect("Failed to spawn stub MCP server")
+    }
+
+    /// The handshake deadline really is the one the caller set, not the
+    /// constant.
+    ///
+    /// Asserted by *shortening* it rather than lengthening it: a test that set
+    /// five minutes and passed would pass just as well if the setter did
+    /// nothing. A stub that answers nothing, given 100ms, must fail in about
+    /// 100ms - and the wall clock proves the deadline moved, since the default
+    /// would have held this test for thirty seconds.
+    #[tokio::test]
+    async fn with_connect_timeout_replaces_the_default_handshake_deadline() {
+        let _guard = always_on_tracing_guard();
+        // Reads forever, answers nothing: the handshake can only end by
+        // deadline.
+        let mut client = spawn_stub_client("import sys\nfor line in sys.stdin: pass\n")
+            .await
+            .with_connect_timeout(Duration::from_millis(100));
+
+        let started = std::time::Instant::now();
+        let err = client
+            .connect()
+            .await
+            .expect_err("a silent server cannot complete a handshake");
+        let waited = started.elapsed();
+
+        assert!(
+            err.to_string().contains("did not respond to 'initialize'"),
+            "{err}"
+        );
+        assert!(
+            waited < DEFAULT_CONNECT_TIMEOUT,
+            "waited {waited:?}, which is the default rather than the 100ms asked for"
+        );
+        let _ = client.shutdown().await;
     }
 
     // Python script that answers initialize then tools/list then tools/call

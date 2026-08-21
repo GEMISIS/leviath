@@ -214,6 +214,9 @@ impl RiskyExecutors for RealExecutors {
             credential_store: leviath_cli::credentials::store_for(config.security.credential_store)
                 .map_err(|e| anyhow::anyhow!("{e}"))?,
             allow_env_vars: config.security.allow_env_vars,
+            // A person is waiting at a terminal, so the handshake keeps the
+            // deadline that is right for one.
+            connect_timeout: leviath_mcp::DEFAULT_CONNECT_TIMEOUT,
         };
         commands::mcp::execute_with(args, &env).await
     }

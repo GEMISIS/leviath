@@ -13,6 +13,18 @@ same list.
 
 ## Unreleased
 
+- Fixed: the MCP handshake deadline is settable, so a stalled CI runner stops
+  failing the suite. `MCPClient::connect` gave the `initialize` handshake a
+  hardcoded 30 seconds - the right answer to "how long should a person's agent
+  startup hang on a broken server", and the wrong one for a test, whose clock
+  belongs to a build machine. On 2026-08-21 a `windows-latest` job stopped
+  executing for 159 seconds (zero tests completed; the binary took 241s against
+  a normal 40s) with all four subprocess-spawning MCP tests in flight, and the
+  one carrying this deadline was the only casualty - its panic reported the
+  instant the process was scheduled again, about a Python stub that had never
+  been given a chance to answer. Production keeps the 30s; the tests pass five
+  minutes, bounded so a genuinely wedged server still fails rather than hanging
+  CI.
 - Added: the run list's folds outlive the dashboard. Folding four finished
   fan-outs to see the two live ones is a decision, and having to make it again
   every time you open `lev dash` is the feature failing to be one. They are kept
