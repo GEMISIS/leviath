@@ -45,6 +45,15 @@ const CLI_MANIFEST: &str = "crates/leviath-cli/Cargo.toml";
 /// Path of the changelog whose `## Unreleased` heading a bump rolls over.
 const CHANGELOG: &str = "CHANGELOG.md";
 
+/// Path of the published OpenAPI spec, whose `info.version` names the API this
+/// build serves.
+///
+/// Bumped here because `API_VERSION` is now the crate version, and a test holds
+/// that equal to this document. Leave the spec behind and the next bump lands
+/// red - which is the point, but it should be this command's job to keep them
+/// together rather than the releaser's.
+const SPEC: &str = "docs/schema/openapi.json";
+
 // ── CLI argument parsing ─────────────────────────────────────────────────────
 
 /// What `cargo xtask version` was asked to do.
@@ -296,6 +305,45 @@ fn replace_pin(line: &str, new: &str) -> String {
     format!("{before}version = \"{new}\"{tail}")
 }
 
+/// Rewrite the OpenAPI spec's `info.version` to `new`.
+///
+/// Textual rather than a parse-and-reserialize, because the spec is a
+/// hand-maintained document: round-tripping it through `serde_json` would
+/// reformat every line of it and bury a one-line version bump in a diff nobody
+/// can review.
+///
+/// Anchored to the `info` block's own indentation so it cannot hit the
+/// `"version"` that appears inside a `required` array further down. Exactly one
+/// line may match; zero means the spec moved and this needs updating, and more
+/// than one means the anchor stopped being specific enough to trust.
+pub fn set_spec_version(spec: &str, new: &str) -> Result<String> {
+    let is_info_version =
+        |line: &str| line.starts_with("    \"version\": \"") && line.trim_end().ends_with("\",");
+    let matches = spec.lines().filter(|l| is_info_version(l)).count();
+    anyhow::ensure!(
+        matches == 1,
+        "expected exactly one `info.version` line in {SPEC}, found {matches}"
+    );
+    let out = spec
+        .lines()
+        .map(|line| {
+            if is_info_version(line) {
+                format!("    \"version\": \"{new}\",")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    // `lines()` drops the trailing newline the file ends with; put it back
+    // rather than leaving a no-newline-at-end-of-file diff on every bump.
+    Ok(if spec.ends_with('\n') {
+        format!("{out}\n")
+    } else {
+        out
+    })
+}
+
 /// Rename `## Unreleased` to a dated heading for this version.
 ///
 /// The entries themselves are left untouched: what was accumulating under
@@ -521,11 +569,18 @@ pub fn run_with(runner: &dyn Runner, mode: VersionMode) -> Result<()> {
             std::fs::write(CHANGELOG, roll_changelog(&changelog, &new, &today())?)
                 .with_context(|| format!("writing {CHANGELOG}"))?;
 
+            // `API_VERSION` is `env!("CARGO_PKG_VERSION")`, and a test in
+            // `serve/mod.rs` holds it equal to this document. Without this the
+            // bump itself would fail that test.
+            let spec = std::fs::read_to_string(SPEC).with_context(|| format!("reading {SPEC}"))?;
+            std::fs::write(SPEC, set_spec_version(&spec, &new)?)
+                .with_context(|| format!("writing {SPEC}"))?;
+
             // The lockfile records the workspace crates' own versions, and CI
             // rejects a lockfile that disagrees with the manifests.
             anyhow::ensure!(
                 runner.cargo(&["update", "--workspace"])?,
-                "cargo update --workspace failed; {MANIFEST} and {CHANGELOG} were still written"
+                "cargo update --workspace failed; {MANIFEST}, {CHANGELOG} and {SPEC} were still written"
             );
 
             println!("Version {previous} -> {new}.");
@@ -600,6 +655,76 @@ mod tests {
             VersionMode::parse(&args(&["--check"])).unwrap(),
             VersionMode::Check
         );
+    }
+
+    /// The spec's own `info.version` line, rewritten; everything else,
+    /// including the `"version"` that appears inside a `required` array, left
+    /// exactly as it was.
+    #[test]
+    fn set_spec_version_rewrites_only_the_info_block() {
+        let spec = concat!(
+            "{\n",
+            "  \"openapi\": \"3.1.0\",\n",
+            "  \"info\": {\n",
+            "    \"title\": \"Leviath HTTP API\",\n",
+            "    \"version\": \"0.4.0\",\n",
+            "    \"description\": \"d\"\n",
+            "  },\n",
+            "  \"components\": {\n",
+            "    \"required\": [\n",
+            "      \"version\"\n",
+            "    ]\n",
+            "  }\n",
+            "}\n",
+        );
+        let out = set_spec_version(spec, "0.5.1").expect("one info.version line");
+        assert!(out.contains("    \"version\": \"0.5.1\",\n"));
+        assert!(!out.contains("0.4.0"));
+        // The bare array entry is not a version declaration and is untouched.
+        assert!(out.contains("      \"version\"\n"));
+        assert!(
+            out.ends_with("}\n"),
+            "the trailing newline survives: {out:?}"
+        );
+    }
+
+    /// A spec with no `info.version` line has moved out from under the anchor,
+    /// and silently writing it back unchanged would hand the releaser a spec
+    /// naming the previous build.
+    #[test]
+    fn set_spec_version_refuses_a_spec_with_no_version_line() {
+        let err = set_spec_version("{\n  \"openapi\": \"3.1.0\"\n}\n", "0.5.1")
+            .expect_err("nothing to rewrite");
+        assert!(err.to_string().contains("found 0"), "{err}");
+    }
+
+    /// Two matching lines mean the anchor stopped being specific enough to
+    /// trust, so it refuses rather than rewriting whichever it saw first.
+    #[test]
+    fn set_spec_version_refuses_an_ambiguous_spec() {
+        let spec = "    \"version\": \"0.4.0\",\n    \"version\": \"0.4.0\",\n";
+        let err = set_spec_version(spec, "0.5.1").expect_err("ambiguous");
+        assert!(err.to_string().contains("found 2"), "{err}");
+    }
+
+    /// A spec that does not end in a newline gets none added, so the function
+    /// is a faithful rewrite rather than a reformatter.
+    #[test]
+    fn set_spec_version_leaves_a_missing_trailing_newline_missing() {
+        let out = set_spec_version("    \"version\": \"0.4.0\",", "0.5.1").expect("one line");
+        assert_eq!(out, "    \"version\": \"0.5.1\",");
+    }
+
+    /// The real spec on disk is the one this has to work on, and it is the one
+    /// that would otherwise only be exercised on release day.
+    #[test]
+    fn set_spec_version_rewrites_the_published_spec() {
+        let spec = include_str!("../../docs/schema/openapi.json");
+        let out = set_spec_version(spec, "9.9.9").expect("the published spec has one");
+        assert!(out.contains("    \"version\": \"9.9.9\","));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out).expect("the rewrite is still valid JSON");
+        assert_eq!(parsed["info"]["version"], "9.9.9");
     }
 
     #[test]

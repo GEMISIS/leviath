@@ -30,7 +30,15 @@ same list.
   its cap when they came back. `lev validate` has always held that a fan_out
   stage needs no `max_iterations`; the runtime was enforcing one anyway, and now
   does not.
-
+- Changed: `api_version` on `GET /api/config` is this build's own version rather
+  than a hand-maintained literal. It was held equal to the OpenAPI spec by a test
+  and to the crates by nobody, so the two agreed only because somebody had last
+  typed the same string into both - and `cargo xtask version` wrote neither. The
+  first release after any bump would have served a version naming a build it was
+  not, silently, with the suite green. `cargo xtask version` now rewrites the
+  spec's `info.version` too, so the existing test guards the release instead of
+  just the document. It moves on every release now, including ones no client can
+  observe; `capabilities` is still what a client should feature-detect on.
 - Added: a run's rename now reaches a websocket subscriber. A run is created
   untitled and named a moment later, once a model has shortened its prompt into
   a title, and nothing on the wire said so - a console showed the prompt's first
