@@ -94,7 +94,27 @@ pub fn enforce_max_iterations(
         if state.status != AgentStatus::Active {
             continue;
         }
-        let max = bp.0.stages[cursor.index].max_iterations.unwrap_or(0);
+        let stage = &bp.0.stages[cursor.index];
+        // A fan-out stage is bounded by `max_attempts`, not by iterations. Its
+        // "iterations" are the framework asking again for the one call the stage
+        // exists to make, and letting the iteration cap count them means two
+        // budgets bound the same loop - with the cap winning, because it fires
+        // first and ends the stage.
+        //
+        // That is not hypothetical. `deep-researcher` allows `investigate` four
+        // iterations; a live run spent three answering in prose and called
+        // `fan_out` on the fourth, and the stage was already at its cap when the
+        // three workers came back, so thirteen minutes of finished research was
+        // discarded. `lev validate` has always held that a fan_out stage needs no
+        // `max_iterations` (see the lint's `counts_iterations`); the runtime was
+        // enforcing one anyway.
+        if matches!(
+            stage.mode,
+            leviath_core::blueprint::StageMode::FanOut { .. }
+        ) {
+            continue;
+        }
+        let max = stage.max_iterations.unwrap_or(0);
         if max > 0 && progress.iterations >= max {
             // Record it on the run: a stage that ran out of iterations is one of
             // the ways a run ends up with nothing to show (issue #107).
