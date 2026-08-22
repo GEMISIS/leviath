@@ -292,6 +292,14 @@
             "description": "Comma-separated statuses to keep. Matched loosely: waiting_input, waitinginput and Waiting-Input are all accepted."
           },
           {
+            "name": "parent",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Which runs to list by their place in the tree. `none` keeps only runs nobody started, which is what a top-level list wants; a run id keeps that run's direct children. Omitted lists every run, sub-agents included. A run id that names nothing gives an empty page rather than a 404. Announced as `runs.parent`."
+          },
+          {
             "name": "sort",
             "in": "query",
             "schema": {

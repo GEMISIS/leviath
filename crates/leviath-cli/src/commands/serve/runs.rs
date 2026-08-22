@@ -134,6 +134,70 @@ impl Source {
     }
 }
 
+/// Which runs a listing is about.
+///
+/// A run's sub-agents are runs, so a console that draws them nested under the
+/// run that started them was paging by a unit it does not display: a page of
+/// fifty could be seven visible rows and forty-three workers hanging off them,
+/// and there was no way to ask for anything better. This is that way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParentFilter {
+    /// No `parent` given: every run, sub-agents included. What this route has
+    /// always returned, so an existing caller sees nothing change.
+    Any,
+    /// `parent=none`: only runs nobody started. What a top-level list wants,
+    /// and what makes `total` a count of the rows a client will actually draw.
+    Roots,
+    /// `parent=<run_id>`: that run's direct children. `GET
+    /// /api/agents/{id}/children` answers the same question in one unpaged,
+    /// unsorted array, which a fan-out of two hundred workers has no windowed
+    /// form of.
+    Of(String),
+}
+
+impl ParentFilter {
+    /// `none` is the only keyword. Nothing else can collide with it: a run id
+    /// is `<agent>-<timestamp>-<hash>`, so no run is ever called `none`.
+    ///
+    /// An empty value reads as absent rather than as a filter matching nothing,
+    /// which is what a client that built its query string from an empty box
+    /// meant. Anything else is taken as a run id, and a run id that names
+    /// nothing gives an empty page - the same answer `status=` gives for a
+    /// status nothing is in, rather than a 404 for a run that may simply have
+    /// no children yet.
+    fn parse(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).filter(|s| !s.is_empty()) {
+            None => Self::Any,
+            Some("none") => Self::Roots,
+            Some(id) => Self::Of(id.to_string()),
+        }
+    }
+
+    /// Whether this run belongs in the listing.
+    fn keeps(&self, meta: &RunMeta) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Roots => meta.parent_run_id.is_none(),
+            Self::Of(parent) => meta.parent_run_id.as_deref() == Some(parent.as_str()),
+        }
+    }
+
+    /// This filter's contribution to the cursor digest, so a walk cannot change
+    /// what it is filtering halfway through.
+    ///
+    /// `None` for [`Any`](Self::Any), which contributes nothing at all rather
+    /// than an empty part - an empty part is still a part, and would have
+    /// changed the digest of every unfiltered listing and so invalidated every
+    /// cursor a client was holding when it upgraded.
+    fn digest_part(&self) -> Option<&str> {
+        match self {
+            Self::Any => None,
+            Self::Roots => Some("none"),
+            Self::Of(parent) => Some(parent.as_str()),
+        }
+    }
+}
+
 /// Query parameters of `GET /api/runs`.
 #[derive(serde::Deserialize, Default)]
 pub(super) struct RunsQuery {
@@ -147,6 +211,7 @@ pub(super) struct RunsQuery {
     pub(super) fields: Option<String>,
     pub(super) ids: Option<String>,
     pub(super) since: Option<i64>,
+    pub(super) parent: Option<String>,
 }
 
 /// A validated query. Every 400 this route can produce is decided here, so the
@@ -163,6 +228,7 @@ struct Resolved {
     fields: Option<HashSet<String>>,
     ids: Option<Vec<String>>,
     since: Option<i64>,
+    parent: ParentFilter,
     digest: String,
 }
 
@@ -194,6 +260,7 @@ fn resolve(query: &RunsQuery) -> Result<Resolved, ApiError> {
     // paging, ordering and filtering have nothing to act on. Rejecting the
     // combination is deliberate - a silently ignored parameter produces the
     // kind of bug report that takes a day to read.
+    let parent = ParentFilter::parse(query.parent.as_deref());
     let ids = query.ids.as_deref().map(comma_list);
     if let Some(ref ids) = ids {
         let conflicts = [
@@ -201,6 +268,9 @@ fn resolve(query: &RunsQuery) -> Result<Resolved, ApiError> {
             ("q", query.q.is_some()),
             ("status", query.status.is_some()),
             ("since", query.since.is_some()),
+            // The resolved filter rather than the raw parameter, so `parent=`
+            // is the no-op it looks like rather than a conflict.
+            ("parent", parent != ParentFilter::Any),
         ];
         if let Some((name, _)) = conflicts.iter().find(|(_, present)| *present) {
             return Err(bad_request(format!(
@@ -293,12 +363,22 @@ fn resolve(query: &RunsQuery) -> Result<Resolved, ApiError> {
 
     // The filters, in a fixed order, so the same filter set always digests the
     // same way.
-    let digest = cursor::filter_digest(&[
-        &statuses.join(","),
-        q.as_deref().unwrap_or(""),
-        sources_raw,
-        &query.since.map(|s| s.to_string()).unwrap_or_default(),
-    ]);
+    let since_part = query.since.map(|s| s.to_string()).unwrap_or_default();
+    let mut parts = vec![
+        statuses.join(","),
+        q.clone().unwrap_or_default(),
+        sources_raw.to_string(),
+        since_part,
+    ];
+    // Appended only when it filters something. A digest identifies the filter
+    // *set*, and `Any` is the absence of this one - so a listing that does not
+    // use it digests exactly as it did before the parameter existed, and every
+    // cursor a client is already holding stays valid across the upgrade.
+    if let Some(part) = parent.digest_part() {
+        parts.push(part.to_string());
+    }
+    let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+    let digest = cursor::filter_digest(&refs);
 
     let cursor = match query.cursor.as_deref() {
         None => None,
@@ -319,6 +399,7 @@ fn resolve(query: &RunsQuery) -> Result<Resolved, ApiError> {
         fields,
         ids,
         since: query.since,
+        parent,
         digest,
     })
 }
@@ -382,6 +463,9 @@ pub(super) async fn list_runs(
     }
 
     let mut runs = runstate::list_runs();
+    // Before the sort and before `total`, like every other filter here, so the
+    // count describes what was asked for rather than what is on the machine.
+    runs.retain(|meta| resolved.parent.keeps(meta));
     if !resolved.statuses.is_empty() {
         runs.retain(|meta| {
             resolved

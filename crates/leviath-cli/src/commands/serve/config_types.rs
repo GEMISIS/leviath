@@ -70,6 +70,13 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "runs.fields",
     "runs.ids",
     "runs.since",
+    // `parent=none` / `parent=<run_id>` on the run listing. Worth announcing
+    // rather than leaving to be discovered, because the fallback is real work:
+    // a console that draws sub-agents nested under their parent has to page
+    // until enough top-level rows exist to fill a viewport, holding several
+    // hundred runs to show a few dozen. With this it pages by the rows it
+    // draws, and `total` counts them.
+    "runs.parent",
     "runs.files.listing",
     "runs.files.workdir",
     "runs.stages",
