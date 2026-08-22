@@ -9,6 +9,7 @@ pub(crate) mod confirm;
 pub(crate) mod footer;
 pub(crate) mod help;
 pub(crate) mod line_edit;
+pub(crate) mod markdown_edit;
 pub(crate) mod picker;
 pub(crate) mod popup;
 pub(crate) mod scroll;

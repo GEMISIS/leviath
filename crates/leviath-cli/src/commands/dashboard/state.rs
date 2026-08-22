@@ -2,9 +2,10 @@
 
 use leviath_runtime::control_socket::{ControlClient, ControlRequest, ControlResponse};
 use ratatui::widgets::TableState;
-use ratatui_textarea::TextArea;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
+
+use crate::tui::widgets::markdown_edit::MarkdownEdit;
 
 use super::graph::load_stage_graph;
 use super::helpers::truncate;
@@ -17,8 +18,10 @@ pub(crate) struct Dashboard {
     pub(super) agents: Vec<DashboardAgent>,
     pub(super) selected: usize,
     pub(super) log: Vec<LogEntry>,
-    /// Multi-line input textarea (active when input_mode = true and kind = FreeText).
-    pub(super) input_textarea: TextArea<'static>,
+    /// The long-form response editor (active when input_mode = true and the
+    /// interaction takes free text). Soft-wrapped and markdown-aware, the same
+    /// component the new-run task and the blueprint prompts use.
+    pub(super) input_textarea: MarkdownEdit,
     pub(super) input_mode: bool,
     /// True when the full-screen detail view is open for the selected agent
     pub(super) detail_view: bool,
@@ -186,9 +189,9 @@ pub(crate) struct Dashboard {
     pub(super) new_run_filter: String,
     /// Selected row of the *filtered* agent list.
     pub(super) new_run_selected: usize,
-    /// The task editor. The same `TextArea` the response pane uses, so word
+    /// The task editor. The same [`MarkdownEdit`] the response pane uses, so word
     /// motions, selection, and undo behave identically in both.
-    pub(super) new_run_task: TextArea<'static>,
+    pub(super) new_run_task: MarkdownEdit,
     /// Which of the two panes has the keys.
     pub(super) new_run_focus: NewRunPane,
     /// Workdir-relative file paths the `@` completion offers, walked once when

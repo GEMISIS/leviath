@@ -14,7 +14,7 @@
 use ratatui::layout::{Position, Rect};
 
 use super::state::Dashboard;
-use super::types::{ClickTarget, MainPane, StageContentMode};
+use super::types::{ClickTarget, MainPane, NewRunPane, StageContentMode};
 
 /// How long after a click a second one on the same cell still counts as a
 /// double click. 400ms is the interval most desktops ship as their default.
@@ -39,6 +39,29 @@ impl Dashboard {
             .rev()
             .find(|(rect, _)| rect.contains(Position::new(column, row)))
             .map(|(_, target)| *target)
+    }
+
+    /// Route a press to the formatting toolbar of whichever long-form editor
+    /// is on screen, reporting whether a button was under it.
+    ///
+    /// This runs ahead of the frame's click registry rather than through it.
+    /// The registry answers "what was drawn here", and an editor's toolbar is
+    /// drawn *over* whatever pane it floats above; a button press that fell
+    /// through to the registry would act on the thing underneath. Clicking a
+    /// button on an unfocused box also focuses it, because a press that
+    /// formats text somewhere the cursor is not is a press nobody meant.
+    pub(super) fn markdown_toolbar_click(&mut self, column: u16, row: u16) -> bool {
+        if self.agent_builder.is_some() {
+            return self.prompts_toolbar_click(column, row);
+        }
+        if self.new_run_screen {
+            if self.new_run_task.click(column, row) {
+                self.new_run_focus = NewRunPane::Task;
+                return true;
+            }
+            return false;
+        }
+        self.input_mode && self.input_textarea.click(column, row)
     }
 
     /// Act on a plain click. Returns whether anything was under it, purely so
@@ -137,6 +160,25 @@ mod tests {
     fn draw(dash: &mut Dashboard, width: u16, height: u16) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    /// Where the long-form editor's `B` button landed in the drawn frame.
+    ///
+    /// Found in the buffer rather than computed from the layout, so the test
+    /// clicks the cell a person would click and not the cell the test thinks
+    /// the renderer should have used. The row reads `" B │ I │ ..."`, so a `B`
+    /// with an `I` four columns later is the toolbar and nothing else is.
+    fn find_bold_button(dash: &mut Dashboard, width: u16, height: u16) -> (u16, u16) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let at = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string());
+        (0..height)
+            .flat_map(|y| (0..width.saturating_sub(4)).map(move |x| (x, y)))
+            .find(|&(x, y)| {
+                at(x, y).as_deref() == Some("B") && at(x + 4, y).as_deref() == Some("I")
+            })
+            .expect("a formatting toolbar was drawn")
     }
 
     fn press_and_release(dash: &mut Dashboard, column: u16, row: u16) {
@@ -420,5 +462,63 @@ mod tests {
             dash.context_history_idx, None,
             "the ctx chip shows the live window, like the `c` key"
         );
+    }
+
+    // ─── the long-form editors' formatting toolbars ─────────────────────────
+
+    /// The new-run task box: clicking `B` wraps at the cursor and moves the
+    /// keys to the pane you just formatted, so the next thing typed lands
+    /// between the markers.
+    #[test]
+    fn clicking_the_task_boxs_bold_button_formats_it_and_takes_the_focus() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = make_test_dashboard();
+        dash.new_run_ctx.workdir = dir.path().to_path_buf();
+        dash.new_run_ctx.agents_dir = dir.path().join("agents");
+        dash.new_run_ctx.config_path = dir.path().join("config.toml");
+        dash.open_new_run_screen();
+        assert_eq!(dash.new_run_focus, NewRunPane::Agents);
+
+        let (x, y) = find_bold_button(&mut dash, 120, 40);
+        press_and_release(&mut dash, x, y);
+        assert_eq!(dash.new_run_task.text(), "****");
+        assert_eq!(dash.new_run_focus, NewRunPane::Task);
+
+        // A press inside the text itself is not a button press.
+        draw(&mut dash, 120, 40);
+        press_and_release(&mut dash, x, y + 2);
+        assert_eq!(dash.new_run_task.text(), "****");
+    }
+
+    /// The same component, in the response box: the wiring has to find it
+    /// there too, and nowhere else on the screen counts as a button.
+    #[test]
+    fn clicking_the_response_boxs_bold_button_formats_the_response() {
+        let mut dash = make_test_dashboard();
+        dash.agents.push(make_test_agent("run-1"));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        let (x, y) = find_bold_button(&mut dash, 120, 40);
+        press_and_release(&mut dash, x, y);
+        assert_eq!(dash.input_textarea.text(), "****");
+
+        // With the box closed there is no toolbar to hit, so the same cell is
+        // an ordinary click again.
+        dash.input_mode = false;
+        draw(&mut dash, 120, 40);
+        assert!(!dash.markdown_toolbar_click(x, y));
+    }
+
+    /// A press on the run list, with no long-form box open anywhere, must not
+    /// be swallowed by the toolbar check that now runs ahead of everything.
+    #[test]
+    fn a_press_with_no_editor_open_falls_through_to_the_panes() {
+        let mut dash = make_test_dashboard();
+        dash.agents.push(make_test_agent("run-1"));
+        dash.update_display_indices();
+        draw(&mut dash, 120, 40);
+        assert!(!dash.markdown_toolbar_click(5, 5));
     }
 }

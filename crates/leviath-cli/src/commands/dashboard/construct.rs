@@ -7,8 +7,8 @@
 //! one-time handover of the MCP, spawn, and daemon-command channel ends to the
 //! tasks that own them for the rest of the process.
 
+use crate::tui::widgets::markdown_edit::MarkdownEdit;
 use ratatui::widgets::TableState;
-use ratatui_textarea::TextArea;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
@@ -116,7 +116,7 @@ impl Dashboard {
             agents: Vec::new(),
             selected: 0,
             log,
-            input_textarea: TextArea::default(),
+            input_textarea: MarkdownEdit::default(),
             input_mode: false,
             detail_view: false,
             cmd_tx,
@@ -177,7 +177,7 @@ impl Dashboard {
             new_run_agents: Vec::new(),
             new_run_filter: String::new(),
             new_run_selected: 0,
-            new_run_task: TextArea::default(),
+            new_run_task: MarkdownEdit::default(),
             new_run_focus: NewRunPane::Agents,
             new_run_files: Vec::new(),
             new_run_file_ref: false,

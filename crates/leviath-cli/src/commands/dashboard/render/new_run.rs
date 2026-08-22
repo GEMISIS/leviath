@@ -12,6 +12,7 @@ use ratatui::widgets::{
 use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::NewRunPane;
+use crate::tui::widgets::markdown_edit::{MdAction, MdEditView, chord_label};
 
 impl Dashboard {
     pub(in crate::commands::dashboard) fn draw_new_run_screen(
@@ -139,35 +140,30 @@ impl Dashboard {
             .new_run_selected_agent()
             .map(|a| a.name.clone())
             .unwrap_or_else(|| "no agent blueprint selected".to_string());
-        self.new_run_task.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(focus_style(focused))
-                .title(Line::from(vec![
-                    Span::styled(
-                        format!(" Task for {agent} "),
-                        Style::default()
-                            .fg(focus_colour(focused))
-                            .add_modifier(Modifier::BOLD),
+        let view = MdEditView::titled(
+            Line::from(vec![
+                Span::styled(
+                    format!(" Task for {agent} "),
+                    Style::default()
+                        .fg(focus_colour(focused))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                // On the title rather than the help bar: this is the pane
+                // you are looking at when you press Enter, and a setting
+                // this consequential should not be one line further away
+                // than the thing it changes.
+                match self.new_run_yolo {
+                    true => Span::styled(
+                        "[ unattended ] ",
+                        Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
                     ),
-                    // On the title rather than the help bar: this is the pane
-                    // you are looking at when you press Enter, and a setting
-                    // this consequential should not be one line further away
-                    // than the thing it changes.
-                    match self.new_run_yolo {
-                        true => Span::styled(
-                            "[ unattended ] ",
-                            Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
-                        ),
-                        false => Span::styled("", Style::default()),
-                    },
-                ])),
+                    false => Span::styled("", Style::default()),
+                },
+            ]),
+            focus_colour(focused),
+            focused,
         );
-        self.new_run_task.set_style(Style::default().fg(C_WHITE));
-        self.new_run_task
-            .set_cursor_style(Style::default().fg(Color::Black).bg(C_ACCENT));
-        frame.render_widget(&self.new_run_task, area);
+        self.new_run_task.render(frame, area, &view);
     }
 
     /// The `@` completion, drawn as a floating menu inside the task pane.
@@ -219,13 +215,18 @@ impl Dashboard {
 
     fn draw_new_run_help_bar(&self, frame: &mut Frame, area: Rect) {
         let hint = match (self.new_run_file_ref, self.new_run_focus) {
-            (true, _) => " ↑↓ choose · Enter/Tab insert · Esc dismiss ",
+            (true, _) => " ↑↓ choose · Enter/Tab insert · Esc dismiss ".to_string(),
             (false, NewRunPane::Agents) => {
                 " ↑↓ select · type to filter · Tab write task · ^Y unattended · F1 help · Esc back "
+                    .to_string()
             }
-            (false, NewRunPane::Task) => {
-                " Enter start · Alt+↵ newline · @ file · ^Y unattended · F1 help · Esc back "
-            }
+            // The formatting chord is named on the pane that has the toolbar,
+            // and only there: on the picker it would be a key that does
+            // nothing.
+            (false, NewRunPane::Task) => format!(
+                " Enter start · Alt+↵ newline · @ file · {} bold · ^Y unattended · F1 help · Esc back ",
+                chord_label(MdAction::Bold)
+            ),
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(C_DIM)))),

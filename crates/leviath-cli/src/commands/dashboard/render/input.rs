@@ -12,6 +12,7 @@ use crate::commands::dashboard::helpers::truncate;
 use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::*;
+use crate::tui::widgets::markdown_edit::MdEditView;
 use leviath_core::interaction;
 
 impl Dashboard {
@@ -109,23 +110,10 @@ impl Dashboard {
             } else {
                 " Response  [Enter] send  [Alt+↵] newline  [Esc] cancel "
             };
-            self.input_textarea.set_block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(C_SUCCESS))
-                    .title(Span::styled(
-                        hint,
-                        Style::default().fg(C_SUCCESS).add_modifier(Modifier::BOLD),
-                    )),
-            );
-            self.input_textarea.set_style(Style::default().fg(C_WHITE));
-            self.input_textarea.set_cursor_style(
-                Style::default()
-                    .fg(ratatui::style::Color::Black)
-                    .bg(C_ACCENT),
-            );
-            frame.render_widget(&self.input_textarea, prompt_area);
+            // The response box is a long-form field: it wraps, and it carries
+            // the same formatting toolbar as the task editor.
+            let view = MdEditView::new(hint, C_SUCCESS, true);
+            self.input_textarea.render(frame, prompt_area, &view);
         } else {
             let (title, prompt_lines): (&str, Vec<Line>) = if self.input_mode {
                 let mut lines: Vec<Line> = vec![];

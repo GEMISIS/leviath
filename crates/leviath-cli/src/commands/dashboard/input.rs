@@ -6,6 +6,7 @@ use super::helpers::truncate;
 use super::state::Dashboard;
 use super::types::*;
 use crate::runstate;
+use crate::tui::widgets::markdown_edit::MarkdownEdit;
 use leviath_core::interaction;
 
 impl Dashboard {
@@ -201,10 +202,8 @@ impl Dashboard {
             .filter(|r| r.kind == InteractionKind::EditText)
             .and_then(|r| r.body.clone());
         self.input_textarea = match seed {
-            Some(body) => {
-                ratatui_textarea::TextArea::new(body.lines().map(|s| s.to_string()).collect())
-            }
-            None => ratatui_textarea::TextArea::default(),
+            Some(body) => MarkdownEdit::from_text(&body),
+            None => MarkdownEdit::default(),
         };
     }
 
@@ -314,21 +313,20 @@ impl Dashboard {
                     }
                     KeyCode::Esc => {
                         self.input_mode = false;
-                        self.input_textarea = ratatui_textarea::TextArea::default();
+                        self.input_textarea = MarkdownEdit::default();
                         self.choice_selected = 0;
                     }
                     KeyCode::PageUp if self.has_scrollable_document() => self.scroll_by(10),
                     KeyCode::PageDown if self.has_scrollable_document() => self.scroll_by(-10),
                     _ => {
-                        self.input_textarea
-                            .input(ratatui_textarea::Input::from(key));
+                        self.input_textarea.handle_key(&key);
                     }
                 }
             }
             _ => match key_code {
                 KeyCode::Esc => {
                     self.input_mode = false;
-                    self.input_textarea = ratatui_textarea::TextArea::default();
+                    self.input_textarea = MarkdownEdit::default();
                     self.choice_selected = 0;
                 }
                 KeyCode::Enter => {
@@ -1027,7 +1025,7 @@ impl Dashboard {
         };
 
         self.input_mode = false;
-        self.input_textarea = ratatui_textarea::TextArea::default();
+        self.input_textarea = MarkdownEdit::default();
         self.choice_selected = 0;
 
         let answered_id = resp.request_id.clone();
@@ -1772,7 +1770,7 @@ mod tests {
         dash.agents.push(agent);
         dash.update_display_indices();
 
-        dash.input_textarea.insert_str("stale");
+        dash.input_textarea.area_mut().insert_str("stale");
         dash.seed_input_textarea();
         // FreeText is not seeded from body → cleared to empty.
         assert_eq!(dash.input_textarea.lines(), vec!["".to_string()]);
@@ -1791,10 +1789,8 @@ mod tests {
         dash.detail_view = true;
         dash.input_mode = true;
 
-        dash.input_textarea = ratatui_textarea::TextArea::new(vec![
-            "  indented".to_string(),
-            "second line".to_string(),
-        ]);
+        dash.input_textarea =
+            MarkdownEdit::new(vec!["  indented".to_string(), "second line".to_string()]);
         dash.submit_input();
 
         assert!(!dash.input_mode);
@@ -1824,7 +1820,7 @@ mod tests {
         dash.input_mode = true;
 
         // Whitespace-only edit → trimmed empty → "(no changes)" display path.
-        dash.input_textarea = ratatui_textarea::TextArea::new(vec!["   ".to_string()]);
+        dash.input_textarea = MarkdownEdit::new(vec!["   ".to_string()]);
         dash.submit_input();
 
         assert!(!dash.input_mode);
@@ -2841,7 +2837,7 @@ mod tests {
         dash.input_mode = true;
 
         // Type something into the textarea
-        dash.input_textarea.insert_str("my answer");
+        dash.input_textarea.area_mut().insert_str("my answer");
 
         dash.submit_input();
 
@@ -2867,7 +2863,7 @@ mod tests {
         dash.detail_view = true;
         dash.input_mode = true;
 
-        dash.input_textarea.insert_str("/quit");
+        dash.input_textarea.area_mut().insert_str("/quit");
 
         dash.submit_input();
 
@@ -3010,7 +3006,9 @@ mod tests {
         dash.detail_view = true;
         dash.input_mode = true;
 
-        dash.input_textarea.insert_str("in-process answer");
+        dash.input_textarea
+            .area_mut()
+            .insert_str("in-process answer");
 
         dash.submit_input();
 
@@ -3018,6 +3016,33 @@ mod tests {
         // Should have sent EngineCommand::SendInput
         let cmd = cmd_rx.try_recv();
         assert!(cmd.is_ok());
+    }
+
+    /// The response box is the shared long-form editor too, so its formatting
+    /// chords have to survive the detail view's key routing.
+    #[test]
+    fn formatting_chords_reach_the_response_box() {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.pending_request = None;
+        agent.waiting_prompt = None;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        dash.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('b'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        for c in "urgent".chars() {
+            dash.handle_key(crossterm::event::KeyEvent::new(
+                KeyCode::Char(c),
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        assert_eq!(dash.input_textarea.text(), "**urgent**");
     }
 
     // ─── submit_input with no pending request (mid-run message) ───────────
@@ -3034,7 +3059,7 @@ mod tests {
         dash.detail_view = true;
         dash.input_mode = true;
 
-        dash.input_textarea.insert_str("hello mid-run");
+        dash.input_textarea.area_mut().insert_str("hello mid-run");
 
         dash.submit_input();
 
@@ -3054,7 +3079,7 @@ mod tests {
         dash.detail_view = true;
         dash.input_mode = true;
 
-        dash.input_textarea.insert_str("/exit");
+        dash.input_textarea.area_mut().insert_str("/exit");
         dash.submit_input();
 
         assert!(!dash.input_mode);
@@ -3204,7 +3229,7 @@ mod tests {
         dash.detail_view = true;
         dash.input_mode = true;
 
-        dash.input_textarea.insert_str("answer");
+        dash.input_textarea.area_mut().insert_str("answer");
 
         // Enter with no modifiers should submit
         dash.handle_key(key(KeyCode::Enter));
@@ -3262,7 +3287,7 @@ mod tests {
         dash.detail_view = true;
         dash.input_mode = true;
 
-        dash.input_textarea.insert_str("answer");
+        dash.input_textarea.area_mut().insert_str("answer");
         dash.submit_input();
 
         assert_eq!(
