@@ -63,6 +63,31 @@ pub struct DashboardUi {
     /// to it every time.
     #[serde(default)]
     pub last_agent: Option<String>,
+    /// How the Context view was left, per run.
+    ///
+    /// Per run rather than per region name: folding `conversation` on one run
+    /// says nothing about another, and an entry index certainly does not - the
+    /// third entry of one run's `system` is not the third of another's.
+    /// Pruned with [`DashboardUi::collapsed_runs`] when a run is deleted, which
+    /// is what stops this growing for every run ever opened.
+    #[serde(default)]
+    pub context: BTreeMap<String, ContextUi>,
+}
+
+/// How one run's Context tree was left.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextUi {
+    /// Regions whose entry list is folded away.
+    #[serde(default)]
+    pub collapsed_regions: BTreeSet<String>,
+    /// `(region, entry index)` pairs opened to their full content.
+    ///
+    /// An index, because that is what the view addresses an entry by. It can
+    /// drift on a *live* run whose region evicts from the front, which is
+    /// already true within a single session and is why this is a convenience
+    /// rather than a promise.
+    #[serde(default)]
+    pub expanded_entries: BTreeSet<(String, usize)>,
 }
 
 /// What `lev setup` remembers.

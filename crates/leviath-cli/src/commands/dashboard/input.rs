@@ -379,6 +379,8 @@ impl Dashboard {
             None => {}
         }
         self.context_tree.follow_cursor = true;
+        // Kept per run, so reopening this one finds it the way it was left.
+        self.save_ui_state();
     }
 
     /// Show stage tab `idx`, from a number key or a click on the tab. Out of

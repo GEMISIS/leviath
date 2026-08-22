@@ -101,10 +101,11 @@ you make them, not on the way out, so a session that ends with the terminal wind
 the same. A run list starts fully expanded until you fold something; a fold whose run is later
 deleted is forgotten the next time the dashboard can see the run list.
 
-Two other choices live in that same file: the sort order `s` cycles, and the agent the new-run
-screen opens on, which is whichever one you last launched. Nothing transient joins them - a
-filter, a search and the marks are all gone when you come back, and unattended (`Ctrl-Y`) is
-deliberately off every time the new-run screen opens.
+Three other choices live in that same file: the sort order `s` cycles, the agent the new-run
+screen opens on (whichever one you last launched), and how each run's [Context view](#context-view)
+was left folded. Nothing transient joins them - a filter, a search and the marks are all gone when
+you come back, and unattended (`Ctrl-Y`) is deliberately off every time the new-run screen opens,
+because a setting that runs tools without asking is not one to inherit out of sight.
 
 Marking selects several runs at once: press `Space` on each run, then `x` or `d` acts on all of
 them behind one confirmation. Marked rows show a check mark, the pane title counts them, and marks
@@ -199,6 +200,14 @@ Space (or by clicking the row), and jump between regions with `[` and `]`. While
 temporarily unfolded so matches inside entries stay reachable. Browsing history with `,`/`.` keeps
 your scroll position and fold state, and the context card's title shows which archived point you
 are on, in which stage, recorded when.
+
+What you fold here is remembered **per run**, and outlives the dashboard: reopening a run finds its
+regions and entries as you left them, while a different run opens at the defaults. Folding
+`conversation` on one run says nothing about another, and an entry index certainly does not. A run
+you put back to its defaults keeps no record at all, and a run you delete takes its record with it.
+The one caveat is a *live* run whose region evicts from the front: entry numbers shift under an
+expansion, which is already true within a single session and is why this is a convenience rather
+than a promise.
 
 ### Stage explorer
 

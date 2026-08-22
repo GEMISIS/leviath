@@ -1,10 +1,11 @@
 //! The dashboard's half of the shared UI memory (see [`crate::ui_state`]).
 //!
-//! Three things are remembered, and they are the three a person would be
-//! annoyed to redo: which runs' sub-agents are folded away, how the run list is
-//! sorted, and which agent the new-run screen should open on. Everything else
-//! the dashboard holds is either transient (a filter, a search, the marks) or
-//! deliberately reset (`--yolo`), and reads there rather than here.
+//! Four things are remembered, and they are the four a person would be annoyed
+//! to redo: which runs' sub-agents are folded away, how the run list is sorted,
+//! which agent the new-run screen should open on, and how each run's Context
+//! tree was left. Everything else the dashboard holds is either transient (a
+//! filter, a search, the marks) or deliberately reset (`--yolo`), and reads
+//! there rather than here.
 
 use super::state::Dashboard;
 use super::types::SortMode;
@@ -33,6 +34,12 @@ impl Dashboard {
 
     /// Write the remembered view state, keeping whatever `lev setup` put in the
     /// same file.
+    ///
+    /// Also drops per-run Context state for runs that no longer exist. That
+    /// tidying happens here, on a write, rather than on the sync tick: only one
+    /// run's tree is in memory at a time, so noticing a stale row means reading
+    /// the file, and doing that ten times a second to find nothing would be a
+    /// poor trade. Every write is a user action, which is often enough.
     pub(super) fn save_ui_state(&self) {
         let Some(path) = &self.ui_state_path else {
             return;
@@ -41,7 +48,54 @@ impl Dashboard {
             state.dashboard.collapsed_runs = self.collapsed_runs.iter().cloned().collect();
             state.dashboard.sort_mode = Some(self.sort_mode.label().to_string());
             state.dashboard.last_agent = self.last_launched_agent.clone();
+            // Guarded on a non-empty list for the same reason the fold prune
+            // is: "no runs" is also what a runs directory that could not be
+            // read for a moment looks like, and pruning against that would
+            // throw away every run's Context state at once.
+            if !self.agents.is_empty() {
+                let agents = &self.agents;
+                state
+                    .dashboard
+                    .context
+                    .retain(|id, _| agents.iter().any(|a| a.id == *id));
+            }
+            if let Some(run) = self.open_run_id() {
+                let tree = &self.context_tree;
+                let entry = ui_state::ContextUi {
+                    collapsed_regions: tree.collapsed_regions.iter().cloned().collect(),
+                    expanded_entries: tree.expanded_entries.iter().cloned().collect(),
+                };
+                // A run back at its defaults keeps no row of its own, so the
+                // file does not accumulate one per run merely visited.
+                if entry == ui_state::ContextUi::default() {
+                    state.dashboard.context.remove(&run);
+                } else {
+                    state.dashboard.context.insert(run, entry);
+                }
+            }
         });
+    }
+
+    /// Put the Context tree back the way this run was left.
+    ///
+    /// Called when a run's page opens. Nothing saved (or no store) leaves the
+    /// default - regions open, entries closed - which is what a run being seen
+    /// for the first time should look like.
+    pub(super) fn restore_context_tree(&mut self) {
+        let (Some(path), Some(run)) = (&self.ui_state_path, self.open_run_id()) else {
+            return;
+        };
+        let Some(saved) = ui_state::load(path).dashboard.context.remove(&run) else {
+            return;
+        };
+        self.context_tree.collapsed_regions = saved.collapsed_regions.into_iter().collect();
+        self.context_tree.expanded_entries = saved.expanded_entries.into_iter().collect();
+    }
+
+    /// The run whose page is open, which is the one the Context tree belongs
+    /// to.
+    fn open_run_id(&self) -> Option<String> {
+        self.selected_agent().map(|a| a.id.clone())
     }
 }
 
@@ -49,6 +103,42 @@ impl Dashboard {
 mod tests {
     use super::*;
     use crate::commands::dashboard::test_support::make_test_dashboard;
+    use crate::commands::dashboard::types::{AgentDisplayStatus, DashboardAgent};
+
+    /// The least an agent can be and still occupy a row.
+    fn agent(id: &str) -> DashboardAgent {
+        DashboardAgent {
+            id: id.to_string(),
+            blueprint_name: "test-agent".to_string(),
+            stage: "main".to_string(),
+            stage_index: 0,
+            num_stages: 1,
+            status: AgentDisplayStatus::Active,
+            tokens_in: 0,
+            tokens_out: 0,
+            cached_tokens: 0,
+            iteration: 0,
+            waiting_prompt: None,
+            wait_reason: None,
+            pending_request: None,
+            last_answered_request_id: None,
+            context_snapshot: None,
+            stages: vec![],
+            workdir: "/tmp".to_string(),
+            task: "task".to_string(),
+            title: None,
+            model: None,
+            parent_id: None,
+            depth: 0,
+            started_at: 1000,
+            last_progress_at: None,
+            active_until: None,
+            waiting_secs: 0,
+            graph: None,
+            accepts_messages: true,
+            taint_summary: vec![],
+        }
+    }
 
     /// The round trip that makes the feature a feature: choose, quit, come
     /// back, and the choices are still there.
@@ -106,6 +196,104 @@ mod tests {
             dash.collapsed_runs.contains("run-1"),
             "load with no store left memory alone"
         );
+    }
+
+    /// One run's Context folds come back on that run, and do not leak onto
+    /// another. Folding `conversation` while reading run A says nothing about
+    /// run B.
+    #[test]
+    fn the_context_tree_is_remembered_per_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ui-state.json");
+        let mut dash = make_test_dashboard();
+        dash.ui_state_path = Some(path);
+        dash.agents.push(agent("run-a"));
+        dash.agents.push(agent("run-b"));
+        dash.update_display_indices();
+
+        // On run A: fold a region and open an entry.
+        dash.selected = dash.row_of_run("run-a").unwrap();
+        dash.context_tree
+            .collapsed_regions
+            .insert("conversation".to_string());
+        dash.context_tree
+            .expanded_entries
+            .insert(("system".to_string(), 2));
+        dash.save_ui_state();
+
+        // Opening run B starts clean.
+        dash.selected = dash.row_of_run("run-b").unwrap();
+        dash.open_detail_view();
+        assert!(dash.context_tree.collapsed_regions.is_empty());
+        assert!(dash.context_tree.expanded_entries.is_empty());
+
+        // Back to run A, and it is as it was left.
+        dash.selected = dash.row_of_run("run-a").unwrap();
+        dash.open_detail_view();
+        assert!(dash.context_tree.collapsed_regions.contains("conversation"));
+        assert!(
+            dash.context_tree
+                .expanded_entries
+                .contains(&("system".to_string(), 2))
+        );
+    }
+
+    /// A run that is deleted takes its Context state with it, so the file does
+    /// not keep a row per run ever opened.
+    #[test]
+    fn context_state_for_a_vanished_run_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ui-state.json");
+        let mut dash = make_test_dashboard();
+        dash.ui_state_path = Some(path.clone());
+        dash.agents.push(agent("run-a"));
+        dash.update_display_indices();
+        dash.context_tree
+            .collapsed_regions
+            .insert("conversation".to_string());
+        dash.save_ui_state();
+        assert!(
+            ui_state::load(&path)
+                .dashboard
+                .context
+                .contains_key("run-a")
+        );
+
+        // Run A is gone and another run exists, so there is a list to prune
+        // against.
+        dash.agents.clear();
+        dash.agents.push(agent("run-b"));
+        dash.update_display_indices();
+        dash.context_tree = Default::default();
+        dash.save_ui_state();
+        assert!(ui_state::load(&path).dashboard.context.is_empty());
+    }
+
+    /// A run put back to its defaults keeps no row, so merely visiting runs
+    /// does not grow the file.
+    #[test]
+    fn a_run_back_at_its_defaults_keeps_no_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ui-state.json");
+        let mut dash = make_test_dashboard();
+        dash.ui_state_path = Some(path.clone());
+        dash.agents.push(agent("run-a"));
+        dash.update_display_indices();
+
+        dash.context_tree
+            .collapsed_regions
+            .insert("conversation".to_string());
+        dash.save_ui_state();
+        assert!(
+            ui_state::load(&path)
+                .dashboard
+                .context
+                .contains_key("run-a")
+        );
+
+        dash.context_tree.collapsed_regions.clear();
+        dash.save_ui_state();
+        assert!(ui_state::load(&path).dashboard.context.is_empty());
     }
 
     /// Saving the dashboard's memory must not erase setup's, since they share

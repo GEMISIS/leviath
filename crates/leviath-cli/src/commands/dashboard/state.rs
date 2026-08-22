@@ -426,6 +426,10 @@ impl Dashboard {
         // Default to the stage the run is actually on.
         self.selected_stage = self.selected_agent().map(|a| a.stage_index).unwrap_or(0);
         self.reset_exploration();
+        // …then put this run's Context tree back the way it was left. The reset
+        // above still clears the explorer and the band, which are canvases for
+        // a particular graph and have to be rebuilt for a different run.
+        self.restore_context_tree();
     }
 
     pub(super) fn selected_agent(&self) -> Option<&DashboardAgent> {
