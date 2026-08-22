@@ -12,7 +12,7 @@ use ratatui::widgets::{
 use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::NewRunPane;
-use crate::tui::widgets::markdown_edit::{MdAction, MdEditView, chord_label};
+use crate::tui::widgets::markdown_edit::{MODE_CHORD, MdAction, MdEditView, chord_label};
 
 impl Dashboard {
     pub(in crate::commands::dashboard) fn draw_new_run_screen(
@@ -224,7 +224,7 @@ impl Dashboard {
             // and only there: on the picker it would be a key that does
             // nothing.
             (false, NewRunPane::Task) => format!(
-                " Enter start · Alt+↵ newline · @ file · {} bold · ^Y unattended · F1 help · Esc back ",
+                " Enter start · Alt+↵ newline · @ file · {} bold · {MODE_CHORD} preview · ^Y unattended · F1 help · Esc back ",
                 chord_label(MdAction::Bold)
             ),
         };

@@ -194,6 +194,11 @@ pub(crate) struct Dashboard {
     pub(super) new_run_task: MarkdownEdit,
     /// Which of the two panes has the keys.
     pub(super) new_run_focus: NewRunPane,
+    /// Which view every long-form box opens in: the markdown you type, or the
+    /// rendered preview. One preference for all of them, remembered in
+    /// `ui-state.json`, because it is a preference about reading rather than
+    /// about any one box.
+    pub(super) md_preview: bool,
     /// Workdir-relative file paths the `@` completion offers, walked once when
     /// the screen opens rather than per keystroke.
     pub(super) new_run_files: Vec<String>,

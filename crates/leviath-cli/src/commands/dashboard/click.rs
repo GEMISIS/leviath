@@ -15,6 +15,7 @@ use ratatui::layout::{Position, Rect};
 
 use super::state::Dashboard;
 use super::types::{ClickTarget, MainPane, NewRunPane, StageContentMode};
+use crate::tui::widgets::markdown_edit::{MdMode, MdOutcome};
 
 /// How long after a click a second one on the same cell still counts as a
 /// double click. 400ms is the interval most desktops ship as their default.
@@ -41,6 +42,52 @@ impl Dashboard {
             .map(|(_, target)| *target)
     }
 
+    /// Take the view a long-form box just switched to as the user's standing
+    /// preference, so the next box opens the same way and so does the next
+    /// session. Reports whether anything on the box happened at all.
+    ///
+    /// Every host funnels its keys and clicks through here, which is what
+    /// keeps four boxes and one remembered choice in step: the box reports the
+    /// switch, and exactly one place writes it down.
+    pub(in crate::commands::dashboard) fn remember_md_mode(&mut self, outcome: MdOutcome) -> bool {
+        match outcome {
+            MdOutcome::ModeChanged(mode) => {
+                self.md_preview = mode == MdMode::Preview;
+                self.save_ui_state();
+                true
+            }
+            MdOutcome::Edited => true,
+            MdOutcome::Ignored => false,
+        }
+    }
+
+    /// The view a newly opened box should start in.
+    pub(in crate::commands::dashboard) fn md_mode(&self) -> MdMode {
+        match self.md_preview {
+            true => MdMode::Preview,
+            false => MdMode::Source,
+        }
+    }
+
+    /// Follow the pointer over whichever long-form editor is on screen, so the
+    /// button under it lifts and the box's bottom border names it.
+    ///
+    /// Motion events already wake the loop (crossterm's mouse capture turns on
+    /// any-motion tracking), so this costs a hit test, not a redraw.
+    pub(super) fn markdown_toolbar_hover(&mut self, column: u16, row: u16) {
+        if self.agent_builder.is_some() {
+            self.prompts_toolbar_hover(column, row);
+            return;
+        }
+        if self.new_run_screen {
+            self.new_run_task.hover(column, row);
+            return;
+        }
+        if self.input_mode {
+            self.input_textarea.hover(column, row);
+        }
+    }
+
     /// Route a press to the formatting toolbar of whichever long-form editor
     /// is on screen, reporting whether a button was under it.
     ///
@@ -55,13 +102,17 @@ impl Dashboard {
             return self.prompts_toolbar_click(column, row);
         }
         if self.new_run_screen {
-            if self.new_run_task.click(column, row) {
+            let outcome = self.new_run_task.click(column, row);
+            if outcome != MdOutcome::Ignored {
                 self.new_run_focus = NewRunPane::Task;
-                return true;
             }
+            return self.remember_md_mode(outcome);
+        }
+        if !self.input_mode {
             return false;
         }
-        self.input_mode && self.input_textarea.click(column, row)
+        let outcome = self.input_textarea.click(column, row);
+        self.remember_md_mode(outcome)
     }
 
     /// Act on a plain click. Returns whether anything was under it, purely so
@@ -166,19 +217,36 @@ mod tests {
     ///
     /// Found in the buffer rather than computed from the layout, so the test
     /// clicks the cell a person would click and not the cell the test thinks
-    /// the renderer should have used. The row reads `" B │ I │ ..."`, so a `B`
-    /// with an `I` four columns later is the toolbar and nothing else is.
+    /// the renderer should have used. The row reads `" B  i  S  U "`, so a `B`
+    /// with an `i` three columns later is the toolbar and nothing else is.
     fn find_bold_button(dash: &mut Dashboard, width: u16, height: u16) -> (u16, u16) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| dash.draw(f)).unwrap();
         let buf = terminal.backend().buffer().clone();
         let at = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string());
         (0..height)
-            .flat_map(|y| (0..width.saturating_sub(4)).map(move |x| (x, y)))
+            .flat_map(|y| (0..width.saturating_sub(3)).map(move |x| (x, y)))
             .find(|&(x, y)| {
-                at(x, y).as_deref() == Some("B") && at(x + 4, y).as_deref() == Some("I")
+                at(x, y).as_deref() == Some("B") && at(x + 3, y).as_deref() == Some("i")
             })
             .expect("a formatting toolbar was drawn")
+    }
+
+    /// Where a toolbar chip with `label` on it landed. Every glyph on that row
+    /// is one column wide, so a char index is a column.
+    fn find_chip(dash: &mut Dashboard, label: &str, width: u16, height: u16) -> (u16, u16) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..height)
+            .filter_map(|y| {
+                let row: String = (0..width)
+                    .map(|x| buf.cell((x, y)).map_or(" ", |c| c.symbol()).to_string())
+                    .collect();
+                row.find(label).map(|x| (x as u16, y))
+            })
+            .next()
+            .expect("the chip was drawn")
     }
 
     fn press_and_release(dash: &mut Dashboard, column: u16, row: u16) {
@@ -480,6 +548,8 @@ mod tests {
         assert_eq!(dash.new_run_focus, NewRunPane::Agents);
 
         let (x, y) = find_bold_button(&mut dash, 120, 40);
+        // The pointer reaching the button lights it before the press lands.
+        dash.markdown_toolbar_hover(x, y);
         press_and_release(&mut dash, x, y);
         assert_eq!(dash.new_run_task.text(), "****");
         assert_eq!(dash.new_run_focus, NewRunPane::Task);
@@ -520,5 +590,66 @@ mod tests {
         dash.update_display_indices();
         draw(&mut dash, 120, 40);
         assert!(!dash.markdown_toolbar_click(5, 5));
+        // Motion with nothing open is a no-op rather than a panic.
+        dash.markdown_toolbar_hover(5, 5);
+    }
+
+    /// Switching the view is a preference, not a per-box setting: it is
+    /// written down once and every box opened afterwards starts there.
+    #[test]
+    fn switching_the_view_is_remembered_for_the_next_box_and_the_next_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = make_test_dashboard();
+        dash.ui_state_path = Some(dir.path().join("ui-state.json"));
+        dash.new_run_ctx.workdir = dir.path().to_path_buf();
+        dash.new_run_ctx.agents_dir = dir.path().join("agents");
+        dash.new_run_ctx.config_path = dir.path().join("config.toml");
+        dash.open_new_run_screen();
+        assert_eq!(dash.new_run_task.mode(), MdMode::Source);
+
+        // Click the `Preview` half of the switch, found where it was drawn.
+        let (preview, y) = find_chip(&mut dash, "Preview", 120, 40);
+        press_and_release(&mut dash, preview, y);
+        assert_eq!(dash.new_run_task.mode(), MdMode::Preview);
+        assert!(dash.md_preview);
+
+        // The next box opens the same way, and so does the next dashboard.
+        dash.open_new_run_screen();
+        assert_eq!(dash.new_run_task.mode(), MdMode::Preview);
+
+        let mut next = make_test_dashboard();
+        next.ui_state_path = Some(dir.path().join("ui-state.json"));
+        next.load_ui_state();
+        assert!(next.md_preview, "the choice outlived the session");
+        assert_eq!(next.md_mode(), MdMode::Preview);
+    }
+
+    /// The pointer moving over a button lights it and names it, on whichever
+    /// box is on screen.
+    #[test]
+    fn motion_over_a_toolbar_names_the_button_under_it() {
+        let mut dash = make_test_dashboard();
+        dash.agents.push(make_test_agent("run-1"));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        let (x, y) = find_bold_button(&mut dash, 120, 40);
+        dash.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: x,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("bold"), "the border names it: {screen}");
     }
 }

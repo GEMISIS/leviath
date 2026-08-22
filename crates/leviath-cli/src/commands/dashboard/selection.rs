@@ -144,6 +144,12 @@ impl Dashboard {
         {
             return;
         }
+        // Plain motion is nobody else's business here: it only lights the
+        // toolbar button under the pointer and names it on the box's border.
+        if event.kind == MouseEventKind::Moved {
+            self.markdown_toolbar_hover(event.column, event.row);
+            return;
+        }
         // The Agents screen's chooser and canvas take the mouse first.
         if self.agent_builder.is_some() && self.handle_agents_mouse(event) {
             return;

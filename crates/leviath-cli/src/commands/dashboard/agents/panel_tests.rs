@@ -1097,6 +1097,12 @@ fn a_prompt_boxs_toolbar_formats_the_box_that_was_clicked() {
         Some(Overlay::Prompts(p)) if p.focus == PromptFocus::System
     ));
 
+    // The pointer moving over a button names it on that box's border.
+    let (bx, by) = buttons[0];
+    dash.handle_mouse(mouse(MouseEventKind::Moved, bx, by));
+    let screen = text(&mut dash);
+    assert!(screen.contains("bold"), "the border names it: {screen}");
+
     // Away from either toolbar, nothing formats.
     assert!(!dash.prompts_toolbar_click(x, y + 3));
 
@@ -1104,23 +1110,26 @@ fn a_prompt_boxs_toolbar_formats_the_box_that_was_clicked() {
     // agents screen at all: the overlay's boxes are the only thing it owns.
     dash.handle_key(ctrl('q'));
     assert!(!dash.prompts_toolbar_click(x, y));
+    dash.prompts_toolbar_hover(x, y);
     dash.agents().editor = None;
     assert!(!dash.prompts_toolbar_click(x, y));
+    dash.prompts_toolbar_hover(x, y);
     dash.agent_builder = None;
     assert!(!dash.prompts_toolbar_click(x, y));
+    dash.prompts_toolbar_hover(x, y);
     let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Every `B` button drawn in the frame, top to bottom. The row reads
-/// `" B │ I │ ..."`, so a `B` with an `I` four columns on is a toolbar.
+/// `" B  i  S  U "`, so a `B` with an `i` three columns on is a toolbar.
 fn bold_buttons(dash: &mut Dashboard, w: u16, h: u16) -> Vec<(u16, u16)> {
     let terminal = draw(dash, w, h);
     let buf = terminal.backend().buffer().clone();
     let at = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string());
     let mut found = Vec::new();
     for y in 0..h {
-        for x in 0..w.saturating_sub(4) {
-            if at(x, y).as_deref() == Some("B") && at(x + 4, y).as_deref() == Some("I") {
+        for x in 0..w.saturating_sub(3) {
+            if at(x, y).as_deref() == Some("B") && at(x + 3, y).as_deref() == Some("i") {
                 found.push((x, y));
             }
         }

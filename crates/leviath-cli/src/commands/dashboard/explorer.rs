@@ -860,7 +860,10 @@ condition = "llm_choice"
             inside.0,
             inside.1,
         ));
-        dash.handle_mouse(mouse(MouseEventKind::Moved, inside.0, inside.1));
+        // A kind the canvas does not route (the wheel sideways) leaves the
+        // capture alone. Plain motion no longer reaches here at all: it is
+        // taken above, to light the long-form editor's toolbar.
+        dash.handle_mouse(mouse(MouseEventKind::ScrollLeft, inside.0, inside.1));
         assert_eq!(dash.mouse_capture, None);
 
         // A press outside the canvas starts a text selection as before, and

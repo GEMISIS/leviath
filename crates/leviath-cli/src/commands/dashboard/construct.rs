@@ -178,6 +178,7 @@ impl Dashboard {
             new_run_filter: String::new(),
             new_run_selected: 0,
             new_run_task: MarkdownEdit::default(),
+            md_preview: false,
             new_run_focus: NewRunPane::Agents,
             new_run_files: Vec::new(),
             new_run_file_ref: false,

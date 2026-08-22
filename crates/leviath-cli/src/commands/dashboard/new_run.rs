@@ -54,7 +54,7 @@ impl Dashboard {
         self.new_run_selected = 0;
         // Filled in below, once the catalog is built: the list has to exist
         // before a name can be found in it.
-        self.new_run_task = MarkdownEdit::default();
+        self.new_run_task = MarkdownEdit::default().in_mode(self.md_mode());
         self.new_run_task
             .set_placeholder("What should this agent do? Markdown is fine here.");
         // Unattended is off every time the screen opens. It is a consequential
@@ -392,7 +392,8 @@ impl Dashboard {
                 self.new_run_file_ref = true;
             }
             _ => {
-                self.new_run_task.handle_key(&key);
+                let outcome = self.new_run_task.handle_key(&key);
+                self.remember_md_mode(outcome);
             }
         }
     }

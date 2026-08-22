@@ -29,7 +29,7 @@ use ratatui::{
 // definition in `tui::theme` rather than a hand-copied duplicate of the
 // dashboard's palette, which is exactly the kind of thing that drifts.
 
-use crate::tui::theme::{C_ACCENT, C_CODE_BG, C_DIM, C_MUTED, C_SUCCESS, C_WHITE};
+use crate::tui::theme::{C_ACCENT, C_CODE_BG, C_CODE_FG, C_DIM, C_MUTED, C_SUCCESS, C_WHITE};
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -44,12 +44,28 @@ pub fn markdown_to_text(input: &str, width: u16) -> Text<'static> {
 
 // ─── Renderer internals ───────────────────────────────────────────────────────
 
+/// Whether an inline-HTML event is exactly `<name>`, whatever case it was
+/// written in and whatever whitespace it was padded with.
+///
+/// Deliberately exact: `<u>` underlines, `<ul>` is left to the catch-all that
+/// ignores every other tag. A prefix test here would have swallowed it.
+fn is_tag(html: &str, name: &str) -> bool {
+    html.trim()
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+        .is_some_and(|inner| inner.trim().eq_ignore_ascii_case(name))
+}
+
 /// Stack of style modifiers accumulated from nested inline tags.
 #[derive(Default, Clone)]
 struct InlineStyle {
     bold: bool,
     italic: bool,
     strikethrough: bool,
+    /// `<u>…</u>`. Markdown has no underline of its own, so this is the HTML
+    /// tag every renderer understands, and the one the dashboard's long-form
+    /// editor writes.
+    underline: bool,
     code: bool,
     link: bool,
 }
@@ -58,7 +74,7 @@ impl InlineStyle {
     fn to_ratatui_style(&self) -> Style {
         let mut style = Style::default().fg(C_WHITE);
         if self.code {
-            style = style.fg(Color::Rgb(200, 160, 100)).bg(C_CODE_BG);
+            style = style.fg(C_CODE_FG).bg(C_CODE_BG);
         } else if self.link {
             style = style.fg(C_ACCENT).add_modifier(Modifier::UNDERLINED);
         }
@@ -70,6 +86,9 @@ impl InlineStyle {
         }
         if self.strikethrough {
             style = style.add_modifier(Modifier::CROSSED_OUT);
+        }
+        if self.underline {
+            style = style.add_modifier(Modifier::UNDERLINED);
         }
         style
     }
@@ -150,6 +169,9 @@ impl Renderer {
             }
             if parent.strikethrough {
                 new_style.strikethrough = true;
+            }
+            if parent.underline {
+                new_style.underline = true;
             }
         }
         self.inline_stack.push(new_style);
@@ -397,6 +419,21 @@ impl Renderer {
                     self.pop_inline();
                 }
 
+                // The one HTML tag this renderer reads. Markdown has no
+                // underline, `<u>` is what every other renderer takes for it,
+                // and the dashboard's long-form editor writes exactly this - so
+                // an agent's output and a prompt you typed underline the same
+                // way. Every other tag stays ignored by the catch-all below.
+                Event::InlineHtml(html) if is_tag(&html, "u") => {
+                    self.push_inline(InlineStyle {
+                        underline: true,
+                        ..Default::default()
+                    });
+                }
+                Event::InlineHtml(html) if is_tag(&html, "/u") => {
+                    self.pop_inline();
+                }
+
                 Event::Start(Tag::Link { dest_url, .. }) => {
                     self.push_inline(InlineStyle {
                         link: true,
@@ -442,7 +479,7 @@ impl Renderer {
                     // Inline code span
                     self.current_spans.push(Span::styled(
                         text.into_string(),
-                        Style::default().fg(Color::Rgb(200, 160, 100)).bg(C_CODE_BG),
+                        Style::default().fg(C_CODE_FG).bg(C_CODE_BG),
                     ));
                 }
 
@@ -620,6 +657,63 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
         assert!(all.contains("deleted"));
+    }
+
+    /// `<u>` is the one HTML tag this renderer reads, because markdown has no
+    /// underline and the dashboard's long-form editor writes exactly this. The
+    /// tags themselves never reach the screen.
+    #[test]
+    fn the_underline_tag_underlines_and_does_not_print_itself() {
+        let text = markdown_to_text("plain <u>marked</u> plain", 80);
+        let spans: Vec<_> = text.lines.iter().flat_map(|l| l.spans.iter()).collect();
+        let all: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(all.trim(), "plain marked plain", "{all:?}");
+        assert!(
+            spans.iter().any(|s| s.content.contains("marked")
+                && s.style.add_modifier.contains(Modifier::UNDERLINED)),
+            "{spans:?}"
+        );
+        assert!(
+            spans.iter().any(|s| s.content.contains("plain")
+                && !s.style.add_modifier.contains(Modifier::UNDERLINED)),
+            "the underline did not stop: {spans:?}"
+        );
+    }
+
+    /// Bold inside an underline keeps both, the way strikethrough-inside-bold
+    /// already did.
+    #[test]
+    fn bold_inside_an_underline_keeps_both() {
+        let text = markdown_to_text("<u>a **b**</u>", 80);
+        let bold = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains('b') && s.style.add_modifier.contains(Modifier::BOLD))
+            .expect("a bold span");
+        assert!(bold.style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    /// Only `<u>` exactly. Every other tag stays ignored, `<ul>` included, and
+    /// a prefix test here would have swallowed it.
+    #[test]
+    fn only_the_underline_tag_is_read() {
+        assert!(is_tag("<u>", "u"));
+        assert!(is_tag("  <U>  ", "u"), "case and padding do not matter");
+        assert!(is_tag("</u>", "/u"));
+        assert!(!is_tag("<ul>", "u"));
+        assert!(!is_tag("<user>", "u"));
+        assert!(!is_tag("u", "u"), "not a tag at all");
+
+        // `<ins>` is the other tag that means underline in HTML, and is
+        // deliberately not read: this reads what the editor writes.
+        let text = markdown_to_text("<ins>x</ins>", 80);
+        let underlined = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .any(|s| s.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(!underlined);
     }
 
     #[test]

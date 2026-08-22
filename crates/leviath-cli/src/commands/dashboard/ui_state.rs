@@ -1,11 +1,11 @@
 //! The dashboard's half of the shared UI memory (see [`crate::ui_state`]).
 //!
-//! Four things are remembered, and they are the four a person would be annoyed
+//! Five things are remembered, and they are the five a person would be annoyed
 //! to redo: which runs' sub-agents are folded away, how the run list is sorted,
-//! which agent the new-run screen should open on, and how each run's Context
-//! tree was left. Everything else the dashboard holds is either transient (a
-//! filter, a search, the marks) or deliberately reset (`--yolo`), and reads
-//! there rather than here.
+//! which agent the new-run screen should open on, how each run's Context tree
+//! was left, and which view the long-form editors open in. Everything else
+//! the dashboard holds is either transient (a filter, a search, the marks) or
+//! deliberately reset (`--yolo`), and reads there rather than here.
 
 use super::state::Dashboard;
 use super::types::SortMode;
@@ -30,6 +30,7 @@ impl Dashboard {
             self.sort_mode = mode;
         }
         self.last_launched_agent = saved.last_agent;
+        self.md_preview = saved.markdown_preview;
     }
 
     /// Write the remembered view state, keeping whatever `lev setup` put in the
@@ -48,6 +49,7 @@ impl Dashboard {
             state.dashboard.collapsed_runs = self.collapsed_runs.iter().cloned().collect();
             state.dashboard.sort_mode = Some(self.sort_mode.label().to_string());
             state.dashboard.last_agent = self.last_launched_agent.clone();
+            state.dashboard.markdown_preview = self.md_preview;
             // Guarded on a non-empty list for the same reason the fold prune
             // is: "no runs" is also what a runs directory that could not be
             // read for a moment looks like, and pruning against that would
