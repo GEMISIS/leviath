@@ -13,6 +13,17 @@ same list.
 
 ## Unreleased
 
+- Fixed: a `fan_out` tool call no longer kills the run when its workers finish.
+  The fan-out parks its caller and delivers the workers' report as that call's
+  tool result, but the rest of the batch landed with a placeholder result for
+  the fan-out call already in it, so the report arrived as a second
+  `tool_result` under the same id and the next request came back
+  `400 each tool_use must have a single result`. Live runs died with their
+  workers already spawned and their findings collected. The call now keeps its
+  `tool_use` block in the assistant turn and gets exactly one result, the real
+  one. Only the tool entry point was affected; a `fan_out` stage was always
+  fine, which is why this survived so long.
+
 - Added: `GET /api/runs` takes a `parent` filter. A run's sub-agents are runs,
   so a console that draws workers nested under the run that started them was
   paging by a unit it does not display: a page of fifty could be seven visible
