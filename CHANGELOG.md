@@ -13,6 +13,15 @@ same list.
 
 ## Unreleased
 
+- Fixed: a model that takes only its default temperature no longer kills the
+  run. `gpt-5.5` rejects any other value outright, the capability table said it
+  supports one because the rest of the `gpt-5` family does, and a research run
+  died at `analyze` after 37 iterations and 2.4M tokens over an HTTP 400. The
+  table is corrected, but a table is the wrong thing to depend on - the next
+  model to behave this way will be wrong in it on the day it ships - so the
+  refusal is now read from the API's own error, the request retried without the
+  field, and the answer remembered for the rest of the process. Both the direct
+  OpenAI provider and the OpenRouter gateway, which reaches the same models.
 - Fixed: an Anthropic model reached through OpenRouter can cache its prompt
   again. System blocks - the stage prompt and the pinned context regions, which
   are the stable and by far the largest part of a request - were sent as plain

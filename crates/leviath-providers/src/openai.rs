@@ -2,7 +2,7 @@
 
 use crate::openai_compat::{
     OpenAiSseStream, TokenLimitField, build_openai_request_body_with, parse_openai_response,
-    send_chat_request, tools_refused_over_reasoning_effort,
+    send_chat_request, temperature_refused, tools_refused_over_reasoning_effort,
 };
 #[cfg(test)]
 use crate::provider::FinishReason;
@@ -41,6 +41,9 @@ pub struct OpenAIProvider {
     /// A `HashSet` behind a lock rather than a field on the request, because the
     /// provider is shared across every agent talking to it.
     reasoning_effort_none: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Models the API has refused a temperature for, so the next request to one
+    /// omits it instead of spending a round trip learning the same thing again.
+    temperature_unsupported: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl OpenAIProvider {
@@ -53,6 +56,7 @@ impl OpenAIProvider {
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             reasoning_effort_none: Default::default(),
+            temperature_unsupported: Default::default(),
         }
     }
 
@@ -68,6 +72,7 @@ impl OpenAIProvider {
             rate_limiter,
             capability_overrides: HashMap::new(),
             reasoning_effort_none: Default::default(),
+            temperature_unsupported: Default::default(),
         }
     }
 
@@ -85,6 +90,7 @@ impl OpenAIProvider {
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
             capability_overrides: overrides,
             reasoning_effort_none: Default::default(),
+            temperature_unsupported: Default::default(),
         }
     }
 
@@ -116,7 +122,11 @@ impl OpenAIProvider {
         // GPT-5.5 - flagship, 1M+ context, 128K output (check before generic gpt-5)
         if model.starts_with("gpt-5.5") {
             ModelCapabilities {
-                supports_temperature: true,
+                // Verified against the API: it takes only its default and
+                // rejects any other value outright. The rest of the gpt-5
+                // family accepts one, which is how the generic branch below
+                // came to cover this model wrongly.
+                supports_temperature: false,
                 supports_streaming: true,
                 supports_tools: true,
                 supports_system_prompt: true,
@@ -181,15 +191,16 @@ impl OpenAIProvider {
         // rejects `0.0` exactly as firmly as `0.7`, so the one flag that exists
         // to protect these models was what broke them. Omitting is what the
         // OpenRouter provider has always done for the same models.
-        if !self.capabilities(&request.model).supports_temperature
-            && let Some(fields) = body.as_object_mut()
-        {
-            fields.remove("temperature");
+        if !self.capabilities(&request.model).supports_temperature {
+            body = drop_temperature(body);
         }
 
         // Already learned for this model: pay nothing and send it up front.
         if self.needs_reasoning_effort_none(&request.model) {
             set_reasoning_effort_none(&mut body);
+        }
+        if self.temperature_is_unsupported(&request.model) {
+            body = drop_temperature(body);
         }
         // A caller who set `reasoning_effort` themselves (via the manifest's
         // `[model.parameters]`) has said what they want. Overriding it, or
@@ -229,8 +240,36 @@ impl OpenAIProvider {
                 )
                 .await
             }
+            Err(ProviderError::ApiError(detail)) if temperature_refused(&detail) => {
+                tracing::debug!(
+                    model = %request.model,
+                    "the API refused the temperature we sent; retrying without it"
+                );
+                self.remember_temperature_unsupported(&request.model);
+                body = drop_temperature(body);
+                send_chat_request(
+                    &self.client,
+                    "openai",
+                    &url,
+                    &headers,
+                    &body,
+                    self.rate_limiter.as_ref(),
+                    request.request_timeout_secs,
+                )
+                .await
+            }
             other => other,
         }
+    }
+
+    /// Whether this model has already refused a temperature.
+    fn temperature_is_unsupported(&self, model: &str) -> bool {
+        leviath_core::sync::lock(&self.temperature_unsupported).contains(model)
+    }
+
+    /// Record that it did, for the rest of this process.
+    fn remember_temperature_unsupported(&self, model: &str) {
+        leviath_core::sync::lock(&self.temperature_unsupported).insert(model.to_string());
     }
 
     /// Whether this model has already refused tools over a reasoning effort.
@@ -241,6 +280,25 @@ impl OpenAIProvider {
     /// Record that it did, for the rest of this process.
     fn remember_reasoning_effort_none(&self, model: &str) {
         leviath_core::sync::lock(&self.reasoning_effort_none).insert(model.to_string());
+    }
+}
+
+/// Take `temperature` out of a request body.
+///
+/// "Not supported" is not a value: a model that takes only its default rejects
+/// `0.0` exactly as firmly as `0.7`, so the field has to be absent rather than
+/// zeroed. One function because three callers want it - the capability says
+/// so, the API said so once already, or the API is saying so right now - and a
+/// body that is not an object is not a case any of them can produce.
+fn drop_temperature(body: serde_json::Value) -> serde_json::Value {
+    match body {
+        serde_json::Value::Object(mut fields) => {
+            fields.remove("temperature");
+            serde_json::Value::Object(fields)
+        }
+        // Not a shape any caller here produces, and returned untouched rather
+        // than panicked over: dropping a field is not worth a crash.
+        other => other,
     }
 }
 
@@ -464,6 +522,98 @@ mod tests {
         assert_eq!(response.finish_reason, FinishReason::ToolCall);
     }
 
+    /// Both arms of the removal, including the shape no caller produces.
+    #[test]
+    fn dropping_a_temperature_leaves_everything_else_alone() {
+        let body = serde_json::json!({"model": "m", "temperature": 0.7, "max_tokens": 8});
+        assert_eq!(
+            super::drop_temperature(body),
+            serde_json::json!({"model": "m", "max_tokens": 8})
+        );
+        // A body that is not an object comes back untouched.
+        assert_eq!(
+            super::drop_temperature(serde_json::json!(7)),
+            serde_json::json!(7)
+        );
+    }
+
+    /// The provider recovers from the refusal instead of failing the run, and
+    /// the second request is the one that differs.
+    ///
+    /// The run this comes from died at `analyze` after 37 iterations and 2.4M
+    /// tokens because the capability table said `gpt-5.5` takes a temperature
+    /// and it does not. The table is corrected too, but a table is the wrong
+    /// thing to depend on - the next model to behave this way will be wrong in
+    /// it on the day it ships - so the recovery is driven by what the API said.
+    #[tokio::test]
+    async fn a_refused_temperature_is_retried_without_one() {
+        let refusal = br#"{"error":{"message":"Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.","type":"invalid_request_error","param":"temperature","code":"unsupported_value"}}"#;
+        let ok = br#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#;
+        let (url, bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (400, "Bad Request", refusal.to_vec()),
+            (200, "OK", ok.to_vec()),
+        ])
+        .await;
+
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        )
+        .with_base_url(Some(url));
+
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "hi".into(),
+                cache_breakpoint: false,
+            }],
+            // A model the table believes takes a temperature, so one is sent
+            // and the refusal is what removes it.
+            model: "gpt-5.4".to_string(),
+            max_tokens: 16,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let out = provider.infer(&request).await;
+        assert!(out.is_ok(), "the retry has to rescue the call: {out:?}");
+        assert_eq!(out.expect("checked ok above").content, "ok");
+
+        let sent = leviath_core::sync::lock(&bodies).clone();
+        assert_eq!(sent.len(), 2, "one refusal, one retry: {sent:?}");
+        // As a pair, so the whole claim is in one message and neither
+        // argument is an expression that only runs when the test fails.
+        let carried: Vec<bool> = sent.iter().map(|b| b.contains("temperature")).collect();
+        assert_eq!(
+            carried,
+            vec![true, false],
+            "the first request carries the temperature and the retry drops it: {sent:?}"
+        );
+
+        // Learned, so the next call to this model omits it up front rather
+        // than spending the refused round trip again. Without this the fix
+        // costs an extra request on every single inference.
+        assert!(provider.temperature_is_unsupported("gpt-5.4"));
+        let (url2, bodies2) =
+            leviath_testkit::spawn_mock_sequence(vec![(200, "OK", ok.to_vec())]).await;
+        let provider = provider.with_base_url(Some(url2));
+        provider
+            .infer(&request)
+            .await
+            .expect("the second call succeeds first time");
+        let again = leviath_core::sync::lock(&bodies2).clone();
+        assert_eq!(again.len(), 1, "no retry needed: {again:?}");
+        let carried_again: Vec<bool> = again.iter().map(|b| b.contains("temperature")).collect();
+        assert_eq!(
+            carried_again,
+            vec![false],
+            "and it was omitted up front: {again:?}"
+        );
+    }
+
     #[test]
     fn test_builtin_capabilities_gpt55() {
         let provider = OpenAIProvider::new(
@@ -471,7 +621,12 @@ mod tests {
             "test-key".to_string(),
         );
         let caps = provider.builtin_capabilities("gpt-5.5");
-        assert!(caps.supports_temperature);
+        // Verified against the API, which answers "Unsupported value:
+        // 'temperature' does not support 0.7 with this model. Only the default
+        // (1) value is supported." The rest of the gpt-5 family does take one,
+        // which is how the generic branch came to cover this model wrongly and
+        // killed a research run mid-`analyze`.
+        assert!(!caps.supports_temperature);
         assert!(caps.supports_streaming);
         assert_eq!(caps.max_context_tokens, 1_050_000);
         assert_eq!(caps.max_output_tokens, 128_000);
