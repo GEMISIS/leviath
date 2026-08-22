@@ -235,13 +235,10 @@ fn agent_editor_sections() -> Vec<HelpSection> {
                 ("ctrl-s / esc", "apply both and close"),
                 ("ctrl-q", "close without applying"),
                 (
-                    "ctrl-e",
+                    "F2",
                     "open the focused prompt in $EDITOR (the dashboard waits for it)",
                 ),
-                (
-                    "",
-                    "so inline code is ctrl-t here; the toolbar button does it too",
-                ),
+                ("F1", "this help (? types a question mark in a prompt)"),
             ],
         },
         formatting_section(),
