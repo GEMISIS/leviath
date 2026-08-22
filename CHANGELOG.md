@@ -86,13 +86,15 @@ same list.
   to their content and squeezed to fit the pane widest-first, with `…` where a
   cell was cut. In an agent's output as much as in the editor's preview.
 - Added: a ```mermaid``` flowchart is drawn as a diagram rather than printed as
-  its own source with an errand attached ("install mermaid-cli"). Boxes laid
-  out in layers, arrows routed between them, edge labels beside the arrow
-  heads, and the `[]`, `()`, `{}` and `(())` shapes drawn differently. An edge
-  that runs backwards or skips a layer is listed under the diagram rather than
-  drawn through the boxes in between, and a mermaid diagram that is not a
-  flowchart still shows its source, because a wrong picture is worse than an
-  honest listing.
+  its own source with an errand attached ("install mermaid-cli"). Being able to
+  see what connects to what is the whole point, so no two edges share a row:
+  each leaves its box, turns onto a lane of its own, and turns down again over
+  its target, with its label at the end of that lane. Where several edges leave
+  one box the stem tees off rather than ending. A loop or a layer-skipping edge
+  runs down a corridor beside the diagram and comes back in with a `◀`, falling
+  back to being named underneath only when the pane is too narrow for one. A
+  mermaid diagram that is not a flowchart still shows its source, because a
+  wrong picture is worse than an honest listing.
 - Added: a table button (`ctrl-t`) that asks how many columns and rows, and a
   diagram button (`ctrl-g`) that writes a small `flowchart TD` to edit rather
   than an empty fence. Both are on the toolbar, drawn in the colours the
@@ -109,7 +111,9 @@ same list.
 - Added: a long-form box has two views. `Markdown` is what you are writing;
   `Preview` is how it will read, rendered by the same code that draws an agent's
   output in the run view, so the two cannot disagree. `ctrl-p` switches, and so
-  does clicking either half of the switch on the toolbar. Which view you prefer
+  does the switch on the toolbar, which is one button that says which view you
+  are in and flips it, and keeps its width when its label changes so the
+  buttons beside it do not jump. Which view you prefer
   is remembered in `ui-state.json`, so every box opens in it and so does the
   next session. The preview is not read-only: typing goes into the document
   underneath and the rendering re-runs as you type, so markup resolves the

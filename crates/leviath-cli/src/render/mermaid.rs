@@ -28,8 +28,8 @@ use crate::tui::theme::{C_ACCENT, C_BORDER, C_DIM, C_MUTED, C_WHITE};
 
 /// Gap between two boxes on the same layer.
 const GAP: usize = 2;
-/// Rows of routing between one layer of boxes and the next.
-const ROUTE_ROWS: usize = 3;
+/// Rows a box takes: its two borders and the label between them.
+const BOX_ROWS: usize = 3;
 
 /// A node's outline, from its mermaid brackets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,8 +115,8 @@ impl Chart {
 /// understands and the caller should show the source instead.
 pub(super) fn render(source: &[String], width: u16) -> Option<Vec<Line<'static>>> {
     let chart = parse(source)?;
-    let (layers, back) = layer(&chart);
-    Some(draw(&chart, &layers, &back, width))
+    let layers = layer(&chart);
+    Some(draw(&chart, &layers, width))
 }
 
 // ─── Parsing ─────────────────────────────────────────────────────────────────
@@ -251,7 +251,7 @@ fn connector(s: &str) -> Option<(Option<String>, bool, &str)> {
 /// (`A --> B --> A`, which is most interesting flowcharts) drives the depths
 /// up until the guard stops them, and the diagram comes out as a column of
 /// empty layers. A back edge is listed under the diagram instead.
-fn layer(chart: &Chart) -> (Vec<Vec<usize>>, Vec<bool>) {
+fn layer(chart: &Chart) -> Vec<Vec<usize>> {
     let back = back_edges(chart);
     let mut depth = vec![0usize; chart.nodes.len()];
     for _ in 0..chart.nodes.len() {
@@ -276,7 +276,7 @@ fn layer(chart: &Chart) -> (Vec<Vec<usize>>, Vec<bool>) {
     }
     // A layer nothing landed on would draw as three blank rows.
     layers.retain(|row: &Vec<usize>| !row.is_empty());
-    (layers, back)
+    layers
 }
 
 /// Which edges close a loop, by depth-first search: an edge whose target is
@@ -385,18 +385,64 @@ fn box_width(node: &Node) -> usize {
     width + (width + 1) % 2
 }
 
-/// Draw the whole diagram: a title line, the layered boxes, and a listing of
-/// any edge that could not be drawn between adjacent layers.
-fn draw(chart: &Chart, layers: &[Vec<usize>], back: &[bool], width: u16) -> Vec<Line<'static>> {
-    let width = width.max(8) as usize;
+/// Where every box sits, and how much room the corridors need.
+struct Plan {
+    /// Per node: left column, centre column, box width.
+    left: Vec<usize>,
+    centre: Vec<usize>,
+    widths: Vec<usize>,
+    /// Per node: the row its box's top border is on.
+    top: Vec<usize>,
+    /// Rows between one layer's boxes and the next, per gap.
+    band: Vec<usize>,
+    /// Total rows.
+    height: usize,
+    /// The column the first side corridor runs down, when there is room for
+    /// corridors at all.
+    corridor: Option<usize>,
+}
+
+/// Edges that do not run from a layer into the one directly below it.
+///
+/// These are the loops and the shortcuts, and they are what a flowchart is
+/// usually *about*. They cannot be drawn straight down without crossing the
+/// boxes in between, so each gets its own corridor down the right-hand side.
+fn detours(chart: &Chart, depth: &[usize]) -> Vec<usize> {
+    (0..chart.edges.len())
+        .filter(|i| {
+            let edge = &chart.edges[*i];
+            depth[edge.to] != depth[edge.from] + 1
+        })
+        .collect()
+}
+
+/// Lay the diagram out: boxes centred per layer, one routing lane per edge
+/// that has to move sideways, and a corridor per detour.
+fn plan(chart: &Chart, layers: &[Vec<usize>], depth: &[usize], width: usize) -> Plan {
     let widths: Vec<usize> = chart.nodes.iter().map(box_width).collect();
-    // Where each layer's boxes start, and each box's centre column.
-    let mut centre = vec![0usize; chart.nodes.len()];
+    let detours = detours(chart, depth);
+    // Two columns per corridor: the line, and a gap beside it. Dropped
+    // entirely when the boxes would be squeezed to nothing by them.
+    let wanted = detours.len() * 2 + 1;
+    let widest: usize = layers
+        .iter()
+        .map(|row| {
+            row.iter().map(|n| widths[*n]).sum::<usize>() + GAP * row.len().saturating_sub(1)
+        })
+        .max()
+        .unwrap_or(0);
+    let corridor = (widest + wanted <= width).then_some(widest + 2);
+
+    let boxes_width = match corridor {
+        Some(_) => widest,
+        None => width,
+    };
     let mut left = vec![0usize; chart.nodes.len()];
+    let mut centre = vec![0usize; chart.nodes.len()];
     for row in layers {
         let span: usize =
             row.iter().map(|n| widths[*n]).sum::<usize>() + GAP * row.len().saturating_sub(1);
-        let mut x = (width.saturating_sub(span)) / 2;
+        let mut x = boxes_width.saturating_sub(span) / 2;
         for node in row {
             left[*node] = x;
             centre[*node] = x + widths[*node] / 2;
@@ -404,42 +450,77 @@ fn draw(chart: &Chart, layers: &[Vec<usize>], back: &[bool], width: u16) -> Vec<
         }
     }
 
-    let height = layers.len() * 3 + layers.len().saturating_sub(1) * ROUTE_ROWS;
-    let mut canvas = Canvas::new(width, height);
-    let border = Style::default().fg(C_BORDER);
+    // One lane per edge that moves sideways, so no two share a row and every
+    // line can be followed from its box to its arrow head.
+    let band: Vec<usize> = (0..layers.len().saturating_sub(1))
+        .map(|i| {
+            let lanes = chart
+                .edges
+                .iter()
+                .filter(|e| {
+                    layers[i].contains(&e.from)
+                        && layers[i + 1].contains(&e.to)
+                        && centre[e.from] != centre[e.to]
+                })
+                .count();
+            lanes.max(1) + 2
+        })
+        .collect();
 
+    let mut top = vec![0usize; chart.nodes.len()];
+    let mut y = 0usize;
     for (i, row) in layers.iter().enumerate() {
-        let top = i * (3 + ROUTE_ROWS);
+        for node in row {
+            top[*node] = y;
+        }
+        // The last layer has no band under it, so `band` runs out and the
+        // total stops at its boxes.
+        y += BOX_ROWS + band.get(i).copied().unwrap_or(0);
+    }
+    let height = y;
+    Plan {
+        left,
+        centre,
+        widths,
+        top,
+        band,
+        height,
+        corridor,
+    }
+}
+
+/// Draw the whole diagram: the layered boxes, a lane per edge between them,
+/// and a corridor down the side for every edge that loops or skips.
+fn draw(chart: &Chart, layers: &[Vec<usize>], width: u16) -> Vec<Line<'static>> {
+    let width = (width.max(8) as usize).saturating_sub(1);
+    let mut depth = vec![0usize; chart.nodes.len()];
+    for (d, row) in layers.iter().enumerate() {
+        for node in row {
+            depth[*node] = d;
+        }
+    }
+    let plan = plan(chart, layers, &depth, width);
+    let mut canvas = Canvas::new(width, plan.height);
+
+    for row in layers {
         for node in row {
             draw_box(
                 &mut canvas,
-                left[*node],
-                top,
+                plan.left[*node],
+                plan.top[*node],
                 &chart.nodes[*node],
-                widths[*node],
-            );
-        }
-        if i + 1 < layers.len() {
-            route(
-                chart,
-                &canvas_rows(top),
-                &mut canvas,
-                &centre,
-                layers,
-                i,
-                border,
+                plan.widths[*node],
             );
         }
     }
+    for i in 0..layers.len().saturating_sub(1) {
+        route(chart, &mut canvas, &plan, layers, i);
+    }
+    let listed = corridors(chart, &mut canvas, &plan, &depth);
 
     let mut out = canvas.into_lines();
-    out.extend(extras(chart, layers, back));
+    out.extend(listed);
     out
-}
-
-/// The three routing rows under a layer whose boxes start at `top`.
-fn canvas_rows(top: usize) -> [usize; 3] {
-    [top + 3, top + 4, top + 5]
 }
 
 /// One node's box.
@@ -472,136 +553,242 @@ fn draw_box(canvas: &mut Canvas, x: usize, y: usize, node: &Node, width: usize) 
     );
 }
 
-/// Route the edges from layer `i` into layer `i + 1`.
-///
-/// Grouped by source, because the junction a line turns through depends on
-/// every edge leaving that node at once: one going right is a `╰`, one each way
-/// is a `┴`. Drawing them one at a time would put an elbow where a tee belongs.
-fn route(
-    chart: &Chart,
-    rows: &[usize; 3],
-    canvas: &mut Canvas,
-    centre: &[usize],
-    layers: &[Vec<usize>],
-    i: usize,
-    border: Style,
-) {
-    let here = &layers[i];
-    let next = &layers[i + 1];
-    // Columns where a line leaves a box downwards. A target that arrives at
-    // one of them is a crossing, not an elbow, and the target pass would
-    // otherwise paint over the junction the source pass just drew.
-    let mut junctions: Vec<usize> = Vec::new();
-    for source in here {
-        let outgoing: Vec<&Edge> = chart
-            .edges
-            .iter()
-            .filter(|e| e.from == *source && next.contains(&e.to))
-            .collect();
-        if outgoing.is_empty() {
-            continue;
-        }
-        let from = centre[*source];
-        let dashed = outgoing.iter().all(|e| e.dashed);
-        canvas.put(from, rows[0], if dashed { '╎' } else { '│' }, border);
+/// Which way a line leaves a cell, and whether every line through it was
+/// drawn with a dashed connector.
+#[derive(Default, Clone, Copy)]
+struct Meets {
+    north: bool,
+    south: bool,
+    east: bool,
+    west: bool,
+    /// Set by the first line through; cleared by any solid one.
+    dashed: bool,
+    seen: bool,
+}
 
-        for edge in &outgoing {
-            let to = centre[edge.to];
-            let (lo, hi) = (from.min(to), from.max(to));
-            for x in lo..=hi {
-                canvas.put(x, rows[1], if dashed { '╌' } else { '─' }, border);
-            }
-        }
-        // The junction under the source, once every direction is known.
-        let left = outgoing.iter().any(|e| centre[e.to] < from);
-        let right = outgoing.iter().any(|e| centre[e.to] > from);
-        let down = outgoing.iter().any(|e| centre[e.to] == from);
-        canvas.put(
-            from,
-            rows[1],
-            match (left, right, down) {
-                (true, true, _) => '┴',
-                (true, false, true) => '┤',
-                (false, true, true) => '├',
-                (true, false, false) => '╯',
-                (false, true, false) => '╰',
-                (false, false, _) => '│',
+impl Meets {
+    /// The glyph for what meets here.
+    fn glyph(self) -> char {
+        // No `┴` or `┬`: a run that continues both ways can only meet a line
+        // that continues both ways, because every edge turns on a row of its
+        // own. A stem ending on a run's row would need the two to share one,
+        // and they never do.
+        match (self.north, self.south, self.east, self.west) {
+            (true, true, true, true) => '┼',
+            (true, true, true, false) => '├',
+            (true, true, false, true) => '┤',
+            (true, false, true, false) => '╰',
+            (true, false, false, true) => '╯',
+            (false, true, true, false) => '╭',
+            (false, true, false, true) => '╮',
+            (_, _, true, _) | (_, _, _, true) => match self.dashed {
+                true => '╌',
+                false => '─',
             },
-            border,
-        );
-        junctions.push(from);
-    }
-
-    // Then the arrow heads, once every run is down. A target's mark cannot be
-    // read off the canvas: the next source's run paints straight over it, so
-    // it is decided from the edges that arrive there instead.
-    let mut by_target: Vec<(usize, Vec<&Edge>)> = Vec::new();
-    for edge in &chart.edges {
-        if !here.contains(&edge.from) || !next.contains(&edge.to) {
-            continue;
-        }
-        match by_target.iter_mut().find(|(t, _)| *t == edge.to) {
-            Some((_, arriving)) => arriving.push(edge),
-            None => by_target.push((edge.to, vec![edge])),
-        }
-    }
-    for (target, incoming) in by_target {
-        let to = centre[target];
-        let left = incoming.iter().any(|e| centre[e.from] < to);
-        let right = incoming.iter().any(|e| centre[e.from] > to);
-        // A column that is already a source junction has a line running down
-        // through it as well as sideways.
-        let crossing = junctions.contains(&to);
-        if let Some(mark) = match (left, right, crossing) {
-            (false, false, _) => None,
-            (_, _, true) => Some('┼'),
-            // Reached from both sides, so the run passes through it.
-            (true, true, false) => Some('┬'),
-            (true, false, false) => Some('╮'),
-            (false, true, false) => Some('╭'),
-        } {
-            canvas.put(to, rows[1], mark, border);
-        }
-        canvas.put(to, rows[2], '▼', Style::default().fg(C_ACCENT));
-        if let Some(label) = incoming.iter().find_map(|e| e.label.as_ref()) {
-            canvas.text(to + 2, rows[2], label, Style::default().fg(C_MUTED));
+            _ => match self.dashed {
+                true => '╎',
+                false => '│',
+            },
         }
     }
 }
 
-/// Edges that do not run between adjacent layers, listed rather than drawn.
+/// The cells a run of line passes through, and which way it leaves each.
 ///
-/// A back edge or a layer-skipping edge needs routing around the boxes in
-/// between; naming it is honest, and drawing it through them would not be.
-fn extras(chart: &Chart, layers: &[Vec<usize>], back: &[bool]) -> Vec<Line<'static>> {
-    let mut depth = vec![0usize; chart.nodes.len()];
-    for (d, row) in layers.iter().enumerate() {
-        for node in row {
-            depth[*node] = d;
-        }
-    }
-    let mut out = Vec::new();
-    for (i, edge) in chart.edges.iter().enumerate() {
-        if !back[i] && depth[edge.to] == depth[edge.from] + 1 {
-            continue;
-        }
-        let label = match &edge.label {
-            Some(label) => format!("  ({label})"),
-            None => String::new(),
+/// Collected before anything is drawn rather than painted edge by edge. Two
+/// lines can want the same cell - a stem carrying on past a lane another edge
+/// turns onto, a box in one layer sitting over a box in the next - and
+/// whichever painted last would win, breaking the other. Deciding the glyph
+/// from everything that meets there is what keeps both followable.
+#[derive(Default)]
+struct Lines {
+    cells: HashMap<(usize, usize), Meets>,
+}
+
+impl Lines {
+    fn mark(&mut self, x: usize, y: usize, dashed: bool, f: impl Fn(&mut Meets)) {
+        let cell = self.cells.entry((x, y)).or_default();
+        f(cell);
+        cell.dashed = match cell.seen {
+            true => cell.dashed && dashed,
+            false => dashed,
         };
-        out.push(Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                chart.nodes[edge.from].label.clone(),
-                Style::default().fg(C_WHITE),
-            ),
-            Span::styled(" ──▶ ", Style::default().fg(C_DIM)),
-            Span::styled(
-                chart.nodes[edge.to].label.clone(),
-                Style::default().fg(C_WHITE),
-            ),
-            Span::styled(label, Style::default().fg(C_MUTED)),
-        ]));
+        cell.seen = true;
     }
-    out
+
+    /// A vertical run down column `x`, from row `top` to row `bottom`.
+    fn down(&mut self, x: usize, top: usize, bottom: usize, dashed: bool) {
+        for y in top..=bottom {
+            self.mark(x, y, dashed, |c| {
+                c.north |= y > top;
+                c.south |= y < bottom;
+            });
+        }
+    }
+
+    /// A horizontal run along row `y`, between columns `a` and `b`.
+    fn across(&mut self, y: usize, a: usize, b: usize, dashed: bool) {
+        let (lo, hi) = (a.min(b), a.max(b));
+        for x in lo..=hi {
+            self.mark(x, y, dashed, |c| {
+                c.west |= x > lo;
+                c.east |= x < hi;
+            });
+        }
+    }
+
+    fn paint(self, canvas: &mut Canvas, style: Style) {
+        for ((x, y), cell) in self.cells {
+            canvas.put(x, y, cell.glyph(), style);
+        }
+    }
+}
+
+/// Route layer `i` into layer `i + 1`, one lane per edge.
+///
+/// A lane of its own is what makes the diagram readable: with every edge
+/// sharing one row, two lines that cross merge into a single run and there is
+/// no way to tell which end joins which. Here each edge leaves its box, turns
+/// onto a row nothing else uses, and turns down again over its target, so a
+/// finger can follow it the whole way.
+fn route(chart: &Chart, canvas: &mut Canvas, plan: &Plan, layers: &[Vec<usize>], i: usize) {
+    let border = Style::default().fg(C_BORDER);
+    let arrow = Style::default().fg(C_ACCENT);
+    let band_top = plan.top[layers[i][0]] + BOX_ROWS;
+    let head = band_top + plan.band[i] - 1;
+
+    let mut lines = Lines::default();
+    let mut heads: Vec<(usize, &Edge)> = Vec::new();
+    let mut lane = 0usize;
+    for source in &layers[i] {
+        let outgoing: Vec<&Edge> = chart
+            .edges
+            .iter()
+            .filter(|e| e.from == *source && layers[i + 1].contains(&e.to))
+            .collect();
+        let from = plan.centre[*source];
+        for edge in outgoing {
+            let to = plan.centre[edge.to];
+            // Marked down to the arrow head's own row, not the one above it:
+            // the cell the head lands on is painted over afterwards, and
+            // stopping short leaves the last turn with nothing below it.
+            if from == to {
+                // Straight down: no lane needed, and nothing to cross.
+                lines.down(from, band_top, head, edge.dashed);
+                heads.push((to, edge));
+                continue;
+            }
+            lane += 1;
+            let row = band_top + lane;
+            lines.down(from, band_top, row, edge.dashed);
+            lines.across(row, from, to, edge.dashed);
+            lines.down(to, row, head, edge.dashed);
+            heads.push((to, edge));
+            // Past the end of the lane rather than on it: a line with a word
+            // in the middle of it is a line you cannot follow.
+            label(canvas, plan, from.max(to) + 2, row, edge);
+        }
+    }
+    lines.paint(canvas, border);
+    for (to, edge) in heads {
+        canvas.put(to, head, '▼', arrow);
+        if plan.centre[edge.from] == to {
+            label(canvas, plan, to + 2, head, edge);
+        }
+    }
+}
+
+/// An edge's label, where it fits without covering the diagram.
+fn label(canvas: &mut Canvas, plan: &Plan, x: usize, y: usize, edge: &Edge) {
+    let Some(text) = &edge.label else {
+        return;
+    };
+    let room = plan.corridor.unwrap_or(canvas.width);
+    if x + text.width() >= room {
+        return;
+    }
+    canvas.text(x, y, text, Style::default().fg(C_MUTED));
+}
+
+/// Draw every loop and shortcut down its own corridor beside the diagram,
+/// and report the ones there was no room for.
+///
+/// A corridor is what makes a loop visible at all: the edge leaves its box on
+/// the right, runs down a column nothing else uses, and comes back in at its
+/// target with a `◀`. Following it is the whole point, so no two share a
+/// column.
+fn corridors(
+    chart: &Chart,
+    canvas: &mut Canvas,
+    plan: &Plan,
+    depth: &[usize],
+) -> Vec<Line<'static>> {
+    let detours = detours(chart, depth);
+    let Some(base) = plan.corridor else {
+        return listing(chart, &detours);
+    };
+    let border = Style::default().fg(C_BORDER);
+    for (n, index) in detours.iter().enumerate() {
+        let edge = &chart.edges[*index];
+        // The corridors were only allocated at all when they all fit, so
+        // there is no "this one does not" case to handle.
+        let column = base + n * 2;
+        let (from, to) = (edge.from, edge.to);
+        let (from_row, to_row) = (plan.top[from] + 1, plan.top[to] + 1);
+        let from_edge = plan.left[from] + plan.widths[from];
+        let to_edge = plan.left[to] + plan.widths[to];
+        for x in from_edge..column {
+            canvas.put(x, from_row, '─', border);
+        }
+        for x in to_edge + 1..column {
+            canvas.put(x, to_row, '─', border);
+        }
+        // Corners by the two directions they join. The source end comes from
+        // the west and turns away vertically; the target end arrives
+        // vertically and turns back west.
+        let down = to_row > from_row;
+        canvas.put(column, from_row, if down { '╮' } else { '╯' }, border);
+        canvas.put(column, to_row, if down { '╯' } else { '╮' }, border);
+        let (lo, hi) = (from_row.min(to_row), from_row.max(to_row));
+        for y in lo + 1..hi {
+            canvas.put(column, y, '│', border);
+        }
+        canvas.put(to_edge, to_row, '◀', Style::default().fg(C_ACCENT));
+        if let Some(text) = &edge.label {
+            canvas.text(
+                column + 1,
+                lo + (hi - lo) / 2,
+                text,
+                Style::default().fg(C_MUTED),
+            );
+        }
+    }
+    Vec::new()
+}
+
+/// The detours as a list, for a pane too narrow to run corridors down.
+fn listing(chart: &Chart, detours: &[usize]) -> Vec<Line<'static>> {
+    detours
+        .iter()
+        .map(|index| {
+            let edge = &chart.edges[*index];
+            let label = match &edge.label {
+                Some(label) => format!("  ({label})"),
+                None => String::new(),
+            };
+            Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    chart.nodes[edge.from].label.clone(),
+                    Style::default().fg(C_WHITE),
+                ),
+                Span::styled(" ──▶ ", Style::default().fg(C_DIM)),
+                Span::styled(
+                    chart.nodes[edge.to].label.clone(),
+                    Style::default().fg(C_WHITE),
+                ),
+                Span::styled(label, Style::default().fg(C_MUTED)),
+            ])
+        })
+        .collect()
 }

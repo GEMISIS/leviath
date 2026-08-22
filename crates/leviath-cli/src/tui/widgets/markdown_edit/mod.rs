@@ -492,7 +492,7 @@ impl MarkdownEdit {
     /// at, and the border costs no rows.
     fn footer(&self) -> Line<'static> {
         let text = match self.hovered {
-            Some(slot) => slot.hint(),
+            Some(slot) => slot.hint(self.mode),
             None => match self.mode {
                 MdMode::Source => format!("markdown · {MODE_CHORD} previews it"),
                 MdMode::Preview => format!("preview · type to edit · {MODE_CHORD} for markdown"),
@@ -682,7 +682,7 @@ impl MarkdownEdit {
             }
             for slot in group {
                 spans.push(Span::styled(
-                    format!(" {} ", slot.label()),
+                    slot.face(self.mode),
                     self.chip_style(*slot, focused),
                 ));
                 self.slots.push((
@@ -710,19 +710,26 @@ impl MarkdownEdit {
     /// A chip: filled when it is the view you are in, lifted under the
     /// pointer, and otherwise wearing the style it applies.
     fn chip_style(&self, slot: Slot, focused: bool) -> Style {
-        if slot == Slot::Mode(self.mode) {
-            return Style::default()
-                .fg(Color::Black)
-                .bg(C_ACCENT)
-                .add_modifier(Modifier::BOLD);
+        // The switch is always filled: it is the one control that says what
+        // the box currently is, and a button that reports state has to look
+        // different from the ones that do something to the text.
+        if slot == Slot::ViewSwitch {
+            let bg = match self.hovered == Some(slot) {
+                true => C_CHROME_HOVER,
+                false => C_ACCENT,
+            };
+            let fg = match self.hovered == Some(slot) {
+                true => C_ACCENT,
+                false => Color::Black,
+            };
+            return Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
         }
         let base = match slot {
-            Slot::Mode(_) => Style::default().fg(C_MUTED),
             Slot::Format(action) if focused => action.face(),
             // An unfocused box still shows its toolbar, so you can see it is
             // there, but greyed rather than competing with the box that has
-            // the keys.
-            Slot::Format(_) => Style::default().fg(C_DIM),
+            // the keys. (The switch never reaches here: it returned above.)
+            _ => Style::default().fg(C_DIM),
         };
         match self.hovered == Some(slot) {
             true => base.bg(C_CHROME_HOVER),
@@ -804,7 +811,7 @@ impl MarkdownEdit {
     /// crossterm reports them.
     pub(crate) fn click(&mut self, column: u16, row: u16) -> MdOutcome {
         match self.slot_at(column, row) {
-            Some(Slot::Mode(mode)) => self.set_mode(mode),
+            Some(Slot::ViewSwitch) => self.set_mode(self.mode.flipped()),
             Some(Slot::Format(action)) => {
                 // No mode to leave: the preview renders the buffer as it is,
                 // so formatting from there shows up where you are looking.
@@ -1255,24 +1262,27 @@ mod tests {
             let label = action.label();
             assert!(bar.contains(label), "{label} is missing from {bar}");
         }
-        for mode in [MdMode::Source, MdMode::Preview] {
-            let label = mode.label();
-            assert!(bar.contains(label), "{label} is missing from {bar}");
-        }
+        // The switch says which view you are in, and says the other one once
+        // you press it.
+        assert!(bar.contains(MdMode::Source.label()), "{bar}");
+        let _ = md.handle_key(&chord('p'));
+        let flipped = draw(&mut md, 70, 6).remove(1);
+        assert!(flipped.contains(MdMode::Preview.label()), "{flipped}");
+        assert!(!flipped.contains(MdMode::Source.label()), "{flipped}");
     }
 
-    /// The whole bar needs 63 columns, which is what the task pane has on a
+    /// The whole bar needs 61 columns, inside what the task pane has on a
     /// 120-column terminal. This is the number to check against when a box
     /// turns out to be dropping groups.
     #[test]
-    fn the_full_toolbar_fits_in_sixty_three_columns() {
+    fn the_full_toolbar_fits_in_sixty_one_columns() {
         let separators = GROUPS.len() as u16 - 1;
         let buttons: u16 = GROUPS
             .iter()
             .flat_map(|group| group.iter())
             .map(|slot| slot.width())
             .sum();
-        assert_eq!(buttons + separators, 63);
+        assert_eq!(buttons + separators, 61);
     }
 
     /// A cramped pane drops buttons off the end rather than drawing outside
@@ -1515,12 +1525,14 @@ mod tests {
     fn the_view_switch_is_clickable_and_a_format_button_works_from_the_preview() {
         let mut md = edit("x");
         let bar = draw(&mut md, 70, 8).remove(1);
-        let preview = bar.find("Preview").expect("a Preview chip") as u16;
-        assert_eq!(
-            md.click(preview, 1),
-            MdOutcome::ModeChanged(MdMode::Preview)
-        );
+        // The switch is the one cell with the flip glyph on it.
+        let switch = bar.chars().position(|c| c == '⇄').expect("a switch") as u16;
+        assert_eq!(md.click(switch, 1), MdOutcome::ModeChanged(MdMode::Preview));
         assert_eq!(md.mode(), MdMode::Preview);
+        // And back again: one button, both ways.
+        assert_eq!(md.click(switch, 1), MdOutcome::ModeChanged(MdMode::Source));
+        assert_eq!(md.mode(), MdMode::Source);
+        let _ = md.click(switch, 1);
 
         // A format button pressed from the preview formats in place: the
         // rendering keeps up, so there is nothing to leave for.
@@ -1556,15 +1568,21 @@ mod tests {
     fn every_button_has_something_to_say_about_itself() {
         for group in GROUPS {
             for slot in group {
-                assert!(!slot.hint().is_empty(), "{slot:?}");
+                assert!(!slot.hint(MdMode::Source).is_empty(), "{slot:?}");
                 assert!(slot.width() > 2, "{slot:?}");
             }
         }
-        // The two halves of the switch describe themselves differently, so
-        // hovering either one is worth doing.
+        // The switch says something different depending on which way it will
+        // go, so hovering it is worth doing in either view.
         assert_ne!(
-            Slot::Mode(MdMode::Source).hint(),
-            Slot::Mode(MdMode::Preview).hint()
+            Slot::ViewSwitch.hint(MdMode::Source),
+            Slot::ViewSwitch.hint(MdMode::Preview)
+        );
+        // And it keeps its width when its label changes, so the buttons beside
+        // it do not jump when you press it.
+        assert_eq!(
+            Slot::ViewSwitch.face(MdMode::Source).chars().count(),
+            Slot::ViewSwitch.face(MdMode::Preview).chars().count()
         );
     }
 
@@ -1599,14 +1617,25 @@ mod tests {
     #[test]
     fn a_chip_is_filled_for_the_current_view_and_lifted_under_the_pointer() {
         let mut md = edit("");
+        // The switch is filled whichever view it is reporting: it is the
+        // control that says what the box is.
+        assert_eq!(md.chip_style(Slot::ViewSwitch, true).bg, Some(C_ACCENT));
+
+        // The switch lifts under the pointer like anything else, swapping its
+        // fill for the hover tint so it is plainly the thing you are about to
+        // press.
+        let _ = draw(&mut md, 70, 8);
+        let switch = draw(&mut md, 70, 8)
+            .remove(1)
+            .chars()
+            .position(|c| c == '⇄')
+            .expect("a switch") as u16;
+        md.hover(switch, 1);
         assert_eq!(
-            md.chip_style(Slot::Mode(MdMode::Source), true).bg,
-            Some(C_ACCENT)
+            md.chip_style(Slot::ViewSwitch, true).bg,
+            Some(C_CHROME_HOVER)
         );
-        assert_eq!(
-            md.chip_style(Slot::Mode(MdMode::Preview), true).bg,
-            Some(C_CHROME_BG)
-        );
+        md.hover(0, 0);
 
         let bold = Slot::Format(MdAction::Bold);
         assert_eq!(md.chip_style(bold, true).bg, Some(C_CHROME_BG));

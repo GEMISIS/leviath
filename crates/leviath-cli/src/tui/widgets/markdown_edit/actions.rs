@@ -209,36 +209,61 @@ impl MdAction {
     }
 }
 
+/// How wide the view switch is, whatever it currently says.
+///
+/// Fixed, because the switch changes its own label: sized to the longer of the
+/// two so the buttons beside it do not jump sideways when you press it.
+pub(super) const TOGGLE_WIDTH: u16 = 13;
+
 /// One cell of the toolbar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Slot {
-    /// Half of the view switch. The one you are in is filled.
-    Mode(MdMode),
+    /// The view switch: one button, saying which view you are in.
+    ViewSwitch,
     /// A formatting button.
     Format(MdAction),
 }
 
 impl Slot {
-    pub(super) fn label(self) -> &'static str {
+    /// The cell's contents, padded to its width.
+    ///
+    /// The switch is the widest thing on the bar on purpose: it is the control
+    /// that changes what the whole box is, and the `⇄` says it flips rather
+    /// than merely reporting.
+    pub(super) fn face(self, mode: MdMode) -> String {
         match self {
-            Self::Mode(mode) => mode.label(),
-            Self::Format(action) => action.label(),
+            Self::ViewSwitch => centred(&format!("{} ⇄", mode.label()), TOGGLE_WIDTH as usize),
+            Self::Format(action) => format!(" {} ", action.label()),
         }
     }
 
-    /// Columns this cell occupies: the label plus a space either side.
+    /// Columns this cell occupies.
     pub(super) fn width(self) -> u16 {
-        self.label().chars().count() as u16 + 2
+        match self {
+            Self::ViewSwitch => TOGGLE_WIDTH,
+            Self::Format(action) => action.label().chars().count() as u16 + 2,
+        }
     }
 
     /// What the bottom border says while the pointer is over it.
-    pub(super) fn hint(self) -> String {
-        match self {
-            Self::Mode(MdMode::Source) => format!("the markdown you write · {MODE_CHORD}"),
-            Self::Mode(MdMode::Preview) => format!("how it will read · {MODE_CHORD}"),
-            Self::Format(action) => format!("{} · {}", action.name(), chord_label(action)),
+    pub(super) fn hint(self, mode: MdMode) -> String {
+        match (self, mode) {
+            (Self::ViewSwitch, MdMode::Source) => {
+                format!("editing the markdown · {MODE_CHORD} shows how it will read")
+            }
+            (Self::ViewSwitch, MdMode::Preview) => {
+                format!("how it will read · {MODE_CHORD} goes back to the markdown")
+            }
+            (Self::Format(action), _) => format!("{} · {}", action.name(), chord_label(action)),
         }
     }
+}
+
+/// `text` centred in `width` columns, leaning left when it cannot be even.
+fn centred(text: &str, width: usize) -> String {
+    let slack = width.saturating_sub(text.chars().count());
+    let left = slack / 2;
+    format!("{}{text}{}", " ".repeat(left), " ".repeat(slack - left))
 }
 
 /// The toolbar, in groups. A group is drawn whole or not at all, so a cramped
@@ -246,7 +271,7 @@ impl Slot {
 /// The view switch leads, because it is the control that has to survive being
 /// narrow.
 pub(super) const GROUPS: [&[Slot]; 5] = [
-    &[Slot::Mode(MdMode::Source), Slot::Mode(MdMode::Preview)],
+    &[Slot::ViewSwitch],
     &[
         Slot::Format(MdAction::Bold),
         Slot::Format(MdAction::Italic),
