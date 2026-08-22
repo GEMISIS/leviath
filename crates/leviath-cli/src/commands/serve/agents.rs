@@ -699,7 +699,11 @@ pub(super) async fn agent_result(
 
     Ok(Json(AgentResultResp {
         run_id: meta.run_id,
-        status: format!("{}", meta.status),
+        // The word every other route uses. This one rendered the status
+        // through `Display` - `WaitingInput`, `CompleteInteractive` - which is
+        // the spelling for a person reading a terminal, not for a client
+        // matching on it.
+        status: meta.status.wire().to_string(),
         output,
         // The answer, when the agent gave one. `output` above is the last
         // stage's log tail, which is what this endpoint served before an agent
@@ -2895,7 +2899,8 @@ system_prompt = "Plan the work"
                     .unwrap();
                 let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(result["run_id"].as_str().unwrap(), run_id);
-                assert_eq!(result["status"].as_str().unwrap(), "Complete");
+                // The word every other route uses, not `Display`'s `Complete`.
+                assert_eq!(result["status"].as_str().unwrap(), "complete");
 
                 let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
             },

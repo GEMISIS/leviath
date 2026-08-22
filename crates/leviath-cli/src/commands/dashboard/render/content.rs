@@ -103,10 +103,13 @@ impl Dashboard {
                 .regions
                 .iter()
                 .take(6)
+                // Both spellings of each: the blueprint's word, which is
+                // what a snapshot writes now, and the short one older
+                // snapshots on this disk still carry.
                 .map(|r| match r.kind.as_str() {
                     "pinned" => "P",
-                    "sliding" => "S",
-                    "compacting" | "history" => "H",
+                    "sliding_window" | "sliding" => "S",
+                    "compacting" | "compact_history" | "history" => "H",
                     _ => "·",
                 })
                 .collect::<Vec<_>>()
@@ -980,7 +983,11 @@ mod tests {
                 },
                 runstate::RegionSnapshot {
                     name: "history".to_string(),
-                    kind: "sliding".to_string(),
+                    // The word a snapshot writes now. The older `sliding` has
+                    // to draw the same letter, which is what
+                    // `render_context_bar_regions_string_with_many_region_types`
+                    // covers with a snapshot spelled the old way.
+                    kind: "sliding_window".to_string(),
                     current_tokens: 3000,
                     max_tokens: 4000,
                     entries: vec![],

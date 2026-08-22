@@ -48,6 +48,30 @@ same list.
   code in that overlay like it is in every other long-form box: one chord
   meaning two things depending on which box you are in is worse than moving the
   rarer of the two.
+- Changed: the API speaks one status vocabulary. `agent_status` on the WebSocket
+  carried the engine's own words - `idle` and `active` for a run that is going,
+  `waiting` for one parked - while every REST route carried the run's:
+  `running`, `waiting_input`. Same field, same fact, four words apart, with the
+  mapping between them living in the daemon and nowhere in the API, so each
+  client re-derived it or guessed. One console's copy normalized the engine's
+  three words to nothing, which meant a status frame could not move a run there
+  for months; a periodic re-read kept supplying the right answer, until the
+  console started trusting the socket for a beat and a parent parked on its
+  workers sat on "working" indefinitely. The translation now happens once, on
+  the way out of the server. Two older spellings go with it:
+  `GET /api/agents/{id}/result` and the two tree routes rendered a status for a
+  human reader, so they said `WaitingInput` where the run said `waiting_input`.
+  Breaking for a client matching on the old words, and announced as
+  `events.run_status` so a console can tell which vocabulary it is being sent
+  rather than sniffing the strings.
+- Changed: a region's `kind` in a context snapshot is spelled the way the
+  blueprint spells it. A `sliding_window` region was written as `sliding` and a
+  `compact_history` as `history`, which is the same hazard one level down: a
+  console reading a snapshot and a console reading a blueprint disagreed about
+  what one region was. Announced as `context.region_kinds`. Snapshots already on
+  disk keep the old two words, so anything rendering a kind should accept both;
+  the dashboard does.
+
 - Fixed: an Anthropic model reached through OpenRouter can cache its prompt
   again. System blocks - the stage prompt and the pinned context regions, which
   are the stable and by far the largest part of a request - were sent as plain

@@ -193,6 +193,48 @@ errors. `tail` is a byte budget for how much of the end you get back.
 > in one shared world, so there is no process per run. If you are tracking slots from outside, read
 > [reconciling an external work queue](/docs/work-queues) first.
 
+## Statuses
+
+A run's status is one word, and it is the same word everywhere: on the run itself, in a tree node,
+on `GET /api/agents/{id}/result`, and on the `agent_status` frames coming off the WebSocket.
+
+| Status | Means |
+|---|---|
+| `starting` | Accepted and being set up. No inference has been issued yet |
+| `running` | Working: inferring, calling tools, or moving between stages |
+| `waiting_input` | Parked. `wait_reason` says on what, and only some of those want a person |
+| `paused` | Paused by somebody. Resumes on request, and comes back paused after a daemon restart |
+| `complete` | Finished, with nothing further to accept |
+| `complete_interactive` | Every required stage is done and the run still takes follow-up input |
+| `error` | Stopped by a failure. The run's `error` carries what went wrong |
+| `cancelled` | Stopped from outside. Nothing went wrong, somebody decided |
+
+The engine keeps its own vocabulary inside the daemon, where a run that is going is `idle` or
+`active` and a parked one is `waiting`. Those words used to reach the socket untranslated, so a
+client watching `/ws` was matching on three words no route ever sent, and a status frame quietly did
+nothing for it. They are translated on the way out now.
+
+Two older spellings are gone with them: `GET /api/agents/{id}/result` and the two tree routes
+rendered the status for a human reader, which meant `WaitingInput` and `CompleteInteractive` where
+every other route said `waiting_input` and `complete_interactive`.
+
+`events.run_status` in the `capabilities` list is how you tell. A server without it sends the
+engine's words on `agent_status` and the older spellings on those three routes.
+
+The `status=` filter on `GET /api/runs` stays looser than this list on purpose: it also takes
+`waitinginput` and `Waiting-Input`, so a status read off any response can be handed straight back as
+a filter.
+
+## Region kinds
+
+A region's `kind`, wherever one appears (`GET /api/agents/{id}/context`, its history, the blueprint
+detail route), is the word the blueprint's own TOML uses: `pinned`, `temporary`, `clearable`,
+`sliding_window`, `compacting`, `compact_history`, `hashmap`, `checklist`, `custom`.
+
+Context snapshots written by an older daemon say `sliding` and `history` for the two multi-word
+kinds, and those files stay on disk, so accept both spellings wherever you render one.
+`context.region_kinds` says a server writes the blueprint's words.
+
 ## Listing and searching runs
 
 `GET /api/runs` returns a page, not the whole list:
@@ -560,6 +602,10 @@ title. `run_renamed` is that moment. The same `title` then rides every `agent_st
 client that connected or reconnected after the rename reads the name off the next status instead of
 fetching the run. Both are the `events.title` capability; without it a client has to poll each new
 run until it has a name. `title` is absent, not null, while a run has none.
+
+`status`, on `agent_status` and on `agent_completed`, is the word `GET /api/runs` uses for the same
+run. See [Statuses](#statuses) for the list and for what a server that predates
+`events.run_status` sends instead.
 
 `wait_reason` is present only on a parked run, and says what it is parked on rather than making
 you fetch the run to find out. `ok` on `tool_call_finished` is `false` for a result the engine

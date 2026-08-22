@@ -163,6 +163,34 @@ impl AgentStatus {
             Self::Cancelled => "cancelled",
         }
     }
+
+    /// The status a [`label`](Self::label) came from, or `None` for a word this
+    /// build does not know.
+    ///
+    /// The inverse table, kept against the forward one so the two are read and
+    /// changed together. It exists because a status crosses the control socket
+    /// flattened to its label: the gateway receives words, not statuses, and
+    /// has to get back to the status to say what it means in the vocabulary its
+    /// own clients read (see
+    /// [`run_status_for_label`](crate::persistence::run_status_for_label)).
+    ///
+    /// An error's message does not survive the round trip - the label never
+    /// carried it - so this returns the variant with an empty one. Match on
+    /// what the status *is*; the message is on the event that carried it.
+    pub fn from_label(label: &str) -> Option<Self> {
+        Some(match label {
+            "idle" => Self::Idle,
+            "active" => Self::Active,
+            "waiting" => Self::Waiting,
+            "paused" => Self::Paused,
+            "complete" => Self::Complete,
+            "error" => Self::Error {
+                message: String::new(),
+            },
+            "cancelled" => Self::Cancelled,
+            _ => return None,
+        })
+    }
 }
 
 impl std::fmt::Display for AgentStatus {
@@ -319,6 +347,31 @@ mod tests {
     use super::*;
     use crate::test_support::with_tracing;
     use leviath_core::{EvictionStrategy, Region, RegionKind};
+
+    /// Every label this build writes has to be a label it can read back, or the
+    /// gateway silently stops translating the status it was handed.
+    #[test]
+    fn a_label_reads_back_as_the_status_that_wrote_it() {
+        for status in [
+            AgentStatus::Idle,
+            AgentStatus::Active,
+            AgentStatus::Waiting,
+            AgentStatus::Paused,
+            AgentStatus::Complete,
+            AgentStatus::Cancelled,
+        ] {
+            assert_eq!(AgentStatus::from_label(status.label()), Some(status));
+        }
+        // The message is not in the label, so an error comes back with an empty
+        // one rather than not coming back at all.
+        assert_eq!(
+            AgentStatus::from_label("error"),
+            Some(AgentStatus::Error {
+                message: String::new()
+            })
+        );
+        assert_eq!(AgentStatus::from_label("hibernating"), None);
+    }
 
     #[test]
     fn test_context_window_creation() {

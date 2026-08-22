@@ -15,7 +15,7 @@ pub(super) fn build_tree(runs: &[RunMeta], parent_id: Option<&str>) -> Vec<Agent
             AgentTreeNode {
                 run_id: r.run_id.clone(),
                 agent_name: r.agent_name.clone(),
-                status: format!("{}", r.status),
+                status: r.status.wire().to_string(),
                 stage: r.current_stage.clone(),
                 iteration: r.iteration,
                 prompt_tokens: r.prompt_tokens,
@@ -44,7 +44,7 @@ pub(super) fn build_tree_status(runs: &[RunMeta], parent_id: Option<&str>) -> Ve
             TreeStatusNode {
                 run_id: r.run_id.clone(),
                 agent_name: r.agent_name.clone(),
-                status: format!("{}", r.status),
+                status: r.status.wire().to_string(),
                 stage: r.current_stage.clone(),
                 prompt_tokens: r.prompt_tokens,
                 completion_tokens: r.completion_tokens,
@@ -88,7 +88,7 @@ pub(super) async fn agent_tree_status(
     Ok(Json(TreeStatusNode {
         run_id: root.run_id.clone(),
         agent_name: root.agent_name.clone(),
-        status: format!("{}", root.status),
+        status: root.status.wire().to_string(),
         stage: root.current_stage.clone(),
         prompt_tokens: root.prompt_tokens,
         completion_tokens: root.completion_tokens,
@@ -170,6 +170,28 @@ mod tests {
         assert_eq!(c1.run_id, "c1");
         assert_eq!(c1.children.len(), 1);
         assert_eq!(c1.children[0].run_id, "gc");
+    }
+
+    /// The tree routes rendered a status through `Display`, which is
+    /// PascalCase and squashes the two multi-word states into `WaitingInput`
+    /// and `CompleteInteractive` - words no other route on this server sends.
+    /// A client walking a tree and then fetching one of its runs got two
+    /// different spellings of the one state.
+    #[test]
+    fn a_tree_node_spells_its_status_the_way_a_run_does() {
+        let mut waiting = make_meta("p", "a", None);
+        waiting.status = crate::runstate::RunStatus::WaitingInput;
+        let mut interactive = make_meta("c", "b", Some("p"));
+        interactive.status = crate::runstate::RunStatus::CompleteInteractive;
+        let runs = vec![waiting, interactive];
+
+        let tree = build_tree(&runs, None);
+        assert_eq!(tree[0].status, "waiting_input");
+        assert_eq!(tree[0].children[0].status, "complete_interactive");
+
+        let tree = build_tree_status(&runs, None);
+        assert_eq!(tree[0].status, "waiting_input");
+        assert_eq!(tree[0].children[0].status, "complete_interactive");
     }
 
     #[test]

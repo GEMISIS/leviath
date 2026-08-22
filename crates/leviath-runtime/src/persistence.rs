@@ -201,6 +201,25 @@ pub fn run_status_from(status: &AgentStatus) -> RunStatus {
     }
 }
 
+/// The [`RunStatus`] behind an engine status *label*, or `None` for a word this
+/// build does not know.
+///
+/// [`run_status_from`] is the authority and takes the status itself; this is
+/// the same mapping for a caller holding only the word. The gateway is that
+/// caller: a [`WorldEvent`](crate::host::WorldEvent) crosses the control socket
+/// with its status already flattened to a label, and the gateway has to name
+/// the same state in the vocabulary its own clients read - `running` where the
+/// engine says `idle` or `active`, `waiting_input` where it says `waiting`.
+/// Doing that here rather than in the gateway is what keeps the mapping in one
+/// place instead of copied into every console that watches the socket.
+///
+/// `None` means the daemon on the other end of the socket knows a status this
+/// build does not, which is a version skew rather than a bad value: the caller
+/// should pass the word through untranslated rather than invent a state.
+pub fn run_status_for_label(label: &str) -> Option<RunStatus> {
+    AgentStatus::from_label(label).map(|status| run_status_from(&status))
+}
+
 /// Map an agent's ECS status to the on-disk per-stage [`StageRunStatus`] for the
 /// stage it is currently in. `Cancelled` has no stage-level equivalent, so it
 /// surfaces as `Error` (the stage stopped without completing).
@@ -214,19 +233,22 @@ pub fn stage_status_from(status: &AgentStatus) -> StageRunStatus {
     }
 }
 
-/// The stringified region kind used in snapshots (matches the dashboard reader).
+/// The stringified region kind used in snapshots and by the blueprint API.
 ///
-/// Public because the blueprint API reports region kinds too, and two spellings
-/// of the same kind - `sliding` from a context snapshot, `sliding_window` from
-/// a blueprint - is a trap for any console reading both.
+/// One word per kind, and it is the word the blueprint's own TOML uses. It used
+/// to be a third spelling of its own - `sliding` for a `sliding_window`,
+/// `history` for a `compact_history` - which meant a console reading a context
+/// snapshot and a console reading a blueprint disagreed about what the same
+/// region was. Snapshots written by an older build still carry the old two
+/// words, so a reader that renders kinds should accept both.
 pub fn region_kind_str(kind: &RegionKind) -> &'static str {
     match kind {
         RegionKind::Pinned => "pinned",
         RegionKind::Temporary => "temporary",
         RegionKind::Clearable => "clearable",
-        RegionKind::SlidingWindow { .. } => "sliding",
+        RegionKind::SlidingWindow { .. } => "sliding_window",
         RegionKind::Compacting { .. } => "compacting",
-        RegionKind::CompactHistory { .. } => "history",
+        RegionKind::CompactHistory { .. } => "compact_history",
         RegionKind::HashMap { .. } => "hashmap",
         RegionKind::Checklist => "checklist",
         RegionKind::Custom { .. } => "custom",
@@ -575,6 +597,38 @@ mod tests {
             run_status_from(&AgentStatus::Cancelled),
             RunStatus::Cancelled
         );
+    }
+
+    /// Going through the label must land where going through the status lands.
+    /// The gateway only ever has the label, so if these two disagree the
+    /// websocket and the REST routes describe the same run differently - which
+    /// is the whole bug this mapping exists to close.
+    #[test]
+    fn the_label_route_and_the_status_route_agree() {
+        for status in [
+            AgentStatus::Idle,
+            AgentStatus::Active,
+            AgentStatus::Waiting,
+            AgentStatus::Paused,
+            AgentStatus::Complete,
+            AgentStatus::Error {
+                message: "x".to_string(),
+            },
+            AgentStatus::Cancelled,
+        ] {
+            assert_eq!(
+                run_status_for_label(status.label()),
+                Some(run_status_from(&status))
+            );
+        }
+    }
+
+    /// A word this build does not know is a daemon newer than the reader, not a
+    /// state to invent: the caller gets `None` and passes the word through.
+    #[test]
+    fn an_unknown_label_maps_to_nothing() {
+        assert_eq!(run_status_for_label("hibernating"), None);
+        assert_eq!(run_status_for_label(""), None);
     }
 
     #[test]
@@ -1073,9 +1127,11 @@ mod tests {
                 "pinned",
                 "temporary",
                 "clearable",
-                "sliding",
+                // The blueprint's own words for these two, not a spelling that
+                // only ever appeared in a snapshot.
+                "sliding_window",
                 "compacting",
-                "history",
+                "compact_history",
                 "hashmap",
                 "custom",
                 "checklist",
