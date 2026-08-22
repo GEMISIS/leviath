@@ -693,6 +693,82 @@ async fn omitting_parent_still_lists_every_run() {
     .await;
 }
 
+/// The filters compose, which is the pair a sidebar actually asks for: the
+/// top-level runs that are still going. Each is a separate `retain`, so this
+/// pins the behaviour rather than the implementation.
+#[tokio::test]
+async fn parent_and_status_filter_together() {
+    crate::runstate::with_isolated_runs_dir_async("runs-handler-parent-status", |_d| async move {
+        let mut busy_root = meta_at("root-busy", 100);
+        busy_root.status = RunStatus::Running;
+        create_run(&busy_root).unwrap();
+
+        let mut done_root = meta_at("root-done", 200);
+        done_root.status = RunStatus::Complete;
+        create_run(&done_root).unwrap();
+
+        // A worker that is running, so a filter on status alone would keep it.
+        let mut busy_worker = child_of("worker-busy", 300, "root-busy");
+        busy_worker.status = RunStatus::Running;
+        create_run(&busy_worker).unwrap();
+
+        let page = page_of(&[("parent", "none"), ("status", "running")]).await;
+        assert_eq!(item_ids(&page), vec!["root-busy".to_string()]);
+        assert_eq!(page.total, Some(1));
+
+        // Several statuses at once still work alongside it.
+        let page = page_of(&[("parent", "none"), ("status", "running,complete")]).await;
+        assert_eq!(
+            item_ids(&page),
+            vec!["root-done".to_string(), "root-busy".to_string()]
+        );
+    })
+    .await;
+}
+
+/// Every status a run can be in is selectable by the word the API hands back,
+/// whatever the spelling. A filter that silently matches nothing is worse than
+/// one that errors, and the two multi-word states are where it would happen.
+#[tokio::test]
+async fn every_status_is_selectable_by_the_word_the_api_returns() {
+    crate::runstate::with_isolated_runs_dir_async("runs-handler-every-status", |_d| async move {
+        let states = [
+            (RunStatus::Starting, "starting"),
+            (RunStatus::Running, "running"),
+            (RunStatus::WaitingInput, "waiting_input"),
+            (RunStatus::Paused, "paused"),
+            (RunStatus::Complete, "complete"),
+            (RunStatus::CompleteInteractive, "complete_interactive"),
+            (RunStatus::Error, "error"),
+            (RunStatus::Cancelled, "cancelled"),
+        ];
+        for (i, (status, word)) in states.iter().enumerate() {
+            let mut meta = meta_at(&format!("run-{word}"), i as i64);
+            meta.status = status.clone();
+            create_run(&meta).unwrap();
+        }
+
+        for (_, word) in states {
+            assert_eq!(
+                item_ids(&page_of(&[("status", word)]).await),
+                vec![format!("run-{word}")],
+                "filtering by {word}"
+            );
+        }
+
+        // And the loose spellings of the two that have more than one word, so a
+        // status taken from any response can be fed straight back as a filter.
+        for spelling in ["waitinginput", "Waiting-Input", "WaitingInput"] {
+            assert_eq!(
+                item_ids(&page_of(&[("status", spelling)]).await),
+                vec!["run-waiting_input".to_string()],
+                "filtering by {spelling}"
+            );
+        }
+    })
+    .await;
+}
+
 /// The batch fetch that replaces N separate `GET /api/agents/{id}` calls.
 #[tokio::test]
 async fn ids_fetches_exactly_those_runs_and_reports_the_ones_that_are_gone() {

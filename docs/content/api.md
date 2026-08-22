@@ -586,6 +586,50 @@ one.
 after clicking it. Finding out whether the other routes exist costs a wasted request; finding out
 this way costs a deleted run.
 
+### What each capability means
+
+Every string this server can announce, and the thing it promises. A server that omits one is older
+than that feature, not broken.
+
+| Capability | The server has |
+|---|---|
+| `runs.envelope` | `GET /api/runs` answering `{items, next_cursor, total, server_time}` rather than a bare array |
+| `runs.cursor` | Keyset paging on that route: `cursor=` in, `next_cursor` out |
+| `runs.search` | `q=`, a case-insensitive substring over the run listing |
+| `runs.search.context` | `q_in=context`, searching each run's current context window |
+| `runs.search.logs` | `q_in=logs`, searching the tail of each stage's logs |
+| `runs.search.journal` | `q_in=journal`, searching the whole run journal |
+| `runs.fields` | `fields=`, trimming each item to the named top-level fields |
+| `runs.ids` | `ids=a,b,c`, fetching exactly those runs in one request |
+| `runs.since` | `since=`, filtering on whichever timestamp `sort` names |
+| `runs.parent` | `parent=none` / `parent=<run_id>`. See [listing by place in the tree](#listing-by-place-in-the-tree) |
+| `runs.files.listing` | `GET /api/agents/{id}/files`, the run's own record of what it changed |
+| `runs.files.workdir` | `source=workdir` on that route, reading the filesystem a directory at a time |
+| `runs.stages` | `GET /api/agents/{id}/stages`, the per-stage ledger |
+| `runs.waiting_on` | `wait_reason` on a run, saying what a parked run is parked on |
+| `runs.delete` | `DELETE /api/runs/{id}`, which removes the record rather than cancelling the run |
+| `runs.delete.bulk` | `DELETE /api/runs` with `before` or `ids`, bounded by `max_ids` |
+| `logs.stage` | `?stage=` on the logs route: an index, or `all` |
+| `logs.stream` | `?stream=` on it: `output` or `logs` |
+| `context.history.page` | Paging on `GET /api/agents/{id}/context/history` |
+| `context.region_kinds` | Region kinds spelled as the blueprint spells them. See [region kinds](#region-kinds) |
+| `events.waiting_on` | `wait_reason` on the socket too, not only on the run |
+| `events.stage_and_tool` | `stage_transition`, `tool_call_started` and `tool_call_finished` as flat frames instead of the old `world` envelope |
+| `events.spawn_parent` | `parent_id` on `agent_spawned`, placing a sub-agent in the tree the moment it starts |
+| `events.title` | The `run_renamed` frame, plus `title` on every `agent_status` |
+| `events.run_status` | One status vocabulary across the whole API. See [statuses](#statuses) |
+| `blueprints.envelope` | The paginated envelope on the blueprint listing |
+| `blueprints.query` | `q=` on that listing |
+| `blueprints.manifest` | The manifest itself on the blueprint detail route |
+| `blueprints.validate.name` | `POST /api/blueprints/validate` accepting an installed name, not only a body |
+| `blueprints.fan_outs` | `fan_outs` on the detail route. See [fan-out limits](#fan-out-limits) |
+| `tools.list` | `GET /api/tools?agent=`, what an agent here can actually call |
+| `scripts.read` | The `GET` half of the scripts routes |
+| `scripts.write` | That this build serves the write half. Whether *this* daemon mounts it is `--allow-admin`, which you find out by calling one and reading the status |
+| `scripts.providers` | `provider` as a fifth script `kind`, the machine's drop-in model providers |
+| `config.gateways` | `gateways` on `GET /api/config`, the script-backed providers this machine has |
+| `fs.mkdir` | `POST /api/fs/dirs`, so a folder picker can offer "New Folder" rather than one that 404s |
+
 ## Live updates over WebSocket
 
 Connect to `/ws` (all agents) or `/ws/agents/{id}` (one run) with `?token=<t>`; the server streams
