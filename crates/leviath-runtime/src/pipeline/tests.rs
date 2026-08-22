@@ -2030,6 +2030,90 @@ fn collect_tools_buffers_one_tool_log_line_per_call() {
     );
 }
 
+/// A title arriving after the run's last move still reaches disk.
+///
+/// The watermark tracks iteration, stage and status - none of which a title
+/// touches - so a name that landed late used to sit in memory until the next
+/// heartbeat, which a finished run is unloaded before reaching. The name was
+/// simply lost, which is what made the retry and failover behind it pointless
+/// for any run that ended quickly.
+#[test]
+fn a_title_that_lands_after_the_last_move_still_reaches_disk() {
+    let (mut world, mut rx) = world_with_persistence();
+    let e = world
+        .spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            ledger2(),
+        ))
+        .id();
+
+    // First tick establishes the watermark.
+    run_dispatch_persistence(&mut world);
+    let first = snapshot_job(rx.try_recv().expect("job sent"));
+    assert_eq!(first.meta.title, None);
+
+    // Nothing moved, so nothing is written: this is the state a late title
+    // would have been stranded in.
+    run_dispatch_persistence(&mut world);
+    assert!(rx.try_recv().is_err(), "an unchanged run writes nothing");
+
+    // The title lands. Still no iteration, stage or status change.
+    world.get_mut::<RunMetadata>(e).unwrap().title = Some("Late But Real".to_string());
+    run_dispatch_persistence(&mut world);
+    let after = snapshot_job(rx.try_recv().expect("a landed title earns a write"));
+    assert_eq!(after.meta.title.as_deref(), Some("Late But Real"));
+
+    // And it is not written again on the next tick.
+    run_dispatch_persistence(&mut world);
+    assert!(rx.try_recv().is_err(), "the same title writes once");
+
+    // The reason for *not* having a name earns a write on the same terms.
+    world.get_mut::<RunMetadata>(e).unwrap().title_error =
+        Some("every candidate refused".to_string());
+    run_dispatch_persistence(&mut world);
+    let reasoned = snapshot_job(rx.try_recv().expect("a recorded reason earns a write"));
+    assert_eq!(
+        reasoned.meta.title_error.as_deref(),
+        Some("every candidate refused")
+    );
+}
+
+/// A title is not the agent moving, so it must not advance the progress stamp
+/// `lev ps` ages its rows against - that stamp is the one thing separating a
+/// slow run from a wedged one (issue #184).
+#[test]
+fn a_landed_title_is_a_write_but_not_progress() {
+    let (mut world, mut rx) = world_with_persistence();
+    let e = world
+        .spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            ledger2(),
+        ))
+        .id();
+    run_dispatch_persistence(&mut world);
+    let _ = rx.try_recv();
+    let progress_before = world.get::<PersistWatermark>(e).unwrap().last_progress_at();
+
+    world.get_mut::<RunMetadata>(e).unwrap().title = Some("A Name".to_string());
+    run_dispatch_persistence(&mut world);
+    assert!(rx.try_recv().is_ok(), "the title was written");
+    assert_eq!(
+        world.get::<PersistWatermark>(e).unwrap().last_progress_at(),
+        progress_before,
+        "naming a run is not the run making progress"
+    );
+}
+
 #[test]
 fn dispatch_persistence_emits_stage_index_and_drains_io_buffer() {
     use leviath_core::run_meta::StageRunStatus;

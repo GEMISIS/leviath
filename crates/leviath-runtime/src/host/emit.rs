@@ -193,7 +193,15 @@ impl WorldHost {
             // Unload a terminal agent once its terminal state has been emitted (a
             // prior pass already saw it terminal, so the event went out and the
             // persistence lane captured it) and no live parent still needs it.
-            if cur.terminal && was_terminal && self.no_live_parent(entity) {
+            // A run whose title is still on its way stays resident. Unloading
+            // it would throw the answer away when it lands - `collect_title`
+            // finds no entity and drops the title and the reason together -
+            // and a run that finishes in a couple of seconds finishes well
+            // inside the time one title call takes. Bounded by
+            // `TITLE_HOLD_SECS` from the run's start, and `expire_title_hold`
+            // ends the wait out loud rather than letting it lapse in silence.
+            let title_owed = crate::title::title_outstanding(self.world.world(), entity, now);
+            if cur.terminal && was_terminal && !title_owed && self.no_live_parent(entity) {
                 let entry = self.entry_for(&run_id, entity, state);
                 to_reap.push((run_id.clone(), entity, entry));
             }

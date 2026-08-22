@@ -134,6 +134,31 @@ fn window() -> crate::components::ContextWindow {
     w
 }
 
+/// Run metadata for a host test. Only `run_id` and `started_at` carry meaning
+/// here; the rest is the shape the component needs.
+fn run_metadata(run_id: &str, started_at: i64) -> RunMetadata {
+    RunMetadata {
+        run_id: run_id.to_string(),
+        agent_name: "a".to_string(),
+        agent_path: String::new(),
+        task: String::new(),
+        model: None,
+        workdir: String::new(),
+        num_stages: 1,
+        started_at,
+        parent_run_id: None,
+        metadata: Default::default(),
+        callback_url: None,
+        callback_secret: None,
+        title: None,
+        title_error: None,
+        unattended: false,
+        read_paths: None,
+        output_request: None,
+        model_override: None,
+    }
+}
+
 fn agent_state(agent_id: &str) -> AgentState {
     AgentState {
         agent_id: agent_id.to_string(),
@@ -2727,6 +2752,83 @@ async fn a_status_event_carries_why_a_run_is_parked_and_re_fires_when_that_chang
         })
         .expect("a run that swapped blockers should send the new one");
     assert_eq!(reason, leviath_core::run_meta::WaitReason::InteractionPoint);
+}
+
+/// A finished run whose name is still coming stays resident until it arrives.
+///
+/// The regression: a terminal run was unloaded a pass after it finished, and a
+/// title landing afterwards found no entity - `collect_title` dropped it, and
+/// the reason with it. A run making two provider calls finished well inside one
+/// title call, so it lost even a single retry.
+#[tokio::test]
+async fn emit_events_holds_a_terminal_agent_while_its_title_is_still_coming() {
+    let mut host = host_with(vec![]);
+    let now = chrono::Utc::now().timestamp();
+
+    let root = {
+        let mut s = agent_state("root");
+        s.status = AgentStatus::Complete;
+        let e = {
+            let world = host.world.world_mut();
+            let e = world.spawn(s).id();
+            // A call is out, with time left on it.
+            let meta = run_metadata("root", now);
+            world.entity_mut(e).insert((
+                meta,
+                crate::title::AwaitingTitle(now + crate::title::TITLE_JOB_BUDGET_SECS as i64),
+            ));
+            e
+        };
+        host.world.own_agent(e)
+    };
+    host.register("root", root);
+    host.emit_events();
+    host.emit_events();
+    assert!(
+        host.live_entity("root").is_some(),
+        "held: the answer it is waiting for can still arrive"
+    );
+
+    // The call reports; nothing is owed any more.
+    host.world
+        .world_mut()
+        .entity_mut(root.entity())
+        .remove::<crate::title::AwaitingTitle>();
+    host.emit_events();
+    assert!(
+        host.live_entity("root").is_none(),
+        "reaped once nothing is owed"
+    );
+}
+
+/// The hold is bounded: a claim past its deadline holds nothing, so a run
+/// cannot be kept resident by a title lane that never answers.
+#[tokio::test]
+async fn emit_events_stops_holding_a_terminal_agent_once_the_claim_lapses() {
+    let mut host = host_with(vec![]);
+
+    let root = {
+        let mut s = agent_state("root");
+        s.status = AgentStatus::Complete;
+        let e = {
+            let world = host.world.world_mut();
+            let e = world.spawn(s).id();
+            // Started long ago, and the call's deadline is in the past.
+            let meta = run_metadata("root", 0);
+            world
+                .entity_mut(e)
+                .insert((meta, crate::title::AwaitingTitle(1)));
+            e
+        };
+        host.world.own_agent(e)
+    };
+    host.register("root", root);
+    host.emit_events();
+    host.emit_events();
+    assert!(
+        host.live_entity("root").is_none(),
+        "a lapsed claim holds nothing"
+    );
 }
 
 #[tokio::test]

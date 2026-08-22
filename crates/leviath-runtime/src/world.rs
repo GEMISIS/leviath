@@ -542,7 +542,16 @@ impl PipelineWorld {
                 // `on_completion` / `on_error`, once, as a run finishes.
                 // Grouped for the 20-system `.chain()` limit, as above.
                 (run_terminal_hooks, crate::title::collect_title).chain(),
-                crate::title::dispatch_title,
+                // Then give up on the name of a finished run the title lane
+                // cannot deliver in time - after dispatch, so a candidate that
+                // could still go out this tick does, and before persistence, so
+                // the reason reaches disk before the host unloads the run.
+                // Paired for the 20-system `.chain()` limit, as above.
+                (
+                    crate::title::dispatch_title,
+                    crate::title::expire_title_hold,
+                )
+                    .chain(),
                 // Fail a run whose dispatch has been declining for something
                 // that will never arrive. Last of the guards, and after *both*
                 // dispatch systems, so it reads stall records both lanes have
