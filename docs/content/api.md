@@ -262,6 +262,34 @@ Two parameters exist so a browser client does not have to make N requests: `ids=
 those runs, and `fields=run_id,status,title` trims each one. Ids that no longer exist come back in
 `missing` rather than failing the request.
 
+### Listing by place in the tree
+
+A run's sub-agents are runs, so a listing that pages by runs is not paging by the rows a console
+draws when it nests workers under the run that started them. At `limit=50`, seven visible rows and
+forty-three workers hanging off them is a real page.
+
+`parent=` fixes that from the server side:
+
+| Value | Keeps |
+|---|---|
+| omitted | Every run, sub-agents included. What this route has always returned |
+| `none` | Only runs nobody started. What a top-level list wants |
+| a run id | That run's direct children, one level down |
+
+`total` then counts what you asked for, which is what makes it worth printing beside a list: `382`
+under a sidebar drawing forty rows is comparing runs the reader can see against runs they cannot.
+
+`parent=<run_id>` is also the paged, sorted, searchable form of
+[`GET /api/agents/{id}/children`](#endpoints), which answers the same question in one unbounded
+array. A fan-out of two hundred workers has no windowed form there.
+
+A run id that names nothing gives an empty page rather than a `404`: a run with no children yet is
+a normal answer, not a missing resource. `none` is the only keyword, and no run can collide with it,
+since a run id is `<agent>-<timestamp>-<hash>`.
+
+Announced as `runs.parent`. Without it, page until enough top-level rows exist to fill the viewport
+and filter client-side, which is what The Lair does today.
+
 ### Search
 
 `q=` is a case-insensitive substring. It is not a regular expression, there are no boolean

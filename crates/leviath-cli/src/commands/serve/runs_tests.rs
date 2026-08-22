@@ -25,6 +25,14 @@ fn meta_at(id: &str, started_at: i64) -> RunMeta {
     meta
 }
 
+/// A run started by `parent`, which is what makes it a sub-agent rather than a
+/// row a top-level listing draws.
+fn child_of(id: &str, started_at: i64, parent: &str) -> RunMeta {
+    let mut meta = meta_at(id, started_at);
+    meta.parent_run_id = Some(parent.to_string());
+    meta
+}
+
 /// Build a `RunsQuery` the way a real request would, through axum's own
 /// extractor, so these tests cannot pass on a struct shape the wire never
 /// produces.
@@ -164,7 +172,7 @@ fn fields_accepts_the_optional_ones_that_only_some_runs_carry() {
 /// reports, so each conflicting combination is refused by name.
 #[test]
 fn ids_cannot_be_combined_with_the_parameters_it_would_override() {
-    for conflicting in ["cursor", "q", "status", "since"] {
+    for conflicting in ["cursor", "q", "status", "since", "parent"] {
         let message = resolve_err(&[("ids", "a,b"), (conflicting, "1")]);
         assert!(
             message.contains(conflicting),
@@ -189,6 +197,55 @@ fn too_many_ids_are_refused() {
 #[test]
 fn an_empty_query_string_is_treated_as_no_search() {
     assert!(resolve_ok(&[("q", "")]).q.is_none());
+}
+
+/// The three things `parent` can mean, and the one spelling that is a keyword.
+#[test]
+fn parent_resolves_to_the_three_shapes_it_has() {
+    assert_eq!(resolve_ok(&[]).parent, ParentFilter::Any);
+    // Whitespace is the query-string equivalent of an empty box.
+    assert_eq!(resolve_ok(&[("parent", "  ")]).parent, ParentFilter::Any);
+    assert_eq!(
+        resolve_ok(&[("parent", "none")]).parent,
+        ParentFilter::Roots
+    );
+    assert_eq!(
+        resolve_ok(&[("parent", "run-7")]).parent,
+        ParentFilter::Of("run-7".to_string())
+    );
+
+    // And what each keeps, which is the half the handler leans on.
+    let root = meta_at("root", 1);
+    let child = child_of("child", 2, "root");
+    assert!(ParentFilter::Any.keeps(&root) && ParentFilter::Any.keeps(&child));
+    assert!(ParentFilter::Roots.keeps(&root) && !ParentFilter::Roots.keeps(&child));
+    let of_root = ParentFilter::Of("root".to_string());
+    assert!(of_root.keeps(&child) && !of_root.keeps(&root));
+}
+
+/// A cursor carries the filters it was minted under, so a walk cannot change
+/// what it is filtering halfway through - which for this one would mean a
+/// client paging past sub-agents it had asked not to see.
+#[test]
+fn a_cursor_is_bound_to_the_parent_filter_it_was_minted_for() {
+    let roots = resolve_ok(&[("parent", "none")]);
+    let raw = cursor::encode(
+        roots.sort.as_str(),
+        "desc",
+        &roots.digest,
+        CursorKey::Int(10),
+        "run-a",
+    );
+
+    assert!(resolve(&query(&[("parent", "none"), ("cursor", &raw)])).is_ok());
+    assert!(resolve_err(&[("cursor", &raw)]).contains("filters"));
+    assert!(resolve_err(&[("parent", "run-7"), ("cursor", &raw)]).contains("filters"));
+
+    // The unfiltered digest is unchanged by this parameter existing, so every
+    // cursor a client is holding from before it stays valid.
+    let anything = resolve_ok(&[]);
+    let before = cursor::filter_digest(&["", "", "meta,files", ""]);
+    assert_eq!(anything.digest, before);
 }
 
 // ─── cursor binding ─────────────────────────────────────────────────────────
@@ -560,6 +617,78 @@ async fn the_handler_filters_by_the_status_spelling_it_serves() {
         // The serde spelling, which is what a client reads back off the wire.
         let page = page_of(&[("status", "waiting_input")]).await;
         assert_eq!(item_ids(&page), vec!["run-waiting".to_string()]);
+    })
+    .await;
+}
+
+/// The listing pages by runs, and a run's sub-agents are runs, so a console
+/// that draws workers nested under the run that started them was paging by a
+/// unit it does not display. A real sidebar at `limit=50` got seven visible
+/// rows and forty-three workers hanging off them.
+#[tokio::test]
+async fn parent_none_lists_only_the_runs_nobody_started() {
+    crate::runstate::with_isolated_runs_dir_async("runs-handler-parent-none", |_d| async move {
+        create_run(&meta_at("root-a", 100)).unwrap();
+        create_run(&meta_at("root-b", 200)).unwrap();
+        for i in 0..8 {
+            create_run(&child_of(&format!("worker-{i}"), 300 + i, "root-b")).unwrap();
+        }
+
+        let page = page_of(&[("parent", "none")]).await;
+        assert_eq!(
+            item_ids(&page),
+            vec!["root-b".to_string(), "root-a".to_string()]
+        );
+        // And the count is of what was asked for. `10` here would be counting
+        // runs the client will never draw, which is what made it not worth
+        // printing.
+        assert_eq!(page.total, Some(2));
+    })
+    .await;
+}
+
+/// The other direction: one run's workers, through the same paging, sorting and
+/// filtering as everything else. `GET /api/agents/{id}/children` answers this
+/// too, in one unpaged array, which a fan-out of two hundred has no windowed
+/// form of.
+#[tokio::test]
+async fn parent_by_id_lists_that_runs_direct_children() {
+    crate::runstate::with_isolated_runs_dir_async("runs-handler-parent-id", |_d| async move {
+        create_run(&meta_at("root", 100)).unwrap();
+        create_run(&child_of("worker-1", 200, "root")).unwrap();
+        create_run(&child_of("worker-2", 300, "root")).unwrap();
+        create_run(&child_of("other-workers-child", 400, "worker-1")).unwrap();
+
+        // Direct children only - the grandchild belongs to `worker-1`.
+        let page = page_of(&[("parent", "root")]).await;
+        assert_eq!(
+            item_ids(&page),
+            vec!["worker-2".to_string(), "worker-1".to_string()]
+        );
+        assert_eq!(page.total, Some(2));
+
+        // A parent that started nothing, or that never existed, is an empty
+        // page rather than a 404: a run with no children yet is a normal
+        // answer, not a missing resource.
+        assert!(page_of(&[("parent", "worker-2")]).await.items.is_empty());
+        assert!(page_of(&[("parent", "no-such-run")]).await.items.is_empty());
+    })
+    .await;
+}
+
+/// Omitting it has to leave the route exactly as it was, or every existing
+/// caller silently loses its sub-agents.
+#[tokio::test]
+async fn omitting_parent_still_lists_every_run() {
+    crate::runstate::with_isolated_runs_dir_async("runs-handler-parent-absent", |_d| async move {
+        create_run(&meta_at("root", 100)).unwrap();
+        create_run(&child_of("worker", 200, "root")).unwrap();
+
+        assert_eq!(page_of(&[]).await.total, Some(2));
+        // An empty value is the same as absent: a client that built its query
+        // from an empty box did not mean "runs whose parent is the empty
+        // string", which matches nothing.
+        assert_eq!(page_of(&[("parent", "")]).await.total, Some(2));
     })
     .await;
 }

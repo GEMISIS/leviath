@@ -13,6 +13,18 @@ same list.
 
 ## Unreleased
 
+- Added: `GET /api/runs` takes a `parent` filter. A run's sub-agents are runs,
+  so a console that draws workers nested under the run that started them was
+  paging by a unit it does not display: a page of fifty could be seven visible
+  rows and forty-three workers hanging off them, and on a fleet that fans out
+  ten ways one visible row per page is possible. `parent=none` lists only the
+  runs nobody started, which is what a top-level list wants; `parent=<run_id>`
+  lists that run's direct children, which is the paged, sorted, searchable form
+  of `GET /api/agents/{id}/children`. Omitting it lists every run exactly as
+  before. `total` then counts what was asked for rather than every run on the
+  machine, which is what makes it worth printing beside a list. Announced as
+  `runs.parent`; cursors minted before this existed stay valid.
+
 - Fixed: the dashboard's Context tree keeps its columns lined up whatever the
   regions are called. The name sat in a fixed sixteen-character column that
   padded a short name but never cut a long one, so `stage_instructions` - which
