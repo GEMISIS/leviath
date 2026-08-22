@@ -3,7 +3,9 @@
 //! OpenRouter provides access to multiple models through a unified API.
 //! Uses OpenAI-compatible format with additional headers.
 
-use crate::openai_compat::{OpenAiSseStream, parse_openai_response, send_chat_request};
+use crate::openai_compat::{
+    OpenAiSseStream, parse_openai_response, send_chat_request, temperature_refused,
+};
 use crate::provider::{
     InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride, ModelInfo,
     Provider, ProviderConfig, ProviderError, Result, StreamChunk,
@@ -34,6 +36,13 @@ pub struct OpenRouterProvider {
     /// Models already reported as falling back, so the warning is once per
     /// model per process rather than once per inference.
     warned_unknown: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+
+    /// Models the gateway has refused a temperature for.
+    ///
+    /// Per instance rather than a table: OpenRouter fronts every vendor, so no
+    /// static list can stay right about which of their models take one, and
+    /// this build's table already names only a few dozen of hundreds.
+    temperature_unsupported: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 
     /// What OpenRouter's own `/models` endpoint says each model's window is,
     /// filled once by [`Provider::prime_capabilities`].
@@ -69,6 +78,7 @@ impl OpenRouterProvider {
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             warned_unknown: Default::default(),
+            temperature_unsupported: Default::default(),
             api_windows: Default::default(),
         }
     }
@@ -85,6 +95,7 @@ impl OpenRouterProvider {
             rate_limiter,
             capability_overrides: HashMap::new(),
             warned_unknown: Default::default(),
+            temperature_unsupported: Default::default(),
             api_windows: Default::default(),
         }
     }
@@ -103,6 +114,7 @@ impl OpenRouterProvider {
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
             capability_overrides: overrides,
             warned_unknown: Default::default(),
+            temperature_unsupported: Default::default(),
             api_windows: Default::default(),
         }
     }
@@ -430,6 +442,16 @@ const FALLBACK_CAPABILITIES: ModelCapabilities = ModelCapabilities {
 };
 
 impl OpenRouterProvider {
+    /// Whether this model has already refused a temperature.
+    fn temperature_is_unsupported(&self, model: &str) -> bool {
+        leviath_core::sync::lock(&self.temperature_unsupported).contains(model)
+    }
+
+    /// Record that it did, for the rest of this process.
+    fn remember_temperature_unsupported(&self, model: &str) {
+        leviath_core::sync::lock(&self.temperature_unsupported).insert(model.to_string());
+    }
+
     /// Say so when a model fell through to [`FALLBACK_CAPABILITIES`].
     ///
     /// OpenRouter fronts hundreds of models and this build's table names a few
@@ -523,27 +545,61 @@ impl Provider for OpenRouterProvider {
             limiter.acquire().await?;
         }
 
-        let body = self.build_request_body(request);
+        let mut body = self.build_request_body(request);
         let url = format!("{}/chat/completions", self.base_url);
+        // A model this gateway has already refused a temperature for: send it
+        // without one rather than spend a round trip learning the same thing.
+        if self.temperature_is_unsupported(&request.model)
+            && let Some(fields) = body.as_object_mut()
+        {
+            fields.remove("temperature");
+        }
+        let headers = [
+            ("Authorization", format!("Bearer {}", self.api_key)),
+            // OpenRouter attributes a request to an app by this pair, and
+            // sending only the referer left every Leviath call unnamed on
+            // the account's activity page.
+            ("HTTP-Referer", "https://leviath.dev".to_string()),
+            ("X-Title", "Leviath".to_string()),
+            ("Content-Type", "application/json".to_string()),
+        ];
 
-        let response = send_chat_request(
+        let mut sent = send_chat_request(
             &self.client,
             "openrouter",
             &url,
-            &[
-                ("Authorization", format!("Bearer {}", self.api_key)),
-                // OpenRouter attributes a request to an app by this pair, and
-                // sending only the referer left every Leviath call unnamed on
-                // the account's activity page.
-                ("HTTP-Referer", "https://leviath.dev".to_string()),
-                ("X-Title", "Leviath".to_string()),
-                ("Content-Type", "application/json".to_string()),
-            ],
+            &headers,
             &body,
             self.rate_limiter.as_ref(),
             request.request_timeout_secs,
         )
-        .await?;
+        .await;
+        // The gateway passes the upstream refusal through verbatim, so the
+        // same answer works here as on the direct provider: drop the
+        // temperature and ask again.
+        if let Err(crate::ProviderError::ApiError(detail)) = &sent
+            && temperature_refused(detail)
+        {
+            tracing::debug!(
+                model = %request.model,
+                "the API refused the temperature we sent; retrying without it"
+            );
+            self.remember_temperature_unsupported(&request.model);
+            if let Some(fields) = body.as_object_mut() {
+                fields.remove("temperature");
+            }
+            sent = send_chat_request(
+                &self.client,
+                "openrouter",
+                &url,
+                &headers,
+                &body,
+                self.rate_limiter.as_ref(),
+                request.request_timeout_secs,
+            )
+            .await;
+        }
+        let response = sent?;
 
         let response_body: serde_json::Value = crate::provider::decode_json(response).await?;
 
@@ -1538,6 +1594,58 @@ mod tests {
             extra: serde_json::Value::Null,
             request_timeout_secs: None,
         }
+    }
+
+    /// The gateway path recovers too.
+    ///
+    /// OpenRouter fronts every vendor, so it reaches the same models that
+    /// refuse a temperature - and its own capability table names a few dozen
+    /// of hundreds, so it is even less able to know in advance which.
+    #[tokio::test]
+    async fn a_refused_temperature_is_retried_without_one() {
+        let refusal = br#"{"error":{"message":"Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.","type":"invalid_request_error","param":"temperature","code":"unsupported_value"}}"#;
+        let ok = br#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#;
+        let (url, bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (400, "Bad Request", refusal.to_vec()),
+            (200, "OK", ok.to_vec()),
+        ])
+        .await;
+
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        )
+        .with_base_url(Some(url));
+
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "hi".into(),
+                cache_breakpoint: false,
+            }],
+            model: "openai/gpt-5.5".to_string(),
+            max_tokens: 16,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let out = provider.infer(&request).await;
+        assert!(out.is_ok(), "the retry has to rescue the call: {out:?}");
+
+        let sent = leviath_core::sync::lock(&bodies).clone();
+        let carried: Vec<bool> = sent.iter().map(|b| b.contains("temperature")).collect();
+        assert_eq!(
+            carried,
+            vec![true, false],
+            "the first request carries the temperature and the retry drops it: {sent:?}"
+        );
+
+        // And it is remembered, so the next call to this model never spends
+        // the refused round trip again.
+        assert!(provider.temperature_is_unsupported("openai/gpt-5.5"));
     }
 
     #[tokio::test]

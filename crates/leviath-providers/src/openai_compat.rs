@@ -479,6 +479,27 @@ pub(crate) fn tools_refused_over_reasoning_effort(detail: &str) -> bool {
     detail.contains("reasoning_effort") && detail.contains("function tool")
 }
 
+/// Whether the API refused the request over the temperature we sent.
+///
+/// Some models take only their default temperature and reject any other value
+/// outright:
+///
+/// ```text
+/// Unsupported value: 'temperature' does not support 0.7 with this model.
+/// Only the default (1) value is supported.
+/// ```
+///
+/// The capability table said `gpt-5.5` supports temperature, because it matches
+/// the `gpt-5` family branch and the rest of that family does. It does not, and
+/// a research run died mid-`analyze` over it after 37 iterations and 2.4M
+/// tokens. The table is now right about that model, but a table is the wrong
+/// mechanism to rely on: the next model to do this will be wrong in it too,
+/// on the day it ships. The API already says so, so ask it rather than a list.
+pub(crate) fn temperature_refused(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("temperature") && detail.contains("does not support")
+}
+
 /// Merge a request's pass-through `extra` params (the manifest's
 /// `[model.parameters]` beyond temperature/max_output_tokens - `top_p`, `stop`,
 /// `seed`, `frequency_penalty`, …) into an OpenAI-shaped request `target`.
@@ -903,6 +924,32 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
 
 #[cfg(test)]
 mod tests {
+    /// The refusal that killed a run, and the shapes that must NOT trip it.
+    ///
+    /// A false positive here silently drops the temperature the caller asked
+    /// for, which is worse than the error it is trying to avoid: the run keeps
+    /// going and quietly samples differently from what the blueprint said.
+    #[test]
+    fn a_temperature_refusal_is_told_apart_from_other_errors() {
+        assert!(super::temperature_refused(
+            "Unsupported value: 'temperature' does not support 0.7 with this \
+             model. Only the default (1) value is supported."
+        ));
+        // Case is not guaranteed by the API.
+        assert!(super::temperature_refused(
+            "UNSUPPORTED VALUE: 'TEMPERATURE' DOES NOT SUPPORT 0.7"
+        ));
+        // A different unsupported field is not ours to fix.
+        assert!(!super::temperature_refused(
+            "Unsupported value: 'reasoning_effort' does not support 'none' with this model."
+        ));
+        // Mentioning temperature is not the same as refusing over it.
+        assert!(!super::temperature_refused(
+            "temperature must be between 0 and 2"
+        ));
+        assert!(!super::temperature_refused("rate limited"));
+    }
+
     use super::*;
     use crate::provider::{InferenceRequest, Message, SystemBlock, Tool};
 
