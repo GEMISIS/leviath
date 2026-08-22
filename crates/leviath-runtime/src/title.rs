@@ -1,25 +1,38 @@
-//! One-shot run-title generation.
+//! Run-title generation.
 //!
 //! The dashboard displays, searches, and persists `RunMetadata.title`; this
 //! module is what fills it in. At spawn, the daemon marks an eligible run
-//! [`PendingTitle`]; [`dispatch_title`] makes one cheap LLM call over the
-//! task prompt via the `title_bridge` worker, and [`collect_title`]
-//! sanitizes the reply into the metadata. Everything downstream (persistence,
-//! dashboard header, run search) already reads the field.
+//! [`PendingTitle`] and hands it a [`TitleCandidates`] chain; [`dispatch_title`]
+//! makes one cheap LLM call over the task prompt via the `title_bridge` worker,
+//! and [`collect_title`] sanitizes the reply into the metadata. Everything
+//! downstream (persistence, dashboard header, run search) already reads the
+//! field.
 //!
-//! Best-effort by design: any failure - no usable provider or model, a full
-//! pool that never frees, a provider error, an empty reply, a reply cut off at
-//! the token limit, or one holding no line short enough to be a title - leaves
-//! the title `None`, and the run shows the task the user typed instead. The
-//! title lands on disk with the next persistence write (the run-level
-//! heartbeat guarantees one within a few seconds).
+//! Best-effort, in that nothing here ever fails a run: a run with no name shows
+//! the task the user typed instead. It is not, however, one shot at one
+//! provider any more. The call retries a transient refusal on the dispatch
+//! lane's schedule, and a call that fails outright moves to the next candidate
+//! - the same chain stage inference fails over along.
 //!
-//! That last pair of refusals matters more than it sounds. A reasoning model
-//! spends output tokens working up to its answer, so a starved budget returns
-//! nothing but working-out - and the OpenAI-shaped parsers promote that into
-//! `content` when the answer itself is empty. The title call asks the provider
-//! not to think, gives it room in case it does anyway, and stores nothing at
-//! all rather than the model's thoughts about what a title should be.
+//! That last part is the fix for a failure worth describing, because every
+//! decision in it was individually reasonable. Titling took the head of the
+//! run's model chain, called it once, and on any error wrote the reason to
+//! `tracing::debug!` - in a daemon whose stdout goes to `/dev/null`. So when an
+//! account went over its limit on one gateway, every stage of every run
+//! completed (stage inference retried, then failed over) while the runs
+//! themselves came out nameless, with nothing anywhere saying why. The lane now
+//! retries, fails over, and records what stopped it in
+//! [`RunMetadata::title_error`](crate::persistence::RunMetadata::title_error).
+//!
+//! What still stops the attempt without a second opinion is a call that
+//! *completed* and produced nothing usable: an empty reply, or one cut off at
+//! the token limit. A reasoning model spends output tokens working up to its
+//! answer, so a starved budget returns nothing but working-out - and the
+//! OpenAI-shaped parsers promote that into `content` when the answer itself is
+//! empty. The title call asks the provider not to think, gives it room in case
+//! it does anyway, and stores nothing at all rather than the model's thoughts
+//! about what a title should be. Paying a second provider to have that same
+//! opinion would buy nothing.
 
 use bevy_ecs::prelude::{Commands, Component, Entity, Query, Res, ResMut, Resource, With, Without};
 use leviath_providers::InferenceRequest;
@@ -35,9 +48,27 @@ use crate::title_bridge::{TitleJob, TitleOutcome, run_title_job};
 pub struct TitleSettings(pub leviath_core::config::TitleConfig);
 
 /// This run wants a title; `dispatch_title` picks it up on the next tick.
-/// Inserted at spawn for enabled, root, non-empty-task runs only.
+/// Inserted at spawn for enabled, root, non-empty-task runs only, always
+/// beside a [`TitleCandidates`] naming what to call.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PendingTitle;
+
+/// The provider/model pairs the title call may use, best first.
+///
+/// `dispatch_title` takes the head; a call that *fails* drops it and
+/// `collect_title` re-arms [`PendingTitle`] so the next one is tried. Empty
+/// means every candidate has been spent.
+///
+/// This exists because the title call used to have exactly one shot at exactly
+/// one provider - the head of the run's own chain - while the stage lane behind
+/// it retried and then failed over across the blueprint's whole model list. So
+/// an account that was over its limit on one gateway produced runs whose stages
+/// all completed (they failed over) and whose names never appeared (the title
+/// call took the 403 and gave up). The chain is the same one stage inference
+/// walks, for the same reason: the run has a name to generate and several ways
+/// to generate it.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct TitleCandidates(pub Vec<(String, String)>);
 
 /// A title call is in flight. Unlike `AwaitingCompaction`, this does not hold
 /// the agent out of inference - titling runs alongside the first turn.
@@ -91,6 +122,58 @@ fn resolve_title_model(
         _ => None,
     })?;
     Some((provider, model))
+}
+
+/// A resolved stage's own model plus everything it would fail over to, as the
+/// `(provider, model)` pairs the title lane speaks.
+///
+/// The caller has a `ResolvedStage`; this crate's title lane wants pairs, and
+/// putting the flattening here rather than at the call site keeps the shape of
+/// the chain in one place with the code that walks it.
+pub fn stage_pairs(
+    provider: &str,
+    model: &str,
+    fallbacks: &[leviath_core::blueprint::ModelEntry],
+) -> Vec<(String, String)> {
+    std::iter::once((provider.to_string(), model.to_string()))
+        .chain(
+            fallbacks
+                .iter()
+                .map(|e| (e.provider.clone(), e.model.clone())),
+        )
+        .collect()
+}
+
+/// The ordered chain of provider/model pairs the title call may walk, best
+/// first, for a run whose entry stage resolved to `stage_candidates`.
+///
+/// The `[title]` config still decides the head, so a provider or model set
+/// there is honoured exactly as before. What follows it is the run's own
+/// candidate list - the same chain stage inference fails over along - so a head
+/// that turns out to be unusable costs the run one attempt rather than its
+/// name.
+///
+/// The tail also answers the case the head resolver has to refuse: an explicit
+/// `[title] provider` naming a *different* provider with no `[title] model` is
+/// unguessable on its own, because the run's model name means nothing to
+/// another provider. Each candidate here carries its own model, so a run in
+/// that shape still gets titled - on its own stage models, one step down.
+///
+/// A pair already in the chain is dropped rather than repeated: trying the same
+/// provider and model twice spends a failover step going nowhere.
+pub fn title_chain(
+    settings: &leviath_core::config::TitleConfig,
+    run_model_label: Option<&str>,
+    stage_candidates: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut chain: Vec<(String, String)> = Vec::new();
+    let head = resolve_title_model(settings, run_model_label);
+    for pair in head.into_iter().chain(stage_candidates.iter().cloned()) {
+        if !chain.contains(&pair) {
+            chain.push(pair);
+        }
+    }
+    chain
 }
 
 /// The provider's own "do not think about this one" switch.
@@ -218,42 +301,84 @@ fn strip_reasoning(raw: &str) -> String {
     out
 }
 
+/// Record why this run has no name, on the run itself.
+///
+/// The reason used to go to `tracing::debug!` alone, in a daemon whose
+/// stdout is `/dev/null` - so "titling failed" and "titling never ran" looked
+/// identical from outside, which is how a broken title call survived a whole
+/// day of runs unnoticed. It is a `warn!` *and* a field on the run now: the log
+/// is for whoever is watching, the field is for everyone who was not.
+fn record_title_failure(meta: &mut RunMetadata, reason: String) {
+    tracing::warn!(
+        run_id = %meta.run_id,
+        reason = %reason,
+        "could not generate a title for this run; it will show its task text instead"
+    );
+    meta.title_error = Some(reason);
+}
+
 /// What `dispatch_title` selects.
 ///
 /// `&'static` is bevy's `WorldQuery` convention, not a claim about
 /// lifetimes: the borrow is bound when the query is fetched.
-type TitleQuery = (Entity, &'static RunMetadata);
+type TitleQuery = (
+    Entity,
+    &'static mut RunMetadata,
+    &'static mut TitleCandidates,
+);
 
-/// Dispatch system: start the title call for each [`PendingTitle`] run.
+/// Dispatch system: start the title call for each [`PendingTitle`] run, on the
+/// best candidate still standing.
 ///
-/// A full pool leaves the marker in place to retry next tick; every other
-/// dead end (no settings resource, no resolvable provider/model, provider
-/// not registered) drops the marker so the query empties instead of spinning.
+/// A full pool leaves the marker in place to retry next tick, and a candidate
+/// naming a provider this daemon never registered is skipped over rather than
+/// ending the attempt - it can never be called, and leaving it at the head
+/// would stall the whole chain behind a name nothing answers to. Only two
+/// things drop the marker without a call: titling being switched off, and a
+/// chain with nothing callable left in it.
 pub fn dispatch_title(
-    agents: Query<TitleQuery, (With<PendingTitle>, Without<AwaitingTitle>)>,
+    mut agents: Query<TitleQuery, (With<PendingTitle>, Without<AwaitingTitle>)>,
     settings: Option<Res<TitleSettings>>,
+    tuning: Option<Res<crate::pipeline::InferenceRetryTuning>>,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,
     sink: Res<TitleSink>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, meta) in agents.iter() {
+    // Read once: `[title] enabled` is a host setting, not a per-run one, and an
+    // operator who turns titling off mid-run means it for every pending call.
+    let enabled = settings.is_some_and(|s| s.0.enabled);
+    // The dispatch lane's own schedule, so a title call retries a 429 or a
+    // dropped connection exactly the way the run's real inference does.
+    let retry = crate::pipeline::retry_policy_for(None, tuning.map(|t| *t).unwrap_or_default());
+    for (entity, mut meta, mut chain) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
-        let resolved = settings
-            .as_ref()
-            .filter(|s| s.0.enabled)
-            .and_then(|s| resolve_title_model(&s.0, meta.model.as_deref()));
-        let Some((provider_name, model)) = resolved else {
-            tracing::debug!(run_id = %meta.run_id, "no usable title provider/model; skipping");
+        if !enabled {
+            tracing::debug!(run_id = %meta.run_id, "titling is switched off; skipping");
             commands.entity(entity).remove::<PendingTitle>();
             continue;
+        }
+        let picked = loop {
+            let Some((provider_name, model)) = chain.0.first().cloned() else {
+                break None;
+            };
+            match providers.0.get(&provider_name) {
+                Some(provider) => break Some((provider_name, model, provider)),
+                None => {
+                    tracing::debug!(
+                        run_id = %meta.run_id,
+                        provider = %provider_name,
+                        "title candidate names an unregistered provider; trying the next"
+                    );
+                    chain.0.remove(0);
+                }
+            }
         };
-        let Some(provider) = providers.0.get(&provider_name) else {
-            tracing::debug!(
-                run_id = %meta.run_id,
-                provider = %provider_name,
-                "title provider not registered; skipping"
+        let Some((provider_name, model, provider)) = picked else {
+            record_title_failure(
+                &mut meta,
+                "no configured provider could serve a title call".to_string(),
             );
             commands.entity(entity).remove::<PendingTitle>();
             continue;
@@ -261,6 +386,9 @@ pub fn dispatch_title(
         let Some(permit) = stage.pools.try_acquire(&provider_name, &model) else {
             continue; // pool full - retry next tick
         };
+        // Spent only once the call is actually going out, so a tick that only
+        // found a full pool does not cost the run a candidate.
+        chain.0.remove(0);
 
         stage.runtime.spawn(run_title_job(
             TitleJob {
@@ -271,7 +399,7 @@ pub fn dispatch_title(
                 request: title_request(&meta.task, &provider_name, &model),
                 permit,
             },
-            std::time::Duration::from_secs(leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS),
+            retry,
             sink.0.clone(),
             stage.wake.clone(),
         ));
@@ -289,12 +417,26 @@ pub fn dispatch_title(
 type CollectTitleQuery = (
     &'static mut RunMetadata,
     Option<&'static mut crate::persistence::TokenTotals>,
+    &'static TitleCandidates,
 );
 
-/// Collect system: store each finished title into its run's metadata. A
-/// provider error or empty reply changes nothing; either way the in-flight
-/// marker comes off. What the call billed is counted either way - see the note
-/// in the body.
+/// Collect system: store each finished title into its run's metadata.
+///
+/// The in-flight marker always comes off, and what the call billed is counted
+/// either way - see the note in the body. What happens next depends on how the
+/// attempt ended:
+///
+/// - a usable title: stored, and any reason left by an earlier candidate is
+///   cleared, because the run does have a name now;
+/// - a *failed call* with candidates left: [`PendingTitle`] goes back on and
+///   the next provider is tried, the same way stage inference fails over;
+/// - anything else: the reason is recorded on the run.
+///
+/// A call that completed but produced nothing usable ends the attempt rather
+/// than failing over. The provider works and answered; another one would be
+/// paying for a second opinion on a prompt that is not in doubt. A call that
+/// *failed* says nothing about the title and everything about the route to it,
+/// which is exactly what the next candidate is for.
 pub fn collect_title(
     mut results: ResMut<TitleResults>,
     mut agents: Query<CollectTitleQuery, With<AwaitingTitle>>,
@@ -303,7 +445,7 @@ pub fn collect_title(
 ) {
     crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((mut meta, mut totals)) = agents.get_mut(outcome.entity) else {
+        let Ok((mut meta, mut totals, chain)) = agents.get_mut(outcome.entity) else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
         crate::tick_scope::enter(outcome.entity);
@@ -328,22 +470,58 @@ pub fn collect_title(
                 },
             );
         }
+        commands.entity(outcome.entity).remove::<AwaitingTitle>();
+        // A failed call is the one outcome another provider can do better on,
+        // so it is the one that moves down the chain. Re-arming `PendingTitle`
+        // is all it takes: the next tick's dispatch picks up the new head.
+        if let Err(err) = &outcome.result {
+            if !chain.0.is_empty() {
+                tracing::warn!(
+                    run_id = %meta.run_id,
+                    provider = %outcome.provider_name,
+                    model = %outcome.model,
+                    error = %err,
+                    "title call failed; trying the next candidate provider"
+                );
+                commands.entity(outcome.entity).insert(PendingTitle);
+                continue;
+            }
+            record_title_failure(
+                &mut meta,
+                format!("{}/{} failed: {err}", outcome.provider_name, outcome.model),
+            );
+            continue;
+        }
         // A reply that stopped at the token limit was cut off mid-sentence, so
         // whatever it holds is not a finished title however short it looks.
         // That is the shape a reasoning model returns here: it spends the
         // budget working up to an answer and the call ends before the answer.
         if outcome.finish_reason == Some(leviath_providers::FinishReason::TokenLimit) {
-            tracing::debug!(
-                run_id = %meta.run_id,
-                "title reply hit the token limit; leaving the run untitled"
+            record_title_failure(
+                &mut meta,
+                format!(
+                    "{}/{} ran out of output tokens before finishing a title",
+                    outcome.provider_name, outcome.model
+                ),
             );
-        } else if let Ok(raw) = outcome.result {
-            let title = sanitize_title(&raw);
-            if !title.is_empty() {
-                meta.title = Some(title);
-            }
+            continue;
         }
-        commands.entity(outcome.entity).remove::<AwaitingTitle>();
+        let raw = outcome.result.unwrap_or_default();
+        let title = sanitize_title(&raw);
+        if title.is_empty() {
+            record_title_failure(
+                &mut meta,
+                format!(
+                    "{}/{} replied with nothing short enough to be a title",
+                    outcome.provider_name, outcome.model
+                ),
+            );
+            continue;
+        }
+        meta.title = Some(title);
+        // An earlier candidate may have left a reason behind. The run has a
+        // name now, so the explanation for not having one has to go with it.
+        meta.title_error = None;
     }
 }
 
@@ -416,6 +594,7 @@ mod tests {
             callback_url: None,
             callback_secret: None,
             title: None,
+            title_error: None,
             unattended: false,
             read_paths: None,
             output_request: None,
@@ -483,6 +662,366 @@ mod tests {
         crate::inference_pool::InferencePools::new(crate::inference_pool::InferencePoolConfig::new())
     }
 
+    /// The candidate chain a spawned run would carry, from `(provider, model)`
+    /// pairs written the way a test reads them.
+    fn chain_of(pairs: &[(&str, &str)]) -> TitleCandidates {
+        TitleCandidates(
+            pairs
+                .iter()
+                .map(|(p, m)| (p.to_string(), m.to_string()))
+                .collect(),
+        )
+    }
+
+    /// A provider that fails its first `fail_first` calls and then answers.
+    /// The counter is what tells a retry apart from a single attempt: the old
+    /// title lane called `infer` exactly once, so a provider having one bad
+    /// moment cost the run its name for good.
+    struct FlakyThenFine {
+        fail_first: std::sync::atomic::AtomicUsize,
+        /// Built per call rather than stored: `ProviderError` is not `Clone`.
+        error: fn() -> ProviderError,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for FlakyThenFine {
+        async fn infer(
+            &self,
+            _r: &InferenceRequest,
+        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+            let left = self
+                .fail_first
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| Some(n.saturating_sub(1)),
+                )
+                .unwrap_or_default();
+            if left > 0 {
+                return Err((self.error)());
+            }
+            Ok(leviath_providers::InferenceResponse {
+                content: "Recovered Title".to_string(),
+                tool_calls: vec![],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::Complete,
+            })
+        }
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+            1
+        }
+        fn max_context_tokens(&self, _m: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "flaky"
+        }
+        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    /// Trait obligations on the flaky mock; only `infer` matters to the tests
+    /// that use it, and an unexercised method is an uncovered region.
+    #[tokio::test]
+    async fn flaky_provider_metadata_is_exercised() {
+        let p = FlakyThenFine {
+            fail_first: std::sync::atomic::AtomicUsize::new(1),
+            error: || ProviderError::Other("scripted".to_string()),
+        };
+        // Both arms of `infer`, driven directly: the scripted failure, then the
+        // answer behind it.
+        let request = title_request("t", "mock", "m");
+        assert!(p.infer(&request).await.is_err());
+        assert_eq!(
+            p.infer(&request)
+                .await
+                .expect("the second call answers")
+                .content,
+            "Recovered Title"
+        );
+        assert_eq!(p.count_tokens("t", "m").await, 1);
+        assert_eq!(p.max_context_tokens("m"), 100_000);
+        assert_eq!(p.name(), "flaky");
+        let _ = p.capabilities("m");
+    }
+
+    /// A retry schedule with no waiting in it, so the test asserts the number
+    /// of attempts rather than the length of the backoff.
+    fn instant_retry() -> crate::inference_bridge::RetryPolicy {
+        crate::inference_bridge::RetryPolicy {
+            base_delay: std::time::Duration::ZERO,
+            capacity_base_delay: std::time::Duration::ZERO,
+            ..crate::inference_bridge::RetryPolicy::default()
+        }
+    }
+
+    /// The regression this whole change exists for, at the job level: a
+    /// provider that refuses once and answers next time now yields a title.
+    /// Before, `run_title_job` made a single naked `infer` call, so this run
+    /// went untitled and said so only to a debug log in a daemon writing to
+    /// `/dev/null`.
+    #[tokio::test]
+    async fn a_transient_refusal_is_retried_rather_than_losing_the_title() {
+        let pools = default_pools();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_title_job(
+            TitleJob {
+                entity: bevy_ecs::entity::Entity::PLACEHOLDER,
+                provider: Arc::new(FlakyThenFine {
+                    fail_first: std::sync::atomic::AtomicUsize::new(2),
+                    error: || ProviderError::RateLimitExceeded {
+                        retry_after_secs: Some(0),
+                    },
+                }),
+                provider_name: "mock".to_string(),
+                model: "m".to_string(),
+                request: title_request("task", "mock", "m"),
+                permit: pools.try_acquire("p", "m").expect("free"),
+            },
+            instant_retry(),
+            tx,
+            Arc::new(Notify::new()),
+        )
+        .await;
+        let outcome = rx.recv().await.expect("an outcome is always reported");
+        assert_eq!(
+            outcome.result.expect("the third attempt answers"),
+            "Recovered Title"
+        );
+    }
+
+    /// The other half of the schedule: a permanent refusal is not retried, so
+    /// a bad request cannot spend the whole attempt budget restating itself.
+    #[tokio::test]
+    async fn a_permanent_refusal_stops_at_the_first_attempt() {
+        let pools = default_pools();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let provider = Arc::new(FlakyThenFine {
+            // More failures than the policy has attempts, so a retrying job
+            // would still end in error - only the counter tells them apart.
+            fail_first: std::sync::atomic::AtomicUsize::new(99),
+            error: || ProviderError::Unavailable {
+                reason: leviath_providers::UnavailableReason::Forbidden,
+                detail: "key limit exceeded (monthly limit)".to_string(),
+            },
+        });
+        run_title_job(
+            TitleJob {
+                entity: bevy_ecs::entity::Entity::PLACEHOLDER,
+                provider: provider.clone(),
+                provider_name: "mock".to_string(),
+                model: "m".to_string(),
+                request: title_request("task", "mock", "m"),
+                permit: pools.try_acquire("p", "m").expect("free"),
+            },
+            instant_retry(),
+            tx,
+            Arc::new(Notify::new()),
+        )
+        .await;
+        let outcome = rx.recv().await.expect("an outcome is always reported");
+        assert!(outcome.result.is_err());
+        assert_eq!(
+            provider
+                .fail_first
+                .load(std::sync::atomic::Ordering::SeqCst),
+            98,
+            "a 403 is the account's answer, not a blip; one call only"
+        );
+    }
+
+    /// A world whose `dead` provider always refuses and whose `live` one
+    /// always answers - the shape of an account that is over its limit on one
+    /// gateway and fine on another.
+    fn build_failover_world() -> (World, mpsc::UnboundedReceiver<TitleOutcome>) {
+        let (mut world, rx) = build_world(Ok("Live Title"), default_pools());
+        let mut registry = crate::ProviderRegistry::new();
+        registry.register(
+            "dead".to_string(),
+            Arc::new(Scripted {
+                reply: Err("HTTP 403 key limit exceeded"),
+                finish_reason: leviath_providers::FinishReason::Complete,
+            }),
+        );
+        registry.register(
+            "live".to_string(),
+            Arc::new(Scripted {
+                reply: Ok("Live Title"),
+                finish_reason: leviath_providers::FinishReason::Complete,
+            }),
+        );
+        world.insert_resource(Providers(registry));
+        (world, rx)
+    }
+
+    /// The failure this change was reported for: every stage of a run
+    /// completed because stage inference failed over past a dead gateway,
+    /// while the run itself stayed nameless because the title call took the
+    /// same refusal with nowhere to go. It now walks the same chain.
+    #[tokio::test]
+    async fn a_failed_call_moves_the_title_to_the_next_candidate() {
+        let (mut world, mut title_rx) = build_failover_world();
+        world.insert_resource(TitleSettings(config(None, None)));
+        let e = world
+            .spawn((
+                metadata(Some("dead/m")),
+                PendingTitle,
+                chain_of(&[("dead", "m"), ("live", "m2")]),
+            ))
+            .id();
+
+        // First attempt: the dead gateway, which refuses.
+        run_dispatch(&mut world);
+        let outcome = title_rx.recv().await.expect("job reported");
+        assert!(outcome.result.is_err());
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(outcome).unwrap();
+        world.insert_resource(TitleResults(rx));
+        run_collect(&mut world);
+
+        // Re-armed rather than abandoned, and pointed at the live candidate.
+        assert!(world.get::<PendingTitle>(e).is_some());
+        assert!(world.get::<AwaitingTitle>(e).is_none());
+        assert!(
+            world.get::<RunMetadata>(e).unwrap().title_error.is_none(),
+            "a candidate that failed with another still to try is not a verdict"
+        );
+
+        // Second attempt: the live one, which answers.
+        run_dispatch(&mut world);
+        let outcome = title_rx.recv().await.expect("second job reported");
+        assert_eq!(outcome.provider_name, "live");
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(outcome).unwrap();
+        world.insert_resource(TitleResults(rx));
+        run_collect(&mut world);
+
+        assert_eq!(
+            world.get::<RunMetadata>(e).unwrap().title.as_deref(),
+            Some("Live Title")
+        );
+        assert!(world.get::<RunMetadata>(e).unwrap().title_error.is_none());
+    }
+
+    /// A title that lands after an earlier candidate failed clears the reason
+    /// that candidate left behind: the run has a name, so an explanation for
+    /// not having one is stale.
+    #[test]
+    fn a_landed_title_clears_an_earlier_failure_reason() {
+        let mut world = World::new();
+        let mut meta = metadata(Some("mock/m"));
+        meta.title_error = Some("dead/m failed: HTTP 403".to_string());
+        let e = world
+            .spawn((meta, AwaitingTitle, TitleCandidates::default()))
+            .id();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(TitleOutcome {
+            entity: e,
+            result: Ok("Second Time Lucky".to_string()),
+            finish_reason: Some(leviath_providers::FinishReason::Complete),
+            usage: None,
+            provider_name: "live".to_string(),
+            model: "m2".to_string(),
+        })
+        .unwrap();
+        world.insert_resource(TitleResults(rx));
+        run_collect(&mut world);
+
+        let meta = world.get::<RunMetadata>(e).unwrap();
+        assert_eq!(meta.title.as_deref(), Some("Second Time Lucky"));
+        assert_eq!(meta.title_error, None);
+    }
+
+    /// A stage's own pair leads its failover entries, in blueprint order.
+    #[test]
+    fn stage_pairs_puts_the_resolved_model_ahead_of_its_fallbacks() {
+        let fallbacks = vec![
+            leviath_core::blueprint::ModelEntry {
+                provider: "openai".to_string(),
+                model: "gpt-5-mini".to_string(),
+            },
+            leviath_core::blueprint::ModelEntry {
+                provider: "ollama".to_string(),
+                model: "qwen3".to_string(),
+            },
+        ];
+        assert_eq!(
+            stage_pairs("anthropic", "claude-x", &fallbacks),
+            vec![
+                ("anthropic".to_string(), "claude-x".to_string()),
+                ("openai".to_string(), "gpt-5-mini".to_string()),
+                ("ollama".to_string(), "qwen3".to_string()),
+            ]
+        );
+        assert_eq!(
+            stage_pairs("anthropic", "claude-x", &[]),
+            vec![("anthropic".to_string(), "claude-x".to_string())],
+            "a stage with nothing to fail over to is still one candidate"
+        );
+    }
+
+    /// `[title]` config still leads, the run's own candidates follow it, and a
+    /// pair already in the chain is not repeated.
+    #[test]
+    fn the_chain_puts_the_configured_pair_ahead_of_the_runs_own() {
+        let stage = [
+            ("anthropic".to_string(), "claude-x".to_string()),
+            ("openai".to_string(), "gpt-5-mini".to_string()),
+        ];
+        assert_eq!(
+            title_chain(&config(Some("openai"), Some("gpt-5-mini")), None, &stage),
+            vec![
+                ("openai".to_string(), "gpt-5-mini".to_string()),
+                ("anthropic".to_string(), "claude-x".to_string()),
+            ],
+            "the configured pair leads and is not repeated behind itself"
+        );
+    }
+
+    /// With nothing configured the head resolves from the run's label, which
+    /// is the entry stage's own pair - so the chain is just the run's list.
+    #[test]
+    fn the_chain_is_the_runs_own_list_when_nothing_is_configured() {
+        let stage = [
+            ("anthropic".to_string(), "claude-x".to_string()),
+            ("openrouter".to_string(), "anthropic/claude-x".to_string()),
+        ];
+        assert_eq!(
+            title_chain(&config(None, None), Some("anthropic/claude-x"), &stage),
+            vec![
+                ("anthropic".to_string(), "claude-x".to_string()),
+                ("openrouter".to_string(), "anthropic/claude-x".to_string()),
+            ]
+        );
+    }
+
+    /// The case `resolve_title_model` has to refuse on its own - a `[title]`
+    /// provider different from the run's, with no `[title]` model - stops
+    /// being a dead end, because each candidate carries its own model name.
+    #[test]
+    fn an_unguessable_configured_provider_falls_through_to_the_runs_chain() {
+        let stage = [("anthropic".to_string(), "claude-x".to_string())];
+        assert_eq!(
+            resolve_title_model(&config(Some("openai"), None), Some("anthropic/claude-x")),
+            None
+        );
+        assert_eq!(
+            title_chain(
+                &config(Some("openai"), None),
+                Some("anthropic/claude-x"),
+                &stage
+            ),
+            vec![("anthropic".to_string(), "claude-x".to_string())]
+        );
+    }
+
     /// The permit must come back within the deadline even when the provider
     /// never answers - a hung title call once held its pool slot forever.
     #[tokio::test]
@@ -528,7 +1067,10 @@ mod tests {
                 request: title_request("task", "mock", "m"),
                 permit: pools.try_acquire("p", "m").expect("free"),
             },
-            std::time::Duration::from_millis(5),
+            crate::inference_bridge::RetryPolicy {
+                job_timeout: std::time::Duration::from_millis(5),
+                ..crate::inference_bridge::RetryPolicy::default()
+            },
             tx,
             Arc::new(Notify::new()),
         )
@@ -542,7 +1084,13 @@ mod tests {
     async fn dispatch_and_collect_set_the_title() {
         let (mut world, title_rx) = build_world(Ok("\"Release notes digest\"\n"), default_pools());
         world.insert_resource(TitleSettings(config(None, None)));
-        let e = world.spawn((metadata(Some("mock/m")), PendingTitle)).id();
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                PendingTitle,
+                chain_of(&[("mock", "m")]),
+            ))
+            .id();
 
         run_dispatch(&mut world);
         assert!(world.get::<PendingTitle>(e).is_none());
@@ -569,7 +1117,13 @@ mod tests {
     async fn provider_error_leaves_the_title_unset() {
         let (mut world, mut title_rx) = build_world(Err("boom"), default_pools());
         world.insert_resource(TitleSettings(config(None, None)));
-        let e = world.spawn((metadata(Some("mock/m")), PendingTitle)).id();
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                PendingTitle,
+                chain_of(&[("mock", "m")]),
+            ))
+            .id();
 
         run_dispatch(&mut world);
         let outcome = title_rx.recv().await.expect("job reported");
@@ -581,13 +1135,32 @@ mod tests {
         run_collect(&mut world);
         assert_eq!(world.get::<RunMetadata>(e).unwrap().title, None);
         assert!(world.get::<AwaitingTitle>(e).is_none());
+        // With the chain spent, the run says why rather than looking like
+        // titling was never asked for.
+        let reason = world
+            .get::<RunMetadata>(e)
+            .unwrap()
+            .title_error
+            .clone()
+            .unwrap_or_default();
+        assert_eq!(reason.split(':').next(), Some("mock/m failed"));
+        assert!(
+            world.get::<PendingTitle>(e).is_none(),
+            "nothing left to try"
+        );
     }
 
     #[tokio::test]
     async fn whitespace_reply_leaves_the_title_unset() {
         let (mut world, mut title_rx) = build_world(Ok("  \n \n"), default_pools());
         world.insert_resource(TitleSettings(config(None, None)));
-        let e = world.spawn((metadata(Some("mock/m")), PendingTitle)).id();
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                PendingTitle,
+                chain_of(&[("mock", "m")]),
+            ))
+            .id();
 
         run_dispatch(&mut world);
         let outcome = title_rx.recv().await.expect("job reported");
@@ -597,6 +1170,11 @@ mod tests {
 
         run_collect(&mut world);
         assert_eq!(world.get::<RunMetadata>(e).unwrap().title, None);
+        assert_eq!(
+            world.get::<RunMetadata>(e).unwrap().title_error.as_deref(),
+            Some("mock/m replied with nothing short enough to be a title"),
+            "the provider answered, so this is the model's verdict, not the route's"
+        );
     }
 
     /// A reply that ran out of tokens is refused however title-shaped the text
@@ -611,7 +1189,13 @@ mod tests {
             default_pools(),
         );
         world.insert_resource(TitleSettings(config(None, None)));
-        let e = world.spawn((metadata(Some("mock/m")), PendingTitle)).id();
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                PendingTitle,
+                chain_of(&[("mock", "m")]),
+            ))
+            .id();
 
         run_dispatch(&mut world);
         let outcome = title_rx.recv().await.expect("job reported");
@@ -624,6 +1208,10 @@ mod tests {
             world.get::<RunMetadata>(e).unwrap().title,
             None,
             "a truncated reply is not a title, however short it is"
+        );
+        assert_eq!(
+            world.get::<RunMetadata>(e).unwrap().title_error.as_deref(),
+            Some("mock/m ran out of output tokens before finishing a title")
         );
         assert!(world.get::<AwaitingTitle>(e).is_none());
     }
@@ -675,7 +1263,13 @@ mod tests {
     #[tokio::test]
     async fn dispatch_without_settings_drops_the_marker() {
         let (mut world, _title_rx) = build_world(Ok("t"), default_pools());
-        let e = world.spawn((metadata(Some("mock/m")), PendingTitle)).id();
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                PendingTitle,
+                chain_of(&[("mock", "m")]),
+            ))
+            .id();
         run_dispatch(&mut world);
         assert!(world.get::<PendingTitle>(e).is_none());
         assert!(world.get::<AwaitingTitle>(e).is_none());
@@ -689,20 +1283,62 @@ mod tests {
             provider: None,
             model: None,
         }));
-        let e = world.spawn((metadata(Some("mock/m")), PendingTitle)).id();
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                PendingTitle,
+                chain_of(&[("mock", "m")]),
+            ))
+            .id();
         run_dispatch(&mut world);
         assert!(world.get::<PendingTitle>(e).is_none());
         assert!(world.get::<AwaitingTitle>(e).is_none());
     }
 
     #[tokio::test]
-    async fn dispatch_with_unregistered_provider_drops_the_marker() {
+    async fn dispatch_with_no_callable_candidate_records_the_reason() {
         let (mut world, _title_rx) = build_world(Ok("t"), default_pools());
         world.insert_resource(TitleSettings(config(Some("nowhere"), Some("m"))));
-        let e = world.spawn((metadata(Some("mock/m")), PendingTitle)).id();
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                PendingTitle,
+                chain_of(&[("nowhere", "m")]),
+            ))
+            .id();
         run_dispatch(&mut world);
         assert!(world.get::<PendingTitle>(e).is_none());
         assert!(world.get::<AwaitingTitle>(e).is_none());
+        // The unregistered head was skipped, the chain emptied, and the run
+        // says why it has no name rather than looking like it was never asked.
+        assert!(world.get::<TitleCandidates>(e).unwrap().0.is_empty());
+        assert_eq!(
+            world.get::<RunMetadata>(e).unwrap().title_error.as_deref(),
+            Some("no configured provider could serve a title call")
+        );
+    }
+
+    /// The title call takes the operator's `[limits]` retry schedule, not a
+    /// hardcoded one - the same resource the dispatch lane reads.
+    #[tokio::test]
+    async fn dispatch_uses_the_configured_retry_schedule() {
+        let (mut world, mut title_rx) = build_world(Ok("Configured"), default_pools());
+        world.insert_resource(TitleSettings(config(None, None)));
+        world.insert_resource(crate::pipeline::InferenceRetryTuning {
+            max_attempts: 7,
+            base_delay_ms: 3,
+        });
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                PendingTitle,
+                chain_of(&[("mock", "m")]),
+            ))
+            .id();
+        run_dispatch(&mut world);
+        let outcome = title_rx.recv().await.expect("job reported");
+        assert_eq!(outcome.entity, e);
+        assert_eq!(outcome.result.expect("the mock answers"), "Configured");
     }
 
     #[tokio::test]
@@ -713,7 +1349,13 @@ mod tests {
         let held = pools.try_acquire("p", "m").unwrap();
         let (mut world, _title_rx) = build_world(Ok("t"), pools);
         world.insert_resource(TitleSettings(config(None, None)));
-        let e = world.spawn((metadata(Some("mock/m")), PendingTitle)).id();
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                PendingTitle,
+                chain_of(&[("mock", "m")]),
+            ))
+            .id();
 
         run_dispatch(&mut world);
         // Slot occupied: the marker stays so the next tick retries.
@@ -953,6 +1595,7 @@ mod tests {
             .spawn((
                 metadata(Some("mock/m")),
                 AwaitingTitle,
+                TitleCandidates::default(),
                 crate::persistence::TokenTotals::default(),
             ))
             .id();
@@ -999,6 +1642,7 @@ mod tests {
             .spawn((
                 metadata(Some("mock/m")),
                 AwaitingTitle,
+                TitleCandidates::default(),
                 crate::persistence::TokenTotals::default(),
             ))
             .id();
@@ -1042,6 +1686,7 @@ mod tests {
             .spawn((
                 metadata(Some("mock/m")),
                 AwaitingTitle,
+                TitleCandidates::default(),
                 crate::persistence::TokenTotals::default(),
             ))
             .id();

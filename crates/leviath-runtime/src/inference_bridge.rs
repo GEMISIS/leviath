@@ -189,7 +189,7 @@ fn exponential(base: Duration, attempt: u32) -> Duration {
 /// The order of the checks is the policy: a permanent error is never retried, an
 /// exhausted attempt count stops, an exhausted backoff budget stops, and only
 /// then does the kind of failure decide how long to wait.
-fn backoff_after(
+pub(crate) fn backoff_after(
     policy: &RetryPolicy,
     error: &ProviderError,
     attempt: u32,

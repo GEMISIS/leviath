@@ -603,6 +603,12 @@ client that connected or reconnected after the rename reads the name off the nex
 fetching the run. Both are the `events.title` capability; without it a client has to poll each new
 run until it has a name. `title` is absent, not null, while a run has none.
 
+Naming can also fail. The call retries a transient refusal and then walks the run's own model
+candidates, the same chain its stage inference fails over along, so one provider being unreachable
+no longer costs the run its name. When every candidate is spent, `title_error` on the run says what
+stopped it, and stays `null` while titling is simply unfinished. Poll that field rather than waiting
+forever on a `run_renamed` frame that is not coming.
+
 `status`, on `agent_status` and on `agent_completed`, is the word `GET /api/runs` uses for the same
 run. See [Statuses](#statuses) for the list and for what a server that predates
 `events.run_status` sends instead.
