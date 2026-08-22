@@ -4296,6 +4296,59 @@ fn a_fan_out_call_is_read_inline_and_never_reaches_the_lane() {
     );
 }
 
+/// Parking on workers must leave the fan-out call with NO result yet, while the
+/// rest of the batch lands normally.
+///
+/// `merge_in_call_order` fills a call with no entry in `context_results` with an
+/// empty string, so the fan-out call used to get a placeholder here and the real
+/// report from `finish_tool_fan_out` later - two `tool_result` blocks under one
+/// id. Anthropic rejects the next request with "each tool_use must have a single
+/// result", which killed a live run after its workers had already spawned.
+#[test]
+fn parking_on_a_fan_out_writes_no_result_for_it_yet() {
+    let (mut world, _jrx) = world_with_lane();
+    let mut fan = tc("c1", "fan_out");
+    fan.arguments = serde_json::json!({
+        "agent": "researcher",
+        "items": [{"id": "a", "context": {"question": "q"}}]
+    });
+    // A context tool in the same turn: it lands now, proving the filter removes
+    // only the fan-out's entry rather than suppressing the whole batch.
+    let mut note = tc("c2", "context_append");
+    note.arguments = serde_json::json!({"region": "conversation", "content": "n"});
+    let e = ready_for_tools(&mut world, vec![fan, note]);
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    let w = world.get::<ContextWindow>(e).unwrap();
+    let conv = w.get_region("conversation").unwrap();
+    let results_for = |id: &str| {
+        conv.content
+            .iter()
+            .filter(|e| {
+                matches!(&e.kind,
+                    leviath_core::EntryKind::ToolResult { tool_call_id, .. }
+                    if tool_call_id == id)
+            })
+            .count()
+    };
+    assert_eq!(
+        results_for("c1"),
+        0,
+        "the fan-out's result arrives when its workers finish, not now"
+    );
+    // The tool_use itself must still be recorded, or the later result is an
+    // orphan with nothing to pair against.
+    assert!(
+        conv.content.iter().any(|e| matches!(&e.kind,
+            leviath_core::EntryKind::AssistantTurn { tool_calls }
+            if tool_calls.iter().any(|c| c.id == "c1"))),
+        "the assistant turn keeps its tool_use block"
+    );
+}
+
 /// Arguments that do not fit are refused as an `[error]` result, which the model
 /// corrects on its next turn like any other refusal.
 #[test]

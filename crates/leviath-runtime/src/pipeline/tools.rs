@@ -659,7 +659,21 @@ pub fn dispatch_tools(
         if let Some((call_id, request)) = fan_out {
             // Everything else in the batch lands now; the fan-out's own result
             // arrives when its workers finish, as that call's tool result.
-            let merged = merge_in_call_order(&result.tool_calls, &context_results);
+            //
+            // It must be dropped from the results applied here, and only from
+            // those: the call stays in `tool_calls` so the assistant turn keeps
+            // its `tool_use` block, but `merge_in_call_order` fills a call with
+            // no entry in `context_results` with an empty string, and that
+            // placeholder plus the real report from `finish_tool_fan_out` is
+            // two `tool_result` blocks under one id. Anthropic rejects the next
+            // request outright: "each tool_use must have a single result".
+            // Deferring is safe because the agent parks on its workers, so no
+            // request goes out carrying a `tool_use` that has no result yet.
+            let merged: Vec<(String, String)> =
+                merge_in_call_order(&result.tool_calls, &context_results)
+                    .into_iter()
+                    .filter(|(id, _)| id != &call_id)
+                    .collect();
             apply_tool_results(
                 &mut window,
                 &result.response,
