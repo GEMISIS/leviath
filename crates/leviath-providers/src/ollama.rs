@@ -412,7 +412,7 @@ impl OllamaProvider {
         let caps = self.capabilities(&request.model);
         let options = if caps.supports_temperature {
             serde_json::json!({
-                "temperature": request.temperature,
+                "temperature": crate::provider::json_number(request.temperature),
                 "num_predict": request.max_tokens,
             })
         } else {

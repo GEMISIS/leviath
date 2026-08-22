@@ -547,6 +547,25 @@ pub struct SystemBlock {
     pub volatility: leviath_core::Volatility,
 }
 
+/// An `f32` as JSON, at the precision it was written with.
+///
+/// `serde_json` widens an `f32` to `f64` to store it, and `0.7f32` widened is
+/// `0.699999988079071`. That is what every request carried: it read as a
+/// Leviath bug in provider error messages, and Z.AI rejects it outright with
+/// `The temperature parameter is illegal: 限制小数点[2]位` - at most two decimal
+/// places - which made an entire vendor family unusable.
+///
+/// `f32`'s own `Display` gives the shortest decimal that round-trips back to
+/// the same `f32`, so `0.7f32` prints "0.7". Parsing that as `f64` gets the
+/// number the blueprint author actually wrote, without imposing a fixed
+/// precision on someone who wanted `0.125`.
+pub fn json_number(value: f32) -> serde_json::Value {
+    // `f32::Display` always produces a decimal that parses back, including for
+    // the non-finite values, so the fallback is the same number rather than a
+    // branch nothing reaches.
+    serde_json::json!(value.to_string().parse::<f64>().unwrap_or(f64::from(value)))
+}
+
 /// Request for LLM inference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceRequest {
@@ -1138,6 +1157,37 @@ mod stream_once {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A temperature reaches the wire as the number that was written.
+    ///
+    /// `serde_json` stores an `f32` by widening it to `f64`, and `0.7f32`
+    /// widened is `0.699999988079071`. Every request carried that. It reads as
+    /// a Leviath bug in provider error text, and Z.AI rejects it outright -
+    /// "The temperature parameter is illegal", at most two decimal places -
+    /// which made the whole GLM family unusable.
+    #[test]
+    fn a_temperature_serializes_at_the_precision_it_was_written_with() {
+        assert_eq!(json_number(0.7f32).to_string(), "0.7");
+        assert_eq!(json_number(1.0f32).to_string(), "1.0");
+        assert_eq!(json_number(0.0f32).to_string(), "0.0");
+        // Someone who wanted three decimals keeps them: the shortest
+        // round-tripping form is the number itself, not a rounded one.
+        assert_eq!(json_number(0.125f32).to_string(), "0.125");
+
+        // What it used to do, and what Z.AI refused.
+        let widened = serde_json::json!(0.7f32);
+        assert_eq!(widened.to_string(), "0.699999988079071");
+        assert_ne!(json_number(0.7f32).to_string(), widened.to_string());
+    }
+
+    /// A non-finite value does not panic on the way through. Not a temperature
+    /// any caller sends, but the conversion should survive one.
+    #[test]
+    fn a_non_finite_number_does_not_panic() {
+        // serde_json has no NaN, so it lands as null - which is the same
+        // answer it gave before, and not a crash.
+        assert!(json_number(f32::NAN).is_null());
+    }
 
     // ─── A partial [model_capabilities] entry corrects, it does not replace ──
 

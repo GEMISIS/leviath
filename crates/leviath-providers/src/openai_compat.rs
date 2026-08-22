@@ -427,7 +427,7 @@ pub fn build_openai_request_body_with(
 
     let mut body = serde_json::json!({
         "model": request.model,
-        "temperature": request.temperature,
+        "temperature": crate::provider::json_number(request.temperature),
         "messages": messages,
     });
     body[token_limit.key()] = serde_json::json!(request.max_tokens);
