@@ -13,6 +13,16 @@ same list.
 
 ## Unreleased
 
+- Fixed: the dashboard's Context tree keeps its columns lined up whatever the
+  regions are called. The name sat in a fixed sixteen-character column that
+  padded a short name but never cut a long one, so `stage_instructions` - which
+  is eighteen characters, and is in the layout every bundled agent uses - ran
+  straight into the kind beside it and pushed that row's token bar two cells
+  right of every other row's. The column now sizes itself to the longest name
+  in the snapshot, within bounds, with a name past the bound cut rather than
+  costing every other row the width its bar needs. Both columns keep a gap
+  open, since a cell filled edge to edge reads as one word.
+
 - Fixed: a model that takes only its default temperature no longer kills the
   run. `gpt-5.5` rejects any other value outright, the capability table said it
   supports one because the rest of the `gpt-5` family does, and a research run
