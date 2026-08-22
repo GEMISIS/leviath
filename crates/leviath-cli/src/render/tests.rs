@@ -742,6 +742,11 @@ fn a_multi_span_cell_truncates_across_its_spans() {
 
 // ─── Mermaid ─────────────────────────────────────────────────────────────────
 
+/// Whether a row is a routing lane: something turns on it.
+fn turns_somewhere(row: &str) -> bool {
+    row.contains('╮') || row.contains('╭') || row.contains('╰') || row.contains('╯')
+}
+
 fn chart(source: &[&str], width: u16) -> Vec<String> {
     let lines: Vec<String> = source.iter().map(|s| s.to_string()).collect();
     super::mermaid::render(&lines, width)
@@ -779,9 +784,9 @@ fn a_flowchart_is_drawn_as_boxes_and_arrows() {
         "no labels:\n{all}"
     );
 
-    // A node that branches is a tee, not an elbow: the line arrives from
-    // above and leaves both ways.
-    assert!(all.contains('┴'), "the fan-out is not a junction:\n{all}");
+    // A branch tees off its stem rather than ending it: the line carries on
+    // down to the edge below, which is what says both are still connected.
+    assert!(all.contains('┤') || all.contains('├'), "no tee:\n{all}");
     // A decision is drawn differently from a step, without costing a row.
     assert!(all.contains("<Plan ok?>"), "{all}");
     assert!(all.contains("(Done)"), "{all}");
@@ -791,10 +796,11 @@ fn a_flowchart_is_drawn_as_boxes_and_arrows() {
     }
 }
 
-/// An edge that goes backwards would need routing around the boxes between
-/// its ends. It is named underneath instead of drawn through them.
+/// A loop is the thing a flowchart is usually about, so it is drawn: out of
+/// the box, down a corridor of its own beside the diagram, and back in with an
+/// arrow head pointing at its target.
 #[test]
-fn an_edge_that_does_not_go_straight_down_is_listed_instead() {
+fn a_loop_is_drawn_down_a_corridor_of_its_own() {
     let rows = chart(
         &[
             "flowchart TD",
@@ -805,8 +811,137 @@ fn an_edge_that_does_not_go_straight_down_is_listed_instead() {
         50,
     );
     let all = rows.join("\n");
-    assert!(all.contains("──▶"), "the back edge is not listed:\n{all}");
-    assert!(all.contains("(retry)"), "its label is missing:\n{all}");
+    assert!(
+        all.contains('◀'),
+        "the loop does not arrive anywhere:\n{all}"
+    );
+    assert!(all.contains("retry"), "its label is missing:\n{all}");
+    // Drawn, so there is nothing left to list underneath.
+    assert!(!all.contains("──▶"), "still listed as well:\n{all}");
+
+    // The corridor is beside the boxes, not through them.
+    let one = rows.iter().find(|r| r.contains("one")).expect("the box");
+    assert!(
+        one.find('◀').expect("the arrow") > one.find("one").expect("the label"),
+        "the corridor came in on the wrong side: {one:?}"
+    );
+}
+
+/// A pane with no room beside the boxes falls back to naming them, which is
+/// still better than drawing a corridor through the diagram. A detour with no
+/// label of its own is named just the same.
+#[test]
+fn a_loop_with_no_room_beside_the_diagram_is_listed_instead() {
+    let rows = chart(
+        &[
+            "flowchart TD",
+            "  A[a wide enough box] --> B[another wide one]",
+            "  B -->|retry| A",
+            "  B --> A",
+        ],
+        24,
+    );
+    let all = rows.join("\n");
+    assert!(all.contains("──▶"), "not listed:\n{all}");
+    assert!(all.contains("(retry)"), "{all}");
+    assert_eq!(
+        all.matches("──▶").count(),
+        2,
+        "the unlabelled one too:\n{all}"
+    );
+}
+
+/// An edge that skips forward over a layer runs down a corridor the same way
+/// a loop does, just the other way round.
+#[test]
+fn an_edge_that_skips_a_layer_runs_down_a_corridor_too() {
+    let rows = chart(
+        &["flowchart TD", "  A --> B", "  B --> C", "  A -->|fast| C"],
+        50,
+    );
+    let all = rows.join("\n");
+    assert!(all.contains('◀'), "not drawn:\n{all}");
+    assert!(all.contains("fast"), "{all}");
+    assert!(!all.contains("──▶"), "listed as well:\n{all}");
+}
+
+/// Two lanes that cross keep the vertical whole, so the line passing through
+/// is still the one you can follow.
+#[test]
+fn a_lane_crossing_another_lines_vertical_leaves_it_whole() {
+    let rows = chart(
+        &[
+            "flowchart TD",
+            "  A --> D",
+            "  B --> C",
+            "  A --> C",
+            "  B --> D",
+        ],
+        50,
+    );
+    let all = rows.join("\n");
+    // Both stems carry on past the lane the other edge turns onto, so a line
+    // crossing another is a junction rather than a break in it.
+    assert!(all.contains('├'), "no tee on the left stem:\n{all}");
+    assert!(all.contains('┤'), "no tee on the right stem:\n{all}");
+    assert!(!all.contains("──▶"), "nothing should be listed:\n{all}");
+}
+
+/// A lane that passes clean over another line's stem is a crossing: both
+/// carry on, and neither is broken by the other.
+#[test]
+fn a_lane_crossing_a_stem_is_a_crossing() {
+    let rows = chart(
+        &[
+            "flowchart TD",
+            "  A --> X",
+            "  B --> Y",
+            "  C --> Z",
+            "  A --> Z",
+        ],
+        60,
+    );
+    let all = rows.join("\n");
+    assert!(all.contains('┼'), "the stem was broken:\n{all}");
+}
+
+/// A corridor label longer than the pane is clipped at the edge rather than
+/// drawn off the end of the canvas.
+#[test]
+fn a_corridor_label_wider_than_the_pane_is_clipped() {
+    let rows = chart(
+        &[
+            "flowchart TD",
+            "  A --> B",
+            "  B -->|a label far longer than the pane can possibly hold| A",
+        ],
+        30,
+    );
+    for row in &rows {
+        assert!(row.chars().count() <= 30, "ran off: {row:?}");
+    }
+}
+
+/// A dashed edge stays dashed when it has to move sideways, not just when it
+/// runs straight down.
+#[test]
+fn a_dashed_edge_is_dashed_along_its_lane_too() {
+    let rows = chart(&["flowchart TD", "  A -.-> B", "  A --> C"], 50);
+    let all = rows.join("\n");
+    assert!(all.contains('╌'), "the run is not dashed:\n{all}");
+}
+
+/// Two edges never share a row. That is the whole reason a reader can tell
+/// which end joins which.
+#[test]
+fn every_edge_gets_a_lane_to_itself() {
+    let rows = chart(&["flowchart TD", "  A --> B", "  A --> C", "  A --> D"], 50);
+    // Two of the three turn off the stem (the middle one runs straight down),
+    // and they take a row each rather than sharing one.
+    let all = rows.join("\n");
+    let lanes = rows.iter().filter(|r| turns_somewhere(r)).count();
+    assert_eq!(lanes, 2, "lanes were shared:\n{all}");
+    assert_eq!(all.matches('▼').count(), 3, "{all}");
 }
 
 /// Every shape and connector the subset covers parses, and a node named
@@ -922,30 +1057,24 @@ fn a_diamond_joins_back_up_without_a_back_edge() {
     );
     let all = rows.join("\n");
     assert!(!all.contains("──▶"), "nothing should be listed:\n{all}");
-    // Two lines arrive at D, so its junction is a tee.
-    assert!(all.contains('┬'), "no join:\n{all}");
+    // Each of the two lines into D turns onto a lane of its own and comes
+    // down D's column, so both are followable; they share the one arrow head
+    // over the box, which is what converging on a box looks like.
+    assert_eq!(all.matches('▼').count(), 3, "{all}");
+    let lanes = rows.iter().filter(|r| turns_somewhere(r)).count();
+    assert_eq!(lanes, 4, "lanes were shared:\n{all}");
 }
 
-/// A node with one edge straight down and another to the side turns through a
-/// tee, not an elbow. Two sources over two targets, each reaching both, puts
-/// one of each kind on the same routing row.
+/// A box with one edge going straight down and another turning off keeps its
+/// stem whole: the turn is a tee, so the line below it still reads as
+/// connected.
 #[test]
-fn an_edge_down_and_one_sideways_meet_at_a_tee() {
-    let rows = chart(
-        &[
-            "flowchart TD",
-            "  A --> C",
-            "  A --> D",
-            "  B --> C",
-            "  B --> D",
-        ],
-        50,
-    );
+fn a_stem_that_carries_on_past_a_turn_is_a_tee() {
+    let rows = chart(&["flowchart TD", "  A --> B", "  A --> C"], 50);
     let all = rows.join("\n");
-    // Each source turns a tee, and because a target sits under each source the
-    // two marks land on the same cells: a line down and a line sideways is a
-    // crossing.
-    assert!(all.contains('┼'), "no crossing:\n{all}");
+    assert!(all.contains('├') || all.contains('┤'), "no tee:\n{all}");
+    // Both arrivals are drawn.
+    assert_eq!(all.matches('▼').count(), 2, "{all}");
 }
 
 /// A label longer than the pane is clipped at the edge rather than drawn off

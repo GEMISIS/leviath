@@ -398,7 +398,7 @@ prompts in the agent editor. All four are the same editor. They wrap, and each
 one draws a toolbar along its top:
 
 ```
- Edit  Preview │ B  i  S  U │ <>  ```  [] │ ▦  ◇ │ H  •  1.  >
+   Edit ⇄    │ B  i  S  U │ <>  ```  [] │ ▦  ◇ │ H  •  1.  >
 ```
 
 Each button's face is drawn in the style it applies, so the bold button is
@@ -408,10 +408,13 @@ are in is the filled one.
 
 #### The two views
 
-`Edit` is the markdown you are writing. `Preview` is how it will read,
-rendered by the same code that draws an agent's output in the run view, so the
-two cannot disagree. `Ctrl-P` switches, and so does clicking either half of the
-switch.
+The switch on the left says which view you are in and flips it: `Edit ⇄` while
+you are writing markdown, `Preview ⇄` while you are looking at how it will
+read. `Ctrl-P` does the same. It keeps its width when its label changes, so the
+buttons beside it do not jump when you press it.
+
+`Preview` is rendered by the same code that draws an agent's output in the run
+view, so the two cannot disagree.
 
 Which view you prefer is remembered in `ui-state.json` and every box opens in
 it, including the next time you start the dashboard.
@@ -468,13 +471,11 @@ Both render in `Preview`, and in an agent's output:
 
 * A **table** is drawn as a framed grid. Columns are sized to their content and
   squeezed to fit the pane, widest first, with `…` where a cell was cut.
-* A **```mermaid``` flowchart** is drawn as a diagram: boxes laid out in layers,
-  arrows between them, and the edge labels beside the arrow heads. `flowchart`
-  and `graph` are supported, with the `[]`, `()`, `{}` and `(())` shapes and
-  the `-->`, `---`, `-.->` and `==>` connectors. An edge that runs backwards or
-  skips a layer is listed under the diagram rather than drawn through the boxes
-  in between. Any other kind of mermaid diagram (a sequence diagram, say) shows
-  its source, because a wrong picture is worse than an honest listing.
+* A **```mermaid``` flowchart** is drawn as a diagram. `flowchart` and `graph`
+  are supported, with the `[]`, `()`, `{}` and `(())` shapes and the `-->`,
+  `---`, `-.->` and `==>` connectors. Any other kind of mermaid diagram (a
+  sequence diagram, say) shows its source, because a wrong picture is worse
+  than an honest listing.
 
 On macOS these read as `⌘B`, `⌘I` and so on in the hint bar and the help
 overlay, and **both** `⌘` and `Ctrl` work. That is deliberate: Terminal.app and
@@ -491,7 +492,39 @@ Every box takes the same chords, including the agent editor's prompt overlay.
 `Ctrl-E` there used to mean "open this prompt in `$EDITOR`"; that moved to
 `F2` so the formatting chord means one thing everywhere.
 
-The whole toolbar needs 63 columns. A box narrower than that drops buttons off
+#### Following a diagram
+
+The point of a diagram is being able to see what connects to what, so no two
+lines ever share a row:
+
+```
+     ┌─────────────┐
+     │  Discover   │◀───────╮
+     └─────────────┘        │
+            │               │
+            ▼               │
+     ╭─────────────╮        │
+     │ <Plan ok?>  │        │
+     ╰─────────────╯        │
+            │               │
+     ╭──────┤ yes           │
+     │      ╰──────╮ no     │
+     ▼             ▼        │
+┌─────────┐  ┌───────────┐  │
+│  Build  │  │  Rethink  │──╯
+└─────────┘  └───────────┘
+```
+
+Every edge leaves its box, turns onto a row nothing else uses, and turns down
+again over its target, with its label at the end of that row. Where several
+edges leave the same box the stem tees off (`├`, `┤`) rather than ending, so
+the line below still reads as connected.
+
+A loop, or an edge that skips a layer, runs down a corridor of its own beside
+the diagram and comes back in with a `◀`. Only when the pane is too narrow for
+a corridor does it fall back to being named underneath.
+
+The whole toolbar needs 61 columns. A box narrower than that drops buttons off
 the right a group at a time, keeping the view switch; one too short to spare a
 line drops the row entirely. The chords and the text are never what gets cut.
 

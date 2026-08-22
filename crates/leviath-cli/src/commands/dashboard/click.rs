@@ -232,20 +232,16 @@ mod tests {
             .expect("a formatting toolbar was drawn")
     }
 
-    /// Where a toolbar chip with `label` on it landed. Every glyph on that row
-    /// is one column wide, so a char index is a column.
-    fn find_chip(dash: &mut Dashboard, label: &str, width: u16, height: u16) -> (u16, u16) {
+    /// The cell holding `glyph`. Scanned cell by cell rather than by searching
+    /// the row as a string: a row is full of multi-byte box-drawing
+    /// characters, so a byte offset into it is not a column.
+    fn find_chip(dash: &mut Dashboard, glyph: &str, width: u16, height: u16) -> (u16, u16) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| dash.draw(f)).unwrap();
         let buf = terminal.backend().buffer().clone();
         (0..height)
-            .filter_map(|y| {
-                let row: String = (0..width)
-                    .map(|x| buf.cell((x, y)).map_or(" ", |c| c.symbol()).to_string())
-                    .collect();
-                row.find(label).map(|x| (x as u16, y))
-            })
-            .next()
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .find(|(x, y)| buf.cell((*x, *y)).is_some_and(|c| c.symbol() == glyph))
             .expect("the chip was drawn")
     }
 
@@ -607,9 +603,9 @@ mod tests {
         dash.open_new_run_screen();
         assert_eq!(dash.new_run_task.mode(), MdMode::Source);
 
-        // Click the `Preview` half of the switch, found where it was drawn.
-        let (preview, y) = find_chip(&mut dash, "Preview", 120, 40);
-        press_and_release(&mut dash, preview, y);
+        // Press the view switch, found where it was drawn.
+        let (switch, y) = find_chip(&mut dash, "⇄", 120, 40);
+        press_and_release(&mut dash, switch, y);
         assert_eq!(dash.new_run_task.mode(), MdMode::Preview);
         assert!(dash.md_preview);
 
