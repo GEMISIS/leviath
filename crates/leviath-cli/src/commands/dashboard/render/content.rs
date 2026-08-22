@@ -13,6 +13,7 @@ use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::*;
 use crate::runstate;
+use crate::tui::widgets::markdown_edit::MdEditView;
 
 /// Replace a leading `home` prefix in `raw` with `~`. Split out so both the
 /// shortened and the raw (path-is-outside-home) branches are unit-testable on
@@ -177,24 +178,13 @@ impl Dashboard {
         // instead of the read-only stage output - so the user revises the plan
         // in place rather than in the bottom input bar.
         if self.editing_document() {
-            self.input_textarea.set_block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(C_SUCCESS))
-                    .title(Span::styled(
-                        " ✎ Editing this document - your changes replace it  ·  [Enter] save  \
-                         [Alt+↵] newline  [Esc] cancel ",
-                        Style::default().fg(C_SUCCESS).add_modifier(Modifier::BOLD),
-                    )),
+            let view = MdEditView::new(
+                " ✎ Editing this document - your changes replace it  ·  [Enter] save  \
+                 [Alt+↵] newline  [Esc] cancel ",
+                C_SUCCESS,
+                true,
             );
-            self.input_textarea.set_style(Style::default().fg(C_WHITE));
-            self.input_textarea.set_cursor_style(
-                Style::default()
-                    .fg(ratatui::style::Color::Black)
-                    .bg(C_ACCENT),
-            );
-            frame.render_widget(&self.input_textarea, content_area);
+            self.input_textarea.render(frame, content_area, &view);
             return;
         }
 

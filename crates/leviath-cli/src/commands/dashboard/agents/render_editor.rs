@@ -17,6 +17,7 @@ use super::editor::{Focus, InspectorHits, Overlay};
 use super::inspector::{Field, FieldValue, Panel, StageTab, panel_title};
 use crate::blueprint_edit::check::Severity;
 use crate::tui::widgets::footer::{draw_hint_bar, hint};
+use crate::tui::widgets::markdown_edit::{MdAction, chord_label};
 use crate::tui::widgets::popup::{centered, popup_frame};
 
 /// Under this many columns the panes take turns.
@@ -324,7 +325,9 @@ impl Dashboard {
                 hint("^q", "discard"),
                 hint("tab", "other prompt"),
                 hint("^e", "$EDITOR"),
-                hint("?", "help"),
+                hint(chord_label(MdAction::Bold), "bold"),
+                hint("toolbar", "click to format"),
+                hint("?", "every chord"),
             ]
         } else if editor.overlay.is_some() {
             vec![

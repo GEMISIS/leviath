@@ -4,16 +4,16 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
-use ratatui_textarea::TextArea;
+use ratatui::widgets::{Clear, Paragraph};
 
 use super::super::state::Dashboard;
 use super::super::theme::*;
 use super::editor::Overlay;
 use super::prompts::PromptFocus;
 use crate::tui::widgets::line_edit::LineEdit;
+use crate::tui::widgets::markdown_edit::{MarkdownEdit, MdEditView};
 use crate::tui::widgets::popup::{centered, popup_frame};
 
 impl Dashboard {
@@ -96,33 +96,16 @@ impl Dashboard {
 }
 
 /// One prompt box: framed, the focused one in the focus colour with a
-/// visible cursor.
+/// visible cursor and a lit toolbar.
 fn prompt_box(
     frame: &mut Frame,
     area: Rect,
-    text: &mut TextArea<'static>,
+    text: &mut MarkdownEdit,
     title: &'static str,
     focused: bool,
 ) {
     let colour = if focused { C_BORDER_FOCUS } else { C_BORDER };
-    text.set_block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(colour))
-            .title(Span::styled(
-                title,
-                Style::default().fg(colour).add_modifier(Modifier::BOLD),
-            )),
-    );
-    text.set_style(Style::default().fg(C_WHITE));
-    text.set_cursor_style(if focused {
-        Style::default().fg(Color::Black).bg(C_ACCENT)
-    } else {
-        Style::default()
-    });
-    text.set_cursor_line_style(Style::default());
-    frame.render_widget(&*text, area);
+    text.render(frame, area, &MdEditView::new(title, colour, focused));
 }
 
 /// A one-line name prompt with a help line under it.

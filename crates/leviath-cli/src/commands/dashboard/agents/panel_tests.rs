@@ -1061,6 +1061,95 @@ fn the_prompts_overlay_edits_applies_and_discards() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The prompts overlay is two long-form boxes side by side, so it is where a
+/// toolbar press has to pick the right one. Clicking the transition box's `B`
+/// formats *that* box and moves the keys to it.
+#[test]
+fn a_prompt_boxs_toolbar_formats_the_box_that_was_clicked() {
+    let (mut dash, root) = dashboard("prompts_toolbar");
+    open_stage(&mut dash, "own", "work", StageTab::Behaviour);
+    goto(&mut dash, FieldId::EditPrompts);
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(matches!(
+        &dash.agents().editor.as_ref().unwrap().overlay,
+        Some(Overlay::Prompts(p)) if p.focus == PromptFocus::System
+    ));
+
+    // Both boxes draw a toolbar; the second one down belongs to the
+    // transition prompt.
+    let buttons = bold_buttons(&mut dash, 160, 50);
+    assert_eq!(buttons.len(), 2, "one toolbar per prompt box");
+    let (x, y) = buttons[1];
+    dash.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+    let editor = dash.agents().editor.as_ref().unwrap();
+    assert!(matches!(
+        &editor.overlay,
+        Some(Overlay::Prompts(p))
+            if p.focus == PromptFocus::Transition && p.transition.text() == "****"
+    ));
+
+    // A press on the system box's toolbar goes back to it.
+    let (x, y) = buttons[0];
+    let _ = draw(&mut dash, 160, 50);
+    dash.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+    assert!(matches!(
+        &dash.agents().editor.as_ref().unwrap().overlay,
+        Some(Overlay::Prompts(p)) if p.focus == PromptFocus::System
+    ));
+
+    // Away from either toolbar, nothing formats.
+    assert!(!dash.prompts_toolbar_click(x, y + 3));
+
+    // Nor does it with the overlay closed, with the editor closed, or with no
+    // agents screen at all: the overlay's boxes are the only thing it owns.
+    dash.handle_key(ctrl('q'));
+    assert!(!dash.prompts_toolbar_click(x, y));
+    dash.agents().editor = None;
+    assert!(!dash.prompts_toolbar_click(x, y));
+    dash.agent_builder = None;
+    assert!(!dash.prompts_toolbar_click(x, y));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Every `B` button drawn in the frame, top to bottom. The row reads
+/// `" B │ I │ ..."`, so a `B` with an `I` four columns on is a toolbar.
+fn bold_buttons(dash: &mut Dashboard, w: u16, h: u16) -> Vec<(u16, u16)> {
+    let terminal = draw(dash, w, h);
+    let buf = terminal.backend().buffer().clone();
+    let at = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string());
+    let mut found = Vec::new();
+    for y in 0..h {
+        for x in 0..w.saturating_sub(4) {
+            if at(x, y).as_deref() == Some("B") && at(x + 4, y).as_deref() == Some("I") {
+                found.push((x, y));
+            }
+        }
+    }
+    found
+}
+
+/// The chord path through the same overlay: `Ctrl-E` still means `$EDITOR`
+/// here, so inline code is on its alias, and the rest of the chords reach the
+/// focused box unchanged.
+#[test]
+fn formatting_chords_reach_the_focused_prompt_box() {
+    let (mut dash, root) = dashboard("prompts_chords");
+    open_stage(&mut dash, "own", "work", StageTab::Behaviour);
+    goto(&mut dash, FieldId::EditPrompts);
+    dash.handle_key(key(KeyCode::Enter));
+    dash.handle_key(key(KeyCode::Tab));
+
+    dash.handle_key(ctrl('b'));
+    type_str(&mut dash, "loud");
+    dash.handle_key(ctrl('t'));
+    type_str(&mut dash, "code");
+    assert!(matches!(
+        &dash.agents().editor.as_ref().unwrap().overlay,
+        Some(Overlay::Prompts(p)) if p.transition.text() == "**loud`code`**"
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn ctrl_e_hands_a_prompt_to_the_editor_and_takes_it_back() {
     let (mut dash, root) = dashboard("prompts_external");

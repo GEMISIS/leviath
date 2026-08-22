@@ -22,6 +22,28 @@ same list.
   refusal is now read from the API's own error, the request retried without the
   field, and the answer remembered for the rest of the process. Both the direct
   OpenAI provider and the OpenRouter gateway, which reaches the same models.
+- Fixed: text in the dashboard's long-form boxes wraps instead of running off
+  the edge. The task editor on the new-run screen, the response box, and a
+  stage's system and transition prompts all sat on a textarea left in its
+  default no-wrap mode, which scrolls sideways; with the cursor at the end of
+  a long task, the beginning of what you had just written was off screen. They
+  now wrap at word boundaries and split a word too wide to fit, so a pasted URL
+  stays readable too.
+- Added: those same boxes are one component with markdown formatting. Bold,
+  italic, strikethrough, inline code, a code fence, links, headings, bullet and
+  numbered lists, and quotes, each with a keyboard chord and a clickable button
+  on a toolbar along the top of the box. A chord wraps the selection when there
+  is one (`shift` + arrows selects) and opens an empty pair at the cursor when
+  there is not; the list, heading and quote keys toggle, and apply to every line
+  a selection touches. Chords read `⌘B` on macOS and `ctrl-b` elsewhere, and
+  both modifiers are accepted everywhere, because most terminals never forward
+  Command to the program at all. `F1` / `?` lists the full set.
+- Changed: in a long-form box, `ctrl-b`, `ctrl-d`, `ctrl-e`, `ctrl-k`, `ctrl-l`
+  and `ctrl-o` now format rather than doing what the textarea's built-in emacs
+  bindings did (back a character, delete forward, end of line, delete to end of
+  line). The arrow, Delete and End keys do all of those. In the blueprint
+  editor's prompt overlay `ctrl-e` still hands the prompt to `$EDITOR`, so
+  inline code there is on its alias, `ctrl-t`.
 - Fixed: an Anthropic model reached through OpenRouter can cache its prompt
   again. System blocks - the stage prompt and the pinned context regions, which
   are the stable and by far the largest part of a request - were sent as plain

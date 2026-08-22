@@ -11,6 +11,7 @@ use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::MainPane;
 use crate::tui::widgets::help::{HelpSection, draw_help};
+use crate::tui::widgets::markdown_edit::shortcut_help;
 
 impl Dashboard {
     pub(in crate::commands::dashboard) fn draw_toasts(&self, frame: &mut Frame) {
@@ -237,9 +238,36 @@ fn agent_editor_sections() -> Vec<HelpSection> {
                     "ctrl-e",
                     "open the focused prompt in $EDITOR (the dashboard waits for it)",
                 ),
+                (
+                    "",
+                    "so inline code is ctrl-t here; the toolbar button does it too",
+                ),
             ],
         },
+        formatting_section(),
     ]
+}
+
+/// The long-form editor's formatting chords.
+///
+/// Shown on every screen that has one of those boxes, because the box is the
+/// same component in all of them. Every chord has a button on the box's
+/// toolbar as well, which is the path that still works on a terminal that
+/// cannot report the chord at all.
+fn formatting_section() -> HelpSection {
+    let mut entries = shortcut_help();
+    entries.push((
+        "click",
+        "the same actions, from the button row along the top of the box",
+    ));
+    entries.push((
+        "shift + ← →",
+        "select first, to wrap text that is already written",
+    ));
+    HelpSection {
+        title: "Formatting a long-form box",
+        entries,
+    }
 }
 
 /// The run list: the screen `lev dash` opens on.
@@ -374,6 +402,7 @@ fn detail_sections() -> Vec<HelpSection> {
                 ("esc", "cancel"),
             ],
         },
+        formatting_section(),
     ]
 }
 
@@ -423,6 +452,7 @@ fn new_run_sections() -> Vec<HelpSection> {
                 ),
             ],
         },
+        formatting_section(),
     ]
 }
 

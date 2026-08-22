@@ -149,6 +149,12 @@ rather than back into the form.
 | `Esc` (in the agent list) | Clear the filter, then close the screen |
 | `Esc` or `Tab` (in the task) | Back to the agent list |
 
+The task box wraps: a task longer than the pane is wide folds onto the next
+row rather than scrolling sideways, so the beginning of what you wrote is
+still on screen when the cursor is at the end. See
+[Formatting a long-form box](#formatting-a-long-form-box) for what the toolbar
+along its top does.
+
 `Ctrl-Y` warns the first time you use it in a sitting, and the warning is worth reading: an
 unattended run approves its own file edits and shell commands, but it does **not** skip a checkpoint
 the blueprint asks a person for. Those still stop, and one nobody answers ends the run when the
@@ -378,6 +384,55 @@ On a terminal under 110 columns the graph and the inspector take turns; `Tab` sw
 | `?` / `F1` (`F1` while typing a URL) | Help |
 | `Esc` | Back to the run list |
 | `q` / `Ctrl-C` | Quit |
+
+### Formatting a long-form box
+
+Four boxes in the dashboard take prose rather than a word: the task on the
+new-run screen, the box you answer a waiting run in, the document you edit in
+place when a run asks you to revise one, and a stage's system and transition
+prompts in the agent editor. All four are the same editor. They wrap, and each
+one draws a row of buttons along its top:
+
+```
+ B │ I │ S │ <> │ ``` │ [] │ H │ • │ 1. │ >
+```
+
+Click a button, or use its chord. Select text first (hold `Shift` and use the
+arrow keys) and the chord wraps the selection; with nothing selected it opens
+an empty pair and leaves the cursor between the halves. The list, heading and
+quote keys toggle, and act on every line a selection touches.
+
+| Button | Chord | What it writes |
+|---|---|---|
+| `B` | `Ctrl-B` | `**bold**` |
+| `I` | `Ctrl-I` | `*italic*` |
+| `S` | `Ctrl-D` | `~~strikethrough~~` |
+| `<>` | `Ctrl-E` | `` `inline code` `` |
+| ` ``` ` | `Ctrl-Shift-E` | a fenced code block |
+| `[]` | `Ctrl-K` | `[text](url)`, cursor ready for the URL |
+| `H` | `Ctrl-H` | cycles `#`, `##`, `###`, none |
+| `•` | `Ctrl-L` | toggles `- ` on the line |
+| `1.` | `Ctrl-O` | toggles `1. ` on the line |
+| `>` | `Ctrl-.` | toggles `> ` on the line |
+
+On macOS these read as `⌘B`, `⌘I` and so on in the hint bar and the help
+overlay, and **both** `⌘` and `Ctrl` work. That is deliberate: Terminal.app and
+iTerm2 keep `⌘` for themselves and never hand it to the program, so a build
+that listened only for `⌘` would be a build with no working chords.
+
+Two chords depend on what the terminal can report. Without the kitty keyboard
+protocol (kitty, Ghostty, WezTerm and foot speak it; Windows Terminal has an
+equivalent) `Ctrl-I` arrives indistinguishable from `Tab` and `Ctrl-H` from
+`Backspace`, so italic and heading are on their buttons there. Nothing else
+changes: `Tab` and `Backspace` keep doing what they always did.
+
+In the agent editor's prompt overlay `Ctrl-E` already means "open this prompt
+in `$EDITOR`" and keeps that meaning, so inline code there is on its alias,
+`Ctrl-T`. `Ctrl-T` works in the other boxes too.
+
+A box too narrow for the whole row drops buttons off the right, and one too
+short to spare a line drops the row entirely; the chords and the text are never
+what gets cut.
 
 > [!TIP]
 > Prefer a browser, or want to drive Leviath from another machine?

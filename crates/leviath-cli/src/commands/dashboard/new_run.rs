@@ -25,6 +25,7 @@ use crate::commands::list::{ListFilter, build_list_report};
 use crate::config::Config;
 use crate::daemon::client::{LaunchRequest, never_interactive, resolve_spawn_args};
 use crate::tui::widgets::confirm::Confirm;
+use crate::tui::widgets::markdown_edit::MarkdownEdit;
 
 /// How many ticks the dashboard waits for a just-started run to appear before
 /// giving up on opening its page. At the 250ms tick the loop runs on, this is
@@ -53,7 +54,9 @@ impl Dashboard {
         self.new_run_selected = 0;
         // Filled in below, once the catalog is built: the list has to exist
         // before a name can be found in it.
-        self.new_run_task = ratatui_textarea::TextArea::default();
+        self.new_run_task = MarkdownEdit::default();
+        self.new_run_task
+            .set_placeholder("What should this agent do? Markdown is fine here.");
         // Unattended is off every time the screen opens. It is a consequential
         // setting, and one that survived out of sight is one somebody can
         // leave on and forget.
@@ -158,7 +161,7 @@ impl Dashboard {
             self.toast("Pick an agent blueprint first", ToastLevel::Error);
             return;
         };
-        let task = self.new_run_task.lines().join("\n").trim().to_string();
+        let task = self.new_run_task.text().trim().to_string();
         // An agent driven entirely by `--<region>` flags takes no task, and
         // there is no way to give it one here; that is a `lev run` command line,
         // and the daemon says so if this screen is pointed at such an agent.
@@ -264,9 +267,9 @@ impl Dashboard {
             .map(|p| p.to_string());
         if let Some(path) = chosen {
             for _ in 0..self.new_run_file_query.chars().count() {
-                self.new_run_task.delete_char();
+                self.new_run_task.area_mut().delete_char();
             }
-            self.new_run_task.insert_str(&path);
+            self.new_run_task.area_mut().insert_str(&path);
         }
         self.close_file_ref();
     }
@@ -385,11 +388,11 @@ impl Dashboard {
             KeyCode::Tab | KeyCode::BackTab => self.new_run_focus = NewRunPane::Agents,
             KeyCode::Enter if key.modifiers.is_empty() => self.submit_new_run(),
             KeyCode::Char('@') => {
-                self.new_run_task.insert_char('@');
+                self.new_run_task.area_mut().insert_char('@');
                 self.new_run_file_ref = true;
             }
             _ => {
-                self.new_run_task.input(ratatui_textarea::Input::from(key));
+                self.new_run_task.handle_key(&key);
             }
         }
     }
@@ -410,7 +413,7 @@ impl Dashboard {
                 }
             }
             KeyCode::Backspace => {
-                self.new_run_task.delete_char();
+                self.new_run_task.area_mut().delete_char();
                 // Backspacing over the `@` itself ends the reference; there is
                 // nothing left to complete.
                 match self.new_run_file_query.pop() {
@@ -420,7 +423,7 @@ impl Dashboard {
                 }
             }
             KeyCode::Char(c) => {
-                self.new_run_task.insert_char(c);
+                self.new_run_task.area_mut().insert_char(c);
                 self.new_run_file_query.push(c);
                 self.new_run_file_selected = 0;
             }
@@ -690,7 +693,7 @@ mod tests {
             .expect("the written agent is in the catalog");
         assert_eq!(dash.last_launched_agent, None, "browsing decides nothing");
 
-        dash.new_run_task.insert_str("do the thing");
+        dash.new_run_task.area_mut().insert_str("do the thing");
         dash.submit_new_run();
         assert_eq!(dash.last_launched_agent.as_deref(), Some("zulu"));
     }
@@ -1101,6 +1104,31 @@ mod tests {
         assert!(dash.file_ref_matches().is_empty());
     }
 
+    // ─── formatting ───────────────────────────────────────────────────────
+
+    /// The task box is the shared long-form editor, so its formatting chords
+    /// have to survive the screen's own key routing (which takes Enter, Esc,
+    /// Tab, `@` and Ctrl-Y before anything else sees them).
+    #[test]
+    fn formatting_chords_reach_the_task_box() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+        dash.new_run_focus = NewRunPane::Task;
+
+        dash.handle_new_run_key(ctrl(KeyCode::Char('b')));
+        for c in "ship it".chars() {
+            dash.handle_new_run_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(dash.new_run_task.text(), "**ship it**");
+
+        // Ctrl-Y still toggles unattended rather than pasting: the screen's
+        // own chords are matched first, and formatting does not claim `y`.
+        assert!(!dash.new_run_yolo);
+        dash.handle_new_run_key(ctrl(KeyCode::Char('y')));
+        assert_eq!(dash.new_run_task.text(), "**ship it**");
+    }
+
     // ─── submitting ───────────────────────────────────────────────────────
 
     #[test]
@@ -1111,7 +1139,7 @@ mod tests {
         dash.open_new_run_screen();
         dash.new_run_filter = "alpha".to_string();
         dash.new_run_focus = NewRunPane::Task;
-        dash.new_run_task.insert_str("  ship it  ");
+        dash.new_run_task.area_mut().insert_str("  ship it  ");
 
         dash.handle_new_run_key(key(KeyCode::Enter));
 
@@ -1132,7 +1160,7 @@ mod tests {
         let mut dash = dash_at(dir.path());
         dash.open_new_run_screen();
         dash.new_run_focus = NewRunPane::Task;
-        dash.new_run_task.insert_str("   ");
+        dash.new_run_task.area_mut().insert_str("   ");
 
         dash.handle_new_run_key(key(KeyCode::Enter));
         assert!(dash.new_run_screen, "the screen stays open to fix it");
@@ -1147,7 +1175,7 @@ mod tests {
         let mut dash = dash_at(dir.path());
         dash.open_new_run_screen();
         dash.new_run_filter = "no-such-agent-anywhere".to_string();
-        dash.new_run_task.insert_str("do a thing");
+        dash.new_run_task.area_mut().insert_str("do a thing");
 
         dash.submit_new_run();
         assert!(dash.spawn_cmd_rx_for_test().try_recv().is_err());
@@ -1408,7 +1436,7 @@ mod tests {
         let mut dash = dash_at(dir.path());
         dash.open_new_run_screen();
         dash.new_run_focus = NewRunPane::Task;
-        dash.new_run_task.insert_str("do the thing");
+        dash.new_run_task.area_mut().insert_str("do the thing");
         dash.new_run_yolo = true;
 
         dash.submit_new_run();

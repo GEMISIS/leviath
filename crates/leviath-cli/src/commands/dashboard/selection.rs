@@ -136,6 +136,14 @@ impl Dashboard {
     /// cursor, hit-tested against the rects each renderer registered this
     /// frame - not whichever pane the keyboard last touched.
     pub(super) fn handle_mouse(&mut self, event: MouseEvent) {
+        // A formatting button on a long-form editor takes a press before any
+        // pane does: the toolbar is drawn over the pane behind it, so a press
+        // routed by position alone would act on that pane instead.
+        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.markdown_toolbar_click(event.column, event.row)
+        {
+            return;
+        }
         // The Agents screen's chooser and canvas take the mouse first.
         if self.agent_builder.is_some() && self.handle_agents_mouse(event) {
             return;

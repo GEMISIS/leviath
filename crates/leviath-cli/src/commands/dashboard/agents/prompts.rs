@@ -7,8 +7,8 @@
 
 use std::path::PathBuf;
 
+use crate::tui::widgets::markdown_edit::MarkdownEdit;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui_textarea::TextArea;
 
 use super::super::state::Dashboard;
 use super::editor::Overlay;
@@ -28,8 +28,8 @@ pub(in crate::commands::dashboard) enum PromptFocus {
 pub(in crate::commands::dashboard) struct PromptsEditor {
     /// The stage whose prompts these are.
     pub(in crate::commands::dashboard) stage: String,
-    pub(in crate::commands::dashboard) system: TextArea<'static>,
-    pub(in crate::commands::dashboard) transition: TextArea<'static>,
+    pub(in crate::commands::dashboard) system: MarkdownEdit,
+    pub(in crate::commands::dashboard) transition: MarkdownEdit,
     pub(in crate::commands::dashboard) focus: PromptFocus,
 }
 
@@ -37,14 +37,14 @@ impl PromptsEditor {
     fn new(stage: &str, system: &str, transition: &str) -> Self {
         Self {
             stage: stage.to_string(),
-            system: textarea(system),
-            transition: textarea(transition),
+            system: MarkdownEdit::from_text(system),
+            transition: MarkdownEdit::from_text(transition),
             focus: PromptFocus::System,
         }
     }
 
     /// The focused box.
-    fn focused_mut(&mut self) -> &mut TextArea<'static> {
+    fn focused_mut(&mut self) -> &mut MarkdownEdit {
         match self.focus {
             PromptFocus::System => &mut self.system,
             PromptFocus::Transition => &mut self.transition,
@@ -52,8 +52,8 @@ impl PromptsEditor {
     }
 
     /// The text of a box, without the trailing newline a textarea adds.
-    fn text_of(area: &TextArea<'static>) -> String {
-        let mut text = area.lines().join("\n");
+    fn text_of(area: &MarkdownEdit) -> String {
+        let mut text = area.text();
         // One trailing newline is how a multi-line prompt ends in the file;
         // a single line has none.
         if text.contains('\n') && !text.ends_with('\n') {
@@ -61,13 +61,6 @@ impl PromptsEditor {
         }
         text
     }
-}
-
-fn textarea(text: &str) -> TextArea<'static> {
-    let mut area = TextArea::new(text.lines().map(str::to_string).collect());
-    area.move_cursor(ratatui_textarea::CursorMove::Bottom);
-    area.move_cursor(ratatui_textarea::CursorMove::End);
-    area
 }
 
 /// Text handed to `$EDITOR`, and where it goes when it comes back.
@@ -110,11 +103,39 @@ impl Dashboard {
             (KeyCode::Char('q'), true) => self.editor().overlay = None,
             (KeyCode::Char('e'), true) => self.editor_request_external_edit(),
             _ => {
-                prompts
-                    .focused_mut()
-                    .input(ratatui_textarea::Input::from(*key));
+                prompts.focused_mut().handle_key(key);
             }
         }
+    }
+
+    /// A press on one of the two prompt boxes' formatting toolbars.
+    ///
+    /// Lives here rather than in `click.rs` because [`Overlay`] and
+    /// [`PromptFocus`] are private to the agents screen, and reaching into an
+    /// overlay from outside it is how the two would drift.
+    pub(in crate::commands::dashboard) fn prompts_toolbar_click(
+        &mut self,
+        column: u16,
+        row: u16,
+    ) -> bool {
+        let Some(screen) = self.agent_builder.as_deref_mut() else {
+            return false;
+        };
+        let Some(editor) = screen.editor.as_mut() else {
+            return false;
+        };
+        let Some(Overlay::Prompts(prompts)) = editor.overlay.as_mut() else {
+            return false;
+        };
+        if prompts.system.click(column, row) {
+            prompts.focus = PromptFocus::System;
+            return true;
+        }
+        if prompts.transition.click(column, row) {
+            prompts.focus = PromptFocus::Transition;
+            return true;
+        }
+        false
     }
 
     /// Write both prompts back and close the overlay.
@@ -193,7 +214,7 @@ impl Dashboard {
                         PromptFocus::System => &mut prompts.system,
                         PromptFocus::Transition => &mut prompts.transition,
                     };
-                    *area = textarea(&text);
+                    *area = MarkdownEdit::from_text(&text);
                 }
                 editor.message = Some("Prompt updated from the editor".to_string());
             }
