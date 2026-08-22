@@ -23,6 +23,15 @@ same list.
   costing every other row the width its bar needs. Both columns keep a gap
   open, since a cell filled edge to edge reads as one word.
 
+- Fixed: a temperature reached the wire as `0.699999988079071` rather than
+  `0.7`. `InferenceRequest.temperature` is an `f32` and `serde_json` stores one
+  by widening it to `f64`, so every request carried the widened value. It read
+  as a Leviath bug in provider error text, and Z.AI refuses it outright - "The
+  temperature parameter is illegal", at most two decimal places - which made the
+  whole GLM family unusable: `z-ai/glm-5.3` failed at iteration 0 on every run.
+  An `f32` now serializes through its own `Display`, which gives the shortest
+  decimal that round-trips, so `0.7` stays `0.7` and an author who wrote `0.125`
+  keeps it. All four providers that send a temperature.
 - Fixed: a model that takes only its default temperature no longer kills the
   run. `gpt-5.5` rejects any other value outright, the capability table said it
   supports one because the rest of the `gpt-5` family does, and a research run

@@ -643,7 +643,7 @@ impl AnthropicProvider {
             serde_json::json!({
                 "model": request.model,
                 "max_tokens": request.max_tokens,
-                "temperature": request.temperature,
+                "temperature": crate::provider::json_number(request.temperature),
                 "messages": messages,
             })
         } else {
