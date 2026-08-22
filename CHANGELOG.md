@@ -13,6 +13,11 @@ same list.
 
 ## Unreleased
 
+- Added: catalog entries for `x-ai/grok-4.6` and `meta/muse-spark-1.2`. An
+  uncatalogued model inherits an 8192 max-output ceiling, so a stage asked to
+  rewrite a whole report truncated at 8192 on every attempt and never finished
+  one. OpenRouter reports no completion ceiling for either, so the table is the
+  only place the real limit can come from.
 - Fixed: a `fan_out` tool call no longer kills the run when its workers finish.
   The fan-out parks its caller and delivers the workers' report as that call's
   tool result, but the rest of the batch landed with a placeholder result for

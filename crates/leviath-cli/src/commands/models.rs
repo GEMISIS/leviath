@@ -303,6 +303,28 @@ fn builtin_table() -> Vec<BuiltinEntry> {
             ctx = 1_048_576,
             out = 65_535
         ),
+        // ── OpenRouter: xAI and Meta ──────────────────────────────────────────
+        // Listed for the reason #568 exists: an unlisted model falls back to
+        // 8192 max output, and a stage asked to rewrite a whole report then
+        // truncates at 8192 every attempt and never finishes. OpenRouter
+        // reports no `max_completion_tokens` for either, so the table is where
+        // the real ceiling has to live until that issue lands.
+        entry!(
+            "openrouter",
+            "x-ai/grok-4.6",
+            "Grok 4.6",
+            temp = true,
+            ctx = 500_000,
+            out = 64_000
+        ),
+        entry!(
+            "openrouter",
+            "meta/muse-spark-1.2",
+            "Muse Spark 1.2",
+            temp = true,
+            ctx = 1_048_576,
+            out = 64_000
+        ),
         // ── OpenRouter: Anthropic ─────────────────────────────────────────────
         // The same models as the `anthropic` entries above, reached through the
         // gateway instead of directly. Listed because a gateway is a route, not
