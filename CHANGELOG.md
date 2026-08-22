@@ -68,18 +68,35 @@ same list.
   now wrap at word boundaries and split a word too wide to fit, so a pasted URL
   stays readable too.
 - Added: those same boxes are one component with markdown formatting. Bold,
-  italic, strikethrough, inline code, a code fence, links, headings, bullet and
-  numbered lists, and quotes, each with a keyboard chord and a clickable button
-  on a toolbar along the top of the box. A chord wraps the selection when there
-  is one (`shift` + arrows selects) and opens an empty pair at the cursor when
-  there is not; the list, heading and quote keys toggle, and apply to every line
-  a selection touches. Chords read `⌘B` on macOS and `ctrl-b` elsewhere, and
-  both modifiers are accepted everywhere, because most terminals never forward
+  italic, strikethrough, underline, inline code, a code fence, links, headings,
+  bullet and numbered lists, and quotes, each with a keyboard chord and a
+  button on a toolbar along the top of the box. Every button's face is drawn in
+  the style it applies (the bold one is bold, the struck one is struck), it
+  lifts under the pointer, and the box's bottom border names whatever the
+  pointer is over and its chord. A chord wraps the selection when there is one
+  (`shift` + arrows selects) and opens an empty pair at the cursor when there is
+  not; the list, heading and quote keys toggle, and apply to every line a
+  selection touches. Chords read `⌘B` on macOS and `ctrl-b` elsewhere, and both
+  modifiers are accepted everywhere, because most terminals never forward
   Command to the program at all. `F1` / `?` lists the full set.
-- Changed: in a long-form box, `ctrl-b`, `ctrl-d`, `ctrl-e`, `ctrl-k`, `ctrl-l`
-  and `ctrl-o` now format rather than doing what the textarea's built-in emacs
-  bindings did (back a character, delete forward, end of line, delete to end of
-  line). The arrow, Delete and End keys do all of those.
+- Added: a long-form box has two views. `Markdown` is what you are writing;
+  `Preview` is how it will read, rendered by the same code that draws an agent's
+  output in the run view, so the two cannot disagree. `ctrl-p` switches, and so
+  does clicking either half of the switch on the toolbar. Which view you prefer
+  is remembered in `ui-state.json`, so every box opens in it and so does the
+  next session. In `Preview` the arrows and page keys scroll the rendering and
+  any other key drops back to `Markdown` and then does what you pressed it for,
+  because a keystroke that appears to do nothing reads as a broken editor.
+- Added: the markdown renderer reads `<u>…</u>` and underlines it, in an
+  agent's output as well as in the editor's preview. Markdown has no underline
+  of its own, and this is the tag every other renderer takes for one. No other
+  HTML tag is read; they stay ignored as before.
+- Changed: in a long-form box, `ctrl-b`, `ctrl-d`, `ctrl-e`, `ctrl-k`, `ctrl-l`,
+  `ctrl-o` and `ctrl-u` now format rather than doing what the textarea's
+  built-in emacs bindings did (back a character, delete forward, end of line,
+  delete to end of line, undo). The arrow, Delete and End keys do all of those,
+  and undo moved to `ctrl-z`, which is what a person reaches for and what the
+  agent editor underneath already used.
 - Changed: in the agent editor's prompt overlay, "open this prompt in `$EDITOR`"
   moved from `Ctrl-E` to `F2`, and `F1` now opens the help there (`?` types a
   question mark inside a prompt, which is why it cannot). `Ctrl-E` is inline

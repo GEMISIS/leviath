@@ -11,7 +11,7 @@ use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::MainPane;
 use crate::tui::widgets::help::{HelpSection, draw_help};
-use crate::tui::widgets::markdown_edit::shortcut_help;
+use crate::tui::widgets::markdown_edit::{MODE_CHORD, shortcut_help};
 
 impl Dashboard {
     pub(in crate::commands::dashboard) fn draw_toasts(&self, frame: &mut Frame) {
@@ -252,15 +252,24 @@ fn agent_editor_sections() -> Vec<HelpSection> {
 /// toolbar as well, which is the path that still works on a terminal that
 /// cannot report the chord at all.
 fn formatting_section() -> HelpSection {
-    let mut entries = shortcut_help();
+    let mut entries = vec![(
+        MODE_CHORD,
+        "switch between the markdown you write and how it will read",
+    )];
+    entries.extend(shortcut_help());
     entries.push((
         "click",
         "the same actions, from the button row along the top of the box",
     ));
     entries.push((
+        "hover",
+        "the bottom border names the button under the pointer",
+    ));
+    entries.push((
         "shift + ← →",
         "select first, to wrap text that is already written",
     ));
+    entries.push(("ctrl-z", "undo; ctrl-shift-z or ctrl-r redoes"));
     HelpSection {
         title: "Formatting a long-form box",
         entries,

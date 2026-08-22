@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 
-use crate::tui::widgets::markdown_edit::MarkdownEdit;
+use crate::tui::widgets::markdown_edit::{MarkdownEdit, MdMode, MdOutcome};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::super::state::Dashboard;
@@ -41,11 +41,11 @@ pub(in crate::commands::dashboard) struct PromptsEditor {
 }
 
 impl PromptsEditor {
-    fn new(stage: &str, system: &str, transition: &str) -> Self {
+    fn new(stage: &str, system: &str, transition: &str, mode: MdMode) -> Self {
         Self {
             stage: stage.to_string(),
-            system: MarkdownEdit::from_text(system),
-            transition: MarkdownEdit::from_text(transition),
+            system: MarkdownEdit::from_text(system).in_mode(mode),
+            transition: MarkdownEdit::from_text(transition).in_mode(mode),
             focus: PromptFocus::System,
         }
     }
@@ -86,10 +86,12 @@ impl Dashboard {
         let Some(view) = self.editor().doc.stage(&stage) else {
             return;
         };
+        let mode = self.md_mode();
         self.editor().overlay = Some(Overlay::Prompts(Box::new(PromptsEditor::new(
             &stage,
             &view.system_prompt,
             &view.transition_prompt,
+            mode,
         ))));
     }
 
@@ -112,7 +114,8 @@ impl Dashboard {
             // F1 rather than `?`, which is a question mark inside a prompt.
             (KeyCode::F(1), _) => self.show_help = true,
             _ => {
-                prompts.focused_mut().handle_key(key);
+                let outcome = prompts.focused_mut().handle_key(key);
+                self.remember_md_mode(outcome);
             }
         }
     }
@@ -136,15 +139,33 @@ impl Dashboard {
         let Some(Overlay::Prompts(prompts)) = editor.overlay.as_mut() else {
             return false;
         };
-        if prompts.system.click(column, row) {
-            prompts.focus = PromptFocus::System;
-            return true;
+        let (outcome, focus) = match prompts.system.click(column, row) {
+            MdOutcome::Ignored => (
+                prompts.transition.click(column, row),
+                PromptFocus::Transition,
+            ),
+            hit => (hit, PromptFocus::System),
+        };
+        if outcome == MdOutcome::Ignored {
+            return false;
         }
-        if prompts.transition.click(column, row) {
-            prompts.focus = PromptFocus::Transition;
-            return true;
-        }
-        false
+        prompts.focus = focus;
+        self.remember_md_mode(outcome)
+    }
+
+    /// The pointer moving over either prompt box's toolbar.
+    pub(in crate::commands::dashboard) fn prompts_toolbar_hover(&mut self, column: u16, row: u16) {
+        let Some(screen) = self.agent_builder.as_deref_mut() else {
+            return;
+        };
+        let Some(editor) = screen.editor.as_mut() else {
+            return;
+        };
+        let Some(Overlay::Prompts(prompts)) = editor.overlay.as_mut() else {
+            return;
+        };
+        prompts.system.hover(column, row);
+        prompts.transition.hover(column, row);
     }
 
     /// Write both prompts back and close the overlay.
@@ -223,7 +244,8 @@ impl Dashboard {
                         PromptFocus::System => &mut prompts.system,
                         PromptFocus::Transition => &mut prompts.transition,
                     };
-                    *area = MarkdownEdit::from_text(&text);
+                    let mode = area.mode();
+                    *area = MarkdownEdit::from_text(&text).in_mode(mode);
                 }
                 editor.message = Some("Prompt updated from the editor".to_string());
             }

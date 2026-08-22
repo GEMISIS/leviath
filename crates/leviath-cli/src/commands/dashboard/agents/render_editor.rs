@@ -17,7 +17,7 @@ use super::editor::{Focus, InspectorHits, Overlay};
 use super::inspector::{Field, FieldValue, Panel, StageTab, panel_title};
 use crate::blueprint_edit::check::Severity;
 use crate::tui::widgets::footer::{draw_hint_bar, hint};
-use crate::tui::widgets::markdown_edit::{MdAction, chord_label};
+use crate::tui::widgets::markdown_edit::{MODE_CHORD, MdAction, chord_label};
 use crate::tui::widgets::popup::{centered, popup_frame};
 
 /// Under this many columns the panes take turns.
@@ -326,6 +326,7 @@ impl Dashboard {
                 hint("tab", "other prompt"),
                 hint("F2", "$EDITOR"),
                 hint(chord_label(MdAction::Bold), "bold"),
+                hint(MODE_CHORD, "preview"),
                 hint("toolbar", "click to format"),
                 hint("F1", "every chord"),
             ]

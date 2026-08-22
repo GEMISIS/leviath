@@ -63,6 +63,11 @@ pub struct DashboardUi {
     /// to it every time.
     #[serde(default)]
     pub last_agent: Option<String>,
+    /// Which view the long-form editors open in: `true` for the rendered
+    /// preview, `false` for the markdown you type. One preference for all of
+    /// them, because it is a preference about reading, not about one box.
+    #[serde(default)]
+    pub markdown_preview: bool,
     /// How the Context view was left, per run.
     ///
     /// Per run rather than per region name: folding `conversation` on one run

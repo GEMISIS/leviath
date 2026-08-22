@@ -395,22 +395,43 @@ Four boxes in the dashboard take prose rather than a word: the task on the
 new-run screen, the box you answer a waiting run in, the document you edit in
 place when a run asks you to revise one, and a stage's system and transition
 prompts in the agent editor. All four are the same editor. They wrap, and each
-one draws a row of buttons along its top:
+one draws a toolbar along its top:
 
 ```
- B │ I │ S │ <> │ ``` │ [] │ H │ • │ 1. │ >
+ Markdown  Preview │ B  i  S  U │ <>  ```  [] │ H  •  1.  >
 ```
 
-Click a button, or use its chord. Select text first (hold `Shift` and use the
-arrow keys) and the chord wraps the selection; with nothing selected it opens
-an empty pair and leaves the cursor between the halves. The list, heading and
+Each button's face is drawn in the style it applies, so the bold button is
+bold and the struck one is struck. Hover any of them and the box's bottom
+border names it and its chord. A button lifts under the pointer; the view you
+are in is the filled one.
+
+#### The two views
+
+`Markdown` is what you are writing. `Preview` is how it will read, rendered by
+the same code that draws an agent's output in the run view, so the two cannot
+disagree. `Ctrl-P` switches, and so does clicking either half of the switch.
+
+Which view you prefer is remembered in `ui-state.json` and every box opens in
+it, including the next time you start the dashboard.
+
+In `Preview` the arrows and `PgUp`/`PgDn` scroll the rendering. Any other key
+drops back to `Markdown` and then does what you pressed it for, so a keystroke
+never appears to do nothing.
+
+#### The buttons
+
+Click one, or use its chord. Select text first (hold `Shift` and use the arrow
+keys) and the chord wraps the selection; with nothing selected it opens an
+empty pair and leaves the cursor between the halves. The list, heading and
 quote keys toggle, and act on every line a selection touches.
 
 | Button | Chord | What it writes |
 |---|---|---|
 | `B` | `Ctrl-B` | `**bold**` |
-| `I` | `Ctrl-I` | `*italic*` |
+| `i` | `Ctrl-I` | `*italic*` |
 | `S` | `Ctrl-D` | `~~strikethrough~~` |
+| `U` | `Ctrl-U` | `<u>underline</u>` |
 | `<>` | `Ctrl-E` | `` `inline code` `` |
 | ` ``` ` | `Ctrl-Shift-E` | a fenced code block |
 | `[]` | `Ctrl-K` | `[text](url)`, cursor ready for the URL |
@@ -418,6 +439,12 @@ quote keys toggle, and act on every line a selection touches.
 | `•` | `Ctrl-L` | toggles `- ` on the line |
 | `1.` | `Ctrl-O` | toggles `1. ` on the line |
 | `>` | `Ctrl-.` | toggles `> ` on the line |
+
+Markdown has no underline of its own, so `U` writes the HTML tag every
+renderer takes for one. The dashboard renders `<u>` too, in a preview and in an
+agent's output alike.
+
+`Ctrl-Z` undoes and `Ctrl-Shift-Z` (or `Ctrl-R`) redoes.
 
 On macOS these read as `⌘B`, `⌘I` and so on in the hint bar and the help
 overlay, and **both** `⌘` and `Ctrl` work. That is deliberate: Terminal.app and
@@ -434,9 +461,9 @@ Every box takes the same chords, including the agent editor's prompt overlay.
 `Ctrl-E` there used to mean "open this prompt in `$EDITOR`"; that moved to
 `F2` so the formatting chord means one thing everywhere.
 
-A box too narrow for the whole row drops buttons off the right, and one too
-short to spare a line drops the row entirely; the chords and the text are never
-what gets cut.
+The whole toolbar needs 60 columns. A box narrower than that drops buttons off
+the right a group at a time, keeping the view switch; one too short to spare a
+line drops the row entirely. The chords and the text are never what gets cut.
 
 > [!TIP]
 > Prefer a browser, or want to drive Leviath from another machine?

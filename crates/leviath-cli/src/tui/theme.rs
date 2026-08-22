@@ -25,6 +25,14 @@ pub(crate) const C_BORDER_FOCUS: Color = Color::Cyan;
 
 /// Background tint for fenced code blocks in the markdown renderer.
 pub(crate) const C_CODE_BG: Color = Color::Rgb(30, 30, 40);
+/// Foreground for code, in the renderer and on the editor's code buttons.
+pub(crate) const C_CODE_FG: Color = Color::Rgb(200, 160, 100);
+
+/// Background for a chrome strip (the long-form editor's toolbar), so the
+/// buttons on it read as buttons rather than as another row of text.
+pub(crate) const C_CHROME_BG: Color = Color::Rgb(38, 38, 48);
+/// The same strip under the pointer: a button lifts when you are over it.
+pub(crate) const C_CHROME_HOVER: Color = Color::Rgb(72, 72, 88);
 
 // ─── Stage status glyphs ────────────────────────────────────────────────────
 

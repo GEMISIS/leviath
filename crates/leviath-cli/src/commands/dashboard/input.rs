@@ -201,10 +201,12 @@ impl Dashboard {
             .and_then(|a| a.pending_request.as_ref())
             .filter(|r| r.kind == InteractionKind::EditText)
             .and_then(|r| r.body.clone());
+        let mode = self.md_mode();
         self.input_textarea = match seed {
             Some(body) => MarkdownEdit::from_text(&body),
             None => MarkdownEdit::default(),
-        };
+        }
+        .in_mode(mode);
     }
 
     /// Whether the user is actively editing a document (an `EditText`
@@ -319,7 +321,8 @@ impl Dashboard {
                     KeyCode::PageUp if self.has_scrollable_document() => self.scroll_by(10),
                     KeyCode::PageDown if self.has_scrollable_document() => self.scroll_by(-10),
                     _ => {
-                        self.input_textarea.handle_key(&key);
+                        let outcome = self.input_textarea.handle_key(&key);
+                        self.remember_md_mode(outcome);
                     }
                 }
             }
