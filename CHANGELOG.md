@@ -41,9 +41,13 @@ same list.
 - Changed: in a long-form box, `ctrl-b`, `ctrl-d`, `ctrl-e`, `ctrl-k`, `ctrl-l`
   and `ctrl-o` now format rather than doing what the textarea's built-in emacs
   bindings did (back a character, delete forward, end of line, delete to end of
-  line). The arrow, Delete and End keys do all of those. In the blueprint
-  editor's prompt overlay `ctrl-e` still hands the prompt to `$EDITOR`, so
-  inline code there is on its alias, `ctrl-t`.
+  line). The arrow, Delete and End keys do all of those.
+- Changed: in the agent editor's prompt overlay, "open this prompt in `$EDITOR`"
+  moved from `Ctrl-E` to `F2`, and `F1` now opens the help there (`?` types a
+  question mark inside a prompt, which is why it cannot). `Ctrl-E` is inline
+  code in that overlay like it is in every other long-form box: one chord
+  meaning two things depending on which box you are in is worse than moving the
+  rarer of the two.
 - Fixed: an Anthropic model reached through OpenRouter can cache its prompt
   again. System blocks - the stage prompt and the pinned context regions, which
   are the stable and by far the largest part of a request - were sent as plain

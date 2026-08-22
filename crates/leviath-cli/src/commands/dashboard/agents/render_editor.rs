@@ -324,10 +324,10 @@ impl Dashboard {
                 hint("esc / ^s", "apply"),
                 hint("^q", "discard"),
                 hint("tab", "other prompt"),
-                hint("^e", "$EDITOR"),
+                hint("F2", "$EDITOR"),
                 hint(chord_label(MdAction::Bold), "bold"),
                 hint("toolbar", "click to format"),
-                hint("?", "every chord"),
+                hint("F1", "every chord"),
             ]
         } else if editor.overlay.is_some() {
             vec![

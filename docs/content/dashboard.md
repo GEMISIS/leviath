@@ -312,7 +312,7 @@ The models the chooser offers come from every provider in your config (asked whe
 opens, so the list fills in a moment later) on top of the built-in catalog, marked with the context
 window when it is known. The prompts open full screen: the system prompt (what the stage is told)
 and the transition prompt (how it picks the next path; only read when there is more than one), with
-`Tab` between them, `Ctrl-S` or `Esc` to apply, `Ctrl-Q` to discard, and `Ctrl-E` to hand the
+`Tab` between them, `Ctrl-S` or `Esc` to apply, `Ctrl-Q` to discard, and `F2` to hand the
 focused prompt to `$EDITOR` (`$VISUAL` first): the dashboard steps aside while the editor runs and
 the text comes back into the box when it closes.
 
@@ -367,7 +367,11 @@ In the prompts:
 | `Tab` | Move between the system prompt and the transition prompt |
 | `Ctrl-S` / `Esc` | Apply both and close |
 | `Ctrl-Q` | Close without applying |
-| `Ctrl-E` | Open the focused prompt in `$EDITOR`; the dashboard waits for it |
+| `F2` | Open the focused prompt in `$EDITOR`; the dashboard waits for it |
+| `F1` | Help. `?` types a question mark in a prompt |
+
+Both boxes wrap and carry the formatting toolbar; see
+[Formatting a long-form box](#formatting-a-long-form-box).
 
 On a terminal under 110 columns the graph and the inspector take turns; `Tab` swaps them.
 
@@ -426,9 +430,9 @@ equivalent) `Ctrl-I` arrives indistinguishable from `Tab` and `Ctrl-H` from
 `Backspace`, so italic and heading are on their buttons there. Nothing else
 changes: `Tab` and `Backspace` keep doing what they always did.
 
-In the agent editor's prompt overlay `Ctrl-E` already means "open this prompt
-in `$EDITOR`" and keeps that meaning, so inline code there is on its alias,
-`Ctrl-T`. `Ctrl-T` works in the other boxes too.
+Every box takes the same chords, including the agent editor's prompt overlay.
+`Ctrl-E` there used to mean "open this prompt in `$EDITOR`"; that moved to
+`F2` so the formatting chord means one thing everywhere.
 
 A box too narrow for the whole row drops buttons off the right, and one too
 short to spare a line drops the row entirely; the chords and the text are never

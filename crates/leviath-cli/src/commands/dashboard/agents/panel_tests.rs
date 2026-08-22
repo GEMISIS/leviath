@@ -980,7 +980,7 @@ fn the_prompts_overlay_edits_applies_and_discards() {
     assert!(screen.contains("Prompts · work"), "{screen}");
     assert!(screen.contains("System prompt"), "{screen}");
     assert!(screen.contains("Transition prompt"), "{screen}");
-    assert!(screen.contains("^e $EDITOR"), "{screen}");
+    assert!(screen.contains("F2 $EDITOR"), "{screen}");
     // Typing lands in the focused box; Tab moves to the other; the keys on
     // the editor underneath (v, u, p) are letters here.
     type_str(&mut dash, " vup");
@@ -1128,12 +1128,13 @@ fn bold_buttons(dash: &mut Dashboard, w: u16, h: u16) -> Vec<(u16, u16)> {
     found
 }
 
-/// The chord path through the same overlay: `Ctrl-E` still means `$EDITOR`
-/// here, so inline code is on its alias, and the rest of the chords reach the
-/// focused box unchanged.
+/// The chord path through the same overlay. `Ctrl-E` is inline code here, the
+/// same as in every other long-form box: this is the overlay that used to
+/// spend that chord on `$EDITOR`, which is now on `F2`.
 #[test]
 fn formatting_chords_reach_the_focused_prompt_box() {
     let (mut dash, root) = dashboard("prompts_chords");
+    dash.external_edit_dir = root.join("scratch");
     open_stage(&mut dash, "own", "work", StageTab::Behaviour);
     goto(&mut dash, FieldId::EditPrompts);
     dash.handle_key(key(KeyCode::Enter));
@@ -1141,8 +1142,18 @@ fn formatting_chords_reach_the_focused_prompt_box() {
 
     dash.handle_key(ctrl('b'));
     type_str(&mut dash, "loud");
-    dash.handle_key(ctrl('t'));
+    dash.handle_key(ctrl('e'));
     type_str(&mut dash, "code");
+    assert!(matches!(
+        &dash.agents().editor.as_ref().unwrap().overlay,
+        Some(Overlay::Prompts(p)) if p.transition.text() == "**loud`code`**"
+    ));
+    // And it formatted rather than reaching for an editor.
+    assert!(!dash.has_external_edit());
+
+    // F1 opens the help without typing into the prompt.
+    dash.handle_key(key(KeyCode::F(1)));
+    assert!(dash.show_help);
     assert!(matches!(
         &dash.agents().editor.as_ref().unwrap().overlay,
         Some(Overlay::Prompts(p)) if p.transition.text() == "**loud`code`**"
@@ -1151,7 +1162,7 @@ fn formatting_chords_reach_the_focused_prompt_box() {
 }
 
 #[test]
-fn ctrl_e_hands_a_prompt_to_the_editor_and_takes_it_back() {
+fn f2_hands_a_prompt_to_the_editor_and_takes_it_back() {
     let (mut dash, root) = dashboard("prompts_external");
     dash.external_edit_dir = root.join("scratch");
     open_stage(&mut dash, "own", "work", StageTab::Behaviour);
@@ -1160,7 +1171,7 @@ fn ctrl_e_hands_a_prompt_to_the_editor_and_takes_it_back() {
     dash.handle_key(key(KeyCode::Tab));
     type_str(&mut dash, "Before.");
     assert!(!dash.has_external_edit());
-    dash.handle_key(ctrl('e'));
+    dash.handle_key(key(KeyCode::F(2)));
     assert!(dash.has_external_edit());
     let edit = dash.take_external_edit().expect("a file to open");
     assert!(!dash.has_external_edit());
@@ -1186,7 +1197,7 @@ fn ctrl_e_hands_a_prompt_to_the_editor_and_takes_it_back() {
             .is_some_and(|m| m.contains("updated"))
     );
     // An editor that failed leaves the box alone and says so.
-    dash.handle_key(ctrl('e'));
+    dash.handle_key(key(KeyCode::F(2)));
     let edit = dash.take_external_edit().unwrap();
     dash.finish_external_edit(edit, Err(std::io::Error::other("no editor")));
     assert!(matches!(
@@ -1203,7 +1214,7 @@ fn ctrl_e_hands_a_prompt_to_the_editor_and_takes_it_back() {
             .is_some_and(|m| m.contains("no editor"))
     );
     // A file that vanished reads the same way.
-    dash.handle_key(ctrl('e'));
+    dash.handle_key(key(KeyCode::F(2)));
     let edit = dash.take_external_edit().unwrap();
     std::fs::remove_file(&edit.path).unwrap();
     dash.finish_external_edit(edit, Ok(()));
@@ -1218,7 +1229,7 @@ fn ctrl_e_hands_a_prompt_to_the_editor_and_takes_it_back() {
     );
     // Coming back with the overlay closed, or the editor closed, or the
     // screen closed, drops the text quietly.
-    dash.handle_key(ctrl('e'));
+    dash.handle_key(key(KeyCode::F(2)));
     let edit = dash.take_external_edit().unwrap();
     dash.handle_key(ctrl('q'));
     dash.finish_external_edit(edit.clone(), Ok(()));
@@ -1235,7 +1246,7 @@ fn ctrl_e_hands_a_prompt_to_the_editor_and_takes_it_back() {
     open_stage(&mut dash, "own", "work", StageTab::Behaviour);
     goto(&mut dash, FieldId::EditPrompts);
     dash.handle_key(key(KeyCode::Enter));
-    dash.handle_key(ctrl('e'));
+    dash.handle_key(key(KeyCode::F(2)));
     assert!(!dash.has_external_edit());
     assert!(
         dash.agents()
@@ -1246,7 +1257,7 @@ fn ctrl_e_hands_a_prompt_to_the_editor_and_takes_it_back() {
             .as_deref()
             .is_some_and(|m| m.contains("Could not hand"))
     );
-    // Ctrl-E with no overlay is a no-op.
+    // F2 with no overlay is a no-op.
     dash.handle_key(ctrl('q'));
     dash.editor_request_external_edit();
     assert!(!dash.has_external_edit());
@@ -1661,7 +1672,7 @@ fn a_system_prompt_comes_back_from_the_editor_too() {
     open_stage(&mut dash, "own", "work", StageTab::Behaviour);
     goto(&mut dash, FieldId::EditPrompts);
     dash.handle_key(key(KeyCode::Enter));
-    dash.handle_key(ctrl('e'));
+    dash.handle_key(key(KeyCode::F(2)));
     let edit = dash.take_external_edit().unwrap();
     assert_eq!(edit.target, PromptFocus::System);
     std::fs::write(&edit.path, "Rewritten.").unwrap();

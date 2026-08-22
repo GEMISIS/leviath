@@ -175,10 +175,6 @@ pub(crate) fn action_for(key: &KeyEvent) -> Option<MdAction> {
         ('i', _) => Some(MdAction::Italic),
         ('d', _) => Some(MdAction::Strike),
         ('e', false) => Some(MdAction::Code),
-        // `Ctrl-E` is already "hand this to $EDITOR" in the blueprint editor's
-        // prompt overlay, which takes its own keys before delegating here.
-        // `Ctrl-T` is the alias that works in every box.
-        ('t', _) => Some(MdAction::Code),
         ('e', true) => Some(MdAction::CodeBlock),
         ('k', _) => Some(MdAction::Link),
         ('h', _) => Some(MdAction::Heading),
@@ -638,7 +634,6 @@ mod tests {
             ('i', MdAction::Italic),
             ('d', MdAction::Strike),
             ('e', MdAction::Code),
-            ('t', MdAction::Code),
             ('k', MdAction::Link),
             ('h', MdAction::Heading),
             ('l', MdAction::Bullet),

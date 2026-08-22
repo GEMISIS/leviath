@@ -1,9 +1,16 @@
 //! A stage's prompts, edited full screen: what the stage is told to do
 //! (`system_prompt`) and how it decides where to go next
 //! (`transition_prompt`). `Tab` moves between the two, `Ctrl-S` or `Esc`
-//! applies and closes, `Ctrl-Q` closes without applying, and `Ctrl-E` hands
+//! applies and closes, `Ctrl-Q` closes without applying, and `F2` hands
 //! the focused text to `$EDITOR`: the dashboard leaves the terminal, the
 //! editor runs, and the text comes back into the box.
+//!
+//! `$EDITOR` was on `Ctrl-E` until the boxes became
+//! [`MarkdownEdit`](crate::tui::widgets::markdown_edit::MarkdownEdit)s, where
+//! `Ctrl-E` is inline code in every other long-form box in the dashboard. One
+//! chord meaning two things depending on which box you are in is worse than
+//! moving the rarer of the two, and a function key is the one thing here no
+//! terminal mangles and no text field can swallow.
 
 use std::path::PathBuf;
 
@@ -101,7 +108,9 @@ impl Dashboard {
             }
             (KeyCode::Esc, _) | (KeyCode::Char('s'), true) => self.editor_apply_prompts(),
             (KeyCode::Char('q'), true) => self.editor().overlay = None,
-            (KeyCode::Char('e'), true) => self.editor_request_external_edit(),
+            (KeyCode::F(2), _) => self.editor_request_external_edit(),
+            // F1 rather than `?`, which is a question mark inside a prompt.
+            (KeyCode::F(1), _) => self.show_help = true,
             _ => {
                 prompts.focused_mut().handle_key(key);
             }
@@ -152,8 +161,8 @@ impl Dashboard {
         });
     }
 
-    /// Ctrl-E: write the focused text to a temp file and ask the loop to
-    /// run `$EDITOR` on it.
+    /// F2: write the focused text to a temp file and ask the loop to run
+    /// `$EDITOR` on it.
     pub(super) fn editor_request_external_edit(&mut self) {
         let Some(Overlay::Prompts(prompts)) = self.editor().overlay.as_mut() else {
             return;
