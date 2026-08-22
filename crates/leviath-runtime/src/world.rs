@@ -529,7 +529,13 @@ impl PipelineWorld {
                 // stage it has been here before, and wants the same window - set
                 // last, so the framing is the final thing in front of the
                 // stage's first request.
+                // `track_stage_progress` rides along too: it closes out the
+                // yield of the stage just left and, when this stage has been
+                // here before, tells it what its own last pass added. First in
+                // the chain, so the number is in the window before anything
+                // else writes to it.
                 (
+                    crate::pipeline::track_stage_progress,
                     run_stage_enter_hooks,
                     crate::stage_seeds::start_stage_seeds,
                     crate::fanout::frame_split_round,
