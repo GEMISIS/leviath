@@ -149,6 +149,7 @@ impl EmbedSpawner {
                 callback_url: None,
                 callback_secret: None,
                 title: None,
+                title_error: None,
                 unattended: args.yolo,
                 // The embedded spawner has no user config to grant against, so
                 // there is nothing to report; `[read_paths]` enforcement is the

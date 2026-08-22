@@ -218,12 +218,14 @@ struct RunRecordParts {
     output_validators:
         HashMap<String, std::sync::Arc<leviath_scripting::output_validator::OutputValidator>>,
     outcome_flags: leviath_runtime::persistence::RunOutcomeFlags,
-    /// Whether this run should be marked for one-shot title generation.
+    /// The provider/model chain the run's title call may walk, best first.
     ///
-    /// Decided by the caller rather than here, because the answer turns on
-    /// whether this is a fresh spawn or a run being paged back in - which is
-    /// the caller's distinction, not a property of the record.
-    wants_title: bool,
+    /// Empty means "do not title this run at all", so this carries both the
+    /// decision and its subject. Decided by the caller rather than here,
+    /// because whether to title turns on whether this is a fresh spawn or a run
+    /// being paged back in - which is the caller's distinction, not a property
+    /// of the record.
+    title_chain: Vec<(String, String)>,
     compaction: Option<leviath_core::CompactionConfig>,
     tool_sensitivities: Option<HashMap<String, leviath_core::TaintLevel>>,
     security: leviath_core::taint::SecurityConfig,
@@ -253,6 +255,7 @@ fn attach_run_record(
         callback_url: args.callback_url.clone(),
         callback_secret: args.callback_secret.clone(),
         title: None,
+        title_error: None,
         unattended: args.yolo,
         read_paths: parts.read_path_counts,
         output_request: args.output.clone(),
@@ -273,17 +276,24 @@ fn attach_run_record(
             // by `recovery::reload_persisted_agents`.
             parts.outcome_flags,
         ));
-        // Mark eligible runs for one-shot title generation (the `title` module
-        // fills `RunMetadata.title`, which the dashboard displays and
-        // searches). Root runs only: sub-agents inherit their parent's context
-        // in the run list, and titling every fan-out worker would multiply
-        // cheap-but-nonzero LLM calls for no UX gain.
-        parts
-            .wants_title
-            .then_some(leviath_runtime::title::PendingTitle)
+        // Mark eligible runs for title generation (the `title` module fills
+        // `RunMetadata.title`, which the dashboard displays and searches). Root
+        // runs only: sub-agents inherit their parent's context in the run list,
+        // and titling every fan-out worker would multiply cheap-but-nonzero LLM
+        // calls for no UX gain.
+        //
+        // The candidates ride along with the marker rather than being resolved
+        // later from the model label, because the label names one provider and
+        // the run has several: a title call that can only try the head of the
+        // chain loses the run's name to whatever the head happens to be doing.
+        (!parts.title_chain.is_empty())
+            .then_some(parts.title_chain)
             .into_iter()
-            .for_each(|marker| {
-                entity_mut.insert(marker);
+            .for_each(|chain| {
+                entity_mut.insert((
+                    leviath_runtime::title::PendingTitle,
+                    leviath_runtime::title::TitleCandidates(chain),
+                ));
             });
         // `--yolo` means run unattended, so a blueprint's stage-boundary
         // checkpoints are approved rather than parked on a deps.hub nobody is
@@ -624,6 +634,14 @@ fn build_agent_inner(
     let model_label = stages
         .first()
         .map(|s| format!("{}/{}", s.provider_name, s.model));
+    // The entry stage's resolved model and everything it would fail over to,
+    // flattened to the `(provider, model)` pairs the title lane speaks. Taken
+    // here, while `stages` is in hand, because `attach_run_record` sees only
+    // the label - and a label is one provider where the run has a whole chain.
+    let entry_stage_candidates: Vec<(String, String)> = stages
+        .first()
+        .map(|s| leviath_runtime::title::stage_pairs(&s.provider_name, &s.model, &s.fallbacks))
+        .unwrap_or_default();
 
     // The tool-permission layers and the Rhai script host, resolved here
     // rather than beside the tool-state registration below because a
@@ -811,20 +829,33 @@ fn build_agent_inner(
         &deps,
         RunRecordParts {
             agent_name: agent_name.clone(),
-            model_label,
+            model_label: model_label.clone(),
             num_stages,
             read_path_counts,
             output_validators,
             outcome_flags,
             // `enforce_seeds` is false on the recovery path, which is also the
             // resume path - and a run being paged back in has already had its
-            // one shot at a title. Without this, every pause/resume cycle buys
+            // shot at a title. Without this, every pause/resume cycle buys
             // another titling call for a run that either has a title or has
             // already failed to get one.
-            wants_title: enforce_seeds
+            //
+            // The chain doubles as the eligibility answer: empty means no
+            // titling. It is the entry stage's own candidate list behind
+            // whatever `[title]` names, so the title call fails over exactly
+            // where the run's inference does.
+            title_chain: match enforce_seeds
                 && deps.config.title.enabled
                 && !args.task.is_empty()
-                && args.parent_run_id.is_none(),
+                && args.parent_run_id.is_none()
+            {
+                true => leviath_runtime::title::title_chain(
+                    &deps.config.title,
+                    model_label.as_deref(),
+                    &entry_stage_candidates,
+                ),
+                false => Vec::new(),
+            },
             compaction,
             tool_sensitivities,
             security: security.clone(),

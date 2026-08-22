@@ -1145,6 +1145,7 @@ mod tests {
                         callback_url: None,
                         callback_secret: None,
                         title: None,
+                        title_error: None,
                         unattended: false,
                         read_paths: None,
                         output_request: None,

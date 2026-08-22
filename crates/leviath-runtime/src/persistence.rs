@@ -47,6 +47,13 @@ pub struct RunMetadata {
     pub callback_secret: Option<String>,
     /// Short human-readable title (None until generated).
     pub title: Option<String>,
+    /// Why [`Self::title`] is still `None`, once titling has given up.
+    ///
+    /// `None` means titling has not finished (or was never asked for), which is
+    /// a different state from "it ran and could not produce a name" - and one
+    /// nothing outside the daemon could tell apart before this, because the
+    /// reason only ever reached a debug log.
+    pub title_error: Option<String>,
     /// Whether this run is unattended (launched with `--yolo`).
     ///
     /// Recorded on the agent so anything holding the world can ask. Two things
@@ -390,6 +397,7 @@ pub fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> RunMeta {
             _ => None,
         },
         title: md.title.clone(),
+        title_error: md.title_error.clone(),
         metadata: md.metadata.clone(),
         callback_url: md.callback_url.clone(),
         callback_secret: md.callback_secret.clone(),
@@ -449,6 +457,7 @@ mod tests {
             callback_url: Some("http://cb".to_string()),
             callback_secret: Some("sekret".to_string()),
             title: Some("Do It".to_string()),
+            title_error: None,
             unattended: false,
             read_paths: None,
             output_request: None,

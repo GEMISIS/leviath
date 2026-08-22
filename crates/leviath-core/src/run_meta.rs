@@ -363,6 +363,14 @@ pub struct RunMeta {
     /// Short human-readable title generated from the task prompt (None until generated).
     #[serde(default)]
     pub title: Option<String>,
+    /// Why [`Self::title`] is still `None`, once title generation has given up
+    /// - the provider it could not reach, or what came back instead of a title.
+    ///
+    /// `None` is the ordinary state: titling has not finished yet, or was never
+    /// asked for. `Some` means it ran and could not produce a name, which is
+    /// the case a reader could not previously distinguish from either.
+    #[serde(default)]
+    pub title_error: Option<String>,
     /// Custom key-value pairs from the spawn request (API metadata).
     #[serde(default)]
     pub metadata: HashMap<String, String>,
@@ -674,6 +682,7 @@ impl RunMeta {
             last_progress_at: None,
             error: None,
             title: None,
+            title_error: None,
             metadata: HashMap::new(),
             callback_url: None,
             callback_secret: None,

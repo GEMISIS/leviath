@@ -420,6 +420,11 @@ fn reload_one(
             .expect("build_agent attached run metadata");
         md.started_at = meta.started_at;
         md.title = meta.title.clone();
+        // Carried across the restart with the title itself. A reloaded run does
+        // not get another titling attempt (see `wants_title` at spawn), so
+        // dropping this would turn "titling ran and could not name this run"
+        // back into the silence the field exists to end.
+        md.title_error = meta.title_error.clone();
         md.callback_url = meta.callback_url.clone();
         md.callback_secret = meta.callback_secret.clone();
         // `parent_run_id` was already restored via `args` into build_agent's metadata.
@@ -647,6 +652,7 @@ mod tests {
             last_progress_at: None,
             error: None,
             title: Some("Resume Me".to_string()),
+            title_error: None,
             metadata: std::collections::HashMap::new(),
             callback_url: Some("http://cb".to_string()),
             callback_secret: None,
