@@ -153,6 +153,13 @@ pub(crate) fn system_cache_breakpoints(
     }
     let mut candidates = Vec::new();
     let mut prefix_tokens = 0usize;
+    // The deepest index whose *entire* prefix holds still, which is the only
+    // kind of marker guaranteed to be readable next turn. Tracked separately
+    // because the candidate test below asks only whether a block itself holds
+    // still, and a prefix is all-or-nothing: one block that moves invalidates
+    // every marker behind it.
+    let mut stable_prefix_end: Option<usize> = None;
+    let mut prefix_holds = true;
     for (index, block) in blocks.iter().enumerate() {
         prefix_tokens = prefix_tokens.saturating_add(leviath_core::estimate_tokens(&block.text));
         let holds_still = block.volatility != leviath_core::Volatility::Rewritten
@@ -160,11 +167,43 @@ pub(crate) fn system_cache_breakpoints(
         if holds_still && prefix_tokens >= MIN_CACHEABLE_TOKENS {
             candidates.push(index);
         }
+        // `Grows` counts as movement here even though it only appends: the
+        // bytes still differ from last request, so a prefix ending at or
+        // behind it cannot match.
+        if block.volatility != leviath_core::Volatility::Stable
+            || block.cache_hint == leviath_core::CacheHint::Never
+        {
+            prefix_holds = false;
+        }
+        if prefix_holds && prefix_tokens >= MIN_CACHEABLE_TOKENS {
+            stable_prefix_end = Some(index);
+        }
     }
-    if candidates.len() > budget {
-        candidates.drain(..candidates.len() - budget);
+
+    // The reliable marker first. Without it every marker could sit on content
+    // that changes: assembly sorts `stable` ahead of `grows`, the candidate
+    // test admits `grows`, and keeping the *last* candidates then picked
+    // exactly the regions that move. A measured research-agent block list put
+    // both markers on `sources_index` and `raw_findings` - appended to on
+    // almost every turn - and left the two genuinely stable blocks unmarked,
+    // so each write was invalidated before it could be read.
+    let mut chosen = Vec::new();
+    if let Some(floor) = stable_prefix_end {
+        chosen.push(floor);
     }
-    candidates
+    // Then the deepest candidates, which pay on a turn where nothing behind
+    // them moved. Anthropic reads back the longest stored prefix that still
+    // matches, so these can only add to what the floor already guarantees.
+    for &candidate in candidates.iter().rev() {
+        if chosen.len() >= budget {
+            break;
+        }
+        if !chosen.contains(&candidate) {
+            chosen.push(candidate);
+        }
+    }
+    chosen.sort_unstable();
+    chosen
 }
 
 /// Always log the serialized request size at debug, and - when `dir` is
@@ -1134,6 +1173,55 @@ mod tests {
             request_timeout_secs: None,
         };
         provider.build_request_body(&request)
+    }
+
+    /// A marker has to have a prefix that holds still, not merely a block that
+    /// does.
+    ///
+    /// Assembly sorts `stable` ahead of `grows`, the candidate test admitted
+    /// `grows`, and keeping the last candidates then chose exactly the regions
+    /// that move. On a real research-agent block list both markers landed on
+    /// `sources_index` and `raw_findings` - appended to on nearly every turn -
+    /// while `query` and `format` went unmarked, so every write was invalid
+    /// before it could be read.
+    #[test]
+    fn a_marker_lands_on_the_prefix_that_holds_still() {
+        use leviath_core::{CacheHint, Volatility};
+        let block = |name: &str, v: Volatility, h: CacheHint| crate::provider::SystemBlock {
+            // ~1250 tokens each, so a single block clears MIN_CACHEABLE_TOKENS
+            // and the token floor is never what decides this test.
+            text: "x ".repeat(2500),
+            cache_hint: h,
+            region: name.to_string(),
+            volatility: v,
+        };
+        // The order assembly produces: stable, then grows, then rewritten.
+        let blocks = vec![
+            block("query", Volatility::Stable, CacheHint::Always),
+            block("format", Volatility::Stable, CacheHint::Always),
+            block("sources_index", Volatility::Grows, CacheHint::Always),
+            block("raw_findings", Volatility::Grows, CacheHint::UntilChanged),
+            block("conversation", Volatility::Rewritten, CacheHint::Never),
+        ];
+
+        let picked = system_cache_breakpoints(&blocks, MAX_SYSTEM_BREAKPOINTS);
+        let names: Vec<&str> = picked.iter().map(|i| blocks[*i].region.as_str()).collect();
+
+        assert!(
+            names.contains(&"format"),
+            "the deepest all-stable prefix ends at `format`, and something has \
+             to mark it or nothing is reliably cacheable: {names:?}"
+        );
+        assert!(
+            !picked.is_empty() && picked.len() <= MAX_SYSTEM_BREAKPOINTS,
+            "within budget: {names:?}"
+        );
+        // The remaining marker may go deeper - a turn that appended nothing
+        // still reads it back - but never at the cost of the reliable one.
+        assert!(
+            !names.contains(&"conversation"),
+            "a block cleared every iteration is never a marker: {names:?}"
+        );
     }
 
     #[test]

@@ -23,6 +23,16 @@ same list.
   to mark is the Anthropic provider's existing choice rather than a second
   implementation, so a marker still never lands on content that changes every
   turn.
+- Fixed: a cache marker no longer lands on content that changes every turn.
+  Assembly sorts `stable` blocks ahead of `grows`, the marker test asked only
+  whether a block itself held still, and the selection then kept the *last*
+  candidates - so on a real research-agent block list both markers went to
+  `sources_index` and `raw_findings`, appended to on nearly every turn, while
+  the two genuinely stable blocks went unmarked. Every entry was invalid before
+  it could be read. A marker now has to have a whole prefix that holds still,
+  and the deepest such point is always claimed first; remaining budget still
+  goes deeper, where it pays on a turn that appended nothing. This is the direct
+  Anthropic path as much as the gateway one.
 - Fixed: `cache_write_tokens` was hardcoded to zero for every OpenAI-compatible
   provider, so a run that paid the 1.25x write premium recorded none of it and
   its token accounting understated what it cost. OpenRouter reports the figure
