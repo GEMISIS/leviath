@@ -61,7 +61,7 @@ const CACHE_LOOKBACK_BLOCKS: usize = 16;
 /// marker in the messages covers everything - every system block *and* the
 /// conversation ahead of it - so it is the single most valuable position in the
 /// request. A fourth system marker can only ever cover less than that.
-const MAX_SYSTEM_BREAKPOINTS: usize = 2;
+pub(crate) const MAX_SYSTEM_BREAKPOINTS: usize = 2;
 
 /// Choose which messages carry a `cache_control` breakpoint.
 ///
@@ -144,7 +144,10 @@ fn message_cache_breakpoints(block_counts: &[usize], budget: usize) -> Vec<usize
 /// a candidate needs both to agree: the blueprint knows whether an author
 /// rewrites a region, and the runtime knows that it clears a `Temporary` one
 /// whatever the blueprint says.
-fn system_cache_breakpoints(blocks: &[crate::provider::SystemBlock], budget: usize) -> Vec<usize> {
+pub(crate) fn system_cache_breakpoints(
+    blocks: &[crate::provider::SystemBlock],
+    budget: usize,
+) -> Vec<usize> {
     if budget == 0 {
         return Vec::new();
     }

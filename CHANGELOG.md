@@ -13,6 +13,20 @@ same list.
 
 ## Unreleased
 
+- Fixed: an Anthropic model reached through OpenRouter can cache its prompt
+  again. System blocks - the stage prompt and the pinned context regions, which
+  are the stable and by far the largest part of a request - were sent as plain
+  strings, so nothing marked them and nothing was cacheable. Two research runs
+  read **zero** tokens from cache across 2.9M and 5.9M input tokens. DeepSeek hid
+  this for as long as it was the model in the OpenRouter slot, because it caches
+  server-side with no markers at all and reported hits regardless. Which blocks
+  to mark is the Anthropic provider's existing choice rather than a second
+  implementation, so a marker still never lands on content that changes every
+  turn.
+- Fixed: `cache_write_tokens` was hardcoded to zero for every OpenAI-compatible
+  provider, so a run that paid the 1.25x write premium recorded none of it and
+  its token accounting understated what it cost. OpenRouter reports the figure
+  and it is now read, in the streaming and non-streaming paths alike.
 - Added: the terminal UIs remember the choices you have already made, in one
   `ui-state.json` under the data directory rather than each surface inventing
   its own answer. `lev setup` no longer re-proposes an MCP server or a bundled

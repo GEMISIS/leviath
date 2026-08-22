@@ -134,21 +134,62 @@ impl OpenRouterProvider {
     ///
     /// For Anthropic models (detected by `claude` in name), pass through
     /// cache breakpoint markers as content-block cache_control annotations.
+    ///
+    /// The system blocks matter more than the conversation does. They are the
+    /// stable prefix - the stage prompt and the pinned context regions - and
+    /// they were being sent as plain strings, so nothing marked them and an
+    /// Anthropic model reached this way cached nothing at all. Two measured
+    /// research runs read 0 tokens from cache across 2.9M and 5.9M input
+    /// tokens; the same request with the system block marked costs a ninth on
+    /// its second call. DeepSeek hid this, because it caches server-side with
+    /// no markers at all and so reported hits regardless.
+    ///
+    /// The choice of which blocks to mark is [`crate::anthropic`]'s, not a
+    /// second implementation: a marker on content that changes every turn
+    /// writes an entry that can never be read back, and that logic already
+    /// exists and is tested.
     fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
         let is_anthropic = request.model.contains("claude");
+        // Anthropic allows four `cache_control` markers per request across
+        // system and messages together. System takes its claim first and the
+        // conversation gets the rest, matching the direct provider.
+        let system_breakpoints: std::collections::HashSet<usize> = match is_anthropic {
+            true => crate::anthropic::system_cache_breakpoints(
+                &request.system,
+                crate::anthropic::MAX_SYSTEM_BREAKPOINTS,
+            )
+            .into_iter()
+            .collect(),
+            false => std::collections::HashSet::new(),
+        };
+        let message_budget = 4usize.saturating_sub(system_breakpoints.len());
         let mut breakpoint_count = 0usize;
 
         let mut messages: Vec<serde_json::Value> = Vec::new();
         // System blocks go first; dropping them silently loses the system prompt.
-        for block in &request.system {
-            messages.push(serde_json::json!({ "role": "system", "content": block.text }));
+        for (index, block) in request.system.iter().enumerate() {
+            match system_breakpoints.contains(&index) {
+                true => messages.push(serde_json::json!({
+                    "role": "system",
+                    "content": [{
+                        "type": "text",
+                        "text": block.text,
+                        "cache_control": { "type": "ephemeral" }
+                    }],
+                })),
+                false => {
+                    messages.push(serde_json::json!({ "role": "system", "content": block.text }))
+                }
+            }
         }
         for msg in &request.messages {
             match &msg.content {
                 // A cache-breakpointed text turn (Anthropic-via-OpenRouter) keeps
                 // its ephemeral cache_control wrapper.
                 crate::provider::MessageContent::Text(text)
-                    if is_anthropic && msg.cache_breakpoint && breakpoint_count < 4 =>
+                    if is_anthropic
+                        && msg.cache_breakpoint
+                        && breakpoint_count < message_budget =>
                 {
                     breakpoint_count += 1;
                     messages.push(serde_json::json!({
@@ -1218,6 +1259,139 @@ mod tests {
         assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
         // Second message should be simple string content
         assert!(msgs[1]["content"].is_string());
+    }
+
+    /// A stable system block carries a marker, so an Anthropic model reached
+    /// through the gateway can cache its prefix at all.
+    ///
+    /// System blocks used to be pushed as plain strings whatever the model, so
+    /// nothing marked the one part of the request worth caching - the stage
+    /// prompt and the pinned regions. Two research runs read zero tokens from
+    /// cache across 2.9M and 5.9M input tokens because of it.
+    #[test]
+    fn a_stable_system_block_is_marked_for_an_anthropic_model() {
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
+        // Long enough to clear the minimum cacheable prefix; a shorter one is
+        // correctly left unmarked and would prove nothing.
+        let big = "stable reference material. ".repeat(400);
+        let request = InferenceRequest {
+            system: vec![crate::provider::SystemBlock {
+                text: big,
+                cache_hint: leviath_core::CacheHint::Always,
+                region: String::new(),
+                volatility: leviath_core::Volatility::Stable,
+            }],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".into(),
+                cache_breakpoint: false,
+            }],
+            model: "anthropic/claude-sonnet-5".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let body = provider.build_request_body(&request);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["role"], "system");
+        assert!(
+            msgs[0]["content"].is_array(),
+            "a marked system block is sent as content blocks: {}",
+            body
+        );
+        assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    /// The same block on a non-Anthropic model stays a plain string: the
+    /// annotation means nothing there and the gateway would carry it anyway.
+    #[test]
+    fn a_system_block_is_not_marked_for_a_non_anthropic_model() {
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
+        let big = "stable reference material. ".repeat(400);
+        let request = InferenceRequest {
+            system: vec![crate::provider::SystemBlock {
+                text: big,
+                cache_hint: leviath_core::CacheHint::Always,
+                region: String::new(),
+                volatility: leviath_core::Volatility::Stable,
+            }],
+            messages: vec![],
+            model: "deepseek/deepseek-v4-flash".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let body = provider.build_request_body(&request);
+        assert!(body["messages"][0]["content"].is_string());
+    }
+
+    /// System markers come out of the same four-marker budget as the messages,
+    /// which is Anthropic's limit for the whole request. Spending two on the
+    /// system leaves two for the conversation.
+    #[test]
+    fn system_markers_take_their_share_of_the_four_marker_budget() {
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
+        let big = "stable reference material. ".repeat(400);
+        let request = InferenceRequest {
+            system: vec![
+                crate::provider::SystemBlock {
+                    text: big.clone(),
+                    cache_hint: leviath_core::CacheHint::Always,
+                    region: String::new(),
+                    volatility: leviath_core::Volatility::Stable,
+                },
+                crate::provider::SystemBlock {
+                    text: big,
+                    cache_hint: leviath_core::CacheHint::Always,
+                    region: String::new(),
+                    volatility: leviath_core::Volatility::Stable,
+                },
+            ],
+            messages: (0..6)
+                .map(|i| crate::provider::Message {
+                    role: "user".to_string(),
+                    content: format!("msg {i}").into(),
+                    cache_breakpoint: true,
+                })
+                .collect(),
+            model: "anthropic/claude-sonnet-5".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let body = provider.build_request_body(&request);
+        let marked = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["content"].is_array() && m["content"][0].get("cache_control").is_some())
+            .count();
+        assert!(
+            marked <= 4,
+            "Anthropic takes at most four markers per request, got {marked}: {body}"
+        );
+        assert!(
+            marked > 2,
+            "the system blocks must not eat the whole budget: {marked}"
+        );
     }
 
     #[test]

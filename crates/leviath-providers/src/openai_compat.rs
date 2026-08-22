@@ -655,6 +655,15 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize;
+    // Reported alongside `cached_tokens` by gateways that front a provider
+    // charging a write premium - OpenRouter does for Anthropic models. It was
+    // hardcoded to zero, so a run that paid the 1.25x write rate recorded none
+    // of it and its token accounting understated what it cost.
+    let cache_write_tokens = usage
+        .and_then(|u| u.get("prompt_tokens_details"))
+        .and_then(|d| d.get("cache_write_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
 
     Ok(InferenceResponse {
         content,
@@ -664,7 +673,7 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
             cached_tokens,
-            cache_write_tokens: 0,
+            cache_write_tokens,
         },
         finish_reason: parse_openai_finish_reason(finish_reason),
     })
@@ -793,6 +802,11 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                         .and_then(|d| d.get("cached_tokens"))
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as usize;
+                    let cache_write_tokens = usage
+                        .get("prompt_tokens_details")
+                        .and_then(|d| d.get("cache_write_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
                     return Some(Some(Ok(StreamChunk {
                         delta: String::new(),
                         tool_calls: Vec::new(),
@@ -801,7 +815,7 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                             completion_tokens,
                             total_tokens: prompt_tokens + completion_tokens,
                             cached_tokens,
-                            cache_write_tokens: 0,
+                            cache_write_tokens,
                         }),
                         finish_reason: None,
                     })));
@@ -861,12 +875,17 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                     .and_then(|d| d.get("cached_tokens"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as usize;
+                let written = usage
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cache_write_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
                 TokenUsage {
                     prompt_tokens: pt,
                     completion_tokens: ct,
                     total_tokens: pt + ct,
                     cached_tokens: cached,
-                    cache_write_tokens: 0,
+                    cache_write_tokens: written,
                 }
             });
 
@@ -1528,12 +1547,17 @@ mod tests {
                 "prompt_tokens": 100,
                 "completion_tokens": 10,
                 "prompt_tokens_details": {
-                    "cached_tokens": 80
+                    "cached_tokens": 80,
+                    // Reported by gateways fronting a provider that charges a
+                    // write premium. It used to be dropped, so a run paying the
+                    // 1.25x rate recorded none of it.
+                    "cache_write_tokens": 15
                 }
             }
         });
         let resp = parse_openai_response(&body).unwrap();
         assert_eq!(resp.tokens_used.cached_tokens, 80);
+        assert_eq!(resp.tokens_used.cache_write_tokens, 15);
     }
 
     #[test]
@@ -1652,7 +1676,7 @@ mod tests {
                 "usage": {
                     "prompt_tokens": 50,
                     "completion_tokens": 25,
-                    "prompt_tokens_details": {"cached_tokens": 10}
+                    "prompt_tokens_details": {"cached_tokens": 10, "cache_write_tokens": 4}
                 }
             })
         );
@@ -1662,6 +1686,7 @@ mod tests {
         assert_eq!(tokens.prompt_tokens, 50);
         assert_eq!(tokens.completion_tokens, 25);
         assert_eq!(tokens.cached_tokens, 10);
+        assert_eq!(tokens.cache_write_tokens, 4);
     }
 
     #[test]
@@ -1687,7 +1712,7 @@ mod tests {
                 "usage": {
                     "prompt_tokens": 100,
                     "completion_tokens": 50,
-                    "prompt_tokens_details": {"cached_tokens": 30}
+                    "prompt_tokens_details": {"cached_tokens": 30, "cache_write_tokens": 7}
                 }
             })
         );
@@ -1696,6 +1721,7 @@ mod tests {
         let tokens = chunk.tokens.unwrap();
         assert_eq!(tokens.prompt_tokens, 100);
         assert_eq!(tokens.cached_tokens, 30);
+        assert_eq!(tokens.cache_write_tokens, 7);
     }
 
     #[test]
