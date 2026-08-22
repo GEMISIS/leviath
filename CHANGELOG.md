@@ -22,9 +22,11 @@ same list.
   accepting needs no memory, since the server lands in your config and the
   blueprint on disk. A blueprint's refusal is recorded against the version that
   was offered, so a newer one is a fresh offer rather than something an old "no
-  thanks" hides. The dashboard joins it with two more: the sort order `s`
-  cycles, and the agent the new-run screen opens on, which is whichever you last
-  launched.
+  thanks" hides. The dashboard joins it with three more: the sort order `s`
+  cycles, the agent the new-run screen opens on (whichever you last launched),
+  and how each run's Context view was left folded - per run, since folding
+  `conversation` on one says nothing about another, and dropped when that run is
+  deleted or put back to its defaults.
 - Changed: nothing transient or consequential is remembered, deliberately. A
   filter, a search and the run marks are gone when you come back, because
   reopening with yesterday's filter silently applied is a bug rather than a
