@@ -320,6 +320,14 @@ impl Dashboard {
             self.handle_file_ref_key(key);
             return;
         }
+        // The task box's own popup outranks the screen's keys: while it is up,
+        // Enter means "insert the link", not "start the run".
+        if self.new_run_task.is_modal() {
+            self.new_run_focus = NewRunPane::Task;
+            let outcome = self.new_run_task.handle_key(&key);
+            self.remember_md_mode(outcome);
+            return;
+        }
         // Ahead of both panes: these belong to the screen, not to whichever
         // half of it currently has the cursor. F1 rather than `?`, which is a
         // question mark in both a filter box and a task.
@@ -1128,6 +1136,34 @@ mod tests {
         assert!(!dash.new_run_yolo);
         dash.handle_new_run_key(ctrl(KeyCode::Char('y')));
         assert_eq!(dash.new_run_task.text(), "**ship it**");
+    }
+
+    /// While the task box has a popup up, the screen's own keys are the
+    /// popup's: Enter finishes the link rather than starting the run.
+    #[test]
+    fn the_task_boxs_popup_outranks_the_screens_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents/alpha"), "alpha", "first");
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+        dash.new_run_filter = "alpha".to_string();
+        dash.new_run_focus = NewRunPane::Task;
+
+        dash.handle_new_run_key(ctrl(KeyCode::Char('k')));
+        assert!(dash.new_run_task.is_modal());
+
+        for c in "docs".chars() {
+            dash.handle_new_run_key(key(KeyCode::Char(c)));
+        }
+        dash.handle_new_run_key(key(KeyCode::Enter));
+        assert!(dash.new_run_screen, "Enter did not start the run");
+        for c in "u".chars() {
+            dash.handle_new_run_key(key(KeyCode::Char(c)));
+        }
+        dash.handle_new_run_key(key(KeyCode::Enter));
+        assert!(!dash.new_run_task.is_modal());
+        assert_eq!(dash.new_run_task.text(), "[docs](u)");
+        assert!(dash.new_run_screen, "still on the screen");
     }
 
     // ─── submitting ───────────────────────────────────────────────────────

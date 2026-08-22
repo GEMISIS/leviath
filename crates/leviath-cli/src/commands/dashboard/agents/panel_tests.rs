@@ -1103,8 +1103,21 @@ fn a_prompt_boxs_toolbar_formats_the_box_that_was_clicked() {
     let screen = text(&mut dash);
     assert!(screen.contains("bold"), "the border names it: {screen}");
 
-    // Away from either toolbar, nothing formats.
-    assert!(!dash.prompts_toolbar_click(x, y + 3));
+    // Away from either toolbar, nothing formats: a press in the text moves
+    // the caret there instead.
+    let before = match &dash.agents().editor.as_ref().unwrap().overlay {
+        Some(Overlay::Prompts(p)) => p.system.text(),
+        _ => unreachable!(),
+    };
+    dash.prompts_toolbar_click(x, y + 3);
+    let after = match &dash.agents().editor.as_ref().unwrap().overlay {
+        Some(Overlay::Prompts(p)) => p.system.text(),
+        _ => unreachable!(),
+    };
+    assert_eq!(before, after, "a press in the text formatted something");
+
+    // The overlay's title row belongs to neither box.
+    assert!(!dash.prompts_toolbar_click(0, 0));
 
     // Nor does it with the overlay closed, with the editor closed, or with no
     // agents screen at all: the overlay's boxes are the only thing it owns.
@@ -1167,6 +1180,31 @@ fn formatting_chords_reach_the_focused_prompt_box() {
         &dash.agents().editor.as_ref().unwrap().overlay,
         Some(Overlay::Prompts(p)) if p.transition.text() == "**loud`code`**"
     ));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A prompt box's popup outranks the overlay's keys: Esc closes the popup,
+/// not the whole overlay, and the prompts are not applied behind it.
+#[test]
+fn a_prompt_boxs_popup_outranks_the_overlays_keys() {
+    let (mut dash, root) = dashboard("prompts_popup");
+    open_stage(&mut dash, "own", "work", StageTab::Behaviour);
+    goto(&mut dash, FieldId::EditPrompts);
+    dash.handle_key(key(KeyCode::Enter));
+
+    dash.handle_key(ctrl('k'));
+    assert!(matches!(
+        &dash.agents().editor.as_ref().unwrap().overlay,
+        Some(Overlay::Prompts(p)) if p.system.is_modal()
+    ));
+    dash.handle_key(key(KeyCode::Esc));
+    assert!(
+        matches!(
+            &dash.agents().editor.as_ref().unwrap().overlay,
+            Some(Overlay::Prompts(p)) if !p.system.is_modal()
+        ),
+        "Esc closed the popup and left the overlay open"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

@@ -398,7 +398,7 @@ prompts in the agent editor. All four are the same editor. They wrap, and each
 one draws a toolbar along its top:
 
 ```
- Markdown  Preview │ B  i  S  U │ <>  ```  [] │ H  •  1.  >
+ Edit  Preview │ B  i  S  U │ <>  ```  [] │ ▦  ◇ │ H  •  1.  >
 ```
 
 Each button's face is drawn in the style it applies, so the bold button is
@@ -408,16 +408,19 @@ are in is the filled one.
 
 #### The two views
 
-`Markdown` is what you are writing. `Preview` is how it will read, rendered by
-the same code that draws an agent's output in the run view, so the two cannot
-disagree. `Ctrl-P` switches, and so does clicking either half of the switch.
+`Edit` is the markdown you are writing. `Preview` is how it will read,
+rendered by the same code that draws an agent's output in the run view, so the
+two cannot disagree. `Ctrl-P` switches, and so does clicking either half of the
+switch.
 
 Which view you prefer is remembered in `ui-state.json` and every box opens in
 it, including the next time you start the dashboard.
 
-In `Preview` the arrows and `PgUp`/`PgDn` scroll the rendering. Any other key
-drops back to `Markdown` and then does what you pressed it for, so a keystroke
-never appears to do nothing.
+**The preview is not read-only.** Typing goes into the document underneath and
+the rendering re-runs as you type, so markup resolves the moment it is well
+formed. Because a rendered document has nowhere to put a caret, the strip along
+the bottom of the box carries the line you are on, as markdown, and the preview
+follows it as you move.
 
 #### The buttons
 
@@ -439,12 +442,39 @@ quote keys toggle, and act on every line a selection touches.
 | `•` | `Ctrl-L` | toggles `- ` on the line |
 | `1.` | `Ctrl-O` | toggles `1. ` on the line |
 | `>` | `Ctrl-.` | toggles `> ` on the line |
+| `▦` | `Ctrl-T` | a table, after asking how many columns and rows |
+| `◇` | `Ctrl-G` | a ```mermaid``` flowchart to fill in |
 
 Markdown has no underline of its own, so `U` writes the HTML tag every
 renderer takes for one. The dashboard renders `<u>` too, in a preview and in an
 agent's output alike.
 
-`Ctrl-Z` undoes and `Ctrl-Shift-Z` (or `Ctrl-R`) redoes.
+`Ctrl-Z` undoes and `Ctrl-Shift-Z` (or `Ctrl-R`) redoes. Clicking in the text
+puts the caret where you clicked.
+
+#### Links, tables and diagrams
+
+`Ctrl-K` opens a popup with two fields, `Text` and `URL`. Selected text becomes
+the caption, so only the URL is left to type. `Tab` moves between the fields,
+`Enter` on the second one inserts, `Esc` cancels. A popup rather than
+punctuation to type around, and it is the only thing that can work in
+`Preview`, where there is no caret to park inside `[]()`.
+
+`Ctrl-T` asks how many columns and rows, then writes the grid. `Ctrl-G` writes
+a small `flowchart TD` to edit rather than an empty fence, because mermaid's
+syntax is the part people look up.
+
+Both render in `Preview`, and in an agent's output:
+
+* A **table** is drawn as a framed grid. Columns are sized to their content and
+  squeezed to fit the pane, widest first, with `…` where a cell was cut.
+* A **```mermaid``` flowchart** is drawn as a diagram: boxes laid out in layers,
+  arrows between them, and the edge labels beside the arrow heads. `flowchart`
+  and `graph` are supported, with the `[]`, `()`, `{}` and `(())` shapes and
+  the `-->`, `---`, `-.->` and `==>` connectors. An edge that runs backwards or
+  skips a layer is listed under the diagram rather than drawn through the boxes
+  in between. Any other kind of mermaid diagram (a sequence diagram, say) shows
+  its source, because a wrong picture is worse than an honest listing.
 
 On macOS these read as `⌘B`, `⌘I` and so on in the hint bar and the help
 overlay, and **both** `⌘` and `Ctrl` work. That is deliberate: Terminal.app and
@@ -461,7 +491,7 @@ Every box takes the same chords, including the agent editor's prompt overlay.
 `Ctrl-E` there used to mean "open this prompt in `$EDITOR`"; that moved to
 `F2` so the formatting chord means one thing everywhere.
 
-The whole toolbar needs 60 columns. A box narrower than that drops buttons off
+The whole toolbar needs 63 columns. A box narrower than that drops buttons off
 the right a group at a time, keeping the view switch; one too short to spare a
 line drops the row entirely. The chords and the text are never what gets cut.
 
