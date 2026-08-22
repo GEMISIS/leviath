@@ -1600,7 +1600,8 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "The run's status, in the same words a run object uses: starting, running, waiting_input, paused, complete, complete_interactive, error, cancelled. A server that does not announce `events.run_status` sends the Display spelling here instead (`WaitingInput`)."
           },
           "output": {
             "type": "string",

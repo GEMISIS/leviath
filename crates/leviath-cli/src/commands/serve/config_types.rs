@@ -104,6 +104,24 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // something unrelated makes it re-read. Announced so a console can drop
     // that poll where the daemon has it and keep it where it does not.
     "events.title",
+    // One status vocabulary across the whole API. `agent_status` and
+    // `agent_completed` carry the same word a run carries - `running`,
+    // `waiting_input` - instead of the engine's own `idle`/`active`/`waiting`,
+    // and the three routes that rendered a status through `Display`
+    // (`GET /api/agents/{id}/result` and the two tree routes) now spell it the
+    // way every other route does.
+    //
+    // Breaking for a client matching on the old words, which is why it is
+    // announced rather than left to be discovered: a console can read this and
+    // know which spelling it is being sent instead of sniffing the strings.
+    "events.run_status",
+    // Region kinds in a context snapshot are spelled the way the blueprint
+    // spells them - `sliding_window`, `compact_history` - rather than the
+    // shorter `sliding`/`history` that only ever existed in a snapshot.
+    // Separate from the status capability because the old words are still on
+    // disk in older snapshots: this says what a *new* one says, not what every
+    // file a client reads back will say.
+    "context.region_kinds",
     "blueprints.envelope",
     "blueprints.query",
     "blueprints.manifest",

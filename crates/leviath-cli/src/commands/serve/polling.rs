@@ -140,11 +140,35 @@ fn handle_event(state: &AppState, client: &reqwest::Client, event: WorldEvent) {
             client,
             &state.current_config().webhook,
             run_id,
-            status,
+            &wire_status(status),
             final_output.as_ref(),
         );
     }
     let _ = state.event_tx.send(to_server_event(event));
+}
+
+/// One status, in the vocabulary every route on this server speaks.
+///
+/// The engine has its own words for where a run stands - `idle` and `active`
+/// for a run that is going, `waiting` for one parked - and they arrive here on
+/// every [`WorldEvent`]. They used to go straight out on the socket, so
+/// `agent_status.status` and `GET /api/runs/{id}` described the same run in
+/// different words, and every client had to carry its own copy of the mapping
+/// between them to reconcile the two. One console's copy quietly normalized the
+/// engine's three words to nothing, which meant a status frame could never move
+/// a run: it heard a completion and a pause and nothing else, for months,
+/// because a 1.5s re-read of the run kept papering over it.
+///
+/// So the translation happens once, here, on the way out. The engine keeps its
+/// vocabulary inside the engine; the API has one.
+///
+/// A word this build does not know goes out untranslated. That means the daemon
+/// is newer than this gateway, and passing its word through is strictly better
+/// than dropping the frame or inventing a state for it.
+fn wire_status(label: &str) -> String {
+    leviath_runtime::persistence::run_status_for_label(label)
+        .map(|status| status.wire().to_string())
+        .unwrap_or_else(|| label.to_string())
 }
 
 /// Map a [`WorldEvent`] to the [`ServerEvent`] WebSocket clients consume.
@@ -178,7 +202,7 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
         } => ServerEvent::AgentStatus {
             agent_id,
             run_id,
-            status,
+            status: wire_status(&status),
             stage,
             iteration,
             tool_calls,
@@ -237,8 +261,8 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             final_output,
         } => ServerEvent::AgentCompleted {
             agent_id,
+            status: wire_status(&status),
             run_id: run_id.clone(),
-            status,
             // Named `result` since before there was one; it carries the run's
             // *error*. The answer is `final_output`, beside it.
             result: runstate::read_meta(&run_id).ok().and_then(|m| m.error),
@@ -688,6 +712,69 @@ mod tests {
         // An untitled run says nothing rather than sending a null a client
         // would have to tell apart from a title it cleared.
         assert!(status(None).get("title").is_none());
+    }
+
+    /// The socket and the run have to say the same word for the same state.
+    ///
+    /// The engine's `idle`, `active` and `waiting` used to go out verbatim, so
+    /// a client watching the socket saw three words no REST route ever sends
+    /// and had to carry its own copy of this mapping to reconcile them. One
+    /// console's copy normalized them to nothing, which meant a status frame
+    /// could never move a run - it heard completions and pauses and nothing
+    /// else - and that went unnoticed because a periodic re-read of the run
+    /// kept supplying the right answer.
+    #[test]
+    fn a_status_frame_speaks_the_run_status_vocabulary() {
+        let word = |status: &str| {
+            serde_json::to_value(to_server_event(WorldEvent::Status {
+                run_id: "run-1".into(),
+                agent_id: "a".into(),
+                status: status.into(),
+                stage: "implement".into(),
+                iteration: 1,
+                tool_calls: 0,
+                accepts_messages: true,
+                wait_reason: None,
+                title: None,
+            }))
+            .unwrap()["status"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        // The three that differed, and the two spellings the engine uses for
+        // one run that is simply going.
+        assert_eq!(word("idle"), "running");
+        assert_eq!(word("active"), "running");
+        assert_eq!(word("waiting"), "waiting_input");
+        // The ones that already agreed still agree.
+        assert_eq!(word("paused"), "paused");
+        assert_eq!(word("complete"), "complete");
+        assert_eq!(word("error"), "error");
+        assert_eq!(word("cancelled"), "cancelled");
+
+        // A word this build does not know belongs to a newer daemon on the
+        // other end of the socket. It goes out as it arrived: a client can
+        // still show it, where a dropped frame or an invented status leaves it
+        // with nothing or with a lie.
+        assert_eq!(word("hibernating"), "hibernating");
+    }
+
+    /// The terminal frame goes through the same translation. The three words
+    /// happen to be identical in both vocabularies, so nothing on the wire
+    /// changes here - the point is that the rule is applied once for every
+    /// status the server emits rather than remembered per call site.
+    #[test]
+    fn the_completion_frame_speaks_it_too() {
+        let json = serde_json::to_value(to_server_event(WorldEvent::Completed {
+            run_id: "run-1".into(),
+            agent_id: "a".into(),
+            status: "complete".into(),
+            final_output: None,
+        }))
+        .unwrap();
+        assert_eq!(json["status"], "complete");
     }
 
     /// The fine-grained events used to arrive wrapped as `{"type":"world",

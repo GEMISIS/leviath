@@ -995,9 +995,9 @@ system_prompt = "Plan the work"
                 },
                 {
                     "name": "chat",
-                    // The same spelling a context snapshot uses. Two spellings
-                    // of one kind is a trap for a console reading both.
-                    "kind": "sliding",
+                    // The blueprint's own word, and the one a context snapshot
+                    // writes: a console reading both sees one kind, not two.
+                    "kind": "sliding_window",
                     "describe_in_prompt": false,
                     "max_tokens": 900,
                 },

@@ -37,6 +37,31 @@ pub enum RunStatus {
     Cancelled,
 }
 
+impl RunStatus {
+    /// The word this status goes on the wire as: `snake_case`, the same
+    /// spelling serde writes into `meta.json` and into every JSON body that
+    /// carries a whole run.
+    ///
+    /// Here rather than left to each caller because a status reaches a client
+    /// three ways - serialized inside a run, rendered into a `status` string by
+    /// a route that builds its own response shape, and forwarded off the
+    /// engine's event stream - and those used to be three different spellings
+    /// of the same state. [`Display`](std::fmt::Display) is PascalCase and is
+    /// for a person reading a terminal; this is for a client matching on it.
+    pub fn wire(&self) -> &'static str {
+        match self {
+            RunStatus::Starting => "starting",
+            RunStatus::Running => "running",
+            RunStatus::WaitingInput => "waiting_input",
+            RunStatus::Complete => "complete",
+            RunStatus::CompleteInteractive => "complete_interactive",
+            RunStatus::Paused => "paused",
+            RunStatus::Error => "error",
+            RunStatus::Cancelled => "cancelled",
+        }
+    }
+}
+
 impl std::fmt::Display for RunStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -715,7 +740,13 @@ pub struct RegionEntrySnapshot {
 pub struct RegionSnapshot {
     /// The region's name, matching its key under `[context.regions]`.
     pub name: String,
-    /// Stringified kind: "pinned", "temporary", "clearable", "sliding", "compacting", "history"
+    /// Stringified kind, spelled the way the blueprint spells it: `pinned`,
+    /// `temporary`, `clearable`, `sliding_window`, `compacting`,
+    /// `compact_history`, `hashmap`, `checklist`, `custom`.
+    ///
+    /// A snapshot written by an older build says `sliding` and `history` for
+    /// those two, and those files stay on disk, so a reader that renders this
+    /// accepts both spellings.
     pub kind: String,
     /// Tokens the region held when the snapshot was taken.
     pub current_tokens: usize,
@@ -896,6 +927,29 @@ mod tests {
             "/work".to_string(),
             3,
         )
+    }
+
+    /// `wire()` has to say exactly what serde says, because the two spellings
+    /// reach the same client from different routes - one from a whole run
+    /// serialized as JSON, the other from a route that builds its own `status`
+    /// string. Derived from serde here rather than compared to a second hand
+    /// written list, so a renamed variant fails this instead of shipping two
+    /// words for one state.
+    #[test]
+    fn the_wire_word_is_the_word_serde_writes() {
+        for status in [
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::WaitingInput,
+            RunStatus::Complete,
+            RunStatus::CompleteInteractive,
+            RunStatus::Paused,
+            RunStatus::Error,
+            RunStatus::Cancelled,
+        ] {
+            let serde_word = serde_json::to_value(&status).unwrap();
+            assert_eq!(serde_word, serde_json::json!(status.wire()));
+        }
     }
 
     /// The webhook signing secret must not survive into anything served over

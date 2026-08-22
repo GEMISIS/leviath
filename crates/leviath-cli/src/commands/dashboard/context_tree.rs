@@ -103,10 +103,13 @@ pub(super) fn flatten(
         } else {
             C_DIM
         };
+        // Two spellings each for the sliding window and the compacted
+        // history: the blueprint's, which is what a snapshot writes now, and
+        // the short one older snapshots on this disk still carry.
         let kind_color = match region.kind.as_str() {
             "pinned" => C_ACCENT,
-            "sliding" => C_SUCCESS,
-            "compacting" | "history" => C_WARN,
+            "sliding_window" | "sliding" => C_SUCCESS,
+            "compacting" | "compact_history" | "history" => C_WARN,
             "temporary" | "clearable" => C_MUTED,
             "custom" => C_SCRIPT,
             _ => C_DIM,
@@ -125,7 +128,10 @@ pub(super) fn flatten(
             ),
             Span::styled(format!("{:<16}", region.name), name_style),
             Span::styled(
-                format!("{:<12}", region.kind),
+                // 16, because `compact_history` is fifteen characters and a
+                // kind wider than its column pushes that row's bar out of line
+                // with every other row.
+                format!("{:<16}", region.kind),
                 Style::default().fg(kind_color),
             ),
             Span::styled(bar, Style::default().fg(bar_color)),
@@ -282,6 +288,35 @@ mod tests {
                     description: None,
                 },
             ],
+        }
+    }
+
+    /// Both spellings of a kind get the same colour and the same cell width.
+    ///
+    /// A `context.json` written by an older daemon says `sliding` where one
+    /// written today says `sliding_window`, and nothing rewrites those files,
+    /// so both are on disk and both get drawn. The width is the half that is
+    /// easy to miss: the kind sits in a fixed column with the token bar after
+    /// it, and a word too long for the column pushes that row's bar out of
+    /// line with every other row.
+    #[test]
+    fn a_region_kind_keeps_its_colour_and_its_column() {
+        let cell = |kind: &str| {
+            let mut s = snap();
+            s.regions[1].kind = kind.to_string();
+            let span = flatten(&s, &ContextTreeState::default(), 0, false, 80)
+                .lines
+                .into_iter()
+                .flat_map(|line| line.spans)
+                .find(|span| span.content.trim() == kind)
+                .expect("the kind cell");
+            (span.style, span.content.chars().count())
+        };
+        for (old, new) in [
+            ("sliding", "sliding_window"),
+            ("history", "compact_history"),
+        ] {
+            assert_eq!(cell(old), cell(new));
         }
     }
 
