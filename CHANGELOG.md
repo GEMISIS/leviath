@@ -13,6 +13,17 @@ same list.
 
 ## Unreleased
 
+- Added: a looping stage is now told what its previous visit actually added,
+  measured, so it can judge whether another pass is worth running. A stage that
+  loops sees the same accumulated context on every entry and cannot tell a
+  productive pass from a barren one; the counters that existed
+  (`max_revisits`, the `stuck` thresholds) end a stage on how many passes have
+  run rather than on whether the last one produced anything, cutting off the
+  useful pass and the wasted one alike. Progress is growth in the regions a
+  blueprint already marks `volatility = "grows"`, so nothing needs new
+  configuration. The note goes to a `progress_report` region when one is
+  declared, else `conversation`.
+
 - Added: catalog entries for `x-ai/grok-4.6` and `meta/muse-spark-1.2`. An
   uncatalogued model inherits an 8192 max-output ceiling, so a stage asked to
   rewrite a whole report truncated at 8192 on every attempt and never finished
