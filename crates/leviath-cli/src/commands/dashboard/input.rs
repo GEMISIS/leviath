@@ -307,6 +307,13 @@ impl Dashboard {
             .map(|r| r.options.len())
             .unwrap_or(0);
 
+        // The response box's own popup outranks this screen's keys, so Enter
+        // finishes the link rather than sending the answer.
+        if self.input_textarea.is_modal() {
+            let outcome = self.input_textarea.handle_key(&key);
+            self.remember_md_mode(outcome);
+            return;
+        }
         match &kind {
             Some(InteractionKind::FreeText) | Some(InteractionKind::EditText) | None => {
                 match key_code {
@@ -3046,6 +3053,39 @@ mod tests {
             ));
         }
         assert_eq!(dash.input_textarea.text(), "**urgent**");
+    }
+
+    /// The response box's popup outranks the detail view's keys, so Enter
+    /// finishes the link rather than sending the answer.
+    #[test]
+    fn the_response_boxs_popup_outranks_the_detail_views_keys() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.pending_request = None;
+        agent.waiting_prompt = None;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        dash.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('k'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        assert!(dash.input_textarea.is_modal());
+        dash.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(dash.input_mode, "Enter did not send the answer");
+        dash.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(!dash.input_textarea.is_modal(), "Esc closed the popup");
+        assert!(dash.input_mode, "and not the box");
+        assert!(cmd_rx.try_recv().is_err(), "nothing was sent");
     }
 
     // ─── submit_input with no pending request (mid-run message) ───────────

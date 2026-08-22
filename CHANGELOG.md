@@ -79,14 +79,43 @@ same list.
   selection touches. Chords read `⌘B` on macOS and `ctrl-b` elsewhere, and both
   modifiers are accepted everywhere, because most terminals never forward
   Command to the program at all. `F1` / `?` lists the full set.
+- Added: markdown tables render as tables. `pulldown-cmark` hands a table over
+  as a stream of cell events and the renderer ignored every one of them, so a
+  table arrived as its cells run together on one line, with the columns, the
+  header and the shape of it all gone. It is a framed grid now, columns sized
+  to their content and squeezed to fit the pane widest-first, with `…` where a
+  cell was cut. In an agent's output as much as in the editor's preview.
+- Added: a ```mermaid``` flowchart is drawn as a diagram rather than printed as
+  its own source with an errand attached ("install mermaid-cli"). Boxes laid
+  out in layers, arrows routed between them, edge labels beside the arrow
+  heads, and the `[]`, `()`, `{}` and `(())` shapes drawn differently. An edge
+  that runs backwards or skips a layer is listed under the diagram rather than
+  drawn through the boxes in between, and a mermaid diagram that is not a
+  flowchart still shows its source, because a wrong picture is worse than an
+  honest listing.
+- Added: a table button (`ctrl-t`) that asks how many columns and rows, and a
+  diagram button (`ctrl-g`) that writes a small `flowchart TD` to edit rather
+  than an empty fence. Both are on the toolbar, drawn in the colours the
+  preview draws them in.
+- Added: links are made through a popup with a `Text` and a `URL` field
+  (`ctrl-k`), rather than by parking the cursor inside `[]()` and typing around
+  the punctuation. A selection becomes the caption, so only the URL is left.
+  It is also the only thing that can work in the preview, where there is no
+  caret to park.
+- Fixed: a rendered link showed its text and swallowed its destination, so
+  there was no way to see where a link went without reading the markdown. The
+  URL now follows the text, dim.
+- Added: clicking in a long-form box puts the caret where you clicked.
 - Added: a long-form box has two views. `Markdown` is what you are writing;
   `Preview` is how it will read, rendered by the same code that draws an agent's
   output in the run view, so the two cannot disagree. `ctrl-p` switches, and so
   does clicking either half of the switch on the toolbar. Which view you prefer
   is remembered in `ui-state.json`, so every box opens in it and so does the
-  next session. In `Preview` the arrows and page keys scroll the rendering and
-  any other key drops back to `Markdown` and then does what you pressed it for,
-  because a keystroke that appears to do nothing reads as a broken editor.
+  next session. The preview is not read-only: typing goes into the document
+  underneath and the rendering re-runs as you type, so markup resolves the
+  moment it is well formed. A rendered document has nowhere to put a caret, so
+  the strip along the bottom of the box carries the line you are on as
+  markdown, and the preview follows it as you move.
 - Added: the markdown renderer reads `<u>…</u>` and underlines it, in an
   agent's output as well as in the editor's preview. Markdown has no underline
   of its own, and this is the tag every other renderer takes for one. No other

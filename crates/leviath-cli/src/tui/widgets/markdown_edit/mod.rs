@@ -26,7 +26,7 @@
 //! Short fields (an agent's name, a numeric limit) stay on
 //! [`LineEdit`](super::line_edit::LineEdit). This one is for prose.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -34,308 +34,21 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
-use crate::tui::theme::{
-    C_ACCENT, C_BORDER, C_CHROME_BG, C_CHROME_HOVER, C_CODE_FG, C_DIM, C_MUTED, C_WHITE,
+use super::line_edit::EditOutcome;
+use super::popup::popup_frame;
+mod actions;
+mod prompts;
+
+use actions::{GROUPS, Slot, chord_char};
+pub(crate) use actions::{
+    MODE_CHORD, MdAction, MdMode, MdOutcome, action_for, chord_label, shortcut_help,
 };
+use prompts::{LinkField, LinkPrompt, Prompt, TablePrompt};
 
-/// Which view a long-form box is in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MdMode {
-    /// The markdown you are writing, with a cursor.
-    Source,
-    /// How it will read, rendered.
-    Preview,
-}
-
-impl MdMode {
-    /// The word on the button.
-    fn label(self) -> &'static str {
-        match self {
-            Self::Source => "Markdown",
-            Self::Preview => "Preview",
-        }
-    }
-
-    /// The other one, for the key that toggles.
-    fn flipped(self) -> Self {
-        match self {
-            Self::Source => Self::Preview,
-            Self::Preview => Self::Source,
-        }
-    }
-}
-
-/// One formatting command. A chord and a toolbar button both resolve to this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MdAction {
-    /// `**bold**`.
-    Bold,
-    /// `*italic*`.
-    Italic,
-    /// `~~struck through~~`.
-    Strike,
-    /// `<u>underlined</u>`: markdown has no underline, so this is the HTML tag
-    /// every renderer takes for it, [`crate::render`] included.
-    Underline,
-    /// `` `inline code` ``.
-    Code,
-    /// A fenced code block.
-    CodeBlock,
-    /// `[text](url)`.
-    Link,
-    /// Cycle the line between `#`, `##`, `###` and no heading.
-    Heading,
-    /// Toggle a `- ` bullet on the line.
-    Bullet,
-    /// Toggle a `1. ` number on the line.
-    Ordered,
-    /// Toggle a `> ` quote on the line.
-    Quote,
-}
-
-/// Every action, in the order the toolbar and the help table list them.
-pub(crate) const ACTIONS: [MdAction; 11] = [
-    MdAction::Bold,
-    MdAction::Italic,
-    MdAction::Strike,
-    MdAction::Underline,
-    MdAction::Code,
-    MdAction::CodeBlock,
-    MdAction::Link,
-    MdAction::Heading,
-    MdAction::Bullet,
-    MdAction::Ordered,
-    MdAction::Quote,
-];
-
-/// Each [`ACTIONS`] entry's chord, spelled the way this platform's users write
-/// it. Paired with `ACTIONS` by index, and a test holds the two the same
-/// length.
-///
-/// macOS says Command, everybody else says Control. Only the *label* differs:
-/// both modifiers are accepted everywhere (see [`action_for`]), because most
-/// terminal emulators never forward Command to the program at all, and an
-/// editor that listened only for the platform-correct one would be an editor
-/// with no working chords on macOS Terminal.
-///
-/// `cfg` rather than a runtime branch, so there is no arm a platform's own
-/// coverage run can never reach.
-#[cfg(target_os = "macos")]
-const CHORD_LABELS: [&str; 11] = [
-    "⌘B", "⌘I", "⌘D", "⌘U", "⌘E", "⌘⇧E", "⌘K", "⌘H", "⌘L", "⌘O", "⌘.",
-];
-/// Each [`ACTIONS`] entry's chord, spelled for this platform.
-#[cfg(not(target_os = "macos"))]
-const CHORD_LABELS: [&str; 11] = [
-    "ctrl-b",
-    "ctrl-i",
-    "ctrl-d",
-    "ctrl-u",
-    "ctrl-e",
-    "ctrl-shift-e",
-    "ctrl-k",
-    "ctrl-h",
-    "ctrl-l",
-    "ctrl-o",
-    "ctrl-.",
-];
-
-/// The chord that switches between the two views, spelled for this platform.
-#[cfg(target_os = "macos")]
-pub(crate) const MODE_CHORD: &str = "⌘P";
-/// The chord that switches between the two views.
-#[cfg(not(target_os = "macos"))]
-pub(crate) const MODE_CHORD: &str = "ctrl-p";
-
-/// The chord that runs `action`, as a person reads it here.
-pub(crate) fn chord_label(action: MdAction) -> &'static str {
-    // `unwrap_or` rather than a guard: every action is in `ACTIONS`, and a
-    // branch that cannot be taken is a branch no test can cover.
-    let i = ACTIONS.iter().position(|a| *a == action).unwrap_or(0);
-    CHORD_LABELS[i]
-}
-
-/// Every chord and what it does, ready to drop into a help overlay.
-pub(crate) fn shortcut_help() -> Vec<(&'static str, &'static str)> {
-    ACTIONS
-        .iter()
-        .zip(CHORD_LABELS)
-        .map(|(action, chord)| (chord, action.name()))
-        .collect()
-}
-
-impl MdAction {
-    /// The button's face. Short on purpose: eleven of these share one row.
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Bold => "B",
-            Self::Italic => "i",
-            Self::Strike => "S",
-            Self::Underline => "U",
-            Self::Code => "<>",
-            Self::CodeBlock => "```",
-            Self::Link => "[]",
-            Self::Heading => "H",
-            Self::Bullet => "•",
-            Self::Ordered => "1.",
-            Self::Quote => ">",
-        }
-    }
-
-    /// What the button does, in words. Shown on the bottom border while the
-    /// pointer is over it, and in the help overlay.
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Bold => "bold",
-            Self::Italic => "italic",
-            Self::Strike => "strikethrough",
-            Self::Underline => "underline",
-            Self::Code => "inline code",
-            Self::CodeBlock => "code block",
-            Self::Link => "link",
-            Self::Heading => "heading",
-            Self::Bullet => "bullet list",
-            Self::Ordered => "numbered list",
-            Self::Quote => "quote",
-        }
-    }
-
-    /// The style the button's own face wears, which is the style the action
-    /// applies. `B` is bold, `S` is struck through, `<>` is the colour code
-    /// renders in: the face *is* the label, so there is nothing to look up.
-    fn face(self) -> Style {
-        let plain = Style::default().fg(C_WHITE);
-        match self {
-            Self::Bold => plain.add_modifier(Modifier::BOLD),
-            Self::Italic => plain.add_modifier(Modifier::ITALIC),
-            Self::Strike => plain.add_modifier(Modifier::CROSSED_OUT),
-            Self::Underline => plain.add_modifier(Modifier::UNDERLINED),
-            Self::Code | Self::CodeBlock => Style::default().fg(C_CODE_FG),
-            Self::Link => Style::default()
-                .fg(C_ACCENT)
-                .add_modifier(Modifier::UNDERLINED),
-            Self::Heading => Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
-            Self::Bullet | Self::Ordered => plain,
-            Self::Quote => Style::default().fg(C_DIM),
-        }
-    }
-}
-
-/// One cell of the toolbar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Slot {
-    /// Half of the view switch. The one you are in is filled.
-    Mode(MdMode),
-    /// A formatting button.
-    Format(MdAction),
-}
-
-impl Slot {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Mode(mode) => mode.label(),
-            Self::Format(action) => action.label(),
-        }
-    }
-
-    /// Columns this cell occupies: the label plus a space either side.
-    fn width(self) -> u16 {
-        self.label().chars().count() as u16 + 2
-    }
-
-    /// What the bottom border says while the pointer is over it.
-    fn hint(self) -> String {
-        match self {
-            Self::Mode(MdMode::Source) => format!("the markdown you write · {MODE_CHORD}"),
-            Self::Mode(MdMode::Preview) => format!("how it will read · {MODE_CHORD}"),
-            Self::Format(action) => format!("{} · {}", action.name(), chord_label(action)),
-        }
-    }
-}
-
-/// The toolbar, in groups. A group is drawn whole or not at all, so a cramped
-/// box loses a coherent set of buttons from the right rather than half of one.
-/// The view switch leads, because it is the control that has to survive being
-/// narrow.
-const GROUPS: [&[Slot]; 4] = [
-    &[Slot::Mode(MdMode::Source), Slot::Mode(MdMode::Preview)],
-    &[
-        Slot::Format(MdAction::Bold),
-        Slot::Format(MdAction::Italic),
-        Slot::Format(MdAction::Strike),
-        Slot::Format(MdAction::Underline),
-    ],
-    &[
-        Slot::Format(MdAction::Code),
-        Slot::Format(MdAction::CodeBlock),
-        Slot::Format(MdAction::Link),
-    ],
-    &[
-        Slot::Format(MdAction::Heading),
-        Slot::Format(MdAction::Bullet),
-        Slot::Format(MdAction::Ordered),
-        Slot::Format(MdAction::Quote),
-    ],
-];
+use crate::tui::theme::{C_ACCENT, C_BORDER, C_CHROME_BG, C_CHROME_HOVER, C_DIM, C_MUTED, C_WHITE};
 
 /// Heading prefixes, in the order the heading key cycles them.
 const HEADINGS: [&str; 3] = ["# ", "## ", "### "];
-
-/// What a key or a click did, for a host that has to remember the view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[must_use]
-pub(crate) enum MdOutcome {
-    /// Nothing here answered to it.
-    Ignored,
-    /// The buffer, the cursor, or the preview's scroll moved.
-    Edited,
-    /// The view switched. The host stores this as the user's preference.
-    ModeChanged(MdMode),
-}
-
-/// Resolve a key event to a formatting action.
-///
-/// Both `Ctrl` and `Super` count as the chord modifier (see [`CHORD_LABELS`]
-/// for why both). Terminals that cannot report a chord simply never produce
-/// one, and the toolbar is there for exactly that case.
-///
-/// Note what is deliberately load-bearing here: in a terminal without the
-/// kitty keyboard protocol, `Ctrl-I` arrives as `Tab` and `Ctrl-H` as
-/// `Backspace`, so those two chords only reach us where the terminal can tell
-/// them apart. Nothing regresses when it cannot; Tab and Backspace keep their
-/// meaning and the buttons still work.
-pub(crate) fn action_for(key: &KeyEvent) -> Option<MdAction> {
-    let (c, shift) = chord_char(key)?;
-    match (c, shift) {
-        ('b', _) => Some(MdAction::Bold),
-        ('i', _) => Some(MdAction::Italic),
-        ('d', _) => Some(MdAction::Strike),
-        ('u', _) => Some(MdAction::Underline),
-        ('e', false) => Some(MdAction::Code),
-        ('e', true) => Some(MdAction::CodeBlock),
-        ('k', _) => Some(MdAction::Link),
-        ('h', _) => Some(MdAction::Heading),
-        ('l', _) => Some(MdAction::Bullet),
-        ('o', _) => Some(MdAction::Ordered),
-        ('.', _) => Some(MdAction::Quote),
-        _ => None,
-    }
-}
-
-/// The character of a chord and whether Shift was on it, or `None` when the
-/// key is not a chord at all.
-fn chord_char(key: &KeyEvent) -> Option<(char, bool)> {
-    let mods = key.modifiers;
-    if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::SUPER) {
-        return None;
-    }
-    let KeyCode::Char(c) = key.code else {
-        return None;
-    };
-    // A terminal may report Shift as the flag, as an uppercased char, or both.
-    let shift = mods.contains(KeyModifiers::SHIFT) || c.is_uppercase();
-    Some((c.to_ascii_lowercase(), shift))
-}
 
 /// How a [`MarkdownEdit`] is framed this frame.
 pub(crate) struct MdEditView {
@@ -383,6 +96,18 @@ pub(crate) struct MarkdownEdit {
     slots: Vec<(Rect, Slot)>,
     /// The cell the pointer is over, if any.
     hovered: Option<Slot>,
+    /// Where the text was drawn last frame, so a click in it can be turned
+    /// into a cursor position.
+    body: Option<Rect>,
+    /// Which screen line of the wrapped document sat at the top of `body`.
+    ///
+    /// The textarea scrolls itself to keep the caret visible and does not say
+    /// where it ended up, so this is read back off the drawn frame: the caret
+    /// is the one cell wearing the cursor style, and its row plus the caret's
+    /// own screen row give the offset.
+    top_line: Option<usize>,
+    /// The link popup, while it is up.
+    prompt: Option<Prompt>,
 }
 
 impl Default for MarkdownEdit {
@@ -408,6 +133,9 @@ impl MarkdownEdit {
             preview_scroll: 0,
             slots: Vec::new(),
             hovered: None,
+            body: None,
+            top_line: None,
+            prompt: None,
         }
     }
 
@@ -449,26 +177,30 @@ impl MarkdownEdit {
         &mut self.area
     }
 
+    /// Whether a popup of this editor's own has the keys.
+    ///
+    /// Hosts match their own keys (Enter to submit, Esc to close) before
+    /// delegating, so they have to ask: while the link popup is up, `Enter`
+    /// means "insert the link", not "start the run".
+    pub(crate) fn is_modal(&self) -> bool {
+        self.prompt.is_some()
+    }
+
     /// Feed a key to the editor.
     ///
-    /// Callers take their own keys (Enter to submit, Esc to close) *before*
-    /// calling this, exactly as they did with the bare textarea.
+    /// Callers take their own keys *before* calling this, except while
+    /// [`Self::is_modal`] holds.
     ///
-    /// In `Preview` only the arrows and the page keys stay in the preview,
-    /// scrolling it. Anything else that would edit drops back to `Markdown`
-    /// first and then does what it was going to do, because a key that appears
-    /// to do nothing reads as a broken editor rather than as a mode.
+    /// `Preview` is a view of the text, not a lock on it: everything still
+    /// edits, and the rendering re-runs as you type, so markup resolves the
+    /// moment it is well formed. The strip under the preview shows the line
+    /// the cursor is on, in the markdown you are actually typing.
     pub(crate) fn handle_key(&mut self, key: &KeyEvent) -> MdOutcome {
+        if self.prompt.is_some() {
+            return self.prompt_key(key);
+        }
         if let Some(('p', _)) = chord_char(key) {
             return self.set_mode(self.mode.flipped());
-        }
-        if self.mode == MdMode::Preview {
-            if let Some(outcome) = self.scroll_preview(key) {
-                return outcome;
-            }
-            let changed = self.set_mode(MdMode::Source);
-            let _ = self.apply_key(key);
-            return changed;
         }
         self.apply_key(key)
     }
@@ -499,27 +231,83 @@ impl MarkdownEdit {
         }
     }
 
-    /// The keys that move the preview rather than leaving it.
-    fn scroll_preview(&mut self, key: &KeyEvent) -> Option<MdOutcome> {
-        let by: i16 = match key.code {
-            KeyCode::Up => -1,
-            KeyCode::Down => 1,
-            KeyCode::PageUp => -10,
-            KeyCode::PageDown => 10,
-            KeyCode::Home => i16::MIN,
-            KeyCode::End => i16::MAX,
-            _ => return None,
+    /// Keys while a popup is up.
+    ///
+    /// Tab and the arrows move between the fields, Esc abandons it, and Enter
+    /// is the confirmation - except on the first field, where it moves on
+    /// rather than finishing before the important half has been typed.
+    ///
+    /// The popup is taken out and put back rather than borrowed in place, so
+    /// there is one place that decides whether it survives the key.
+    fn prompt_key(&mut self, key: &KeyEvent) -> MdOutcome {
+        let mut prompt = self.prompt.take().expect("a popup, checked by the caller");
+        match key.code {
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Down | KeyCode::Up => {
+                match &mut prompt {
+                    Prompt::Link(link) => link.focus = link.focus.flipped(),
+                    Prompt::Table(table) => table.on_columns = !table.on_columns,
+                }
+                self.prompt = Some(prompt);
+                return MdOutcome::Edited;
+            }
+            // Abandoned: the popup was taken above, so dropping it is enough.
+            KeyCode::Esc => return MdOutcome::Edited,
+            _ => {}
+        }
+        let outcome = match &mut prompt {
+            Prompt::Link(link) => link.focused_mut().handle_key(key),
+            Prompt::Table(table) => table.focused_mut().handle_key(key),
         };
-        // The draw clamps to the document's last row; this only has to stay
-        // inside the type.
-        self.preview_scroll = self.preview_scroll.saturating_add_signed(by);
-        Some(MdOutcome::Edited)
+        match outcome {
+            EditOutcome::Commit => self.commit_prompt(prompt),
+            // Esc is taken above, so the only thing left is ordinary typing.
+            _ => {
+                self.prompt = Some(prompt);
+                MdOutcome::Edited
+            }
+        }
+    }
+
+    /// Enter on a popup: insert what it describes, or move on when there is
+    /// still a field below.
+    fn commit_prompt(&mut self, prompt: Prompt) -> MdOutcome {
+        match prompt {
+            Prompt::Link(link) if link.focus == LinkField::Text => {
+                self.prompt = Some(Prompt::Link(LinkPrompt {
+                    focus: LinkField::Url,
+                    ..link
+                }));
+            }
+            Prompt::Link(link) => self.insert_link(link.text.value(), link.url.value()),
+            Prompt::Table(table) if table.on_columns => {
+                self.prompt = Some(Prompt::Table(TablePrompt {
+                    on_columns: false,
+                    ..table
+                }));
+            }
+            Prompt::Table(table) => {
+                self.area.insert_str(table.markdown());
+            }
+        }
+        MdOutcome::Edited
+    }
+
+    /// Write the finished link at the cursor.
+    ///
+    /// An empty URL still writes `[text]()`, so the markdown is there to
+    /// finish rather than silently dropped; an empty text falls back to the
+    /// URL, which is what a bare link means.
+    fn insert_link(&mut self, text: &str, url: &str) {
+        let label = match text.is_empty() {
+            true => url,
+            false => text,
+        };
+        self.area.insert_str(format!("[{label}]({url})"));
     }
 
     /// Switch views, reporting it so the host can remember the choice.
     fn set_mode(&mut self, mode: MdMode) -> MdOutcome {
         self.mode = mode;
-        self.preview_scroll = 0;
         MdOutcome::ModeChanged(mode)
     }
 
@@ -538,7 +326,18 @@ impl MarkdownEdit {
             MdAction::Bullet => self.prefix_lines(|line| toggle_prefix(line, "- ")),
             MdAction::Ordered => self.prefix_lines(|line| toggle_prefix(line, "1. ")),
             MdAction::Quote => self.prefix_lines(|line| toggle_prefix(line, "> ")),
+            MdAction::Table => self.prompt = Some(Prompt::Table(TablePrompt::default())),
+            MdAction::Diagram => self.diagram(),
         }
+    }
+
+    /// A flowchart to fill in, rather than an empty fence: mermaid's own
+    /// syntax is the part people look up, so the skeleton is the help.
+    fn diagram(&mut self) {
+        self.area.insert_str(
+            "```mermaid\nflowchart TD\n    A[Start] --> B{Choice}\n    \
+             B -->|yes| C[Do it]\n    B -->|no| D[Stop]\n```",
+        );
     }
 
     /// Wrap the selection in `open`/`close`, or unwrap it when it is already
@@ -579,20 +378,19 @@ impl MarkdownEdit {
         }
     }
 
-    /// `[selection]()` with the cursor between the parentheses, ready for a
-    /// URL, or `[]()` with the cursor in the brackets when nothing is
-    /// selected.
+    /// Ask for the two halves of a link.
+    ///
+    /// A popup rather than `[]()` with the cursor parked inside it: the parts
+    /// of a link are a caption and a URL, and typing them by walking a cursor
+    /// over punctuation is the sort of thing an editor is supposed to spare
+    /// you. It is also the only thing that can work in `Preview`, where there
+    /// is no cursor to park.
+    ///
+    /// A selection becomes the caption, so "select the words, press the key"
+    /// does what it does everywhere else.
     fn link(&mut self) {
-        match self.take_selection() {
-            Some(text) => {
-                self.area.insert_str(format!("[{text}]()"));
-                self.move_back(1);
-            }
-            None => {
-                self.area.insert_str("[]()");
-                self.move_back(3);
-            }
-        }
+        let text = self.take_selection().unwrap_or_default();
+        self.prompt = Some(Prompt::Link(LinkPrompt::new(&text)));
     }
 
     /// Apply `rule` to the head of every line the selection touches, or to the
@@ -670,7 +468,7 @@ impl MarkdownEdit {
         };
 
         match self.mode {
-            MdMode::Preview => self.draw_preview(frame, body),
+            MdMode::Preview => self.draw_preview(frame, body, view.focused),
             MdMode::Source => {
                 self.area.set_style(Style::default().fg(C_WHITE));
                 self.area.set_cursor_line_style(Style::default());
@@ -679,8 +477,12 @@ impl MarkdownEdit {
                     false => Style::default(),
                 });
                 frame.render_widget(&self.area, body);
+                self.top_line = caret_offset(frame, body, &self.area);
             }
         }
+        self.body = Some(body);
+        // Last, and over everything: the popup is the thing with the keys.
+        self.draw_prompt(frame, area);
     }
 
     /// The bottom border: what the pointer is over, or which view this is.
@@ -693,7 +495,7 @@ impl MarkdownEdit {
             Some(slot) => slot.hint(),
             None => match self.mode {
                 MdMode::Source => format!("markdown · {MODE_CHORD} previews it"),
-                MdMode::Preview => format!("preview · {MODE_CHORD} edits it"),
+                MdMode::Preview => format!("preview · type to edit · {MODE_CHORD} for markdown"),
             },
         };
         Line::from(Span::styled(
@@ -703,19 +505,162 @@ impl MarkdownEdit {
     }
 
     /// The rendered view, through the same renderer the run view uses for an
-    /// agent's output. Scrolling is clamped to the document's last row,
-    /// counted in *display* rows, so the bottom is genuinely reachable.
-    fn draw_preview(&mut self, frame: &mut Frame, body: Rect) {
-        let text = crate::render::markdown_to_text(&self.text(), body.width);
-        let rows = wrapped_rows(&text.lines, body.width);
-        let max = rows.saturating_sub(body.height as usize);
-        self.preview_scroll = self.preview_scroll.min(max.min(u16::MAX as usize) as u16);
+    /// agent's output.
+    ///
+    /// The preview is not read-only. Typing goes into the buffer underneath
+    /// and this re-renders every frame, so markup resolves the moment it is
+    /// well formed - which is what makes it a view of the document rather than
+    /// a mode you have to leave. The strip along the bottom carries the line
+    /// the cursor is on, in the markdown you are typing, because a rendered
+    /// document has nowhere to put a caret.
+    fn draw_preview(&mut self, frame: &mut Frame, body: Rect, focused: bool) {
+        // A focused box spends its last row on the source strip. An unfocused
+        // one has no cursor worth showing, and keeps the row for the document.
+        let (doc, strip) = match focused && body.height >= 3 {
+            true => (
+                Rect {
+                    height: body.height - 1,
+                    ..body
+                },
+                Some(Rect {
+                    y: body.y + body.height - 1,
+                    height: 1,
+                    ..body
+                }),
+            ),
+            false => (body, None),
+        };
+
+        let text = crate::render::markdown_to_text(&self.text(), doc.width);
+        let rows = wrapped_rows(&text.lines, doc.width);
+        let height = doc.height as usize;
+        let max = rows.saturating_sub(height);
+        // Follow the caret rather than keeping a scroll of its own: the line
+        // you are editing is the line that has to be on screen, and one
+        // offset that answers to the cursor cannot disagree with itself.
+        let top = self
+            .caret_display_row(doc.width)
+            .saturating_sub(height)
+            .min(max);
+        self.preview_scroll = top.min(u16::MAX as usize) as u16;
         frame.render_widget(
             Paragraph::new(text)
                 .wrap(Wrap { trim: false })
                 .scroll((self.preview_scroll, 0)),
-            body,
+            doc,
         );
+        if let Some(strip) = strip {
+            self.draw_source_strip(frame, strip);
+        }
+    }
+
+    /// Which display row of the rendered document the caret's line ends on.
+    ///
+    /// Measured by rendering the document up to and including that line: the
+    /// renderer is block-structured, so a prefix of the source renders as a
+    /// prefix of the output, and this is exact wherever that holds. Where it
+    /// does not (mid-fence, say) it is off by the height of the unclosed
+    /// block, and the strip below still shows what you are typing.
+    fn caret_display_row(&self, width: u16) -> usize {
+        let row = self.area.cursor().0;
+        let prefix = self
+            .area
+            .lines()
+            .iter()
+            .take(row + 1)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        wrapped_rows(
+            &crate::render::markdown_to_text(&prefix, width).lines,
+            width,
+        )
+    }
+
+    /// The line under the cursor, as markdown, with the caret on it.
+    ///
+    /// Windowed on the caret so a long line keeps the part you are typing in
+    /// view, and split on chars because the buffer holds whatever was typed.
+    fn draw_source_strip(&self, frame: &mut Frame, strip: Rect) {
+        let (row, col) = {
+            let cursor = self.area.cursor();
+            (cursor.0, cursor.1)
+        };
+        let line = self.area.lines().get(row).cloned().unwrap_or_default();
+        let marker = Span::styled("▏", Style::default().fg(C_ACCENT));
+        let room = strip.width.saturating_sub(1) as usize;
+        // Keep the caret in the window: scroll only once it would fall off.
+        let from = (col + 1).saturating_sub(room);
+        let before: String = line.chars().skip(from).take(col - from).collect();
+        let at: String = line.chars().skip(col).take(1).collect();
+        let after: String = line.chars().skip(col + 1).collect();
+        let plain = Style::default().fg(C_MUTED).bg(C_CHROME_BG);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                marker,
+                Span::styled(before, plain),
+                Span::styled(
+                    match at.is_empty() {
+                        true => " ".to_string(),
+                        false => at,
+                    },
+                    Style::default().fg(Color::Black).bg(C_ACCENT),
+                ),
+                Span::styled(after, plain),
+            ]))
+            .style(Style::default().bg(C_CHROME_BG)),
+            strip,
+        );
+    }
+
+    /// The popup, drawn over the box that owns it.
+    fn draw_prompt(&self, frame: &mut Frame, area: Rect) {
+        let Some(prompt) = self.prompt.as_ref() else {
+            return;
+        };
+        let width = area.width.saturating_sub(4).clamp(12, 56);
+        let height = 6u16.min(area.height);
+        let popup = Rect {
+            x: area.x + (area.width - width) / 2,
+            y: area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        };
+        frame.render_widget(ratatui::widgets::Clear, popup);
+        let (title, fields) = match prompt {
+            Prompt::Link(link) => (
+                "Link",
+                vec![
+                    ("Text  ", &link.text, link.focus == LinkField::Text),
+                    ("URL   ", &link.url, link.focus == LinkField::Url),
+                ],
+            ),
+            Prompt::Table(table) => (
+                "Table",
+                vec![
+                    ("Columns  ", &table.columns, table.on_columns),
+                    ("Rows     ", &table.rows, !table.on_columns),
+                ],
+            ),
+        };
+        let inner = popup_frame(frame, popup, title, C_ACCENT);
+        let mut lines: Vec<Line<'static>> = fields
+            .into_iter()
+            .map(|(label, edit, focused)| {
+                let colour = match focused {
+                    true => C_ACCENT,
+                    false => C_DIM,
+                };
+                let mut spans = vec![Span::styled(label, Style::default().fg(colour))];
+                spans.extend(edit.display_spans(true).spans);
+                Line::from(spans)
+            })
+            .collect();
+        lines.push(Line::from(Span::styled(
+            "Tab switches · Enter inserts · Esc cancels",
+            Style::default().fg(C_MUTED),
+        )));
+        frame.render_widget(Paragraph::new(lines), inner);
     }
 
     /// The button row, and the registry that makes it clickable.
@@ -801,30 +746,99 @@ impl MarkdownEdit {
         was != self.hovered
     }
 
+    /// Put the caret where the pointer is, when the click landed in the text.
+    ///
+    /// Only in `Edit`, and only while the box is focused: the rendered view
+    /// has no invertible map back to a source position, and an unfocused box
+    /// has no caret drawn to measure the scroll from.
+    ///
+    /// The data position is found by asking the textarea where each candidate
+    /// would sit on screen - the row first, then the column within it - which
+    /// costs a walk of the lines rather than a second copy of its wrapping
+    /// rules. A copy is the thing that would quietly disagree.
+    fn place_caret(&mut self, column: u16, row: u16) -> bool {
+        let (Some(body), Some(top)) = (self.body, self.top_line) else {
+            return false;
+        };
+        if self.mode != MdMode::Source || !body.contains(Position::new(column, row)) {
+            return false;
+        }
+        let want_row = top + (row - body.y) as usize;
+        let want_col = (column - body.x) as usize;
+
+        let at = |area: &mut TextArea<'static>, r: usize, c: usize| {
+            area.move_cursor(CursorMove::Jump(
+                r.min(u16::MAX as usize) as u16,
+                c.min(u16::MAX as usize) as u16,
+            ));
+            let screen = area.screen_cursor();
+            (screen.row, screen.col)
+        };
+
+        // The last line whose first screen row is at or above the click.
+        let mut line = 0usize;
+        for r in 0..self.area.lines().len() {
+            if at(&mut self.area, r, 0).0 <= want_row {
+                line = r;
+            } else {
+                break;
+            }
+        }
+        // Then the last column of that line still at or before the click.
+        let len = self.area.lines()[line].chars().count();
+        let mut best = 0usize;
+        for c in 0..=len {
+            let (sr, sc) = at(&mut self.area, line, c);
+            if sr < want_row || (sr == want_row && sc <= want_col) {
+                best = c;
+            } else {
+                break;
+            }
+        }
+        self.area.cancel_selection();
+        at(&mut self.area, line, best);
+        true
+    }
+
     /// Act on a click at `(column, row)`. Coordinates are absolute, as
     /// crossterm reports them.
-    ///
-    /// A formatting button pressed while the preview is up switches back to
-    /// `Markdown` first, on the same reasoning as the keys: the press has to
-    /// do something you can see.
     pub(crate) fn click(&mut self, column: u16, row: u16) -> MdOutcome {
         match self.slot_at(column, row) {
             Some(Slot::Mode(mode)) => self.set_mode(mode),
             Some(Slot::Format(action)) => {
-                let left_preview = self.mode == MdMode::Preview;
-                if left_preview {
-                    self.mode = MdMode::Source;
-                    self.preview_scroll = 0;
-                }
+                // No mode to leave: the preview renders the buffer as it is,
+                // so formatting from there shows up where you are looking.
                 self.apply(action);
-                match left_preview {
-                    true => MdOutcome::ModeChanged(MdMode::Source),
-                    false => MdOutcome::Edited,
-                }
+                MdOutcome::Edited
             }
-            None => MdOutcome::Ignored,
+            None => match self.place_caret(column, row) {
+                true => MdOutcome::Edited,
+                false => MdOutcome::Ignored,
+            },
         }
     }
+}
+
+/// Which screen line of the wrapped document sits at the top of `body`.
+///
+/// Read off the frame that was just drawn: the caret is the one cell in the
+/// body wearing the cursor's background, and the textarea will say which
+/// screen row the caret is on, so the difference is the scroll offset.
+fn caret_offset(frame: &mut Frame, body: Rect, area: &TextArea<'static>) -> Option<usize> {
+    let want = area.cursor_style().bg?;
+    let buffer = frame.buffer_mut();
+    let caret_y = (body.y..body.y + body.height).find(|y| {
+        (body.x..body.x + body.width).any(|x| {
+            buffer
+                .cell((x, *y))
+                .is_some_and(|c| c.style().bg == Some(want))
+        })
+    })?;
+    Some(
+        area.screen_cursor()
+            .row
+            .saturating_sub((caret_y - body.y) as usize),
+    )
 }
 
 /// How many display rows `lines` take at `width`, which is what a scroll
@@ -871,7 +885,13 @@ fn toggle_prefix(line: &str, prefix: &'static str) -> (usize, &'static str) {
 }
 #[cfg(test)]
 mod tests {
+    use crossterm::event::KeyModifiers;
+
+    use super::actions::{ACTIONS, CHORD_LABELS};
+
+    use super::super::line_edit::LineEdit;
     use super::*;
+    use crate::tui::theme::C_CODE_FG;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -881,6 +901,10 @@ mod tests {
 
     fn plain(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty())
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
     }
 
     fn edit(text: &str) -> MarkdownEdit {
@@ -1056,23 +1080,86 @@ mod tests {
 
     // ── Links and fences ───────────────────────────────────────────────────
 
+    /// A selection becomes the caption, so only the URL is left to type, and
+    /// the popup opens on that field.
     #[test]
-    fn a_link_keeps_the_selection_as_its_text_and_waits_for_the_url() {
+    fn a_link_takes_the_selection_as_its_caption_and_asks_for_the_url() {
         let mut md = edit("docs");
         select_back(&mut md, 4);
         md.apply(MdAction::Link);
-        assert_eq!(md.text(), "[docs]()");
-        let _ = md.handle_key(&plain('x'));
-        assert_eq!(md.text(), "[docs](x)");
+        assert!(md.is_modal(), "the popup has the keys");
+        assert_eq!(md.text(), "", "the selection was lifted into the popup");
+
+        for c in "https://x".chars() {
+            let _ = md.handle_key(&plain(c));
+        }
+        let _ = md.handle_key(&press(KeyCode::Enter));
+        assert!(!md.is_modal());
+        assert_eq!(md.text(), "[docs](https://x)");
+    }
+
+    /// With nothing selected there are two things to type, and Enter on the
+    /// caption moves to the URL rather than inserting half a link.
+    #[test]
+    fn a_link_with_nothing_selected_asks_for_both_halves() {
+        let mut md = edit("");
+        md.apply(MdAction::Link);
+        assert!(md.is_modal());
+        for c in "docs".chars() {
+            let _ = md.handle_key(&plain(c));
+        }
+        let _ = md.handle_key(&press(KeyCode::Enter));
+        assert!(md.is_modal(), "Enter moved on to the URL");
+        assert_eq!(md.text(), "");
+        let _ = md.handle_key(&plain('u'));
+        let _ = md.handle_key(&press(KeyCode::Enter));
+        assert_eq!(md.text(), "[docs](u)");
     }
 
     #[test]
-    fn a_link_with_nothing_selected_waits_for_the_text_first() {
+    fn the_link_popup_switches_fields_and_can_be_abandoned() {
         let mut md = edit("");
         md.apply(MdAction::Link);
-        assert_eq!(md.text(), "[]()");
-        let _ = md.handle_key(&plain('a'));
-        assert_eq!(md.text(), "[a]()");
+        // Tab lands on the URL; typing there fills it, not the caption.
+        let _ = md.handle_key(&press(KeyCode::Tab));
+        let _ = md.handle_key(&plain('u'));
+        let _ = md.handle_key(&press(KeyCode::BackTab));
+        let _ = md.handle_key(&plain('t'));
+        let _ = md.handle_key(&press(KeyCode::Down));
+        let _ = md.handle_key(&press(KeyCode::Enter));
+        assert_eq!(md.text(), "[t](u)");
+
+        // Esc abandons it, leaving the buffer alone.
+        let mut md = edit("keep");
+        md.apply(MdAction::Link);
+        let _ = md.handle_key(&press(KeyCode::Esc));
+        assert!(!md.is_modal());
+        assert_eq!(md.text(), "keep");
+    }
+
+    /// A URL with no caption is a bare link: the URL reads as its own text.
+    #[test]
+    fn a_link_with_no_caption_uses_the_url_as_the_caption() {
+        let mut md = edit("");
+        md.apply(MdAction::Link);
+        let _ = md.handle_key(&press(KeyCode::Tab));
+        for c in "https://x".chars() {
+            let _ = md.handle_key(&plain(c));
+        }
+        let _ = md.handle_key(&press(KeyCode::Enter));
+        assert_eq!(md.text(), "[https://x](https://x)");
+    }
+
+    /// The popup is drawn over the box, with both fields on it.
+    #[test]
+    fn the_link_popup_shows_both_halves() {
+        let mut md = edit("");
+        md.apply(MdAction::Link);
+        let framed = draw(&mut md, 60, 12).join("\n");
+        assert!(framed.contains("Link"), "{framed}");
+        assert!(framed.contains("Text"), "{framed}");
+        assert!(framed.contains("URL"), "{framed}");
+        assert!(framed.contains("Esc cancels"), "{framed}");
     }
 
     #[test]
@@ -1174,18 +1261,18 @@ mod tests {
         }
     }
 
-    /// The whole bar needs 60 columns. Every box that draws one is wider than
-    /// that on a normal terminal, and this is the number to check against when
-    /// one of them turns out not to be.
+    /// The whole bar needs 63 columns, which is what the task pane has on a
+    /// 120-column terminal. This is the number to check against when a box
+    /// turns out to be dropping groups.
     #[test]
-    fn the_full_toolbar_fits_in_sixty_columns() {
+    fn the_full_toolbar_fits_in_sixty_three_columns() {
         let separators = GROUPS.len() as u16 - 1;
         let buttons: u16 = GROUPS
             .iter()
             .flat_map(|group| group.iter())
             .map(|slot| slot.width())
             .sum();
-        assert_eq!(buttons + separators, 60);
+        assert_eq!(buttons + separators, 63);
     }
 
     /// A cramped pane drops buttons off the end rather than drawing outside
@@ -1195,17 +1282,18 @@ mod tests {
     fn a_cramped_box_drops_buttons_and_then_the_whole_toolbar() {
         let mut narrow = edit("");
         let bar = draw(&mut narrow, 24, 6).remove(1);
-        assert!(bar.contains("Markdown"), "the view switch survives: {bar}");
+        assert!(bar.contains("Edit"), "the view switch survives: {bar}");
         assert!(!bar.contains("```"), "the later groups do not: {bar}");
 
         let mut short = edit("text");
         let first = draw(&mut short, 40, 3).remove(1);
         assert!(first.contains("text"), "{first}");
-        assert_eq!(
-            short.click(2, 1),
-            MdOutcome::Ignored,
-            "no toolbar means nothing to click"
-        );
+        // Row 1 is the text now, not a button row: a press there moves the
+        // caret and formats nothing.
+        assert_eq!(short.click(2, 1), MdOutcome::Edited);
+        assert_eq!(short.text(), "text");
+        // And the border is nobody's.
+        assert_eq!(short.click(0, 0), MdOutcome::Ignored);
     }
 
     #[test]
@@ -1235,12 +1323,10 @@ mod tests {
         assert_eq!(md.click(bold, 1), MdOutcome::Edited);
         assert_eq!(md.text(), "****");
 
-        assert_eq!(
-            md.click(bold, 4),
-            MdOutcome::Ignored,
-            "the text area is not a button"
-        );
         assert_eq!(md.click(69, 1), MdOutcome::Ignored, "past the last button");
+        // The text is not a button: a press there moves the caret and leaves
+        // the buffer as it was.
+        assert_eq!(md.click(bold, 4), MdOutcome::Edited);
         assert_eq!(md.text(), "****");
     }
 
@@ -1260,7 +1346,7 @@ mod tests {
         let toolbar: String = (0..40)
             .map(|x| buf.cell((x, 1)).map_or(" ", |c| c.symbol()).to_string())
             .collect();
-        assert!(toolbar.contains("Markdown"), "{toolbar}");
+        assert!(toolbar.contains("Edit"), "{toolbar}");
         // The filled chip on the toolbar row is the view you are in; below it,
         // an unfocused box paints no cursor.
         let body_has_cursor = (2..6).any(|y| {
@@ -1294,9 +1380,14 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
-        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
-        assert!(!text.contains("**loud**"), "still raw: {text}");
-        assert!(text.contains("loud"), "{text}");
+        // Rows 2..6 are the rendered document: the toolbar is above it and the
+        // source strip, which shows the markdown on purpose, is below.
+        let document: String = (2..6)
+            .flat_map(|y| (0..50).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).map_or(" ", |c| c.symbol()).to_string())
+            .collect();
+        assert!(!document.contains("**loud**"), "still raw: {document}");
+        assert!(document.contains("loud"), "{document}");
 
         // And the words carry the styles the markers asked for.
         let styled = |needle: char, modifier: Modifier| {
@@ -1331,50 +1422,97 @@ mod tests {
         assert_eq!(edit("x").in_mode(MdMode::Preview).mode(), MdMode::Preview);
     }
 
-    /// A key that would edit must not silently do nothing just because the
-    /// preview is up: it drops back to the markdown and then does it.
+    /// The preview is a view of the document, not a lock on it: typing goes
+    /// in, the box stays where it is, and the rendering resolves the markup as
+    /// soon as it is well formed.
     #[test]
-    fn typing_in_the_preview_returns_to_the_markdown_and_types() {
+    fn typing_in_the_preview_edits_it_and_the_rendering_keeps_up() {
         let mut md = edit("ab").in_mode(MdMode::Preview);
-        assert_eq!(
-            md.handle_key(&plain('c')),
-            MdOutcome::ModeChanged(MdMode::Source)
-        );
-        assert_eq!(md.mode(), MdMode::Source);
+        assert_eq!(md.handle_key(&plain('c')), MdOutcome::Edited);
+        assert_eq!(md.mode(), MdMode::Preview, "still the rendered view");
         assert_eq!(md.text(), "abc");
 
-        // A formatting chord does the same.
+        // Half-written markup is still text; finishing it renders.
+        let mut md = edit("").in_mode(MdMode::Preview);
+        for c in "**loud".chars() {
+            let _ = md.handle_key(&plain(c));
+        }
+        let half = draw(&mut md, 40, 8).join("\n");
+        assert!(half.contains("**loud"), "unclosed markup is text: {half}");
+        for c in "**".chars() {
+            let _ = md.handle_key(&plain(c));
+        }
+        let whole = draw(&mut md, 40, 8);
+        // The last two rows are the source strip and the border; the document
+        // is what is above them.
+        let body = whole[..whole.len() - 2].join("\n");
+        assert!(!body.contains("**loud"), "it resolved: {body}");
+        assert!(body.contains("loud"), "{body}");
+
+        // A formatting chord works there too, without leaving.
         let mut md = edit("").in_mode(MdMode::Preview);
         let _ = md.handle_key(&chord('b'));
-        assert_eq!(md.mode(), MdMode::Source);
+        assert_eq!(md.mode(), MdMode::Preview);
         assert_eq!(md.text(), "****");
     }
 
-    /// The arrows and page keys are the exception: they move the preview
-    /// rather than leaving it, and the draw clamps them to the document.
+    /// The rendered document has nowhere to put a caret, so the strip under it
+    /// carries the line the cursor is on, as markdown.
     #[test]
-    fn the_arrows_scroll_the_preview_and_stay_in_it() {
-        let long: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    fn the_preview_shows_the_line_being_typed_underneath_it() {
+        let mut md = edit("# Title\n\n**loud**").in_mode(MdMode::Preview);
+        // Mid-line, so the caret sits on a character rather than past the end.
+        for _ in 0..3 {
+            let _ = md.handle_key(&press(KeyCode::Left));
+        }
+        let rows = draw(&mut md, 40, 10);
+        let strip = rows[rows.len() - 2].clone();
+        assert!(strip.contains("**loud**"), "the raw line: {strip:?}");
+        // And the document above it is rendered rather than raw.
+        let body = rows[..rows.len() - 2].join("\n");
+        assert!(body.contains("Title"), "{body}");
+
+        // An unfocused box has no cursor worth showing and keeps the row.
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        terminal
+            .draw(|f| {
+                let view = MdEditView::titled(Line::from("t"), C_BORDER, false);
+                md.render(f, f.area(), &view);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let last: String = (0..40)
+            .map(|x| buf.cell((x, 8)).map_or(" ", |c| c.symbol()).to_string())
+            .collect();
+        assert!(
+            !last.contains("**loud**"),
+            "no strip when unfocused: {last}"
+        );
+    }
+
+    /// The preview follows the caret rather than keeping a scroll of its own,
+    /// so moving through a long document brings the rendering with you.
+    #[test]
+    fn the_preview_follows_the_caret_through_a_long_document() {
+        let long: String = (0..60).map(|i| format!("line {i}\n")).collect();
         let mut md = edit(&long).in_mode(MdMode::Preview);
 
-        for code in [KeyCode::Down, KeyCode::PageDown, KeyCode::End] {
-            let key = KeyEvent::new(code, KeyModifiers::empty());
-            assert_eq!(md.handle_key(&key), MdOutcome::Edited, "{code:?}");
-            assert_eq!(md.mode(), MdMode::Preview, "{code:?}");
+        // The cursor starts at the end, so the end is what is on screen.
+        let rows = draw(&mut md, 40, 12).join("\n");
+        assert!(rows.contains("line 59"), "{rows}");
+        assert!(!rows.contains("line 0"), "{rows}");
+
+        // Walking it back to the top brings the top into view.
+        for _ in 0..80 {
+            let _ = md.handle_key(&press(KeyCode::Up));
         }
-        // Drawing clamps to the last row, so `End` cannot leave the document
-        // behind: scrolling back up from there reaches the top again.
-        let _ = draw(&mut md, 40, 10);
-        for code in [KeyCode::Up, KeyCode::PageUp, KeyCode::Home] {
-            let key = KeyEvent::new(code, KeyModifiers::empty());
-            assert_eq!(md.handle_key(&key), MdOutcome::Edited, "{code:?}");
-        }
-        let rows = draw(&mut md, 40, 10).join("\n");
-        assert!(rows.contains("line 0"), "back at the top: {rows}");
+        let rows = draw(&mut md, 40, 12).join("\n");
+        assert!(rows.contains("line 0"), "{rows}");
+        assert_eq!(md.mode(), MdMode::Preview);
     }
 
     #[test]
-    fn the_view_switch_is_clickable_and_a_format_button_leaves_the_preview() {
+    fn the_view_switch_is_clickable_and_a_format_button_works_from_the_preview() {
         let mut md = edit("x");
         let bar = draw(&mut md, 70, 8).remove(1);
         let preview = bar.find("Preview").expect("a Preview chip") as u16;
@@ -1384,11 +1522,11 @@ mod tests {
         );
         assert_eq!(md.mode(), MdMode::Preview);
 
-        // A format button pressed from the preview has to do something you can
-        // see, so it comes back to the markdown first.
+        // A format button pressed from the preview formats in place: the
+        // rendering keeps up, so there is nothing to leave for.
         let bold = bold_button(&mut md);
-        assert_eq!(md.click(bold, 1), MdOutcome::ModeChanged(MdMode::Source));
-        assert_eq!(md.mode(), MdMode::Source);
+        assert_eq!(md.click(bold, 1), MdOutcome::Edited);
+        assert_eq!(md.mode(), MdMode::Preview);
         assert_eq!(md.text(), "x****");
     }
 
@@ -1510,6 +1648,152 @@ mod tests {
         );
         let _ = md.handle_key(&redo);
         assert_eq!(md.text(), "ab");
+    }
+
+    // ── Tables and diagrams ────────────────────────────────────────────────
+
+    /// The table button asks for a shape rather than making you count pipes,
+    /// and writes a grid the preview can render.
+    #[test]
+    fn the_table_button_asks_for_a_shape_and_writes_a_grid() {
+        let mut md = edit("");
+        md.apply(MdAction::Table);
+        assert!(md.is_modal());
+
+        // Two columns, one row. Enter on the first field moves on rather than
+        // finishing early.
+        let _ = md.handle_key(&press(KeyCode::Backspace));
+        let _ = md.handle_key(&plain('2'));
+        let _ = md.handle_key(&press(KeyCode::Enter));
+        assert!(md.is_modal(), "Enter on the first field moved on");
+        let _ = md.handle_key(&press(KeyCode::Backspace));
+        let _ = md.handle_key(&plain('1'));
+        let _ = md.handle_key(&press(KeyCode::Enter));
+        assert!(!md.is_modal());
+
+        let lines = md.lines();
+        assert_eq!(lines[0], "| Column 1 | Column 2 |", "{lines:?}");
+        assert_eq!(lines[1], "|---|---|", "{lines:?}");
+        assert_eq!(lines[2], "|   |   |", "{lines:?}");
+    }
+
+    /// Tab moves between the two numbers, the same as on the link popup.
+    #[test]
+    fn the_table_popup_switches_fields() {
+        let mut md = edit("");
+        md.apply(MdAction::Table);
+        let _ = md.handle_key(&press(KeyCode::Tab));
+        // The rows field has the keys now, so typing lands there.
+        let _ = md.handle_key(&press(KeyCode::Backspace));
+        let _ = md.handle_key(&plain('1'));
+        let _ = md.handle_key(&press(KeyCode::Enter));
+        assert!(!md.is_modal(), "Enter on the second field inserted");
+        // Header, alignment row, one body row, and the newline it ends on.
+        let lines = md.lines();
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert_eq!(lines[2], "|   |   |   |", "{lines:?}");
+
+        // And it can be abandoned like any other popup.
+        let mut md = edit("keep");
+        md.apply(MdAction::Table);
+        let framed = draw(&mut md, 60, 12).join("\n");
+        assert!(framed.contains("Table"), "{framed}");
+        assert!(framed.contains("Columns"), "{framed}");
+        assert!(framed.contains("Rows"), "{framed}");
+        let _ = md.handle_key(&press(KeyCode::Esc));
+        assert_eq!(md.text(), "keep");
+    }
+
+    /// A field that is not a number, or a silly one, still gives a table.
+    #[test]
+    fn a_tables_size_is_clamped_rather_than_refused() {
+        let mut table = TablePrompt {
+            columns: LineEdit::new("banana", false),
+            rows: LineEdit::new("900", false),
+            on_columns: true,
+        };
+        assert_eq!(table.size(), (3, 12), "fell back, then clamped");
+        table.columns = LineEdit::new("0", false);
+        assert_eq!(table.size().0, 1, "a table has at least one column");
+    }
+
+    /// The diagram button writes a flowchart worth editing, not an empty
+    /// fence: mermaid's syntax is the part people look up.
+    #[test]
+    fn the_diagram_button_writes_a_flowchart_to_edit() {
+        let mut md = edit("");
+        let _ = md.handle_key(&chord('g'));
+        let text = md.text();
+        assert!(text.starts_with("```mermaid"), "{text}");
+        assert!(text.contains("flowchart TD"), "{text}");
+        assert!(text.trim_end().ends_with("```"), "{text}");
+
+        // And the preview draws it, rather than showing the source back.
+        let _ = md.handle_key(&chord('p'));
+        let rows = draw(&mut md, 60, 20);
+        let body = rows[..rows.len() - 2].join("\n");
+        assert!(!body.contains("flowchart TD"), "still source: {body}");
+    }
+
+    #[test]
+    fn the_new_buttons_are_on_the_toolbar_with_the_rest() {
+        let mut md = edit("");
+        let bar = draw(&mut md, 70, 6).remove(1);
+        assert!(bar.contains('▦'), "no table button: {bar}");
+        assert!(bar.contains('◇'), "no diagram button: {bar}");
+        assert_eq!(action_for(&chord('t')), Some(MdAction::Table));
+        assert_eq!(action_for(&chord('g')), Some(MdAction::Diagram));
+    }
+
+    // ── The pointer ────────────────────────────────────────────────────────
+
+    /// Clicking in the text puts the caret there, which is the one thing a
+    /// mouse is for in an editor.
+    #[test]
+    fn clicking_in_the_text_moves_the_caret_there() {
+        let mut md = edit("hello world\nsecond line");
+        // Drawn once so the widget knows where its text landed and how far it
+        // has scrolled; a click before any draw has nothing to go on.
+        let _ = draw(&mut md, 40, 10);
+        assert_eq!(md.area_mut().cursor(), (1, 11), "starts at the end");
+
+        // Row 2 of the frame is the first line of text; column 4 is its `l`.
+        assert_eq!(md.click(4, 2), MdOutcome::Edited);
+        assert_eq!(md.area_mut().cursor(), (0, 3));
+
+        // Typing lands where the click put it.
+        let _ = md.handle_key(&plain('X'));
+        assert_eq!(md.lines()[0], "helXlo world");
+    }
+
+    /// A click past the end of a line lands on its last character rather than
+    /// somewhere else entirely.
+    #[test]
+    fn clicking_past_the_end_of_a_line_lands_on_its_end() {
+        let mut md = edit("ab\nlonger line");
+        let _ = draw(&mut md, 40, 10);
+        assert_eq!(md.click(30, 2), MdOutcome::Edited);
+        assert_eq!(md.area_mut().cursor(), (0, 2), "the end of `ab`");
+    }
+
+    /// The rendered view has no map back to a source position, so a press
+    /// there is not a caret move.
+    #[test]
+    fn clicking_in_the_preview_does_not_move_the_caret() {
+        let mut md = edit("hello").in_mode(MdMode::Preview);
+        let _ = draw(&mut md, 40, 10);
+        let before = md.area_mut().cursor();
+        assert_eq!(md.click(4, 2), MdOutcome::Ignored);
+        assert_eq!(md.area_mut().cursor(), before);
+    }
+
+    /// A box with no room to draw text has no caret to measure the scroll
+    /// from, so a click in it is not a caret move.
+    #[test]
+    fn a_box_with_no_room_for_text_takes_no_clicks() {
+        let mut md = edit("text");
+        let _ = draw(&mut md, 40, 2);
+        assert_eq!(md.click(1, 1), MdOutcome::Ignored);
     }
 
     #[test]

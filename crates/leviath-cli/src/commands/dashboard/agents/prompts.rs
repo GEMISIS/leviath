@@ -101,6 +101,13 @@ impl Dashboard {
         let Some(Overlay::Prompts(prompts)) = self.editor().overlay.as_mut() else {
             return;
         };
+        // A prompt box's own popup outranks the overlay's keys: Esc while it
+        // is up closes the popup, not the whole overlay.
+        if prompts.focused_mut().is_modal() {
+            let outcome = prompts.focused_mut().handle_key(key);
+            self.remember_md_mode(outcome);
+            return;
+        }
         match (key.code, ctrl) {
             (KeyCode::Tab, _) | (KeyCode::BackTab, _) => {
                 prompts.focus = match prompts.focus {
