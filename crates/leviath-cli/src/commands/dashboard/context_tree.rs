@@ -69,6 +69,60 @@ pub(super) struct FlatTree {
     pub(super) cursor_lines: Vec<usize>,
 }
 
+/// The narrowest the name column gets, so a tree of short names looks the same
+/// as it always has.
+const NAME_MIN: usize = 16;
+
+/// The widest it gets. A region can be called anything, and one very long name
+/// must not push the token bars of every other row off the pane to keep a
+/// column it alone needs.
+const NAME_MAX: usize = 24;
+
+/// The blank kept between a cell's contents and the next column, so the two
+/// never read as one word. `stage_instructionspinned` is what a column with no
+/// gutter looks like when something fills it exactly.
+const GUTTER: usize = 2;
+
+/// The kind column, contents plus gutter. Fixed, because the kinds are a closed
+/// set and the longest of them (`compact_history`) is fifteen characters;
+/// sizing it to the contents would only make the layout shift between one run
+/// and the next.
+const KIND_WIDTH: usize = 15 + GUTTER;
+
+/// How wide the name column has to be for `snap`: the longest name in it plus
+/// the gutter, inside [`NAME_MIN`]..=[`NAME_MAX`].
+///
+/// Measured across the whole snapshot before any row is drawn, because a column
+/// is only a column if every row uses the same one.
+fn name_width(snap: &ContextSnapshot) -> usize {
+    snap.regions
+        .iter()
+        .map(|region| region.name.chars().count() + GUTTER)
+        .max()
+        .unwrap_or(NAME_MIN)
+        .clamp(NAME_MIN, NAME_MAX)
+}
+
+/// `text` in a `width`-wide cell, always leaving the gutter: padded out when it
+/// is short, cut with an ellipsis when it would otherwise run into the column
+/// beside it.
+///
+/// The cut is what makes this a cell rather than a `{:<width$}`, which pads but
+/// never truncates - so a name or a kind wider than its column used to shunt
+/// that one row's remaining columns right of every other row's.
+///
+/// Counted in characters, which is also what the padding counts, so the two
+/// agree on what "wide" means.
+fn cell(text: &str, width: usize) -> String {
+    let room = width.saturating_sub(GUTTER);
+    if text.chars().count() <= room {
+        return format!("{text:<width$}");
+    }
+    let mut cut: String = text.chars().take(room.saturating_sub(1)).collect();
+    cut.push('…');
+    format!("{cut:<width$}")
+}
+
 /// Render the region tree. `cursor` highlights that interactive row.
 pub(super) fn flatten(
     snap: &ContextSnapshot,
@@ -80,6 +134,7 @@ pub(super) fn flatten(
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut cursor_lines: Vec<usize> = Vec::new();
     let mut row_idx = 0usize;
+    let name_width = name_width(snap);
 
     for region in &snap.regions {
         let folded = !searching && tree.collapsed_regions.contains(&region.name);
@@ -126,12 +181,9 @@ pub(super) fn flatten(
                 if folded { "▸ " } else { "▾ " },
                 Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("{:<16}", region.name), name_style),
+            Span::styled(cell(&region.name, name_width), name_style),
             Span::styled(
-                // 16, because `compact_history` is fifteen characters and a
-                // kind wider than its column pushes that row's bar out of line
-                // with every other row.
-                format!("{:<16}", region.kind),
+                cell(&region.kind, KIND_WIDTH),
                 Style::default().fg(kind_color),
             ),
             Span::styled(bar, Style::default().fg(bar_color)),
@@ -289,6 +341,57 @@ mod tests {
                 },
             ],
         }
+    }
+
+    /// Where each region row's kind column starts, one entry per row.
+    fn kind_starts(snap: &ContextSnapshot) -> Vec<usize> {
+        flatten(snap, &ContextTreeState::default(), 0, false, 80)
+            .lines
+            .into_iter()
+            // A region header is the only line with the full column set; an
+            // entry stub under it has two spans.
+            .filter(|line| line.spans.len() >= 4)
+            .map(|line| {
+                line.spans[..2]
+                    .iter()
+                    .map(|span| span.content.chars().count())
+                    .sum()
+            })
+            .collect()
+    }
+
+    /// A name too long for its column used to push that row's kind and token
+    /// bar right of every other row's. `stage_instructions` is eighteen
+    /// characters and is in the layout every bundled agent uses, so this was
+    /// on screen rather than hypothetical.
+    #[test]
+    fn a_long_region_name_does_not_push_its_own_row_out_of_line() {
+        let mut s = snap();
+        s.regions[0].name = "stage_instructions".to_string();
+        let starts = kind_starts(&s);
+        assert_eq!(starts.len(), 2);
+        assert_eq!(starts[0], starts[1]);
+        // ...and the column grew to fit rather than cutting a name that fits
+        // inside the bound: eighteen characters and the gutter after them.
+        assert_eq!(starts[0], 2 + 18 + GUTTER);
+    }
+
+    /// The column grows only so far. One region with a very long name must not
+    /// cost every other row the width its token bar needs, so past the bound
+    /// the name is cut with an ellipsis instead.
+    #[test]
+    fn an_absurd_region_name_is_cut_rather_than_widening_every_row() {
+        let mut s = snap();
+        s.regions[0].name = "a_region_name_nobody_would_actually_write".to_string();
+        let starts = kind_starts(&s);
+        assert_eq!(starts[0], starts[1]);
+        assert_eq!(starts[0], 2 + NAME_MAX);
+        // Cut with an ellipsis, and still holding its gutter open.
+        let name = flatten(&s, &ContextTreeState::default(), 0, false, 80).lines[0].spans[1]
+            .content
+            .to_string();
+        assert!(name.trim_end().ends_with('…'), "{name:?}");
+        assert!(name.ends_with("  "), "{name:?}");
     }
 
     /// Both spellings of a kind get the same colour and the same cell width.
