@@ -24,6 +24,16 @@
 //! retries, fails over, and records what stopped it in
 //! [`RunMetadata::title_error`](crate::persistence::RunMetadata::title_error).
 //!
+//! Retrying makes a title *later*, which brought a second failure into view: a
+//! terminal run is unloaded from memory a pass after it finishes, and a title
+//! landing on an unloaded run was dropped, reason and all. A run making two
+//! provider calls finishes well inside one title call, so it lost even a single
+//! 50ms retry. The host now holds a finished run resident while the title lane
+//! still has a live claim on it (see [`title_outstanding`]), the claim is
+//! bounded by [`TITLE_JOB_BUDGET_SECS`] so nothing is held long, and the
+//! persistence lane treats a landed name as worth a write - without which the
+//! title reached the entity and never reached disk.
+//!
 //! What still stops the attempt without a second opinion is a call that
 //! *completed* and produced nothing usable: an empty reply, or one cut off at
 //! the token limit. A reasoning model spends output tokens working up to its
@@ -34,10 +44,13 @@
 //! about what a title should be. Paying a second provider to have that same
 //! opinion would buy nothing.
 
-use bevy_ecs::prelude::{Commands, Component, Entity, Query, Res, ResMut, Resource, With, Without};
+use bevy_ecs::prelude::{
+    Commands, Component, Entity, Or, Query, Res, ResMut, Resource, With, Without,
+};
 use leviath_providers::InferenceRequest;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::components::AgentState;
 use crate::persistence::RunMetadata;
 use crate::pipeline::{InferenceStage, Providers};
 use crate::title_bridge::{TitleJob, TitleOutcome, run_title_job};
@@ -70,10 +83,86 @@ pub struct PendingTitle;
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct TitleCandidates(pub Vec<(String, String)>);
 
-/// A title call is in flight. Unlike `AwaitingCompaction`, this does not hold
-/// the agent out of inference - titling runs alongside the first turn.
+/// A title call is in flight, and the Unix second by which it must have
+/// reported. Unlike `AwaitingCompaction`, this does not hold the agent out of
+/// inference - titling runs alongside the first turn.
+///
+/// The deadline is what lets the host hold a finished run exactly as long as
+/// the answer can still arrive, rather than guessing. It is
+/// [`TITLE_JOB_BUDGET_SECS`] past dispatch, which is also what bounds the job
+/// itself, so a call cannot outlive the entity that is waiting for it.
 #[derive(Component, Debug, Clone, Copy)]
-pub struct AwaitingTitle;
+pub struct AwaitingTitle(pub i64);
+
+/// How long a run may still be owed its name, measured from when it started.
+///
+/// A terminal run is unloaded from memory a pass after it finishes, and a title
+/// landing on an unloaded run is dropped - reason and all. A run that ends
+/// quickly therefore used to race its own title and usually win: a probe making
+/// two provider calls lost even a single 50ms retry. So the host holds a
+/// finished run resident while the title lane still has a live claim on it, and
+/// this is how long that claim lasts.
+///
+/// Measured from the run's *start* rather than from the moment it finished, so
+/// the bound cannot be stretched by a run that ends early: whatever happens, a
+/// run is never held past this long after its own beginning. A run that took
+/// longer than this has already had its window and is never held at all.
+///
+/// Long enough to cover a title call that was refused once and backed off,
+/// short enough that a finished run is not kept in memory waiting on a nicety.
+pub const TITLE_HOLD_SECS: i64 = 30;
+
+/// The whole wall-clock budget for one title call, retries and backoff
+/// included.
+///
+/// The dispatch lane's default is fifteen minutes, which is right for a stage
+/// turn that may legitimately think that long and wrong for a run's name: a
+/// finished run is held in memory until its call reports, and nothing is worth
+/// holding one that long. Capping the job here is what makes the hold
+/// bounded - the call reports within this, so the entity waiting for it is
+/// still there when it does.
+pub const TITLE_JOB_BUDGET_SECS: u64 = 60;
+
+/// Whether the title lane's claim on a run that started at `started_at` has run
+/// out. The one place the bound is applied, so the host's hold and
+/// [`expire_title_hold`]'s verdict cannot disagree about when it ends.
+pub fn title_hold_expired(started_at: i64, now: i64) -> bool {
+    now >= started_at.saturating_add(TITLE_HOLD_SECS)
+}
+
+/// Whether a claim on a run's name is still live: a call already out and inside
+/// its own deadline, or one still queued inside the run's hold window.
+///
+/// `awaiting` is [`AwaitingTitle`]'s deadline when a call is in flight. The one
+/// place the two cases are distinguished, so the host's hold and
+/// [`expire_title_hold`]'s verdict cannot disagree.
+pub fn title_claim_live(awaiting: Option<i64>, started_at: i64, now: i64) -> bool {
+    match awaiting {
+        // A call already out is held to its own deadline, not the run's. The
+        // job is bounded by the same number, so this waits exactly as long as
+        // an answer can still arrive - which is the difference between a late
+        // title landing and being dropped on the floor with its reason.
+        Some(deadline) => now < deadline,
+        // Nothing out yet: waiting on a pool slot. Bounded from the run's
+        // start, so a run that already had its window is never held.
+        None => !title_hold_expired(started_at, now),
+    }
+}
+
+/// Whether the title lane still has a live claim on `entity`.
+///
+/// The host asks this before unloading a finished run. Answered here rather
+/// than in the host because the markers and the bound are this module's, and a
+/// second copy of the rule is a second thing to keep in step.
+pub fn title_outstanding(world: &bevy_ecs::world::World, entity: Entity, now: i64) -> bool {
+    let awaiting = world.get::<AwaitingTitle>(entity);
+    if awaiting.is_none() && world.get::<PendingTitle>(entity).is_none() {
+        return false;
+    }
+    world
+        .get::<RunMetadata>(entity)
+        .is_some_and(|meta| title_claim_live(awaiting.map(|a| a.0), meta.started_at, now))
+}
 
 /// The receiving end of the title-outcomes channel, as a world resource.
 #[derive(Resource)]
@@ -317,6 +406,33 @@ fn record_title_failure(meta: &mut RunMetadata, reason: String) {
     meta.title_error = Some(reason);
 }
 
+/// The host settings the title lane reads.
+///
+/// Every field is optional because `lev run` and the tests drive these systems
+/// with no daemon behind them. Bundled as one `SystemParam` so the dispatch
+/// signature stays about what it queries rather than listing what might be
+/// wired - and because the three of them together are one thing: how this host
+/// wants titles made.
+#[derive(bevy_ecs::system::SystemParam)]
+pub struct TitleServices<'w> {
+    /// `[title]`, when the daemon installed it. Absent means no titling.
+    pub settings: Option<Res<'w, TitleSettings>>,
+    /// The operator's retry schedule, from `[limits]`.
+    pub tuning: Option<Res<'w, crate::pipeline::InferenceRetryTuning>>,
+    /// The clock deadlines are measured against. Absent outside tests, where
+    /// the wall clock is the only sensible answer.
+    pub clock: Option<Res<'w, crate::pipeline::StallClock>>,
+}
+
+impl TitleServices<'_> {
+    /// Unix seconds, from the pinned clock when a test installed one.
+    fn now(&self) -> i64 {
+        self.clock
+            .as_deref()
+            .map_or_else(|| chrono::Utc::now().timestamp(), |c| (c.0)())
+    }
+}
+
 /// What `dispatch_title` selects.
 ///
 /// `&'static` is bevy's `WorldQuery` convention, not a claim about
@@ -338,8 +454,7 @@ type TitleQuery = (
 /// chain with nothing callable left in it.
 pub fn dispatch_title(
     mut agents: Query<TitleQuery, (With<PendingTitle>, Without<AwaitingTitle>)>,
-    settings: Option<Res<TitleSettings>>,
-    tuning: Option<Res<crate::pipeline::InferenceRetryTuning>>,
+    services: TitleServices,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,
     sink: Res<TitleSink>,
@@ -348,10 +463,22 @@ pub fn dispatch_title(
     crate::tick_scope::clear();
     // Read once: `[title] enabled` is a host setting, not a per-run one, and an
     // operator who turns titling off mid-run means it for every pending call.
-    let enabled = settings.is_some_and(|s| s.0.enabled);
+    let enabled = services.settings.as_deref().is_some_and(|s| s.0.enabled);
     // The dispatch lane's own schedule, so a title call retries a 429 or a
     // dropped connection exactly the way the run's real inference does.
-    let retry = crate::pipeline::retry_policy_for(None, tuning.map(|t| *t).unwrap_or_default());
+    // The operator's schedule, cut to the title lane's own budget: a name is
+    // not worth the dispatch lane's fifteen-minute patience, and the cut is
+    // what keeps the host's hold on a finished run short.
+    let budget = std::time::Duration::from_secs(TITLE_JOB_BUDGET_SECS);
+    let retry = crate::inference_bridge::RetryPolicy {
+        job_timeout: budget,
+        max_total_backoff: budget,
+        ..crate::pipeline::retry_policy_for(
+            None,
+            services.tuning.as_deref().copied().unwrap_or_default(),
+        )
+    };
+    let now = services.now();
     for (entity, mut meta, mut chain) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if !enabled {
@@ -406,7 +533,65 @@ pub fn dispatch_title(
         commands
             .entity(entity)
             .remove::<PendingTitle>()
-            .insert(AwaitingTitle);
+            // Padded by a second so the deadline the host holds to cannot land
+            // fractionally before the job's own, which would unload the run in
+            // the instant before its answer arrives.
+            .insert(AwaitingTitle(
+                now.saturating_add(TITLE_JOB_BUDGET_SECS as i64)
+                    .saturating_add(1),
+            ));
+    }
+}
+
+/// What `expire_title_hold` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+/// The runs `expire_title_hold` considers: anything the title lane still has a
+/// marker on, either shape.
+type TitleOwed = Or<(With<PendingTitle>, With<AwaitingTitle>)>;
+
+type ExpireTitleQuery = (
+    Entity,
+    &'static mut RunMetadata,
+    &'static AgentState,
+    Option<&'static AwaitingTitle>,
+);
+
+/// Stop waiting for a name a finished run is not going to get in time.
+///
+/// Only terminal runs are given up on. A live run keeps waiting however long it
+/// takes - a busy daemon whose pool is full is the case this whole change
+/// exists for, and giving up on it after half a minute would put the original
+/// bug back. A finished one is different: the host is holding it in memory for
+/// this alone, so the wait has to end, and it ends saying why rather than
+/// leaving the silence this run's `title_error` exists to break.
+pub fn expire_title_hold(
+    mut agents: Query<ExpireTitleQuery, TitleOwed>,
+    services: TitleServices,
+    mut commands: Commands,
+) {
+    crate::tick_scope::clear();
+    let now = services.now();
+    for (entity, mut meta, state, awaiting) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
+        let terminal = matches!(
+            state.status,
+            crate::components::AgentStatus::Complete
+                | crate::components::AgentStatus::Error { .. }
+                | crate::components::AgentStatus::Cancelled
+        );
+        if !terminal || title_claim_live(awaiting.map(|a| a.0), meta.started_at, now) {
+            continue;
+        }
+        record_title_failure(
+            &mut meta,
+            "the run finished before a title could be generated".to_string(),
+        );
+        commands
+            .entity(entity)
+            .remove::<PendingTitle>()
+            .remove::<AwaitingTitle>();
     }
 }
 
@@ -660,6 +845,187 @@ mod tests {
 
     fn default_pools() -> crate::inference_pool::InferencePools {
         crate::inference_pool::InferencePools::new(crate::inference_pool::InferencePoolConfig::new())
+    }
+
+    /// An in-flight title whose deadline is not what the test is about.
+    fn awaiting() -> AwaitingTitle {
+        AwaitingTitle(i64::MAX)
+    }
+
+    /// `started_at` is 0 in `metadata()`, so these read as "seconds into the
+    /// run". A run is held while its claim is live and not a second longer.
+    #[test]
+    fn a_queued_claim_lives_until_the_hold_runs_out() {
+        assert!(title_claim_live(None, 0, TITLE_HOLD_SECS - 1));
+        assert!(!title_claim_live(None, 0, TITLE_HOLD_SECS));
+        assert!(!title_claim_live(None, 0, TITLE_HOLD_SECS + 1));
+        // The window travels with the run, not the clock.
+        assert!(title_claim_live(None, 1_000, 1_000 + TITLE_HOLD_SECS - 1));
+    }
+
+    /// A call already out answers to its own deadline instead, because the job
+    /// behind it is bounded by the same number - waiting any less would throw
+    /// away an answer that is still coming.
+    #[test]
+    fn an_in_flight_claim_lives_to_its_own_deadline() {
+        // Well past the run's own hold, yet still live: the call is out.
+        assert!(title_claim_live(Some(500), 0, TITLE_HOLD_SECS + 100));
+        assert!(title_claim_live(Some(500), 0, 499));
+        assert!(!title_claim_live(Some(500), 0, 500));
+    }
+
+    #[test]
+    fn a_run_with_no_title_marker_is_never_outstanding() {
+        let mut world = World::new();
+        let e = world.spawn(metadata(Some("mock/m"))).id();
+        assert!(!title_outstanding(&world, e, 0));
+    }
+
+    /// The host reads this off a live world, so the two marker shapes and the
+    /// no-metadata case are exercised through it rather than through the pure
+    /// rule alone.
+    #[test]
+    fn outstanding_reads_both_markers_off_the_world() {
+        let mut world = World::new();
+        let queued = world.spawn((metadata(Some("mock/m")), PendingTitle)).id();
+        assert!(title_outstanding(&world, queued, 0));
+        assert!(!title_outstanding(&world, queued, TITLE_HOLD_SECS));
+
+        let flying = world
+            .spawn((metadata(Some("mock/m")), AwaitingTitle(500)))
+            .id();
+        assert!(title_outstanding(&world, flying, TITLE_HOLD_SECS + 1));
+        assert!(!title_outstanding(&world, flying, 500));
+
+        // A marker with no run metadata cannot be dated, so it holds nothing.
+        let bare = world.spawn(PendingTitle).id();
+        assert!(!title_outstanding(&world, bare, 0));
+    }
+
+    fn agent_state(status: crate::components::AgentStatus) -> AgentState {
+        AgentState {
+            agent_id: "a".to_string(),
+            current_stage: "s".to_string(),
+            iteration: 0,
+            status,
+            spawned_children_ids: vec![],
+            pending_wait: None,
+            accepts_messages: true,
+        }
+    }
+
+    /// A pinned clock, so a boundary test is not a coin toss on a loaded runner.
+    fn at(secs: i64) -> crate::pipeline::StallClock {
+        // A `fn` pointer, so the resource stays `Copy`; the value is baked in
+        // per helper rather than captured.
+        match secs {
+            0 => crate::pipeline::StallClock(|| 0),
+            _ => crate::pipeline::StallClock(|| 10_000),
+        }
+    }
+
+    fn run_expire(world: &mut World) {
+        let mut schedule = Schedule::default();
+        schedule.add_systems(expire_title_hold);
+        schedule.run(world);
+    }
+
+    /// A finished run whose claim has run out stops waiting, and says so. This
+    /// is the case the host would otherwise unload in silence.
+    #[test]
+    fn a_finished_run_past_its_hold_gives_up_out_loud() {
+        let mut world = World::new();
+        world.insert_resource(at(10_000));
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                PendingTitle,
+                agent_state(crate::components::AgentStatus::Complete),
+            ))
+            .id();
+        run_expire(&mut world);
+        assert!(world.get::<PendingTitle>(e).is_none());
+        assert_eq!(
+            world.get::<RunMetadata>(e).unwrap().title_error.as_deref(),
+            Some("the run finished before a title could be generated")
+        );
+    }
+
+    /// The guard that keeps the original bug fixed: a run that is still going
+    /// waits for its name however long the pool makes it wait. Giving up here
+    /// after half a minute is exactly what a busy daemon would trip.
+    #[test]
+    fn a_running_agent_is_never_given_up_on() {
+        let mut world = World::new();
+        world.insert_resource(at(10_000));
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                PendingTitle,
+                agent_state(crate::components::AgentStatus::Active),
+            ))
+            .id();
+        run_expire(&mut world);
+        assert!(world.get::<PendingTitle>(e).is_some());
+        assert_eq!(world.get::<RunMetadata>(e).unwrap().title_error, None);
+    }
+
+    /// A finished run whose call is still out keeps waiting for it, and the
+    /// in-flight marker comes off with the answer rather than under it.
+    #[test]
+    fn a_finished_run_still_waits_for_a_call_that_is_out() {
+        let mut world = World::new();
+        world.insert_resource(at(0));
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                AwaitingTitle(i64::MAX),
+                agent_state(crate::components::AgentStatus::Complete),
+            ))
+            .id();
+        run_expire(&mut world);
+        assert!(world.get::<AwaitingTitle>(e).is_some());
+        assert_eq!(world.get::<RunMetadata>(e).unwrap().title_error, None);
+    }
+
+    /// A finished run whose call blew its deadline stops waiting too - the same
+    /// verdict, reached through the other marker.
+    #[test]
+    fn a_finished_run_past_its_call_deadline_gives_up() {
+        let mut world = World::new();
+        world.insert_resource(at(10_000));
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                AwaitingTitle(9_000),
+                agent_state(crate::components::AgentStatus::Complete),
+            ))
+            .id();
+        run_expire(&mut world);
+        assert!(world.get::<AwaitingTitle>(e).is_none());
+        assert!(world.get::<RunMetadata>(e).unwrap().title_error.is_some());
+    }
+
+    /// Dispatch stamps the deadline the host holds the run to, so the two
+    /// cannot drift apart.
+    #[tokio::test]
+    async fn dispatch_stamps_the_deadline_it_bounded_the_call_by() {
+        let (mut world, _title_rx) = build_world(Ok("t"), default_pools());
+        world.insert_resource(TitleSettings(config(None, None)));
+        world.insert_resource(at(0));
+        let e = world
+            .spawn((
+                metadata(Some("mock/m")),
+                PendingTitle,
+                chain_of(&[("mock", "m")]),
+            ))
+            .id();
+        run_dispatch(&mut world);
+        assert_eq!(
+            world.get::<AwaitingTitle>(e).map(|a| a.0),
+            Some(TITLE_JOB_BUDGET_SECS as i64 + 1),
+            "the job's budget plus the second of slack"
+        );
     }
 
     /// The candidate chain a spawned run would carry, from `(provider, model)`
@@ -919,7 +1285,7 @@ mod tests {
         let mut meta = metadata(Some("mock/m"));
         meta.title_error = Some("dead/m failed: HTTP 403".to_string());
         let e = world
-            .spawn((meta, AwaitingTitle, TitleCandidates::default()))
+            .spawn((meta, awaiting(), TitleCandidates::default()))
             .id();
         let (tx, rx) = mpsc::unbounded_channel();
         tx.send(TitleOutcome {
@@ -1594,7 +1960,7 @@ mod tests {
         let entity = world
             .spawn((
                 metadata(Some("mock/m")),
-                AwaitingTitle,
+                awaiting(),
                 TitleCandidates::default(),
                 crate::persistence::TokenTotals::default(),
             ))
@@ -1641,7 +2007,7 @@ mod tests {
         let entity = world
             .spawn((
                 metadata(Some("mock/m")),
-                AwaitingTitle,
+                awaiting(),
                 TitleCandidates::default(),
                 crate::persistence::TokenTotals::default(),
             ))
@@ -1685,7 +2051,7 @@ mod tests {
         let entity = world
             .spawn((
                 metadata(Some("mock/m")),
-                AwaitingTitle,
+                awaiting(),
                 TitleCandidates::default(),
                 crate::persistence::TokenTotals::default(),
             ))

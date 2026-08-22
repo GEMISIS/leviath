@@ -58,6 +58,15 @@ pub struct PersistWatermark {
     /// Without it every snapshot re-serialized the whole (append-only) log,
     /// an O(events) allocation per tick that grew with the run.
     last_taint: Option<(usize, usize)>,
+    /// The run's `(title, title_error)` as of the last snapshot.
+    ///
+    /// A title arrives on its own schedule: it is generated beside the run's
+    /// first turn and can land after the run's last move, changing nothing
+    /// [`Self::last`] tracks. Without this it would sit in memory until the
+    /// next heartbeat - which a finished run is unloaded before reaching, so
+    /// the name was simply lost. Compared by reference below; only a write
+    /// clones.
+    last_title: Option<(Option<String>, Option<String>)>,
 }
 
 impl PersistWatermark {
@@ -329,12 +338,21 @@ pub fn dispatch_persistence(
         let status = crate::persistence::run_status_from(&state.status);
         let current = (state.iteration, cursor.index, status);
         let watermark_changed = watermark.last.as_ref() != Some(&current);
+        // Deliberately *not* folded into `current`: a title is not the agent
+        // moving, so it must not advance `last_progress_at` and make a wedged
+        // run look alive (issue #184). It only earns a write.
+        let title_now = (md.title.as_deref(), md.title_error.as_deref());
+        let title_changed = watermark
+            .last_title
+            .as_ref()
+            .map(|(t, e)| (t.as_deref(), e.as_deref()))
+            != Some(title_now);
         // Beat even when nothing changed, so `updated_at` distinguishes a run
         // that is slow from one that nothing is driving.
         let due_for_heartbeat = watermark
             .last_written_at
             .is_none_or(|at| now.saturating_sub(at) >= PERSIST_HEARTBEAT_SECS);
-        if !watermark_changed && !has_appends && !due_for_heartbeat {
+        if !watermark_changed && !title_changed && !has_appends && !due_for_heartbeat {
             continue; // nothing meaningful changed, nothing buffered, beat not due
         }
 
@@ -362,7 +380,7 @@ pub fn dispatch_persistence(
         // window per snapshot, and tool activity buffers lines several times
         // per iteration - snapshotting on each batch multiplied the lane's
         // biggest allocation by the run's tool traffic for no new state.
-        if !watermark_changed && !due_for_heartbeat {
+        if !watermark_changed && !title_changed && !due_for_heartbeat {
             let _ = stage.0.send(PersistMsg::StageLines {
                 run_id: md.run_id.clone(),
                 output_appends,
@@ -374,6 +392,9 @@ pub fn dispatch_persistence(
         if watermark_changed {
             watermark.last = Some(current);
             watermark.last_progress_at = Some(now);
+        }
+        if title_changed {
+            watermark.last_title = Some((md.title.clone(), md.title_error.clone()));
         }
         watermark.last_written_at = Some(now);
 

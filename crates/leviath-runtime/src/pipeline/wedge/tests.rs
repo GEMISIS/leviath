@@ -178,7 +178,8 @@ fn every_phase_marker_exempts_its_agent() {
             w.entity_mut(e).insert(crate::title::PendingTitle);
         }),
         ("AwaitingTitle", |w, e| {
-            w.entity_mut(e).insert(crate::title::AwaitingTitle);
+            w.entity_mut(e)
+                .insert(crate::title::AwaitingTitle(i64::MAX));
         }),
         ("AwaitingInteraction", |w, e| {
             w.entity_mut(e)
