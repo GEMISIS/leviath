@@ -501,6 +501,9 @@ mod tests {
     /// The published OpenAPI spec for this API.
     const OPENAPI: &str = include_str!("../../../../../docs/schema/openapi.json");
 
+    /// The published API guide, which is where a capability is explained.
+    const API_GUIDE: &str = include_str!("../../../../../docs/content/api.md");
+
     /// `GET /api/config` reports an `api_version`, and it has to mean
     /// something. A version a client can read that disagrees with the document
     /// describing that version is worse than publishing no version at all - the
@@ -515,6 +518,27 @@ mod tests {
             .as_str()
             .expect("the spec declares a version");
         assert_eq!(documented, types::API_VERSION);
+    }
+
+    /// A capability is a promise, and a promise nobody can read is not one.
+    ///
+    /// `GET /api/config` hands a client a list of strings and expects it to
+    /// change its behaviour based on them. Twenty-three of them had never been
+    /// named in the guide, so the only way to learn what one meant was to read
+    /// this crate - which a browser console's author has no reason to have.
+    /// The same spirit as the route-drift test below: announcing it and
+    /// documenting it are one act, or they drift.
+    #[test]
+    fn every_announced_capability_is_explained_in_the_guide() {
+        let undocumented: Vec<&str> = types::API_CAPABILITIES
+            .iter()
+            .copied()
+            .filter(|capability| !API_GUIDE.contains(*capability))
+            .collect();
+        assert!(
+            undocumented.is_empty(),
+            "announced but never explained in docs/content/api.md: {undocumented:?}"
+        );
     }
 
     /// Every `(path, METHOD)` the spec documents.

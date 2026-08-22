@@ -24,6 +24,13 @@ same list.
   before. `total` then counts what was asked for rather than every run on the
   machine, which is what makes it worth printing beside a list. Announced as
   `runs.parent`; cursors minted before this existed stay valid.
+- Fixed: the API guide explains every capability the server announces. `GET
+  /api/config` hands a client a list of strings and expects it to change what it
+  does based on them, and twenty-three of the thirty-six had never been written
+  down anywhere but the source, so the only way to learn what one meant was to
+  read the daemon. There is now a table of all of them, and a test that fails
+  when a capability is announced without being explained, because announcing and
+  documenting are one act or they drift.
 
 - Fixed: the dashboard's Context tree keeps its columns lined up whatever the
   regions are called. The name sat in a fixed sixteen-character column that
