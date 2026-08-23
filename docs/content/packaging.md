@@ -3,7 +3,7 @@ title: Packaging blueprints
 description: Bundle a blueprint into a .leviath-bundle, install one, and share it without a hosted registry.
 group: Guides
 group_order: 4
-order: 4
+order: 5
 ---
 
 # Packaging & sharing blueprints

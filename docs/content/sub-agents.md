@@ -23,6 +23,12 @@ Five bundled agents work this way: `data-analyst` gathers one slice of a subject
 Sub-agents cost very little here. They are more entities in the same [world](/docs/engine), so there
 are no extra processes to start and nothing has to be serialized between a parent and its children.
 
+
+> [!NOTE]
+> A fan-out is where most of a run's money goes: in one measured research run, 34 second-generation
+> workers accounted for $198 of a $236 total while the top-level agent cost $15. See
+> [managing your costs](/docs/costs) for the knobs that bound it.
+
 ## Two tools, one for each shape of the job
 
 | Want | Tool | What you get back |
