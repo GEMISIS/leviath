@@ -182,12 +182,35 @@ cerebras = 1                     # every model this provider serves, together
 | `max_concurrent_inferences_by_model` | empty | Per-model overrides of the cap above. See below |
 | `max_concurrent_inferences_by_provider` | empty | Per-provider caps across every model a provider serves. See below |
 | `notify_spend_usd` | empty | Dollar figures to be told about while a run is still going. See below |
+| `max_agents_per_run` | `0` | Most agents one run may create, sub-agents included. `0` is no ceiling. See below |
 
-Ten of those need more than a table cell.
+Eleven of those need more than a table cell.
 
 **`exact_token_counting`** measures each assembled request before sending it and refuses one that
 would overflow the window. On providers with a remote counting endpoint that costs a network round
 trip per inference, so it is off by default.
+
+**`max_agents_per_run`** is what makes a run's cost predictable:
+
+```toml
+[limits]
+max_agents_per_run = 20
+```
+
+A run's price is very nearly its headcount. Measured across four finished research
+runs, cost per agent stayed between $5.37 and $9.05 while the count ranged from 10
+to 42, so the bill followed the headcount and nothing bounded the headcount:
+`max_child_depth` bounds how deep the sub-agent tree goes, and a fan-out stage's
+`max_items` bounds a single split, but the total was whatever each generation of
+workers thought was worth spawning.
+
+A run that reaches the ceiling stops widening. It is not failed and its workers are
+not cancelled: the ones already running finish, the merge happens on what came back,
+and the run writes its report on that. Stopping early is a cheaper answer, not a
+broken one.
+
+Counted per run from its root, so a worker deep in the tree cannot spend the whole
+budget on its own branch.
 
 **`notify_spend_usd`** says which figures are worth interrupting you for:
 

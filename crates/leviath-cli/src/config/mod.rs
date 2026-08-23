@@ -3557,6 +3557,7 @@ enabled = false
                 max_concurrent_inferences: Some(4),
                 max_concurrent_tools: 3,
                 notify_spend_usd: Vec::new(),
+                max_agents_per_run: 0,
                 default_max_iterations: Some(99),
                 exact_token_counting: false,
                 script_shell_timeout_secs: 45,

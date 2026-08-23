@@ -329,6 +329,27 @@ pub struct LimitsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_run_write_bytes: Option<u64>,
 
+    /// How many agents one run may create, sub-agents included. `0`, the
+    /// default, is no ceiling.
+    ///
+    /// ```toml
+    /// [limits]
+    /// max_agents_per_run = 20
+    /// ```
+    ///
+    /// What a run costs is very nearly its headcount: measured across four
+    /// finished research runs, cost per agent stayed between $5.37 and $9.05
+    /// while the count ranged from 10 to 42. `max_child_depth` bounds how deep
+    /// the tree goes and a fan-out stage's `max_items` bounds one split, but
+    /// nothing bounded the total, so the price was decided by how many workers
+    /// each generation happened to think were worth spawning.
+    ///
+    /// A run that reaches the ceiling stops widening and finishes on what it
+    /// has. It is not failed: the work already done is worth keeping, and the
+    /// merge still runs on the workers that did start.
+    #[serde(default)]
+    pub max_agents_per_run: usize,
+
     /// Dollar figures at which a running agent emits a spend event.
     ///
     /// ```toml
@@ -469,6 +490,8 @@ impl Default for LimitsConfig {
             max_concurrent_tools: default_max_concurrent_tools(),
             // Empty: nothing is emitted for an operator who has not asked.
             notify_spend_usd: Vec::new(),
+            // No ceiling, which is what every install has today.
+            max_agents_per_run: 0,
             default_max_iterations: default_default_max_iterations(),
             exact_token_counting: false,
             script_shell_timeout_secs: default_script_shell_timeout_secs(),

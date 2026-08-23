@@ -823,11 +823,10 @@ system_prompt = "hi"
     #[tokio::test]
     async fn a_machine_with_no_https_client_has_no_registry_to_prime() {
         let config = crate::config::Config::default();
-        let no_client = |_: Option<u64>| {
-            reqwest::Client::builder()
-                .use_preconfigured_tls("not a tls backend")
-                .build()
-        };
+        // The purpose-built error rather than a TLS-backend trick: which
+        // backend refuses a bogus configuration differs by platform, so that
+        // version passed on macOS and failed on Linux.
+        let no_client = |_: Option<u64>| Err(leviath_providers::provider::malformed_url_error());
         assert!(
             primed_registry_with(Some(&config), &no_client)
                 .await
