@@ -1534,6 +1534,36 @@ mod tests {
         assert_eq!(a.total_tokens, 209);
     }
 
+    /// One provider's private field must not ride shared history into another
+    /// provider's request.
+    ///
+    /// Gemini attaches a `thought_signature` to its tool calls. That call goes
+    /// into the conversation, and with per-stage models the next stage may run
+    /// on Anthropic - which rejects the unknown key outright:
+    ///
+    ///     tool_use.thought_signature: Extra inputs are not permitted
+    ///
+    /// Observed as a Gemini stage followed by an Anthropic one dying on its
+    /// first request, with the failing model not the one under test (#575).
+    #[test]
+    fn a_foreign_thought_signature_never_reaches_anthropic() {
+        // As a Gemini turn left it in history.
+        let body = body_with_breakpoint_on(crate::MessageContent::Blocks(vec![
+            crate::provider::ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "a.md"}),
+                thought_signature: Some("gemini-sig".to_string()),
+            },
+        ]));
+        let json = serde_json::to_string(&body).expect("serializes");
+        assert!(
+            !json.contains("thought_signature"),
+            "Anthropic rejects the key outright; it must not be in the body: {json}"
+        );
+        assert!(json.contains("call_1"), "the tool call itself still goes");
+    }
+
     #[test]
     fn test_parse_response_with_tool_calls() {
         let provider = AnthropicProvider::new(

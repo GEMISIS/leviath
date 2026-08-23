@@ -503,7 +503,22 @@ pub enum ContentBlock {
         input: serde_json::Value,
         /// See [`ToolCall::thought_signature`]: replayed verbatim so a
         /// provider that requires it accepts the follow-up request.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ///
+        /// **Never serialized.** This is one provider's field riding in shared
+        /// history, and history is replayed to whichever provider runs next -
+        /// which, with per-stage models, is routinely a different one. Anthropic
+        /// rejects the unknown key outright (`tool_use.thought_signature: Extra
+        /// inputs are not permitted`), so a Gemini stage followed by an
+        /// Anthropic stage died on its first request (issue #575).
+        ///
+        /// A provider that wants it emits it deliberately rather than getting
+        /// it by default: `openai_compat` already does exactly that when
+        /// building its tool calls, which is why the OpenAI-shaped path
+        /// (Gemini included) keeps working. The field stays on the struct - it
+        /// is still needed in memory and still persisted through
+        /// `SerializedToolCall` - it just no longer leaks into a body nobody
+        /// asked to put it in.
+        #[serde(default, skip_serializing)]
         thought_signature: Option<String>,
     },
     /// A tool result from executing a tool.
