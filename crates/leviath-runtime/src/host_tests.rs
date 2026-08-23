@@ -2588,7 +2588,7 @@ async fn a_run_announces_each_spend_threshold_once_as_it_passes_it() {
     let WorldEvent::Spend {
         threshold_usd,
         total_usd,
-        exact,
+        complete,
         stage,
         ..
     } = &crossed[0]
@@ -2597,7 +2597,7 @@ async fn a_run_announces_each_spend_threshold_once_as_it_passes_it() {
     };
     assert_eq!(*threshold_usd, 1.0);
     assert!((*total_usd - 2.0).abs() < 1e-9, "the running total");
-    assert!(*exact, "every call in this total was priced");
+    assert!(*complete, "every call in this total was priced");
     assert!(
         !stage.is_empty(),
         "and it names the stage doing the spending"
@@ -2612,7 +2612,7 @@ async fn a_run_announces_each_spend_threshold_once_as_it_passes_it() {
     assert_eq!(again.len(), 1, "only the newly passed one: {again:?}");
     let WorldEvent::Spend {
         threshold_usd,
-        exact,
+        complete,
         ..
     } = &again[0]
     else {
@@ -2620,8 +2620,8 @@ async fn a_run_announces_each_spend_threshold_once_as_it_passes_it() {
     };
     assert_eq!(*threshold_usd, 5.0);
     assert!(
-        !exact,
-        "a run holding an unpriced call has spent at least this, not exactly it"
+        !complete,
+        "a run holding an unpriced call has spent at least this, not all of it"
     );
 
     // Nothing further to say while the total sits still.

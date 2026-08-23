@@ -204,8 +204,10 @@ crossed, which is the stage doing the spending; the full per-stage breakdown is 
 This is reporting, not a ceiling. It does not stop a run, because stopping one mid-stage throws away
 work and that is a different decision from wanting to know what is happening.
 
-A run whose models have no published price reports what it could price and says the figure is not
-exact, rather than a confident number that is wrong. See [providers](/docs/providers) for where
+A run whose models have no published price reports what it could price and marks the figure
+incomplete, rather than a confident number that is wrong. Completeness is a different question from
+whether the priced part came from the provider's own figures or was reconstructed from rate cards;
+the run record's `cost_is_exact` answers that one. See [providers](/docs/providers) for where
 prices come from and when they are a reconstruction rather than the invoice.
 
 **`max_concurrent_inferences_by_model`** and **`max_concurrent_inferences_by_provider`** are the
