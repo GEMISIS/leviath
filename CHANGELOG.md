@@ -13,6 +13,15 @@ same list.
 
 ## Unreleased
 
+- Fixed: a fan-out worker's bibliography vanished when the parent's
+  `sources_index` was near its budget. The merge built one block of every source
+  the worker found and handed it to a whole-entry write that refuses anything
+  over budget, discarding the refusal. Measured on a finished 7-worker run: the
+  region ended at 19,461 tokens of 20,000 holding **four** worker bibliographies,
+  and the other three were nowhere, with nothing reporting it. The merge now
+  contributes what fits and warns, naming the worker and how many sources were
+  dropped, so a report that cannot cite a source at least says why.
+
 - Fixed: a Rhai script provider ignored the rates written for its models.
   Every built-in provider answers from `[model_capabilities]` first; the script
   provider held the same overrides, used them for capabilities, and never asked
