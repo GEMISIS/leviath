@@ -46,10 +46,14 @@ pub enum WorldEvent {
         threshold_usd: f64,
         /// What the run has spent in total, in dollars.
         total_usd: f64,
-        /// Whether every call in that total could be priced. When false the
-        /// real figure is higher by however much went unpriced, so a consumer
-        /// must not present it as the invoice.
-        exact: bool,
+        /// Whether every call behind that total could be priced. When false
+        /// the real figure is higher by however much went unpriced.
+        ///
+        /// Not the same question as `RunMeta::cost_is_exact`, which asks
+        /// whether the priced calls carried the provider's own figure rather
+        /// than one reconstructed from rate cards. A total can be complete and
+        /// still be a reconstruction, so neither answers for the other.
+        complete: bool,
         /// The stage the run was in when it crossed - the one doing the
         /// spending. The full per-stage breakdown is in `stages.json`.
         stage: String,
@@ -302,7 +306,7 @@ pub(super) struct Emitted {
     pub(super) cost_micros: u64,
     /// Whether that figure covers every call. A run with unpriced calls has
     /// spent at least this much, and the event says which it is.
-    pub(super) cost_exact: bool,
+    pub(super) cost_complete: bool,
     pub(super) terminal: bool,
     /// Why the run is parked, so a change of reason counts as a change worth
     /// telling subscribers about.
@@ -346,7 +350,7 @@ mod spend_tests {
             agent_id: "agent-spendy".into(),
             threshold_usd: 25.0,
             total_usd: 27.5,
-            exact: true,
+            complete: true,
             stage: "analyze".into(),
         };
         assert_eq!(event.run_id(), "run-spendy");

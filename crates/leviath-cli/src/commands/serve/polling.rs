@@ -183,14 +183,14 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             agent_id,
             threshold_usd,
             total_usd,
-            exact,
+            complete,
             stage,
         } => ServerEvent::AgentSpend {
             agent_id,
             run_id,
             threshold_usd,
             total_usd,
-            exact,
+            complete,
             stage,
         },
         WorldEvent::Spawned {
@@ -584,7 +584,7 @@ mod tests {
                 agent_id: "a".into(),
                 threshold_usd: 25.0,
                 total_usd: 27.5,
-                exact: true,
+                complete: true,
                 stage: "analyze".into(),
             }),
             "agent_spend"

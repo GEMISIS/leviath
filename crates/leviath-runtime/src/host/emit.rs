@@ -80,7 +80,7 @@ impl WorldHost {
                     // reporting nothing until every call is priced would stay
                     // silent through exactly the run worth interrupting.
                     cost_micros: super::events::usd_to_micros(totals.cost.priced_usd),
-                    cost_exact: totals.cost.total_usd().is_some(),
+                    cost_complete: totals.cost.total_usd().is_some(),
                     terminal,
                     wait_reason: self.wait_reason(agent),
                     title: self
@@ -184,7 +184,7 @@ impl WorldHost {
                         agent_id: agent_id.clone(),
                         threshold_usd: *threshold,
                         total_usd: cur.cost_micros as f64 / 1_000_000.0,
-                        exact: cur.cost_exact,
+                        complete: cur.cost_complete,
                         stage: cur.stage.clone(),
                     });
                 }

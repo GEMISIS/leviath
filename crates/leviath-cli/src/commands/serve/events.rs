@@ -30,7 +30,11 @@ pub enum ServerEvent {
         /// Whether every call behind that total could be priced. When false the
         /// run has spent at least this, and more by an unknown amount, so it
         /// must not be shown as a final figure.
-        exact: bool,
+        ///
+        /// A complete total can still be a reconstruction from published rates
+        /// rather than the provider's own figure; that is a separate question,
+        /// and `cost_is_exact` on the run record is what answers it.
+        complete: bool,
         /// The stage that was running when it crossed. The full per-stage
         /// breakdown is in the run's `stages.json`.
         stage: String,
@@ -527,7 +531,7 @@ mod tests {
                     run_id: "r11".to_string(),
                     threshold_usd: 25.0,
                     total_usd: 27.5,
-                    exact: true,
+                    complete: true,
                     stage: "analyze".to_string(),
                 },
                 "r11",
