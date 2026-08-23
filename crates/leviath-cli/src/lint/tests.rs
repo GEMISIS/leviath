@@ -889,6 +889,60 @@ fn a_model_present_in_the_catalog_passes() {
     assert!(lint(&manifest(CLEAN_STAGE), &env).is_empty());
 }
 
+/// A stage naming models and no providers is not accused of naming none.
+///
+/// This check asks whether any listed entry names a provider the install has.
+/// An entry in the current form names a model and leaves the route open, so a
+/// blueprint written entirely that way had no provider to find, failed the check
+/// every time, and was told it would "fall back to your default model" having
+/// "tried" a list of empty strings: `(tried , )`.
+///
+/// Which providers serve a bare model is a question for the resolver, which has
+/// a registry. This check does not, so an open entry is not evidence either way.
+#[test]
+fn a_stage_naming_models_without_providers_is_not_warned_about() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = ["claude-sonnet-5", "gpt-5.5"] }
+max_iterations = 10
+"#,
+    );
+    let env = LintEnv {
+        available_providers: Some(known_tools(&["ollama"])),
+        ..LintEnv::default()
+    };
+    let findings = lint(&toml, &env);
+    assert!(
+        !codes(&findings).contains(&"no-reachable-provider"),
+        "an open-route entry is not a provider named and missing: {findings:?}"
+    );
+}
+
+/// A stage that pins every route and has none of them is still warned about,
+/// which is the case the check exists for.
+#[test]
+fn a_stage_pinning_only_unreachable_providers_is_still_warned_about() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = ["claude-sonnet-5", { provider = "openai", model = "gpt-5.5" }] }
+max_iterations = 10
+"#,
+    );
+    let env = LintEnv {
+        available_providers: Some(known_tools(&["ollama"])),
+        ..LintEnv::default()
+    };
+    let findings = lint(&toml, &env);
+    assert!(
+        !codes(&findings).contains(&"no-reachable-provider"),
+        "one open entry is enough to leave this undecided: {findings:?}"
+    );
+}
+
 /// A stage with nothing reachable in its whole list is the shape the runtime
 /// rejects at spawn, so it is worth saying up front.
 #[test]
