@@ -1369,15 +1369,54 @@ mod tests {
     /// four research runs, and the raw OS message ("Is a directory (os error
     /// 21)") named the problem without naming the fix.
     #[tokio::test]
-    async fn read_file_on_a_directory_points_at_list_dir() {
+    async fn read_file_on_a_directory_answers_with_what_is_in_it() {
         let dir = tempfile::tempdir().unwrap();
         let tools = make_tools(dir.path());
         fs::create_dir(dir.path().join("adir")).unwrap();
+        fs::write(dir.path().join("adir/notes.md"), "hi").unwrap();
+        fs::create_dir(dir.path().join("adir/nested")).unwrap();
 
         let result = tools.execute("read_file", json!({"path": "adir"})).await;
         assert!(result.contains("[error]"), "{result}");
         assert!(result.contains("is a directory, not a file"), "{result}");
-        assert!(result.contains("list_dir"), "{result}");
+        // The listing comes back here rather than a pointer to `list_dir`: most
+        // stages that grant `read_file` do not grant `list_dir`, so naming it
+        // asks for something they cannot do.
+        assert!(result.contains("notes.md"), "names what is in it: {result}");
+        assert!(
+            result.contains("nested/"),
+            "and marks the entries that are themselves directories: {result}"
+        );
+    }
+
+    /// An empty directory still has to read as an answer, not as a blank.
+    #[tokio::test]
+    async fn read_file_on_an_empty_directory_says_it_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        fs::create_dir(dir.path().join("hollow")).unwrap();
+
+        let result = tools.execute("read_file", json!({"path": "hollow"})).await;
+        assert!(result.contains("no entries to show"), "{result}");
+    }
+
+    /// A directory of thousands would bury the answer, so the listing is capped
+    /// and says how much it left out.
+    #[tokio::test]
+    async fn a_long_directory_listing_is_capped_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        fs::create_dir(dir.path().join("many")).unwrap();
+        for n in 0..60 {
+            fs::write(dir.path().join(format!("many/f{n:03}.txt")), "x").unwrap();
+        }
+
+        let result = tools.execute("read_file", json!({"path": "many"})).await;
+        assert!(result.contains("f000.txt"), "the first entries are there");
+        assert!(
+            result.contains("and 10 more"),
+            "and the rest are accounted for: {result}"
+        );
     }
 
     #[tokio::test]
