@@ -13,6 +13,18 @@ same list.
 
 ## Unreleased
 
+- Fixed: a stage running on Gemini could not be followed by a stage on
+  Anthropic. Gemini attaches a `thought_signature` to its tool calls, history is
+  replayed to whichever provider runs next, and Anthropic rejects the unknown
+  key outright. The field is no longer serialized; the providers that want it
+  (the OpenAI-shaped path, Gemini included) already attach it deliberately.
+- Fixed: a fan-out worker's bibliography now reaches its parent. The merge took
+  a worker's findings and dropped its sources, so `sources_index` described only
+  what the parent read itself - 33 entries at the root of a run whose tree held
+  419. Merged entries are deduplicated by URL and carry the worker they came
+  from instead of a citation number, because `[n]` is per agent and renumbering
+  would repoint the citations already in the merged findings.
+
 - Fixed: `TokenUsage` meant two different things depending on the provider, so
   any arithmetic over it was wrong for one of them. Anthropic reports
   `input_tokens` exclusive of both cache counts; the OpenAI shape reports a

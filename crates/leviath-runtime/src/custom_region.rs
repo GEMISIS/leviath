@@ -865,15 +865,43 @@ mod tests {
     fn render_tool_call_passes_thought_signature_through() {
         let src = r#"
             fn render(ctx) {
-                #{ messages: [#{ role: "assistant", tool_calls: [
+                #{ messages: [#{ role: "assistant", content: "thinking",
+                   tool_calls: [
                     #{ id: "c", name: "n", thought_signature: "sig123" },
                 ] }] }
             }
         "#;
         let region = region_with(&[("x", EntryKind::Text)]);
         let (_, messages) = render(&region, Some(&script(src)), false);
-        let blocks = serde_json::to_value(&messages[0].content).unwrap();
-        assert_eq!(blocks[0]["thought_signature"], json!("sig123"));
+        // Asserted on the block rather than on its serialized form: the field
+        // is deliberately never serialized, because it is one provider's and
+        // history is replayed to whichever provider runs next (issue #575).
+        // `openai_compat` re-attaches it by hand for the providers that want it.
+        assert_eq!(
+            tool_signature(&messages[0].content).as_deref(),
+            Some("sig123")
+        );
+        // Both arms of the helper, so neither is an unexercised branch: plain
+        // text carries no tool call and so no signature.
+        assert_eq!(
+            tool_signature(&leviath_providers::MessageContent::Text("hi".to_string())),
+            None
+        );
+    }
+
+    /// The first tool call's `thought_signature` in a message, if it has one.
+    fn tool_signature(content: &leviath_providers::MessageContent) -> Option<String> {
+        match content {
+            leviath_providers::MessageContent::Blocks(blocks) => {
+                blocks.iter().find_map(|b| match b {
+                    leviath_providers::ContentBlock::ToolUse {
+                        thought_signature, ..
+                    } => thought_signature.clone(),
+                    _ => None,
+                })
+            }
+            leviath_providers::MessageContent::Text(_) => None,
+        }
     }
 
     #[test]
