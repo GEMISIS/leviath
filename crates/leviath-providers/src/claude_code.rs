@@ -469,6 +469,12 @@ impl Provider for ClaudeCodeProvider {
         "claude-code"
     }
 
+    // No `pricing` impl on purpose. This transport bills against a Claude
+    // subscription rather than per token, so there is no per-token rate that
+    // would be true. Returning zero would let a run report that it cost nothing
+    // while consuming real quota; leaving it unknown makes the run say its cost
+    // is unavailable, which it is.
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // Merged, not swapped: an entry names only what it corrects.
         match self.capability_overrides.get(model) {

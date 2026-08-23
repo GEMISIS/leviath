@@ -1,7 +1,8 @@
 [agent]
 name = "researcher"
-version = "0.1.9"
+version = "0.4.0"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
+max_child_depth = 2
 entry_stage = "gather"
 
 # Read/search agent: it gathers and synthesizes, writing only its final report.
@@ -11,6 +12,11 @@ list_dir   = "allow"
 web_search = "allow"
 web_fetch  = "allow"
 current_time = "allow"
+# `fan_out` is deliberately not pre-approved here. A blueprint may only loosen
+# `web_search` and `web_fetch` on a stock machine; spawning sub-agents spends
+# money and can recurse, so it is worth a consent prompt. `available_tools`
+# below still offers it, and an unattended run waives the prompt as it does
+# every other.
 write_file = "ask"
 bash       = "ask"
 
@@ -20,7 +26,7 @@ mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Gather relevant information on the topic"
 # web_search / web_fetch are provided by the agent's script tools (issue #97).
-available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "context_read", "current_time"]
+available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "context_read", "current_time", "fan_out"]
 max_iterations = 8
 max_revisits = 2
 system_prompt = """
@@ -88,13 +94,45 @@ Record that in `sources_index` and do NOT close the gap from memory. Reporting a
 topic as unresearched is a usable result; a confident answer assembled from
 recall is not, and a reader cannot tell the two apart after the fact.
 Prefer primary sources and well-established outlets; note when something is a blog,
-forum, or vendor claim. Once you have solid coverage of the sub-topics, transition
-to analyze - don't keep searching for marginal additions. The analyze stage will
-send you back if it finds a real gap.
+forum, or vendor claim. FIRST, before the broad search: read the task and count the subjects.
+
+Several INDEPENDENT subjects - separate companies, systems, incidents, products,
+each with its own sources and its own answer, no shared thread - call the
+`fan_out` tool RIGHT NOW, one item per subject, `agent` set to "researcher".
+That is how you split; you do not need to finish this stage first. It researches them in parallel and hands the findings back. Do one
+orienting search if you need it, then go; do not research them one at a time.
+Researching five subjects yourself costs five times what splitting them costs
+and you will run out of iterations before you finish.
+
+ONE subject, however deep, examined from several angles: stay here and gather,
+then go to `analyze`. Depth is not a reason to split; independence is.
+
+Say which it is and why in one line before you do anything else.
+
+If you are still gathering at the end of this stage, that decision is already
+made - you are the single-subject case, so finish and go to `analyze`. `analyze`
+will send you back if it finds a real gap.
+"""
+
+transition_prompt = """
+Say what this topic actually is. Answer this EARLY - `dig` exists to
+split work before you do it, so choosing it after a full gather saves nothing:
+- Several INDEPENDENT subjects that share a name - separate companies, systems,
+  incidents, products - each with its own sources and its own answer. Each one
+  is worth a researcher of its own. Respond with: dig
+- ONE subject, however deep, examined from several angles. Respond with: analyze
+
+Depth is not a reason to split and neither is a long source list; independence
+is. Six pages about one system are one subject. A dozen companies are a dozen
+subjects.
 """
 
 [stages.gather.tool_routing]
 default_region = "raw_findings"
+
+[stages.gather.transitions.dig]
+hint = "This thread is several independent investigations, not one"
+transform = "direct"
 
 [stages.gather.transitions.analyze]
 hint = "Enough gathered for a first pass of analysis"
@@ -275,7 +313,52 @@ reads instead of the report, not a second copy of it.
 # not reservations: a region costs only what is stored in it, so a ceiling it
 # never reaches is free, and they may sum past 100% because regions rarely fill
 # together.
+
+# ─── Dig: one more level, only when the thread is genuinely several ──────────
+# A worker handed "compare the sandboxing stories" may find that is four
+# separate investigations. Splitting once more finds what one pass cannot,
+# which is the whole reason for sub-agents. Three items, not twelve: this is
+# the level where a generous cap multiplies.
+[stages.dig]
+mode = "fan_out"
+# The split decision is an inference like any other, so this stage names its own
+# model. sonnet-5 measured best at it: given the same material it produced eight
+# subject-shaped items where deepseek produced three vague buckets.
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+worker_agent = "researcher"
+max_workers = 3
+max_items = 3
+max_iterations = 4
+max_revisits = 1
+description = "Split a thread that turned out to be several, one level deeper"
+split_prompt = """
+Split when this thread turned out to be several distinct subjects rather than
+one - different companies, systems, standards or approaches, each needing its
+own reading. Worth checking for every time.
+
+Name one sub-question per subject, as a JSON array:
+[{"id": "...", "context": {"question": "...", "why": "..."}}]
+
+The unit is a SUBJECT, not a source:
+- Several distinct subjects is several items. They do not overlap.
+- Six pages about one subject is ONE item, or none - read them yourself.
+- "Read this page" is never an item. You are a research agent with your own
+  gather loop; pointing a whole agent at one URL wastes it.
+- Two sub-questions whose workers would read the same material are one.
+
+If this really is a single subject, reply with exactly: []
+"""
+
+[stages.dig.transitions.analyze]
+hint = "Sub-findings are in - fold them into the analysis"
+transform = "direct"
+
+[stages.dig.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
 [context.regions]
+sub_findings   = { kind = "pinned", budget = "15%", volatility = "grows", description = "What deeper workers returned, one entry each" }
 # The research question - required. Supplied via --task (or the API/ACP task field).
 query          = { kind = "pinned", budget = "1%", required = true, seed = "task", required_message = "State the research question via --task.", volatility = "stable" }
 # Optional caller bounds: --scope "peer-reviewed sources since 2020 only".

@@ -137,6 +137,97 @@ impl ModelPricing {
     }
 }
 
+/// The day the rates in [`published_rates`] were read from the vendors' pages.
+///
+/// Shipped with the numbers so staleness is visible rather than assumed. A
+/// build months old is quoting months-old prices, and the only honest thing to
+/// do about that is say so.
+pub const RATES_READ_ON: &str = "2026-08-23";
+
+/// Published list prices for the providers whose APIs do not quote them.
+///
+/// ⚠️ **A snapshot, not a feed.** Anthropic, OpenAI and Google publish rates on
+/// a web page with nothing programmatic behind it, so these were transcribed by
+/// hand on [`RATES_READ_ON`] and cannot notice a repricing. They are a floor
+/// under "no cost at all", not an authority:
+///
+/// * a per-model config entry overrides any row here, and is the right place
+///   for a negotiated rate, which no public page will ever show;
+/// * OpenRouter is absent on purpose - it reports each call's real cost and
+///   serves live rates from its own catalogue, both of which beat a table;
+/// * a cost computed from these is reported as computed, so
+///   [`CostTotals::is_exact`] stays false and a reader can tell a reconstruction
+///   from an invoice.
+///
+/// Cache columns are the vendors' own. Anthropic prices a 5-minute cache write
+/// at 1.25x input and a read at 0.1x, which is the caching Leviath uses.
+/// OpenAI and Google quote a cached-input rate and charge nothing extra to
+/// write, so their write rate is the input rate.
+///
+/// Discounts and multipliers that depend on how a request was made - batch,
+/// data residency, fast mode, long-context tiers - are deliberately not
+/// modelled. They would need per-request state this table does not see, and a
+/// wrong adjustment is worse than a plain list price.
+pub fn published_rates(provider: &str, model: &str) -> Option<ModelPricing> {
+    // (model prefix, input, cache read, cache write, output), longest prefix
+    // first so `gpt-5.5` is not swallowed by `gpt-5`.
+    let rows: &[(&str, f64, f64, f64, f64)] = match provider {
+        "anthropic" => &[
+            ("claude-fable-5", 10.0, 1.0, 12.5, 50.0),
+            ("claude-opus-5", 5.0, 0.5, 6.25, 25.0),
+            ("claude-opus-4-8", 5.0, 0.5, 6.25, 25.0),
+            ("claude-opus-4-7", 5.0, 0.5, 6.25, 25.0),
+            ("claude-opus-4-6", 5.0, 0.5, 6.25, 25.0),
+            ("claude-sonnet-5", 2.0, 0.2, 2.5, 10.0),
+            ("claude-sonnet-4-6", 3.0, 0.3, 3.75, 15.0),
+            ("claude-haiku-4-5", 1.0, 0.1, 1.25, 5.0),
+        ],
+        "openai" => &[
+            ("gpt-5.5", 5.0, 0.5, 5.0, 30.0),
+            ("gpt-5.4-mini", 0.75, 0.075, 0.75, 4.5),
+            ("gpt-5.4-nano", 0.2, 0.02, 0.2, 1.25),
+            ("gpt-5.4", 2.5, 0.25, 2.5, 15.0),
+        ],
+        "google" => &[
+            ("gemini-3.5-flash", 1.5, 0.15, 1.5, 9.0),
+            ("gemini-3.1-pro", 2.0, 0.2, 2.0, 12.0),
+            ("gemini-3.1-flash-lite", 0.25, 0.025, 0.25, 1.5),
+            ("gemini-3-flash", 0.5, 0.05, 0.5, 3.0),
+        ],
+        _ => return None,
+    };
+    rows.iter()
+        .find(|(prefix, ..)| model.starts_with(prefix))
+        .map(|&(_, input, read, write, output)| ModelPricing {
+            input_per_mtok: input,
+            cached_input_per_mtok: read,
+            cache_write_per_mtok: write,
+            output_per_mtok: output,
+        })
+}
+
+impl crate::ModelCapabilityOverride {
+    /// The rates this entry declares, or `None` when it declares no usable pair.
+    ///
+    /// Both sides are required. A total built from an input rate with no output
+    /// rate is wrong in a way that still looks like a number, which is the one
+    /// outcome the cost work exists to prevent - so half a rate card is treated
+    /// as none of one.
+    ///
+    /// The cache rates default to the input rate, which is what a provider that
+    /// does not price caching separately effectively charges.
+    pub fn pricing(&self) -> Option<crate::ModelPricing> {
+        let input = self.input_per_mtok?;
+        let output = self.output_per_mtok?;
+        Some(crate::ModelPricing {
+            input_per_mtok: input,
+            cached_input_per_mtok: self.cached_input_per_mtok.unwrap_or(input),
+            cache_write_per_mtok: self.cache_write_per_mtok.unwrap_or(input),
+            output_per_mtok: output,
+        })
+    }
+}
+
 /// A run's money, kept so that "unknown" stays distinguishable from "zero".
 ///
 /// A partial total is the dangerous shape: it looks authoritative, gets quoted
@@ -194,6 +285,172 @@ impl CostTotals {
 #[cfg(test)]
 mod cost_tests {
     use super::*;
+
+    /// The rates as published, including Anthropic's asymmetric cache columns:
+    /// a 5-minute write costs MORE than fresh input (1.25x) and a read costs a
+    /// tenth of it. Flattening either way misprices every cached call, and a
+    /// well-cached run is exactly the one whose cost is most worth trusting.
+    #[test]
+    fn anthropic_cache_rates_sit_either_side_of_the_input_rate() {
+        let p = published_rates("anthropic", "claude-opus-5").expect("listed");
+        assert_eq!(p.input_per_mtok, 5.0);
+        assert_eq!(p.output_per_mtok, 25.0);
+        assert!(
+            p.cache_write_per_mtok > p.input_per_mtok,
+            "writes cost more"
+        );
+        assert!(
+            p.cached_input_per_mtok < p.input_per_mtok,
+            "reads cost less"
+        );
+        assert_eq!(p.cache_write_per_mtok, 6.25);
+        assert_eq!(p.cached_input_per_mtok, 0.5);
+    }
+
+    /// OpenAI and Google quote a cached-input rate and charge nothing extra to
+    /// write, so their write rate is the input rate rather than a premium.
+    #[test]
+    fn providers_without_a_write_premium_charge_the_input_rate() {
+        for (provider, model) in [("openai", "gpt-5.5"), ("google", "gemini-3.5-flash")] {
+            let p = published_rates(provider, model).expect("listed");
+            assert_eq!(
+                p.cache_write_per_mtok, p.input_per_mtok,
+                "{provider}/{model} has no write premium"
+            );
+            assert!(p.cached_input_per_mtok < p.input_per_mtok);
+        }
+    }
+
+    /// Longest prefix wins. `gpt-5.4-mini` must not be swallowed by `gpt-5.4`,
+    /// which would bill a mini model at three times its rate.
+    #[test]
+    fn a_longer_model_prefix_is_not_swallowed_by_a_shorter_one() {
+        let mini = published_rates("openai", "gpt-5.4-mini").expect("listed");
+        let full = published_rates("openai", "gpt-5.4").expect("listed");
+        assert_eq!(mini.input_per_mtok, 0.75);
+        assert_eq!(full.input_per_mtok, 2.5);
+        assert!(mini.input_per_mtok < full.input_per_mtok);
+
+        let lite = published_rates("google", "gemini-3.1-flash-lite").expect("listed");
+        assert_eq!(lite.input_per_mtok, 0.25);
+    }
+
+    /// A model or provider the table does not name is unpriced, not free.
+    #[test]
+    fn an_unlisted_model_or_provider_is_unpriced() {
+        assert_eq!(published_rates("anthropic", "claude-opus-9"), None);
+        assert_eq!(published_rates("openai", "davinci"), None);
+        // OpenRouter is absent on purpose: it reports each call's real cost and
+        // serves live rates, both of which beat a transcription.
+        assert_eq!(published_rates("openrouter", "x-ai/grok-4.6"), None);
+        assert_eq!(published_rates("ollama", "qwen3.5:9b"), None);
+    }
+
+    /// Every row quotes both sides and a sane ordering, so a typo in the table
+    /// cannot ship a model that bills output below input or a zero rate.
+    #[test]
+    fn every_row_is_internally_consistent() {
+        let models = [
+            ("anthropic", "claude-fable-5"),
+            ("anthropic", "claude-opus-5"),
+            ("anthropic", "claude-sonnet-5"),
+            ("anthropic", "claude-haiku-4-5"),
+            ("openai", "gpt-5.5"),
+            ("openai", "gpt-5.4"),
+            ("openai", "gpt-5.4-mini"),
+            ("openai", "gpt-5.4-nano"),
+            ("google", "gemini-3.5-flash"),
+            ("google", "gemini-3.1-pro"),
+            ("google", "gemini-3-flash"),
+            ("google", "gemini-3.1-flash-lite"),
+        ];
+        // Two passes rather than a panicking closure: the closure's body is a
+        // branch a passing test never enters, and the 100% gate counts it.
+        let missing: Vec<&(&str, &str)> = models
+            .iter()
+            .filter(|(p, m)| published_rates(p, m).is_none())
+            .collect();
+        assert!(missing.is_empty(), "unlisted rows: {missing:?}");
+        for p in models
+            .iter()
+            .filter_map(|(provider, model)| published_rates(provider, model))
+        {
+            let model = "row";
+            assert!(p.input_per_mtok > 0.0, "{model} input");
+            assert!(
+                p.output_per_mtok > p.input_per_mtok,
+                "{model} output > input"
+            );
+            assert!(p.cached_input_per_mtok > 0.0, "{model} cache read");
+            assert!(
+                p.cached_input_per_mtok <= p.input_per_mtok,
+                "{model} cache read is not a premium"
+            );
+        }
+    }
+
+    /// The date ships with the numbers. Without it a reader cannot tell a
+    /// current price from one transcribed a year ago.
+    #[test]
+    fn the_table_carries_the_day_it_was_read() {
+        assert_eq!(RATES_READ_ON.len(), "YYYY-MM-DD".len());
+        assert!(RATES_READ_ON.starts_with("202"));
+    }
+
+    /// Rates declared on a model's config entry are what the direct providers
+    /// serve, since their APIs do not quote prices.
+    #[test]
+    fn a_config_entry_can_declare_rates() {
+        let o = crate::ModelCapabilityOverride {
+            input_per_mtok: Some(5.0),
+            output_per_mtok: Some(25.0),
+            cached_input_per_mtok: Some(0.5),
+            cache_write_per_mtok: Some(6.25),
+            ..Default::default()
+        };
+        let p = o.pricing().expect("both sides declared");
+        assert_eq!(p.input_per_mtok, 5.0);
+        assert_eq!(p.output_per_mtok, 25.0);
+        assert_eq!(p.cached_input_per_mtok, 0.5);
+        assert_eq!(p.cache_write_per_mtok, 6.25);
+    }
+
+    /// Cache rates left out default to the input rate.
+    #[test]
+    fn declared_rates_default_their_cache_sides_to_input() {
+        let o = crate::ModelCapabilityOverride {
+            input_per_mtok: Some(2.0),
+            output_per_mtok: Some(8.0),
+            ..Default::default()
+        };
+        let p = o.pricing().expect("both sides declared");
+        assert_eq!(p.cached_input_per_mtok, 2.0);
+        assert_eq!(p.cache_write_per_mtok, 2.0);
+    }
+
+    /// One side alone is treated as no rate card at all.
+    #[test]
+    fn half_a_rate_card_prices_nothing() {
+        let only_in = crate::ModelCapabilityOverride {
+            input_per_mtok: Some(5.0),
+            ..Default::default()
+        };
+        let only_out = crate::ModelCapabilityOverride {
+            output_per_mtok: Some(25.0),
+            ..Default::default()
+        };
+        assert_eq!(only_in.pricing(), None);
+        assert_eq!(only_out.pricing(), None);
+        assert_eq!(crate::ModelCapabilityOverride::default().pricing(), None);
+    }
+
+    /// A set built from capabilities names no rates: what a model can do and
+    /// what it charges are different questions.
+    #[test]
+    fn capabilities_converted_to_an_override_carry_no_rates() {
+        let o = crate::ModelCapabilityOverride::from(crate::ModelCapabilities::default());
+        assert_eq!(o.pricing(), None);
+    }
 
     fn usage(fresh: usize, cached: usize, written: usize, out: usize) -> TokenUsage {
         TokenUsage::new(fresh, cached, written, out)

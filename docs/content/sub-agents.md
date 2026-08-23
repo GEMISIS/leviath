@@ -197,6 +197,18 @@ That is what the bundled `deep-researcher` and `wide-researcher` do. The differe
 does the work: a `worker_agent` worker is a run of its own, so it brings its own stages, its own
 tools, and its own clean context window, rather than a share of the parent's.
 
+It also brings its own ability to fan out. The bundled `researcher` grants the `fan_out` tool to its
+gathering stage, so a worker that finds its slice is really several independent subjects hands them
+out in parallel rather than working through them one at a time. `max_child_depth` bounds how far that
+can go. Note the distinction: a `mode = "fan_out"` STAGE is only entered when the current stage ends,
+which for a gathering stage means after the gathering is done, so a split meant to parallelise work
+would arrive too late to save any. Granting the tool is what lets the decision happen while it still
+matters.
+
+A worker's bibliography merges back into its parent's `sources_index`, deduplicated by URL. Merged
+entries name the worker they came from and carry no `[n]` marker, because numbering is per agent and
+renumbering would repoint the citations already in the merged findings.
+
 The cost is a dependency. The named blueprint has to be installed, and `lev validate` cannot check
 that for you the way it checks a `worker_stage`, because what is installed is a property of the
 machine rather than of the blueprint. A missing one fails per item, so with the default

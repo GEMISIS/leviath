@@ -57,6 +57,45 @@ pub struct OpenRouterProvider {
     /// reached - both mean "fall back to the built-in table", which is what
     /// happened before this existed.
     api_windows: std::sync::Arc<std::sync::Mutex<HashMap<String, ApiWindow>>>,
+
+    /// Per-model rates as `/models` reports them, filled by the same priming
+    /// pass that fills [`Self::api_windows`].
+    ///
+    /// A fallback only. `usage.cost` on the response is what the account is
+    /// actually charged and always wins; this covers a reply that arrives
+    /// without it. Empty until primed, and empty forever if the endpoint could
+    /// not be reached - which reports the call unpriced rather than guessing.
+    api_pricing: std::sync::Arc<std::sync::Mutex<HashMap<String, crate::ModelPricing>>>,
+}
+
+/// One model's rates from a `/models` entry, or `None` when it does not quote
+/// both sides.
+///
+/// The endpoint reports USD **per token** as strings; `ModelPricing` is per
+/// million, hence the scale. A model missing either half is skipped rather than
+/// half-priced: a total built from a prompt rate and no completion rate is
+/// wrong in a way that looks right.
+///
+/// Cache rates are quoted separately and often absent. When they are, the read
+/// rate falls back to the input rate and the write rate with it - the same
+/// shape as a provider that does not price caching separately, which is what
+/// `ModelPricing::flat` encodes.
+fn parse_pricing(entry: &serde_json::Value) -> Option<crate::ModelPricing> {
+    let p = entry.get("pricing")?;
+    let rate = |key: &str| -> Option<f64> {
+        p.get(key)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|per_token| per_token * 1_000_000.0)
+    };
+    let input = rate("prompt")?;
+    let output = rate("completion")?;
+    Some(crate::ModelPricing {
+        input_per_mtok: input,
+        cached_input_per_mtok: rate("input_cache_read").unwrap_or(input),
+        cache_write_per_mtok: rate("input_cache_write").unwrap_or(input),
+        output_per_mtok: output,
+    })
 }
 
 /// What `/models` reports about one model's sizes.
@@ -80,6 +119,7 @@ impl OpenRouterProvider {
             warned_unknown: Default::default(),
             temperature_unsupported: Default::default(),
             api_windows: Default::default(),
+            api_pricing: Default::default(),
         }
     }
 
@@ -97,6 +137,7 @@ impl OpenRouterProvider {
             warned_unknown: Default::default(),
             temperature_unsupported: Default::default(),
             api_windows: Default::default(),
+            api_pricing: Default::default(),
         }
     }
 
@@ -116,6 +157,7 @@ impl OpenRouterProvider {
             warned_unknown: Default::default(),
             temperature_unsupported: Default::default(),
             api_windows: Default::default(),
+            api_pricing: Default::default(),
         }
     }
 
@@ -691,6 +733,12 @@ impl Provider for OpenRouterProvider {
         }
     }
 
+    fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
+        leviath_core::sync::lock(&self.api_pricing)
+            .get(model)
+            .copied()
+    }
+
     async fn prime_capabilities(&self) -> Result<()> {
         let body = self.fetch_models_json().await?;
         let data = body
@@ -699,10 +747,14 @@ impl Provider for OpenRouterProvider {
             .ok_or_else(|| ProviderError::InvalidResponse("Missing 'data' array".to_string()))?;
 
         let mut windows = HashMap::with_capacity(data.len());
+        let mut pricing = HashMap::with_capacity(data.len());
         for entry in data {
             let Some(id) = entry.get("id").and_then(|v| v.as_str()) else {
                 continue;
             };
+            if let Some(rates) = parse_pricing(entry) {
+                pricing.insert(id.to_string(), rates);
+            }
             // No `context_length` means the endpoint is telling us nothing
             // useful; skipping leaves the built-in table in charge rather than
             // recording a guess that outranks it.
@@ -723,8 +775,14 @@ impl Provider for OpenRouterProvider {
         }
 
         let count = windows.len();
+        let priced = pricing.len();
         *leviath_core::sync::lock(&self.api_windows) = windows;
-        tracing::debug!(models = count, "learned OpenRouter model windows");
+        *leviath_core::sync::lock(&self.api_pricing) = pricing;
+        tracing::debug!(
+            models = count,
+            priced,
+            "learned OpenRouter model windows and rates"
+        );
         Ok(())
     }
 
@@ -778,6 +836,74 @@ impl Provider for OpenRouterProvider {
 
 #[cfg(test)]
 mod tests {
+
+    /// `/models` quotes USD per token as strings; `ModelPricing` is per million.
+    /// Getting that scale wrong is a factor of a million, which is the kind of
+    /// error that looks like a bug in something else entirely.
+    #[test]
+    fn model_rates_are_read_per_million_from_the_catalog() {
+        let entry = serde_json::json!({
+            "id": "x-ai/grok-4.6",
+            "pricing": {
+                "prompt": "0.000002",
+                "completion": "0.000006",
+                "input_cache_read": "0.0000002",
+                "input_cache_write": "0.0000025"
+            }
+        });
+        let p = parse_pricing(&entry).expect("both sides quoted");
+        // Compared with a tolerance, not for equality: scaling a per-token rate
+        // by a million lands a hair off the decimal it came from
+        // (0.0000002 * 1e6 is 0.19999999999999998), and a cost report does not
+        // care about the sixteenth digit.
+        let close = |got: f64, want: f64| {
+            assert!((got - want).abs() < 1e-9, "{got} != {want}");
+        };
+        close(p.input_per_mtok, 2.0);
+        close(p.output_per_mtok, 6.0);
+        close(p.cached_input_per_mtok, 0.2);
+        close(p.cache_write_per_mtok, 2.5);
+    }
+
+    /// Cache rates are often absent. A provider that does not price caching
+    /// separately charges the input rate for it, which is what the fallback
+    /// encodes - not zero, which would under-report every cached call.
+    #[test]
+    fn absent_cache_rates_fall_back_to_the_input_rate() {
+        let entry = serde_json::json!({
+            "id": "m",
+            "pricing": { "prompt": "0.000003", "completion": "0.000009" }
+        });
+        let p = parse_pricing(&entry).expect("both sides quoted");
+        assert_eq!(p.cached_input_per_mtok, 3.0);
+        assert_eq!(p.cache_write_per_mtok, 3.0);
+    }
+
+    /// Half a rate card is not a rate card. A total built from an input rate
+    /// with no output rate is wrong and still looks like a number.
+    #[test]
+    fn a_model_missing_either_side_is_left_unpriced() {
+        for pricing in [
+            serde_json::json!({ "prompt": "0.000003" }),
+            serde_json::json!({ "completion": "0.000009" }),
+            serde_json::json!({ "prompt": "free", "completion": "0.000009" }),
+        ] {
+            let entry = serde_json::json!({ "id": "m", "pricing": pricing });
+            assert!(parse_pricing(&entry).is_none(), "{pricing}");
+        }
+        assert!(parse_pricing(&serde_json::json!({ "id": "m" })).is_none());
+    }
+
+    /// Until priming has run there are no rates, and a call is unpriced rather
+    /// than free - the endpoint may be unreachable and never answer.
+    #[test]
+    fn an_unprimed_provider_quotes_nothing() {
+        let p = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+        );
+        assert_eq!(p.pricing("x-ai/grok-4.6"), None);
+    }
     use super::*;
     use crate::test_support::always_on_tracing_guard;
     use leviath_testkit::{spawn_mock_server, spawn_mock_server_truncated_body};

@@ -1,7 +1,8 @@
 [agent]
 name = "deep-researcher"
-version = "0.3.6"
+version = "0.4.0"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
+max_child_depth = 2
 entry_stage = "gather"
 
 # Read/search agent: writes only its final report.
@@ -17,7 +18,7 @@ bash       = "ask"
 # ─── Stage 1: Gather ──────────────────────────────────────────────────────────
 [stages.gather]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "openrouter", model = "x-ai/grok-4.6" }, { provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Gather primary sources and key references on the topic"
 # web_search / web_fetch are provided by this agent's tools/ (issue #97).
 available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time", "context_read", "ask_user_text", "ask_user_choice"]
@@ -136,8 +137,8 @@ transform = "direct"
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
 # target has spent its max_revisits budget, the run can still move forward
 # to the deliverable instead of dead-ending.
-[stages.gather.transitions.synthesize]
-hint = "Analysis is out of revisits - synthesize from the material in hand"
+[stages.gather.transitions.challenge]
+hint = "Out of revisits here - hand what exists to the adversarial pass, which is the only way to the report"
 condition = "dead_end"
 transform = "compact"
 
@@ -156,7 +157,7 @@ transform = "direct"
 # `on_worker_failure = "continue"` means the run reports that rather than dying.
 [stages.investigate]
 mode = "fan_out"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "openrouter", model = "x-ai/grok-4.6" }, { provider = "openai", model = "gpt-5.4" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Research each sub-question of the topic in parallel"
 available_tools = []
 max_iterations = 4
@@ -166,7 +167,7 @@ worker_agent = "researcher"
 merge_stage = "analyze"
 # Every sub-question at once rather than in waves; the daemon's inference
 # pool paces the requests. Set to 0 for no cap at all.
-max_workers = 30
+max_workers = 12
 # Where the workers' findings land, and the budget their shares divide.
 results_region = "sub_findings"
 # A ceiling on sub-questions, not just on concurrency. Thirty leaves each
@@ -186,6 +187,24 @@ Call `fan_out` with one entry in `items` per work item:
 Every item MUST carry enough to work from alone: a worker is a separate agent
 and does not share this run's context, so the work item is all it gets. Name the
 question precisely enough that two workers cannot answer the same one.
+
+The unit of a work item is a SUBJECT, not a source. Judge a split by what a
+worker would have to read, not by how many links you have:
+
+- A dozen companies, models or standards to compare is a dozen items. They do
+  not overlap and no one worker could do them justice.
+- Six links on the same site about the same subject is ONE item. Hand the
+  worker the subject and let it read all six.
+- "Read this page" is never an item. A worker is a research agent with its own
+  gather/analyze loop, and pointing it at a single URL wastes all of that -
+  fetch it yourself instead.
+- If two items would send workers to overlapping material, they are one item.
+  Two workers reading the same sources return the same finding twice, and a
+  finding that appears twice reads like corroboration when it is an echo.
+
+There is no prize for few items and no penalty for many. Split as wide as the
+subject genuinely is - and no wider, because a split finer than the material
+returns thin answers that cost a full agent each.
 
 GROUND EVERY NAME IN `sources`. A proper noun in a sub-question - a product,
 model, version, company, standard - must already appear in `sources`. If you
@@ -211,8 +230,8 @@ transform = "direct"
 # Un-exhaustible escape (lint: dead-end-possible). Conditioned, like every
 # other escape here: an unconditioned edge is on the model's menu, so this one
 # let a fan-out stage answer "synthesize" and walk past its own workers.
-[stages.investigate.transitions.synthesize]
-hint = "Analysis is out of revisits - synthesize from what came back"
+[stages.investigate.transitions.challenge]
+hint = "Out of revisits here - hand what exists to the adversarial pass, which is the only way to the report"
 condition = "dead_end"
 transform = "compact"
 
@@ -221,11 +240,11 @@ transform = "compact"
 # (follow_citations), or write the report (synthesize).
 [stages.analyze]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "anthropic/claude-opus-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Analyze findings, cross-reference claims, and decide the next move"
 available_tools = ["read_file", "web_fetch", "context_write", "context_append", "current_time"]
 max_iterations = 20
-max_revisits = 3
+max_revisits = 4  # backstop only; the convergence note is what should end this loop
 transition_prompt = """
 Decide the next move:
 - Broad gaps that need new sources on a sub-topic → respond with: gather
@@ -237,7 +256,11 @@ Decide the next move:
   own source → respond with: gather, naming the page to go and open
 - A specific cited source you should pull and read before concluding →
   respond with: follow_citations
-- Enough well-supported evidence to write the report → respond with: synthesize
+- Enough well-supported evidence to write the report → respond with: challenge
+  (the adversarial pass runs before writing, always - it is not a sign of doubt)
+- The `[Progress in stage ...]` note says this pass added little next to the one
+  before it, and you cannot name a specific gap you would go and fill → the work
+  here has converged → respond with: challenge
 """
 system_prompt = """
 Analyze the `sources` and `sub_findings` against `sources_index`. Be rigorous:
@@ -271,8 +294,9 @@ transform = "compact"
 hint = "A specific cited source should be pulled and read directly"
 transform = "compact"
 
-[stages.analyze.transitions.synthesize]
-hint = "Evidence is sufficient - write the report"
+
+[stages.analyze.transitions.challenge]
+hint = "Evidence is sufficient - have it attacked before writing"
 transform = "compact"
 
 [stages.analyze.transitions.error_recovery]
@@ -284,7 +308,7 @@ transform = "direct"
 # sources analyze flagged, then hand back.
 [stages.follow_citations]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Pull and read specific cited sources flagged during analysis"
 available_tools = ["web_fetch", "web_search", "read_file", "context_append", "current_time", "context_read"]
 max_iterations = 12
@@ -313,8 +337,8 @@ transform = "compact"
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
 # target has spent its max_revisits budget, the run can still move forward
 # to the deliverable instead of dead-ending.
-[stages.follow_citations.transitions.synthesize]
-hint = "Analysis is out of revisits - synthesize from the material in hand"
+[stages.follow_citations.transitions.challenge]
+hint = "Done here - hand to the adversarial pass, which is the only way to the report"
 condition = "dead_end"
 transform = "compact"
 
@@ -325,7 +349,7 @@ transform = "direct"
 # ─── Stage 4: Synthesize (terminal) ───────────────────────────────────────────
 [stages.synthesize]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "anthropic/claude-opus-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "openai", model = "gpt-5.5" }, { provider = "anthropic", model = "claude-opus-5" }, { provider = "openrouter", model = "anthropic/claude-opus-5" }, { provider = "anthropic", model = "claude-sonnet-5" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Produce a structured, cited research report"
 available_tools = ["write_file", "read_file"]
 max_iterations = 15
@@ -369,13 +393,13 @@ A finding resting on sources you could not fetch is low confidence however
 familiar it feels.
 """
 
-[stages.synthesize.transitions.summary]
+[stages.synthesize.transitions.polish]
 hint = "The synthesis is written"
 
 # ─── Stage 5: Error recovery ──────────────────────────────────────────────────
 [stages.error_recovery]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Recover from a failed source fetch or parse during research"
 available_tools = ["read_file", "bash"]
 max_iterations = 8
@@ -407,7 +431,7 @@ model = "claude-sonnet-5"
 # not work.
 [stages.summary]
 mode = "output"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Say what the investigation found"
 max_iterations = 8
 system_prompt = """
@@ -424,7 +448,143 @@ is worse than no summary.
 
 # ─── Context layout ───────────────────────────────────────────────────────────
 # Percentage budgets (issue #100) with absolute guard-rails.
+
+# ─── Challenge: an adversary that flags, and cannot rewrite ───────────────────
+# A different vendor's model reading the analysis with no attachment to it. The
+# point is independence, not authority: it writes only to `challenges`, so it
+# can annotate a finding and never alter one, and `synthesize` decides what
+# survives. Grok is here because it is the least likely to agree with a Claude
+# analysis out of politeness - and because it may simply be wrong, which is why
+# its output is a lead to check rather than a verdict to apply.
+[stages.challenge]
+mode = "autonomous"
+model = { models = [{ provider = "openrouter", model = "x-ai/grok-4.6" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Attack the analysis: what is thin, unsupported, or too confident"
+available_tools = ["context_read", "context_append", "web_search", "web_fetch", "current_time"]
+max_iterations = 10
+max_revisits = 1
+system_prompt = """
+You are reading someone else's analysis in order to attack it. You did not
+write it and you owe it nothing.
+
+Go through `claims`, `contradictions` and `analysis`. For each thing the report
+is going to assert, ask the uncomfortable question:
+
+- What single source is this resting on, and would I believe it alone?
+- Is the confidence claimed higher than the evidence supports?
+- Is a number quoted from something that repeated it rather than measured it?
+- Is a comparison to another system based on that system's own docs, or on
+  what someone said about it?
+- What would have to be true for this conclusion to be wrong, and did anyone
+  check that?
+
+Write each challenge to `challenges` (context_append) as one line:
+`[!] <the claim> - <what is wrong with the support> - <what would settle it>`
+
+You may fetch a source to test a specific doubt. You may not rewrite the
+analysis, and nothing you write goes into the report directly.
+
+Two rules that make you useful rather than noise:
+
+Be specific. "This needs more sources" helps nobody; "the 2.8 GB figure comes
+only from the vendor's own page and no third party has reproduced it" is a
+lead someone can act on.
+
+Say when something holds. If a claim is well supported, write
+`[ok] <the claim> - <why the support is sufficient>`. An adversary that only
+ever objects is indistinguishable from noise, and the reader cannot tell which
+of your objections to take seriously.
+
+If the analysis is sound throughout, say so and stop. You are not required to
+find fault.
+"""
+
+[stages.challenge.transitions.gather]
+hint = "A challenge needs evidence nobody has gathered yet - name what to fetch"
+transform = "compact"
+
+[stages.challenge.transitions.synthesize]
+hint = "Challenges are recorded - write the report"
+transform = "compact"
+
+[stages.challenge.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Polish: the same report, readable ───────────────────────────────────────
+# Measured on a real report: this model took it from grade 12.8 to 9.6 and
+# reading ease 42 to 58, kept all fourteen linked citations, and lost no
+# entities - while defining jargon inline as it went ("MCP (Model Context
+# Protocol) is a standard for connecting agents to outside tools"). Claude
+# rewriting its own prose barely moved it, and llama-4-maverick made it worse.
+#
+# No web tools and no send-back edge: this is a filter, not a decision point.
+# A validator enforces what the prompt asks for, because "keep every citation"
+# is not something to leave to good intentions.
+[stages.polish]
+mode = "autonomous"
+model = { models = [{ provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }], parameters = { max_output_tokens = 24000 } }
+description = "Rewrite the report in plain language without changing what it says"
+
+available_tools = ["context_read", "context_write", "read_file", "write_file"]
+max_iterations = 10
+system_prompt = """
+Rewrite the report so a smart reader outside this field can follow it.
+
+You are changing how it reads, never what it says. Every fact, number, name,
+date, confidence marker and citation survives exactly as written. If you cannot
+make a sentence clearer without risking its meaning, leave it alone.
+
+What to change:
+- Long sentences into shorter ones.
+- Jargon into plain words where a plain word exists.
+- A term with no plain equivalent stays, with a short definition the first time
+  it appears: "an append-only journal (a log you can only add to, never erase)".
+- Nested clauses into sequence.
+
+Write the way a careful person writes, not the way a model writes. These are the
+tells, and they matter as much as sentence length:
+
+- No em dashes. Use a full stop, a comma, or brackets.
+- No stock openers: "It's worth noting", "It's important to note", "That said",
+  "Overall", "In conclusion", "At its core", "When it comes to".
+- No throat-clearing connectives where the sentence works without them:
+  "Furthermore", "Moreover", "Additionally", "Consequently".
+- No inflated vocabulary where a plain word exists: "leverage" is use, "utilize"
+  is use, "robust" is usually strong or reliable, "crucial" is usually important,
+  "delve into" is examine. "comprehensive", "seamless", "pivotal", "landscape",
+  "ecosystem" and "myriad" are almost always padding.
+- No "not only X but also Y", and no "isn't just X, it's Y".
+- Not every list needs three items. If two will do, write two.
+- Do not open a bullet with a bolded phrase and a colon unless the bold is a
+  real term being defined.
+
+A sentence that states the finding plainly beats one that performs expertise.
+If a phrase could be deleted without losing information, delete it.
+
+What must not change:
+- `[[n]](url)` citation links. Same markers, same URLs, same places.
+- Numbers, units, versions, dates, proper nouns.
+- Confidence markers and every caveat. A hedge is content, not padding - if the
+  original said "medium-to-low for the numbers", the rewrite says it too.
+- The heading structure.
+
+Do not add an introduction, a note about the rewrite, or anything the original
+did not say. Write the finished report to the same file the previous stage
+wrote, replacing it.
+"""
+
+[stages.polish.transitions.summary]
+hint = "The report reads clearly - produce the final answer"
+transform = "compact"
+
+[stages.polish.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
 [context.regions]
+progress_report = { kind = "clearable", budget = "1%", volatility = "rewritten", description = "What your last visit to this stage actually added, measured. Weigh another pass against it." }
+challenges     = { kind = "pinned", budget = "4%", volatility = "grows", description = "Adversarial challenges to the analysis: leads to check, not verdicts" }
 query          = { kind = "pinned", budget = "1%", required = true, seed = "task", required_message = "State the research topic via --task.", volatility = "stable" }
 scope          = { kind = "pinned", budget = "1%", seed = "scope", volatility = "stable" }
 environment    = { kind = "pinned", budget = "1%", seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
@@ -445,7 +605,7 @@ sub_findings   = { kind = "pinned", budget = "20%", volatility = "grows" }
 analysis         = { kind = "compacting",      budget = "30%", compact_at = "80%" }
 analysis_history = { kind = "compact_history", source_region = "analysis", budget = "3%", volatility = "grows" }
 
-conversation   = { kind = "sliding_window", max_items = 30, budget = "12%", strategy = "bulk", overflow = 10 }
+conversation   = { kind = "sliding_window", max_items = 12, budget = "12%", strategy = "bulk", overflow = 10 }
 
 # Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
 # inference call's error text, or a note that a stage hit its iteration cap.
