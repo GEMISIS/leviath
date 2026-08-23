@@ -11,7 +11,7 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
-## Unreleased
+## 0.5.0 - 2026-08-24
 
 - Fixed: naming a script provider as `default_provider` did not send any stage
   to it. A blueprint entry that names a model and no provider is resolved by
