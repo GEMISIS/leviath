@@ -258,6 +258,10 @@ Decide the next move:
   respond with: follow_citations
 - Enough well-supported evidence to write the report → respond with: challenge
   (the adversarial pass runs before writing, always - it is not a sign of doubt)
+  Before you choose this: the claims you extracted this pass must be in `claims`
+  and any source disagreements in `contradictions`. `challenge` reads those
+  regions and `synthesize` builds the report out of them, so a claim you leave
+  in your reply and not in the region is one neither of them can see.
 - The `[Progress in stage ...]` note says this pass added little next to the one
   before it, and you cannot name a specific gap you would go and fill → the work
   here has converged → respond with: challenge
@@ -298,6 +302,11 @@ transform = "compact"
 [stages.analyze.transitions.challenge]
 hint = "Evidence is sufficient - have it attacked before writing"
 transform = "compact"
+# `challenge` and `synthesize` both read `claims`, so leaving analyze without
+# having written it hands them an empty region. Measured on a finished run:
+# `claims` held nothing for all 225 snapshots while `sources` sat at 99% of its
+# budget, because everything went into the accumulator instead.
+gate = { require_region_updated = "claims", message = "Add the claims from this pass to `claims` with context_append, one per line as `<claim> [n]` with its source ref, and any source disagreements to `contradictions`. The adversarial pass reads those regions, and the report is written from them." }
 
 [stages.analyze.transitions.error_recovery]
 condition = "error"

@@ -13,6 +13,16 @@ same list.
 
 ## Unreleased
 
+- Fixed: the researcher agents stopped writing the regions their own later
+  stages read from. Measured over two finished runs, `claims`, `contradictions`
+  and `analysis` held nothing across all 225 snapshots of one, and
+  `comparisons` held 2% of its budget across 251 snapshots of the other, while
+  the accumulator regions sat at 83-99%. `challenge` was attacking empty
+  regions and `synthesize` was building the report without the claims it is
+  told to build from. The instruction lived only in `system_prompt`; it is now
+  named in `transition_prompt`, where the decision is actually made, and the
+  edge out of the stage is gated on the region having changed.
+
 - Fixed: `read_file` on a directory told the model to call `list_dir`, which 21
   of the bundled agents' stages do not grant. It now answers with the directory's
   contents, so the model can pick its next path in one call whatever the stage
