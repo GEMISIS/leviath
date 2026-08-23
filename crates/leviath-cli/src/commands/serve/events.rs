@@ -13,6 +13,29 @@ use super::types::FinalOutputResp;
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
+    /// A run's spend passed a figure the operator asked to be told about.
+    ///
+    /// Sent once per threshold per run. The point is to arrive while the run is
+    /// still going: a run that quietly spent far more than intended looked, from
+    /// outside, exactly like one making ordinary progress.
+    AgentSpend {
+        /// The agent's live id in the world.
+        agent_id: String,
+        /// The durable run id, and what a per-run subscription filters on.
+        run_id: String,
+        /// The figure that was crossed, in dollars.
+        threshold_usd: f64,
+        /// What the run has spent so far, in dollars.
+        total_usd: f64,
+        /// Whether every call behind that total could be priced. When false the
+        /// run has spent at least this, and more by an unknown amount, so it
+        /// must not be shown as a final figure.
+        exact: bool,
+        /// The stage that was running when it crossed. The full per-stage
+        /// breakdown is in the run's `stages.json`.
+        stage: String,
+    },
+
     /// Where a run stands, re-sent whenever any of it changes.
     AgentStatus {
         /// The agent's live id in the world.
@@ -230,7 +253,8 @@ impl ServerEvent {
             | ServerEvent::Tokens { run_id, .. }
             | ServerEvent::StageTransition { run_id, .. }
             | ServerEvent::ToolCallStarted { run_id, .. }
-            | ServerEvent::ToolCallFinished { run_id, .. } => run_id,
+            | ServerEvent::ToolCallFinished { run_id, .. }
+            | ServerEvent::AgentSpend { run_id, .. } => run_id,
             ServerEvent::DaemonLink { .. } => "",
         }
     }
@@ -496,6 +520,17 @@ mod tests {
                     summary: "ok".to_string(),
                 },
                 "r10",
+            ),
+            (
+                ServerEvent::AgentSpend {
+                    agent_id: "a".to_string(),
+                    run_id: "r11".to_string(),
+                    threshold_usd: 25.0,
+                    total_usd: 27.5,
+                    exact: true,
+                    stage: "analyze".to_string(),
+                },
+                "r11",
             ),
         ];
         for (ev, want) in cases {

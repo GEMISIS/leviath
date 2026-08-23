@@ -329,6 +329,26 @@ pub struct LimitsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_run_write_bytes: Option<u64>,
 
+    /// Dollar figures at which a running agent emits a spend event.
+    ///
+    /// ```toml
+    /// [limits]
+    /// notify_spend_usd = [5, 25, 100]
+    /// ```
+    ///
+    /// Each is reported once per run, the first time that run's total passes it,
+    /// with the stage that was running at the time. Empty by default: nothing is
+    /// emitted for an operator who has not asked.
+    ///
+    /// This is the reporting half only. It does not stop a run - killing one
+    /// mid-stage throws away work, which is a different decision from being told
+    /// what is happening (#573).
+    ///
+    /// A run whose models have no published price reports what it could price
+    /// and says the figure is not exact, rather than reporting a confident zero.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notify_spend_usd: Vec<f64>,
+
     /// Per-model overrides of `max_concurrent_inferences`, keyed by model id.
     ///
     /// ```toml
@@ -447,6 +467,8 @@ impl Default for LimitsConfig {
         Self {
             max_concurrent_inferences: default_max_concurrent_inferences(),
             max_concurrent_tools: default_max_concurrent_tools(),
+            // Empty: nothing is emitted for an operator who has not asked.
+            notify_spend_usd: Vec::new(),
             default_max_iterations: default_default_max_iterations(),
             exact_token_counting: false,
             script_shell_timeout_secs: default_script_shell_timeout_secs(),

@@ -32,6 +32,29 @@ use leviath_core::interaction::InteractionRequest;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum WorldEvent {
+    /// A run's spend crossed a threshold the operator asked to hear about.
+    ///
+    /// One event per threshold, the first time the total passes it. A run that
+    /// crosses several between two passes gets one for each, in order, so a
+    /// consumer that acts on the highest sees them all.
+    Spend {
+        /// The run id.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// The threshold that was crossed, in dollars.
+        threshold_usd: f64,
+        /// What the run has spent in total, in dollars.
+        total_usd: f64,
+        /// Whether every call in that total could be priced. When false the
+        /// real figure is higher by however much went unpriced, so a consumer
+        /// must not present it as the invoice.
+        exact: bool,
+        /// The stage the run was in when it crossed - the one doing the
+        /// spending. The full per-stage breakdown is in `stages.json`.
+        stage: String,
+    },
+
     /// A run first appeared in the world.
     Spawned {
         /// The run id.
@@ -206,6 +229,18 @@ pub enum WorldEvent {
     },
 }
 
+/// Dollars as millionths of a dollar, saturating.
+///
+/// The unit [`Emitted::cost_micros`] and the spend thresholds are both kept in,
+/// so the comparison between them is integer and exact. A negative or
+/// non-finite input is zero: neither is a sum of money.
+pub(super) fn usd_to_micros(usd: f64) -> u64 {
+    if !usd.is_finite() || usd <= 0.0 {
+        return 0;
+    }
+    (usd * 1_000_000.0).round() as u64
+}
+
 impl WorldEvent {
     /// The run id this event belongs to. Every variant carries one; this saves
     /// consumers an exhaustive match (which, with the enum non-exhaustive,
@@ -222,6 +257,7 @@ impl WorldEvent {
             | WorldEvent::StageTransition { run_id, .. }
             | WorldEvent::ToolCallStarted { run_id, .. }
             | WorldEvent::ToolCallFinished { run_id, .. }
+            | WorldEvent::Spend { run_id, .. }
             | WorldEvent::Log { run_id, .. } => run_id,
         }
     }
@@ -256,6 +292,17 @@ pub(super) struct Emitted {
     pub(super) cached_tokens: usize,
     pub(super) cache_write_tokens: usize,
     pub(super) context_tokens: usize,
+    /// What the run had spent as of the last pass, in millionths of a dollar,
+    /// so a crossing is recognised by comparing against this rather than by
+    /// re-deriving it.
+    ///
+    /// An integer because this struct is hashed for the progress fingerprint,
+    /// and because it makes the comparison exact - a sub-cent call still counts
+    /// instead of rounding away.
+    pub(super) cost_micros: u64,
+    /// Whether that figure covers every call. A run with unpriced calls has
+    /// spent at least this much, and the event says which it is.
+    pub(super) cost_exact: bool,
     pub(super) terminal: bool,
     /// Why the run is parked, so a change of reason counts as a change worth
     /// telling subscribers about.
@@ -268,4 +315,40 @@ pub(super) struct Emitted {
     /// iteration it already sent would say nothing new. The title rides the
     /// next status frame that fires on its own.
     pub(super) title: Option<String>,
+}
+
+#[cfg(test)]
+mod spend_tests {
+    use super::*;
+
+    /// Money is compared in whole micros, so the threshold check is exact and
+    /// a sub-cent call still moves the total instead of rounding away.
+    #[test]
+    fn usd_to_micros_is_exact_and_refuses_what_is_not_money() {
+        assert_eq!(usd_to_micros(1.0), 1_000_000);
+        assert_eq!(usd_to_micros(0.000_001), 1, "a millionth still counts");
+        assert_eq!(usd_to_micros(27.5), 27_500_000);
+        // Neither of these is a sum of money, and either would otherwise
+        // become a nonsense integer.
+        assert_eq!(usd_to_micros(-5.0), 0);
+        assert_eq!(usd_to_micros(f64::NAN), 0);
+        assert_eq!(usd_to_micros(f64::INFINITY), 0);
+        assert_eq!(usd_to_micros(0.0), 0);
+    }
+
+    /// Every event names the run it is about, which is what a per-run
+    /// subscription filters on. A variant that answered wrongly here would be
+    /// delivered to the wrong subscriber, or to none.
+    #[test]
+    fn a_spend_event_names_its_run() {
+        let event = WorldEvent::Spend {
+            run_id: "run-spendy".into(),
+            agent_id: "agent-spendy".into(),
+            threshold_usd: 25.0,
+            total_usd: 27.5,
+            exact: true,
+            stage: "analyze".into(),
+        };
+        assert_eq!(event.run_id(), "run-spendy");
+    }
 }

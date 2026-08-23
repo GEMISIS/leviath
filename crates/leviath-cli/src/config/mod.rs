@@ -3556,6 +3556,7 @@ enabled = false
                 max_run_write_bytes: None,
                 max_concurrent_inferences: Some(4),
                 max_concurrent_tools: 3,
+                notify_spend_usd: Vec::new(),
                 default_max_iterations: Some(99),
                 exact_token_counting: false,
                 script_shell_timeout_secs: 45,

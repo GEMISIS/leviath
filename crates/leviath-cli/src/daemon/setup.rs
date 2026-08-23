@@ -320,6 +320,9 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // How long the daemon may sit with a full tool lane and no run moving before
     // it widens the lane to break the jam (issue #191).
     host.set_dead_cycles_before_relief(parts.config.limits.dead_cycles_before_relief);
+    // Told once at start, like the other limits: a run that crosses one of these
+    // says so while it is still running, which is the whole point (#573).
+    host.set_spend_notify_usd(parts.config.limits.notify_spend_usd.clone());
     // How long a finished run keeps its place in the listing, so a scheduler
     // polling on an interval can see how a run ended (issue #205).
     host.set_finished_retention_secs(parts.config.limits.finished_retention_secs);

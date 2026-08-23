@@ -49,6 +49,10 @@ pub struct WorldHost {
     reaper: Option<Reaper>,
     events: broadcast::Sender<WorldEvent>,
     emitted: HashMap<String, Emitted>,
+    /// Dollar figures the operator wants to hear about, ascending. Empty by
+    /// default, which is the current behaviour: no events, no cost to anyone
+    /// who has not asked.
+    spend_notify_usd: Vec<f64>,
     emitted_interactions: HashSet<String>,
     /// Sub-agent world-access requests from tool lanes. The host holds a `tx`
     /// clone so the receiver never closes (its `recv` never yields `None`).
@@ -175,6 +179,7 @@ impl WorldHost {
             reaper: None,
             events,
             emitted: HashMap::new(),
+            spend_notify_usd: Vec::new(),
             emitted_interactions: HashSet::new(),
             parked: HashMap::new(),
             subagent_tx,
@@ -292,6 +297,21 @@ impl WorldHost {
                 ),
             },
         }
+    }
+
+    /// Dollar figures to emit [`WorldEvent::Spend`] at, in any order.
+    ///
+    /// Sorted and de-duplicated here so the caller can pass a config list as
+    /// written. Empty disables the events, which is the default: a run that
+    /// nobody asked to be told about costs nothing to watch.
+    ///
+    /// A threshold is reported once per run, the first time the total passes
+    /// it, so a long run does not repeat itself every pass.
+    pub fn set_spend_notify_usd(&mut self, mut thresholds: Vec<f64>) {
+        thresholds.retain(|t| t.is_finite() && *t > 0.0);
+        thresholds.sort_by(|a, b| a.partial_cmp(b).expect("finite, filtered above"));
+        thresholds.dedup();
+        self.spend_notify_usd = thresholds;
     }
 
     /// Install the spawner used to service `Spawn` control ops. Without one, a

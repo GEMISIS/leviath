@@ -178,6 +178,21 @@ fn wire_status(label: &str) -> String {
 /// no client knows to unwrap.
 fn to_server_event(event: WorldEvent) -> ServerEvent {
     match event {
+        WorldEvent::Spend {
+            run_id,
+            agent_id,
+            threshold_usd,
+            total_usd,
+            exact,
+            stage,
+        } => ServerEvent::AgentSpend {
+            agent_id,
+            run_id,
+            threshold_usd,
+            total_usd,
+            exact,
+            stage,
+        },
         WorldEvent::Spawned {
             run_id,
             agent_id,
@@ -563,6 +578,17 @@ mod tests {
 
     #[test]
     fn to_server_event_maps_every_variant() {
+        assert_eq!(
+            mapped_tag(WorldEvent::Spend {
+                run_id: "r".into(),
+                agent_id: "a".into(),
+                threshold_usd: 25.0,
+                total_usd: 27.5,
+                exact: true,
+                stage: "analyze".into(),
+            }),
+            "agent_spend"
+        );
         assert_eq!(
             mapped_tag(WorldEvent::Spawned {
                 run_id: "r".into(),
