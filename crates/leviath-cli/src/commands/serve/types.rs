@@ -994,6 +994,13 @@ pub(super) struct AgentTreeNode {
     pub(super) iteration: usize,
     pub(super) prompt_tokens: usize,
     pub(super) completion_tokens: usize,
+    /// What this one agent spent, or `null` when some call it made could not be
+    /// priced. Never `0` for unknown: a total that drops what it could not price
+    /// reads as authoritative and understates.
+    pub(super) cost_usd: Option<f64>,
+    /// This agent and everything below it. `null` when anything in that subtree
+    /// is unpriced, for the same reason.
+    pub(super) subtree_cost_usd: Option<f64>,
     pub(super) children: Vec<AgentTreeNode>,
 }
 
@@ -1007,6 +1014,16 @@ pub(super) struct TreeStatusNode {
     pub(super) completion_tokens: usize,
     pub(super) subtree_prompt_tokens: usize,
     pub(super) subtree_completion_tokens: usize,
+    /// What this one agent spent, or `null` when some call it made could not be
+    /// priced.
+    pub(super) cost_usd: Option<f64>,
+    /// This agent and everything below it, which is the number somebody asking
+    /// "what did this run cost" means. `null` when anything in the subtree is
+    /// unpriced.
+    pub(super) subtree_cost_usd: Option<f64>,
+    /// Calls in this subtree that carried no price. Non-zero is why
+    /// `subtree_cost_usd` is `null`, and says how much of the total is missing.
+    pub(super) subtree_unpriced_calls: usize,
     pub(super) children: Vec<TreeStatusNode>,
 }
 

@@ -48,6 +48,8 @@ pub enum ActivityRecord {
         cached_tokens: usize,
         /// Whether a response came back at all.
         success: bool,
+        /// What this call cost, when it could be priced.
+        cost_usd: Option<f64>,
     },
     /// One tool call out of a finished batch.
     ToolCall {
@@ -213,6 +215,7 @@ pub fn observe_lifecycle(
                             completion_tokens,
                             cached_tokens,
                             success,
+                            cost_usd,
                         } => TelemetryEvent::InferenceCompleted {
                             run_id: md.run_id.clone(),
                             stage_name: stage_name.clone(),
@@ -223,6 +226,7 @@ pub fn observe_lifecycle(
                             completion_tokens,
                             cached_tokens,
                             success,
+                            cost_usd,
                         },
                         ActivityRecord::ToolCall {
                             tool_name,

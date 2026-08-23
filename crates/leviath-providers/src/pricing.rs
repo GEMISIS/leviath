@@ -90,6 +90,18 @@ impl TokenUsage {
         self.prompt_tokens + self.cached_tokens + self.cache_write_tokens
     }
 
+    /// What this one call cost, or `None` when nothing can price it.
+    ///
+    /// The same rule [`CostTotals::add`] attributes by: the provider's own
+    /// figure when it reported one, arithmetic from published rates when it did
+    /// not, and nothing when neither is available. Kept here rather than written
+    /// out again at each caller, so a per-call figure and a run total cannot
+    /// disagree about the same call.
+    pub fn priced_cost(&self, pricing: Option<&crate::pricing::ModelPricing>) -> Option<f64> {
+        self.reported_cost_usd
+            .or_else(|| pricing.map(|p| self.cost_usd(p)))
+    }
+
     /// What this call cost, in USD, at `pricing`.
     ///
     /// Every input class is priced separately because providers charge them
@@ -564,5 +576,35 @@ mod cost_tests {
         assert_eq!(totals.reported_calls, 1);
         assert_eq!(totals.computed_calls, 1);
         assert!(!totals.is_exact());
+    }
+    /// The per-call figure and the running total agree, because a dashboard and
+    /// a run record disagreeing about one call is the failure this exists to
+    /// prevent.
+    #[test]
+    fn priced_cost_matches_what_the_totals_attribute() {
+        let rates = ModelPricing {
+            input_per_mtok: 3.0,
+            cached_input_per_mtok: 0.3,
+            cache_write_per_mtok: 3.75,
+            output_per_mtok: 15.0,
+        };
+        let computed = TokenUsage::new(1_000, 0, 0, 500);
+        let mut totals = CostTotals::default();
+        totals.add(&computed, Some(&rates));
+        assert_eq!(computed.priced_cost(Some(&rates)), Some(totals.priced_usd));
+
+        // A provider that priced the call itself wins over the rate card, on
+        // both paths.
+        let reported = TokenUsage::new(1_000, 0, 0, 500).with_reported_cost(Some(0.42));
+        let mut totals = CostTotals::default();
+        totals.add(&reported, Some(&rates));
+        assert_eq!(reported.priced_cost(Some(&rates)), Some(totals.priced_usd));
+        assert_eq!(reported.priced_cost(Some(&rates)), Some(0.42));
+
+        // Nothing to price it with: no figure, and the totals count it unpriced.
+        let mut totals = CostTotals::default();
+        totals.add(&computed, None);
+        assert_eq!(computed.priced_cost(None), None);
+        assert_eq!(totals.unpriced_calls, 1);
     }
 }

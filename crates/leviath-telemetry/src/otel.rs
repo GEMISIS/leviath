@@ -109,6 +109,10 @@ struct OpenRun {
 struct Instruments {
     active: UpDownCounter<i64>,
     tokens: Counter<u64>,
+    /// Money, beside the tokens it is computed from. A dashboard deriving cost
+    /// from token counts has to carry its own copy of every rate table, which is
+    /// how a monitoring figure comes to disagree with the invoice.
+    cost: Counter<f64>,
     tool_calls: Counter<u64>,
     stage_duration: Histogram<f64>,
     inference_latency: Histogram<f64>,
@@ -254,6 +258,11 @@ impl Instruments {
             tokens: meter
                 .u64_counter("leviath.tokens.total")
                 .with_description("Cumulative tokens by provider, model, and kind")
+                .build(),
+            cost: meter
+                .f64_counter("leviath.cost.total")
+                .with_description("Cumulative spend in USD by provider and model")
+                .with_unit("USD")
                 .build(),
             tool_calls: meter
                 .u64_counter("leviath.tool_calls.total")
@@ -546,6 +555,7 @@ impl TelemetrySink for OtelSink {
                 completion_tokens,
                 cached_tokens,
                 success,
+                cost_usd,
             } => {
                 let token_attrs = [
                     KeyValue::new("leviath.provider", provider.clone()),
@@ -561,6 +571,11 @@ impl TelemetrySink for OtelSink {
                         attrs.push(KeyValue::new("leviath.tokens.kind", kind));
                         self.instruments.tokens.add(count as u64, &attrs);
                     }
+                }
+                // Only a priced call contributes. An unpriced one adding zero
+                // would make the total look complete while being short.
+                if let Some(cost) = cost_usd {
+                    self.instruments.cost.add(cost, &token_attrs);
                 }
                 self.instruments.inference_latency.record(
                     latency_ms as f64 / 1000.0,
@@ -852,6 +867,7 @@ mod tests {
             completion_tokens: 4,
             cached_tokens: 2,
             success: true,
+            cost_usd: Some(0.01),
         });
         let spans = h.spans.get_finished_spans().unwrap();
         assert_eq!(spans.len(), 1);
@@ -932,6 +948,7 @@ mod tests {
             completion_tokens: 0,
             cached_tokens: 0,
             success: true,
+            cost_usd: Some(0.01),
         });
         h.sink.emit(TelemetryEvent::Log {
             run_id: "ghost".to_string(),
@@ -1017,6 +1034,21 @@ mod tests {
             completion_tokens: 4,
             cached_tokens: 0,
             success: true,
+            cost_usd: Some(0.01),
+        });
+        // A call nothing could price. It must contribute no cost rather than a
+        // zero, so the counter stays a floor instead of looking complete.
+        h.sink.emit(TelemetryEvent::InferenceCompleted {
+            run_id: "r1".to_string(),
+            stage_name: "stage0".to_string(),
+            provider: "local".to_string(),
+            model: "unpriced".to_string(),
+            latency_ms: 10,
+            prompt_tokens: 5,
+            completion_tokens: 2,
+            cached_tokens: 0,
+            success: true,
+            cost_usd: None,
         });
         h.sink.emit(TelemetryEvent::ToolCallCompleted {
             run_id: "r1".to_string(),

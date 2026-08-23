@@ -20,10 +20,43 @@ pub(super) fn build_tree(runs: &[RunMeta], parent_id: Option<&str>) -> Vec<Agent
                 iteration: r.iteration,
                 prompt_tokens: r.prompt_tokens,
                 completion_tokens: r.completion_tokens,
+                cost_usd: r.cost_usd,
+                subtree_cost_usd: subtree_spend(
+                    r.cost_usd,
+                    r.unpriced_calls,
+                    &children
+                        .iter()
+                        .map(|c| (c.subtree_cost_usd, 0))
+                        .collect::<Vec<_>>(),
+                )
+                .0,
                 children,
             }
         })
         .collect()
+}
+
+/// A subtree's spend: this run plus everything under it, and how much of it
+/// could not be priced.
+///
+/// `None` when anything in the subtree is unpriced. Adding up only the priced
+/// part would produce a number that looks like the answer and is smaller than
+/// the truth by an amount nobody can see, which is the one failure worse than
+/// having no number.
+fn subtree_spend(
+    own: Option<f64>,
+    own_unpriced: usize,
+    below: &[(Option<f64>, usize)],
+) -> (Option<f64>, usize) {
+    let unpriced = own_unpriced + below.iter().map(|(_, u)| u).sum::<usize>();
+    // `Option` sums to `None` the moment one term is `None`, which is exactly
+    // the rule wanted here and leaves no branch to get wrong.
+    let total: Option<f64> = below
+        .iter()
+        .map(|(cost, _)| *cost)
+        .chain(std::iter::once(own))
+        .sum();
+    (total.filter(|_| unpriced == 0), unpriced)
 }
 
 pub(super) fn build_tree_status(runs: &[RunMeta], parent_id: Option<&str>) -> Vec<TreeStatusNode> {
@@ -41,6 +74,11 @@ pub(super) fn build_tree_status(runs: &[RunMeta], parent_id: Option<&str>) -> Ve
                     .iter()
                     .map(|c| c.subtree_completion_tokens)
                     .sum::<usize>();
+            let below: Vec<(Option<f64>, usize)> = children
+                .iter()
+                .map(|c| (c.subtree_cost_usd, c.subtree_unpriced_calls))
+                .collect();
+            let spend = subtree_spend(r.cost_usd, r.unpriced_calls, &below);
             TreeStatusNode {
                 run_id: r.run_id.clone(),
                 agent_name: r.agent_name.clone(),
@@ -50,6 +88,9 @@ pub(super) fn build_tree_status(runs: &[RunMeta], parent_id: Option<&str>) -> Ve
                 completion_tokens: r.completion_tokens,
                 subtree_prompt_tokens: subtree_prompt,
                 subtree_completion_tokens: subtree_completion,
+                cost_usd: r.cost_usd,
+                subtree_cost_usd: spend.0,
+                subtree_unpriced_calls: spend.1,
                 children,
             }
         })
@@ -85,6 +126,12 @@ pub(super) async fn agent_tree_status(
             .map(|c| c.subtree_completion_tokens)
             .sum::<usize>();
 
+    let below: Vec<(Option<f64>, usize)> = children
+        .iter()
+        .map(|c| (c.subtree_cost_usd, c.subtree_unpriced_calls))
+        .collect();
+    let spend = subtree_spend(root.cost_usd, root.unpriced_calls, &below);
+
     Ok(Json(TreeStatusNode {
         run_id: root.run_id.clone(),
         agent_name: root.agent_name.clone(),
@@ -94,6 +141,9 @@ pub(super) async fn agent_tree_status(
         completion_tokens: root.completion_tokens,
         subtree_prompt_tokens: subtree_prompt,
         subtree_completion_tokens: subtree_completion,
+        cost_usd: root.cost_usd,
+        subtree_cost_usd: spend.0,
+        subtree_unpriced_calls: spend.1,
         children,
     }))
 }
