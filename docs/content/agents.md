@@ -42,10 +42,7 @@ bash       = "ask"
 
 [stages.analyze]
 mode = "autonomous"
-model = { models = [
-  { provider = "anthropic", model = "claude-sonnet-4-6" },
-  { provider = "openai",    model = "gpt-5.4-mini" },
-] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini"] }
 available_tools = ["read_file", "list_dir"]
 required_tools = []                # human-in-the-loop tools kept in an unattended run
 max_iterations = 15
@@ -106,17 +103,18 @@ run is stuck.
 
 ## Stages and models
 
-Each stage gets its own **model** (an ordered provider/model fallback list: the first configured
-provider wins), tools, iteration cap, and context layout. Transitions form a
+Each stage gets its own **model** (an ordered list of models, best first: the first one a configured
+provider serves wins), tools, iteration cap, and context layout. Transitions form a
 [graph](/docs/stages): linear by default, or branch on conditions like `error` and `stuck`.
 
 ```toml
 [stages.analyze.model]
 allow_user_default = true          # fall back to the user's default model, else fail closed
-models = [
-  { provider = "anthropic", model = "claude-sonnet-4-6" },
-  { provider = "openai",    model = "gpt-5.4-mini" },
-]
+models = ["claude-sonnet-5", "gpt-5.4-mini"]
+                                   # name models, not routes: whichever provider
+                                   # the user configured is asked which it serves.
+                                   # Pin one only for a model a single route can
+                                   # reach: { provider = "ollama", model = "..." }
 request_timeout_secs = 120         # per-stage inference wall-clock cap
 
 [stages.analyze.model.parameters]  # free-form, passed through to the provider

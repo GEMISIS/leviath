@@ -13,6 +13,37 @@ same list.
 
 ## Unreleased
 
+- Fixed: a stage asking for a model got whichever model the matching route
+  happened to name. Entries were matched as a whole `provider/model` pair, so
+  `deep-researcher`'s `polish` stage, which lists `gemini-3.1-pro-preview`
+  first, ran `claude-sonnet-5`, and `synthesize`, which lists `gpt-5.5` first,
+  ran `claude-opus-5`. Resolution now groups by model, so the blueprint's
+  preference order is the order that is tried (#578).
+- Changed: a blueprint names models, not routes. `models = ["gpt-5.5",
+  "claude-sonnet-5"]` asks each configured provider which of them serves the
+  model, the user's default provider first, so the same blueprint runs on
+  whichever provider a machine actually has. A table still pins a route where
+  only one exists: `{ provider = "ollama", model = "qwen3.5:9b" }`. The old
+  `{ provider = ..., model = ... }` form is still read. Every bundled agent has
+  been rewritten this way, which drops one entry per route: they listed the same
+  model up to five times to be reachable from any provider.
+- Fixed: a model no configured provider serves is skipped with a warning naming
+  it, and the stage falls through to the next model listed.
+- Fixed: the blueprint editor and The Lair showed a stage's models as one local
+  model. They read only entries carrying both a provider and a model, so a
+  blueprint that leaves routing open lost every entry but the pinned one.
+- Fixed: a run died with `Function call is missing a thought_signature in
+  functionCall parts` on reaching a Gemini stage. Nothing dropped the signature:
+  the calls were made by a different model. A blueprint that runs one stage on
+  grok and the next on Gemini carries the conversation across, and Gemini
+  rejects function calls it never signed. Calls it cannot have signed are now
+  folded into the assistant's text, which keeps what the run learned without
+  replaying a call the model will refuse.
+- Changed: `deep-researcher` and `wide-researcher` no longer carry the research
+  transcript into `polish`. That stage rewrites the report named in
+  `report_path` and never needed the turn-by-turn history, which was prompt
+  weight on the most expensive model in the run.
+
 - Added: every bundled provider can price a call. OpenRouter learns rates from
   the same `/models` fetch that teaches it context windows; Anthropic, OpenAI and
   Google get a table transcribed from their pricing pages, stamped with the date

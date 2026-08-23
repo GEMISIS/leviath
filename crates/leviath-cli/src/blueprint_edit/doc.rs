@@ -690,9 +690,13 @@ impl ManifestDoc {
     }
 }
 
-/// The `provider/model` chain a stage's `model` value stands for. A bare
-/// string is one entry (The Lair's reading; the runtime ignores that form,
-/// which is why the editor never writes it).
+/// The model chain a stage's `model` value stands for, each entry rendered as
+/// `provider/model` when the blueprint pins a route and as a bare model name
+/// when it leaves the route open.
+///
+/// Dropping the entries that name no provider is what made a migrated blueprint
+/// show a single local model where it lists five: the open-route form is now
+/// the ordinary one, so it has to read, not merely parse.
 fn model_chain(value: Option<&Item>) -> Vec<String> {
     let Some(value) = value else {
         return Vec::new();
@@ -709,13 +713,15 @@ fn model_chain(value: Option<&Item>) -> Vec<String> {
     models
         .iter()
         .filter_map(|entry| {
+            if let Some(name) = entry.as_str() {
+                return Some(name.to_string());
+            }
             let t = entry.as_inline_table()?;
-            match (
-                t.get("provider").and_then(Value::as_str),
-                t.get("model").and_then(Value::as_str),
-            ) {
-                (Some(provider), Some(model)) => Some(format!("{provider}/{model}")),
-                _ => None,
+            let model = t.get("model").and_then(Value::as_str)?;
+            // An empty provider is the same statement as omitting it.
+            match t.get("provider").and_then(Value::as_str) {
+                Some(provider) if !provider.is_empty() => Some(format!("{provider}/{model}")),
+                _ => Some(model.to_string()),
             }
         })
         .collect()

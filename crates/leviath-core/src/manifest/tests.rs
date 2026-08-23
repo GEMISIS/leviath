@@ -1548,25 +1548,38 @@ allow_user_default = false
 }
 
 #[test]
-fn parse_manifest_models_array_skips_non_table_and_applies_defaults() {
-    // A non-table entry in the `models` array is skipped; table entries
-    // missing `provider`/`model` fall back to the per-field defaults.
+fn parse_manifest_models_array_takes_bare_names_and_leaves_the_route_open() {
+    // A bare string names a model and leaves the route open. A table may pin a
+    // provider when the route matters, and one naming no model names nothing.
     let toml = r#"
 [agent]
 name = "models-defaults"
 
 [stages.main.model]
-models = ["skip-me", { provider = "openai" }, { model = "custom-model" }]
+models = ["gpt-5.5", { provider = "openai" }, { model = "custom-model" }, 7, { provider = "ollama", model = "q:9b" }]
 "#;
     let bp = parse_manifest(toml).unwrap();
     let stage = bp.find_stage("main").unwrap();
-    assert_eq!(stage.model.models.len(), 2);
-    // provider given, model defaulted
-    assert_eq!(stage.model.models[0].provider, "openai");
-    assert_eq!(stage.model.models[0].model, "claude-sonnet-4-6");
-    // model given, provider defaulted
-    assert_eq!(stage.model.models[1].provider, "anthropic");
+    assert_eq!(
+        stage.model.models.len(),
+        3,
+        "an entry naming no model is dropped, whether it is a table without one \
+         or not a model entry at all"
+    );
+
+    // A bare name: the model is what the author asked for, the route is not
+    // theirs to know.
+    assert_eq!(stage.model.models[0].model, "gpt-5.5");
+    assert_eq!(stage.model.models[0].provider, "");
+
+    // An absent provider is empty, NOT "anthropic". Defaulting it made omitting
+    // the field a silent specific choice rather than an open one.
     assert_eq!(stage.model.models[1].model, "custom-model");
+    assert_eq!(stage.model.models[1].provider, "");
+
+    // A named provider still pins the route, which a local model needs.
+    assert_eq!(stage.model.models[2].provider, "ollama");
+    assert_eq!(stage.model.models[2].model, "q:9b");
 }
 
 #[test]

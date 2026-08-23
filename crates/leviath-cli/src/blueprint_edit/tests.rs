@@ -173,8 +173,20 @@ fn the_views_read_the_coder_the_way_the_lair_does() {
     assert_eq!(discover.mode, StageModeView::Autonomous);
     assert_eq!(discover.max_iterations, Some(8));
     assert_eq!(discover.max_revisits, Some(2));
-    assert_eq!(discover.models[0], "anthropic/claude-sonnet-5");
-    assert_eq!(discover.models.len(), 5);
+    // A model the blueprint names without pinning a route reads back as the
+    // bare name. It has to survive the view: this stage lists several such
+    // models, and reading only the route-pinned ones showed just the local one.
+    assert_eq!(discover.models[0], "claude-sonnet-5");
+    assert!(
+        discover.models.len() > 1,
+        "open-route models must survive the view, got {:?}",
+        discover.models
+    );
+    assert!(
+        discover.models.iter().any(|m| m.starts_with("ollama/")),
+        "a local model still pins its route, got {:?}",
+        discover.models
+    );
     assert_eq!(
         discover.tools,
         [
@@ -272,7 +284,7 @@ fn the_views_read_the_coder_the_way_the_lair_does() {
     assert!(tools.contains(&"read_file".to_string()));
     assert!(tools.windows(2).all(|w| w[0] < w[1]), "sorted, deduped");
     let models = doc.known_models();
-    assert!(models.contains(&"anthropic/claude-opus-5".to_string()));
+    assert!(models.contains(&"claude-opus-5".to_string()));
     assert!(models.windows(2).all(|w| w[0] < w[1]));
 }
 
@@ -356,7 +368,10 @@ transitions = 4
 "#,
     )
     .unwrap();
-    assert_eq!(odder.stage("a").unwrap().models, ["p/m"]);
+    // `{ model = "y" }` is the open-route form, so it reads as the model it
+    // names - the same reading the runtime's parser gives it. Only the entries
+    // that name no model at all (`3`, `{ provider = "x" }`) are dropped.
+    assert_eq!(odder.stage("a").unwrap().models, ["y", "p/m"]);
     let edges = odder.edges();
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].to, "c");
@@ -732,15 +747,22 @@ fn stage_fields_write_and_delete_the_way_the_lair_does() {
     doc.set_tools("work", &[]).unwrap();
     assert!(!doc.to_toml().contains("available_tools"));
 
-    // Models: the table form, keeping a sibling key; slashless keeps the
-    // model visible with an empty provider; empty deletes.
+    // Models: a slash pins the route and writes the table form; a slashless
+    // entry is a model with the route left open, and writes the bare form that
+    // says so. Both survive a round trip through the view; empty deletes.
     doc.set_models("work", &["anthropic/claude".into(), "gpt-4".into()])
         .unwrap();
     let text = doc.to_toml();
-    assert!(text.contains(r#"model = { models = [{ provider = "anthropic", model = "claude" }, { provider = "", model = "gpt-4" }] }"#), "{text}");
+    assert!(
+        text.contains(
+            r#"model = { models = [{ provider = "anthropic", model = "claude" }, "gpt-4"] }"#
+        ),
+        "{text}"
+    );
     assert_eq!(
         doc.stage("work").unwrap().models,
-        ["anthropic/claude", "/gpt-4"]
+        ["anthropic/claude", "gpt-4"],
+        "what was written reads back unchanged"
     );
     let mut kept = ManifestDoc::parse(
         "[agent]\nname = \"m\"\n[stages.a]\nmodel = { allow_user_default = false, models = [{ provider = \"x\", model = \"y\" }] }\n",

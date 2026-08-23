@@ -599,9 +599,50 @@ mod tests {
         }
     }
 
-    /// Every provider `lev setup` can configure. Claude Code is a transport
-    /// rather than a provider a stage names, so it is not in this list.
-    const SETUP_PROVIDERS: &[&str] = &["anthropic", "openai", "google", "openrouter", "ollama"];
+    /// Every provider `lev setup` can configure, built so a test can ask them
+    /// what they serve. Claude Code is a transport rather than a provider a
+    /// stage names, so it is not in this list.
+    ///
+    /// The keys are never used: `serves_model` reads a table compiled into the
+    /// build, which is exactly the offline answer wanted here.
+    fn setup_providers() -> Vec<(&'static str, Box<dyn leviath_providers::Provider>)> {
+        let client = reqwest::Client::new();
+        let key = || "not-used-offline".to_string();
+        vec![
+            (
+                "anthropic",
+                Box::new(leviath_providers::AnthropicProvider::new(
+                    client.clone(),
+                    key(),
+                )) as Box<dyn leviath_providers::Provider>,
+            ),
+            (
+                "openai",
+                Box::new(leviath_providers::OpenAIProvider::new(
+                    client.clone(),
+                    key(),
+                )),
+            ),
+            (
+                "google",
+                Box::new(leviath_providers::GeminiProvider::new(
+                    client.clone(),
+                    key(),
+                )),
+            ),
+            (
+                "openrouter",
+                Box::new(leviath_providers::OpenRouterProvider::new(
+                    client.clone(),
+                    key(),
+                )),
+            ),
+            (
+                "ollama",
+                Box::new(leviath_providers::OllamaProvider::new(client)),
+            ),
+        ]
+    }
 
     /// The published JSON Schema for `agent.leviath`.
     ///
@@ -858,11 +899,57 @@ mod tests {
         assert!(!rejects("[agent]\nname = \"a\"\n"), "a minimal manifest");
     }
 
+    /// A `transform = "custom"` edge must actually name regions.
+    ///
+    /// `transform_config` is parsed key by key, so a misspelt key leaves every
+    /// list empty and the edge becomes an expensive no-op that still parses and
+    /// still validates. Discovered from BUNDLED_AGENTS so it covers whatever
+    /// ships, not a list kept by hand.
+    #[test]
+    fn a_custom_transform_never_parses_to_nothing() {
+        for agent in BUNDLED_AGENTS {
+            let manifest = agent
+                .files
+                .iter()
+                .find(|(rel, _)| *rel == "agent.leviath")
+                .map(|(_, c)| *c)
+                .expect("every bundled agent has a manifest");
+            let blueprint =
+                leviath_core::manifest::parse_manifest(manifest).expect("manifest parses");
+            for stage in &blueprint.stages {
+                for (target, edge) in stage.transitions.iter().flatten() {
+                    let leviath_core::blueprint::EdgeTransform::Custom {
+                        carry,
+                        compact,
+                        clear,
+                        ..
+                    } = &edge.transform
+                    else {
+                        continue;
+                    };
+                    assert!(
+                        !(carry.is_empty() && compact.is_empty() && clear.is_empty()),
+                        "{}: {} -> {} declares a custom transform that names no \
+                         regions, so it does nothing; check the spelling of the \
+                         keys under transform_config",
+                        agent.name,
+                        stage.name,
+                        target
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn every_bundled_stage_offers_every_provider_setup_can_configure() {
-        // Getting Started promises that one provider is all you need. That is
-        // only true if each stage lists them all: a stage naming a subset fails
-        // at spawn on a machine holding a key for a provider it left out.
+        // Getting Started promises that one provider is all you need: on a
+        // machine configured with exactly one of them, every stage still runs.
+        //
+        // Asked of the providers themselves rather than of the spelling. A
+        // blueprint names models and leaves routing to the machine, so "does
+        // this stage name a provider" no longer answers the question - "does
+        // this provider serve anything this stage named" does.
         //
         // Discovered from BUNDLED_AGENTS rather than enumerated, so a new
         // blueprint is covered the day it lands.
@@ -884,13 +971,31 @@ mod tests {
                     .iter()
                     .map(|entry| entry.provider.as_str())
                     .collect();
-                for provider in SETUP_PROVIDERS {
+                let providers = setup_providers();
+                // A gateway fronts the other vendors, so it reaches whatever
+                // they reach. Its own answer comes from a catalogue fetched at
+                // startup, which a test with no network cannot consult.
+                let native = |key: &str| {
+                    providers
+                        .iter()
+                        .any(|(n, p)| *n != "openrouter" && p.serves_model(key).is_some())
+                };
+                for (name, provider) in &providers {
+                    let reachable = stage.model.models.iter().any(|entry| {
+                        if !entry.provider.is_empty() {
+                            return entry.provider == *name;
+                        }
+                        let key = entry.model.rsplit('/').next().unwrap_or(&entry.model);
+                        if *name == "openrouter" {
+                            return native(key);
+                        }
+                        provider.serves_model(key).is_some()
+                    });
                     assert!(
-                        listed.contains(provider),
-                        "{}/{} omits provider {}",
-                        agent.name,
-                        stage_name,
-                        provider
+                        reachable,
+                        "{}/{} names nothing {} can run, so a machine holding \
+                         only that provider cannot reach this stage: {:?}",
+                        agent.name, stage_name, name, stage.model.models
                     );
                 }
                 // Ollama needs no API key, so it registers on every machine. Any

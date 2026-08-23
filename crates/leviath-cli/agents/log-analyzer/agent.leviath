@@ -1,6 +1,6 @@
 [agent]
 name = "log-analyzer"
-version = "0.2.1"
+version = "0.2.2"
 description = "Analyzes log files - sweeps many files or time windows in parallel, then identifies anomalies, trends, and error patterns via a scripted analyze⇄script loop, maintaining a severity-ranked findings index"
 entry_stage = "ingest"
 
@@ -13,7 +13,7 @@ write_file = "ask"
 # ─── Stage 1: Ingest ──────────────────────────────────────────────────────────
 [stages.ingest]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Read log files, identify format and structure"
 available_tools = ["read_file", "list_dir", "bash", "context_write", "context_read"]
 max_iterations = 15
@@ -62,7 +62,7 @@ transform = "direct"
 # analyze stage takes them from there and digs into what they turned up.
 [stages.split_logs]
 mode = "fan_out"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Split the logs into files or time windows, one sweeper each"
 available_tools = []
 max_iterations = 4
@@ -119,7 +119,7 @@ transform = "direct"
 # this one's.
 [stages.scan_worker]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Sweep one log file or time window for errors, anomalies, and trends"
 available_tools = ["read_file", "bash", "submit_output"]
 allow_as_worker = true
@@ -154,7 +154,7 @@ instructions = "One finding per line, as `<severity> | <finding> | <evidence: co
 # ─── Stage 3: Analyze ─────────────────────────────────────────────────────────
 [stages.analyze]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "anthropic/claude-opus-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Identify anomalies, trends, and error patterns"
 available_tools = ["read_file", "bash", "context_write", "context_append", "context_read"]
 max_iterations = 25
@@ -209,7 +209,7 @@ transform = "direct"
 # ─── Stage 4: Script ──────────────────────────────────────────────────────────
 [stages.script]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Write and execute scripts to parse, filter, and aggregate log data"
 available_tools = ["read_file", "bash", "context_read"]
 max_iterations = 20
@@ -260,7 +260,7 @@ transform = "direct"
 # ─── Stage 5: Report ──────────────────────────────────────────────────────────
 [stages.report]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "anthropic/claude-opus-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Produce a structured analysis report with findings"
 available_tools = ["write_file", "read_file"]
 max_iterations = 10
@@ -287,7 +287,7 @@ hint = "The report is written"
 # ─── Stage 6: Error recovery ──────────────────────────────────────────────────
 [stages.error_recovery]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Recover from a failed read or script execution"
 available_tools = ["read_file", "bash"]
 max_iterations = 10
@@ -320,7 +320,7 @@ model = "claude-sonnet-5"
 # not work.
 [stages.summary]
 mode = "output"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Say what the logs showed"
 max_iterations = 8
 system_prompt = """

@@ -11,6 +11,7 @@
 //! - Provider-specific features (caching, etc.)
 
 pub mod anthropic;
+pub mod capabilities;
 pub mod claude_code;
 #[cfg(feature = "debug-http")]
 pub mod debug_http;
@@ -30,6 +31,7 @@ pub mod tokenizer;
 mod test_support;
 
 pub use anthropic::AnthropicProvider;
+pub use capabilities::{ModelCapabilities, ModelCapabilityOverride};
 pub use claude_code::ClaudeCodeProvider;
 pub use gemini::GeminiProvider;
 pub use ollama::OllamaProvider;
@@ -38,9 +40,9 @@ pub use openrouter::OpenRouterProvider;
 pub use pricing::{CostTotals, ModelPricing};
 pub use provider::{
     ContentBlock, DEFAULT_INFERENCE_TIMEOUT_SECS, FinishReason, InferenceRequest,
-    InferenceResponse, Message, MessageContent, ModelCapabilities, ModelCapabilityOverride,
-    ModelInfo, Provider, ProviderConfig, ProviderError, RateLimitConfig, Result, RetryAdvice,
-    SystemBlock, TokenUsage, Tool, ToolCall, UnavailableReason, build_http_client,
+    InferenceResponse, Message, MessageContent, ModelInfo, Provider, ProviderConfig, ProviderError,
+    RateLimitConfig, Result, RetryAdvice, SystemBlock, TokenUsage, Tool, ToolCall,
+    UnavailableReason, build_http_client,
 };
 pub use rhai_provider::RhaiProvider;
 

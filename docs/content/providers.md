@@ -206,35 +206,36 @@ Models this install would use:
 
 ### A gateway is a route, not a model
 
-`default_provider` picks among the entries a stage lists, so what that provider's entry *names*
-decides what you get. This matters most for OpenRouter, which serves models from every vendor: an
-entry naming a different model there is not a different route to the same answer, it is a different
-answer.
+`default_provider` picks the route, not the answer. This matters most for OpenRouter, which serves
+models from every vendor: preferring the gateway should change who bills you and nothing else.
 
-The bundled agents therefore name the same model in their OpenRouter slot as in their first entry -
-`anthropic/claude-sonnet-5` on OpenRouter where the blueprint's first choice is `claude-sonnet-5` on
-Anthropic. Preferring the gateway changes who bills you and nothing else. They used to name a much
-cheaper model there, so `default_provider = "openrouter"` quietly meant "run every stage on the
-cheapest model this blueprint mentions", which is not what preferring a provider should mean.
+It once took discipline to keep that true. A stage listed one entry per route, and the entries were
+matched whole, so `{ provider = "openrouter", model = "..." }` naming a cheaper model than the
+Anthropic entry beside it meant `default_provider = "openrouter"` quietly ran the cheaper model
+everywhere. A blueprint asking for `gemini-3.1-pro-preview` could and did run sonnet instead,
+because the route it happened to match named sonnet.
 
-Write your own blueprint's OpenRouter entry the same way unless you mean the substitution: name the
-model you actually want, prefixed by its vendor, because that is how OpenRouter ids are spelled.
+Stages now name models and leave the route open, so the substitution has nowhere to hide. There is
+one entry per model rather than one per route, and the provider is whichever configured one serves
+it. The same spelling works everywhere: write `gpt-5.5`, and OpenAI serves it as `gpt-5.5` while
+OpenRouter serves it as `openai/gpt-5.5`, without the blueprint knowing either id.
 
 ### Running the bundled agents on your provider
 
-The [bundled agents](/docs/agent-catalog) list all five providers, so any configured key works out
-of the box. But each blueprint's own order decides which is tried first, and a custom Rhai
-provider is never on the list. Naming yours as the default is what puts it in front:
+The [bundled agents](/docs/agent-catalog) name models rather than routes, so any configured key
+works out of the box: whichever provider you set up is asked which of the listed models it serves.
+Each blueprint's own order still decides which model is tried first, and a custom Rhai provider is
+never consulted for an open route. Naming yours as the default is what puts it in front:
 
 ```toml
 default_provider = "openrouter"
 openrouter_api_key = "sk-or-..."
 ```
 
-Every stage now starts on OpenRouter and keeps the blueprint's own list behind it, each stage still
-on the OpenRouter model its author picked for that stage. Add `default_model` only when you want one
-model everywhere regardless of stage. A stage that must stay on the provider its author picked opts
-out with `allow_user_default = false`.
+Every stage now starts on OpenRouter, on the model its author picked for that stage, and keeps the
+blueprint's own order behind it. Add `default_model` only when you want one model everywhere
+regardless of stage. A stage that must stay on the provider its author picked opts out with
+`allow_user_default = false`.
 
 Two other ways in. A full override, for one run:
 
@@ -242,21 +243,28 @@ Two other ways in. A full override, for one run:
 lev run coder -t "fix the failing test" --model openrouter/deepseek/deepseek-v4-flash
 ```
 
-Or, for something permanent and per stage, copying the blueprint and naming your provider on the
-stages you care about:
+Or, for something permanent and per stage, copying the blueprint and naming the models you want on
+the stages you care about, best first:
 
 ```toml
-model = { models = [
-  { provider = "openrouter", model = "deepseek/deepseek-v4-flash" },
-  { provider = "anthropic",  model = "claude-sonnet-5" },
-] }
+model = { models = ["deepseek-v4-flash", "claude-sonnet-5"] }
 ```
+
+Pin a provider only for a model that one route alone can reach, such as anything local:
+
+```toml
+model = { models = ["claude-sonnet-5", { provider = "ollama", model = "qwen3.5:9b" }] }
+```
+
+A model no configured provider serves is skipped, with a warning naming it, and the stage falls
+through to the next model listed.
 
 > [!WARNING]
 > Ollama needs no key, so it is registered whether or not a server is running. Leave
 > `default_model` unset on a machine with no Ollama and every stage that lists it starts against
 > `http://localhost:11434`. The run moves on to its next candidate rather than dying there, but
-> it still spends four attempts finding out.
+> it still spends the attempts finding out. This is why the bundled agents pin their Ollama entry
+> explicitly and put it last.
 
 ### Turning off an Ollama model's thinking
 

@@ -35,7 +35,7 @@ hint = "The work is done"
 
 [stages.summary]
 mode = "output"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+model = { models = ["claude-sonnet-5"] }
 description = "Say what changed"
 max_iterations = 8
 system_prompt = """

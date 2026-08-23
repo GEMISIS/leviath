@@ -65,6 +65,21 @@ pub fn resolve_stage_model(
 /// host-wide `fallback_order`. Deduplicated, because the same pair reaching the
 /// list twice would spend a failover step going nowhere. Never empty: with
 /// nothing registered it yields the blueprint's own first entry, exactly as
+/// A model's identity, independent of the route it is reached by.
+///
+/// The same model is spelled differently depending on the provider serving it:
+/// `gpt-5.5` on OpenAI is `openai/gpt-5.5` on OpenRouter, and
+/// `claude-opus-5` is `anthropic/claude-opus-5`. Comparing the raw strings
+/// makes one model look like two, which is what let a route preference be read
+/// as a model preference (issue #578).
+///
+/// The last segment is the model; anything before it is the vendor namespace a
+/// gateway prefixes. A local model with no slash (`qwen3.5:9b`) is already its
+/// own key.
+fn model_key(model: &str) -> &str {
+    model.rsplit('/').next().unwrap_or(model)
+}
+
 /// before, and `resolve_stages` rejects that unusable case with a clear error.
 pub fn resolve_stage_candidates(
     model_cfg: &ModelConfig,
@@ -103,14 +118,44 @@ pub fn resolve_stage_candidates(
         }
     };
 
-    // Every listed model whose provider is registered, in blueprint order. A
-    // bare `--model` override renames the model but keeps the provider order.
+    // Every listed model, in blueprint order. A bare `--model` override renames
+    // the model but keeps the order.
+    //
+    // An entry with no provider names a model and leaves the route open: ask
+    // the registered providers which of them serves it. That is the point of
+    // letting a blueprint omit the provider - the author knows which model the
+    // stage needs, and only the machine knows how to reach it.
     for entry in &model_cfg.models {
-        if registry.has(&entry.provider) {
-            let model = override_model
-                .clone()
-                .unwrap_or_else(|| entry.model.clone());
-            push(entry.provider.clone(), model);
+        let model = override_model
+            .clone()
+            .unwrap_or_else(|| entry.model.clone());
+        if !entry.provider.is_empty() {
+            if registry.has(&entry.provider) {
+                push(entry.provider.clone(), model);
+            }
+            continue;
+        }
+        let key = model_key(&model);
+        // Default provider first, so an open route follows the same preference
+        // a named model's routes do.
+        let mut candidates_for_model = registry.native_providers();
+        candidates_for_model.sort_by_key(|(name, _)| *name != defaults.provider);
+        let mut routed = false;
+        for (name, provider) in candidates_for_model {
+            if let Some(id) = provider.serves_model(key) {
+                push(name.to_string(), id);
+                routed = true;
+            }
+        }
+        // Say so when nothing serves it. The chain carries on to the next model,
+        // which is what a fallback list is for, but an unroutable name is worth
+        // seeing: it is equally a typo, a model no configured provider carries,
+        // or a gateway whose catalogue never primed.
+        if !routed {
+            tracing::warn!(
+                model = %model,
+                "no configured provider serves this model, so it is skipped;                  the stage falls through to the next model listed"
+            );
         }
     }
 
@@ -143,13 +188,42 @@ pub fn resolve_stage_candidates(
     // must pin its own provider already has the way to say so -
     // `allow_user_default = false` - and that suppresses this too.
     if model_cfg.allow_user_default && registry.has(&defaults.provider) {
-        let (mut preferred, rest): (Vec<ModelEntry>, Vec<ModelEntry>) = candidates
-            .into_iter()
-            .partition(|c| c.provider == defaults.provider);
-        // Stable, so the blueprint's order survives behind the default.
+        // Grouped by MODEL, not by provider. `default_provider` says where a
+        // run should go, which is a statement about routes; letting it reorder
+        // across models turns it into a statement about which model to use, and
+        // a blueprint that deliberately chose one per stage silently gets
+        // another (issue #578).
+        //
+        // Models keep blueprint order, except that the user's own
+        // `default_model` leads - that IS a model preference, and someone who
+        // named a model meant it.
         let default_model = user_default.as_ref().map(|(_, m)| m.as_str());
-        preferred.sort_by_key(|c| Some(c.model.as_str()) != default_model);
-        candidates = preferred.into_iter().chain(rest).collect();
+        let mut order: Vec<String> = Vec::new();
+        for c in &candidates {
+            let key = model_key(&c.model).to_string();
+            if !order.contains(&key) {
+                order.push(key);
+            }
+        }
+        if let Some(dm) = default_model
+            && let Some(at) = order.iter().position(|k| k == model_key(dm))
+        {
+            let key = order.remove(at);
+            order.insert(0, key);
+        }
+        let mut grouped: Vec<ModelEntry> = Vec::with_capacity(candidates.len());
+        for key in order {
+            let mut group: Vec<ModelEntry> = candidates
+                .iter()
+                .filter(|c| model_key(&c.model) == key)
+                .cloned()
+                .collect();
+            // Stable: the default provider's route to this model first, the
+            // blueprint's order behind it.
+            group.sort_by_key(|c| c.provider != defaults.provider);
+            grouped.extend(group);
+        }
+        candidates = grouped;
     }
 
     if candidates.is_empty() {
@@ -575,15 +649,48 @@ mod tests {
         }
     }
 
+    /// A stage config whose entries name models and leave the route open.
+    fn model_cfg_open(models: Vec<&str>) -> ModelConfig {
+        ModelConfig {
+            models: models
+                .into_iter()
+                .map(|m| ModelEntry::new(String::new(), m.to_string()))
+                .collect(),
+            allow_user_default: true,
+            parameters: HashMap::new(),
+            request_timeout_secs: None,
+        }
+    }
+
     fn registry_with(providers: &[&str]) -> ProviderRegistry {
         let mut r = ProviderRegistry::new();
         for p in providers {
-            r.register(p.to_string(), Arc::new(FakeProvider));
+            r.register(p.to_string(), Arc::new(FakeProvider::default()));
         }
         r
     }
 
-    struct FakeProvider;
+    /// A registry whose providers each serve a named set of models, for the
+    /// entries that name a model and leave the route open.
+    fn registry_serving(providers: &[(&str, &[&str])]) -> ProviderRegistry {
+        let mut r = ProviderRegistry::new();
+        for (name, models) in providers {
+            r.register(
+                (*name).to_string(),
+                Arc::new(FakeProvider {
+                    serves: models.iter().map(|m| (*m).to_string()).collect(),
+                }),
+            );
+        }
+        r
+    }
+
+    #[derive(Default)]
+    struct FakeProvider {
+        /// Models this provider claims. Empty is the ordinary fixture: the
+        /// resolver only asks `has()` for a route-pinned entry.
+        serves: Vec<String>,
+    }
     #[async_trait::async_trait]
     impl leviath_providers::Provider for FakeProvider {
         async fn infer(
@@ -606,6 +713,12 @@ mod tests {
         fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
             leviath_providers::ModelCapabilities::default()
         }
+        fn serves_model(&self, model_key: &str) -> Option<String> {
+            self.serves
+                .iter()
+                .any(|m| m == model_key)
+                .then(|| model_key.to_string())
+        }
     }
 
     #[tokio::test]
@@ -613,7 +726,7 @@ mod tests {
         // The resolver only asks the registry `has()`, so the fixture provider
         // is inert; this pins its stub answers so the impl stays measured.
         use leviath_providers::Provider as _;
-        let p = FakeProvider;
+        let p = FakeProvider::default();
         let request: leviath_providers::InferenceRequest =
             serde_json::from_value(serde_json::json!({
                 "messages": [],
@@ -1019,6 +1132,40 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_with_no_provider_resolves_to_whoever_serves_the_model() {
+        // What a blueprint that names models rather than routes produces. The
+        // author asks for `gpt-5.5`; which providers can reach it is a property
+        // of the machine, so every registered one is asked.
+        let cfg = model_cfg_open(vec!["gpt-5.5"]);
+        let registry = registry_serving(&[
+            ("anthropic", &[][..]),
+            ("openai", &["gpt-5.5"][..]),
+            ("openrouter", &["gpt-5.5"][..]),
+        ]);
+        let defaults = ModelDefaults {
+            provider: "openrouter".to_string(),
+            ..Default::default()
+        };
+        let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
+        assert_eq!(
+            pairs(&got),
+            vec![("openrouter", "gpt-5.5"), ("openai", "gpt-5.5")],
+            "both routes are offered, the user's default provider first, and \
+             the provider that does not serve it is not offered at all"
+        );
+    }
+
+    #[test]
+    fn a_model_nobody_serves_is_skipped_and_the_next_one_is_used() {
+        // An unroutable name is not fatal: the chain carries on, which is what
+        // a fallback list is for. It warns rather than failing the stage.
+        let cfg = model_cfg_open(vec!["nobody-serves-this", "claude-sonnet-5"]);
+        let registry = registry_serving(&[("anthropic", &["claude-sonnet-5"][..])]);
+        let got = resolve_stage_candidates(&cfg, None, &ModelDefaults::default(), &registry);
+        assert_eq!(pairs(&got), vec![("anthropic", "claude-sonnet-5")]);
+    }
+
+    #[test]
     fn the_global_chain_rescues_a_single_model_stage() {
         // The reported configuration: every stage names one OpenRouter model,
         // so the blueprint alone offers nowhere to fail over to.
@@ -1066,11 +1213,15 @@ mod tests {
     }
 
     /// Every bundled blueprint lists Ollama as `qwen3.5:9b`. A user who set
-    /// `default_model = "qwen3.8:latest"` next to `default_provider = "ollama"`
-    /// was still sent to the blueprint's model, because the preference only
-    /// moved the *provider* forward and left the blueprint's entry ahead of
-    /// the user's. The named default leads; the blueprint's entry stays behind
-    /// it as the fallback.
+    /// `default_model = "qwen3.8:latest"` was still sent to the blueprint's
+    /// model, so the named default leads.
+    ///
+    /// What it does NOT do is drag the rest of that provider's entries with it.
+    /// `default_model` is a statement about a model and moves that model;
+    /// `default_provider` is a statement about a route and reorders routes
+    /// within a model. So the blueprint's own first model stays ahead of the
+    /// blueprint's later ones, and only falls through when nothing registered
+    /// can serve it (issue #578).
     #[test]
     fn the_users_default_model_leads_the_blueprints_entry_on_the_same_provider() {
         let cfg = model_cfg(vec![
@@ -1089,14 +1240,16 @@ mod tests {
             pairs(&got),
             vec![
                 ("ollama", "qwen3.8:latest"),
+                ("anthropic", "claude-sonnet-5"),
                 ("ollama", "qwen3.5:9b"),
                 ("ollama", "qwen3.6:27b"),
-                ("anthropic", "claude-sonnet-5"),
             ],
         );
 
-        // A default that repeats the blueprint's own entry changes nothing but
-        // the head, and is listed once.
+        // A default that repeats the blueprint's own entry moves that model to
+        // the head and is listed once. The models behind it keep the
+        // blueprint's order rather than the provider's: `default_provider`
+        // reorders the routes to a model, not the models themselves (#578).
         let repeated = ModelDefaults {
             provider: "ollama".to_string(),
             model: Some("qwen3.6:27b".to_string()),
@@ -1107,8 +1260,8 @@ mod tests {
             pairs(&got),
             vec![
                 ("ollama", "qwen3.6:27b"),
-                ("ollama", "qwen3.5:9b"),
                 ("anthropic", "claude-sonnet-5"),
+                ("ollama", "qwen3.5:9b"),
             ],
         );
     }

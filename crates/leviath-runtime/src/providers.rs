@@ -101,6 +101,20 @@ impl ProviderRegistry {
         self.providers.keys().map(|k| k.as_str()).collect()
     }
 
+    /// Every natively registered provider, with the name it is registered under.
+    ///
+    /// The pair form for callers that ask each provider a question rather than
+    /// looking one up by name: [`Self::provider_names`] plus [`Self::get`] leaves
+    /// the caller holding an `Option` that cannot be `None`, because both read
+    /// the same map. Script providers are excluded for the reason
+    /// [`Self::prime_capabilities`] gives: `get` compiles them on demand.
+    pub fn native_providers(&self) -> Vec<(&str, Arc<dyn Provider>)> {
+        self.providers
+            .iter()
+            .map(|(name, provider)| (name.as_str(), provider.clone()))
+            .collect()
+    }
+
     /// Every provider name this registry could answer for right now: the
     /// natively registered ones, then the script providers the layer can see.
     ///

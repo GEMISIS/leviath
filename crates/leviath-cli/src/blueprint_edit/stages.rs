@@ -318,7 +318,14 @@ impl ManifestDoc {
         }
         let mut models = Array::new();
         for entry in chain {
-            let (provider, model) = entry.split_once('/').unwrap_or(("", entry.as_str()));
+            // No route in the string means the author is naming a model and
+            // leaving the provider to the machine, which the bare-string form
+            // says directly. Writing `provider = ""` would say the same thing
+            // in a shape nobody would type by hand.
+            let Some((provider, model)) = entry.split_once('/') else {
+                models.push(Value::from(entry.as_str()));
+                continue;
+            };
             let mut t = InlineTable::new();
             t.insert("provider", Value::from(provider));
             t.insert("model", Value::from(model));

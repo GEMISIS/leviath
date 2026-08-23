@@ -1,6 +1,6 @@
 [agent]
 name = "reviewer"
-version = "0.2.1"
+version = "0.2.2"
 description = "Code review agent - discover, scan, review the areas in parallel, then deep review and report, with error recovery and multi-provider fallback"
 entry_stage = "discover"
 
@@ -16,7 +16,7 @@ bash      = "ask"
 # iteration cap, one non-error edge (auto-followed, no routing call).
 [stages.discover]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Map the project and work out how to verify a hypothesis in it"
 available_tools = ["read_file", "list_dir", "bash", "context_write"]
 max_iterations = 6
@@ -57,7 +57,7 @@ transform = "direct"
 # ─── Stage 2: Scan ────────────────────────────────────────────────────────────
 [stages.scan]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Fast first pass for obvious issues"
 available_tools = ["read_file", "list_dir", "context_append", "context_read"]
 max_iterations = 12
@@ -106,7 +106,7 @@ transform = "direct"
 # them and does the work that needs the whole picture.
 [stages.split_review]
 mode = "fan_out"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Split the change into areas, one reviewer each"
 available_tools = []
 max_iterations = 4
@@ -163,7 +163,7 @@ transform = "direct"
 # at once, so verification stays in the merge, where `workflow`'s VERIFY line is.
 [stages.review_worker]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "anthropic/claude-opus-5" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Review one area of the change in depth"
 available_tools = ["read_file", "list_dir", "submit_output"]
 allow_as_worker = true
@@ -200,7 +200,7 @@ instructions = "One finding per line, most severe first, as `severity | file:lin
 # ─── Stage 4: Deep review ─────────────────────────────────────────────────────
 [stages.deep_review]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "anthropic/claude-opus-5" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "In-depth analysis of correctness, security, and architecture"
 available_tools = ["read_file", "list_dir", "bash", "context_write", "context_append", "context_read"]
 max_iterations = 25
@@ -255,7 +255,7 @@ transform = "direct"
 # ─── Stage 5: Report ──────────────────────────────────────────────────────────
 [stages.report]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Produce an actionable, ranked review report"
 available_tools = ["read_file"]
 max_iterations = 10
@@ -282,7 +282,7 @@ hint = "The review is written"
 # ─── Stage 6: Error handler ───────────────────────────────────────────────────
 [stages.error_handler]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Handle errors encountered during scanning or review"
 available_tools = ["read_file", "bash"]
 max_iterations = 10
@@ -314,7 +314,7 @@ model = "claude-sonnet-5"
 # not work.
 [stages.summary]
 mode = "output"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Say what the review found"
 max_iterations = 8
 system_prompt = """
