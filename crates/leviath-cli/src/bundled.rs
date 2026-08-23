@@ -945,6 +945,55 @@ mod tests {
         }
     }
 
+    /// A provider claims the models it serves, and not the rest.
+    ///
+    /// `serves_model` decides which provider a bare model name resolves to, so a
+    /// provider that over-claims wins models it cannot run. That is the same
+    /// failure #578 was about, arriving from the other direction: there the host
+    /// picked a route and got the wrong model, here a provider claims a model it
+    /// has never heard of.
+    #[test]
+    fn a_provider_does_not_claim_models_from_other_vendors() {
+        let providers = setup_providers();
+        let get = |want: &str| {
+            providers
+                .iter()
+                .find(|(n, _)| *n == want)
+                .map(|(_, p)| p)
+                .expect("configured above")
+        };
+
+        // Each of these is unmistakably one vendor's.
+        for (owner, model) in [
+            ("anthropic", "claude-opus-5"),
+            ("openai", "gpt-5.5"),
+            ("google", "gemini-3.1-pro-preview"),
+        ] {
+            assert!(
+                get(owner).serves_model(model).is_some(),
+                "{owner} should serve its own {model}"
+            );
+            for other in ["anthropic", "openai", "google"] {
+                if other == owner {
+                    continue;
+                }
+                assert!(
+                    get(other).serves_model(model).is_none(),
+                    "{other} claims {model}, which belongs to {owner}: a bare \
+                     model name would resolve to a provider that cannot run it"
+                );
+            }
+        }
+
+        // And nobody claims a model that does not exist.
+        for name in ["anthropic", "openai", "google"] {
+            assert!(
+                get(name).serves_model("not-a-real-model-xyz").is_none(),
+                "{name} claims a model nobody has"
+            );
+        }
+    }
+
     /// A `transform = "custom"` edge must actually name regions.
     ///
     /// `transform_config` is parsed key by key, so a misspelt key leaves every

@@ -365,6 +365,20 @@ impl Provider for OpenAIProvider {
         "openai"
     }
 
+    fn serves_model(&self, model_key: &str) -> Option<String> {
+        // OpenAI's chat models are `gpt-*`, and its reasoning line is `o1`/`o3`
+        // and successors. See the note on the Gemini provider for why the
+        // capability table is the wrong thing to ask.
+        let reasoning = model_key.starts_with('o')
+            && model_key
+                .get(1..2)
+                .is_some_and(|c| c.chars().all(|c| c.is_ascii_digit()));
+        (model_key.starts_with("gpt")
+            || reasoning
+            || self.capability_overrides.contains_key(model_key))
+        .then(|| model_key.to_string())
+    }
+
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
         // Config first: it is the only source that can know a negotiated rate,
         // and the shipped table is a transcription of a public page that may
@@ -1373,5 +1387,50 @@ mod tests {
             None,
         );
         assert!(unlimited.rate_limiter.is_none());
+    }
+
+    /// This vendor claims the models it serves, and declines the rest.
+    ///
+    /// `serves_model` is what decides where a bare model name resolves, so a
+    /// provider that over-claims wins a model it cannot run. Deciding it from
+    /// the capability table did exactly that: the table answers how big a
+    /// context window to assume, its fallback for an unknown model is a guess,
+    /// and a guess is indistinguishable from a real entry. Measured, `google`
+    /// claimed `claude-opus-5`.
+    #[test]
+    fn it_claims_its_own_models_and_no_one_elses() {
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+        );
+        assert_eq!(
+            provider.serves_model("gpt-5.5"),
+            Some("gpt-5.5".to_string()),
+            "its own model"
+        );
+        assert!(
+            provider.serves_model("claude-opus-5").is_none(),
+            "claude-opus-5 belongs to another vendor"
+        );
+        assert!(
+            provider.serves_model("gemini-3.1-pro-preview").is_none(),
+            "gemini-3.1-pro-preview belongs to another vendor"
+        );
+        assert!(
+            provider.serves_model("grok-4.6").is_none(),
+            "grok-4.6 belongs to another vendor"
+        );
+        // The reasoning line is named differently from the chat line.
+        assert_eq!(provider.serves_model("o3"), Some("o3".to_string()));
+        assert_eq!(
+            provider.serves_model("o1-preview"),
+            Some("o1-preview".to_string())
+        );
+        // A name that merely opens with the same letter is not one of them.
+        assert!(provider.serves_model("opus-5").is_none(), "not OpenAI's");
+        assert!(
+            provider.serves_model("not-a-real-model-xyz").is_none(),
+            "a model nobody has"
+        );
     }
 }

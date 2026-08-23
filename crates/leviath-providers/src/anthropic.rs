@@ -870,6 +870,13 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
+    fn serves_model(&self, model_key: &str) -> Option<String> {
+        // Anthropic's models are named `claude-*`. See the note on the Gemini
+        // provider for why the capability table is the wrong thing to ask.
+        (model_key.starts_with("claude") || self.capability_overrides.contains_key(model_key))
+            .then(|| model_key.to_string())
+    }
+
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
         // Config first: it is the only source that can know a negotiated rate,
         // and the shipped table is a transcription of a public page that may
@@ -3759,5 +3766,42 @@ mod tests {
     fn message_markers_respect_a_zero_budget() {
         let counts: Vec<usize> = (0..60).map(|_| 2).collect();
         assert!(message_cache_breakpoints(&counts, 0).is_empty());
+    }
+
+    /// This vendor claims the models it serves, and declines the rest.
+    ///
+    /// `serves_model` is what decides where a bare model name resolves, so a
+    /// provider that over-claims wins a model it cannot run. Deciding it from
+    /// the capability table did exactly that: the table answers how big a
+    /// context window to assume, its fallback for an unknown model is a guess,
+    /// and a guess is indistinguishable from a real entry. Measured, `google`
+    /// claimed `claude-opus-5`.
+    #[test]
+    fn it_claims_its_own_models_and_no_one_elses() {
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+        );
+        assert_eq!(
+            provider.serves_model("claude-opus-5"),
+            Some("claude-opus-5".to_string()),
+            "its own model"
+        );
+        assert!(
+            provider.serves_model("gemini-3.1-pro-preview").is_none(),
+            "gemini-3.1-pro-preview belongs to another vendor"
+        );
+        assert!(
+            provider.serves_model("gpt-5.5").is_none(),
+            "gpt-5.5 belongs to another vendor"
+        );
+        assert!(
+            provider.serves_model("grok-4.6").is_none(),
+            "grok-4.6 belongs to another vendor"
+        );
+        assert!(
+            provider.serves_model("not-a-real-model-xyz").is_none(),
+            "a model nobody has"
+        );
     }
 }

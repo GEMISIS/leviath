@@ -1,6 +1,6 @@
 [agent]
 name = "deep-researcher"
-version = "0.4.1"
+version = "0.4.2"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 max_child_depth = 2
 entry_stage = "gather"
@@ -358,7 +358,7 @@ transform = "direct"
 # ─── Stage 4: Synthesize (terminal) ───────────────────────────────────────────
 [stages.synthesize]
 mode = "autonomous"
-model = { models = ["gpt-5.5", "claude-opus-5", "claude-sonnet-5", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-opus-5", "gpt-5.5", "claude-sonnet-5", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Produce a structured, cited research report"
 available_tools = ["write_file", "read_file", "context_write"]
 max_iterations = 15
@@ -602,7 +602,7 @@ one of those instead would leave the real report untouched while the stage
 reports success.
 """
 
-[stages.polish.transitions.voice]
+[stages.polish.transitions.summary]
 gate = { require_modifications = true, message = "You have not written the report yet. Read the file named in `report_path`, rewrite it in plain language, and write it back to that same path with write_file. The stage is not done until that file has been replaced." }
 hint = "The report reads clearly - produce the final answer"
 transform = "compact"
@@ -611,57 +611,6 @@ transform = "compact"
 condition = "error"
 transform = "direct"
 
-
-# ─── Second pass: voice ───────────────────────────────────────────────────────
-# Measured: one pass leaves grade 11.2 and 30.3 LLM-tells per 1,000 words; a
-# second takes them to 8.0 and 5.1 without losing a citation. The first pass is
-# structural and its attention goes on sentences; the phrasing that makes a
-# report sound machine-written survives it and needs a pass of its own.
-[stages.voice]
-mode = "autonomous"
-model = { models = ["gemini-3.1-pro-preview", "claude-opus-5", "gpt-5.5", "claude-sonnet-5", { provider = "ollama", model = "qwen3.5:9b" }], parameters = { max_output_tokens = 24000 } }
-description = "Second pass: make it sound like a person wrote it"
-available_tools = ["context_read", "read_file", "write_file", "list_dir"]
-max_iterations = 8
-system_prompt = """
-The report is already readable. This pass is about how it SOUNDS, not how hard
-it is to parse. Read the file named in `report_path` and write your rewrite back
-to that same path.
-
-Change nothing that is a fact, a number, a citation marker, a URL, a heading or
-a caveat. If you cannot improve a sentence without risking its meaning, leave it
-exactly as it is. A pass that changes little is a good outcome; a pass that
-changes a number is a failure.
-
-What to go after, in order:
-
-- Stock openers and connectives: "It is worth noting", "That said", "Overall",
-  "In conclusion", "At its core", "Furthermore", "Moreover", "Additionally".
-  Most sentences work with them deleted and nothing put back.
-- Inflated words where a plain one exists: leverage is use, utilize is use,
-  robust is usually reliable, crucial is usually important, delve into is
-  examine. "comprehensive", "seamless", "pivotal", "myriad", "landscape" and
-  "ecosystem" are almost always padding.
-- Em dashes. A full stop, a comma or brackets.
-- "not only X but also Y", and "isn't just X, it's Y".
-- Lists padded to three when two would do.
-- Bullets that open with a bolded phrase and a colon, unless the bold is a real
-  term being defined.
-- Hedging stacked on hedging: "may potentially", "could possibly". One hedge is
-  a caveat and belongs; two is a tic.
-
-A sentence that states the finding plainly beats one that performs expertise.
-If a phrase could be deleted without losing information, delete it.
-"""
-
-[stages.voice.transitions.summary]
-gate = { require_modifications = true, message = "You have not written the report yet. Read the file named in `report_path`, rewrite it, and write it back to that same path with write_file. The stage is not done until that file has been replaced." }
-hint = "The report reads like a person wrote it - produce the final answer"
-transform = "compact"
-
-[stages.voice.transitions.error_recovery]
-condition = "error"
-transform = "direct"
 
 [context.regions]
 report_path    = { kind = "pinned", budget = "1%", volatility = "rewritten", description = "The exact filename of the report, written by the stage that created it so the polish stage rewrites that file rather than guessing among the workers' own reports in the same directory." }
