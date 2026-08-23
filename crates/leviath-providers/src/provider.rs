@@ -958,9 +958,15 @@ pub trait Provider: Send + Sync {
     /// live catalogue, and when that catalogue is empty (priming failed, or has
     /// not run yet) the table is a better answer than "no".
     fn serves_model_from_table(&self, model_key: &str) -> Option<String> {
-        let caps = self.capabilities(model_key);
-        let fallback = ModelCapabilities::default();
-        (caps.max_context_tokens != fallback.max_context_tokens).then(|| model_key.to_string())
+        // Decided against this provider's own answer for a model it certainly
+        // does not know, not against `ModelCapabilities::default()`. Those are
+        // the same test only for a provider whose unknown-model answer IS the
+        // default; one that falls back to a family-shaped guess differs from the
+        // default for every string, so it claimed every model in existence.
+        // Measured, that made `google` claim `claude-opus-5`, and this is what
+        // decides where a bare model name resolves.
+        let unknown = self.capabilities("\u{0}no-such-model\u{0}");
+        (self.capabilities(model_key) != unknown).then(|| model_key.to_string())
     }
 
     /// What this provider charges for `model`, or `None` when it does not know.

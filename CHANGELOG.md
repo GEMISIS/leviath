@@ -13,6 +13,22 @@ same list.
 
 ## Unreleased
 
+- Fixed: a provider claimed models belonging to other vendors. `serves_model` decided from the capability table, reading "differs from the
+  default capabilities" as "the table knows this model" - but a provider whose
+  fallback for an unknown model is a family-shaped guess differs from the
+  default for every string, so it claimed everything. Measured: `google`
+  claimed `claude-opus-5`, and since this is what decides where a bare model
+  name resolves, a stage could have run on a provider that cannot serve it.
+  Each vendor now recognises its own models by name.
+- Changed: `deep-researcher` and `wide-researcher` drop the `voice` stage and
+  ask for Claude Opus at the stage that writes the report. Measured on one
+  report polished by seven models, a single Gemini pass grades 11.7 with no
+  stock phrasing, and adding the voice pass on top gives 11.9: the second pass
+  cost a stage and moved nothing. At the writing stage Opus cited 44% of the
+  sources it had against GPT-5.5's 16% of more than twice as many, and the
+  earlier run only got Opus there by accident, through the substitution bug
+  that is now fixed.
+
 - Fixed: a fan-out worker's bibliography vanished when the parent's
   `sources_index` was near its budget. The merge built one block of every source
   the worker found and handed it to a whole-entry write that refuses anything
