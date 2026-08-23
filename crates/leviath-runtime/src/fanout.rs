@@ -399,6 +399,60 @@ pub fn parse_fan_out_call(arguments: &serde_json::Value) -> Result<FanOutRequest
     })
 }
 
+/// How many agents one run may create, sub-agents included, or `0` for no limit.
+///
+/// Read at every fan-out spawn. A run at its ceiling stops widening and finishes
+/// on what it has, rather than failing: the work already done is worth keeping,
+/// and a run that stopped early is a cheaper answer, not a broken one.
+///
+/// The operator's number rather than the blueprint's. Cost per agent is stable
+/// (measured $5.37 to $9.05 across four runs) while the count is not (10 to 42),
+/// so this is the knob that decides what a run costs - and whose account it
+/// costs it to is not something a blueprint author can know.
+#[derive(bevy_ecs::prelude::Resource, Clone, Copy, Debug, Default)]
+pub struct FanOutBudget(pub usize);
+
+/// Every agent in this run's tree, counted from its root.
+///
+/// Walked from the root rather than the spawning parent: a depth-2 worker asking
+/// "how many of us are there" must not answer with the size of its own branch.
+fn run_tree_size(world: &World, entity: Entity) -> usize {
+    let mut root = entity;
+    while let Some(parent) = world.get::<ParentRef>(root) {
+        root = parent.parent_entity;
+    }
+    fn count(world: &World, at: Entity) -> usize {
+        1 + world
+            .get::<SubAgentChildren>(at)
+            .map(|kids| {
+                kids.children
+                    .iter()
+                    .map(|c| count(world, *c))
+                    .sum::<usize>()
+            })
+            .unwrap_or(0)
+    }
+    count(world, root)
+}
+
+/// The item ceiling this blueprint declares on any fan-out stage it has.
+///
+/// `None` when it declares none, which leaves a tool-driven split unbounded, as
+/// it has always been. Read from the blueprint rather than the current stage on
+/// purpose: the tool is called from ordinary stages, which is the whole reason
+/// the ceiling was being missed.
+fn blueprint_fan_out_max_items(world: &World, entity: Entity) -> Option<usize> {
+    world
+        .get::<AgentBlueprint>(entity)?
+        .0
+        .stages
+        .iter()
+        .find_map(|stage| match &stage.mode {
+            StageMode::FanOut { config } => config.max_items,
+            _ => None,
+        })
+}
+
 /// Turn a request into the config the engine runs it under.
 ///
 /// A stage's `[stages.x]` fan-out keys are the starting point when there are any;
@@ -497,7 +551,21 @@ pub fn start_pending_fan_outs(world: &mut World) {
             true => FanOutOrigin::Stage,
             false => FanOutOrigin::Tool { call_id },
         };
-        let config = config_for(&request, stage_config.as_ref());
+        let mut config = config_for(&request, stage_config.as_ref());
+        // A call through the tool comes from an ordinary stage, so it carries no
+        // `max_items` and creates as many workers as the model named. Where the
+        // blueprint declares a fan-out stage, that stage's ceiling is the
+        // author's answer to "how wide should a split of this work be", and a
+        // split of this work is what this is. Measured: a blueprint saying
+        // `max_items = 3` produced six-way splits through this door, and one run
+        // reached 34 sub-agents where an earlier one reached 7.
+        //
+        // Only the ceiling is inherited. `worker_agent`, `merge_stage` and
+        // `results_region` describe how a *stage* delivers its report, and
+        // taking those would change where this call's result goes.
+        if config.max_items.is_none() {
+            config.max_items = blueprint_fan_out_max_items(world, entity);
+        }
         begin_fan_out(world, entity, config, request.items, origin);
     }
 }
@@ -835,6 +903,18 @@ fn start_worker(
     if child_depth > max_depth {
         return Err(format!(
             "fan-out worker depth limit ({max_depth}) reached; not spawning"
+        ));
+    }
+    // The run's own ceiling, beside the depth one. Refusing here rather than at
+    // the split means the items already started keep running and the merge still
+    // happens on what came back: a run that stopped widening is a cheaper answer,
+    // not a failure.
+    let budget = world.get_resource::<FanOutBudget>().map_or(0, |b| b.0);
+    let live = run_tree_size(world, parent);
+    if budget > 0 && live >= budget {
+        return Err(format!(
+            "this run already has {live} agents and its ceiling is {budget} \
+             ([limits] max_agents_per_run); not spawning another"
         ));
     }
 
@@ -3125,6 +3205,143 @@ mod tests {
             .content
             .clone();
         assert_eq!(landed, report);
+    }
+
+    /// A run at its ceiling stops widening.
+    ///
+    /// Refused at the spawn rather than at the split, so the workers already
+    /// running keep going and the merge still happens on what came back. A run
+    /// that stopped widening is a cheaper answer, not a failure.
+    #[test]
+    fn a_run_at_its_ceiling_does_not_spawn_another_worker() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let parent = world.spawn(parent_state()).id();
+
+        let item = WorkItem {
+            id: "one".to_string(),
+            context: serde_json::json!({}),
+        };
+        let config = cfg(None, 3, WorkerFailurePolicy::Continue);
+
+        // No ceiling: the spawn goes through, and the run now holds two agents.
+        world.insert_resource(FanOutBudget(0));
+        assert!(start_worker(&mut world, parent, &config, &item).is_ok());
+        assert_eq!(run_tree_size(&world, parent), 2);
+
+        // A ceiling of two, already reached.
+        world.insert_resource(FanOutBudget(2));
+        let refused = start_worker(&mut world, parent, &config, &item)
+            .expect_err("the run is at its ceiling");
+        assert!(refused.contains("ceiling is 2"), "{refused}");
+        assert!(
+            refused.contains("max_agents_per_run"),
+            "names the knob that set it: {refused}"
+        );
+        assert_eq!(run_tree_size(&world, parent), 2, "and nothing was spawned");
+
+        // Raised: it widens again, so this is a ceiling and not a latch.
+        world.insert_resource(FanOutBudget(3));
+        assert!(start_worker(&mut world, parent, &config, &item).is_ok());
+        assert_eq!(run_tree_size(&world, parent), 3);
+    }
+
+    /// The headcount is the run's, not the branch's.
+    ///
+    /// A depth-2 worker asking "how many of us are there" must not answer with
+    /// the size of its own subtree, or every branch gets the whole budget and
+    /// the ceiling multiplies by however many branches there are.
+    #[test]
+    fn the_run_headcount_is_counted_from_the_root() {
+        let mut world = World::new();
+        let root = world.spawn_empty().id();
+        let a = world.spawn_empty().id();
+        let b = world.spawn_empty().id();
+        let leaf = world.spawn_empty().id();
+
+        world.entity_mut(root).insert(SubAgentChildren {
+            children: vec![a, b],
+            max_child_depth: 2,
+        });
+        for (child, depth) in [(a, 1), (b, 1)] {
+            world.entity_mut(child).insert(ParentRef {
+                parent_entity: root,
+                parent_agent_id: "root".to_string(),
+                depth,
+            });
+        }
+        world.entity_mut(a).insert(SubAgentChildren {
+            children: vec![leaf],
+            max_child_depth: 2,
+        });
+        world.entity_mut(leaf).insert(ParentRef {
+            parent_entity: a,
+            parent_agent_id: "a".to_string(),
+            depth: 2,
+        });
+
+        // Four agents: the root, two workers, and one grandchild.
+        assert_eq!(run_tree_size(&world, root), 4, "counted from the root");
+        assert_eq!(
+            run_tree_size(&world, leaf),
+            4,
+            "and the same from the deepest leaf, which is the point"
+        );
+        assert_eq!(run_tree_size(&world, b), 4, "and from a childless branch");
+    }
+
+    /// A lone agent is one agent, so a run with no sub-agents is not somehow
+    /// zero and does not get a free spawn past a ceiling of one.
+    #[test]
+    fn a_run_with_no_sub_agents_counts_itself() {
+        let mut world = World::new();
+        let solo = world.spawn_empty().id();
+        assert_eq!(run_tree_size(&world, solo), 1);
+    }
+
+    /// A blueprint's fan-out ceiling reaches a split made through the tool.
+    ///
+    /// `max_items` lives on a `mode = "fan_out"` stage, and the tool is called
+    /// from ordinary stages, so a tool-driven split saw no ceiling and made as
+    /// many workers as the model named. Measured on a blueprint declaring
+    /// `max_items = 3`: splits through this door made five and six, and one run
+    /// reached 34 sub-agents where an earlier one reached 7.
+    #[test]
+    fn a_tool_split_takes_the_blueprints_declared_ceiling() {
+        let bp = fanout_blueprint(FanOutConfig {
+            max_items: Some(3),
+            ..cfg(None, 3, WorkerFailurePolicy::Continue)
+        });
+        let mut world = World::new();
+        // Cursor on the merge stage rather than the fan-out one, because that is
+        // the situation: the tool is called from a stage that declares nothing.
+        let e = world
+            .spawn((AgentBlueprint(bp), StageCursor { index: 1 }))
+            .id();
+
+        assert_eq!(
+            blueprint_fan_out_max_items(&world, e),
+            Some(3),
+            "the ceiling the blueprint wrote, found from a stage that does not \
+             declare it"
+        );
+    }
+
+    /// An author who wrote no ceiling is not given one. The fix carries a
+    /// declared number to a second door; it does not invent a number.
+    #[test]
+    fn a_blueprint_declaring_no_ceiling_still_has_none() {
+        let bp = fanout_blueprint(cfg(None, 3, WorkerFailurePolicy::Continue));
+        let mut world = World::new();
+        let e = world
+            .spawn((AgentBlueprint(bp), StageCursor { index: 1 }))
+            .id();
+        assert_eq!(blueprint_fan_out_max_items(&world, e), None);
+
+        // An entity carrying no blueprint declares nothing either, rather than
+        // the lookup being an error.
+        let bare = world.spawn_empty().id();
+        assert_eq!(blueprint_fan_out_max_items(&world, bare), None);
     }
 
     #[test]

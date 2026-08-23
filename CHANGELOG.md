@@ -13,6 +13,21 @@ same list.
 
 ## Unreleased
 
+- Added: `[limits] max_agents_per_run` caps how many agents one run may
+  create, sub-agents included. A run's price is very nearly its headcount:
+  measured across four finished research runs, cost per agent stayed between
+  $5.37 and $9.05 while the count ranged from 10 to 42. `max_child_depth`
+  bounded the depth and a fan-out stage's `max_items` bounded one split, but
+  nothing bounded the total. A run at its ceiling stops widening and finishes
+  on what it has; it is not failed. `0`, the default, is no ceiling.
+- Fixed: a `fan_out` tool call ignored the item ceiling its own blueprint
+  declares. `max_items` lives on a `mode = "fan_out"` stage and the tool is
+  called from ordinary stages, so a tool-driven split created as many workers
+  as the model named. Measured on a blueprint declaring `max_items = 3`:
+  splits through that door made five and six, and one run reached 34
+  sub-agents where an earlier one reached 7. A blueprint that declares no
+  ceiling still has none.
+
 - Fixed: `lev validate` and the daemon disagreed about which model a stage
   runs. The daemon asks every provider for its model list before anything runs;
   validate did not, so a gateway with an unprimed catalogue answered from the

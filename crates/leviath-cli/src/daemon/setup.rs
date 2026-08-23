@@ -323,6 +323,13 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // Told once at start, like the other limits: a run that crosses one of these
     // says so while it is still running, which is the whole point (#573).
     host.set_spend_notify_usd(parts.config.limits.notify_spend_usd.clone());
+    // Read at every fan-out spawn, so a run cannot widen past the operator's
+    // ceiling however many sub-questions its workers think are worth asking.
+    host.world_mut()
+        .world_mut()
+        .insert_resource(leviath_runtime::fanout::FanOutBudget(
+            parts.config.limits.max_agents_per_run,
+        ));
     // How long a finished run keeps its place in the listing, so a scheduler
     // polling on an interval can see how a run ended (issue #205).
     host.set_finished_retention_secs(parts.config.limits.finished_retention_secs);
