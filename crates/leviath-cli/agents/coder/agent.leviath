@@ -1,6 +1,6 @@
 [agent]
 name = "coder"
-version = "0.1.2"
+version = "0.1.3"
 description = "Coding agent: discover the repo, plan with your sign-off, optionally spike, implement, and review, with stuck detection and graph-based recovery"
 entry_stage = "discover"
 
@@ -20,7 +20,7 @@ bash       = "ask"
 # hard iteration cap, and a single non-error edge (auto-followed, no routing call).
 [stages.discover]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Map the codebase and synthesize a verification workflow"
 available_tools = ["read_file", "list_dir", "bash", "context_write", "context_read"]
 max_iterations = 8
@@ -106,7 +106,7 @@ condition = "dead_end"
 
 [stages.plan]
 mode = "interactive_points"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Explore the codebase and produce a step-by-step implementation plan"
 available_tools = ["read_file", "list_dir", "ask_user_text", "ask_user_choice", "edit_document", "context_read"]
 # Attended, planning is where this agent most wants its user, and all three of
@@ -260,7 +260,7 @@ edit_options = ["Add detail - expand a section"]
 # user's approved GOAL is never renegotiated here, only the technical route.
 [stages.prototype]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Spike the riskiest assumption in the approved plan before executing it"
 available_tools = ["read_file", "list_dir", "write_file", "edit_file", "bash", "context_write", "context_append", "context_read"]
 max_iterations = 15
@@ -336,7 +336,7 @@ condition = "dead_end"
 
 [stages.implement]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "anthropic/claude-opus-5" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Write code according to the approved plan"
 available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "ask_user_text", "ask_user_confirm", "context_append", "context_read"]
 max_iterations = 50
@@ -463,7 +463,7 @@ condition = "dead_end"
 
 [stages.review]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "anthropic/claude-opus-5" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Review the implementation and evaluate code quality"
 available_tools = ["read_file", "list_dir", "bash", "context_read"]
 max_iterations = 20
@@ -549,7 +549,7 @@ transform = "direct"
 # before handing back to implement.
 [stages.reassess]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "anthropic/claude-opus-5" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Step back after no progress: diagnose the dead end and re-plan"
 available_tools = ["read_file", "list_dir", "bash", "context_write", "context_append", "context_read"]
 max_iterations = 8
@@ -619,7 +619,7 @@ condition = "dead_end"
 
 [stages.error_recovery]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Diagnose and resolve errors encountered during implementation"
 available_tools = ["read_file", "bash", "context_append"]
 max_iterations = 10
@@ -669,7 +669,7 @@ model    = "claude-sonnet-5"
 # not work.
 [stages.summary]
 mode = "output"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Say what changed"
 max_iterations = 8
 system_prompt = """

@@ -114,10 +114,7 @@ A **stage** is one phase of the work, with its own prompt, model, and tools:
 [stages.survey]
 mode = "autonomous"
 description = "Sort the commits into what a user would notice and what they would not"
-model = { models = [
-  { provider = "anthropic", model = "claude-sonnet-5" },
-  { provider = "openai", model = "gpt-5.4-mini" },
-] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini"] }
 available_tools = ["context_write"]
 max_iterations = 10
 system_prompt = """
@@ -163,10 +160,7 @@ Now the stage it points at:
 [stages.draft]
 mode = "autonomous"
 description = "Turn the sorted changes into release notes"
-model = { models = [
-  { provider = "anthropic", model = "claude-opus-5" },
-  { provider = "openai", model = "gpt-5.5" },
-] }
+model = { models = ["claude-opus-5", "gpt-5.5"] }
 available_tools = ["bash", "read_file"]
 max_iterations = 15
 system_prompt = """
@@ -197,10 +191,7 @@ A run's result should be something a script can use, not a transcript to read. T
 mode = "output"
 description = "Hand back the finished notes"
 max_iterations = 3
-model = { models = [
-  { provider = "anthropic", model = "claude-sonnet-5" },
-  { provider = "openai", model = "gpt-5.4-mini" },
-] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini"] }
 
 [stages.publish.output]
 format = "markdown"
@@ -234,10 +225,7 @@ condition = "error"
 [stages.recover]
 mode = "autonomous"
 description = "Say what went wrong when a stage fails"
-model = { models = [
-  { provider = "anthropic", model = "claude-sonnet-5" },
-  { provider = "openai", model = "gpt-5.4-mini" },
-] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini"] }
 available_tools = []
 max_iterations = 3
 system_prompt = """
@@ -325,10 +313,7 @@ conversation = { kind = "sliding_window", budget = "25%", max_items = 20 }
 [stages.survey]
 mode = "autonomous"
 description = "Sort the commits into what a user would notice and what they would not"
-model = { models = [
-  { provider = "anthropic", model = "claude-sonnet-5" },
-  { provider = "openai", model = "gpt-5.4-mini" },
-] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini"] }
 available_tools = ["context_write"]
 max_iterations = 10
 system_prompt = """
@@ -350,10 +335,7 @@ condition = "error"
 [stages.draft]
 mode = "autonomous"
 description = "Turn the sorted changes into release notes"
-model = { models = [
-  { provider = "anthropic", model = "claude-opus-5" },
-  { provider = "openai", model = "gpt-5.5" },
-] }
+model = { models = ["claude-opus-5", "gpt-5.5"] }
 available_tools = ["bash", "read_file"]
 max_iterations = 15
 system_prompt = """
@@ -377,10 +359,7 @@ condition = "error"
 mode = "output"
 description = "Hand back the finished notes"
 max_iterations = 3
-model = { models = [
-  { provider = "anthropic", model = "claude-sonnet-5" },
-  { provider = "openai", model = "gpt-5.4-mini" },
-] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini"] }
 
 [stages.publish.output]
 format = "markdown"
@@ -389,10 +368,7 @@ instructions = "The release notes only. Start at the first heading, with no prea
 [stages.recover]
 mode = "autonomous"
 description = "Say what went wrong when a stage fails"
-model = { models = [
-  { provider = "anthropic", model = "claude-sonnet-5" },
-  { provider = "openai", model = "gpt-5.4-mini" },
-] }
+model = { models = ["claude-sonnet-5", "gpt-5.4-mini"] }
 available_tools = []
 max_iterations = 3
 system_prompt = """

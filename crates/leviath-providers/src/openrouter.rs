@@ -733,6 +733,29 @@ impl Provider for OpenRouterProvider {
         }
     }
 
+    fn serves_model(&self, model_key: &str) -> Option<String> {
+        // Answered from the primed catalogue rather than the built-in table:
+        // OpenRouter fronts hundreds of models and the table lists a few dozen,
+        // so the table would deny models the gateway serves perfectly well.
+        // Matching on the last path segment because the gateway prefixes a
+        // vendor namespace (`openai/gpt-5.5`) that the blueprint does not name.
+        let primed = leviath_core::sync::lock(&self.api_windows)
+            .keys()
+            .find(|id| id.rsplit('/').next().unwrap_or(id) == model_key)
+            .cloned();
+        // An empty catalogue means priming failed or has not run, and answering
+        // "no" to everything there would deny models this gateway plainly
+        // carries. The compiled-in table is the fallback, read directly rather
+        // than through `serves_model_from_table`: that helper treats "differs
+        // from the default capabilities" as "known", and an unlisted model here
+        // falls through to FALLBACK_CAPABILITIES, which differs from the default
+        // too. Going through it would claim every model in existence.
+        primed.or_else(|| {
+            (builtin_capabilities(model_key) != FALLBACK_CAPABILITIES)
+                .then(|| model_key.to_string())
+        })
+    }
+
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
         leviath_core::sync::lock(&self.api_pricing)
             .get(model)
@@ -2020,6 +2043,53 @@ mod tests {
             leviath_core::sync::lock(&provider.warned_unknown).contains("nobody/knows"),
             "a model with no answer anywhere is still called out"
         );
+    }
+
+    /// The gateway answers a blueprint's bare model name from its live
+    /// catalogue, translating to the vendor-prefixed id it wants in a request.
+    /// The blueprint says `gpt-5.5`; only the gateway knows it is
+    /// `openai/gpt-5.5` here.
+    #[tokio::test]
+    async fn serves_model_translates_a_bare_name_to_the_gateway_id() {
+        let body = br#"{"data":[{"id":"openai/gpt-5.5","context_length":400000},{"id":"x-ai/grok-4.6","context_length":256000}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+        provider.prime_capabilities().await.expect("primes");
+
+        assert_eq!(
+            provider.serves_model("gpt-5.5"),
+            Some("openai/gpt-5.5".to_string())
+        );
+        assert_eq!(
+            provider.serves_model("grok-4.6"),
+            Some("x-ai/grok-4.6".to_string()),
+            "a model no built-in table names is still served once the catalogue \
+             says so, which is the whole reason to ask the gateway"
+        );
+        assert_eq!(
+            provider.serves_model("not-on-this-gateway"),
+            None,
+            "a primed catalogue that does not list it, and no table entry either"
+        );
+    }
+
+    /// Priming can fail or simply not have run. Answering "I serve nothing"
+    /// there would deny models the gateway plainly carries, so an empty
+    /// catalogue falls through to the table compiled into this build.
+    #[test]
+    fn an_unprimed_gateway_answers_from_the_built_in_table() {
+        let provider = provider_with_url("http://127.0.0.1:1".to_string());
+        assert!(
+            leviath_core::sync::lock(&provider.api_windows).is_empty(),
+            "nothing has primed this one"
+        );
+        assert_eq!(
+            provider.serves_model("deepseek-v4-pro"),
+            Some("deepseek-v4-pro".to_string()),
+            "the built-in table names this model, so an unprimed gateway still \
+             offers it rather than degrading to nothing"
+        );
+        assert_eq!(provider.serves_model("nobody-has-heard-of-this"), None);
     }
 
     /// An entry with no `id` cannot be looked up by one, so it is skipped.

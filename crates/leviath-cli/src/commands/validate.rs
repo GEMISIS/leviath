@@ -672,22 +672,23 @@ system_prompt = "hi"
             "no substitution, so nothing to explain: {lines:#?}"
         );
 
-        // Preferring openrouter: the second-listed entry is promoted over the
-        // blueprint's first choice, and the run silently goes there.
+        // Preferring openrouter no longer substitutes a different MODEL. The
+        // blueprint asked for claude-sonnet-5 first and a route to it exists,
+        // so that is what runs: `default_provider` chooses between routes to a
+        // model, not between models (#578). Before this, the second-listed
+        // entry was promoted and the run silently went to deepseek.
         let openrouter_first = with_keys("openrouter");
         let registry = registry_for(&openrouter_first);
         let lines = model_resolution_lines(blueprint, &openrouter_first, &registry);
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("openrouter/deepseek/deepseek-v4-flash")),
-            "{lines:#?}"
+            lines.iter().any(|l| l.contains("claude-sonnet-5")),
+            "the blueprint's first model still wins: {lines:#?}"
         );
         assert!(
-            lines
+            !lines
                 .iter()
-                .any(|l| l.contains("blueprint order") && l.contains("anthropic/claude-sonnet-5")),
-            "the override has to be visible against what the blueprint asked for: {lines:#?}"
+                .any(|l| l.contains("openrouter/deepseek/deepseek-v4-flash")),
+            "a preference for a provider must not pick a different model: {lines:#?}"
         );
         assert!(
             lines

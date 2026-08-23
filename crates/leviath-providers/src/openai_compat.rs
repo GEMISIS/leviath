@@ -227,7 +227,117 @@ pub fn openai_messages_with(
     for msg in &request.messages {
         messages.extend(message_to_openai_with(&msg.role, &msg.content, tool_args));
     }
-    ensure_user_turn(satisfy_call_turn_order(drop_unpaired_tool_turns(messages)))
+    // After the unpaired sweep, not before: a call with no answer is dropped
+    // outright, and folding it first would preserve it as text instead.
+    let messages = drop_unpaired_tool_turns(messages);
+    let messages = if wants_signed_tool_calls(&request.model) {
+        fold_unsigned_tool_calls(messages)
+    } else {
+        messages
+    };
+    ensure_user_turn(satisfy_call_turn_order(messages))
+}
+
+/// Whether this model rejects a function call replayed without the signature it
+/// would have issued.
+///
+/// Matched on the model rather than the provider: the same Gemini model is
+/// reached natively and through a gateway, and it refuses either way. The name
+/// carries a vendor prefix on some routes (`google/gemini-3.1-pro-preview`) and
+/// not on others, so this looks for the family anywhere in the id.
+fn wants_signed_tool_calls(model: &str) -> bool {
+    model.contains("gemini")
+}
+
+/// Fold every unsigned function call, and the result that answered it, into the
+/// assistant's own words.
+///
+/// A call this model did not sign cannot be replayed to it as a call. Removing
+/// it alone would strand its result, and removing both would lose what the run
+/// actually learned, so both are rewritten as text on the turn that made the
+/// call. A signed call is left exactly as it is.
+fn fold_unsigned_tool_calls(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let signed = |call: &serde_json::Value| {
+        call.pointer("/extra_content/google/thought_signature")
+            .and_then(|v| v.as_str())
+            .is_some_and(|sig| !sig.is_empty())
+    };
+
+    // What each call returned, so the fold can say so where the call was made.
+    let mut answers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for m in &messages {
+        if m["role"] != "tool" {
+            continue;
+        }
+        let id = m["tool_call_id"].as_str().unwrap_or_default();
+        let body = m["content"].as_str().unwrap_or_default().to_string();
+        answers.insert(id.to_string(), body);
+    }
+
+    let mut folded_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for mut m in messages {
+        if m["role"] == "tool" {
+            // Emitted as part of the assistant turn that called it, or kept if
+            // its call survived as a call.
+            let id = m["tool_call_id"].as_str().unwrap_or_default();
+            if !folded_ids.contains(id) {
+                out.push(m);
+            }
+            continue;
+        }
+        let Some(calls) = m["tool_calls"].as_array() else {
+            out.push(m);
+            continue;
+        };
+        let (keep, fold): (Vec<_>, Vec<_>) = calls.iter().cloned().partition(signed);
+        if fold.is_empty() {
+            out.push(m);
+            continue;
+        }
+
+        let mut told = String::new();
+        for call in &fold {
+            let name = call
+                .pointer("/function/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("a tool");
+            let args = call
+                .pointer("/function/arguments")
+                .map(render_call_arguments)
+                .unwrap_or_default();
+            let id = call["id"].as_str().unwrap_or_default();
+            let answer = answers.get(id).map(String::as_str).unwrap_or("");
+            folded_ids.insert(id.to_string());
+            // Every call reaching here was answered: the unpaired sweep ran
+            // first. An answer that is empty reads as one, which is true.
+            told.push_str(&format!(
+                "\n\n[Earlier in this run I called {name}({args}) and it \
+                 returned:\n{answer}]"
+            ));
+        }
+
+        let text = m["content"].as_str().unwrap_or_default();
+        m["content"] = serde_json::Value::String(format!("{text}{told}"));
+        if keep.is_empty() {
+            m.as_object_mut().map(|o| o.remove("tool_calls"));
+        } else {
+            m["tool_calls"] = serde_json::Value::Array(keep);
+        }
+        out.push(m);
+    }
+    out
+}
+
+/// A call's arguments as text, however this wire format rendered them.
+///
+/// [`ToolArgsFormat`] means they arrive here as either a JSON string or an
+/// object, and the fold quotes them back to the model either way.
+fn render_call_arguments(args: &serde_json::Value) -> String {
+    match args.as_str() {
+        Some(text) => text.to_string(),
+        None => args.to_string(),
+    }
 }
 
 /// The minimal user turn this layer inserts when a wire format demands one that
@@ -2203,6 +2313,217 @@ mod tests {
 
     /// The shape Gemini rejects with HTTP 400: a call turn whose response has
     /// aged out of the context window (or vice versa) must not be sent.
+    /// The shape that killed `wide-researcher-x-1787453815`: a `challenge`
+    /// stage ran grok on OpenRouter and called tools, then `polish` handed the
+    /// same conversation to Gemini, which refused function calls it never
+    /// signed ("Function call is missing a thought_signature in functionCall
+    /// parts ... `default_api:read_file`, position 9").
+    ///
+    /// Nothing had dropped a signature. Grok never issues one, and the
+    /// conversation region carries turns across a stage boundary, so any
+    /// blueprint that changes model family mid-run arrives here.
+    #[test]
+    fn a_call_made_by_another_model_is_folded_into_text_for_gemini() {
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![
+                Message {
+                    role: "assistant".to_string(),
+                    content: MessageContent::Blocks(vec![
+                        ContentBlock::Text {
+                            text: "Checking the source.".to_string(),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "call_grok_1".to_string(),
+                            name: "read_file".to_string(),
+                            input: serde_json::json!({ "path": "README.md" }),
+                            // Grok issues no signature. This is the whole bug.
+                            thought_signature: None,
+                        },
+                    ]),
+                    cache_breakpoint: false,
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: "call_grok_1".to_string(),
+                        content: "# Leviath\nAn agent framework.".to_string(),
+                        is_error: false,
+                    }]),
+                    cache_breakpoint: false,
+                },
+            ],
+            model: "google/gemini-3.1-pro-preview".to_string(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let msgs = openai_messages(&request);
+        let wire = serde_json::to_string(&msgs).expect("serialises");
+
+        // The claim the API makes: no functionCall part may be unsigned. The
+        // simplest way to satisfy it for a call this model did not make is to
+        // stop calling it a call.
+        assert!(
+            !wire.contains("tool_calls"),
+            "an unsigned call must not be replayed as a call: {wire}"
+        );
+        assert!(
+            !wire.contains("\"role\":\"tool\""),
+            "and its result must not be left stranded as a tool turn: {wire}"
+        );
+
+        // What the run learned still has to reach the model, or the polish
+        // stage rewrites a report it can no longer see the evidence for.
+        assert!(wire.contains("read_file"), "the call is still described");
+        assert!(
+            wire.contains("An agent framework."),
+            "and so is what it returned: {wire}"
+        );
+        assert!(wire.contains("Checking the source."), "original text kept");
+    }
+
+    /// The signed call is the one Gemini itself made, so it must survive as a
+    /// call. Folding everything would throw away the turn structure the model
+    /// depends on when it is talking to itself.
+    #[test]
+    fn a_signed_call_is_left_alone_and_an_unsigned_neighbour_is_not() {
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "call_signed".to_string(),
+                        name: "web_search".to_string(),
+                        input: serde_json::json!({ "q": "leviath" }),
+                        thought_signature: Some("sig-abc".to_string()),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_unsigned".to_string(),
+                        name: "read_file".to_string(),
+                        input: serde_json::json!({ "path": "x" }),
+                        thought_signature: None,
+                    },
+                    // Both answered: an unanswered call is dropped before the
+                    // fold ever sees it, so it would prove nothing here.
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_signed".to_string(),
+                        content: "results".to_string(),
+                        is_error: false,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_unsigned".to_string(),
+                        content: "file body".to_string(),
+                        is_error: false,
+                    },
+                ]),
+                cache_breakpoint: false,
+            }],
+            model: "gemini-3.1-pro-preview".to_string(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let msgs = openai_messages(&request);
+        let wire = serde_json::to_string(&msgs).expect("serialises");
+        assert!(
+            wire.contains("sig-abc"),
+            "the signed call keeps its signature"
+        );
+        assert!(wire.contains("web_search"), "and stays a call");
+        assert!(
+            wire.contains("[Earlier in this run I called read_file"),
+            "while the unsigned one beside it is folded: {wire}"
+        );
+    }
+
+    /// Arguments reach the fold as an object on the routes that send them that
+    /// way, and as a JSON string on the rest. Both have to come back out as
+    /// something the model can read.
+    #[test]
+    fn the_fold_quotes_object_arguments_too() {
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "call_1".to_string(),
+                        name: "read_file".to_string(),
+                        input: serde_json::json!({ "path": "notes.md" }),
+                        thought_signature: None,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_1".to_string(),
+                        content: "the notes".to_string(),
+                        is_error: false,
+                    },
+                ]),
+                cache_breakpoint: false,
+            }],
+            model: "gemini-3.1-pro-preview".to_string(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let msgs = openai_messages_with(&request, ToolArgsFormat::Object);
+        let wire = serde_json::to_string(&msgs).expect("serialises");
+        assert!(!wire.contains("tool_calls"), "still folded: {wire}");
+        assert!(
+            wire.contains("notes.md"),
+            "the arguments survive the fold as text: {wire}"
+        );
+        assert!(wire.contains("the notes"), "and so does the answer");
+    }
+
+    /// A model with no such rule is untouched, so this costs nothing anywhere
+    /// else: the same unsigned call replays as a call.
+    #[test]
+    fn a_model_that_does_not_sign_calls_replays_them_unchanged() {
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "call_1".to_string(),
+                        name: "read_file".to_string(),
+                        input: serde_json::json!({ "path": "x" }),
+                        thought_signature: None,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_1".to_string(),
+                        content: "file body".to_string(),
+                        is_error: false,
+                    },
+                ]),
+                cache_breakpoint: false,
+            }],
+            model: "gpt-5.5".to_string(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let wire = serde_json::to_string(&openai_messages(&request)).expect("serialises");
+        assert!(
+            wire.contains("tool_calls"),
+            "untouched for a model with no rule"
+        );
+    }
+
     /// Gemini 3.x returns an opaque per-call `thought_signature` under
     /// `extra_content.google` and rejects a follow-up request that omits it.
     /// Capture on parse ...
@@ -2294,7 +2615,7 @@ mod tests {
                         id: "orphan".into(),
                         name: "search".into(),
                         input: serde_json::json!({}),
-                        thought_signature: None,
+                        thought_signature: Some("sig".into()),
                     }]),
                     cache_breakpoint: false,
                 },
@@ -2346,7 +2667,7 @@ mod tests {
                         id: "c1".into(),
                         name: "search".into(),
                         input: serde_json::json!({}),
-                        thought_signature: None,
+                        thought_signature: Some("sig".into()),
                     }]),
                     cache_breakpoint: false,
                 },
@@ -2391,7 +2712,7 @@ mod tests {
                         id: "c1".into(),
                         name: "list_dir".into(),
                         input: serde_json::json!({}),
-                        thought_signature: None,
+                        thought_signature: Some("sig".into()),
                     },
                     ContentBlock::ToolResult {
                         tool_use_id: "c1".into(),
@@ -2448,7 +2769,7 @@ mod tests {
                     id: format!("c{n}"),
                     name: "list_dir".into(),
                     input: serde_json::json!({}),
-                    thought_signature: None,
+                    thought_signature: Some("sig".into()),
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: format!("c{n}"),
@@ -2513,7 +2834,7 @@ mod tests {
                             id: "c1".into(),
                             name: "list_dir".into(),
                             input: serde_json::json!({}),
-                            thought_signature: None,
+                            thought_signature: Some("sig".into()),
                         },
                         ContentBlock::ToolResult {
                             tool_use_id: "c1".into(),

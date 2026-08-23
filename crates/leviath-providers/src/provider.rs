@@ -1,5 +1,8 @@
 //! Provider trait and common types.
 
+// Re-exported so `use crate::provider::*` keeps working: the types moved for
+// structural reasons (the 1200-line rule), not as an interface change.
+pub use crate::capabilities::{ModelCapabilities, ModelCapabilityOverride};
 use async_trait::async_trait;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
@@ -323,125 +326,6 @@ impl ProviderError {
             // with a usable OpenRouter fallback sitting untouched behind it.
             ProviderError::RequestFailed(_) => Some(UnavailableReason::Unreachable),
             _ => None,
-        }
-    }
-}
-
-/// Capabilities supported by a model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelCapabilities {
-    /// Whether the model supports temperature sampling
-    pub supports_temperature: bool,
-
-    /// Whether the model supports streaming responses
-    pub supports_streaming: bool,
-
-    /// Whether the model supports tool/function calling
-    pub supports_tools: bool,
-
-    /// Whether the model supports a system prompt
-    pub supports_system_prompt: bool,
-
-    /// Maximum number of context (input) tokens
-    pub max_context_tokens: usize,
-
-    /// Maximum number of output tokens
-    pub max_output_tokens: usize,
-}
-
-impl Default for ModelCapabilities {
-    fn default() -> Self {
-        Self {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 8192,
-            max_output_tokens: 4096,
-        }
-    }
-}
-
-/// A `[model_capabilities]` entry: the fields an operator chose to change.
-///
-/// Every field is optional and unset means "leave it alone", so an entry names
-/// only what it is correcting. The alternative - deserializing straight into
-/// [`ModelCapabilities`] - has two failure modes, and this repo has now seen
-/// both. Without field defaults a partial table fails to deserialize and the
-/// override is dropped in silence (#338). With `#[serde(default)]` it succeeds
-/// and quietly substitutes [`ModelCapabilities::default`] for everything the
-/// operator did not mention, so correcting one boolean would drop a 400 000
-/// token window to 8 192.
-///
-/// Merging onto the provider's own answer for that model is the only reading
-/// that matches what the table looks like it does.
-// No `Eq`: rates are `f64`, which has no total equality.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct ModelCapabilityOverride {
-    /// See [`ModelCapabilities::supports_temperature`].
-    pub supports_temperature: Option<bool>,
-    /// See [`ModelCapabilities::supports_streaming`].
-    pub supports_streaming: Option<bool>,
-    /// See [`ModelCapabilities::supports_tools`].
-    pub supports_tools: Option<bool>,
-    /// See [`ModelCapabilities::supports_system_prompt`].
-    pub supports_system_prompt: Option<bool>,
-    /// See [`ModelCapabilities::max_context_tokens`].
-    pub max_context_tokens: Option<usize>,
-    /// See [`ModelCapabilities::max_output_tokens`].
-    pub max_output_tokens: Option<usize>,
-
-    /// USD per million fresh input tokens. Overrides the shipped rate table,
-    /// and is the only place a negotiated price can be recorded - no public
-    /// pricing page shows one. See `crate::pricing::published_rates`.
-    #[serde(default)]
-    pub input_per_mtok: Option<f64>,
-    /// USD per million cached input tokens. Defaults to the input rate.
-    #[serde(default)]
-    pub cached_input_per_mtok: Option<f64>,
-    /// USD per million tokens written to cache. Defaults to the input rate.
-    #[serde(default)]
-    pub cache_write_per_mtok: Option<f64>,
-    /// USD per million output tokens.
-    #[serde(default)]
-    pub output_per_mtok: Option<f64>,
-}
-
-impl ModelCapabilityOverride {
-    /// `base` with every field this entry names replaced.
-    pub fn apply_to(&self, base: ModelCapabilities) -> ModelCapabilities {
-        ModelCapabilities {
-            supports_temperature: self
-                .supports_temperature
-                .unwrap_or(base.supports_temperature),
-            supports_streaming: self.supports_streaming.unwrap_or(base.supports_streaming),
-            supports_tools: self.supports_tools.unwrap_or(base.supports_tools),
-            supports_system_prompt: self
-                .supports_system_prompt
-                .unwrap_or(base.supports_system_prompt),
-            max_context_tokens: self.max_context_tokens.unwrap_or(base.max_context_tokens),
-            max_output_tokens: self.max_output_tokens.unwrap_or(base.max_output_tokens),
-        }
-    }
-}
-
-impl From<ModelCapabilities> for ModelCapabilityOverride {
-    /// Every field named, for a caller that already has a complete set.
-    fn from(c: ModelCapabilities) -> Self {
-        Self {
-            supports_temperature: Some(c.supports_temperature),
-            supports_streaming: Some(c.supports_streaming),
-            supports_tools: Some(c.supports_tools),
-            supports_system_prompt: Some(c.supports_system_prompt),
-            max_context_tokens: Some(c.max_context_tokens),
-            max_output_tokens: Some(c.max_output_tokens),
-            // Capabilities describe what a model can do, not what it charges,
-            // so a set converted from them names no rates.
-            input_per_mtok: None,
-            cached_input_per_mtok: None,
-            cache_write_per_mtok: None,
-            output_per_mtok: None,
         }
     }
 }
@@ -1052,6 +936,31 @@ pub trait Provider: Send + Sync {
     /// their available models.
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         Ok(Vec::new())
+    }
+
+    /// This provider's id for `model_key`, or `None` if it does not serve it.
+    ///
+    /// A blueprint names a model; the route to it belongs to the machine, so
+    /// asking each provider lets an author stop enumerating routes they cannot
+    /// know. `model_key` carries no vendor prefix (`gpt-5.5`), because the same
+    /// model is spelled `openai/gpt-5.5` through a gateway; the answer is
+    /// whatever THIS provider wants in a request.
+    ///
+    /// Defaults to whether [`Self::capabilities`] is a real entry rather than
+    /// the fallback. A gateway fronting hundreds of models overrides it.
+    fn serves_model(&self, model_key: &str) -> Option<String> {
+        self.serves_model_from_table(model_key)
+    }
+
+    /// [`Self::serves_model`] answered from the compiled-in capability table.
+    ///
+    /// Split out so an override can fall back to it: a gateway answers from its
+    /// live catalogue, and when that catalogue is empty (priming failed, or has
+    /// not run yet) the table is a better answer than "no".
+    fn serves_model_from_table(&self, model_key: &str) -> Option<String> {
+        let caps = self.capabilities(model_key);
+        let fallback = ModelCapabilities::default();
+        (caps.max_context_tokens != fallback.max_context_tokens).then(|| model_key.to_string())
     }
 
     /// What this provider charges for `model`, or `None` when it does not know.
@@ -1958,9 +1867,34 @@ mod tests {
             "minimal"
         }
 
-        fn capabilities(&self, _model: &str) -> ModelCapabilities {
-            ModelCapabilities::default()
+        fn capabilities(&self, model: &str) -> ModelCapabilities {
+            // Knows one model and nothing else, so `serves_model` has a real
+            // answer to give in both directions. Everything else falls through
+            // to the fallback capabilities, which is how a provider says it does
+            // not recognise a model.
+            let mut caps = ModelCapabilities::default();
+            if model == "only-this-one" {
+                caps.max_context_tokens += 1;
+            }
+            caps
         }
+    }
+
+    /// The question a blueprint's bare model name asks of every provider. A
+    /// provider answers from its own table, so the one model it names comes back
+    /// with the id to call it by and everything else comes back as "not mine".
+    #[test]
+    fn serves_model_answers_from_the_capability_table() {
+        assert_eq!(
+            MinimalProvider.serves_model("only-this-one"),
+            Some("only-this-one".to_string()),
+            "a model the table names is served, under the id it was asked about"
+        );
+        assert_eq!(
+            MinimalProvider.serves_model("some-other-model"),
+            None,
+            "a model the table does not name is not claimed"
+        );
     }
 
     /// A provider whose capability table is compiled in has nothing to fetch,

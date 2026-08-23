@@ -4,14 +4,20 @@
   "title": "Leviath agent blueprint (agent.leviath)",
   "description": "The TOML manifest defining a Leviath agent: its stages, the model each one runs on, the tools it may call, and the shape of its context. Written against the parser in crates/leviath-core/src/manifest.rs, and checked against every bundled blueprint by a test in crates/leviath-cli/src/bundled.rs. See https://leviath.dev/docs/agents.",
   "type": "object",
-  "required": ["agent"],
+  "required": [
+    "agent"
+  ],
   "additionalProperties": false,
   "properties": {
-    "agent": { "$ref": "#/$defs/agent" },
+    "agent": {
+      "$ref": "#/$defs/agent"
+    },
     "stages": {
       "type": "object",
       "description": "One entry per stage, keyed by stage name.",
-      "additionalProperties": { "$ref": "#/$defs/stage" }
+      "additionalProperties": {
+        "$ref": "#/$defs/stage"
+      }
     },
     "context": {
       "type": "object",
@@ -20,27 +26,49 @@
         "regions": {
           "type": "object",
           "description": "One entry per context region, keyed by region name.",
-          "additionalProperties": { "$ref": "#/$defs/region" }
+          "additionalProperties": {
+            "$ref": "#/$defs/region"
+          }
         },
         "file_tracking": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "region": { "type": "string", "default": "files" },
-            "track_reads": { "type": "boolean", "default": true },
-            "track_writes": { "type": "boolean", "default": true },
-            "max_file_tokens": { "type": "integer", "minimum": 0 }
+            "region": {
+              "type": "string",
+              "default": "files"
+            },
+            "track_reads": {
+              "type": "boolean",
+              "default": true
+            },
+            "track_writes": {
+              "type": "boolean",
+              "default": true
+            },
+            "max_file_tokens": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         }
       }
     },
-    "tool_permissions": { "$ref": "#/$defs/toolPermissions" },
+    "tool_permissions": {
+      "$ref": "#/$defs/toolPermissions"
+    },
     "security": {
       "type": "object",
       "description": "Taint tracking for this blueprint. A machine-wide ceiling still applies.",
-      "properties": { "taint_tracking": { "type": "boolean" } }
+      "properties": {
+        "taint_tracking": {
+          "type": "boolean"
+        }
+      }
     },
-    "sandbox": { "$ref": "#/$defs/sandbox" },
+    "sandbox": {
+      "$ref": "#/$defs/sandbox"
+    },
     "read_paths": {
       "type": "object",
       "description": "Paths outside the workdir this agent may read. Inert until the host grants them under [agent_read_paths] in config.toml.",
@@ -81,20 +109,39 @@
       "description": "The model that summarizes a compacting region. Skipped without error when its provider is not registered, so a run on another provider loses compaction rather than failing.",
       "additionalProperties": false,
       "properties": {
-        "provider": { "type": "string" },
-        "model": { "type": "string" },
-        "system_prompt": { "type": "string" },
-        "max_summary_tokens": { "type": "integer", "minimum": 1 },
-        "temperature": { "type": "number" }
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "system_prompt": {
+          "type": "string"
+        },
+        "max_summary_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number"
+        }
       }
     },
     "repetition_detection": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "max_repeat_calls": { "type": "integer", "minimum": 1 },
-        "max_readonly_streak": { "type": "integer", "minimum": 1 }
+        "enabled": {
+          "type": "boolean"
+        },
+        "max_repeat_calls": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_readonly_streak": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "transforms": {
@@ -104,18 +151,37 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "from_blueprint": { "type": "string" },
-          "to_blueprint": { "type": "string" },
+          "from_blueprint": {
+            "type": "string"
+          },
+          "to_blueprint": {
+            "type": "string"
+          },
           "mappings": {
             "type": "array",
             "items": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "from_region": { "type": "string" },
-                "to_region": { "type": "string" },
-                "transform": { "enum": ["direct", "summarize", "extract"] },
-                "fields": { "type": "array", "items": { "type": "string" } }
+                "from_region": {
+                  "type": "string"
+                },
+                "to_region": {
+                  "type": "string"
+                },
+                "transform": {
+                  "enum": [
+                    "direct",
+                    "summarize",
+                    "extract"
+                  ]
+                },
+                "fields": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
               }
             }
           }
@@ -128,22 +194,44 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string", "default": "unnamed" },
-        "version": { "type": "string", "default": "0.1.0" },
-        "description": { "type": "string", "default": "" },
+        "name": {
+          "type": "string",
+          "default": "unnamed"
+        },
+        "version": {
+          "type": "string",
+          "default": "0.1.0"
+        },
+        "description": {
+          "type": "string",
+          "default": ""
+        },
         "entry_stage": {
           "type": "string",
           "description": "The stage a run starts in. Defaults to the first stage declared."
         },
-        "max_child_depth": { "type": "integer", "minimum": 0 },
-        "dynamic_tools": { "type": "boolean", "default": false },
-        "batch_tool_hint": { "type": "boolean" },
-        "shell_hint": { "type": "boolean" },
-        "nudge": { "$ref": "#/$defs/nudge" },
-        "output": { "$ref": "#/$defs/outputSpec" }
+        "max_child_depth": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dynamic_tools": {
+          "type": "boolean",
+          "default": false
+        },
+        "batch_tool_hint": {
+          "type": "boolean"
+        },
+        "shell_hint": {
+          "type": "boolean"
+        },
+        "nudge": {
+          "$ref": "#/$defs/nudge"
+        },
+        "output": {
+          "$ref": "#/$defs/outputSpec"
+        }
       }
     },
-
     "outputSpec": {
       "type": "object",
       "additionalProperties": false,
@@ -171,7 +259,6 @@
         }
       }
     },
-
     "stage": {
       "type": "object",
       "additionalProperties": false,
@@ -187,18 +274,28 @@
             "output"
           ]
         },
-        "description": { "type": "string" },
-        "system_prompt": { "type": "string" },
-        "transition_prompt": { "type": "string" },
+        "description": {
+          "type": "string"
+        },
+        "system_prompt": {
+          "type": "string"
+        },
+        "transition_prompt": {
+          "type": "string"
+        },
         "available_tools": {
           "type": "array",
           "description": "The only tools the model is offered here. Anything absent is refused at dispatch.",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "available_connectors": {
           "type": "array",
           "description": "MCP servers whose whole tool set this stage may use, by server name. Resolved at spawn against what each server actually advertises, and merged with available_tools - so a tool the server gains later is offered without editing the manifest.",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "$comment": "Kept separate from available_tools because that field is exact-match, and because an MCP tool's advertised name does not reliably carry its server - there is no prefix a wildcard could match."
         },
         "require_output": {
@@ -207,48 +304,103 @@
           "description": "This stage must call submit_output before it transitions. Unlike required_tools, which is never checked afterwards, this is enforced: a stage that finishes without submitting is nudged and re-run, bounded, then let through with the run's output_forced flag set. `mode = \"output\"` sets it for you.",
           "$comment": "A stage that sets this must also grant submit_output; lev validate refuses it otherwise."
         },
-        "output": { "$ref": "#/$defs/outputSpec" },
+        "output": {
+          "$ref": "#/$defs/outputSpec"
+        },
         "required_tools": {
           "type": "array",
           "description": "Tools this stage cannot work without. Every entry must also appear in available_tools. Survives an unattended run, where the blocking interaction tools are otherwise withheld.",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
-        "max_iterations": { "type": "integer", "minimum": 1 },
-        "max_revisits": { "type": "integer", "minimum": 0 },
-        "requires_children": { "type": "boolean", "default": false },
-        "allow_complete": { "type": "boolean", "default": false },
-        "allow_as_worker": { "type": "boolean", "default": false },
-        "accepts_messages": { "type": "boolean", "default": true },
-        "allow_blocking_tools": { "type": "boolean", "default": false },
-        "batch_tool_hint": { "type": "boolean" },
-        "shell_hint": { "type": "boolean" },
-        "model": { "$ref": "#/$defs/modelConfig" },
-        "nudge": { "$ref": "#/$defs/nudge" },
-        "hooks": { "$ref": "#/$defs/stageHooks" },
-        "sandbox": { "$ref": "#/$defs/sandbox" },
-        "security": { "type": "object" },
-        "tool_permissions": { "$ref": "#/$defs/toolPermissions" },
+        "max_iterations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_revisits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requires_children": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_complete": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_as_worker": {
+          "type": "boolean",
+          "default": false
+        },
+        "accepts_messages": {
+          "type": "boolean",
+          "default": true
+        },
+        "allow_blocking_tools": {
+          "type": "boolean",
+          "default": false
+        },
+        "batch_tool_hint": {
+          "type": "boolean"
+        },
+        "shell_hint": {
+          "type": "boolean"
+        },
+        "model": {
+          "$ref": "#/$defs/modelConfig"
+        },
+        "nudge": {
+          "$ref": "#/$defs/nudge"
+        },
+        "hooks": {
+          "$ref": "#/$defs/stageHooks"
+        },
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "security": {
+          "type": "object"
+        },
+        "tool_permissions": {
+          "$ref": "#/$defs/toolPermissions"
+        },
         "tool_routing": {
           "type": "object",
           "description": "Where a tool result lands in context.",
           "additionalProperties": false,
           "properties": {
-            "default_region": { "type": "string" },
-            "persist": { "type": "boolean" },
-            "max_result_tokens": { "type": "integer", "minimum": 1 },
+            "default_region": {
+              "type": "string"
+            },
+            "persist": {
+              "type": "boolean"
+            },
+            "max_result_tokens": {
+              "type": "integer",
+              "minimum": 1
+            },
             "overrides": {
               "type": "object",
               "description": "Tool name to a region name, or to a table carrying that tool's region, its result ceiling, or both.",
               "additionalProperties": {
                 "oneOf": [
-                  { "type": "string" },
+                  {
+                    "type": "string"
+                  },
                   {
                     "type": "object",
                     "additionalProperties": false,
                     "minProperties": 1,
                     "properties": {
-                      "region": { "type": "string" },
-                      "max_result_tokens": { "type": "integer", "minimum": 0 }
+                      "region": {
+                        "type": "string"
+                      },
+                      "max_result_tokens": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
                     }
                   }
                 ]
@@ -257,7 +409,10 @@
             "max_result_tokens_per_tool": {
               "type": "object",
               "description": "Tool name to that tool's result ceiling, overriding max_result_tokens for it.",
-              "additionalProperties": { "type": "integer", "minimum": 0 }
+              "additionalProperties": {
+                "type": "integer",
+                "minimum": 0
+              }
             }
           }
         },
@@ -267,31 +422,52 @@
           "properties": {
             "regions": {
               "type": "object",
-              "additionalProperties": { "$ref": "#/$defs/region" }
+              "additionalProperties": {
+                "$ref": "#/$defs/region"
+              }
             }
           }
         },
         "transitions": {
           "type": "object",
           "description": "Outgoing edges, keyed by target stage name. An empty table marks a terminal stage.",
-          "additionalProperties": { "$ref": "#/$defs/transition" }
+          "additionalProperties": {
+            "$ref": "#/$defs/transition"
+          }
         },
         "interaction_points": {
           "type": "array",
-          "items": { "$ref": "#/$defs/interactionPoint" }
+          "items": {
+            "$ref": "#/$defs/interactionPoint"
+          }
         },
-        "on_worker_failure": { "enum": ["continue", "fail_all"] },
+        "on_worker_failure": {
+          "enum": [
+            "continue",
+            "fail_all"
+          ]
+        },
         "max_workers": {
           "type": "integer",
           "minimum": 0,
           "default": 30,
           "description": "How many workers run at once. 0 means unlimited: every work item starts as soon as the split has produced it, and the daemon's inference pool paces the requests."
         },
-        "worker_agent": { "type": "string" },
-        "worker_stage": { "type": "string" },
-        "worker_query": { "type": "string" },
-        "merge_stage": { "type": "string" },
-        "split_prompt": { "type": "string" },
+        "worker_agent": {
+          "type": "string"
+        },
+        "worker_stage": {
+          "type": "string"
+        },
+        "worker_query": {
+          "type": "string"
+        },
+        "merge_stage": {
+          "type": "string"
+        },
+        "split_prompt": {
+          "type": "string"
+        },
         "results_region": {
           "type": "string",
           "description": "Context region the consolidated worker report is written to. Defaults to conversation, which is also carrying the message history. Worth naming when the results are bulky: the region's budget is what each worker's share is divided from."
@@ -309,7 +485,6 @@
         }
       }
     },
-
     "modelConfig": {
       "type": "object",
       "description": "Which model this stage runs on. `models` is an ordered fallback list: the first entry whose provider is registered wins.",
@@ -317,7 +492,9 @@
       "properties": {
         "models": {
           "type": "array",
-          "items": { "$ref": "#/$defs/modelEntry" }
+          "items": {
+            "$ref": "#/$defs/modelEntry"
+          }
         },
         "provider": {
           "type": "string",
@@ -330,14 +507,19 @@
         "fallbacks": {
           "type": "array",
           "description": "Back-compat: folded onto the end of `models`.",
-          "items": { "$ref": "#/$defs/modelEntry" }
+          "items": {
+            "$ref": "#/$defs/modelEntry"
+          }
         },
         "allow_user_default": {
           "type": "boolean",
           "default": true,
           "description": "Whether the host's default model may be used when nothing listed is registered."
         },
-        "request_timeout_secs": { "type": "integer", "minimum": 1 },
+        "request_timeout_secs": {
+          "type": "integer",
+          "minimum": 1
+        },
         "parameters": {
           "type": "object",
           "description": "Passed to the provider verbatim, so the accepted keys are the provider's.",
@@ -345,23 +527,32 @@
         }
       }
     },
-
     "modelEntry": {
-      "type": "object",
-      "required": ["provider", "model"],
-      "additionalProperties": false,
-      "properties": {
-        "provider": {
+      "description": "A model this stage may run on. Either a bare model name, which leaves the route to whichever configured provider serves it, or a table that pins a provider for a model only one route can reach (a local or self-hosted model). Entries are tried in order.",
+      "oneOf": [
+        {
           "type": "string",
-          "description": "A registered provider name. The built-ins are anthropic, openai, google, openrouter, ollama, and claude-code; a Rhai provider resolves by its script name."
+          "description": "A model name with no route. Every configured provider is asked which of them serves it, the user's default provider first."
         },
-        "model": {
-          "type": "string",
-          "description": "Passed to the provider verbatim and never validated locally, so a typo surfaces on the first live call."
+        {
+          "type": "object",
+          "required": [
+            "model"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "provider": {
+              "type": "string",
+              "description": "A registered provider name. The built-ins are anthropic, openai, google, openrouter, ollama, and claude-code; a Rhai provider resolves by its script name. Omit it unless the model is reachable only one way; omitting it lets the user's own provider choice decide."
+            },
+            "model": {
+              "type": "string",
+              "description": "Passed to the provider verbatim and never validated locally, so a typo surfaces on the first live call."
+            }
+          }
         }
-      }
+      ]
     },
-
     "region": {
       "type": "object",
       "description": "One region of the context window. Budgets are ceilings, not allocations, and may sum past 100%.",
@@ -387,34 +578,97 @@
           "pattern": "^[0-9]+(\\.[0-9]+)?%$",
           "description": "A percentage of the window, as a string such as \"35%\"."
         },
-        "max_tokens": { "type": "integer", "minimum": 1, "default": 5000 },
-        "min_tokens": { "type": "integer", "minimum": 0 },
-        "required": { "type": "boolean", "default": false },
-          "volatility": { "type": "string", "enum": ["stable", "grows", "rewritten"], "default": "rewritten", "description": "How much this region's contents move between requests, which decides where it sits in the prompt and whether it is split for caching. A provider caches by prefix, so a region that changes invalidates the cache for every region behind it: \"stable\" is seeded and never written, \"grows\" is appended to, \"rewritten\" changes in place. The default is the pessimistic value, so leaving it out never makes a blueprint slower." },
-          "summarizable": { "type": "boolean", "default": true, "description": "Set false to keep an edge transform = \"compact\" from handing this region to the summarizer. Protects the region wherever it is used, and wins over an explicit compact list." },
-        "description": { "type": "string", "description": "One line on what this region is for, shown to the model above the region's contents on every turn. Optional - most regions are named well enough that a sentence would only cost tokens; use it where the contents do not explain themselves." },
-        "admission": { "enum": ["evict", "reject"], "default": "evict", "description": "What the region does when a write does not fit. \"evict\" makes room by dropping the oldest entry; \"reject\" refuses the write and tells the agent to release something first, so nothing is discarded without the agent knowing." },
+        "max_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 5000
+        },
+        "min_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "required": {
+          "type": "boolean",
+          "default": false
+        },
+        "volatility": {
+          "type": "string",
+          "enum": [
+            "stable",
+            "grows",
+            "rewritten"
+          ],
+          "default": "rewritten",
+          "description": "How much this region's contents move between requests, which decides where it sits in the prompt and whether it is split for caching. A provider caches by prefix, so a region that changes invalidates the cache for every region behind it: \"stable\" is seeded and never written, \"grows\" is appended to, \"rewritten\" changes in place. The default is the pessimistic value, so leaving it out never makes a blueprint slower."
+        },
+        "summarizable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Set false to keep an edge transform = \"compact\" from handing this region to the summarizer. Protects the region wherever it is used, and wins over an explicit compact list."
+        },
+        "description": {
+          "type": "string",
+          "description": "One line on what this region is for, shown to the model above the region's contents on every turn. Optional - most regions are named well enough that a sentence would only cost tokens; use it where the contents do not explain themselves."
+        },
+        "admission": {
+          "enum": [
+            "evict",
+            "reject"
+          ],
+          "default": "evict",
+          "description": "What the region does when a write does not fit. \"evict\" makes room by dropping the oldest entry; \"reject\" refuses the write and tells the agent to release something first, so nothing is discarded without the agent knowing."
+        },
         "required_message": {
           "type": "string",
           "description": "Shown when a required region is empty. `{region}` interpolates."
         },
-        "seed": { "$ref": "#/$defs/regionSeed" },
-        "max_items": { "type": "integer", "minimum": 1, "default": 10 },
-        "strategy": { "enum": ["per_item", "bulk", "compact"] },
-        "overflow": { "type": "integer", "minimum": 0 },
-        "compact_count": { "type": "integer", "minimum": 1 },
-        "compact_at": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?%$" },
-        "threshold_tokens": { "type": "integer", "minimum": 1 },
-        "source_region": { "type": "string" },
-        "max_entries": { "type": "integer", "minimum": 1 },
+        "seed": {
+          "$ref": "#/$defs/regionSeed"
+        },
+        "max_items": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 10
+        },
+        "strategy": {
+          "enum": [
+            "per_item",
+            "bulk",
+            "compact"
+          ]
+        },
+        "overflow": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "compact_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "compact_at": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?%$"
+        },
+        "threshold_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source_region": {
+          "type": "string"
+        },
+        "max_entries": {
+          "type": "integer",
+          "minimum": 1
+        },
         "script": {
           "type": "string",
           "description": "For `kind = \"custom\"`: the Rhai script under context_hooks/."
         },
-        "persistent": { "type": "boolean" }
+        "persistent": {
+          "type": "boolean"
+        }
       }
     },
-
     "regionSeed": {
       "description": "What fills the region at spawn. The table form is checked key by key in the order below, so the first one present wins.",
       "oneOf": [
@@ -434,7 +688,9 @@
             "files": {
               "type": "array",
               "description": "Concatenated contents of these workdir-relative paths.",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             },
             "literal": {
               "type": "string",
@@ -465,17 +721,28 @@
                   {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["name"],
+                    "required": [
+                      "name"
+                    ],
                     "properties": {
-                      "name": { "type": "string", "description": "The tool to call." },
-                      "args": { "type": "object", "description": "The arguments object." }
+                      "name": {
+                        "type": "string",
+                        "description": "The tool to call."
+                      },
+                      "args": {
+                        "type": "object",
+                        "description": "The arguments object."
+                      }
                     }
                   }
                 ]
               }
             },
             "refresh": {
-              "enum": ["once", "each_stage"],
+              "enum": [
+                "once",
+                "each_stage"
+              ],
               "default": "once",
               "description": "For `tool`/`tools`: when the calls run again. `once` (the default, and what every other seed kind does) resolves at spawn. `each_stage` resolves again on every stage entry, for a seed whose answer moves - a clock, say - at the cost of a tool call per stage."
             },
@@ -487,7 +754,6 @@
         }
       ]
     },
-
     "transition": {
       "type": "object",
       "description": "One outgoing edge. A `hint` with no `condition` implies `llm_choice`.",
@@ -499,20 +765,50 @@
         },
         "condition": {
           "description": "An unrecognised value is a hard parse error.",
-          "enum": ["always", "llm_choice", "error", "max_iterations", "stuck", "dead_end"]
+          "enum": [
+            "always",
+            "llm_choice",
+            "error",
+            "max_iterations",
+            "stuck",
+            "dead_end"
+          ]
         },
         "transform": {
           "description": "What happens to context on this edge. `custom` reads transform_config. Anything else is a hard parse error rather than a silent downgrade to `direct`.",
-          "enum": ["direct", "clear", "compact", "summarize", "custom"]
+          "enum": [
+            "direct",
+            "clear",
+            "compact",
+            "summarize",
+            "custom"
+          ]
         },
         "transform_config": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "carry": { "type": "array", "items": { "type": "string" } },
-            "compact": { "type": "array", "items": { "type": "string" } },
-            "clear": { "type": "array", "items": { "type": "string" } },
-            "compact_prompt": { "type": "string" }
+            "carry": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "compact": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "clear": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "compact_prompt": {
+              "type": "string"
+            }
           }
         },
         "gate": {
@@ -520,11 +816,15 @@
           "description": "A condition the stage must satisfy before this edge may be taken.",
           "additionalProperties": false,
           "properties": {
-            "require_modifications": { "type": "boolean" },
+            "require_modifications": {
+              "type": "boolean"
+            },
             "require_regions": {
               "type": "array",
               "description": "Regions that must all hold content before this edge may be taken. ANDed with every other condition on the gate, unlike `region`.",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             },
             "require_region_updated": {
               "type": "string",
@@ -534,60 +834,108 @@
               "type": "string",
               "description": "A checklist region that must have no open items before this edge is taken."
             },
-            "message": { "type": "string" },
+            "message": {
+              "type": "string"
+            },
             "region": {
               "type": "string",
               "description": "An alternative way to satisfy require_modifications: the gate also passes when this region is non-empty. A restart-durable stand-in for the per-stage counters, not a requirement - use require_regions for that."
             },
-            "tools": { "type": "array", "items": { "type": "string" } },
-            "max_attempts": { "type": "integer", "minimum": 1 }
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "max_attempts": {
+              "type": "integer",
+              "minimum": 1
+            }
           }
         },
-        "stuck_after_iterations": { "type": "integer" },
-        "stuck_after_minutes": { "type": "integer" },
-        "stuck_after_same_file_edits": { "type": "integer" },
-        "stuck_after_tool_calls": { "type": "integer" }
+        "stuck_after_iterations": {
+          "type": "integer"
+        },
+        "stuck_after_minutes": {
+          "type": "integer"
+        },
+        "stuck_after_same_file_edits": {
+          "type": "integer"
+        },
+        "stuck_after_tool_calls": {
+          "type": "integer"
+        }
       }
     },
-
     "interactionPoint": {
       "type": "object",
       "description": "A checkpoint the runtime raises at the stage boundary, every time, rather than one the model chooses to raise.",
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string" },
-        "prompt": { "type": "string" },
-        "required": { "type": "boolean", "default": true },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean",
+          "default": true
+        },
         "unattended": {
           "description": "What a --yolo run does here. `auto_approve` (the default) resolves it without asking. `ask` holds for a person even unattended, and the run then waits for [limits] interaction_timeout_secs.",
-          "enum": ["ask", "auto_approve"]
+          "enum": [
+            "ask",
+            "auto_approve"
+          ]
         },
-        "style": { "enum": ["free_text", "multiple_choice", "confirm"] },
-        "options": { "type": "array", "items": { "type": "string" } },
+        "style": {
+          "enum": [
+            "free_text",
+            "multiple_choice",
+            "confirm"
+          ]
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "choices": {
           "type": "array",
           "description": "Alias for `options`.",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "directives": {
           "type": "object",
           "description": "Option text to the instruction added when it is picked.",
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "followups": {
           "type": "object",
           "description": "Alias for `directives`.",
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "abort_options": {
           "type": "array",
           "description": "Options that end the run immediately, with no further inference.",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "edit_options": {
           "type": "array",
           "description": "Options that open the document for the user to edit directly.",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "document_region": {
           "type": "string",
@@ -595,55 +943,110 @@
         }
       }
     },
-
     "toolPermissions": {
       "type": "object",
       "description": "Tool name to policy. May only tighten the machine-wide ceiling in config.toml, never loosen it. `ask` blocks until answered.",
-      "additionalProperties": { "enum": ["allow", "ask", "deny"] }
+      "additionalProperties": {
+        "enum": [
+          "allow",
+          "ask",
+          "deny"
+        ]
+      }
     },
-
     "sandbox": {
       "type": "object",
       "description": "Where tools execute. An agent and a stage resolve to the stronger of the pair.",
       "additionalProperties": false,
       "properties": {
-        "kind": { "enum": ["none", "namespace", "container"] },
-        "image": { "type": "string" },
-        "engine": { "enum": ["docker", "podman", "nerdctl", "finch"] },
-        "network": { "type": "boolean" },
-        "mount": { "type": "array", "items": { "type": "string" } },
-        "mounts": { "type": "array", "items": { "type": "string" } },
-        "persist": { "type": "boolean" },
-        "on_unavailable": { "enum": ["error", "warn"] }
+        "kind": {
+          "enum": [
+            "none",
+            "namespace",
+            "container"
+          ]
+        },
+        "image": {
+          "type": "string"
+        },
+        "engine": {
+          "enum": [
+            "docker",
+            "podman",
+            "nerdctl",
+            "finch"
+          ]
+        },
+        "network": {
+          "type": "boolean"
+        },
+        "mount": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mounts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "persist": {
+          "type": "boolean"
+        },
+        "on_unavailable": {
+          "enum": [
+            "error",
+            "warn"
+          ]
+        }
       }
     },
-
     "nudge": {
       "type": "object",
       "description": "What to say to a stage that has gone quiet. Cascades stage over agent over config.",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "max": { "type": "integer", "minimum": 0 },
+        "enabled": {
+          "type": "boolean"
+        },
+        "max": {
+          "type": "integer",
+          "minimum": 0
+        },
         "text": {
           "type": "string",
           "description": "`{stage}` and `{regions}` interpolate."
         }
       }
     },
-
     "stageHooks": {
       "type": "object",
       "description": "Rhai scripts run at points in this stage's lifecycle. Each value is a script path relative to the agent directory.",
       "additionalProperties": false,
       "properties": {
-        "on_stage_enter": { "type": "string" },
-        "on_stage_exit": { "type": "string" },
-        "before_inference": { "type": "string" },
-        "after_inference": { "type": "string" },
-        "on_tool_call": { "type": "string" },
-        "on_completion": { "type": "string" },
-        "on_error": { "type": "string" }
+        "on_stage_enter": {
+          "type": "string"
+        },
+        "on_stage_exit": {
+          "type": "string"
+        },
+        "before_inference": {
+          "type": "string"
+        },
+        "after_inference": {
+          "type": "string"
+        },
+        "on_tool_call": {
+          "type": "string"
+        },
+        "on_completion": {
+          "type": "string"
+        },
+        "on_error": {
+          "type": "string"
+        }
       }
     }
   }

@@ -564,22 +564,23 @@ pub(super) fn parse_stage_model(stage_value: &toml::Value) -> ModelConfig {
     if let Some(mt) = model_table {
         let mut models = Vec::new();
 
-        // New format: [[stages.<name>.model.models]] list
+        // An entry may be a bare model name, or a table naming a provider only
+        // when the route matters (a local or self-hosted model). An absent
+        // provider is EMPTY, not "anthropic": an author cannot know what a
+        // machine has configured, and defaulting made omission a silent choice.
         if let Some(models_arr) = mt.get("models").and_then(|v| v.as_array()) {
             for entry in models_arr {
-                if let Some(entry_table) = entry.as_table() {
-                    models.push(ModelEntry::new(
-                        entry_table
-                            .get("provider")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("anthropic")
-                            .to_string(),
-                        entry_table
-                            .get("model")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("claude-sonnet-4-6")
-                            .to_string(),
-                    ));
+                if let Some(name) = entry.as_str() {
+                    models.push(ModelEntry::new(String::new(), name.to_string()));
+                    continue;
+                }
+                // A table naming no model names nothing, so it is dropped.
+                if let Some(t) = entry.as_table()
+                    && let Some(model) = t.get("model").and_then(|v| v.as_str())
+                {
+                    let route = t.get("provider").and_then(|v| v.as_str());
+                    let route = route.unwrap_or_default().to_string();
+                    models.push(ModelEntry::new(route, model.to_string()));
                 }
             }
         }

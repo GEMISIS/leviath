@@ -1,6 +1,6 @@
 [agent]
 name = "deep-researcher"
-version = "0.4.0"
+version = "0.4.1"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 max_child_depth = 2
 entry_stage = "gather"
@@ -18,7 +18,7 @@ bash       = "ask"
 # ─── Stage 1: Gather ──────────────────────────────────────────────────────────
 [stages.gather]
 mode = "autonomous"
-model = { models = [{ provider = "openrouter", model = "x-ai/grok-4.6" }, { provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["grok-4.6", "claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Gather primary sources and key references on the topic"
 # web_search / web_fetch are provided by this agent's tools/ (issue #97).
 available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time", "context_read", "ask_user_text", "ask_user_choice"]
@@ -157,7 +157,7 @@ transform = "direct"
 # `on_worker_failure = "continue"` means the run reports that rather than dying.
 [stages.investigate]
 mode = "fan_out"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "openrouter", model = "x-ai/grok-4.6" }, { provider = "openai", model = "gpt-5.4" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "grok-4.6", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Research each sub-question of the topic in parallel"
 available_tools = []
 max_iterations = 4
@@ -240,7 +240,7 @@ transform = "compact"
 # (follow_citations), or write the report (synthesize).
 [stages.analyze]
 mode = "autonomous"
-model = { models = [{ provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["deepseek-v4-pro", "claude-opus-5", "gpt-5.5", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Analyze findings, cross-reference claims, and decide the next move"
 available_tools = ["read_file", "web_fetch", "context_write", "context_append", "current_time"]
 max_iterations = 20
@@ -308,7 +308,7 @@ transform = "direct"
 # sources analyze flagged, then hand back.
 [stages.follow_citations]
 mode = "autonomous"
-model = { models = [{ provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["deepseek-v4-pro", "claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Pull and read specific cited sources flagged during analysis"
 available_tools = ["web_fetch", "web_search", "read_file", "context_append", "current_time", "context_read"]
 max_iterations = 12
@@ -349,9 +349,9 @@ transform = "direct"
 # ─── Stage 4: Synthesize (terminal) ───────────────────────────────────────────
 [stages.synthesize]
 mode = "autonomous"
-model = { models = [{ provider = "openai", model = "gpt-5.5" }, { provider = "anthropic", model = "claude-opus-5" }, { provider = "openrouter", model = "anthropic/claude-opus-5" }, { provider = "anthropic", model = "claude-sonnet-5" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["gpt-5.5", "claude-opus-5", "claude-sonnet-5", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Produce a structured, cited research report"
-available_tools = ["write_file", "read_file"]
+available_tools = ["write_file", "read_file", "context_write"]
 max_iterations = 15
 system_prompt = """
 Write the report (write_file), built from `claims` and citing `sources_index`,
@@ -391,15 +391,29 @@ Citations are load-bearing, so two rules bind absolutely:
 Confidence is a claim about the evidence, not about how sure the prose sounds.
 A finding resting on sources you could not fetch is low confidence however
 familiar it feels.
+
+
+When you have written the report, record its filename with `context_write` to
+the `report_path` region, exactly as you passed it to `write_file` and nothing
+else. The stage after this one rewrites that file, and the working directory
+also holds a report from every worker, so a name it has to guess at is a name it
+gets wrong.
 """
 
 [stages.synthesize.transitions.polish]
 hint = "The synthesis is written"
+# The transcript of the research is not wanted here: this stage rewrites the
+# report named in `report_path`, and the turns that produced it are only
+# prompt weight on the run's most expensive model. Carrying them also handed
+# this stage function calls made by a different model family, which Gemini
+# refuses because it never signed them.
+transform = "custom"
+transform_config = { clear = ["conversation"] }
 
 # ─── Stage 5: Error recovery ──────────────────────────────────────────────────
 [stages.error_recovery]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Recover from a failed source fetch or parse during research"
 available_tools = ["read_file", "bash"]
 max_iterations = 8
@@ -431,7 +445,7 @@ model = "claude-sonnet-5"
 # not work.
 [stages.summary]
 mode = "output"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Say what the investigation found"
 max_iterations = 8
 system_prompt = """
@@ -458,7 +472,7 @@ is worse than no summary.
 # its output is a lead to check rather than a verdict to apply.
 [stages.challenge]
 mode = "autonomous"
-model = { models = [{ provider = "openrouter", model = "x-ai/grok-4.6" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["grok-4.6", "deepseek-v4-pro", "claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Attack the analysis: what is thin, unsupported, or too confident"
 available_tools = ["context_read", "context_append", "web_search", "web_fetch", "current_time"]
 max_iterations = 10
@@ -523,10 +537,10 @@ transform = "direct"
 # is not something to leave to good intentions.
 [stages.polish]
 mode = "autonomous"
-model = { models = [{ provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "openrouter", model = "anthropic/claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }], parameters = { max_output_tokens = 24000 } }
+model = { models = ["gemini-3.1-pro-preview", "claude-opus-5", "gpt-5.5", "claude-sonnet-5", { provider = "ollama", model = "qwen3.5:9b" }], parameters = { max_output_tokens = 24000 } }
 description = "Rewrite the report in plain language without changing what it says"
 
-available_tools = ["context_read", "context_write", "read_file", "write_file"]
+available_tools = ["context_read", "context_write", "read_file", "write_file", "list_dir"]
 max_iterations = 10
 system_prompt = """
 Rewrite the report so a smart reader outside this field can follow it.
@@ -570,11 +584,17 @@ What must not change:
 - The heading structure.
 
 Do not add an introduction, a note about the rewrite, or anything the original
-did not say. Write the finished report to the same file the previous stage
-wrote, replacing it.
+did not say.
+
+The file to rewrite is named in the `report_path` region. Read that file, and
+write your rewrite back to that same path, replacing it. Do not go looking for
+it: this directory also holds a separate report from every worker, and rewriting
+one of those instead would leave the real report untouched while the stage
+reports success.
 """
 
-[stages.polish.transitions.summary]
+[stages.polish.transitions.voice]
+gate = { require_modifications = true, message = "You have not written the report yet. Read the file named in `report_path`, rewrite it in plain language, and write it back to that same path with write_file. The stage is not done until that file has been replaced." }
 hint = "The report reads clearly - produce the final answer"
 transform = "compact"
 
@@ -582,7 +602,60 @@ transform = "compact"
 condition = "error"
 transform = "direct"
 
+
+# ─── Second pass: voice ───────────────────────────────────────────────────────
+# Measured: one pass leaves grade 11.2 and 30.3 LLM-tells per 1,000 words; a
+# second takes them to 8.0 and 5.1 without losing a citation. The first pass is
+# structural and its attention goes on sentences; the phrasing that makes a
+# report sound machine-written survives it and needs a pass of its own.
+[stages.voice]
+mode = "autonomous"
+model = { models = ["gemini-3.1-pro-preview", "claude-opus-5", "gpt-5.5", "claude-sonnet-5", { provider = "ollama", model = "qwen3.5:9b" }], parameters = { max_output_tokens = 24000 } }
+description = "Second pass: make it sound like a person wrote it"
+available_tools = ["context_read", "read_file", "write_file", "list_dir"]
+max_iterations = 8
+system_prompt = """
+The report is already readable. This pass is about how it SOUNDS, not how hard
+it is to parse. Read the file named in `report_path` and write your rewrite back
+to that same path.
+
+Change nothing that is a fact, a number, a citation marker, a URL, a heading or
+a caveat. If you cannot improve a sentence without risking its meaning, leave it
+exactly as it is. A pass that changes little is a good outcome; a pass that
+changes a number is a failure.
+
+What to go after, in order:
+
+- Stock openers and connectives: "It is worth noting", "That said", "Overall",
+  "In conclusion", "At its core", "Furthermore", "Moreover", "Additionally".
+  Most sentences work with them deleted and nothing put back.
+- Inflated words where a plain one exists: leverage is use, utilize is use,
+  robust is usually reliable, crucial is usually important, delve into is
+  examine. "comprehensive", "seamless", "pivotal", "myriad", "landscape" and
+  "ecosystem" are almost always padding.
+- Em dashes. A full stop, a comma or brackets.
+- "not only X but also Y", and "isn't just X, it's Y".
+- Lists padded to three when two would do.
+- Bullets that open with a bolded phrase and a colon, unless the bold is a real
+  term being defined.
+- Hedging stacked on hedging: "may potentially", "could possibly". One hedge is
+  a caveat and belongs; two is a tic.
+
+A sentence that states the finding plainly beats one that performs expertise.
+If a phrase could be deleted without losing information, delete it.
+"""
+
+[stages.voice.transitions.summary]
+gate = { require_modifications = true, message = "You have not written the report yet. Read the file named in `report_path`, rewrite it, and write it back to that same path with write_file. The stage is not done until that file has been replaced." }
+hint = "The report reads like a person wrote it - produce the final answer"
+transform = "compact"
+
+[stages.voice.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
 [context.regions]
+report_path    = { kind = "pinned", budget = "1%", volatility = "rewritten", description = "The exact filename of the report, written by the stage that created it so the polish stage rewrites that file rather than guessing among the workers' own reports in the same directory." }
 progress_report = { kind = "clearable", budget = "1%", volatility = "rewritten", description = "What your last visit to this stage actually added, measured. Weigh another pass against it." }
 challenges     = { kind = "pinned", budget = "4%", volatility = "grows", description = "Adversarial challenges to the analysis: leads to check, not verdicts" }
 query          = { kind = "pinned", budget = "1%", required = true, seed = "task", required_message = "State the research topic via --task.", volatility = "stable" }
