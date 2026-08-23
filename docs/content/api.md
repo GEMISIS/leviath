@@ -618,6 +618,7 @@ than that feature, not broken.
 | `events.spawn_parent` | `parent_id` on `agent_spawned`, placing a sub-agent in the tree the moment it starts |
 | `events.title` | The `run_renamed` frame, plus `title` on every `agent_status` |
 | `events.run_status` | One status vocabulary across the whole API. See [statuses](#statuses) |
+| `events.spend` | The `agent_spend` frame, sent as a run passes a figure in `[limits] notify_spend_usd` |
 | `blueprints.envelope` | The paginated envelope on the blueprint listing |
 | `blueprints.query` | `q=` on that listing |
 | `blueprints.manifest` | The manifest itself on the blueprint detail route |
@@ -665,9 +666,22 @@ Every frame is a JSON object with a `type`, and every frame except `daemon_link`
 | `tool_call_started` | A tool call goes to the async lane | `call_id`, `tool` |
 | `tool_call_finished` | That call returns | `call_id`, `tool`, `ok`, `summary` |
 | `log` | A log or output line is written | `line` |
+| `agent_spend` | The run's spend passes a figure named in `[limits] notify_spend_usd` | `threshold_usd`, `total_usd`, `complete`, `stage` |
 | `interaction_needed` | The run is blocked on a person | `request` |
 | `agent_completed` | The run reaches a terminal status | `status`, `result` (its error), `final_output` |
 | `daemon_link` | This server's link to the daemon changes | `connected`, `daemon`, `restarted`, `restart_advised` |
+
+`agent_spend` arrives while the run is still going, which is the point: a run that quietly spends
+far more than intended looks, from the outside, exactly like one making ordinary progress. Each
+figure in `[limits] notify_spend_usd` is announced once per run, the first time the total passes it,
+and `stage` names the stage that was running when it crossed. Nothing is emitted for an operator who
+has not listed any figures.
+
+`complete` says whether every call behind `total_usd` could be priced. When it is false the run has
+spent at least that much and more by an unknown amount. It is a different question from whether the
+priced part came from the provider's own figures or was reconstructed from published rate cards,
+which is what `cost_is_exact` on the run record answers, so a total can be complete and still be a
+reconstruction.
 
 A run is created untitled and named a moment later, once a model has shortened its prompt into a
 title. `run_renamed` is that moment. The same `title` then rides every `agent_status` frame, so a
