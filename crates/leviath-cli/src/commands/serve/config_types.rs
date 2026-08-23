@@ -111,6 +111,13 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // something unrelated makes it re-read. Announced so a console can drop
     // that poll where the daemon has it and keep it where it does not.
     "events.title",
+    // `cost_usd` and `subtree_cost_usd` on the agent tree routes. A sub-agent's
+    // cost is on the sub-agent's own record, so answering "what did this run
+    // cost" used to mean walking every descendant and reading each one - the walk
+    // that gets skipped, and skipping it understates a fan-out badly. Announced
+    // so a console can tell a daemon that answers this from one that does not,
+    // rather than reading a missing field as a zero.
+    "runs.cost",
     // The `agent_spend` frame, sent while a run is still going when its spend
     // passes a figure named in `[limits] notify_spend_usd`. Additive - a client
     // without this simply never sees one - but announced so a console can tell

@@ -12234,6 +12234,9 @@ fn collect_inference_records_activity_with_provider_and_latency() {
             completion_tokens: 1,
             cached_tokens: 0,
             success: true,
+            // `pricing: None` above, and no provider-reported cost, so there is
+            // nothing to price this call with.
+            cost_usd: None,
         }]
     );
 }
@@ -12269,6 +12272,7 @@ fn collect_inference_records_a_failed_call_without_stage_inference() {
             completion_tokens: 0,
             cached_tokens: 0,
             success: false,
+            cost_usd: None,
         }]
     );
 }

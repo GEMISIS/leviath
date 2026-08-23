@@ -619,6 +619,7 @@ than that feature, not broken.
 | `events.title` | The `run_renamed` frame, plus `title` on every `agent_status` |
 | `events.run_status` | One status vocabulary across the whole API. See [statuses](#statuses) |
 | `events.spend` | The `agent_spend` frame, sent as a run passes a figure in `[limits] notify_spend_usd` |
+| `runs.cost` | `cost_usd` and `subtree_cost_usd` on the agent tree routes |
 | `blueprints.envelope` | The paginated envelope on the blueprint listing |
 | `blueprints.query` | `q=` on that listing |
 | `blueprints.manifest` | The manifest itself on the blueprint detail route |

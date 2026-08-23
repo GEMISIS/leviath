@@ -93,6 +93,13 @@ pub enum TelemetryEvent {
         /// Whether a response came back. A refusal or a tool call is still a
         /// success; only a failed call is not.
         success: bool,
+        /// What this one call cost, when it could be priced at all.
+        ///
+        /// `None` where the model has no reported cost and no known rate. Not
+        /// zero: a zero sums into a total that looks complete and is short by an
+        /// unknown amount, which is the failure this whole accounting exists to
+        /// avoid.
+        cost_usd: Option<f64>,
     },
     /// One tool call finished.
     ToolCallCompleted {
@@ -430,6 +437,7 @@ mod tests {
                 completion_tokens: 5,
                 cached_tokens: 0,
                 success: true,
+                cost_usd: Some(0.01),
             },
             TelemetryEvent::ToolCallCompleted {
                 run_id: "r1".to_string(),

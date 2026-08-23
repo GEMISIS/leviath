@@ -63,10 +63,21 @@ Per run, labelled by agent, stage, provider, and model:
 |---|---|---|
 | `leviath.agents.active` | gauge | How many runs are going right now |
 | `leviath.tokens.total` | counter | Tokens consumed |
+| `leviath.cost.total` | counter | Spend in USD, by provider and model. See below |
 | `leviath.tool_calls.total` | counter | Tool calls made |
 | `leviath.stage_duration` | histogram | How long stages take |
 | `leviath.inference_latency` | histogram | How long model calls take |
 | `leviath.runs.total` | counter | One per finished run, attributed by `leviath.status` and `leviath.empty_output` |
+
+`leviath.cost.total` carries the same figure the run's own record does: the provider's own cost
+when it reported one, and arithmetic from published rates when it did not. A call nothing can price
+contributes nothing rather than a zero, so the counter is a floor when some model has no known rate.
+Compare it against `unpriced_calls` on the run to know whether it is the whole story, and see
+[managing your costs](/docs/costs).
+
+Emitting it rather than leaving a dashboard to multiply tokens by rates is deliberate: rates differ
+per input class and change when a vendor reprices, and a dashboard carrying its own copy of the
+table is how a monitoring figure comes to disagree with the invoice.
 
 Per daemon, sampled every 30 seconds:
 

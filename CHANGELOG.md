@@ -13,6 +13,16 @@ same list.
 
 ## Unreleased
 
+- Added: `cost_usd` and `subtree_cost_usd` on the agent tree routes, so what a
+  run cost is one request rather than a walk. A sub-agent's cost is on the
+  sub-agent's own record, and skipping that walk understates a fan-out badly:
+  one run's own record said $10.76 against a subtree of $190.91. A subtree total
+  is `null` when anything under it could not be priced, with
+  `subtree_unpriced_calls` saying how much is missing. Announced as `runs.cost`.
+- Added: `leviath.cost.total`, an OpenTelemetry counter of spend in USD by
+  provider and model, carrying the same figure the run record does. A call
+  nothing can price contributes nothing rather than a zero.
+
 - Added: `[limits] max_agents_per_run` caps how many agents one run may
   create, sub-agents included. A run's price is very nearly its headcount:
   measured across four finished research runs, cost per agent stayed between

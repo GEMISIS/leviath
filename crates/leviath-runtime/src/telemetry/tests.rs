@@ -329,6 +329,7 @@ fn activity_records_drain_into_enriched_events() {
                 completion_tokens: 4,
                 cached_tokens: 2,
                 success: true,
+                cost_usd: Some(0.01),
             },
             ActivityRecord::ToolCall {
                 tool_name: "read_file".to_string(),

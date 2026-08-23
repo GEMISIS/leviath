@@ -140,6 +140,10 @@ pub fn collect_inference(
                     completion_tokens: usage.map_or(0, |u| u.completion_tokens),
                     cached_tokens: usage.map_or(0, |u| u.cached_tokens),
                     success: outcome.result.is_ok(),
+                    // The same figure the run's own totals get, priced from the
+                    // same rates a few lines below, so a dashboard and a run
+                    // record cannot disagree about one call.
+                    cost_usd: usage.and_then(|u| u.priced_cost(outcome.pricing.as_ref())),
                 });
         }
         // Breaker bookkeeping, before the arms below consume the outcome. Any
