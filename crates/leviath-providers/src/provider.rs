@@ -375,7 +375,8 @@ impl Default for ModelCapabilities {
 ///
 /// Merging onto the provider's own answer for that model is the only reading
 /// that matches what the table looks like it does.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+// No `Eq`: rates are `f64`, which has no total equality.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelCapabilityOverride {
     /// See [`ModelCapabilities::supports_temperature`].
@@ -390,6 +391,21 @@ pub struct ModelCapabilityOverride {
     pub max_context_tokens: Option<usize>,
     /// See [`ModelCapabilities::max_output_tokens`].
     pub max_output_tokens: Option<usize>,
+
+    /// USD per million fresh input tokens. Overrides the shipped rate table,
+    /// and is the only place a negotiated price can be recorded - no public
+    /// pricing page shows one. See `crate::pricing::published_rates`.
+    #[serde(default)]
+    pub input_per_mtok: Option<f64>,
+    /// USD per million cached input tokens. Defaults to the input rate.
+    #[serde(default)]
+    pub cached_input_per_mtok: Option<f64>,
+    /// USD per million tokens written to cache. Defaults to the input rate.
+    #[serde(default)]
+    pub cache_write_per_mtok: Option<f64>,
+    /// USD per million output tokens.
+    #[serde(default)]
+    pub output_per_mtok: Option<f64>,
 }
 
 impl ModelCapabilityOverride {
@@ -420,6 +436,12 @@ impl From<ModelCapabilities> for ModelCapabilityOverride {
             supports_system_prompt: Some(c.supports_system_prompt),
             max_context_tokens: Some(c.max_context_tokens),
             max_output_tokens: Some(c.max_output_tokens),
+            // Capabilities describe what a model can do, not what it charges,
+            // so a set converted from them names no rates.
+            input_per_mtok: None,
+            cached_input_per_mtok: None,
+            cache_write_per_mtok: None,
+            output_per_mtok: None,
         }
     }
 }
@@ -1176,6 +1198,7 @@ mod stream_once {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     /// A temperature reaches the wire as the number that was written.

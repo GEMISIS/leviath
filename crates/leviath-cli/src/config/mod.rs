@@ -3504,6 +3504,12 @@ enabled = false
                 supports_system_prompt: Some(true),
                 max_context_tokens: Some(8192),
                 max_output_tokens: Some(4096),
+                // Rates round-trip through config too, so the serialization
+                // test carries a full set rather than only the capabilities.
+                input_per_mtok: Some(5.0),
+                cached_input_per_mtok: Some(0.5),
+                cache_write_per_mtok: Some(6.25),
+                output_per_mtok: Some(25.0),
             },
         );
         let mut tool_perms = HashMap::new();

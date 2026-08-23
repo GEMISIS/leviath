@@ -870,6 +870,16 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
+    fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
+        // Config first: it is the only source that can know a negotiated rate,
+        // and the shipped table is a transcription of a public page that may
+        // have moved since this build.
+        self.capability_overrides
+            .get(model)
+            .and_then(|o| o.pricing())
+            .or_else(|| crate::pricing::published_rates("anthropic", model))
+    }
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // Merged, not swapped: an entry names only what it corrects.
         match self.capability_overrides.get(model) {
@@ -1138,6 +1148,39 @@ fn parse_sse_event(buffer: &mut String, tool_index: &mut usize) -> Option<Stream
 
 #[cfg(test)]
 mod tests {
+
+    /// Config beats the shipped table, and an unconfigured model still gets the
+    /// published rate rather than falling to unpriced.
+    #[test]
+    fn pricing_prefers_config_then_the_published_table() {
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "claude-opus-5".to_string(),
+            crate::ModelCapabilityOverride {
+                input_per_mtok: Some(1.0),
+                output_per_mtok: Some(2.0),
+                ..Default::default()
+            },
+        );
+        let provider = AnthropicProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+            overrides,
+            None,
+        );
+
+        // Configured: the operator's number, not the table's.
+        let configured = provider.pricing("claude-opus-5").expect("configured");
+        assert_eq!(configured.input_per_mtok, 1.0);
+        assert_eq!(configured.output_per_mtok, 2.0);
+
+        // Not configured: the published rate.
+        let listed = provider.pricing("claude-sonnet-5").expect("in the table");
+        assert_eq!(listed.input_per_mtok, 2.0);
+
+        // Neither: unpriced, so the run reports its cost unavailable.
+        assert_eq!(provider.pricing("no-such-model-9"), None);
+    }
     use super::*;
 
     // ─── A breakpoint on a tool turn is not thrown away ─────────────────────

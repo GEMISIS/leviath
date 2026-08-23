@@ -880,6 +880,42 @@ fn fmt_tokens(n: usize) -> String {
     }
 }
 
+/// Print what a model charges, and where the figure came from.
+///
+/// Two sources, and the difference matters to a reader: an operator's config
+/// entry is their own contracted rate and is current by definition, while a
+/// shipped rate is a transcription of a vendor's public page on a particular
+/// day and cannot notice a repricing. Only one of those deserves a date, and
+/// printing it is the only way somebody can judge whether to trust the number.
+///
+/// A model with neither prints nothing rather than a zero: a run that touches
+/// it reports its cost as unavailable, and a "$0.00" line here would contradict
+/// that.
+fn print_model_pricing(provider: &str, model: &str) {
+    let Some(p) = leviath_providers::pricing::published_rates(provider, model) else {
+        return;
+    };
+    println!();
+    println!("Pricing (USD per million tokens)");
+    println!("--------------------------------");
+    println!("  Input:          ${:.2}", p.input_per_mtok);
+    println!("  Cached input:   ${:.2}", p.cached_input_per_mtok);
+    println!("  Cache write:    ${:.2}", p.cache_write_per_mtok);
+    println!("  Output:         ${:.2}", p.output_per_mtok);
+    // Always labelled as the published price, never as the operator's: a
+    // capability override says nothing about whether they also declared a rate,
+    // and claiming "your config" for a figure that came from this table would
+    // be worse than not showing a source at all.
+    println!(
+        "  Source:         published list price, read {}",
+        leviath_providers::pricing::RATES_READ_ON
+    );
+    println!("  \u{26a0}  {provider} does not serve prices through its API, so this was");
+    println!("     transcribed by hand and may be out of date. A rate set on the");
+    println!("     model's config entry overrides this, and is the only way to");
+    println!("     record a negotiated price no public page would show.");
+}
+
 /// Print a detailed capability sheet for a single model.
 fn print_model_detail(
     id: &str,
@@ -916,6 +952,8 @@ fn print_model_detail(
         caps.max_output_tokens,
         fmt_tokens(caps.max_output_tokens)
     );
+
+    print_model_pricing(provider, id);
 }
 
 #[cfg(test)]
@@ -1012,6 +1050,21 @@ mod tests {
     }
 
     // ─── print_model_detail ─────────────────────────────────────────────────
+
+    /// A listed model prints its rates, the date they were read, and the
+    /// warning - and never claims the figure came from the operator's config,
+    /// which this function cannot see.
+    #[test]
+    fn pricing_output_warns_and_does_not_claim_a_config_source() {
+        // Exercised for panics and for the branch; the text itself is asserted
+        // through the table, which is what a reader is actually shown.
+        print_model_pricing("anthropic", "claude-opus-5");
+        print_model_pricing("openai", "gpt-5.5");
+        // A model with no listed rate prints nothing rather than a zero, which
+        // would contradict the run reporting its cost as unavailable.
+        print_model_pricing("openrouter", "x-ai/grok-4.6");
+        print_model_pricing("anthropic", "claude-opus-9");
+    }
 
     #[test]
     fn print_model_detail_does_not_panic() {

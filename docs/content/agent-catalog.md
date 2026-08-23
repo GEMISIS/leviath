@@ -162,12 +162,15 @@ then write an overview with recommendations. Reach for it to map a whole space.
 ```mermaid
 flowchart TD
     survey --> investigate
-    survey -->|narrow area| compare
     investigate -->|"fan out: one researcher per thread"| compare
     compare -->|gaps| survey
     compare --> deep_dive
     deep_dive --> compare
-    compare --> summarize
+    compare --> challenge
+    challenge -->|"needs more evidence"| survey
+    challenge --> summarize
+    summarize --> polish
+    polish --> summary
     compare -->|error| error_recovery
     error_recovery --> compare
 ```
@@ -178,8 +181,13 @@ lev run wide-researcher --task "Survey approaches to vector database indexing"
 
 `investigate` is a [fan-out](/docs/sub-agents) stage, and its workers are full `researcher` runs
 rather than stages of this blueprint. Every thread the survey found is researched at the same time,
-each with its own clean context window, and their findings merge into `compare`. A survey that
-turns up one thread skips it and goes straight to `compare`.
+each with its own clean context window, and their findings merge into `compare`. A worker that finds
+its thread is really several independent subjects can split again, one level further.
+
+`challenge` and `polish` work as they do in [deep-researcher](#deep-researcher): every route to the
+writing stage passes through an adversary that can send the survey back for more evidence, and the
+finished overview is rewritten in plain language without any fact, number, citation or caveat
+changing.
 
 `compare` is then the hub: widen coverage (back to `survey`), pull one thread for a focused
 `deep_dive`, or finish.
@@ -192,12 +200,15 @@ structured, cited report. Reach for it when rigor and sources matter.
 ```mermaid
 flowchart TD
     gather --> investigate
-    gather -->|single question| analyze
     investigate -->|"fan out: one researcher per sub-question"| analyze
     analyze -->|gaps| gather
     analyze --> follow_citations
     follow_citations --> analyze
-    analyze --> synthesize
+    analyze --> challenge
+    challenge -->|"needs more evidence"| gather
+    challenge --> synthesize
+    synthesize --> polish
+    polish --> summary
     analyze -->|error| error_recovery
     error_recovery --> analyze
 ```
@@ -208,11 +219,26 @@ lev run deep-researcher --task "Investigate the evidence for X causing Y"
 
 A thorough investigation is usually several questions wearing one coat. `investigate` is a
 [fan-out](/docs/sub-agents) stage that splits them out and runs each as its own `researcher` sub-agent
-in parallel, merging what comes back into `analyze`. A topic that really is one question skips it.
+in parallel, merging what comes back into `analyze`. A sub-researcher that finds its own slice is
+several independent subjects can split again, one level further.
 
 `follow_citations` is a dedicated targeted-read stage: `analyze` flags a specific cited source, the
-stage pulls and reads it, then hands control back. Evidence accumulates in
-[context regions](/docs/context) across the loop before `synthesize` writes the report on Opus.
+stage pulls and reads it, then hands control back.
+
+`challenge` is the gate to the report, and every path to the writing stage runs through it. A
+different vendor's model attacks the analysis, marks what holds as well as what is weak, and can send
+the run back to gather more evidence. A different vendor on purpose: an adversary that shares the
+writer's blind spots is not an adversary. Making it optional does not work, because a model that
+feels confident will not elect to be attacked, and confidence is the failure it exists to catch.
+
+`polish` rewrites the finished report in plain language without touching a fact, number, citation or
+caveat. It exists because the stage that gathers the most evidence is not the one that writes the
+clearest prose, and asking one model for both gets a worse version of each.
+
+Per stage, the models are chosen on measurement rather than by defaulting to one family: a fast
+broad-search model gathers, a cheaper reasoning model analyses, a strong writer synthesises, a
+different vendor challenges, and a plain-language model polishes. See
+[providers](/docs/providers) for how a stage picks its model and falls back.
 
 ## log-analyzer
 

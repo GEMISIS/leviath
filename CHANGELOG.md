@@ -13,6 +13,22 @@ same list.
 
 ## Unreleased
 
+- Added: every bundled provider can price a call. OpenRouter learns rates from
+  the same `/models` fetch that teaches it context windows; Anthropic, OpenAI and
+  Google get a table transcribed from their pricing pages, stamped with the date
+  it was read because those vendors serve no prices through their APIs; Ollama
+  reports a known zero for local inference; Claude Code reports nothing, since it
+  bills a subscription rather than per token. A per-model config entry overrides
+  any of it and is the only place a negotiated rate can live. `lev models show`
+  prints the rates, the date, and the warning.
+- Changed: `deep-researcher`, `wide-researcher` and `researcher` ship the
+  measured configuration. Two new stages: `challenge`, a different vendor
+  attacking the analysis on the only path to the report, and `polish`, a
+  plain-language rewrite that changes no fact, number, citation or caveat. Each
+  stage's model is the one that measured best for its job. Sub-researchers can
+  now split their own work when a slice turns out to be several independent
+  subjects.
+
 - Fixed: a stage running on Gemini could not be followed by a stage on
   Anthropic. Gemini attaches a `thought_signature` to its tool calls, history is
   replayed to whichever provider runs next, and Anthropic rejects the unknown

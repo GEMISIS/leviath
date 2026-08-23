@@ -604,6 +604,14 @@ impl Provider for OllamaProvider {
         "ollama"
     }
 
+    fn pricing(&self, _model: &str) -> Option<crate::ModelPricing> {
+        // Local inference: the tokens cost electricity, not money billed to an
+        // account, so this is a known zero rather than an unknown. Reporting it
+        // keeps a run that used a local model out of the "cost unavailable"
+        // bucket it does not belong in.
+        Some(crate::ModelPricing::flat(0.0, 0.0))
+    }
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // Three answers, narrowest first: what the user wrote, what the server
         // says, what this build was compiled with.
@@ -853,6 +861,37 @@ impl Stream for OllamaNdjsonStream {
 
 #[cfg(test)]
 mod tests {
+
+    /// Local inference is a KNOWN zero, not an unknown: the tokens cost
+    /// electricity rather than money billed to an account. The difference
+    /// matters because a zero folds into an exact total while an unknown makes
+    /// the whole run's cost unavailable.
+    #[test]
+    fn local_inference_is_free_rather_than_unpriced() {
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
+        let p = provider.pricing("qwen3.5:9b").expect("a known zero");
+        assert_eq!(p.input_per_mtok, 0.0);
+        assert_eq!(p.output_per_mtok, 0.0);
+        assert_eq!(p.cached_input_per_mtok, 0.0);
+        assert_eq!(p.cache_write_per_mtok, 0.0);
+
+        // And it folds into a real total rather than voiding it: the point of
+        // pricing local inference at all is that a run using it reports $0.00
+        // instead of "cost unavailable".
+        let mut totals = crate::CostTotals::default();
+        totals.add(&crate::TokenUsage::new(1_000, 0, 0, 500), Some(&p));
+        assert_eq!(totals.total_usd(), Some(0.0));
+        assert_eq!(totals.unpriced_calls, 0);
+        // `is_exact` stays false because the figure came from a rate rather
+        // than from the provider quoting a cost. That reads oddly for a zero
+        // that cannot be wrong, but the flag answers "reported or computed",
+        // not "trustworthy", and widening it would blur the one distinction it
+        // exists to draw.
+        assert!(!totals.is_exact());
+        assert_eq!(totals.computed_calls, 1);
+    }
     use super::*;
     use crate::test_support::always_on_tracing_guard;
     use leviath_testkit::{
