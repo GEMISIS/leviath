@@ -899,6 +899,52 @@ mod tests {
         assert!(!rejects("[agent]\nname = \"a\"\n"), "a minimal manifest");
     }
 
+    /// A declared `gate` must actually check something.
+    ///
+    /// Its fields are parsed one by one, so a misspelt condition leaves them all
+    /// at their defaults and the gate passes every time. The edge still parses
+    /// and still validates, which is exactly how a gate silently stops gating.
+    #[test]
+    fn a_declared_gate_never_parses_to_one_that_checks_nothing() {
+        for agent in BUNDLED_AGENTS {
+            let manifest = agent
+                .files
+                .iter()
+                .find(|(rel, _)| *rel == "agent.leviath")
+                .map(|(_, c)| *c)
+                .expect("every bundled agent has a manifest");
+            // The raw text says which edges *declare* a gate; the parsed
+            // blueprint says what those gates actually check. Comparing the two
+            // is the point: a gate that parses to nothing is invisible in the
+            // blueprint alone.
+            let declared = manifest.matches("gate = {").count();
+            let blueprint =
+                leviath_core::manifest::parse_manifest(manifest).expect("manifest parses");
+            let mut checking = 0;
+            for stage in &blueprint.stages {
+                for (target, edge) in stage.transitions.iter().flatten() {
+                    let Some(gate) = &edge.gate else { continue };
+                    let checks = gate.require_modifications
+                        || gate.region.is_some()
+                        || gate.require_region_updated.is_some();
+                    assert!(
+                        checks,
+                        "{}: {} -> {} declares a gate that checks nothing, so it \
+                         passes every time; check the spelling of its keys",
+                        agent.name, stage.name, target
+                    );
+                    checking += 1;
+                }
+            }
+            assert_eq!(
+                declared, checking,
+                "{}: {declared} edges write `gate = {{`, but {checking} parsed \
+                 into a gate - the difference is gates that were dropped",
+                agent.name
+            );
+        }
+    }
+
     /// A `transform = "custom"` edge must actually name regions.
     ///
     /// `transform_config` is parsed key by key, so a misspelt key leaves every

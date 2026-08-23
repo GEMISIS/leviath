@@ -242,6 +242,10 @@ Decide the next move:
 - One especially interesting/consequential thread worth a focused deep read
   before you can judge it fairly → respond with: deep_dive
 - You've covered enough ground to write a useful overview → respond with: challenge
+  Before you choose this or deep_dive: the comparative judgments you made this
+  pass must be in `comparisons`. That region is what the overview is written
+  from, so a judgment left in your reply and not in the region is one the
+  writing stage cannot use.
 - The `[Progress in stage ...]` note says this pass added little next to the one
   before it, and you cannot name a specific gap you would go and fill → the work
   here has converged → respond with: challenge
@@ -273,6 +277,11 @@ off before finishing - treat its coverage as incomplete when judging the field.
 [stages.compare.transitions.deep_dive]
 hint = "Threads compared - read the most significant one in depth"
 transform = "compact"
+# Both ways out of `compare` are gated on the same region: it is the comparison
+# this agent exists to produce. Measured on a finished run, `comparisons` held
+# 2,560 tokens of its 125,000 while `landscape` sat at 83%, so the comparing was
+# happening and only the recording was not.
+gate = { require_region_updated = "comparisons", message = "Write the comparative judgments you reached this pass into `comparisons` with context_write before moving on. The overview is written from that region." }
 
 # Un-exhaustible escape (lint: dead-end-possible): once `deep_dive` has spent its
 # revisits there is nowhere else to go, and the overview still gets written.
@@ -280,6 +289,7 @@ transform = "compact"
 [stages.compare.transitions.challenge]
 hint = "Evidence is sufficient - have it attacked before writing"
 transform = "compact"
+gate = { require_region_updated = "comparisons", message = "Write the comparative judgments you reached this pass into `comparisons` with context_write before moving on. The adversarial pass reads that region, and the overview is written from it." }
 
 [stages.compare.transitions.error_recovery]
 condition = "error"
