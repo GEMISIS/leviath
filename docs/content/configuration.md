@@ -212,6 +212,9 @@ broken one.
 Counted per run from its root, so a worker deep in the tree cannot spend the whole
 budget on its own branch.
 
+[Managing your costs](/docs/costs) puts this beside the other levers, with the measurements each
+one came from.
+
 **`notify_spend_usd`** says which figures are worth interrupting you for:
 
 ```toml
@@ -225,7 +228,9 @@ crossed, which is the stage doing the spending; the full per-stage breakdown is 
 `stages.json`.
 
 This is reporting, not a ceiling. It does not stop a run, because stopping one mid-stage throws away
-work and that is a different decision from wanting to know what is happening.
+work and that is a different decision from wanting to know what is happening. To bound the spend
+rather than watch it, see `max_agents_per_run` below and
+[managing your costs](/docs/costs).
 
 A run whose models have no published price reports what it could price and marks the figure
 incomplete, rather than a confident number that is wrong. Completeness is a different question from

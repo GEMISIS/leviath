@@ -3,7 +3,7 @@ title: Troubleshooting
 description: Common snags organised by symptom, starting with what `lev doctor` tells you.
 group: Guides
 group_order: 4
-order: 2
+order: 3
 ---
 
 # Troubleshooting
