@@ -488,6 +488,15 @@ impl Provider for RhaiProvider {
         crate::tokenizer::count_tokens(text, model)
     }
 
+    fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
+        // Config is the only source there is here. A script provider fronts an
+        // endpoint whose rates Leviath cannot look up, so without the user's own
+        // number the model has no price and every call on it reports unpriced.
+        self.capability_overrides
+            .get(model)
+            .and_then(|o| o.pricing())
+    }
+
     fn max_context_tokens(&self, model: &str) -> usize {
         self.capability_overrides
             .get(model)

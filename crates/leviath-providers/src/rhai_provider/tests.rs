@@ -125,6 +125,47 @@ const NOOP_INIT: &str = "fn initialize(config) { #{} }\n";
 
 // ── Construction ─────────────────────────────────────────────────────────────
 
+/// A script provider fronts an endpoint whose rates Leviath cannot look up, so
+/// the operator's own number is the only price there will ever be. It was being
+/// read into the provider and then never asked for, which left every call on a
+/// script model unpriced no matter what the config said.
+///
+/// Found by running it: a probe with a rate in config still finished with
+/// `unpriced_calls: 7` and `cost_priced_usd: 0.0`.
+#[test]
+fn a_script_model_is_priced_from_config_and_otherwise_not_at_all() {
+    let mut caps = HashMap::new();
+    caps.insert(
+        "mock-model".to_string(),
+        crate::ModelCapabilityOverride {
+            input_per_mtok: Some(3.0),
+            output_per_mtok: Some(15.0),
+            ..Default::default()
+        },
+    );
+    let provider = RhaiProvider::from_source(
+        GOOD_PROVIDER,
+        Arc::new(FakeExecutor::default()),
+        ScriptProviderSettings {
+            name: "test".to_string(),
+            init_config: serde_json::json!({}),
+            caps,
+            rate_limit: None,
+            request_timeout_secs: None,
+            env_allowlist: no_env_allowlist(),
+        },
+    )
+    .expect("the script compiles");
+
+    let priced = provider.pricing("mock-model").expect("configured");
+    assert_eq!(priced.input_per_mtok, 3.0);
+    assert_eq!(priced.output_per_mtok, 15.0);
+
+    // No entry, no price. Reporting a zero here would read as "this was free",
+    // which is the one answer worse than "unknown".
+    assert!(provider.pricing("some-other-model").is_none());
+}
+
 #[test]
 fn from_source_compile_error() {
     let err = build("fn inference( { oops", FakeExecutor::new())

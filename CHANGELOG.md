@@ -13,6 +13,13 @@ same list.
 
 ## Unreleased
 
+- Fixed: a Rhai script provider ignored the rates written for its models.
+  Every built-in provider answers from `[model_capabilities]` first; the script
+  provider held the same overrides, used them for capabilities, and never asked
+  them for a price, so every call on a script model reported unpriced however the
+  rate was configured. That is the one case where the operator's own number is
+  the only price there will ever be, since a self-hosted endpoint publishes none.
+
 - Fixed: `lev resume` on a cancelled run did the work and reported failure.
   Paging a stopped run back in restores it ready to work, so nothing paused is
   left to un-pause and every check said no, while the run was already going
