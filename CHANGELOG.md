@@ -13,6 +13,14 @@ same list.
 
 ## Unreleased
 
+- Fixed: a cancelled run can be resumed. Cancelling stops a run rather than
+  ending it, and everything needed to carry on is already written down: the
+  journal in `run.lvr`, every region in `context.json`, the stage and iteration
+  in `meta.json`, and any parked fan-out in `fanout.json`. A status check was
+  treating `Cancelled` like `Complete`, so `lev resume` could not reach it.
+  Startup recovery still leaves cancelled runs alone: somebody stopped that run
+  on purpose, and restarting the daemon is not them changing their mind (#576).
+
 - Fixed: the researcher agents stopped writing the regions their own later
   stages read from. Measured over two finished runs, `claims`, `contradictions`
   and `analysis` held nothing across all 225 snapshots of one, and

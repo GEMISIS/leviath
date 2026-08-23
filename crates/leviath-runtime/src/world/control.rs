@@ -59,7 +59,9 @@ impl PipelineWorld {
     }
 
     /// Resume a paused agent. `Idle` is also accepted (resume-as-nudge for an
-    /// agent that has not ticked yet); anything else returns `false`.
+    /// agent that has not ticked yet), and so is `Cancelled`: cancelling stops a
+    /// run rather than ending it, and everything it needs to carry on is still
+    /// on disk (#576). Anything else returns `false`.
     pub fn resume(&mut self, agent: AgentId) -> bool {
         // Resolved once, up front. Doing it again inside the arm below would
         // be a second check that cannot fail - the status lookup already
@@ -69,7 +71,7 @@ impl PipelineWorld {
             return false;
         };
         match self.agent_status(agent) {
-            Some(AgentStatus::Paused | AgentStatus::Idle) => {
+            Some(AgentStatus::Paused | AgentStatus::Idle | AgentStatus::Cancelled) => {
                 // An explicit resume says conditions have changed - most often
                 // a top-up after a run paused on exhausted credits (issue
                 // #413). A tripped breaker would otherwise hold the retry
