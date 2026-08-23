@@ -339,6 +339,28 @@ pub struct RunMeta {
     /// Total number of tool calls made across all iterations.
     #[serde(default)]
     pub tool_calls: usize,
+    /// What this run has spent, when every call could be priced.
+    ///
+    /// `None` means *unknown*, never free: some call was served by a model with
+    /// no reported cost and no known rates, so any total would be understating
+    /// by an unknown amount. See [`unpriced_calls`](Self::unpriced_calls) for
+    /// how many, and [`cost_is_exact`](Self::cost_is_exact) for whether the
+    /// figure is the provider's own or reconstructed from rate cards.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// Calls that could not be priced at all. Non-zero forces
+    /// [`cost_usd`](Self::cost_usd) to `None`.
+    #[serde(default)]
+    pub unpriced_calls: usize,
+    /// Whether every priced call carried the provider's own cost figure rather
+    /// than one computed from published rates. `false` means the total is this
+    /// process's best reconstruction of the invoice, not the invoice.
+    #[serde(default)]
+    pub cost_is_exact: bool,
+    /// The priced subtotal, kept even when `cost_usd` is `None` so a resumed run
+    /// does not restart its accounting from zero.
+    #[serde(default)]
+    pub cost_priced_usd: f64,
     /// Absolute path to the working directory for tool execution
     pub workdir: String,
     /// Unix timestamp (seconds)
@@ -676,6 +698,12 @@ impl RunMeta {
             cached_tokens: 0,
             cache_write_tokens: 0,
             tool_calls: 0,
+            // A run that has made no calls has spent nothing, and that
+            // zero IS known - unlike a run whose calls could not be priced.
+            cost_usd: Some(0.0),
+            unpriced_calls: 0,
+            cost_is_exact: true,
+            cost_priced_usd: 0.0,
             workdir,
             started_at: now,
             updated_at: now,

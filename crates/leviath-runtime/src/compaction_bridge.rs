@@ -59,6 +59,10 @@ pub struct CompactionOutcome {
     pub provider_name: String,
     /// The model the batch targeted.
     pub model: String,
+    /// What the provider charges for that model, resolved while the
+    /// `Arc<dyn Provider>` was still in scope. Only the name survives past
+    /// here, and a name cannot be asked its rates.
+    pub pricing: Option<leviath_providers::ModelPricing>,
 }
 
 /// Run one compaction job: summarize each region sequentially with the permit
@@ -112,6 +116,7 @@ pub async fn run_compaction_job(
         entity,
         result: result.map(|()| summaries),
         usage,
+        pricing: provider.pricing(&model),
         provider_name,
         model,
     };
@@ -160,6 +165,7 @@ mod tests {
                         total_tokens: 2,
                         cached_tokens: 0,
                         cache_write_tokens: 0,
+                        reported_cost_usd: None,
                     },
                     finish_reason: FinishReason::Complete,
                 }),

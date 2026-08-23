@@ -1245,6 +1245,7 @@ mod tests {
                 total_tokens: 2,
                 cached_tokens: 0,
                 cache_write_tokens: 0,
+                reported_cost_usd: None,
             },
             finish_reason: FinishReason::Complete,
         }
@@ -1979,6 +1980,7 @@ mod tests {
                     entity: e.entity(),
                     latency: std::time::Duration::ZERO,
                     result: Ok(text("t1")),
+                    pricing: None,
                 },
                 lane: crate::pipeline::HeldLane::Stage,
             });
@@ -2032,6 +2034,7 @@ mod tests {
                     entity: e.entity(),
                     latency: std::time::Duration::ZERO,
                     result: Ok(text("t1")),
+                    pricing: None,
                 },
                 lane: crate::pipeline::HeldLane::TransitionChoice,
             });

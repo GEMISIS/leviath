@@ -646,26 +646,10 @@ pub struct InferenceResponse {
     pub finish_reason: FinishReason,
 }
 
-/// Token usage breakdown.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenUsage {
-    /// Tokens in the prompt
-    pub prompt_tokens: usize,
-
-    /// Tokens in the completion
-    pub completion_tokens: usize,
-
-    /// Total tokens
-    pub total_tokens: usize,
-
-    /// Tokens read from cache (Anthropic: cache_read_input_tokens)
-    #[serde(default)]
-    pub cached_tokens: usize,
-
-    /// Tokens written to cache this request (Anthropic: cache_creation_input_tokens)
-    #[serde(default)]
-    pub cache_write_tokens: usize,
-}
+// `TokenUsage` lives in `crate::pricing` alongside the rates it is priced
+// at, and is re-exported here because every provider imports it from this
+// module and the move was structural, not an interface change.
+pub use crate::pricing::TokenUsage;
 
 /// Reason inference completed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1031,6 +1015,27 @@ pub trait Provider: Send + Sync {
     /// their available models.
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         Ok(Vec::new())
+    }
+
+    /// What this provider charges for `model`, or `None` when it does not know.
+    ///
+    /// The peer of [`Self::capabilities`], and fed the same way: a provider
+    /// whose rates live behind its API fetches them in
+    /// [`Self::prime_capabilities`] and answers from the primed table here,
+    /// because this is called on the accounting path and must not go to the
+    /// network.
+    ///
+    /// **`None` is the safe answer and the default.** An unpriced call makes
+    /// its run's cost report `UNKNOWN` rather than contributing zero, so a
+    /// provider that has not implemented this yet cannot cause a total to
+    /// silently understate. That is the property worth protecting: a partial
+    /// total looks authoritative and gets quoted onward.
+    ///
+    /// Prefer reporting real cost over rates where the API offers it - see
+    /// [`TokenUsage::reported_cost_usd`], which is used in preference to
+    /// anything computed here.
+    fn pricing(&self, _model: &str) -> Option<crate::pricing::ModelPricing> {
+        None
     }
 }
 
@@ -1720,6 +1725,7 @@ mod tests {
             total_tokens: 150,
             cached_tokens: 20,
             cache_write_tokens: 10,
+            reported_cost_usd: None,
         };
         let json = serde_json::to_string(&usage).unwrap();
         let back: TokenUsage = serde_json::from_str(&json).unwrap();
@@ -1896,6 +1902,7 @@ mod tests {
                     total_tokens: 2,
                     cached_tokens: 0,
                     cache_write_tokens: 0,
+                    reported_cost_usd: None,
                 },
                 finish_reason: FinishReason::Complete,
             })
@@ -1960,6 +1967,14 @@ mod tests {
         let provider = MinimalProvider;
         let models = provider.list_models().await.unwrap();
         assert!(models.is_empty());
+    }
+
+    /// A provider that has not implemented `pricing` reports no rates, and that
+    /// is the safe default: an unpriced call makes its run report UNKNOWN
+    /// rather than contributing zero to a total that then reads as authoritative.
+    #[test]
+    fn default_pricing_is_unknown_rather_than_free() {
+        assert_eq!(MinimalProvider.pricing("any-model"), None);
     }
 
     #[tokio::test]

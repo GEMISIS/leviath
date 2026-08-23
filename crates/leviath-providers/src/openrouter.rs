@@ -239,6 +239,14 @@ impl OpenRouterProvider {
             })
         };
 
+        // Ask the gateway to report what the call cost. Without this it returns
+        // token counts only and the cost has to be reconstructed from a rate
+        // card, which is an estimate: it cannot see this account's actual
+        // rates, the gateway's margin, or a request rerouted to a different
+        // backend at a different price. With it, `usage.cost` comes back as the
+        // real figure and nothing downstream has to guess.
+        body["usage"] = serde_json::json!({ "include": true });
+
         if !request.tools.is_empty() {
             let tools: Vec<serde_json::Value> = request
                 .tools

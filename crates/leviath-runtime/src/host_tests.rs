@@ -84,6 +84,7 @@ fn text(content: &str) -> InferenceResponse {
             total_tokens: 2,
             cached_tokens: 0,
             cache_write_tokens: 0,
+            reported_cost_usd: None,
         },
         finish_reason: FinishReason::Complete,
     }
@@ -1213,6 +1214,7 @@ async fn a_paused_run_holding_a_landed_response_is_not_parked() {
                 entity: e.entity(),
                 latency: std::time::Duration::ZERO,
                 result: Err(leviath_providers::ProviderError::Other("held".to_string())),
+                pricing: None,
             },
             lane: crate::pipeline::HeldLane::Stage,
         },

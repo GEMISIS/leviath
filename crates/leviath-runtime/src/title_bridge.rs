@@ -59,6 +59,8 @@ pub struct TitleOutcome {
     pub provider_name: String,
     /// The model the call targeted.
     pub model: String,
+    /// That model's rates, resolved while the provider handle was in scope.
+    pub pricing: Option<leviath_providers::ModelPricing>,
 }
 
 /// Run one title job: make the call with the permit held, release the slot,
@@ -135,6 +137,7 @@ pub async fn run_title_job(
         result,
         finish_reason,
         usage,
+        pricing: provider.pricing(&model),
         provider_name,
         model,
     });

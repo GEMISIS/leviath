@@ -476,6 +476,9 @@ pub fn dispatch_inference(
                             result: Err(leviath_providers::ProviderError::Other(message)),
                             // The job never got to measure itself.
                             latency: std::time::Duration::ZERO,
+                            // ...and never reached a provider, so it billed
+                            // nothing and needs no rates.
+                            pricing: None,
                         });
                         lost_wake.notify_one();
                     },

@@ -13,6 +13,21 @@ same list.
 
 ## Unreleased
 
+- Fixed: `TokenUsage` meant two different things depending on the provider, so
+  any arithmetic over it was wrong for one of them. Anthropic reports
+  `input_tokens` exclusive of both cache counts; the OpenAI shape reports a
+  `prompt_tokens` that includes `prompt_tokens_details.cached_tokens`. Cached
+  tokens were billed twice on one side, and `total_tokens` omitted cache reads
+  and writes entirely on the other. Every provider now normalises to one
+  contract: `prompt_tokens` is fresh input, the three input counts are disjoint,
+  and `total_tokens` covers all of them.
+- Added: a run reports what it cost. The provider's own figure is used when it
+  gives one (OpenRouter now asks for it, and a script provider can report
+  `cost_usd`); otherwise the model's rates via the new `Provider::pricing()`.
+  A run with any call that could not be priced reports its cost as unknown
+  rather than as a partial total, and says whether the figure is the provider's
+  or computed. Per-call cost lands in the journal, run totals in `meta.json`.
+
 - Added: a looping stage is now told what its previous visit actually added,
   measured, so it can judge whether another pass is worth running. A stage that
   loops sees the same accumulated context on every entry and cannot tell a

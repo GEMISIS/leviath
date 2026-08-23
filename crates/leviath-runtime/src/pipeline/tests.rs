@@ -28,6 +28,7 @@ impl Provider for Cfg {
                 total_tokens: 2,
                 cached_tokens: 0,
                 cache_write_tokens: 0,
+                reported_cost_usd: None,
             },
             finish_reason: leviath_providers::FinishReason::Complete,
         })
@@ -761,6 +762,7 @@ fn resp(text: &str) -> leviath_providers::InferenceResponse {
             total_tokens: 2,
             cached_tokens: 0,
             cache_write_tokens: 0,
+            reported_cost_usd: None,
         },
         finish_reason: leviath_providers::FinishReason::Complete,
     }
@@ -794,6 +796,7 @@ fn collect_applies_ok_and_advances_to_process_response() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(response),
+        pricing: None,
     })
     .unwrap();
 
@@ -825,6 +828,7 @@ fn collect_holds_a_success_that_lands_on_a_paused_agent() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("hi")),
+        pricing: None,
     })
     .unwrap();
 
@@ -873,6 +877,7 @@ fn collect_holds_a_failure_that_lands_on_a_paused_agent() {
         result: Err(leviath_providers::ProviderError::RequestFailed(
             "reading response body: error decoding response body".to_string(),
         )),
+        pricing: None,
     })
     .unwrap();
 
@@ -906,6 +911,7 @@ fn collect_parks_a_run_whose_provider_is_unreachable() {
         result: Err(leviath_providers::ProviderError::RequestFailed(
             "reading response body: error decoding response body".to_string(),
         )),
+        pricing: None,
     })
     .unwrap();
 
@@ -964,6 +970,7 @@ fn a_run_with_no_stage_log_still_parks_on_an_unreachable_provider() {
         result: Err(leviath_providers::ProviderError::RequestFailed(
             "reading response body: error decoding response body".to_string(),
         )),
+        pricing: None,
     })
     .unwrap();
 
@@ -984,6 +991,7 @@ fn collect_marks_error_on_failure() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
+        pricing: None,
     })
     .unwrap();
 
@@ -1040,6 +1048,7 @@ fn an_unusable_provider_fails_over_instead_of_killing_the_run() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Err(credits_exhausted()),
+        pricing: None,
     })
     .unwrap();
 
@@ -1079,6 +1088,7 @@ fn failover_is_recorded_in_the_stage_log() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Err(credits_exhausted()),
+        pricing: None,
     })
     .unwrap();
 
@@ -1114,6 +1124,7 @@ fn an_exhausted_fallback_list_pauses_on_credits_instead_of_dying() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Err(credits_exhausted()),
+        pricing: None,
     })
     .unwrap();
 
@@ -1167,6 +1178,7 @@ fn an_unattended_run_out_of_credits_parks_instead_of_losing_its_work() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Err(credits_exhausted()),
+        pricing: None,
     })
     .unwrap();
 
@@ -1204,6 +1216,7 @@ fn a_credits_pause_records_the_remedy_on_the_run() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Err(credits_exhausted()),
+        pricing: None,
     })
     .unwrap();
 
@@ -1232,6 +1245,7 @@ fn the_credits_pause_copes_without_a_stage_log_buffer() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Err(credits_exhausted()),
+        pricing: None,
     })
     .unwrap();
 
@@ -1260,6 +1274,7 @@ fn an_exhausted_fallback_list_still_terminates_on_a_dead_key() {
             reason: leviath_providers::UnavailableReason::AuthFailed,
             detail: "HTTP 401 Unauthorized".to_string(),
         }),
+        pricing: None,
     })
     .unwrap();
 
@@ -1287,6 +1302,7 @@ fn an_ordinary_error_does_not_burn_a_fallback() {
         result: Err(leviath_providers::ProviderError::ApiError(
             "HTTP 400: bad request".to_string(),
         )),
+        pricing: None,
     })
     .unwrap();
 
@@ -1319,6 +1335,7 @@ fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
             latency: std::time::Duration::ZERO,
             entity: e,
             result: Err(credits_exhausted()),
+            pricing: None,
         })
         .unwrap();
         run_collect(&mut world);
@@ -1338,6 +1355,7 @@ fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("hi")),
+        pricing: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -1368,6 +1386,7 @@ fn an_ordinary_error_does_not_count_against_the_provider() {
         result: Err(leviath_providers::ProviderError::ApiError(
             "HTTP 400: bad request".to_string(),
         )),
+        pricing: None,
     })
     .unwrap();
 
@@ -1392,6 +1411,7 @@ fn collect_works_without_the_breaker_installed() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Err(credits_exhausted()),
+        pricing: None,
     })
     .unwrap();
 
@@ -1418,6 +1438,7 @@ fn an_unusable_provider_without_a_stage_component_still_terminates() {
             reason: leviath_providers::UnavailableReason::AuthFailed,
             detail: "HTTP 401 Unauthorized".to_string(),
         }),
+        pricing: None,
     })
     .unwrap();
 
@@ -1600,6 +1621,7 @@ fn collect_inference_buffers_output_token_line_and_stage_tokens() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(response),
+        pricing: None,
     })
     .unwrap();
 
@@ -1730,6 +1752,7 @@ fn collect_learns_the_drift_between_what_was_believed_and_what_was_charged() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(response),
+        pricing: None,
     })
     .unwrap();
 
@@ -1763,6 +1786,7 @@ fn collect_folds_a_worse_call_into_an_existing_calibration() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(response),
+        pricing: None,
     })
     .unwrap();
 
@@ -1790,6 +1814,7 @@ fn collect_calibrates_nothing_when_there_was_no_estimate() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(response),
+        pricing: None,
     })
     .unwrap();
 
@@ -1904,6 +1929,7 @@ fn collect_inference_drops_a_response_for_a_cancelled_run() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("too late")),
+        pricing: None,
     })
     .unwrap();
 
@@ -1937,6 +1963,7 @@ fn collect_inference_skips_empty_output_but_logs_tokens() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("   ")), // whitespace-only ⇒ no output line
+        pricing: None,
     })
     .unwrap();
 
@@ -1962,6 +1989,7 @@ fn collect_inference_error_buffers_error_line() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
+        pricing: None,
     })
     .unwrap();
 
@@ -1987,6 +2015,7 @@ fn collect_inference_tolerates_cursor_beyond_ledger() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("x")),
+        pricing: None,
     })
     .unwrap();
 
@@ -3118,6 +3147,7 @@ fn collect_drops_outcome_for_non_awaiting_agent() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("x")),
+        pricing: None,
     })
     .unwrap();
 
@@ -3145,11 +3175,13 @@ fn collect_inference_accumulates_token_totals() {
         total_tokens: 15,
         cached_tokens: 2,
         cache_write_tokens: 1,
+        reported_cost_usd: None,
     };
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(r),
+        pricing: None,
     })
     .unwrap();
 
@@ -7361,6 +7393,7 @@ fn collect_choice_errors_when_system_prompt_overflows() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("b")),
+        pricing: None,
     })
     .unwrap();
 
@@ -10862,6 +10895,7 @@ fn collect_compaction_stores_summary_and_clears_source() {
         provider_name: "p".to_string(),
         model: "m".to_string(),
         result: Ok(vec![("conv".to_string(), "the summary".to_string())]),
+        pricing: None,
     })
     .unwrap();
 
@@ -10895,6 +10929,7 @@ fn collect_compaction_keeps_the_region_when_the_summary_is_empty() {
             provider_name: "p".to_string(),
             model: "m".to_string(),
             result: Ok(vec![("conv".to_string(), summary.to_string())]),
+            pricing: None,
         })
         .unwrap();
 
@@ -10944,6 +10979,7 @@ fn compaction_calls_are_counted_one_record_per_region() {
         cached_tokens: 0,
         cache_write_tokens: 0,
         total_tokens: prompt + 10,
+        reported_cost_usd: None,
     };
     tx.send(CompactionOutcome {
         entity: e,
@@ -10952,6 +10988,7 @@ fn compaction_calls_are_counted_one_record_per_region() {
         provider_name: "p".to_string(),
         model: "m".to_string(),
         result: Ok(vec![("conv".to_string(), "the summary".to_string())]),
+        pricing: None,
     })
     .unwrap();
 
@@ -10983,10 +11020,12 @@ fn a_failed_compaction_batch_still_counts_the_calls_that_ran() {
             cached_tokens: 0,
             cache_write_tokens: 0,
             total_tokens: 4040,
+            reported_cost_usd: None,
         }],
         provider_name: "p".to_string(),
         model: "m".to_string(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
+        pricing: None,
     })
     .unwrap();
 
@@ -11017,6 +11056,7 @@ fn collect_compaction_error_leaves_context_and_readies() {
         provider_name: "p".to_string(),
         model: "m".to_string(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
+        pricing: None,
     })
     .unwrap();
 
@@ -11045,6 +11085,7 @@ fn collect_compaction_drops_stale_outcome() {
         provider_name: "p".to_string(),
         model: "m".to_string(),
         result: Ok(vec![]),
+        pricing: None,
     })
     .unwrap();
     run_collect_compaction(&mut world); // no matching agent ⇒ dropped
@@ -11078,6 +11119,7 @@ fn collect_compaction_summary_for_unpaired_region_is_skipped() {
             ("lone".to_string(), "s".to_string()),
             ("gone".to_string(), "s2".to_string()),
         ]),
+        pricing: None,
     })
     .unwrap();
 
@@ -11805,6 +11847,7 @@ fn collect_choice_holds_an_outcome_that_lands_on_a_paused_agent() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("b")),
+        pricing: None,
     })
     .unwrap();
 
@@ -11847,6 +11890,7 @@ fn collect_choice_enters_chosen_stage() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("b")),
+        pricing: None,
     })
     .unwrap();
 
@@ -11885,11 +11929,13 @@ fn a_routing_call_is_counted_against_the_run() {
         cached_tokens: 1,
         cache_write_tokens: 2,
         total_tokens: 303,
+        reported_cost_usd: None,
     };
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(response),
+        pricing: None,
     })
     .unwrap();
 
@@ -11928,6 +11974,7 @@ fn collect_choice_does_not_resurrect_or_complete_a_cancelled_run() {
             latency: std::time::Duration::ZERO,
             entity: e,
             result: Ok(resp(choice)),
+            pricing: None,
         })
         .unwrap();
 
@@ -11966,6 +12013,7 @@ fn collect_choice_applies_the_chosen_edge_transform() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("b")),
+        pricing: None,
     })
     .unwrap();
 
@@ -11999,6 +12047,7 @@ fn collect_choice_holds_the_stage_when_the_chosen_edge_is_gated() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("review")),
+        pricing: None,
     })
     .unwrap();
 
@@ -12041,6 +12090,7 @@ fn collect_choice_records_a_forced_gate_and_enters_the_stage() {
             latency: std::time::Duration::ZERO,
             entity,
             result: Ok(resp("review")),
+            pricing: None,
         })
         .unwrap();
     }
@@ -12068,6 +12118,7 @@ fn collect_choice_done_completes() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("DONE")),
+        pricing: None,
     })
     .unwrap();
 
@@ -12092,6 +12143,7 @@ fn collect_choice_unknown_target_falls_back_to_first_stage() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("ghost")),
+        pricing: None,
     })
     .unwrap();
 
@@ -12111,6 +12163,7 @@ fn collect_choice_marks_error_on_failure() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
+        pricing: None,
     })
     .unwrap();
 
@@ -12133,6 +12186,7 @@ fn collect_choice_drops_stale_outcome() {
         latency: std::time::Duration::ZERO,
         entity: ghost,
         result: Ok(resp("x")),
+        pricing: None,
     })
     .unwrap();
     // No matching AwaitingTransitionResponse agent ⇒ silently dropped.
@@ -12163,6 +12217,7 @@ fn collect_inference_records_activity_with_provider_and_latency() {
         latency: std::time::Duration::from_millis(1500),
         entity: e,
         result: Ok(resp("hi")),
+        pricing: None,
     })
     .unwrap();
 
@@ -12197,6 +12252,7 @@ fn collect_inference_records_a_failed_call_without_stage_inference() {
         latency: std::time::Duration::from_millis(20),
         entity: e,
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
+        pricing: None,
     })
     .unwrap();
 
@@ -12281,6 +12337,7 @@ fn collect_compaction_records_success_and_failure() {
         provider_name: "p".to_string(),
         model: "m".to_string(),
         result: Ok(vec![("conv".to_string(), "summary".to_string())]),
+        pricing: None,
     })
     .unwrap();
     run_collect_compaction(&mut world);
@@ -12298,6 +12355,7 @@ fn collect_compaction_records_success_and_failure() {
         provider_name: "p".to_string(),
         model: "m".to_string(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
+        pricing: None,
     })
     .unwrap();
     run_collect_compaction(&mut world);
@@ -12395,6 +12453,7 @@ fn collect_choice_emits_a_stage_transition_event() {
         latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("b")),
+        pricing: None,
     })
     .unwrap();
 

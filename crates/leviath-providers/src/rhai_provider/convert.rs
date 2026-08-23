@@ -31,12 +31,21 @@ fn usize_field(obj: Option<&Value>, key: &str) -> usize {
 
 /// Build a [`TokenUsage`] from an optional JSON `tokens`/`tokens_used` object.
 fn parse_usage(obj: Option<&Value>) -> TokenUsage {
+    // A script provider may report `cost_usd` for the call it just made. It is
+    // the one that knows: it wrote the request, it saw whatever the endpoint
+    // said, and nothing here has a rate card for a model it has never heard of.
+    // Absent, the call is unpriced and its run reports UNKNOWN rather than a
+    // total quietly missing it.
+    let cost = obj
+        .and_then(|v| v.get("cost_usd").or_else(|| v.get("cost")))
+        .and_then(|v| v.as_f64());
     TokenUsage {
         prompt_tokens: usize_field(obj, "prompt_tokens"),
         completion_tokens: usize_field(obj, "completion_tokens"),
         total_tokens: usize_field(obj, "total_tokens"),
         cached_tokens: usize_field(obj, "cached_tokens"),
         cache_write_tokens: usize_field(obj, "cache_write_tokens"),
+        reported_cost_usd: cost,
     }
 }
 
@@ -230,3 +239,29 @@ pub fn map_rhai_err(err: Box<EvalAltResult>) -> ProviderError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cost_tests {
+    use super::*;
+
+    /// A script provider knows what its own endpoint charged; nothing else
+    /// does, since a custom model has no rate card here. Both spellings are
+    /// accepted because a script author will reach for either.
+    #[test]
+    fn a_script_provider_can_report_its_own_cost() {
+        for key in ["cost_usd", "cost"] {
+            let usage = serde_json::json!({
+                "prompt_tokens": 12, "completion_tokens": 4, key: 0.0021
+            });
+            let parsed = parse_usage(Some(&usage));
+            assert_eq!(parsed.reported_cost_usd, Some(0.0021), "via `{key}`");
+        }
+    }
+
+    /// Silence means unpriced, not free.
+    #[test]
+    fn a_script_provider_that_says_nothing_leaves_the_call_unpriced() {
+        let usage = serde_json::json!({"prompt_tokens": 12, "completion_tokens": 4});
+        assert_eq!(parse_usage(Some(&usage)).reported_cost_usd, None);
+    }
+}

@@ -218,6 +218,21 @@ fn totals_from(meta: &RunMeta) -> TokenTotals {
         cached_tokens: meta.cached_tokens,
         cache_write_tokens: meta.cache_write_tokens,
         tool_calls: meta.tool_calls,
+        // Restored so a resumed run keeps counting from what it already spent
+        // rather than restarting at zero. The unpriced count comes back too:
+        // a run that could not be priced before resuming still cannot be.
+        cost: leviath_providers::CostTotals {
+            priced_usd: meta.cost_priced_usd,
+            // The per-call split is not persisted, only whether the total was
+            // exact. Restoring both counts as zero would let a resumed run
+            // whose cost had been RECONSTRUCTED come back claiming to be the
+            // invoice, so an inexact total carries one computed call forward -
+            // enough to keep `is_exact()` false, which is the only thing these
+            // two counts are read for after a resume.
+            reported_calls: 0,
+            computed_calls: usize::from(!meta.cost_is_exact),
+            unpriced_calls: meta.unpriced_calls,
+        },
     }
 }
 
@@ -646,6 +661,10 @@ mod tests {
             cached_tokens: 0,
             cache_write_tokens: 0,
             tool_calls: 3,
+            cost_usd: Some(0.0),
+            unpriced_calls: 0,
+            cost_is_exact: true,
+            cost_priced_usd: 0.0,
             workdir: std::env::temp_dir().to_string_lossy().to_string(),
             started_at: 111,
             updated_at: 222,

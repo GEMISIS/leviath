@@ -310,13 +310,14 @@ impl ClaudeCodeProvider {
         Ok(InferenceResponse {
             content,
             tool_calls,
-            tokens_used: TokenUsage {
+            // Anthropic's shape: `input_tokens` already excludes both cache
+            // counts, so it is the fresh figure and only the total changes.
+            tokens_used: TokenUsage::new(
                 prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
                 cached_tokens,
                 cache_write_tokens,
-            },
+                completion_tokens,
+            ),
             finish_reason,
         })
     }
