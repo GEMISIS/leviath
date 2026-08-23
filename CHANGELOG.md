@@ -13,6 +13,12 @@ same list.
 
 ## Unreleased
 
+- Fixed: `lev resume` on a cancelled run did the work and reported failure.
+  Paging a stopped run back in restores it ready to work, so nothing paused is
+  left to un-pause and every check said no, while the run was already going
+  again. Caught by running it rather than by a test: the run advanced from
+  iteration 4 to 5 and the command still exited 1.
+
 - Added: `[limits] notify_spend_usd = [5, 25, 100]` emits an event the first
   time a run's spend passes each figure, naming the running total and the stage
   that was running when it crossed. A run that quietly spent $274 looked, from

@@ -3309,6 +3309,45 @@ async fn emit_events_never_unloads_waiting_agents() {
     }
 }
 
+/// Resuming a run that was not loaded reports that it happened.
+///
+/// Paging a stopped run back in restores it ready to work, so by the time the
+/// per-agent `resume` runs there is nothing paused left to un-pause and every
+/// call reports false. Returning false there told the operator the resume had
+/// failed while the run was already going again, and the obvious next move on
+/// being told that is to start the work over.
+///
+/// Caught live, not here: the unit tests for #576 passed while `lev resume`
+/// still exited 1.
+#[tokio::test]
+async fn resuming_a_run_that_had_to_be_loaded_reports_success() {
+    let mut host = host_with(vec![]);
+    host.set_reloader(Box::new(|world, run_id| {
+        Some(world.spawn_agent((agent_state(run_id),)))
+    }));
+
+    assert!(
+        ask(&mut host, |reply| ControlOp::Resume {
+            run_id: "run-from-disk".to_string(),
+            reply
+        })
+        .await,
+        "the run came back from disk and is going again, which is a resume"
+    );
+
+    // The control: a run that was already live and is not paused has nothing
+    // to resume, and still says so.
+    spawn(&mut host, "run-live", "agent-live");
+    assert!(
+        !ask(&mut host, |reply| ControlOp::Resume {
+            run_id: "run-live".to_string(),
+            reply
+        })
+        .await,
+        "an already-running run is not resumed by asking"
+    );
+}
+
 #[tokio::test]
 async fn resolve_or_reload_pages_in_and_registers() {
     let mut host = host_with(vec![]);

@@ -233,10 +233,15 @@ impl WorldHost {
     /// resuming the tree through the parent would otherwise report failure and
     /// leave every paused child paused with nothing left to resume them.
     pub(super) fn resume_tree(&mut self, run_id: &str) -> bool {
+        // Whether this run had to come back from disk. Paging in a stopped run
+        // restores it ready to work, so the `resume` calls below find nothing
+        // paused and all report false - while the run is, in fact, going again.
+        // Loading it back is the act of resuming it, so it counts as one.
+        let was_unloaded = self.live_entity(run_id).is_none();
         let Some(root) = self.resolve_or_reload(run_id) else {
             return false;
         };
-        let mut acted = false;
+        let mut acted = was_unloaded;
         for e in self.subtree(root.entity()) {
             acted |= self.world.resume(self.world.own_agent(e));
             if let Some(mut fan_out) = self.world.world_mut().get_mut::<FanOutWaiting>(e) {
