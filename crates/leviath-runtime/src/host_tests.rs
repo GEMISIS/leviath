@@ -2539,6 +2539,131 @@ async fn a_completed_event_without_an_answer_carries_none() {
     assert!(answer.is_none());
 }
 
+/// A run announces each spend threshold once, as it passes it.
+///
+/// The run that motivated this spent $274 while looking, from outside, exactly
+/// like one making ordinary progress (#573).
+#[tokio::test]
+async fn a_run_announces_each_spend_threshold_once_as_it_passes_it() {
+    let mut host = host_with(vec![text("done")]);
+    host.set_spend_notify_usd(vec![5.0, 1.0, 5.0, -3.0]);
+    let mut rx = host.subscribe();
+    let agent = spawn(&mut host, "run-spendy", "agent-spendy");
+    let entity = agent.entity();
+
+    // Baseline: the first pass emits the spawn frames and no spend, because
+    // nothing has been spent.
+    host.emit_events();
+    let opening: Vec<WorldEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        !opening
+            .iter()
+            .any(|e| matches!(e, WorldEvent::Spend { .. })),
+        "a run that has spent nothing has nothing to announce"
+    );
+
+    // The spawn bundle here carries no totals, so the run gets one to move.
+    let set_cost = |host: &mut WorldHost, priced_usd: f64, unpriced: usize| {
+        let mut totals = host
+            .world_mut()
+            .world()
+            .get::<crate::persistence::TokenTotals>(entity)
+            .copied()
+            .unwrap_or_default();
+        totals.cost.priced_usd = priced_usd;
+        totals.cost.unpriced_calls = unpriced;
+        host.world_mut()
+            .world_mut()
+            .entity_mut(entity)
+            .insert(totals);
+    };
+
+    // Past the first threshold and not the second.
+    set_cost(&mut host, 2.0, 0);
+    host.emit_events();
+    let crossed: Vec<WorldEvent> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|e| matches!(e, WorldEvent::Spend { .. }))
+        .collect();
+    assert_eq!(crossed.len(), 1, "one threshold passed: {crossed:?}");
+    let WorldEvent::Spend {
+        threshold_usd,
+        total_usd,
+        exact,
+        stage,
+        ..
+    } = &crossed[0]
+    else {
+        unreachable!("filtered to Spend above")
+    };
+    assert_eq!(*threshold_usd, 1.0);
+    assert!((*total_usd - 2.0).abs() < 1e-9, "the running total");
+    assert!(*exact, "every call in this total was priced");
+    assert!(
+        !stage.is_empty(),
+        "and it names the stage doing the spending"
+    );
+
+    // Past the second. The first is not repeated: it was already announced.
+    set_cost(&mut host, 6.0, 1);
+    host.emit_events();
+    let again: Vec<WorldEvent> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|e| matches!(e, WorldEvent::Spend { .. }))
+        .collect();
+    assert_eq!(again.len(), 1, "only the newly passed one: {again:?}");
+    let WorldEvent::Spend {
+        threshold_usd,
+        exact,
+        ..
+    } = &again[0]
+    else {
+        unreachable!("filtered to Spend above")
+    };
+    assert_eq!(*threshold_usd, 5.0);
+    assert!(
+        !exact,
+        "a run holding an unpriced call has spent at least this, not exactly it"
+    );
+
+    // Nothing further to say while the total sits still.
+    host.emit_events();
+    let quiet: Vec<WorldEvent> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|e| matches!(e, WorldEvent::Spend { .. }))
+        .collect();
+    assert!(quiet.is_empty(), "a total that has not moved says nothing");
+}
+
+/// A run that jumps several thresholds between two passes announces each of
+/// them, so a consumer watching for the highest one still sees it.
+#[tokio::test]
+async fn a_single_jump_past_several_thresholds_announces_all_of_them() {
+    let mut host = host_with(vec![text("done")]);
+    host.set_spend_notify_usd(vec![1.0, 5.0, 25.0]);
+    let mut rx = host.subscribe();
+    let agent = spawn(&mut host, "run-jump", "agent-jump");
+    host.emit_events();
+    let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
+
+    let mut totals = crate::persistence::TokenTotals::default();
+    totals.cost.priced_usd = 30.0;
+    host.world_mut()
+        .world_mut()
+        .entity_mut(agent.entity())
+        .insert(totals);
+    host.emit_events();
+
+    let crossed: Vec<f64> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|e| match e {
+            WorldEvent::Spend { threshold_usd, .. } => Some(threshold_usd),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        crossed,
+        vec![1.0, 5.0, 25.0],
+        "each threshold passed, in order"
+    );
+}
+
 #[tokio::test]
 async fn emit_events_broadcasts_agent_changes() {
     let mut host = host_with(vec![text("done")]);

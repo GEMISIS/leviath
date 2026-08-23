@@ -75,6 +75,12 @@ impl WorldHost {
                     cached_tokens: totals.cached_tokens,
                     cache_write_tokens: totals.cache_write_tokens,
                     context_tokens,
+                    // `priced_usd` rather than `total_usd()`: a run with an
+                    // unpriced call has still spent what it could price, and
+                    // reporting nothing until every call is priced would stay
+                    // silent through exactly the run worth interrupting.
+                    cost_micros: super::events::usd_to_micros(totals.cost.priced_usd),
+                    cost_exact: totals.cost.total_usd().is_some(),
                     terminal,
                     wait_reason: self.wait_reason(agent),
                     title: self
@@ -163,6 +169,25 @@ impl WorldHost {
                     cached_tokens: cur.cached_tokens,
                     cache_write_tokens: cur.cache_write_tokens,
                 });
+            }
+
+            // Every threshold the total passed since the last pass, in order.
+            // Compared against what was emitted before rather than a per-run
+            // "highest seen", so a threshold is announced once and a run that
+            // jumps several in one pass announces each of them.
+            let spent_before = prev.as_ref().map(|e| e.cost_micros).unwrap_or(0);
+            for threshold in &self.spend_notify_usd {
+                let crossing = super::events::usd_to_micros(*threshold);
+                if spent_before < crossing && cur.cost_micros >= crossing {
+                    let _ = self.events.send(WorldEvent::Spend {
+                        run_id: run_id.clone(),
+                        agent_id: agent_id.clone(),
+                        threshold_usd: *threshold,
+                        total_usd: cur.cost_micros as f64 / 1_000_000.0,
+                        exact: cur.cost_exact,
+                        stage: cur.stage.clone(),
+                    });
+                }
             }
 
             if prev.as_ref().map(|e| e.context_tokens) != Some(cur.context_tokens) {

@@ -13,6 +13,15 @@ same list.
 
 ## Unreleased
 
+- Added: `[limits] notify_spend_usd = [5, 25, 100]` emits an event the first
+  time a run's spend passes each figure, naming the running total and the stage
+  that was running when it crossed. A run that quietly spent $274 looked, from
+  outside, exactly like one making ordinary progress; this is what says so while
+  it is still going. Reporting only: it does not stop a run, since stopping one
+  mid-stage throws away work and is a different decision. A run holding calls
+  that could not be priced says its figure is not exact rather than reporting a
+  confident number that is wrong (#573).
+
 - Fixed: a cancelled run can be resumed. Cancelling stops a run rather than
   ending it, and everything needed to carry on is already written down: the
   journal in `run.lvr`, every region in `context.json`, the stage and iteration

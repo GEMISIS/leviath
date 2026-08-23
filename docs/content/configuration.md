@@ -181,12 +181,32 @@ cerebras = 1                     # every model this provider serves, together
 | `max_run_write_bytes` | unset | Most a whole run may write. See below |
 | `max_concurrent_inferences_by_model` | empty | Per-model overrides of the cap above. See below |
 | `max_concurrent_inferences_by_provider` | empty | Per-provider caps across every model a provider serves. See below |
+| `notify_spend_usd` | empty | Dollar figures to be told about while a run is still going. See below |
 
-Nine of those need more than a table cell.
+Ten of those need more than a table cell.
 
 **`exact_token_counting`** measures each assembled request before sending it and refuses one that
 would overflow the window. On providers with a remote counting endpoint that costs a network round
 trip per inference, so it is off by default.
+
+**`notify_spend_usd`** says which figures are worth interrupting you for:
+
+```toml
+[limits]
+notify_spend_usd = [5, 25, 100]
+```
+
+Each is reported once per run, the first time that run's total passes it, over the event stream and
+in the dashboard. The event carries the running total and the stage that was running when it
+crossed, which is the stage doing the spending; the full per-stage breakdown is in the run's
+`stages.json`.
+
+This is reporting, not a ceiling. It does not stop a run, because stopping one mid-stage throws away
+work and that is a different decision from wanting to know what is happening.
+
+A run whose models have no published price reports what it could price and says the figure is not
+exact, rather than a confident number that is wrong. See [providers](/docs/providers) for where
+prices come from and when they are a reconstruction rather than the invoice.
 
 **`max_concurrent_inferences_by_model`** and **`max_concurrent_inferences_by_provider`** are the
 two ways to say "not this one". The first replaces the global cap for one model id. The second adds
