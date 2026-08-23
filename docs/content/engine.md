@@ -316,6 +316,24 @@ takes a slot before calling the provider and holds it for the whole request. The
 `[limits] max_concurrent_inferences` in the [config](/docs/configuration); a model named in
 `[limits.max_concurrent_inferences_by_model]` uses its own number instead.
 
+One pool per *model*, which is what decides how wide a fan-out actually runs. Workers that resolve
+to the same model share a single pool no matter how many of them were spawned, so a fan-out of
+fifty agents that all lead with the same model runs `max_concurrent_inferences` at a time and the
+rest wait their turn. Measured on a 67-agent run where 65 agents resolved to one model: 9.9
+inference turns a minute against a default pool of 8.
+
+If a fan-out is slower than its worker count suggests, that is the first thing to check, and there
+are two ways to widen it. Raise the pool for the model the workers pile onto:
+
+```toml
+[limits.max_concurrent_inferences_by_model]
+"claude-sonnet-5" = 32
+```
+
+Or give the stages different models, which spreads them across separate pools. Neither is a rate
+limit: a provider rate limit is configured per provider under `[model_providers.<name>.rate_limit]`
+and is a different mechanism, so a slow fan-out is worth measuring before it is blamed on one.
+
 A provider named in `[limits.max_concurrent_inferences_by_provider]` gets a second, coarser pool in
 front of that one, bounding every model it serves together. A request takes a slot in both and
 holds both for its duration. It is for the metered API where the point of a small pool is bounding
