@@ -116,7 +116,7 @@ pub fn reload_run(
 ) -> Option<leviath_runtime::world::AgentId> {
     let run_dir = runs_dir.join(run_id);
     let meta = read_meta(&run_dir)?;
-    if is_terminal(&meta.status) {
+    if is_finished(&meta.status) {
         return None; // a finished run isn't paged back in
     }
     let entity = reload_one(world, deps, &meta, &run_dir).ok()?;
@@ -266,11 +266,20 @@ fn mark_crashed(run_dir: &Path, meta: RunMeta, reason: &str, now_secs: i64) {
 }
 
 /// Whether a run's status means it should not be resumed.
-fn is_terminal(status: &RunStatus) -> bool {
-    matches!(
-        status,
-        RunStatus::Complete | RunStatus::Cancelled | RunStatus::Error
-    )
+/// Whether this run is over, as opposed to merely stopped.
+///
+/// `Cancelled` is deliberately not here. A cancelled run keeps its journal, its
+/// context regions, its stage and iteration, and its parked fan-out state, so
+/// there is something to carry on from and `lev resume` should be able to reach
+/// it (#576). A `Complete` run has nothing left to do, and an `Error` one should
+/// be read before it is continued.
+///
+/// This governs paging a run back in on demand. Startup recovery has its own
+/// filter in `triage_restores`, which still drops cancelled runs: somebody
+/// stopped that run on purpose, and restarting the daemon is not them changing
+/// their mind.
+fn is_finished(status: &RunStatus) -> bool {
+    matches!(status, RunStatus::Complete | RunStatus::Error)
 }
 
 /// Reload one run: spawn it fresh from its blueprint, then overlay the persisted
@@ -1633,6 +1642,44 @@ mod tests {
         assert_eq!(order, vec!["zzz-active", "aaa-blocked"]);
     }
 
+    /// #576: cancelling stops a run, it does not end it. Everything needed to
+    /// carry on is on disk, so `lev resume` has to be able to reach it, which
+    /// means it has to page back in.
+    #[tokio::test]
+    async fn reload_run_pages_in_a_cancelled_run_but_not_a_finished_one() {
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let mpath = manifest.to_str().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+        write_run(runs.path(), "stopped", mpath, RunStatus::Cancelled, None);
+        write_run(runs.path(), "died", mpath, RunStatus::Error, None);
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let config = Config::default();
+        let owners = Default::default();
+        let deps = |mcp: Arc<Mutex<ToolExecutor>>| crate::daemon::spawn::SpawnDeps {
+            tool_service: cli.as_ref(),
+            config: &config,
+            shared_mcp: mcp,
+            mcp_tool_defs: &[],
+            mcp_tool_owners: &owners,
+            hub: &hub,
+            now_secs: 1,
+            subagent_tx: sub_tx().clone(),
+        };
+
+        assert!(
+            reload_run(&mut world, deps(mcp.clone()), "stopped", runs.path()).is_some(),
+            "a cancelled run keeps its journal, context and stage, so it pages in"
+        );
+        assert!(
+            reload_run(&mut world, deps(mcp.clone()), "died", runs.path()).is_none(),
+            "a run that errored is read before it is continued, not resumed blind"
+        );
+    }
+
     #[tokio::test]
     async fn reload_run_pages_in_nonterminal_only() {
         let agent = agent_dir();
@@ -2288,11 +2335,13 @@ mod tests {
     }
 
     #[test]
-    fn is_terminal_covers_all_statuses() {
-        assert!(is_terminal(&RunStatus::Complete));
-        assert!(is_terminal(&RunStatus::Cancelled));
-        assert!(is_terminal(&RunStatus::Error));
-        assert!(!is_terminal(&RunStatus::Running));
-        assert!(!is_terminal(&RunStatus::WaitingInput));
+    fn is_finished_covers_all_statuses() {
+        assert!(is_finished(&RunStatus::Complete));
+        assert!(is_finished(&RunStatus::Error));
+        // The point of #576: a cancelled run stopped, it did not end, and
+        // everything it needs to carry on is still on disk.
+        assert!(!is_finished(&RunStatus::Cancelled));
+        assert!(!is_finished(&RunStatus::Running));
+        assert!(!is_finished(&RunStatus::WaitingInput));
     }
 }

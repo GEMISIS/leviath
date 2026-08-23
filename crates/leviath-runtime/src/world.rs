@@ -2090,6 +2090,19 @@ mod tests {
         assert!(world.open_circuits().is_empty());
     }
 
+    /// #576: a cancelled agent is stopped, not finished, so an explicit resume
+    /// puts it back to work. Nothing else does: it stays stopped until asked.
+    #[tokio::test]
+    async fn resume_restarts_a_cancelled_agent() {
+        let mut world = build_world(registry_with(vec![text("t1")]));
+        let e = spawn(&mut world);
+        assert!(world.cancel(e));
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Cancelled));
+
+        assert!(world.resume(e), "a cancelled run can be picked up again");
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Active));
+    }
+
     /// An id belonging to another world names a different agent here, so
     /// resuming with one refuses rather than resuming whatever happens to sit
     /// at that entity index. This is the check `AgentId` exists for.
