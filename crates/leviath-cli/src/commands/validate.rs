@@ -465,6 +465,16 @@ fn print_model_resolution(blueprint: &leviath_core::Blueprint, config: &crate::c
     }
 }
 
+/// A model id without its vendor prefix, for comparing what was asked for
+/// against what resolved.
+///
+/// The same model is spelled differently by route (`gpt-5.5` on OpenAI,
+/// `openai/gpt-5.5` on a gateway), so comparing the full ids would report a
+/// substitution every time a gateway serves the model the blueprint named.
+fn model_key(model: &str) -> &str {
+    model.rsplit('/').next().unwrap_or(model)
+}
+
 /// The lines [`print_model_resolution`] prints, so they can be asserted
 /// without capturing stdout.
 fn model_resolution_lines(
@@ -482,16 +492,31 @@ fn model_resolution_lines(
             leviath_runtime::pipeline::resolve_stage_model(&stage.model, None, &defaults, registry);
         let head = format!("{provider}/{model}");
         lines.push(format!("  {:<16} {head}", stage.name));
+        // Written the way the blueprint writes them: a bare name for an entry
+        // that left the route open, `provider/model` for one that pinned it.
+        // Rendering an open entry as `/gpt-5.5` would show a route it does not
+        // claim to have.
         let listed: Vec<String> = stage
             .model
             .models
             .iter()
-            .map(|e| format!("{}/{}", e.provider, e.model))
+            .map(|e| {
+                if e.provider.is_empty() {
+                    e.model.clone()
+                } else {
+                    format!("{}/{}", e.provider, e.model)
+                }
+            })
             .collect();
         // Only when the install disagrees with the blueprint: printing the
         // list under every stage that already got its first choice is noise,
         // and the point of the line is to make a substitution visible.
-        if listed.first().is_some_and(|first| *first != head) {
+        //
+        // Compared by MODEL, not by the whole route. An open entry names no
+        // provider, so comparing the rendered strings would differ every time
+        // and print the list under every stage.
+        let first_model = stage.model.models.first().map(|e| e.model.as_str());
+        if first_model.is_some_and(|first| model_key(first) != model_key(&model)) {
             lines.push(format!(
                 "  {:<16}   blueprint order: {}",
                 "",
@@ -612,6 +637,66 @@ mod tests {
     /// not ask for first. Nothing surfaced that, so the substitution is shown
     /// against the blueprint's own order - and only when they differ, because
     /// repeating the list under a stage that got its first choice is noise.
+    /// A blueprint leading with a model nothing configured serves falls through
+    /// to the next one, and the listing says so. This is the surviving reason
+    /// for a substitution: #578 removed the other one, where preferring a
+    /// provider silently changed which model ran.
+    #[test]
+    fn model_resolution_explains_falling_through_to_the_next_model() {
+        let manifest = r#"
+[agent]
+name = "m"
+version = "0.1.0"
+entry_stage = "one"
+
+[stages.one]
+model = { models = ["a-model-nobody-serves", "claude-sonnet-5"] }
+system_prompt = "hi"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_agent(dir.path(), manifest);
+        let checked = check_manifest(&path).expect("the manifest parses");
+        let blueprint = &checked.blueprint;
+
+        let config = crate::config::Config {
+            default_provider: "anthropic".to_string(),
+            default_model: None,
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("test-key".to_string()),
+                ..Default::default()
+            },
+            ..crate::config::Config::default()
+        };
+        let registry = crate::commands::run::build_provider_registry_from_config_probing(
+            &config,
+            &leviath_providers::provider::build_http_client,
+            &|_| false,
+        )
+        .expect("an HTTPS client builds in tests");
+
+        let lines = model_resolution_lines(blueprint, &config, &registry);
+        assert!(
+            lines.iter().any(|l| l.contains("blueprint order")),
+            "the substitution is explained: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("a-model-nobody-serves")),
+            "and it names what was asked for: {lines:#?}"
+        );
+        // The open-route entries are printed as the blueprint wrote them, not
+        // as `/claude-sonnet-5` with an empty provider in front.
+        // Checked on the blueprint-order line alone: the resolved line above it
+        // legitimately shows the route the run will take.
+        let order = lines
+            .iter()
+            .find(|l| l.contains("blueprint order"))
+            .expect("the line asserted above");
+        assert!(
+            !order.contains("/claude-sonnet-5"),
+            "an entry that pinned no route is not shown with one: {order}"
+        );
+    }
+
     #[test]
     fn model_resolution_shows_where_the_install_overrides_the_blueprint() {
         let manifest = r#"
