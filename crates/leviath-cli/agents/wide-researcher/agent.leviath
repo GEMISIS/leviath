@@ -277,11 +277,6 @@ off before finishing - treat its coverage as incomplete when judging the field.
 [stages.compare.transitions.deep_dive]
 hint = "Threads compared - read the most significant one in depth"
 transform = "compact"
-# Both ways out of `compare` are gated on the same region: it is the comparison
-# this agent exists to produce. Measured on a finished run, `comparisons` held
-# 2,560 tokens of its 125,000 while `landscape` sat at 83%, so the comparing was
-# happening and only the recording was not.
-gate = { require_region_updated = "comparisons", message = "Write the comparative judgments you reached this pass into `comparisons` with context_write before moving on. The overview is written from that region." }
 
 # Un-exhaustible escape (lint: dead-end-possible): once `deep_dive` has spent its
 # revisits there is nowhere else to go, and the overview still gets written.
@@ -289,6 +284,13 @@ gate = { require_region_updated = "comparisons", message = "Write the comparativ
 [stages.compare.transitions.challenge]
 hint = "Evidence is sufficient - have it attacked before writing"
 transform = "compact"
+# Gated on the region this agent exists to produce. Measured on a finished run,
+# `comparisons` held 2,560 tokens of its 125,000 while `landscape` sat at 83%: the
+# comparing was happening and only the recording was not.
+#
+# This edge and not `deep_dive` as well. Everything written passes through here,
+# so this is where the region has to exist; asking a pass that went to read one
+# thread in depth to also add something new would block it for being honest.
 gate = { require_region_updated = "comparisons", message = "Write the comparative judgments you reached this pass into `comparisons` with context_write before moving on. The adversarial pass reads that region, and the overview is written from it." }
 
 [stages.compare.transitions.error_recovery]
