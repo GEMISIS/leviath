@@ -593,20 +593,27 @@ pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lin
     // expected as long as something later in the list answers. What is worth
     // saying is that *nothing* in the list does, which is the shape that
     // reaches the runtime as "no usable provider" at spawn.
+    //
+    // An entry that pins no provider is not evidence either way here. It names a
+    // model and leaves the route open, and which providers serve that model is a
+    // question for the resolver, which has a registry; this check does not. So an
+    // open entry counts as reachable rather than as a provider named and missing
+    // - before that, a blueprint written entirely in the current form failed this
+    // check every time and was told it would "fall back to your default model",
+    // having tried providers it never named.
+    let pinned: Vec<&str> = stage
+        .model
+        .models
+        .iter()
+        .filter(|e| !e.provider.is_empty())
+        .map(|e| e.provider.as_str())
+        .collect();
     if let Some(available) = &env.available_providers
         && !stage.model.models.is_empty()
-        && !stage
-            .model
-            .models
-            .iter()
-            .any(|e| available.contains(&e.provider))
+        && pinned.len() == stage.model.models.len()
+        && !pinned.iter().any(|p| available.contains(&p.to_string()))
     {
-        let tried: Vec<&str> = stage
-            .model
-            .models
-            .iter()
-            .map(|e| e.provider.as_str())
-            .collect();
+        let tried: Vec<&str> = pinned.clone();
         findings.push(
             LintFinding::new(
                 LintSeverity::Warning,

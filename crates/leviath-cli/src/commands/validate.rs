@@ -384,6 +384,7 @@ fn print_findings(findings: &[LintFinding]) -> (usize, usize) {
 fn execute_reporting_outcome(
     args: &ValidateArgs,
     config: Option<&crate::config::Config>,
+    registry: Option<&leviath_runtime::ProviderRegistry>,
 ) -> anyhow::Result<ValidateOutcome> {
     let path = PathBuf::from(&args.path);
 
@@ -422,7 +423,7 @@ fn execute_reporting_outcome(
         // resolve against.
         let workdir = crate::commands::resolve_cwd().unwrap_or_default();
         if !args.json {
-            print_model_resolution(&checked.blueprint, config);
+            print_model_resolution(&checked.blueprint, config, registry);
         }
         env = env
             .with_providers(&checked.blueprint, config)
@@ -453,16 +454,38 @@ fn execute_reporting_outcome(
 /// evidence was in a finished run's metadata. The line under each stage is the
 /// blueprint's own order, so the promotion is visible as a difference rather
 /// than something to take on trust.
-fn print_model_resolution(blueprint: &leviath_core::Blueprint, config: &crate::config::Config) {
+fn print_model_resolution(
+    blueprint: &leviath_core::Blueprint,
+    config: &crate::config::Config,
+    registry: Option<&leviath_runtime::ProviderRegistry>,
+) {
     // A registry that will not build says nothing here rather than failing the
     // validation: this block is extra information about an install, and the
     // lint below has its own thing to say about unreachable providers.
-    let lines = crate::commands::run::build_provider_registry_from_config(config)
-        .map(|registry| model_resolution_lines(blueprint, config, &registry))
-        .unwrap_or_default();
-    for line in lines {
+    let Some(registry) = registry else {
+        return;
+    };
+    for line in model_resolution_lines(blueprint, config, registry) {
         println!("{line}");
     }
+}
+
+/// Whether anything registered here can run this entry.
+///
+/// A pinned entry needs its provider registered. An open one needs some provider
+/// to claim the model, which is the same question the resolver asks.
+fn model_is_reachable(
+    entry: &leviath_core::blueprint::ModelEntry,
+    registry: &leviath_runtime::ProviderRegistry,
+) -> bool {
+    if !entry.provider.is_empty() {
+        return registry.has(&entry.provider);
+    }
+    let key = model_key(&entry.model);
+    registry
+        .native_providers()
+        .iter()
+        .any(|(_, p)| p.serves_model(key).is_some())
 }
 
 /// A model id without its vendor prefix, for comparing what was asked for
@@ -492,6 +515,40 @@ fn model_resolution_lines(
             leviath_runtime::pipeline::resolve_stage_model(&stage.model, None, &defaults, registry);
         let head = format!("{provider}/{model}");
         lines.push(format!("  {:<16} {head}", stage.name));
+
+        // The blueprint's own first choice, and whether this machine can run
+        // it. An entry nothing serves is skipped silently at resolution, so the
+        // stage works on something further down and the only evidence is that
+        // the top one is not what ran - which is a typo, a renamed model and an
+        // unprimed gateway all wearing the same face.
+        //
+        // Only the FIRST entry earns a warning. A later one that cannot run here
+        // is usually the machine declining an option rather than a fault: every
+        // bundled blueprint ends with Ollama so a machine running one can use it,
+        // and listing that as unserved on a machine that is not would read as a
+        // fault list and bury the one line that matters.
+        let reachable = stage
+            .model
+            .models
+            .iter()
+            .filter(|e| model_is_reachable(e, registry))
+            .count();
+        if let Some(first) = stage.model.models.first()
+            && !model_is_reachable(first, registry)
+        {
+            lines.push(format!(
+                "  {:<16}   prefers {}, which no configured provider serves - running {model}",
+                "", first.model
+            ));
+        }
+        // Nothing behind whatever is running: a provider outage mid-run ends the
+        // stage rather than moving it along.
+        if reachable == 1 {
+            lines.push(format!(
+                "  {:<16}   no fallback here: {model} is the only one this install can run",
+                ""
+            ));
+        }
         // Written the way the blueprint writes them: a bare name for an entry
         // that left the route open, `provider/model` for one that pinned it.
         // Rendering an open entry as `/gpt-5.5` would show a route it does not
@@ -600,6 +657,49 @@ fn print_script_tool_report(path: &std::path::Path) {
     }
 }
 
+/// The provider registry this install would use, with every provider's model
+/// list already fetched.
+///
+/// `None` when there is no config to build one from, or when it will not build:
+/// both mean this command has nothing to say about which model a stage runs, and
+/// neither is a validation failure - the lints have their own thing to say about
+/// an install with no reachable provider.
+async fn primed_registry(
+    config: Option<&crate::config::Config>,
+) -> Option<leviath_runtime::ProviderRegistry> {
+    primed_registry_with(config, &leviath_providers::provider::build_http_client).await
+}
+
+/// [`primed_registry`], with client construction injected.
+///
+/// The same seam [`build_provider_registry_from_config_with`] carries, and for
+/// the same reason: reqwest will not fail to build a client in any environment a
+/// test can arrange, so the "no registry" path is only reachable through here.
+///
+/// [`build_provider_registry_from_config_with`]:
+///     crate::commands::run::build_provider_registry_from_config_with
+async fn primed_registry_with(
+    config: Option<&crate::config::Config>,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> Option<leviath_runtime::ProviderRegistry> {
+    let registry =
+        crate::commands::run::build_provider_registry_from_config_with(config?, build_client)
+            .ok()?;
+    registry
+        .prime_capabilities(std::time::Duration::from_secs(VALIDATE_PRIME_TIMEOUT_SECS))
+        .await;
+    Some(registry)
+}
+
+/// How long `lev validate` waits for a provider's model list.
+///
+/// Shorter than the daemon's: the daemon is starting up once and every run after
+/// it depends on the answer, while this is a command someone is waiting on. A
+/// provider that does not answer in time falls back to the compiled-in table,
+/// and `prime_capabilities` warns saying which one, so the difference is visible
+/// rather than silently changing which model the output names.
+const VALIDATE_PRIME_TIMEOUT_SECS: u64 = 5;
+
 /// Run `lev validate`: check a blueprint and print what is wrong with it.
 pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
     let config = crate::config::Config::load().ok();
@@ -613,7 +713,14 @@ pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
             "\n\n",
         )
     };
-    match execute_reporting_outcome(&args, config.as_ref())? {
+    // Primed exactly as the daemon primes, and for the same reason: a provider
+    // whose model list is a network call away answers from the compiled-in
+    // table until it is asked. Without this, `validate` and the daemon disagree
+    // about which model a stage runs, and the tool whose job is saying what will
+    // happen is the one that does not know.
+    let registry = primed_registry(config.as_ref()).await;
+
+    match execute_reporting_outcome(&args, config.as_ref(), registry.as_ref())? {
         ValidateOutcome::Success => Ok(()),
         ValidateOutcome::ParseError(e) => anyhow::bail!("✗ Parse error: {}{}", e, stale()),
         ValidateOutcome::ValidationError(e) => {
@@ -694,6 +801,38 @@ system_prompt = "hi"
         assert!(
             !order.contains("/claude-sonnet-5"),
             "an entry that pinned no route is not shown with one: {order}"
+        );
+    }
+
+    /// With no config there is no install to describe, so there is no registry
+    /// and the models block says nothing. Not a validation failure: the
+    /// blueprint is still checked, it is only the "what would run here" part
+    /// that has no answer.
+    #[tokio::test]
+    async fn no_config_means_no_registry_to_prime() {
+        assert!(
+            primed_registry(None).await.is_none(),
+            "nothing to build a registry from"
+        );
+    }
+
+    /// A machine that cannot build an HTTPS client cannot reach any provider, so
+    /// the same silence applies. Reached through the injected factory, because
+    /// reqwest will not fail to build a client in any environment a test can
+    /// arrange.
+    #[tokio::test]
+    async fn a_machine_with_no_https_client_has_no_registry_to_prime() {
+        let config = crate::config::Config::default();
+        let no_client = |_: Option<u64>| {
+            reqwest::Client::builder()
+                .use_preconfigured_tls("not a tls backend")
+                .build()
+        };
+        assert!(
+            primed_registry_with(Some(&config), &no_client)
+                .await
+                .is_none(),
+            "no client, so no providers, so nothing to say"
         );
     }
 
@@ -877,7 +1016,11 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             width: 80,
             ..args_for(dir.path())
         };
-        assert!(execute_reporting_outcome(&args, None).unwrap().is_success());
+        assert!(
+            execute_reporting_outcome(&args, None, None)
+                .unwrap()
+                .is_success()
+        );
     }
 
     /// With a config in hand, the report also says which model each stage
@@ -897,14 +1040,14 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             ..crate::config::Config::default()
         };
         assert!(
-            execute_reporting_outcome(&args_for(dir.path()), Some(&config))
+            execute_reporting_outcome(&args_for(dir.path()), Some(&config), None)
                 .unwrap()
                 .is_success()
         );
         // The same run as JSON: the block is suppressed, and the outcome is
         // the same either way.
         assert!(
-            execute_reporting_outcome(&json_args_for(dir.path()), Some(&config))
+            execute_reporting_outcome(&json_args_for(dir.path()), Some(&config), None)
                 .unwrap()
                 .is_success()
         );
@@ -1249,7 +1392,11 @@ system = { kind = "pinned", max_tokens = 1000 }
                 );
 
                 let mut args = args_for(dir.path());
-                assert!(execute_reporting_outcome(&args, None).unwrap().is_success());
+                assert!(
+                    execute_reporting_outcome(&args, None, None)
+                        .unwrap()
+                        .is_success()
+                );
 
                 args.deny_warnings = true;
                 let err = execute(args).await.unwrap_err();
@@ -1455,7 +1602,7 @@ system = { kind = "pinned", max_tokens = 1000 }
         let dir = tempfile::tempdir().unwrap();
         write_manifest(dir.path(), "not valid toml [[[");
         assert!(
-            execute_reporting_outcome(&json_args_for(dir.path()), None)
+            execute_reporting_outcome(&json_args_for(dir.path()), None, None)
                 .unwrap()
                 .is_parse_error()
         );
@@ -1486,7 +1633,7 @@ system = { kind = "pinned", max_tokens = 1000 }
 "#,
         );
         assert!(
-            execute_reporting_outcome(&json_args_for(dir.path()), None)
+            execute_reporting_outcome(&json_args_for(dir.path()), None, None)
                 .unwrap()
                 .is_validation_error()
         );
@@ -1497,7 +1644,7 @@ system = { kind = "pinned", max_tokens = 1000 }
         let dir = tempfile::tempdir().unwrap();
         write_manifest(dir.path(), CLEAN_MANIFEST);
         assert!(
-            execute_reporting_outcome(&json_args_for(dir.path()), None)
+            execute_reporting_outcome(&json_args_for(dir.path()), None, None)
                 .unwrap()
                 .is_success()
         );
@@ -1508,7 +1655,7 @@ system = { kind = "pinned", max_tokens = 1000 }
         let dir = tempfile::tempdir().unwrap();
         write_manifest(dir.path(), "not valid toml [[[");
         assert!(
-            execute_reporting_outcome(&args_for(dir.path()), None)
+            execute_reporting_outcome(&args_for(dir.path()), None, None)
                 .unwrap()
                 .is_parse_error()
         );
@@ -1535,7 +1682,7 @@ system = { kind = "pinned", max_tokens = 1000 }
 "#;
         write_manifest(dir.path(), manifest);
         assert!(
-            execute_reporting_outcome(&args_for(dir.path()), None)
+            execute_reporting_outcome(&args_for(dir.path()), None, None)
                 .unwrap()
                 .is_validation_error()
         );
@@ -1544,7 +1691,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     #[test]
     fn execute_reporting_outcome_missing_manifest_is_io_error() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(execute_reporting_outcome(&args_for(dir.path()), None).is_err());
+        assert!(execute_reporting_outcome(&args_for(dir.path()), None, None).is_err());
     }
 
     #[test]
@@ -1552,7 +1699,7 @@ system = { kind = "pinned", max_tokens = 1000 }
         let dir = tempfile::tempdir().unwrap();
         write_manifest(dir.path(), CLEAN_MANIFEST);
         assert!(
-            execute_reporting_outcome(&args_for(dir.path()), None)
+            execute_reporting_outcome(&args_for(dir.path()), None, None)
                 .unwrap()
                 .is_success()
         );
@@ -1587,7 +1734,11 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
             graph: false,
             width: 120,
         };
-        assert!(execute_reporting_outcome(&args, None).unwrap().is_success());
+        assert!(
+            execute_reporting_outcome(&args, None, None)
+                .unwrap()
+                .is_success()
+        );
     }
 
     #[test]
@@ -1604,7 +1755,7 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         // Compiles but requires an unsatisfiable capability → the won't-load warning.
         std::fs::write(tools.join("gpu.rhai"), "// @tool gpu\n// @requires gpu\n1").unwrap();
         assert!(
-            execute_reporting_outcome(&args_for(dir.path()), None)
+            execute_reporting_outcome(&args_for(dir.path()), None, None)
                 .unwrap()
                 .is_success()
         );
@@ -1631,7 +1782,7 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         )
         .unwrap();
         assert!(
-            execute_reporting_outcome(&args_for(dir.path()), None)
+            execute_reporting_outcome(&args_for(dir.path()), None, None)
                 .unwrap()
                 .is_success()
         );

@@ -13,6 +13,21 @@ same list.
 
 ## Unreleased
 
+- Fixed: `lev validate` and the daemon disagreed about which model a stage
+  runs. The daemon asks every provider for its model list before anything runs;
+  validate did not, so a gateway with an unprimed catalogue answered from the
+  compiled-in table and validate named a different model from the one the run
+  would use. It primes too now, on a short timeout.
+- Added: `lev validate` says when a stage cannot run the model it leads with,
+  naming what it runs instead, and says when a stage has no fallback left. A
+  later entry nothing serves is not reported: every bundled blueprint ends with
+  Ollama so a machine running one can use it, and listing that as unserved would
+  read as a fault list and bury the line that matters.
+- Fixed: the no-reachable-provider lint fired on every blueprint that names
+  models without pinning routes, reporting `(tried , )` and telling the reader
+  their stage would fall back to a default model. An entry that pins no provider
+  is a question for the resolver, which has a registry; the lint does not.
+
 - Fixed: a provider claimed models belonging to other vendors. `serves_model` decided from the capability table, reading "differs from the
   default capabilities" as "the table knows this model" - but a provider whose
   fallback for an unknown model is a family-shaped guess differs from the

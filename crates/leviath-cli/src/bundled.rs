@@ -599,6 +599,14 @@ mod tests {
         }
     }
 
+    fn client() -> reqwest::Client {
+        reqwest::Client::new()
+    }
+
+    fn key() -> String {
+        "not-used-offline".to_string()
+    }
+
     /// Every provider `lev setup` can configure, built so a test can ask them
     /// what they serve. Claude Code is a transport rather than a provider a
     /// stage names, so it is not in this list.
@@ -942,6 +950,115 @@ mod tests {
                  into a gate - the difference is gates that were dropped",
                 agent.name
             );
+        }
+    }
+
+    /// Every stage resolves to the first model it lists that anything serves.
+    ///
+    /// A blueprint's `models` is a preference order. The host picks a route
+    /// within that order; it does not get to pick a different preference. #578
+    /// was exactly that failure: entries matched as whole `provider/model`
+    /// pairs, so `default_provider` chose among routes and whatever model its
+    /// route happened to name came back. `polish` asked for
+    /// `gemini-3.1-pro-preview` and ran `claude-sonnet-5`.
+    ///
+    /// Run over every bundled agent, because the blueprints are what ship.
+    #[test]
+    fn every_bundled_stage_runs_the_first_model_anything_serves() {
+        let providers = setup_providers();
+        let registry = {
+            let mut r = leviath_runtime::ProviderRegistry::new();
+            for (name, _) in &providers {
+                // The same set, as the resolver sees them.
+                let p: std::sync::Arc<dyn leviath_providers::Provider> = match *name {
+                    "anthropic" => std::sync::Arc::new(leviath_providers::AnthropicProvider::new(
+                        client(),
+                        key(),
+                    )),
+                    "openai" => {
+                        std::sync::Arc::new(leviath_providers::OpenAIProvider::new(client(), key()))
+                    }
+                    "google" => {
+                        std::sync::Arc::new(leviath_providers::GeminiProvider::new(client(), key()))
+                    }
+                    "openrouter" => std::sync::Arc::new(
+                        leviath_providers::OpenRouterProvider::new(client(), key()),
+                    ),
+                    _ => std::sync::Arc::new(leviath_providers::OllamaProvider::new(client())),
+                };
+                r.register((*name).to_string(), p);
+            }
+            r
+        };
+
+        for agent in BUNDLED_AGENTS {
+            let manifest = agent
+                .files
+                .iter()
+                .find(|(rel, _)| *rel == "agent.leviath")
+                .map(|(_, c)| *c)
+                .expect("every bundled agent has a manifest");
+            let blueprint =
+                leviath_core::manifest::parse_manifest(manifest).expect("manifest parses");
+
+            for stage in &blueprint.stages {
+                // Kept rather than found: filtering evaluates the predicate for
+                // every entry, so the arm handling a pinned route is exercised by
+                // the entries that pin one instead of being skipped the moment an
+                // earlier open entry matches.
+                let reachable: Vec<&leviath_core::blueprint::ModelEntry> = stage
+                    .model
+                    .models
+                    .iter()
+                    .filter(|e| {
+                        let k = e.model.rsplit('/').next().unwrap_or(&e.model);
+                        match e.provider.is_empty() {
+                            true => providers.iter().any(|(_, p)| p.serves_model(k).is_some()),
+                            false => providers.iter().any(|(n, _)| *n == e.provider),
+                        }
+                    })
+                    .collect();
+                let listed: Vec<&str> = stage
+                    .model
+                    .models
+                    .iter()
+                    .map(|e| e.model.as_str())
+                    .collect();
+                assert!(
+                    !reachable.is_empty(),
+                    "{}/{} lists {listed:?} and this registry reaches none of them",
+                    agent.name,
+                    stage.name,
+                );
+                let want_key = reachable[0]
+                    .model
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&reachable[0].model);
+
+                // A real default provider, because the reordering #578 lived in
+                // only runs when one is set and registered. Passing the empty
+                // default skips that block entirely and tests nothing.
+                let defaults = leviath_runtime::pipeline::ModelDefaults {
+                    provider: "openrouter".to_string(),
+                    ..Default::default()
+                };
+                let (got_provider, got_model) = leviath_runtime::pipeline::resolve_stage_model(
+                    &stage.model,
+                    None,
+                    &defaults,
+                    &registry,
+                );
+                let got_key = got_model.rsplit('/').next().unwrap_or(&got_model);
+
+                assert_eq!(
+                    got_key, want_key,
+                    "{}/{} lists {listed:?} and the first one reachable is \
+                     {want_key}, but it resolved to {got_key} on {got_provider}: \
+                     the host chose a different model, not a different route",
+                    agent.name, stage.name,
+                );
+            }
         }
     }
 
