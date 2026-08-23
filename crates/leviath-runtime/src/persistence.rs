@@ -81,7 +81,9 @@ pub struct RunMetadata {
 
 /// Running token + tool-call totals accumulated across an agent's inferences, for
 /// the snapshot. Updated by the inference-collect system.
-#[derive(Component, Clone, Copy, Default, Debug, PartialEq, Eq)]
+// No `Eq`: the cost is an `f64`, which has no total equality. `PartialEq` is
+// what the tests compare with.
+#[derive(Component, Clone, Copy, Default, Debug, PartialEq)]
 pub struct TokenTotals {
     /// Cumulative prompt tokens.
     pub prompt_tokens: usize,
@@ -93,6 +95,15 @@ pub struct TokenTotals {
     pub cache_write_tokens: usize,
     /// Cumulative tool calls across all iterations.
     pub tool_calls: usize,
+    /// What the run has spent, and how well that figure is known.
+    ///
+    /// Not a bare `f64`: a total that silently omits the calls it could not
+    /// price looks authoritative and understates by however much it skipped.
+    /// [`CostTotals`] keeps the priced part and the unpriced count apart so the
+    /// difference stays visible.
+    ///
+    /// [`CostTotals`]: leviath_providers::CostTotals
+    pub cost: leviath_providers::CostTotals,
 }
 
 /// Run-scoped productivity flags, mirrored into `meta.json` so an empty run can
@@ -167,10 +178,23 @@ fn stage_can_modify(stage: &leviath_core::Stage) -> bool {
 impl TokenTotals {
     /// Add one inference response's usage to the running totals.
     pub fn add_usage(&mut self, usage: &leviath_providers::TokenUsage) {
+        self.add_usage_priced(usage, None);
+    }
+
+    /// The same, also folding the call into the run's cost at `pricing`.
+    ///
+    /// `pricing` is the fallback: a call the provider priced itself is counted
+    /// at that figure and these rates are never consulted.
+    pub fn add_usage_priced(
+        &mut self,
+        usage: &leviath_providers::TokenUsage,
+        pricing: Option<&leviath_providers::ModelPricing>,
+    ) {
         self.prompt_tokens += usage.prompt_tokens;
         self.completion_tokens += usage.completion_tokens;
         self.cached_tokens += usage.cached_tokens;
         self.cache_write_tokens += usage.cache_write_tokens;
+        self.cost.add(usage, pricing);
     }
 }
 
@@ -388,6 +412,12 @@ pub fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> RunMeta {
         cached_tokens: totals.cached_tokens,
         cache_write_tokens: totals.cache_write_tokens,
         tool_calls: totals.tool_calls,
+        // `None` when any call went unpriced: an understated total that looks
+        // authoritative is worse than an honest absence.
+        cost_usd: totals.cost.total_usd(),
+        unpriced_calls: totals.cost.unpriced_calls,
+        cost_is_exact: totals.cost.is_exact(),
+        cost_priced_usd: totals.cost.priced_usd,
         workdir: md.workdir.clone(),
         started_at: md.started_at,
         updated_at: now_secs,
@@ -684,6 +714,7 @@ mod tests {
             total_tokens: 15,
             cached_tokens: 2,
             cache_write_tokens: 1,
+            reported_cost_usd: None,
         });
         t.add_usage(&TokenUsage {
             prompt_tokens: 3,
@@ -691,6 +722,7 @@ mod tests {
             total_tokens: 7,
             cached_tokens: 0,
             cache_write_tokens: 0,
+            reported_cost_usd: None,
         });
         t.tool_calls = 6;
         assert_eq!(t.prompt_tokens, 13);
@@ -806,6 +838,7 @@ mod tests {
             cached_tokens: 10,
             cache_write_tokens: 5,
             tool_calls: 7,
+            cost: Default::default(),
         };
         let mut st = state(AgentStatus::Active);
         st.spawned_children_ids = vec!["child-a".to_string(), "child-b".to_string()];

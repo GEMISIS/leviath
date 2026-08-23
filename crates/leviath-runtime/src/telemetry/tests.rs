@@ -215,6 +215,7 @@ fn terminal_status_emits_final_exit_and_completed_exactly_once() {
                 cached_tokens: 0,
                 cache_write_tokens: 0,
                 tool_calls: 5,
+                cost: Default::default(),
             },
         ))
         .id();

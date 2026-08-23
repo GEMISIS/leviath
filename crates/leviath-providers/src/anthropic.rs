@@ -766,13 +766,15 @@ impl AnthropicProvider {
         Ok(InferenceResponse {
             content,
             tool_calls,
-            tokens_used: TokenUsage {
+            // `input_tokens` is already exclusive of both cache counts here, so
+            // it is the fresh figure `TokenUsage` wants. The old total omitted
+            // the cache counts entirely and under-reported every cached call.
+            tokens_used: TokenUsage::new(
                 prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
                 cached_tokens,
                 cache_write_tokens,
-            },
+                completion_tokens,
+            ),
             finish_reason: Self::parse_stop_reason(stop_reason),
         })
     }
@@ -1098,13 +1100,7 @@ fn parse_sse_event(buffer: &mut String, tool_index: &mut usize) -> Option<Stream
             Some(StreamChunk {
                 delta: String::new(),
                 tool_calls: Vec::new(),
-                tokens: Some(TokenUsage {
-                    prompt_tokens: 0,
-                    completion_tokens: output_tokens,
-                    total_tokens: output_tokens,
-                    cached_tokens: 0,
-                    cache_write_tokens: 0,
-                }),
+                tokens: Some(TokenUsage::new(0, 0, 0, output_tokens)),
                 finish_reason: Some(AnthropicProvider::parse_stop_reason(stop_reason)),
             })
         }
@@ -1128,13 +1124,7 @@ fn parse_sse_event(buffer: &mut String, tool_index: &mut usize) -> Option<Stream
                 Some(StreamChunk {
                     delta: String::new(),
                     tool_calls: Vec::new(),
-                    tokens: Some(TokenUsage {
-                        prompt_tokens: input_tokens,
-                        completion_tokens: 0,
-                        total_tokens: input_tokens,
-                        cached_tokens: cached,
-                        cache_write_tokens: cache_write,
-                    }),
+                    tokens: Some(TokenUsage::new(input_tokens, cached, cache_write, 0)),
                     finish_reason: None,
                 })
             } else {
@@ -1488,6 +1478,60 @@ mod tests {
         assert_eq!(response.tokens_used.prompt_tokens, 10);
         assert_eq!(response.tokens_used.completion_tokens, 5);
         assert_eq!(response.finish_reason, FinishReason::Complete);
+    }
+
+    /// The same call, billed the same way, whichever provider reported it.
+    ///
+    /// This is the property that was broken and that no test held: Anthropic
+    /// reports its three input counts separately while the OpenAI shape folds
+    /// two of them into `prompt_tokens`, so identical usage produced different
+    /// `TokenUsage` and any cost arithmetic was wrong for one of them. 100
+    /// fresh + 80 cached + 4 written must read the same from both.
+    #[test]
+    fn the_two_provider_shapes_agree_on_identical_usage() {
+        let anthropic = serde_json::json!({
+            "content": [{"type": "text", "text": "hi"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 25,
+                "cache_read_input_tokens": 80,
+                "cache_creation_input_tokens": 4
+            }
+        });
+        let openai = serde_json::json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                // Same call: the OpenAI shape reports the 184 total inclusive
+                // of the 80 cached and 4 written.
+                "prompt_tokens": 184,
+                "completion_tokens": 25,
+                "prompt_tokens_details": {"cached_tokens": 80, "cache_write_tokens": 4}
+            }
+        });
+
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
+        let a = provider
+            .parse_response(&anthropic)
+            .expect("anthropic parses")
+            .tokens_used;
+        let o = crate::openai_compat::parse_openai_response(&openai)
+            .expect("openai parses")
+            .tokens_used;
+
+        assert_eq!(a.prompt_tokens, o.prompt_tokens, "fresh input");
+        assert_eq!(a.cached_tokens, o.cached_tokens, "cache reads");
+        assert_eq!(a.cache_write_tokens, o.cache_write_tokens, "cache writes");
+        assert_eq!(a.total_tokens, o.total_tokens, "total");
+        assert_eq!(a.prompt_tokens, 100);
+        assert_eq!(a.input_tokens(), 184);
+        assert_eq!(a.total_tokens, 209);
     }
 
     #[test]
@@ -2102,6 +2146,7 @@ mod tests {
             total_tokens: 150,
             cached_tokens: 0,
             cache_write_tokens: 0,
+            reported_cost_usd: None,
         };
         assert_eq!(usage.cached_tokens, 0);
         assert_eq!(usage.cache_write_tokens, 0);

@@ -522,12 +522,15 @@ impl OllamaProvider {
         Ok(InferenceResponse {
             content,
             tool_calls,
+            // Local inference: no cache classes and, running on your own
+            // hardware, no per-token price to report.
             tokens_used: TokenUsage {
                 prompt_tokens: prompt_eval_count,
                 completion_tokens: eval_count,
                 total_tokens: prompt_eval_count + eval_count,
                 cached_tokens: 0,
                 cache_write_tokens: 0,
+                reported_cost_usd: None,
             },
             finish_reason,
         })
@@ -794,6 +797,7 @@ impl Stream for OllamaNdjsonStream {
                             total_tokens: prompt_eval_count + eval_count,
                             cached_tokens: 0,
                             cache_write_tokens: 0,
+                            reported_cost_usd: None,
                         }),
                         finish_reason: Some(finish_reason),
                     })));

@@ -48,6 +48,8 @@ fn spawn_supervised_compaction(stage: &InferenceStage, entity: Entity, job: Comp
             let _ = lost_outcomes.send(CompactionOutcome {
                 entity,
                 result: Err(leviath_providers::ProviderError::Other(message)),
+                // Nothing ran, so there is nothing to price.
+                pricing: None,
                 // A job that never ran billed nothing. Empty rather than
                 // absent: there is no call to attribute, not an unknown cost.
                 usage: Vec::new(),
@@ -220,6 +222,7 @@ pub fn collect_compaction(
                     provider: &outcome.provider_name,
                     model: &outcome.model,
                     usage,
+                    pricing: outcome.pricing,
                 },
             );
         }

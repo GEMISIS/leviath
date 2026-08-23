@@ -229,6 +229,9 @@ pub fn dispatch_transition_choice(
                     entity,
                     result: Err(leviath_providers::ProviderError::Other(message)),
                     latency: std::time::Duration::ZERO,
+                    // A job that never reached a provider has no rates and no
+                    // cost; there is nothing to price.
+                    pricing: None,
                 });
                 lost_wake.notify_one();
             },
@@ -353,6 +356,7 @@ pub fn collect_transition_choice(
                 provider: &si.provider_name,
                 model: &si.model,
                 usage: &response.tokens_used,
+                pricing: outcome.pricing,
             },
         );
 

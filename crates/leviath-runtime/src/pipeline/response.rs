@@ -187,6 +187,7 @@ pub fn collect_inference(
                         provider: &called_provider,
                         model: &called_model,
                         usage: &response.tokens_used,
+                        pricing: outcome.pricing,
                     },
                 );
                 // Accrue this iteration's tokens against the current stage record.

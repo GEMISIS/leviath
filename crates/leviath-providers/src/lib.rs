@@ -19,6 +19,7 @@ pub mod ollama;
 pub mod openai;
 pub mod openai_compat;
 pub mod openrouter;
+pub mod pricing;
 pub mod provider;
 pub mod rate_limit;
 pub mod rhai_provider;
@@ -34,6 +35,7 @@ pub use gemini::GeminiProvider;
 pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
 pub use openrouter::OpenRouterProvider;
+pub use pricing::{CostTotals, ModelPricing};
 pub use provider::{
     ContentBlock, DEFAULT_INFERENCE_TIMEOUT_SECS, FinishReason, InferenceRequest,
     InferenceResponse, Message, MessageContent, ModelCapabilities, ModelCapabilityOverride,

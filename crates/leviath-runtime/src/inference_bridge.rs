@@ -232,6 +232,13 @@ pub struct InferenceOutcome {
     /// here because the ECS only sees the outcome land on a later tick; this
     /// is the only place the call's real duration exists.
     pub latency: std::time::Duration,
+    /// What the provider charges for the model this job called.
+    ///
+    /// Resolved here for the same reason `latency` is: this is the last place
+    /// the `Arc<dyn Provider>` exists. By the time the outcome reaches the ECS
+    /// only the provider's *name* survives, and a name cannot be asked its
+    /// rates. Used only when the response carried no cost of its own.
+    pub pricing: Option<leviath_providers::ModelPricing>,
 }
 
 /// Run one inference job to completion: perform the (possibly hour-long) network
@@ -269,6 +276,7 @@ pub async fn run_inference_job(
                 entity,
                 result: Err(ProviderError::TokenLimitExceeded { used, max }),
                 latency: started.elapsed(),
+                pricing: provider.pricing(&request.model),
             });
             wake.notify_one();
             return;
@@ -332,6 +340,7 @@ pub async fn run_inference_job(
         entity,
         result,
         latency: started.elapsed(),
+        pricing: provider.pricing(&request.model),
     });
     wake.notify_one();
 }
@@ -365,6 +374,7 @@ mod tests {
                 total_tokens: 2,
                 cached_tokens: 0,
                 cache_write_tokens: 0,
+                reported_cost_usd: None,
             },
             finish_reason: leviath_providers::FinishReason::Complete,
         }

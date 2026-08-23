@@ -38,6 +38,13 @@ pub struct CallUsage<'a> {
     pub model: &'a str,
     /// What the provider billed.
     pub usage: &'a leviath_providers::TokenUsage,
+    /// This model's published rates, when the provider knows them.
+    ///
+    /// Only consulted when the provider did not report the call's cost itself
+    /// (`usage.reported_cost_usd`), which is always the better figure. `None`
+    /// with no reported cost makes the call unpriced, so the run reports its
+    /// cost as unknown rather than as a total quietly missing this call.
+    pub pricing: Option<leviath_providers::ModelPricing>,
 }
 
 /// Fold one call into the run's cumulative totals and journal what it cost.
@@ -53,7 +60,7 @@ pub fn record_call(
     call: &CallUsage<'_>,
 ) {
     if let Some(totals) = totals {
-        totals.add_usage(call.usage);
+        totals.add_usage_priced(call.usage, call.pricing.as_ref());
     }
     let (Some(persist), Some(md)) = (persist, metadata) else {
         return;
@@ -68,6 +75,18 @@ pub fn record_call(
         completion_tokens: call.usage.completion_tokens,
         cached_tokens: call.usage.cached_tokens,
         cache_write_tokens: call.usage.cache_write_tokens,
+        // The provider's own figure when it gave one, else this model's rates
+        // applied to the counts above, else nothing at all.
+        cost_usd: call
+            .usage
+            .reported_cost_usd
+            .or_else(|| call.pricing.as_ref().map(|p| call.usage.cost_usd(p))),
+        cost_reported_by_provider: call
+            .usage
+            .reported_cost_usd
+            .is_some()
+            .then_some(true)
+            .or_else(|| call.pricing.as_ref().map(|_| false)),
         at: chrono::Utc::now().timestamp(),
     };
     // No ack: a usage record is telemetry, and nothing downstream waits on it
@@ -91,6 +110,7 @@ mod tests {
             cached_tokens: 3,
             cache_write_tokens: 4,
             total_tokens: 120,
+            reported_cost_usd: None,
         }
     }
 
@@ -125,7 +145,124 @@ mod tests {
             provider: "anthropic",
             model: "claude-sonnet-5",
             usage: u,
+            pricing: None,
         }
+    }
+
+    /// Every `Append` the lane received, in order.
+    ///
+    /// Drained with an `if let` rather than destructured with a `let ... else
+    /// { panic!() }`: the panicking arm is a branch no test can take, and the
+    /// 100% gate counts it.
+    fn appended(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::persistence_bridge::PersistMsg>,
+    ) -> Vec<RunRecord> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg {
+                out.push(*record);
+            }
+        }
+        out
+    }
+
+    /// A provider that reports its own cost has that figure journaled verbatim
+    /// and flagged as reported, so a later reader can tell the invoice from a
+    /// reconstruction of it.
+    #[test]
+    fn a_reported_cost_is_journaled_as_reported() {
+        let u = leviath_providers::TokenUsage::new(100, 0, 0, 20).with_reported_cost(Some(0.0042));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let noise = tx.clone();
+        let mut totals = TokenTotals::default();
+        record_call(
+            Some(&mut totals),
+            Some(&PersistenceStage(tx)),
+            Some(&metadata()),
+            &CallUsage {
+                kind: InferenceKind::Stage,
+                stage: "plan",
+                iteration: 1,
+                provider: "openrouter",
+                model: "x-ai/grok-4.6",
+                usage: &u,
+                // Rates are present AND ignored: the reported figure wins.
+                pricing: Some(leviath_providers::ModelPricing::flat(999.0, 999.0)),
+            },
+        );
+        assert_eq!(totals.cost.total_usd(), Some(0.0042));
+        assert!(totals.cost.is_exact());
+
+        // The lane carries snapshots and buffered log lines on the same wire,
+        // so the drain has to skip what is not an append rather than assume
+        // every message is one.
+        let _ = noise.send(crate::persistence_bridge::PersistMsg::StageLines {
+            run_id: "run-u".to_string(),
+            output_appends: vec![],
+            log_appends: vec![],
+        });
+        let records = appended(&mut rx);
+        assert_eq!(records.len(), 1, "one call, one record");
+        let value = serde_json::to_value(&records[0]).unwrap();
+        let f = &value["InferenceUsage"];
+        assert_eq!(f["cost_usd"], serde_json::json!(0.0042));
+        assert_eq!(f["cost_reported_by_provider"], serde_json::json!(true));
+    }
+
+    /// With no reported cost, the model's rates are applied and the record says
+    /// so, because that number is this process's arithmetic rather than a bill.
+    #[test]
+    fn a_computed_cost_is_journaled_as_computed() {
+        let u = leviath_providers::TokenUsage::new(1_000_000, 0, 0, 1_000_000);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut totals = TokenTotals::default();
+        record_call(
+            Some(&mut totals),
+            Some(&PersistenceStage(tx)),
+            Some(&metadata()),
+            &CallUsage {
+                kind: InferenceKind::Stage,
+                stage: "plan",
+                iteration: 1,
+                provider: "anthropic",
+                model: "claude-opus-5",
+                usage: &u,
+                pricing: Some(leviath_providers::ModelPricing::flat(5.0, 25.0)),
+            },
+        );
+        assert_eq!(totals.cost.total_usd(), Some(30.0));
+        assert!(!totals.cost.is_exact(), "arithmetic, not an invoice");
+
+        let records = appended(&mut rx);
+        assert_eq!(records.len(), 1, "one call, one record");
+        let value = serde_json::to_value(&records[0]).unwrap();
+        let f = &value["InferenceUsage"];
+        assert_eq!(f["cost_usd"], serde_json::json!(30.0));
+        assert_eq!(f["cost_reported_by_provider"], serde_json::json!(false));
+    }
+
+    /// Neither route available: the call is journaled with no cost at all
+    /// rather than with a zero, which would read as "this was free".
+    #[test]
+    fn an_unpriced_call_journals_no_cost_rather_than_zero() {
+        let u = leviath_providers::TokenUsage::new(10, 0, 0, 5);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut totals = TokenTotals::default();
+        record_call(
+            Some(&mut totals),
+            Some(&PersistenceStage(tx)),
+            Some(&metadata()),
+            &call(InferenceKind::Stage, &u),
+        );
+        assert_eq!(totals.cost.total_usd(), None, "unknown, not zero");
+        assert_eq!(totals.cost.unpriced_calls, 1);
+
+        let records = appended(&mut rx);
+        assert_eq!(records.len(), 1, "one call, one record");
+        let value = serde_json::to_value(&records[0]).unwrap();
+        let f = value["InferenceUsage"].as_object().unwrap();
+        assert!(!f.contains_key("cost_usd"), "absent, not 0.0");
+        assert!(!f.contains_key("cost_reported_by_provider"));
     }
 
     /// The two halves are independent by design, so the four combinations of

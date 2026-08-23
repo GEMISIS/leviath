@@ -559,6 +559,7 @@ mod tests {
                     total_tokens: 2,
                     cached_tokens: 0,
                     cache_write_tokens: 0,
+                    reported_cost_usd: None,
                 },
                 finish_reason: FinishReason::Complete,
             })
@@ -815,6 +816,7 @@ mod tests {
             provider_name: "p".to_string(),
             model: "m".to_string(),
             result: Ok(vec![("task".to_string(), "SHORT".to_string())]),
+            pricing: None,
         })
         .unwrap();
         run_collect(&mut world);
@@ -840,6 +842,7 @@ mod tests {
             provider_name: "p".to_string(),
             model: "m".to_string(),
             result: Err(leviath_providers::ProviderError::Other("x".to_string())),
+            pricing: None,
         })
         .unwrap();
         // A stale (despawned) entity is skipped without panic.
@@ -850,6 +853,7 @@ mod tests {
             provider_name: "p".to_string(),
             model: "m".to_string(),
             result: Ok(vec![("task".to_string(), "ignored".to_string())]),
+            pricing: None,
         })
         .unwrap();
         run_collect(&mut world);

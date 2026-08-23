@@ -685,17 +685,38 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
         .and_then(|d| d.get("cache_write_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize;
+    // What the gateway says this call actually cost. OpenRouter reports it in
+    // USD when usage accounting is on; plain OpenAI omits the field entirely,
+    // which is the `None` case and leaves the caller to fall back to rates.
+    //
+    // Taken verbatim and never recomputed: this is the figure that reflects
+    // whatever the account actually pays - negotiated rates, promotional
+    // pricing, the gateway's own margin, a model rerouted to a different
+    // backend mid-request - none of which is visible from a published rate card.
+    let reported_cost_usd = usage.and_then(|u| u.get("cost")).and_then(|v| v.as_f64());
 
     Ok(InferenceResponse {
         content,
         tool_calls,
-        tokens_used: TokenUsage {
-            prompt_tokens,
-            completion_tokens,
-            total_tokens: prompt_tokens + completion_tokens,
+        // The OpenAI shape reports a `prompt_tokens` that INCLUDES its
+        // `prompt_tokens_details` breakdown, where Anthropic reports the three
+        // separately. `TokenUsage::prompt_tokens` is the fresh figure, so the
+        // breakdown comes back out here - otherwise cached tokens are counted
+        // once at the full input rate and again at the cache rate, and the same
+        // arithmetic cannot be right for both providers.
+        //
+        // Saturating: a gateway whose details exceed its own total is
+        // malformed, and clamping to zero is better than wrapping to a
+        // nonsensical figure.
+        tokens_used: TokenUsage::new(
+            prompt_tokens
+                .saturating_sub(cached_tokens)
+                .saturating_sub(cache_write_tokens),
             cached_tokens,
             cache_write_tokens,
-        },
+            completion_tokens,
+        )
+        .with_reported_cost(reported_cost_usd),
         finish_reason: parse_openai_finish_reason(finish_reason),
     })
 }
@@ -831,13 +852,17 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                     return Some(Some(Ok(StreamChunk {
                         delta: String::new(),
                         tool_calls: Vec::new(),
-                        tokens: Some(TokenUsage {
-                            prompt_tokens,
-                            completion_tokens,
-                            total_tokens: prompt_tokens + completion_tokens,
+                        // Same normalisation as the non-streaming path: the
+                        // details come back out of `prompt_tokens` so the three
+                        // input counts stay disjoint.
+                        tokens: Some(TokenUsage::new(
+                            prompt_tokens
+                                .saturating_sub(cached_tokens)
+                                .saturating_sub(cache_write_tokens),
                             cached_tokens,
                             cache_write_tokens,
-                        }),
+                            completion_tokens,
+                        )),
                         finish_reason: None,
                     })));
                 }
@@ -901,13 +926,16 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                     .and_then(|d| d.get("cache_write_tokens"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as usize;
-                TokenUsage {
-                    prompt_tokens: pt,
-                    completion_tokens: ct,
-                    total_tokens: pt + ct,
-                    cached_tokens: cached,
-                    cache_write_tokens: written,
-                }
+                // Same normalisation and the same cost passthrough as the
+                // buffered path, so streaming a request does not report it
+                // differently from buffering it.
+                TokenUsage::new(
+                    pt.saturating_sub(cached).saturating_sub(written),
+                    cached,
+                    written,
+                    ct,
+                )
+                .with_reported_cost(usage.get("cost").and_then(|v| v.as_f64()))
             });
 
             return Some(Some(Ok(StreamChunk {
@@ -1715,6 +1743,35 @@ mod tests {
         assert_eq!(chunk.tool_calls[0].arguments_delta, "{\"q\":");
     }
 
+    /// A gateway that reports what the call cost has that figure taken
+    /// verbatim. OpenRouter does this when usage accounting is on, and it is
+    /// preferred over anything computed from a rate card.
+    #[test]
+    fn a_reported_cost_is_carried_through_from_the_buffered_response() {
+        let body = serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "hi"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.00123}
+        });
+        let r = parse_openai_response(&body).unwrap();
+        assert_eq!(r.tokens_used.reported_cost_usd, Some(0.00123));
+    }
+
+    /// The same for a streamed call, or streaming and buffering the identical
+    /// request would report different money.
+    #[test]
+    fn a_reported_cost_is_carried_through_from_a_stream_chunk() {
+        let mut buf = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 2, "cost": 0.0004}
+            })
+        );
+        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap().unwrap();
+        assert_eq!(chunk.tokens.unwrap().reported_cost_usd, Some(0.0004));
+    }
+
     #[test]
     fn sse_event_usage_only_chunk() {
         let mut buf = format!(
@@ -1730,10 +1787,16 @@ mod tests {
         let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap().unwrap();
         assert_eq!(chunk.delta, "");
         let tokens = chunk.tokens.unwrap();
-        assert_eq!(tokens.prompt_tokens, 50);
+        // 50 reported inclusive of its details: 10 cache reads and 4 writes,
+        // leaving 36 fresh. The streaming path normalises the same way the
+        // non-streaming one does, or a streamed call and a buffered call of the
+        // same request would cost different amounts.
+        assert_eq!(tokens.prompt_tokens, 36, "fresh input only");
         assert_eq!(tokens.completion_tokens, 25);
         assert_eq!(tokens.cached_tokens, 10);
         assert_eq!(tokens.cache_write_tokens, 4);
+        assert_eq!(tokens.input_tokens(), 50);
+        assert_eq!(tokens.total_tokens, 75);
     }
 
     #[test]
@@ -1766,9 +1829,12 @@ mod tests {
         let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap().unwrap();
         assert_eq!(chunk.delta, "X");
         let tokens = chunk.tokens.unwrap();
-        assert_eq!(tokens.prompt_tokens, 100);
+        // 100 inclusive of 30 cached and 7 written leaves 63 fresh.
+        assert_eq!(tokens.prompt_tokens, 63, "fresh input only");
         assert_eq!(tokens.cached_tokens, 30);
         assert_eq!(tokens.cache_write_tokens, 7);
+        assert_eq!(tokens.input_tokens(), 100);
+        assert_eq!(tokens.reported_cost_usd, None, "this gateway reported none");
     }
 
     #[test]

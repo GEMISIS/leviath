@@ -274,6 +274,22 @@ pub enum RunRecord {
         cached_tokens: usize,
         /// Tokens written to provider cache.
         cache_write_tokens: usize,
+        /// What this one call cost in USD, when it could be established.
+        ///
+        /// Per call rather than only per run, because the model can change
+        /// mid-run: a stage that fails over to a second provider has spent at
+        /// two different rates, and a run-level total cannot be re-derived from
+        /// `meta.model` afterwards. Recorded here, the journal answers "which
+        /// call cost that" without re-pricing anything.
+        ///
+        /// `None` means unpriced - the provider reported no cost and no rates
+        /// were known - never that the call was free.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
+        /// Whether `cost_usd` is the provider's own figure rather than one
+        /// computed from published rates. Absent when there is no cost.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_reported_by_provider: Option<bool>,
         /// Unix seconds.
         at: i64,
     },
@@ -613,7 +629,9 @@ pub struct PendingToolBatch {
 ///
 /// The flattened form of [`RunRecord::InferenceUsage`], so a consumer walking a
 /// folded run does not have to match the record enum to read a number.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// `Eq` is not derivable once a cost is present: `f64` has no total equality.
+// `PartialEq` is what the tests compare with anyway.
+#[derive(Debug, Clone, PartialEq)]
 pub struct InferenceUsageRecord {
     /// Which kind of call this was.
     pub kind: InferenceKind,
@@ -633,6 +651,11 @@ pub struct InferenceUsageRecord {
     pub cached_tokens: usize,
     /// Tokens written to provider cache.
     pub cache_write_tokens: usize,
+    /// What this call cost in USD, when it could be established at all.
+    /// `None` is unpriced, never free.
+    pub cost_usd: Option<f64>,
+    /// Whether `cost_usd` came from the provider rather than from rates.
+    pub cost_reported_by_provider: Option<bool>,
     /// Unix seconds.
     pub at: i64,
 }
@@ -732,6 +755,8 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
                 completion_tokens,
                 cached_tokens,
                 cache_write_tokens,
+                cost_usd,
+                cost_reported_by_provider,
                 at,
             } => {
                 // Counted alongside the heavy variant: both name one provider
@@ -748,6 +773,8 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
                     completion_tokens: *completion_tokens,
                     cached_tokens: *cached_tokens,
                     cache_write_tokens: *cache_write_tokens,
+                    cost_usd: *cost_usd,
+                    cost_reported_by_provider: *cost_reported_by_provider,
                     at: *at,
                 });
             }
@@ -1538,6 +1565,8 @@ mod tests {
                 completion_tokens: 70,
                 cached_tokens: 12,
                 cache_write_tokens: 34,
+                cost_usd: None,
+                cost_reported_by_provider: None,
                 at: 102,
             },
             RunRecord::ToolBatch {
@@ -2557,6 +2586,8 @@ mod tests {
                 completion_tokens: 2,
                 cached_tokens: 0,
                 cache_write_tokens: 0,
+                cost_usd: None,
+                cost_reported_by_provider: None,
                 at: 5,
             }
         );
@@ -2578,6 +2609,8 @@ mod tests {
             completion_tokens: 1,
             cached_tokens: 0,
             cache_write_tokens: 0,
+            cost_usd: None,
+            cost_reported_by_provider: None,
             at,
         };
         // The shape the issue reported: a compaction call and a stage call

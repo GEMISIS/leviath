@@ -1322,6 +1322,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
                     total_tokens: 2,
                     cached_tokens: 0,
                     cache_write_tokens: 0,
+                    reported_cost_usd: None,
                 },
                 finish_reason: FinishReason::Complete,
             })
@@ -1363,6 +1364,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
                     total_tokens: 2,
                     cached_tokens: 0,
                     cache_write_tokens: 0,
+                    reported_cost_usd: None,
                 },
                 finish_reason: FinishReason::Complete,
             })
@@ -1474,6 +1476,7 @@ max_tokens = 5000
                     total_tokens: 2,
                     cached_tokens: 0,
                     cache_write_tokens: 0,
+                    reported_cost_usd: None,
                 },
                 finish_reason: FinishReason::Complete,
             })

@@ -126,6 +126,7 @@ impl Provider for WritesThenAnswers {
                 cached_tokens: 0,
                 cache_write_tokens: 0,
                 total_tokens: 2,
+                reported_cost_usd: None,
             },
             finish_reason: FinishReason::Stop,
         })

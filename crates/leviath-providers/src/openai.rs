@@ -739,9 +739,16 @@ mod tests {
         });
 
         let response = parse_openai_response(&body).unwrap();
-        assert_eq!(response.tokens_used.prompt_tokens, 100);
+        // The OpenAI shape reports `prompt_tokens` INCLUSIVE of its details, so
+        // 80 of those 100 were cache reads and only 20 were fresh. Reporting
+        // 100 here (as this once did) bills the 80 twice: once at the full
+        // input rate inside `prompt_tokens`, and again at the cache rate.
+        assert_eq!(response.tokens_used.prompt_tokens, 20, "fresh input only");
         assert_eq!(response.tokens_used.cached_tokens, 80);
         assert_eq!(response.tokens_used.cache_write_tokens, 0);
+        // The three input counts are disjoint, so they add back up.
+        assert_eq!(response.tokens_used.input_tokens(), 100);
+        assert_eq!(response.tokens_used.total_tokens, 120);
     }
 
     #[test]

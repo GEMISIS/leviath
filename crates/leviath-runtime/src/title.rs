@@ -652,6 +652,7 @@ pub fn collect_title(
                     provider: &outcome.provider_name,
                     model: &outcome.model,
                     usage,
+                    pricing: outcome.pricing,
                 },
             );
         }
@@ -744,6 +745,7 @@ mod tests {
                         total_tokens: 2,
                         cached_tokens: 0,
                         cache_write_tokens: 0,
+                        reported_cost_usd: None,
                     },
                     finish_reason: self.finish_reason.clone(),
                 }),
@@ -1075,6 +1077,7 @@ mod tests {
                     total_tokens: 0,
                     cached_tokens: 0,
                     cache_write_tokens: 0,
+                    reported_cost_usd: None,
                 },
                 finish_reason: leviath_providers::FinishReason::Complete,
             })
@@ -1295,6 +1298,7 @@ mod tests {
             usage: None,
             provider_name: "live".to_string(),
             model: "m2".to_string(),
+            pricing: None,
         })
         .unwrap();
         world.insert_resource(TitleResults(rx));
@@ -1620,6 +1624,7 @@ mod tests {
             usage: None,
             provider_name: "mock".to_string(),
             model: "m".to_string(),
+            pricing: None,
         })
         .unwrap();
         world.insert_resource(TitleResults(rx));
@@ -1976,9 +1981,11 @@ mod tests {
                 cached_tokens: 3,
                 cache_write_tokens: 4,
                 total_tokens: 912,
+                reported_cost_usd: None,
             }),
             provider_name: "mock".to_string(),
             model: "m".to_string(),
+            pricing: None,
         })
         .unwrap();
         world.insert_resource(TitleResults(rx));
@@ -2024,9 +2031,11 @@ mod tests {
                 cached_tokens: 0,
                 cache_write_tokens: 0,
                 total_tokens: 501,
+                reported_cost_usd: None,
             }),
             provider_name: "mock".to_string(),
             model: "m".to_string(),
+            pricing: None,
         })
         .unwrap();
         world.insert_resource(TitleResults(rx));
@@ -2064,6 +2073,7 @@ mod tests {
             usage: None,
             provider_name: "mock".to_string(),
             model: "m".to_string(),
+            pricing: None,
         })
         .unwrap();
         world.insert_resource(TitleResults(rx));
