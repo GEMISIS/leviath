@@ -111,6 +111,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // something unrelated makes it re-read. Announced so a console can drop
     // that poll where the daemon has it and keep it where it does not.
     "events.title",
+    // The `agent_spend` frame, sent while a run is still going when its spend
+    // passes a figure named in `[limits] notify_spend_usd`. Additive - a client
+    // without this simply never sees one - but announced so a console can tell
+    // "this daemon does not report spend" apart from "this run has not crossed
+    // anything", which are the same silence otherwise.
+    "events.spend",
     // One status vocabulary across the whole API. `agent_status` and
     // `agent_completed` carry the same word a run carries - `running`,
     // `waiting_input` - instead of the engine's own `idle`/`active`/`waiting`,
