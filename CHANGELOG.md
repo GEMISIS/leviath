@@ -13,6 +13,11 @@ same list.
 
 ## Unreleased
 
+- Fixed: `read_file` on a directory told the model to call `list_dir`, which 21
+  of the bundled agents' stages do not grant. It now answers with the directory's
+  contents, so the model can pick its next path in one call whatever the stage
+  allows. Long listings are capped and say how many entries they left out.
+
 - Fixed: a stage asking for a model got whichever model the matching route
   happened to name. Entries were matched as a whole `provider/model` pair, so
   `deep-researcher`'s `polish` stage, which lists `gemini-3.1-pro-preview`

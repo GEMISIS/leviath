@@ -2,6 +2,46 @@
 
 use super::*;
 
+/// What a directory holds, one entry per line, for the `read_file` correction.
+///
+/// Capped: a directory of thousands would bury the answer it is meant to give,
+/// and the model only needs enough to pick its next path. Directories are marked
+/// so a second wrong `read_file` is avoidable rather than merely explained.
+fn directory_listing(path: &std::path::Path) -> String {
+    const MAX_ENTRIES: usize = 50;
+    let mut names: Vec<String> = std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            match e.file_type().map(|ft| ft.is_dir()) {
+                Ok(true) => format!("{name}/"),
+                _ => name,
+            }
+        })
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        // Empty, or unreadable. The model does the same thing next either way.
+        return "  (no entries to show)".to_string();
+    }
+    let total = names.len();
+    names.truncate(MAX_ENTRIES);
+    let mut out = names
+        .iter()
+        .map(|n| format!("  {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if total > MAX_ENTRIES {
+        out.push_str(&format!(
+            "\n  ... and {} more (call list_dir for the rest)",
+            total - MAX_ENTRIES
+        ));
+    }
+    out
+}
+
 impl BuiltinTools {
     /// Execute a built-in tool by name (resolving aliases), returning the result
     /// as a string.
@@ -265,10 +305,19 @@ impl BuiltinTools {
             // call, and the raw OS message ("Is a directory (os error 21)")
             // names the problem without naming the fix, so the next call was
             // usually another guess.
-            Err(_) if path.is_dir() => format!(
-                "[error] '{path_str}' is a directory, not a file. Use list_dir to see what \
-                 is in it, then read_file on one of the entries."
-            ),
+            //
+            // The listing comes back with the error rather than a pointer to
+            // `list_dir`, because 21 of the bundled agents' stages grant
+            // `read_file` and not `list_dir`: there, naming that tool asks for
+            // something the stage cannot do. Answering here settles it in one
+            // call and reads the same in every stage.
+            Err(_) if path.is_dir() => {
+                let listing = directory_listing(&path);
+                format!(
+                    "[error] '{path_str}' is a directory, not a file. It contains:\n{listing}\n\
+                     Call read_file again on one of these entries."
+                )
+            }
             Err(e) => format!("[error] Failed to read '{}': {}", path_str, e),
         }
     }
