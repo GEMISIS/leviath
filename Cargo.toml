@@ -180,7 +180,7 @@ tiktoken-rs = "0.12"
 # schema pull external `$ref`s over the network or filesystem at validation
 # time. Without them an external `$ref` simply fails to compile, and a schema
 # that fails to compile skips validation instead of refusing calls.
-jsonschema = { version = "0.49", default-features = false }
+jsonschema = { version = "0.50", default-features = false }
 # Parsers behind the built-in output validators, which check that a submitted
 # answer is well-formed in the format it claims. Well-formedness only: schema
 # conformance is JSON Schema (above) or an agent's own Rhai validator, so none
