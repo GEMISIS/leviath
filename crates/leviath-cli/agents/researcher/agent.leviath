@@ -413,25 +413,23 @@ format         = { kind = "pinned", budget = "1%", seed = { literal = "Cite ever
 # `rewritten`, which assumes the whole region changes every turn and so caches
 # none of it - measured at 4% cache hits on a run where this region held 280K
 # tokens, every one of them re-sent and re-paid on every single inference.
-# The percentage is what sizes it, and it is lower than it looks: this region is
-# re-sent on every inference for the rest of the stage, so its size multiplies
-# cost and latency rather than being paid once. 30% was written against a
-# 200K-token window and became 300K tokens of raw scrape on a 1M-token model,
-# which is where a measured run spent most of $137. `min_tokens` keeps a small
-# window from resolving to less than one fetched page; `max_tokens` is a
-# backstop for a window nobody ships yet, deliberately far above the percentage
-# so that the percentage, not the cap, is what decides on every model in use.
-raw_findings   = { kind = "temporary", budget = "8%", volatility = "grows", min_tokens = 16000, max_tokens = 150000 }
+# Sized by the percentage alone. An absolute ceiling has been tried here twice
+# and removed twice - once at 40,000 with the note that "the percentages were
+# decorative from about 167k upward", once at 60,000 for the same reason found
+# again. A cap low enough to matter binds on every model above the window it was
+# chosen for, so from there up it decides the size and the percentage - the whole
+# mechanism for scaling with the model in front of you - decides nothing. The size was never the fault anyway. 280K tokens
+# re-sent at 4% cached is expensive; the same 280K mostly cached is not, and the
+# `volatility` above is what makes the difference.
+raw_findings   = { kind = "temporary", budget = "30%", volatility = "grows" }
 # Extracted claims (with source refs) and cross-source conflicts.
 # The report is written FROM this region, so anything evicted here is a finding
 # the run paid for and cannot deliver. At 30 items that bound was reached long
 # before the reading was: on one measured run an agent read 8.8M tokens, spent
 # $35, and handed back 2,596 bytes - fewer than one that read 462K and spent
 # $2.41, because both filled the same 30 slots. Wide enough now that the budget
-# is what limits it, which is a limit that scales with the model - a percentage
-# low enough that what the region holds is bounded by what a run can afford to
-# re-send, not by what the window could technically fit.
-claims         = { kind = "sliding_window", max_items = 150, budget = "5%", volatility = "grows", min_tokens = 10000, max_tokens = 75000 }
+# is what limits it, which is a limit that scales with the model.
+claims         = { kind = "sliding_window", max_items = 150, budget = "15%", volatility = "grows" }
 contradictions = { kind = "clearable",      budget = "3%" }
 
 # Synthesis workspace (compacts to a running history when it grows).

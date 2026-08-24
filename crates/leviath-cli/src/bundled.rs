@@ -373,16 +373,27 @@ mod tests {
         );
     }
 
-    /// A `temporary` region on a percentage budget must declare `volatility` and
-    /// a `max_tokens` ceiling, because both defaults fail quietly and only at
-    /// scale.
+    /// A `temporary` region must declare its `volatility`, because the default
+    /// fails quietly and only at scale.
     ///
-    /// Keyed on the kind rather than on how large the percentage looks. An
-    /// earlier version of this test only examined regions at 20% or more, on the
-    /// reasoning that a smaller one could not matter - which stopped being true
-    /// the moment those percentages were lowered and their guard-rails did the
-    /// scaling instead. The percentage is not what makes a region worth checking;
-    /// accumulating tool output is, and `temporary` is the kind that does it.
+    /// `rewritten` - the default - says the whole region changes every turn, so
+    /// none of it is cached. That is right for a scratchpad and wrong for the
+    /// append-only region tool results land in, where it was worth 4% cache hits
+    /// instead of most of the region on a measured run. A region re-sent in full
+    /// on every inference for the rest of a stage is the single largest thing a
+    /// blueprint can get wrong about its own cost.
+    ///
+    /// Keyed on the kind, not on how large the percentage is. An earlier version
+    /// checked only regions at 20% or more, on the reasoning that a smaller one
+    /// could not matter; it stopped covering anything the moment those
+    /// percentages changed. Accumulating tool output is what makes a region worth
+    /// checking and `temporary` is the kind that does it.
+    ///
+    /// Deliberately NOT asserting an absolute ceiling alongside the percentage.
+    /// One was tried and removed: it bound on every model above 200K, which left
+    /// the percentage - the entire mechanism for scaling to the model in front of
+    /// you - deciding nothing over the range anyone runs on. Size was never the
+    /// fault; uncached size was.
     ///
     /// `volatility` defaults to `rewritten`, which assumes the whole region
     /// changes every turn and so caches none of it. That is right for a
@@ -399,7 +410,7 @@ mod tests {
     /// An invariant over discovered blueprints rather than a list of known ones:
     /// the next bulk region somebody adds is the one this is here to catch.
     #[test]
-    fn a_bulk_temporary_region_says_how_it_changes_and_where_it_stops() {
+    fn a_temporary_region_says_how_its_contents_change() {
         use leviath_core::BudgetSpec;
         use leviath_core::region::{RegionKind, Volatility};
 
@@ -419,33 +430,23 @@ mod tests {
                 .regions
                 .iter()
                 .filter_map(|region| match region.budget {
-                    BudgetSpec::Percent { percent, max, .. }
-                        if region.kind == RegionKind::Temporary =>
-                    {
-                        Some((region, percent, max))
+                    BudgetSpec::Percent { percent, .. } if region.kind == RegionKind::Temporary => {
+                        Some((region, percent))
                     }
                     _ => None,
                 });
 
-            for (region, percent, max) in bulk {
+            for (region, percent) in bulk {
                 checked += 1;
+                // Computed here rather than in the failure message: an argument
+                // expression evaluated only on failure is its own uncovered
+                // region on an assertion that has to pass.
                 let share = percent * 100.0;
-                // Both figures are computed here rather than in the failure
-                // message: an argument expression evaluated only on failure is
-                // its own uncovered region on an assertion that has to pass.
-                let on_a_wide_window = percent * 1000.0;
                 assert_ne!(
                     region.volatility,
                     Volatility::Rewritten,
                     "{}: `{}` holds {share:.0}% of the window as accumulated tool output but \
                      is `rewritten`, so none of it is ever cached",
-                    agent.name,
-                    region.name,
-                );
-                assert!(
-                    max.is_some(),
-                    "{}: `{}` is {share:.0}% of the window with no `max_tokens`, so a \
-                     1M-token model gives it {on_a_wide_window:.0}K tokens on every call",
                     agent.name,
                     region.name,
                 );
