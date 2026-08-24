@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.4.3"
+version = "0.4.4"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 max_child_depth = 2
 entry_stage = "survey"
@@ -312,6 +312,16 @@ best sources on JUST that thread, read them, and append the findings to
 source refs) and a bibliography line to `sources_index`. Then hand back to compare.
 Stay on the flagged thread - this is depth on one item, not a new broad survey.
 """
+transition_prompt = """
+Decide the next move:
+- This read exposed something the survey never covered - a name, a category, a
+  kind of source that is absent from `sources_index` - → respond with: survey,
+  naming what to go and get. This is one of only two ways left to widen what the
+  report can draw on, so take it whenever the gap is nameable rather than noting
+  it and moving on.
+- Another flagged thread is still worth a focused read → respond with: compare
+- The threads worth reading have been read → respond with: challenge
+"""
 
 [stages.deep_dive.tool_routing]
 default_region = "conversation"
@@ -334,6 +344,13 @@ transform = "compact"
 [stages.deep_dive.transitions.challenge]
 hint = "Done here - hand to the adversarial pass, which is the only way to the report"
 transform = "compact"
+# Everything leaving this stage for good passes through here, so this is where
+# the region has to exist. Without it the stage produced nothing at all: on one
+# measured run it spent 77 seconds, made no tool call, and left `deep_dives`
+# empty, while `compare` next door - which has a gate - filled its region every
+# pass. A focused read that records nothing is indistinguishable from one that
+# never happened.
+gate = { require_region_updated = "deep_dives", message = "This stage is a focused read and it has to leave a trace. Append what you found to `deep_dives` with context_append: what makes this thread notable, with source refs, and a bibliography line to `sources_index` for anything you opened. If the read changed nothing about your judgment, write THAT and why - a thread that turned out to be ordinary is a finding the report can use." }
 
 [stages.deep_dive.transitions.error_recovery]
 condition = "error"
@@ -476,8 +493,9 @@ system_prompt = """
 You are reading someone else's analysis in order to attack it. You did not
 write it and you owe it nothing.
 
-Go through `claims`, `contradictions` and `analysis`. For each thing the report
-is going to assert, ask the uncomfortable question:
+Go through `thread_findings`, `comparisons` and `deep_dives` - what the workers
+handed back, the judgments compare reached, and any focused read. For each thing
+the report is going to assert, ask the uncomfortable question:
 
 - What single source is this resting on, and would I believe it alone?
 - Is the confidence claimed higher than the evidence supports?
@@ -486,6 +504,12 @@ is going to assert, ask the uncomfortable question:
   what someone said about it?
 - What would have to be true for this conclusion to be wrong, and did anyone
   check that?
+- Is anything MISSING? Read `sources_index` and ask what kind of source is not
+  in it. A survey that found its candidates through category listings has only
+  what that category is indexed under, and the best answer is often filed
+  somewhere else - a different category, an award or a guide, a venue rather
+  than its type. Name what is absent and where it would be found: absence is a
+  finding, and this is the last stage that can still go and get it.
 
 Write each challenge to `challenges` (context_append) as one line:
 `[!] <the claim> - <what is wrong with the support> - <what would settle it>`
@@ -504,8 +528,22 @@ Say when something holds. If a claim is well supported, write
 ever objects is indistinguishable from noise, and the reader cannot tell which
 of your objections to take seriously.
 
-If the analysis is sound throughout, say so and stop. You are not required to
-find fault.
+You are not required to invent fault. You are required to look: read the regions
+named above and say what you found, per claim. "It all looks fine" without that
+reading is the one answer this stage cannot give, because it is also what an
+adversary that never ran would produce, and the two are indistinguishable from
+outside.
+"""
+transition_prompt = """
+Decide the next move:
+- A challenge you just wrote needs evidence nobody has gathered, or you named a
+  kind of source missing from `sources_index` → respond with: survey, naming
+  what to go and get. Going back is the point of this stage existing before the
+  report rather than after it, and it is the ONLY remaining way to add anything
+  the survey missed. Prefer it whenever you named an absence: a gap you record
+  and do not fill is one the report ships with.
+- Every challenge is recorded and each one is either settled or is a caveat the
+  report can state honestly → respond with: summarize
 """
 
 [stages.challenge.transitions.survey]
@@ -515,6 +553,11 @@ transform = "compact"
 [stages.challenge.transitions.summarize]
 hint = "Challenges are recorded - write the overview"
 transform = "compact"
+# On the edge to the report, not on the one back to `survey`: a pass that found
+# a real gap should be able to go and fill it without first writing up why it is
+# leaving. This is the last edge before the deliverable, so it is where "the
+# adversarial pass actually ran" has to be provable.
+gate = { require_region_updated = "challenges", message = "Write this pass's challenges to `challenges` with context_append, one line each: `[!] <claim> - <what is wrong with the support> - <what would settle it>`, or `[ok] <claim> - <why the support is sufficient>` for the ones that hold. Include at least one line about what is MISSING from `sources_index` rather than wrong in it. The stage is not done until that region has them: a pass that leaves it empty is indistinguishable from one that never read anything." }
 
 [stages.challenge.transitions.error_recovery]
 condition = "error"

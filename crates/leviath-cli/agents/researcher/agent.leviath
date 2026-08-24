@@ -1,6 +1,6 @@
 [agent]
 name = "researcher"
-version = "0.4.2"
+version = "0.4.3"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 max_child_depth = 2
 entry_stage = "gather"
@@ -202,7 +202,7 @@ transform = "direct"
 [stages.summarize]
 mode = "autonomous"
 model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
-description = "Create a concise, well-organized summary"
+description = "Write up everything found, organized by theme"
 available_tools = ["write_file", "read_file"]
 max_iterations = 10
 system_prompt = """
@@ -224,8 +224,20 @@ Structure:
 - Open questions.
 - Sources - the numbered bibliography from `sources_index`.
 
-Keep it tight and skimmable. Every non-obvious claim must carry a linked
-`[[n]](<url>)` citation.
+Length follows the material: every claim in `claims` that bears on the question
+gets its line, and a claim is dropped only because it is irrelevant or
+unsupported, never to keep the page short. Be dense rather than brief - no
+throat-clearing, no restating the question, no summary of the summary - but do
+not compress by leaving findings out.
+
+This matters most when you are a worker in a fan-out. Then this report is not
+read by a person, it IS the hand-off: whatever you leave out is deleted from the
+run, because the agent that reads it cannot see your sources, your `claims`, or
+anything you decided was not worth the space. It has only this. A worker that
+returns a tidy page while its region holds five times as much has thrown away
+what it was paid to find.
+
+Every non-obvious claim must carry a linked `[[n]](<url>)` citation.
 
 A qualifier travels with the claim it qualifies. If the evidence says "yes, with
 offload" or "tight", or the figure came from one uncorroborated page, the
@@ -385,7 +397,13 @@ format         = { kind = "pinned", budget = "1%", seed = { literal = "Cite ever
 # 300K tokens of raw scrape carried into every later stage.
 raw_findings   = { kind = "temporary", budget = "30%", volatility = "grows", max_tokens = 60000 }
 # Extracted claims (with source refs) and cross-source conflicts.
-claims         = { kind = "sliding_window", max_items = 30, budget = "7%" }
+# The report is written FROM this region, so anything evicted here is a finding
+# the run paid for and cannot deliver. At 30 items that bound was reached long
+# before the reading was: on one measured run an agent read 8.8M tokens, spent
+# $35, and handed back 2,596 bytes - fewer than one that read 462K and spent
+# $2.41, because both filled the same 30 slots. Wide enough now that the budget
+# is what limits it, which is a limit that scales with the model.
+claims         = { kind = "sliding_window", max_items = 150, budget = "15%", volatility = "grows", max_tokens = 30000 }
 contradictions = { kind = "clearable",      budget = "3%" }
 
 # Synthesis workspace (compacts to a running history when it grows).
