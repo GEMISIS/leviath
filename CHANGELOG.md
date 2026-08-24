@@ -13,6 +13,16 @@ same list.
 
 ## Unreleased
 
+- Fixed: a run could be named with the model's scratch instead of a title. The
+  check that was meant to catch this was a length check, on the reasoning that
+  reasoning is longer than a title, so anything short got through: a chat
+  template's stop token (`<|end_of|`), the model reading the instruction back
+  ("drafting a short title (max 8 words, no quotes)"), and a model stuck
+  repeating itself ("response. response. response.") were all stored and shown
+  to people as the names of their runs. A title is now cut at the first control
+  token, and refused if it loops or paraphrases the instruction. A refused
+  reply leaves the run with no title, which is already how it falls back to
+  showing the task, and the reason is recorded on the run.
 - Fixed: `lev serve` announced itself before it had the port. A machine where
   something else already held 3000 saw `Leviath API server listening on
   http://127.0.0.1:3000` and then a bare `os error 48`, which reads as a server
