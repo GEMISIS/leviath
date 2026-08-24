@@ -13,6 +13,12 @@ same list.
 
 ## Unreleased
 
+- Added: `GET /api/update` reports how this copy of Leviath was installed and
+  the command that upgrades it, as the same JSON `lev update --check --json`
+  prints. The browser console had no way to ask, so it printed one hard-coded
+  `brew upgrade` at everyone, including the Windows users it could never work
+  for. Read-only, available without `--allow-admin`, and announced as the
+  `update.plan` capability.
 - Fixed: a run could be named with the model's scratch instead of a title. The
   check that was meant to catch this was a length check, on the reasoning that
   reasoning is longer than a title, so anything short got through: a chat

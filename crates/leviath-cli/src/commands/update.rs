@@ -708,6 +708,113 @@ pub struct UpdateEnv {
     pub migrations: &'static [Migration],
 }
 
+impl UpdateEnv {
+    /// The real machine, wired up for a caller that only intends to [`plan`].
+    ///
+    /// `plan` never touches `runner` or `confirm` - it works out what the
+    /// command *would* do and does none of it - so a caller that will not go on
+    /// to `execute_with` has nothing to supply for them. Both are filled with
+    /// refusals rather than no-ops, so a future caller that runs this env
+    /// through the executing path fails loudly instead of silently doing
+    /// nothing.
+    ///
+    /// Resolving the executable is the load-bearing part. A Homebrew `bin/lev`
+    /// is a symlink into the Cellar, and the Cellar path is the only place the
+    /// formula name - and so the channel - is written down, so the link has to
+    /// be followed before [`detect`] can read anything off it.
+    pub fn for_planning() -> Self {
+        Self::real(
+            std::sync::Arc::new(refuse_to_run),
+            std::sync::Arc::new(say_no),
+        )
+    }
+
+    /// The real machine, with the caller's own way to run a command and ask a
+    /// question. `lev update` passes a terminal's; the API passes refusals.
+    ///
+    /// Infallible on purpose. Every step here degrades to worse *detection*
+    /// rather than to an error: no home, no `brew`, or an executable path that
+    /// will not resolve all land in [`detect`]'s `Unknown` arm, which advises
+    /// re-installing. "I could not work out how you installed this" is an
+    /// answer; refusing to answer is not, and a `lev update` that failed
+    /// outright because it could not locate its own binary would be strictly
+    /// less useful than one that says so.
+    pub fn real(runner: CommandRunner, confirm: Confirm) -> Self {
+        let home = dirs::home_dir();
+        // A path that cannot be read, or cannot be canonicalized, is used as
+        // whatever it came out as. An empty one detects as `Unknown`.
+        let exe = std::env::current_exe().unwrap_or_default();
+        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+        Self {
+            exe,
+            agents_dir: crate::commands::setup::real_agents_dir(home.as_deref()),
+            home,
+            brew_prefix: brew_prefix(),
+            config_path: crate::config::Config::config_path(),
+            runner,
+            confirm,
+            migrations: MIGRATIONS,
+        }
+    }
+}
+
+/// The `runner` a planning-only environment carries: a loud refusal.
+///
+/// Not a no-op. A no-op runner would let a caller wire this env into
+/// `execute_with`, watch it print every step, and change nothing - a silent
+/// failure dressed as a successful update.
+fn refuse_to_run(_argv: &[String]) -> anyhow::Result<()> {
+    anyhow::bail!("this update environment was built for planning only, and cannot run commands")
+}
+
+/// The `confirm` a planning-only environment carries. Nothing is agreed to by
+/// something that is only working out what it would ask.
+fn say_no(_question: &str) -> bool {
+    false
+}
+
+/// What `brew --prefix` says, when there is a `brew` to ask.
+///
+/// Cached: this used to run once per `lev update`, and now also answers an HTTP
+/// route, where spawning a process per request to learn a thing that cannot
+/// change under a running server would be a waste worth noticing.
+pub fn brew_prefix() -> Option<PathBuf> {
+    static CACHED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            brew_prefix_from(
+                leviath_sys::child_command("brew")
+                    .arg("--prefix")
+                    .output()
+                    .ok(),
+            )
+        })
+        .clone()
+}
+
+/// The part of [`brew_prefix`] that is worth testing: what to make of whatever
+/// `brew --prefix` did or did not say.
+///
+/// Any failure is a `None` - it only ever adds evidence, and a machine without
+/// Homebrew is the ordinary case rather than an error. Empty output is a `None`
+/// for the same reason: an empty prefix would match every path under
+/// [`detect`]'s `starts_with`, which is the opposite of no evidence.
+///
+/// Takes the answer rather than a closure that produces one. A generic seam
+/// would be tidier to read and is measured per instantiation, so the arms this
+/// machine's own `brew` does not take would go uncovered however many closures
+/// the tests passed. The command is spawned once, inside the cache above, so
+/// taking it eagerly costs nothing.
+fn brew_prefix_from(output: Option<std::process::Output>) -> Option<PathBuf> {
+    let output = output?;
+    let prefix = String::from_utf8(output.stdout).ok()?;
+    let prefix = prefix.trim();
+    match prefix.is_empty() {
+        true => None,
+        false => Some(PathBuf::from(prefix)),
+    }
+}
+
 // ─── Execution ────────────────────────────────────────────────────────────────
 
 /// Ask, unless `--yes` has already answered.

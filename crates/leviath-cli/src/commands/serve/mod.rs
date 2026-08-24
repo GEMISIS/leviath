@@ -24,6 +24,7 @@ mod tls;
 mod tools;
 mod tree;
 mod types;
+mod update;
 mod websocket;
 
 #[cfg(test)]
@@ -130,6 +131,10 @@ fn api_router() -> Router<AppState> {
         .route("/api/mcp/servers/{name}/test", post(mcp::test_server))
         // Doctor - the same checks `lev doctor` runs, returned as data.
         .route("/api/doctor", get(doctor::run_doctor))
+        // Update - how this copy was installed, and what upgrades it. The
+        // console has no other way to know, and printed a macOS-only command
+        // to everyone because of it.
+        .route("/api/update", get(update::get_update))
         // Filesystem - directory browsing for the console's folder picker,
         // and the "New Folder" a browser cannot get from a native dialog.
         .route("/api/fs/dirs", get(fs::list_dirs).post(fs::create_dir))

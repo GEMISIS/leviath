@@ -1039,6 +1039,20 @@
         }
       }
     },
+    "/api/update": {
+      "get": {
+        "tags": [
+          "diagnostics"
+        ],
+        "summary": "How this copy was installed, and what upgrades it",
+        "description": "The same answer `lev update --check --json` prints, from the same planner, so a client never sends a user a command their own terminal disagrees with. `install_method` is one of `homebrew`, `scoop`, `cargo`, `script`, `unknown`. `binary.action` is `run` with a `commands` list of argv lists to run in order, or `advise` with a `message` to show. Read-only and available without `--allow-admin`: it works out what an update would do and does none of it.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
+      }
+    },
     "/api/fs/dirs": {
       "get": {
         "tags": [
