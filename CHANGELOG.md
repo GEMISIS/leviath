@@ -13,6 +13,14 @@ same list.
 
 ## Unreleased
 
+- Fixed: `lev serve` announced itself before it had the port. A machine where
+  something else already held 3000 saw `Leviath API server listening on
+  http://127.0.0.1:3000` and then a bare `os error 48`, which reads as a server
+  that started and crashed rather than one that never started. It binds first
+  now, and a taken port says so and names `--port`. The startup line reports the
+  address the socket actually got, so `--port 0` prints the port the system
+  chose instead of `:0`.
+
 - Fixed: `deep-researcher` carried the same ceiling just lifted from
   `researcher` - its report is written from `claims`, and `claims` was a 40-item
   sliding window, so a run above a fan-out of up to twelve workers could deliver
@@ -65,7 +73,6 @@ same list.
   going back to `survey` is available and when to take it. Both already had that
   edge and neither used it; an edge a transition prompt does not mention is one
   the model does not weigh.
-
 - Fixed: a per-model inference pool configured under the model's own name did
   nothing when the resolver reached that model through a gateway. The same model
   carries a different id per route - `claude-sonnet-5` direct,
