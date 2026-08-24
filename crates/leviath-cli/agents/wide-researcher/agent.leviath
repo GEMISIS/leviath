@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.4.6"
+version = "0.4.7"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 max_child_depth = 2
 entry_stage = "survey"
@@ -69,6 +69,15 @@ Reach for what a category filter cannot reach: awards and guides, a
 professional body's own roster, the "related" and "see also" edges out of a
 page you already trust, whatever an entry sits inside rather than the type it
 is filed under, and what the primary source says it is in its own words.
+
+Ask an index what is ON it. Do not name the entries you already have in the
+query: adding the three you know turns "what is on this list" into "confirm these
+are on this list", and the answer comes back about them. This is the failure mode
+that survives crossing indexes properly, because the query still looks like the
+right query. Measured: a run searched an awards guide - exactly the kind a
+category listing cannot reach - and appended three names it already had. The
+top-rated entry it was missing sits third in the results for the same search with
+those three names removed, on that guide's own page for it.
 
 Then ask the question that catches the filter: what would something in this
 field have to be for it NOT to appear in the indexes I used? Name one such thing

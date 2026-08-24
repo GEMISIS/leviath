@@ -11,6 +11,18 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+- Fixed: the research blueprints crossed to the right index and then asked it
+  the wrong question. Told to reach past category listings, a survey searched an
+  awards guide - exactly the kind a category filter cannot reach - and appended
+  three entries it already had to the query, which turns "what is on this list"
+  into "confirm these are on this list". The entry it was missing sits third in
+  the results for the same search without those three names, on that guide's own
+  page for it. The survey stages now say not to name what you already have in an
+  index query. This is the failure that survives crossing indexes properly,
+  because the query still looks like the right one.
+
 ## 0.5.0 - 2026-08-24
 
 - Fixed: naming a script provider as `default_provider` did not send any stage
