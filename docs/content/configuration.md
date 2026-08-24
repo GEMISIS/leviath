@@ -697,6 +697,18 @@ tokens_per_minute   = 100000
 
 Any other key you add is forwarded verbatim to the script's `initialize(config)`.
 
+`serves` is the one key that is not forwarded: it names the models this provider answers for, so a
+blueprint entry naming one of them with no provider can resolve here.
+
+```toml
+[model_providers.spark]
+serves = ["deepseek-v4-flash"]
+```
+
+Only needed by a script with no `list_models`; one that has it is asked directly and its answer
+wins. A provider that reports neither claims no models and can only be reached by a blueprint that
+pins it. See [preferring a script provider](/docs/providers#preferring-a-script-provider).
+
 ## `[[mcp_servers]]`
 
 [MCP](/docs/mcp) tool servers. `lev mcp add` writes these for you.

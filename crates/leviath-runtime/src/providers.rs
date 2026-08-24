@@ -58,11 +58,29 @@ impl ProviderRegistry {
     /// the start-up path, and an unreachable endpoint must cost a bounded wait
     /// rather than however long a connect takes to give up.
     ///
-    /// Script providers are deliberately not consulted. `get` compiles them on
-    /// demand, so priming would compile every `.rhai` provider on disk whether
-    /// or not the run touches one.
-    pub async fn prime_capabilities(&self, timeout: std::time::Duration) {
-        for (name, provider) in &self.providers {
+    /// Script providers are consulted only when `also` names one - in practice
+    /// the machine's `default_provider`. `get` compiles them on demand, so
+    /// priming the lot would compile every `.rhai` provider on disk whether or
+    /// not a run touches one; priming the one a machine has actually chosen
+    /// costs a single compile of a script that is about to be used anyway, and
+    /// it is what lets that provider answer [`Provider::serves_model`] and so
+    /// win an open route (issue #598).
+    pub async fn prime_capabilities(&self, timeout: std::time::Duration, also: Option<&str>) {
+        let mut targets: Vec<(String, Arc<dyn Provider>)> = self
+            .providers
+            .iter()
+            .map(|(name, provider)| (name.clone(), provider.clone()))
+            .collect();
+        // Only when it is not already registered natively: a native provider of
+        // the same name wins everywhere else, and priming it twice would be a
+        // second network call for one answer.
+        if let Some(name) = also
+            && !self.providers.contains_key(name)
+            && let Some(provider) = self.get(name)
+        {
+            targets.push((name.to_string(), provider));
+        }
+        for (name, provider) in targets {
             match tokio::time::timeout(timeout, provider.prime_capabilities()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => tracing::warn!(
@@ -99,6 +117,20 @@ impl ProviderRegistry {
     /// them.
     pub fn provider_names(&self) -> Vec<&str> {
         self.providers.keys().map(|k| k.as_str()).collect()
+    }
+
+    /// The script provider registered under `name`, when there is one and it is
+    /// not shadowed by a native provider of the same name.
+    ///
+    /// The narrow counterpart to [`Self::native_providers`]: it resolves one
+    /// name rather than enumerating, so it compiles exactly the script asked
+    /// for. That is what makes it safe on the resolve path, where enumerating
+    /// would compile every `.rhai` on disk.
+    pub fn script_provider_named(&self, name: &str) -> Option<Arc<dyn Provider>> {
+        if self.providers.contains_key(name) {
+            return None;
+        }
+        self.script_layer.as_ref()?.get_or_load(name)
     }
 
     /// Every natively registered provider, with the name it is registered under.
@@ -286,7 +318,7 @@ mod tests {
         reg.register("prime".to_string(), p);
         reg.register("other".to_string(), mock());
 
-        reg.prime_capabilities(std::time::Duration::from_secs(5))
+        reg.prime_capabilities(std::time::Duration::from_secs(5), None)
             .await;
         assert_eq!(primed.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
@@ -298,7 +330,7 @@ mod tests {
         let mut reg = ProviderRegistry::new();
         let (bad, bad_calls) = priming(PrimeOutcome::Fails);
         reg.register("bad".to_string(), bad);
-        reg.prime_capabilities(std::time::Duration::from_secs(5))
+        reg.prime_capabilities(std::time::Duration::from_secs(5), None)
             .await;
         assert_eq!(bad_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
@@ -312,7 +344,7 @@ mod tests {
         // With the clock paused this returns as soon as the timeout is the only
         // thing left to wait on, so a regression here fails by hanging the
         // suite rather than by sleeping through it.
-        reg.prime_capabilities(std::time::Duration::from_secs(10))
+        reg.prime_capabilities(std::time::Duration::from_secs(10), None)
             .await;
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
@@ -350,6 +382,118 @@ mod tests {
         // An unknown name resolves to nothing (layer returns None).
         assert!(!reg.has("nope"));
         assert!(reg.get("nope").is_none());
+    }
+
+    /// The narrow lookup that lets the resolve path reach one script provider
+    /// without enumerating them all.
+    #[test]
+    fn one_script_provider_resolves_by_name_and_a_native_shadows_it() {
+        use crate::script_provider::ScriptProviderLayer;
+        use std::collections::HashMap;
+
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["spark", "other"] {
+            std::fs::write(
+                dir.path().join(format!("{name}.rhai")),
+                "fn initialize(config) { #{} }\n\
+                 fn inference(state, request) { #{ content: \"ok\" } }",
+            )
+            .unwrap();
+        }
+        let layer = ScriptProviderLayer::new(
+            dir.path().to_path_buf(),
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            Vec::new(),
+        );
+        let mut reg = ProviderRegistry::new().with_script_layer(Arc::new(layer));
+
+        // The one asked for, and nothing else.
+        assert!(reg.script_provider_named("spark").is_some());
+        assert!(reg.script_provider_named("nope").is_none());
+
+        // A native provider of the same name shadows the script, so this
+        // answers None rather than handing back a provider `get` would not.
+        reg.register("spark".to_string(), mock());
+        assert!(reg.script_provider_named("spark").is_none());
+    }
+
+    /// A registry with no script layer at all has no script to name.
+    #[test]
+    fn a_registry_without_a_script_layer_names_no_script_provider() {
+        assert!(
+            ProviderRegistry::new()
+                .script_provider_named("spark")
+                .is_none()
+        );
+    }
+
+    /// Priming reaches the script provider a machine names as its default, so
+    /// it can answer what it serves on the synchronous resolve path (#598).
+    #[tokio::test]
+    async fn priming_also_reaches_the_named_script_provider() {
+        use crate::script_provider::ScriptProviderLayer;
+        use std::collections::HashMap;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("spark.rhai"),
+            "fn initialize(config) { #{} }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }\n\
+             fn list_models(state) { [ #{ id: \"local-fast\", display_name: \"F\", \
+             max_context_tokens: 4096, max_output_tokens: 512 } ] }",
+        )
+        .unwrap();
+        let layer = ScriptProviderLayer::new(
+            dir.path().to_path_buf(),
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            Vec::new(),
+        );
+        let reg = ProviderRegistry::new().with_script_layer(Arc::new(layer));
+
+        // Unprimed it claims nothing, which is the state that made a local
+        // model unreachable.
+        assert_eq!(
+            reg.get("spark")
+                .expect("resolves")
+                .serves_model("local-fast"),
+            None
+        );
+
+        reg.prime_capabilities(std::time::Duration::from_secs(5), Some("spark"))
+            .await;
+
+        assert_eq!(
+            reg.get("spark")
+                .expect("resolves")
+                .serves_model("local-fast"),
+            Some("local-fast".to_string())
+        );
+    }
+
+    /// Naming a provider that is already registered natively does not prime it
+    /// twice: one answer is worth one network call.
+    #[tokio::test]
+    async fn naming_a_native_provider_does_not_prime_it_twice() {
+        let mut reg = ProviderRegistry::new();
+        let (p, primed) = priming(PrimeOutcome::Ok);
+        reg.register("prime".to_string(), p);
+
+        reg.prime_capabilities(std::time::Duration::from_secs(5), Some("prime"))
+            .await;
+        assert_eq!(primed.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// Naming something that resolves to nothing is not an error - a machine
+    /// may name a default it has not set up yet.
+    #[tokio::test]
+    async fn naming_a_provider_that_does_not_resolve_is_harmless() {
+        let reg = ProviderRegistry::new();
+        reg.prime_capabilities(std::time::Duration::from_secs(5), Some("nope"))
+            .await;
     }
 
     #[tokio::test]

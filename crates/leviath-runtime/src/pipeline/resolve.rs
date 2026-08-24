@@ -140,6 +140,19 @@ pub fn resolve_stage_candidates(
         // a named model's routes do.
         let mut candidates_for_model = registry.native_providers();
         candidates_for_model.sort_by_key(|(name, _)| *name != defaults.provider);
+        // A script provider is not in `native_providers` - it is compiled on
+        // demand rather than enumerated - so an open route could never land on
+        // one, and a local box serving one fast model was unreachable however
+        // the machine set `default_provider` (issue #598). The *default*
+        // provider is asked as well, which costs one compile of a script this
+        // machine has explicitly chosen, and leaves every other script on disk
+        // untouched. Put first, because being the default is what it means.
+        if let Some(script) = registry
+            .script_provider_named(&defaults.provider)
+            .filter(|_| model_cfg.allow_user_default)
+        {
+            candidates_for_model.insert(0, (defaults.provider.as_str(), script));
+        }
         let mut routed = false;
         for (name, provider) in candidates_for_model {
             if let Some(id) = provider.serves_model(key) {
@@ -660,6 +673,122 @@ mod tests {
             parameters: HashMap::new(),
             request_timeout_secs: None,
         }
+    }
+
+    /// A registry whose only provider is a script one, named as the default.
+    ///
+    /// Built from a real script on disk because that is the only way to reach
+    /// the lazy-resolve path: a script provider is compiled on demand rather
+    /// than registered, which is exactly why it was invisible to an open route.
+    fn registry_with_script_default(models: &[&str]) -> (ProviderRegistry, tempfile::TempDir) {
+        use crate::script_provider::ScriptProviderLayer;
+        let dir = tempfile::tempdir().unwrap();
+        let listed = models
+            .iter()
+            .map(|m| {
+                format!(
+                    "#{{ id: \"{m}\", display_name: \"{m}\", max_context_tokens: 4096, \
+                     max_output_tokens: 512 }}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        std::fs::write(
+            dir.path().join("spark.rhai"),
+            format!(
+                "fn initialize(config) {{ #{{}} }}\n\
+                 fn inference(state, request) {{ #{{ content: \"ok\" }} }}\n\
+                 fn list_models(state) {{ [ {listed} ] }}"
+            ),
+        )
+        .unwrap();
+        let layer = ScriptProviderLayer::new(
+            dir.path().to_path_buf(),
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            Vec::new(),
+        );
+        (
+            ProviderRegistry::new().with_script_layer(Arc::new(layer)),
+            dir,
+        )
+    }
+
+    /// The whole of issue #598: a stage naming a model with no provider resolves
+    /// to the script provider the machine named as its default.
+    ///
+    /// Before this, `native_providers` was the only thing asked and it does not
+    /// enumerate script providers, so a local box serving exactly the model the
+    /// blueprint asked for won nothing and the stage went elsewhere.
+    #[tokio::test]
+    async fn a_script_provider_named_as_default_wins_an_open_route() {
+        let (registry, _dir) = registry_with_script_default(&["local-fast"]);
+        registry
+            .prime_capabilities(std::time::Duration::from_secs(5), Some("spark"))
+            .await;
+        let defaults = ModelDefaults {
+            provider: "spark".to_string(),
+            model: None,
+            fallback_order: Vec::new(),
+        };
+
+        let picked = resolve_stage_candidates(
+            &model_cfg_open(vec!["local-fast"]),
+            None,
+            &defaults,
+            &registry,
+        );
+
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].provider, "spark");
+        assert_eq!(picked[0].model, "local-fast");
+    }
+
+    /// The preference decides the route, not the model, so a blueprint that
+    /// tiers its stages keeps each stage's own model. This is what separates it
+    /// from `default_model`, which pins one model everywhere.
+    #[tokio::test]
+    async fn preferring_a_script_provider_keeps_each_stage_on_its_own_model() {
+        let (registry, _dir) = registry_with_script_default(&["cheap-model", "costly-model"]);
+        registry
+            .prime_capabilities(std::time::Duration::from_secs(5), Some("spark"))
+            .await;
+        let defaults = ModelDefaults {
+            provider: "spark".to_string(),
+            model: None,
+            fallback_order: Vec::new(),
+        };
+
+        for model in ["cheap-model", "costly-model"] {
+            let picked =
+                resolve_stage_candidates(&model_cfg_open(vec![model]), None, &defaults, &registry);
+            assert_eq!(picked[0].provider, "spark");
+            assert_eq!(picked[0].model, model, "each stage keeps its own model");
+        }
+    }
+
+    /// A stage that pins its own provider opts out of the machine's preference,
+    /// and that has to hold for a script provider too.
+    #[tokio::test]
+    async fn a_stage_that_refuses_the_user_default_does_not_get_the_script() {
+        let (registry, _dir) = registry_with_script_default(&["local-fast"]);
+        registry
+            .prime_capabilities(std::time::Duration::from_secs(5), Some("spark"))
+            .await;
+        let defaults = ModelDefaults {
+            provider: "spark".to_string(),
+            model: None,
+            fallback_order: Vec::new(),
+        };
+        let mut cfg = model_cfg_open(vec!["local-fast"]);
+        cfg.allow_user_default = false;
+
+        let picked = resolve_stage_candidates(&cfg, None, &defaults, &registry);
+
+        // Nothing else serves it, so the stage falls through to the blueprint's
+        // own first entry rather than silently landing on the script.
+        assert!(picked.iter().all(|c| c.provider != "spark"), "{picked:?}");
     }
 
     fn registry_with(providers: &[&str]) -> ProviderRegistry {

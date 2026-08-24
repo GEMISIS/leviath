@@ -167,7 +167,14 @@ pub async fn setup_daemon_host_with(
     // budget sized against it (#360). Awaited rather than spawned so the first
     // run has the answer instead of racing it; failures are warnings.
     providers
-        .prime_capabilities(std::time::Duration::from_secs(PROVIDER_PRIME_TIMEOUT_SECS))
+        .prime_capabilities(
+            std::time::Duration::from_secs(PROVIDER_PRIME_TIMEOUT_SECS),
+            // The machine's default, so a script provider named there can
+            // answer what it serves and win an open route (issue #598). No
+            // effect when the default is a native provider, which is already
+            // in the list.
+            Some(config.default_provider.as_str()),
+        )
         .await;
     // MCP connections are shared across agents; the workdir here only seeds the
     // (discarded) built-ins - each agent gets its own over its own workdir.

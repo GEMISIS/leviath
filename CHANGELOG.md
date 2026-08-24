@@ -13,6 +13,18 @@ same list.
 
 ## Unreleased
 
+- Fixed: naming a script provider as `default_provider` did not send any stage
+  to it. A blueprint entry that names a model and no provider is resolved by
+  asking the configured providers which of them serves it, and script providers
+  were not among those asked - they are compiled the first time they are used
+  rather than enumerated. So a machine with a local model serving exactly what
+  the blueprint asked for sent every stage somewhere else, and setting
+  `default_provider` changed nothing. The provider named as the default is now
+  asked too, which is one script compiled rather than every script on disk. It
+  answers from its own `list_models`, or from a new
+  `[model_providers.<name>] serves` list for a script that has none. Per-stage
+  models are unaffected: this decides the route, so a tiered blueprint keeps
+  each stage on the model its author picked.
 - Fixed: a turn in which the model only wrote to its own context left no trace
   in the stage log. Those calls are resolved by the dispatcher rather than the
   tool lane, and the lane is where `[tool]` lines are written, so a batch made

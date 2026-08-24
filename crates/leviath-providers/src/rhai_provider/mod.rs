@@ -30,7 +30,7 @@ mod meta;
 use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -128,6 +128,18 @@ pub struct RhaiProvider {
     /// script may read via `env_var`. Held so each per-call execution engine is
     /// built with the same policy the init engine was.
     env_allowlist: Arc<Vec<String>>,
+    /// Model ids this script serves, as `list_models` reported them.
+    ///
+    /// Filled by [`Provider::prime_capabilities`] and read by
+    /// [`Provider::serves_model`], which is synchronous and on the resolve path
+    /// so it cannot go and ask. Empty until priming runs, and priming only runs
+    /// for the provider a machine names as its default - a script is compiled
+    /// on demand, and asking every script on disk what it serves is the cost
+    /// the registry exists to avoid.
+    served_models: Arc<Mutex<Vec<String>>>,
+    /// Model ids `[model_providers.<name>] serves` declares, for a script with
+    /// no `list_models` to ask. Static, so it needs no priming.
+    declared_models: Arc<Vec<String>>,
 }
 
 /// What a script provider is configured with, as distinct from the script
@@ -143,6 +155,9 @@ pub struct ScriptProviderSettings {
     pub init_config: serde_json::Value,
     /// Per-model capabilities the config declares.
     pub caps: HashMap<String, ModelCapabilityOverride>,
+    /// `[model_providers.<name>] serves`: model ids this script serves, for one
+    /// that has no `list_models` to be asked. Empty is the ordinary case.
+    pub serves: Vec<String>,
     /// Rate limiting, when configured.
     pub rate_limit: Option<RateLimitConfig>,
     /// Per-request timeout, when configured.
@@ -185,6 +200,7 @@ impl RhaiProvider {
             name,
             init_config,
             caps,
+            serves,
             rate_limit,
             request_timeout_secs,
             env_allowlist,
@@ -224,6 +240,8 @@ impl RhaiProvider {
             has_count_tokens,
             has_list_models,
             env_allowlist,
+            served_models: Arc::new(Mutex::new(Vec::new())),
+            declared_models: Arc::new(serves),
         })
     }
 
@@ -521,6 +539,63 @@ impl Provider for RhaiProvider {
             Some(o) => o.apply_to(base),
             None => base,
         }
+    }
+
+    /// Whether this script serves `model_key`, for resolving an open route.
+    ///
+    /// The default implementation reads the compiled-in capability table, which
+    /// a script provider does not have: [`Self::capabilities`] answers the same
+    /// `base` for every model it has no override for, so the default said "no"
+    /// to everything. A local box serving one fast model could therefore never
+    /// win a blueprint entry that named that model, however the machine set
+    /// `default_provider` (issue #598).
+    ///
+    /// Three sources, cheapest evidence last:
+    ///
+    /// 1. What `list_models` reported, filled by [`Self::prime_capabilities`].
+    ///    Matched on the last path segment as well as whole, because a gateway
+    ///    namespaces its ids (`deepseek/deepseek-v4-flash`) and a blueprint
+    ///    names the model (`deepseek-v4-flash`).
+    /// 2. `[model_providers.<name>] serves`, for a script with no `list_models`
+    ///    to ask. Static, so it works with no priming at all.
+    /// 3. A `[model_capabilities.<model>]` entry, which is someone describing
+    ///    that model for this provider and so saying it serves it.
+    ///
+    /// Deliberately no family-shaped guess. Answering from a default-shaped
+    /// table is how a provider comes to claim every model in existence, which
+    /// [`Provider::serves_model_from_table`] documents having measured.
+    fn serves_model(&self, model_key: &str) -> Option<String> {
+        let served = leviath_core::sync::lock(&self.served_models);
+        if let Some(id) = served
+            .iter()
+            .find(|id| id.as_str() == model_key || id.rsplit('/').next() == Some(model_key))
+        {
+            return Some(id.clone());
+        }
+        drop(served);
+        if self.declared_models.iter().any(|m| m == model_key)
+            || self.capability_overrides.contains_key(model_key)
+        {
+            return Some(model_key.to_string());
+        }
+        None
+    }
+
+    /// Ask the script what it serves, once, so [`Self::serves_model`] can answer
+    /// on the synchronous resolve path.
+    ///
+    /// A script with no `list_models` reports nothing and stays on its
+    /// `serves` list; a script whose call fails leaves the catalogue empty,
+    /// which reads as "claims nothing" rather than as an error - the same
+    /// degradation every other provider's priming has.
+    async fn prime_capabilities(&self) -> Result<()> {
+        if !self.has_list_models {
+            return Ok(());
+        }
+        let models = self.list_models().await?;
+        let ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
+        *leviath_core::sync::lock(&self.served_models) = ids;
+        Ok(())
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {

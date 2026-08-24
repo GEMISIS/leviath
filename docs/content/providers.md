@@ -164,6 +164,12 @@ In order:
    not set `allow_user_default = false`. Every entry in the stage's `models` on that provider moves
    to the front, keeping the blueprint's order among them. This is what a preference means: your
    provider first, then whatever the blueprint asked for.
+   An entry that names a model and **no** provider is an *open route*: the providers configured
+   here are asked which of them serves that model, and yours is asked first. That is how the
+   bundled agents run on whichever key you have without ever naming it. A
+   [script provider](/docs/rhai-providers) is asked too when it is the one you named as
+   `default_provider` - see [preferring a script provider](#preferring-a-script-provider) for what
+   it has to report before it can answer.
 3. Your `default_model`, when it is set, first among the entries from step 2. It leads even when the
    blueprint lists that same provider with a different model: `default_provider = "ollama"` with
    `default_model = "qwen3.8:latest"` runs on `qwen3.8:latest`, and the blueprint's own
@@ -224,8 +230,8 @@ OpenRouter serves it as `openai/gpt-5.5`, without the blueprint knowing either i
 
 The [bundled agents](/docs/agent-catalog) name models rather than routes, so any configured key
 works out of the box: whichever provider you set up is asked which of the listed models it serves.
-Each blueprint's own order still decides which model is tried first, and a custom Rhai provider is
-never consulted for an open route. Naming yours as the default is what puts it in front:
+Each blueprint's own order still decides which model is tried first. Naming yours as the default is
+what puts it in front:
 
 ```toml
 default_provider = "openrouter"
@@ -258,6 +264,62 @@ model = { models = ["claude-sonnet-5", { provider = "ollama", model = "qwen3.5:9
 
 A model no configured provider serves is skipped, with a warning naming it, and the stage falls
 through to the next model listed.
+
+### Preferring a script provider
+
+A [script provider](/docs/rhai-providers) is preferred the same way any other is - name it as your
+`default_provider` and stages start there, each on the model its author picked for it:
+
+```toml
+default_provider = "spark"
+```
+
+One extra thing is true of a script provider, and it is worth knowing because the failure is
+silent: it has to be able to say **which models it serves**, or there is nothing for the preference
+to prefer and every stage quietly goes somewhere else.
+
+Two ways it can say so, and the first needs nothing from you:
+
+**Its `list_models`.** A script that implements `list_models(state)` is asked once at start-up and
+claims whatever it reports. Every provider script in [the examples](/docs/rhai-providers) does this
+already.
+
+**Or `serves`, in config.** For a script with no `list_models` to be asked:
+
+```toml
+[model_providers.spark]
+serves = ["deepseek-v4-flash"]
+```
+
+A provider that reports neither claims nothing, and can then only be reached by a blueprint that
+pins it - `{ provider = "spark", model = "..." }` - which is worth knowing before concluding the
+preference is broken.
+
+> [!NOTE]
+> Only the provider you name as `default_provider` is asked. Every other script on disk is left
+> alone, because a script is compiled the first time it is used and asking all of them what they
+> serve would compile every `.rhai` file on the machine before any run started.
+
+Two commands settle whether it worked, and are much faster than a run:
+
+```bash
+lev models list --provider spark   # does it claim the model at all
+lev validate <agent>               # which model each stage would actually use here
+```
+
+`lev validate` is the one that answers the real question. On a machine with `default_provider =
+"spark"` it prints the route per stage, so a tiered blueprint shows its shape intact:
+
+```
+Models this install would use:
+  cheap            spark/deepseek-v4-flash
+  deciding         spark/deepseek-v4-max
+  default_provider = spark, default_model = (unset)
+```
+
+Both stages on your provider, each still on the model its author chose. Add `default_model` and
+that collapses to one model everywhere, with the blueprint's own choice printed underneath as the
+substitution it is.
 
 > [!WARNING]
 > Ollama needs no key, so it is registered whether or not a server is running. Leave

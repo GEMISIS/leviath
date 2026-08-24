@@ -43,6 +43,9 @@ pub struct ScriptProviderSpec {
     /// The `config` map passed to the script's `initialize` (base_url, api_key,
     /// and any extra keys), pre-assembled by the CLI.
     pub init_config: serde_json::Value,
+    /// `serves`: the model ids this script answers for, so it can win an open
+    /// route without a `list_models` to be asked. Empty is the ordinary case.
+    pub serves: Vec<String>,
 }
 
 /// Everything a script-provider load reads out of `config.toml`.
@@ -318,6 +321,7 @@ impl ScriptProviderLayer {
                 name: name.to_string(),
                 init_config,
                 caps: config.default_caps.clone(),
+                serves: spec.map(|s| s.serves.clone()).unwrap_or_default(),
                 rate_limit,
                 request_timeout_secs: config.request_timeout_secs,
                 env_allowlist: config.env_allowlist.clone(),
@@ -465,6 +469,85 @@ mod tests {
             overrides,
             ..Default::default()
         }
+    }
+
+    /// A machine whose `default_provider` is a script provider can win an open
+    /// route, which is the whole of issue #598.
+    ///
+    /// The failing shape: a local box serves one fast model, every bundled
+    /// blueprint names that model with no provider, and the run goes remote
+    /// anyway. `native_providers` does not enumerate script providers - they
+    /// are compiled on demand - so the open route was offered to every built-in
+    /// and never to the one the user had actually chosen. Setting
+    /// `default_provider` changed nothing, because there was no route it was
+    /// eligible to win.
+    #[tokio::test]
+    async fn a_script_provider_named_as_default_can_answer_what_it_serves() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "spark.rhai",
+            "fn initialize(config) { #{ ok: true } }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }\n\
+             fn list_models(state) { [ #{ id: \"deepseek-v4-flash\" } ] }",
+        );
+        let l = layer(dir.path().to_path_buf());
+        let provider = l.get_or_load("spark").expect("the script loads");
+
+        // Before priming it claims nothing: `serves_model` is synchronous and
+        // on the resolve path, so it cannot go and ask.
+        assert_eq!(provider.serves_model("deepseek-v4-flash"), None);
+
+        provider.prime_capabilities().await.unwrap();
+
+        // After priming it answers for the model its own catalogue reports, and
+        // still refuses one it does not - a provider that claimed everything
+        // would be worse than one that claimed nothing.
+        assert_eq!(
+            provider.serves_model("deepseek-v4-flash"),
+            Some("deepseek-v4-flash".to_string())
+        );
+        assert_eq!(provider.serves_model("claude-opus-5"), None);
+    }
+
+    /// A script with no `list_models` says what it serves in config instead, so
+    /// the feature does not depend on a script implementing an optional entry
+    /// point. Static, so it needs no priming at all.
+    #[tokio::test]
+    async fn a_script_provider_can_declare_what_it_serves_in_config() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "spark.rhai",
+            "fn initialize(config) { #{ ok: true } }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }",
+        );
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "spark".to_string(),
+            ScriptProviderSpec {
+                serves: vec!["deepseek-v4-flash".to_string()],
+                ..Default::default()
+            },
+        );
+        let l = ScriptProviderLayer::with_config_source(
+            dir.path().to_path_buf(),
+            Box::new(move || {
+                Arc::new(ScriptProviderConfig {
+                    overrides: overrides.clone(),
+                    ..Default::default()
+                })
+            }),
+            ScriptProviderLayer::build_executor(None),
+        );
+        let provider = l.get_or_load("spark").expect("the script loads");
+
+        // No priming, and no `list_models` to prime from.
+        assert_eq!(
+            provider.serves_model("deepseek-v4-flash"),
+            Some("deepseek-v4-flash".to_string())
+        );
+        assert_eq!(provider.serves_model("claude-opus-5"), None);
     }
 
     /// The id of the first model `hot` reports - which this script sets to
