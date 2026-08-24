@@ -1,6 +1,6 @@
 [agent]
 name = "data-analyst"
-version = "0.1.3"
+version = "0.1.4"
 description = "Data analyst - searches the web for data on a subject, builds a clean CSV of it, and hands back a ready-to-use summary of what the numbers say"
 entry_stage = "scope"
 
@@ -309,10 +309,15 @@ caveats       = { kind = "pinned", budget = "2%", volatility = "grows" }
 # `rewritten`, which assumes the whole region changes every turn and so caches
 # none of it - measured at 4% cache hits on a run where this region held 280K
 # tokens, every one of them re-sent and re-paid on every single inference.
-# `max_tokens` is the ceiling the percentage alone stopped providing: 30% was
-# written against a 200K-token window, and the same 30% of a 1M-token model is
-# 300K tokens of raw scrape carried into every later stage.
-raw_sources   = { kind = "temporary", budget = "25%", volatility = "grows", max_tokens = 50000 }
+# The percentage is what sizes it, and it is lower than it looks: this region is
+# re-sent on every inference for the rest of the stage, so its size multiplies
+# cost and latency rather than being paid once. 30% was written against a
+# 200K-token window and became 300K tokens of raw scrape on a 1M-token model,
+# which is where a measured run spent most of $137. `min_tokens` keeps a small
+# window from resolving to less than one fetched page; `max_tokens` is a
+# backstop for a window nobody ships yet, deliberately far above the percentage
+# so that the percentage, not the cap, is what decides on every model in use.
+raw_sources   = { kind = "temporary", budget = "7%", volatility = "grows", min_tokens = 14000, max_tokens = 125000 }
 # The workers' consolidated rows, on the way into the merge. Its budget is what
 # each worker's share is divided from, so it gets the largest slice here.
 worker_rows   = { kind = "clearable", budget = "40%" }

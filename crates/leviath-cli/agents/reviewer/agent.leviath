@@ -1,6 +1,6 @@
 [agent]
 name = "reviewer"
-version = "0.2.3"
+version = "0.2.4"
 description = "Code review agent - discover, scan, review the areas in parallel, then deep review and report, with error recovery and multi-provider fallback"
 entry_stage = "discover"
 
@@ -371,10 +371,15 @@ worker_findings = { kind = "clearable", budget = "20%" }
 # `rewritten`, which assumes the whole region changes every turn and so caches
 # none of it - measured at 4% cache hits on a run where this region held 280K
 # tokens, every one of them re-sent and re-paid on every single inference.
-# `max_tokens` is the ceiling the percentage alone stopped providing: 30% was
-# written against a 200K-token window, and the same 30% of a 1M-token model is
-# 300K tokens of raw scrape carried into every later stage.
-findings        = { kind = "temporary", budget = "20%", volatility = "grows", max_tokens = 40000 }
+# The percentage is what sizes it, and it is lower than it looks: this region is
+# re-sent on every inference for the rest of the stage, so its size multiplies
+# cost and latency rather than being paid once. 30% was written against a
+# 200K-token window and became 300K tokens of raw scrape on a 1M-token model,
+# which is where a measured run spent most of $137. `min_tokens` keeps a small
+# window from resolving to less than one fetched page; `max_tokens` is a
+# backstop for a window nobody ships yet, deliberately far above the percentage
+# so that the percentage, not the cap, is what decides on every model in use.
+findings        = { kind = "temporary", budget = "6%", volatility = "grows", min_tokens = 12000, max_tokens = 100000 }
 severity_index  = { kind = "pinned",    budget = "2%" }
 report          = { kind = "clearable", budget = "7%" }
 
