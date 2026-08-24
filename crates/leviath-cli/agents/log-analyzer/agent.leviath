@@ -352,15 +352,13 @@ worker_findings = { kind = "clearable", budget = "12%" }
 # `rewritten`, which assumes the whole region changes every turn and so caches
 # none of it - measured at 4% cache hits on a run where this region held 280K
 # tokens, every one of them re-sent and re-paid on every single inference.
-# The percentage is what sizes it, and it is lower than it looks: this region is
-# re-sent on every inference for the rest of the stage, so its size multiplies
-# cost and latency rather than being paid once. 30% was written against a
-# 200K-token window and became 300K tokens of raw scrape on a 1M-token model,
-# which is where a measured run spent most of $137. `min_tokens` keeps a small
-# window from resolving to less than one fetched page; `max_tokens` is a
-# backstop for a window nobody ships yet, deliberately far above the percentage
-# so that the percentage, not the cap, is what decides on every model in use.
-logs            = { kind = "temporary",       budget = "8%", volatility = "grows", min_tokens = 16000, max_tokens = 150000 }
+# Sized by the percentage alone. An absolute ceiling was tried here and removed:
+# it bound on every model above 200K, so the percentage - which is the whole
+# mechanism for scaling with the model in front of you - decided nothing across
+# the range anyone runs on. The size was never the fault anyway. 280K tokens
+# re-sent at 4% cached is expensive; the same 280K mostly cached is not, and the
+# `volatility` above is what makes the difference.
+logs            = { kind = "temporary",       budget = "30%", volatility = "grows" }
 scripts         = { kind = "compacting",      budget = "20%", compact_at = "80%", volatility = "grows" }
 scripts_history = { kind = "compact_history", source_region = "scripts", budget = "3%", volatility = "grows" }
 

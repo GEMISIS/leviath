@@ -36,20 +36,20 @@ same list.
   now, and a taken port says so and names `--port`. The startup line reports the
   address the socket actually got, so `--port 0` prints the port the system
   chose instead of `:0`.
-- Changed: the accumulating regions in the bundled blueprints are sized by their
-  percentage again, rather than by an absolute cap that overrode it. Capping a
-  `30%` region at 60,000 tokens stopped it ballooning on a large model, but the
-  cap then decided the size on every model above 200K and the percentage decided
-  nothing across the whole range anyone runs on. Each is now a lower percentage
-  with guard-rails either side: `min_tokens` so a small window does not resolve
-  the region below one fetched page, and `max_tokens` set far enough above what
-  the percentage yields to be a backstop for a window nobody ships yet. A
-  `raw_findings` region now resolves to 16K at 200K, 83K at 1M and 150K at 2M,
-  where before it was 60K at every one of them.
-- Changed: the test behind those regions is keyed on the region's kind rather
-  than on how large its percentage looks. It previously examined only regions at
-  20% or more, which stopped covering anything the moment those percentages were
-  lowered - it caught its own blind spot through the vacuity check rather than
+- Fixed: the accumulating regions in the bundled blueprints are sized by their
+  percentage alone again. An absolute `max_tokens` had been added alongside the
+  percentage to stop a `30%` region resolving to 300,000 tokens on a 1M-token
+  model, but a ceiling low enough to do that binds on every model above the
+  window it was picked for, so from 200K upward the cap decided the size and the
+  percentage decided nothing. A region that resolves to the same number on a
+  200K model and a 1M one is not percentage-sized. The size was not the fault:
+  280,000 tokens re-sent at 4% cached is expensive and the same 280,000 mostly
+  cached is not, and the `volatility` declaration is what changed that.
+- Changed: the test behind those regions asserts the `volatility` declaration
+  and no longer requires an absolute ceiling, and is keyed on the region's kind
+  rather than on how large its percentage looks. It previously examined only
+  regions at 20% or more, which stopped covering anything the moment those
+  percentages moved - it reported that through its vacuity check rather than
   passing on an empty set.
 
 - Fixed: `deep-researcher` carried the same ceiling just lifted from
