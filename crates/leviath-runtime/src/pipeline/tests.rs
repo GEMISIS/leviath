@@ -4094,6 +4094,17 @@ async fn dispatch_all_inline_batch_is_not_journaled() {
     // A batch the dispatcher fully resolves inline never reaches the lane; its
     // results land in the window, which the snapshot path persists - a batch
     // record would be pure noise.
+    //
+    // Deliberate, and worth stating why, because it looks like an omission:
+    // `restore_pending_batch` replays a journaled batch by landing its recorded
+    // results in the conversation, and it does *not* re-apply a context tool's
+    // write. Journaling this batch would mean a crash between the append and
+    // the next snapshot restores a turn saying `context_write: ok` over a
+    // region that never got the content - a silent divergence far worse than
+    // the missing record. Unjournaled, the batch is simply re-issued.
+    //
+    // The observability half of that gap is closed by the `[tool]` lines the
+    // test below asserts, which carry no recovery meaning at all.
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let (ptx, mut prx) = mpsc::unbounded_channel();
     let mut world = World::new();
@@ -4116,6 +4127,82 @@ async fn dispatch_all_inline_batch_is_not_journaled() {
     assert!(world.get::<ReadyToInfer>(e).is_some());
     assert!(jrx.try_recv().is_err());
     assert!(prx.try_recv().is_err(), "no batch record for inline-only");
+}
+
+/// A batch of only inline-resolved calls still says what it did.
+///
+/// It returns before `collect_tools`, which is where every other batch gets its
+/// `[tool]` lines, so it used to leave no trace a person could read: nothing in
+/// `logs.log`, nothing in the journal, and yet `meta.tool_calls` counted it. A
+/// run could report 45 tool calls beside a stage log holding none of them,
+/// which is how an empty activity panel read as a dropped-log bug rather than
+/// as the model having only written to its own context (issues #589, #595).
+#[tokio::test]
+async fn dispatch_logs_an_all_inline_batch_it_would_otherwise_swallow() {
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![
+                ctx_call("c1", "notes", "hi"),
+                ctx_call("c2", "notes", "there"),
+            ]),
+            notes_window(),
+            StageCursor { index: 2 },
+            StageIoBuffer::default(),
+            ReadyForTools,
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    assert!(world.get::<ReadyToInfer>(e).is_some(), "nothing to await");
+    let buf = world
+        .get::<StageIoBuffer>(e)
+        .expect("the buffer is still there");
+    // One line per call, on the stage the run is actually on, in call order.
+    assert_eq!(buf.logs.len(), 2, "one line per call: {:?}", buf.logs);
+    assert!(buf.logs.iter().all(|(idx, _)| *idx == 2));
+    assert!(
+        buf.logs[0].1.starts_with("[tool] context_write:"),
+        "{:?}",
+        buf.logs[0]
+    );
+    assert!(
+        buf.logs[1].1.starts_with("[tool] context_write:"),
+        "{:?}",
+        buf.logs[1]
+    );
+    // The readable output stream stays empty: the model said nothing here, and
+    // claiming otherwise is what made the other panel misleading.
+    assert!(buf.output.is_empty());
+}
+
+/// The same batch on an agent with no buffer (a `lev run` world, or a test)
+/// dispatches exactly as before rather than panicking on the missing component.
+#[tokio::test]
+async fn dispatch_all_inline_without_a_buffer_still_advances() {
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![ctx_call("c1", "notes", "hi")]),
+            notes_window(),
+            StageCursor { index: 0 },
+            ReadyForTools,
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+    assert!(world.get::<ReadyToInfer>(e).is_some());
 }
 
 #[tokio::test]
