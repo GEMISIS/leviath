@@ -13,6 +13,31 @@ same list.
 
 ## Unreleased
 
+- Fixed: a per-model inference pool configured under the model's own name did
+  nothing when the resolver reached that model through a gateway. The same model
+  carries a different id per route - `claude-sonnet-5` direct,
+  `anthropic/claude-sonnet-5` through OpenRouter - and the table matched exactly,
+  so the operator had to know which spelling the resolver would land on and got
+  no warning when they guessed the other one; the pool silently stayed at the
+  global default. A bare name now covers every route to that model. A full
+  gateway id stays specific to the route it names and wins for that route when
+  both are written, and Ollama size tags keep their own pools, so a 70b never
+  inherits a 9b's limit.
+- Fixed: the bundled blueprints left their bulk `temporary` regions - the ones
+  tool results accumulate in - without a `volatility`, so each defaulted to
+  `rewritten`: assumed to change entirely every turn, and therefore never cached.
+  Measured on a research run, a 280,000-token findings region cached at 4%,
+  meaning the same content was re-sent, re-billed and re-processed on every
+  inference for the rest of the stage. They now declare `grows`, so the settled
+  part caches and only the newest is sent.
+- Fixed: those same regions had a percentage budget and no ceiling. A percentage
+  is written against the window the author had in mind, and the window is not a
+  constant: `30%` was 60,000 tokens against a 200K-token model and 300,000
+  against a 1M-token one, with nothing in the blueprint changed. Each now carries
+  a `max_tokens` cap as well. A test asserts both properties over every
+  discovered blueprint rather than a list of known ones, so the next bulk region
+  somebody adds is covered too.
+
 - Added: `cost_usd` and `subtree_cost_usd` on the agent tree routes, so what a
   run cost is one request rather than a walk. A sub-agent's cost is on the
   sub-agent's own record, and skipping that walk understates a fan-out badly:

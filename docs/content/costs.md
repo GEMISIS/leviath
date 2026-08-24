@@ -169,6 +169,35 @@ against the default pool of 8. Widening the pool for the model a fan-out piles o
 throughput knob; see [the engine](/docs/engine) for how the pools work, and note that a provider
 rate limit is a different mechanism configured under `[model_providers.<name>.rate_limit]`.
 
+The bare name covers every route to that model, so the line above also sets the pool when the
+same model is reached through a gateway that prefixes the vendor, as
+`anthropic/claude-sonnet-5`. Write the full gateway id instead to keep the entry to that one
+route, and an exact id beside a bare one wins for the route it names. Ollama size tags are left
+alone: `qwen3.5:9b` and `qwen3.5:70b` are separate models with separate pools, which is what you
+want, since the pool a 9b can afford is not the one a 70b can.
+
+## Don't pay for the same tokens twice
+
+A region that accumulates - the one tool results land in - is re-sent on every inference for the
+rest of the stage. Whether you pay full price for it each time comes down to one field:
+
+```toml
+raw_findings = { kind = "temporary", budget = "30%", volatility = "grows", max_tokens = 60000 }
+```
+
+`volatility` defaults to `rewritten`, which tells the assembler the whole region changes every
+turn, so none of it is cached. That is right for a scratchpad and wrong for an append-only pile
+of fetched pages. On a measured run, a 280,000-token findings region left at the default cached
+4% of the prompt: the same content re-sent, re-billed, and re-processed on every call, which is
+latency as much as cost. Declared `grows`, the settled head caches and only the tail is new.
+
+`max_tokens` is the ceiling the percentage on its own does not give you. A percentage is written
+against whatever window the author had in mind, and the model's window is not a constant: `30%`
+was 60,000 tokens against a 200K-token model and is 300,000 against a 1M-token one, with nothing
+in the blueprint changed. Setting both caps the region at the smaller of the two.
+
+See [structured context](/docs/context) for the full set of region fields.
+
 ## A short checklist
 
 1. Set `notify_spend_usd` so a run tells you what it is doing.

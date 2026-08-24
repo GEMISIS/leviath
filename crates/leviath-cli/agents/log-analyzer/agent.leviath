@@ -1,6 +1,6 @@
 [agent]
 name = "log-analyzer"
-version = "0.2.2"
+version = "0.2.3"
 description = "Analyzes log files - sweeps many files or time windows in parallel, then identifies anomalies, trends, and error patterns via a scripted analyze⇄script loop, maintaining a severity-ranked findings index"
 entry_stage = "ingest"
 
@@ -347,7 +347,15 @@ findings        = { kind = "sliding_window", max_items = 30, budget = "12%", str
 # report is safe to drop.
 worker_findings = { kind = "clearable", budget = "12%" }
 
-logs            = { kind = "temporary",       budget = "30%" }
+# Declared `grows` because it is appended to and never rewritten: tool results
+# land here and earlier ones stay put. Undeclared it would default to
+# `rewritten`, which assumes the whole region changes every turn and so caches
+# none of it - measured at 4% cache hits on a run where this region held 280K
+# tokens, every one of them re-sent and re-paid on every single inference.
+# `max_tokens` is the ceiling the percentage alone stopped providing: 30% was
+# written against a 200K-token window, and the same 30% of a 1M-token model is
+# 300K tokens of raw scrape carried into every later stage.
+logs            = { kind = "temporary",       budget = "30%", volatility = "grows", max_tokens = 60000 }
 scripts         = { kind = "compacting",      budget = "20%", compact_at = "80%", volatility = "grows" }
 scripts_history = { kind = "compact_history", source_region = "scripts", budget = "3%", volatility = "grows" }
 

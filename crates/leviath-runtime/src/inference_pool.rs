@@ -34,6 +34,25 @@ use tokio::sync::{AcquireError, Notify, OwnedSemaphorePermit, Semaphore};
 /// permits, so `acquire` never actually waits for it.
 const UNBOUNDED_PERMITS: usize = Semaphore::MAX_PERMITS;
 
+/// A model id with the vendor path a gateway prepends removed, so
+/// `anthropic/claude-sonnet-5` reads as `claude-sonnet-5`.
+///
+/// Only the path is dropped. A `:` is left alone because it does not mean the
+/// same thing everywhere: on OpenRouter it introduces a variant of one model,
+/// but Ollama uses it for the size tag, where `qwen3.5:9b` and `qwen3.5:70b` are
+/// different models that should never share a pool - a 70b wants a far smaller
+/// one. Treating the tag as a variant would hand the larger model the smaller
+/// one's limit, which is the failure this whole change is about, inverted.
+///
+/// Used only to look up a pool limit, never to call anything: the id sent to a
+/// provider stays exactly as the resolver produced it.
+fn bare_model_name(model: &str) -> &str {
+    match model.rsplit_once('/') {
+        Some((_, name)) => name,
+        None => model,
+    }
+}
+
 /// Configuration for the world's inference concurrency limits.
 ///
 /// A model listed in `per_model` uses that limit; any other model uses
@@ -70,10 +89,31 @@ impl InferencePoolConfig {
         self.per_provider.insert(provider.into(), limit);
     }
 
-    /// The configured limit for `model`: its explicit entry if present, else the
-    /// default. `None` means unbounded.
+    /// The configured limit for `model`: its explicit entry if present, else an
+    /// entry under its bare name, else the default. `None` means unbounded.
+    ///
+    /// The bare-name step is what makes one line of config cover a model reached
+    /// by more than one route. The same model carries a different id per route -
+    /// `claude-sonnet-5` direct from Anthropic, `anthropic/claude-sonnet-5`
+    /// through OpenRouter - so an exact-match table asked the operator to know
+    /// which spelling the resolver would land on, and quietly did nothing when
+    /// they guessed the other one. Nothing said so: an unmatched key looks
+    /// exactly like a matched one, and the pool stays at the global default.
+    ///
+    /// Exact first, so a route that genuinely needs its own number can still say
+    /// so - `anthropic/claude-sonnet-5 = 4` beside a bare `claude-sonnet-5` - and
+    /// the more specific key wins.
+    ///
+    /// Matching does not merge the pools: each route keeps its own semaphore at
+    /// the same size. Two routes to one model are two upstream endpoints with
+    /// their own limits, and sharing one semaphore between them would throttle
+    /// a run below what either endpoint allows.
     pub fn limit_for(&self, model: &str) -> Option<usize> {
-        self.per_model.get(model).copied().or(self.default_limit)
+        self.per_model
+            .get(model)
+            .or_else(|| self.per_model.get(bare_model_name(model)))
+            .copied()
+            .or(self.default_limit)
     }
 
     /// The configured limit for `provider` as a whole. `None` means the
@@ -398,6 +438,74 @@ mod tests {
         cfg.set_limit("anthropic:x", 3);
         assert_eq!(cfg.limit_for("anthropic:x"), Some(3)); // explicit entry
         assert_eq!(cfg.limit_for("ollama:gemma"), Some(5)); // falls back to default
+    }
+
+    /// The case that sent this run at the global default: the operator wrote the
+    /// model as the vendor names it, the resolver landed on a gateway route that
+    /// spells the same model with a vendor path, and the exact-match table
+    /// matched neither. Nothing reported it - an unmatched key and a matched one
+    /// look identical from outside, and the pool silently stayed at 8.
+    #[test]
+    fn one_line_of_config_covers_a_model_reached_by_either_route() {
+        let mut cfg = InferencePoolConfig::new().with_default(Some(8));
+        cfg.set_limit("claude-sonnet-5", 24);
+
+        assert_eq!(cfg.limit_for("claude-sonnet-5"), Some(24), "direct");
+        assert_eq!(
+            cfg.limit_for("anthropic/claude-sonnet-5"),
+            Some(24),
+            "the same model through a gateway takes the same number"
+        );
+        assert_eq!(
+            cfg.limit_for("anthropic/claude-opus-5"),
+            Some(8),
+            "a different model on that vendor is untouched"
+        );
+    }
+
+    /// Written the other way round, a gateway id covers itself and nothing else:
+    /// the bare name is what generalises, so a key that names one route stays
+    /// specific to it.
+    #[test]
+    fn a_key_that_names_a_route_stays_specific_to_that_route() {
+        let mut cfg = InferencePoolConfig::new().with_default(Some(8));
+        cfg.set_limit("x-ai/grok-4.6", 12);
+
+        assert_eq!(cfg.limit_for("x-ai/grok-4.6"), Some(12));
+        assert_eq!(
+            cfg.limit_for("grok-4.6"),
+            Some(8),
+            "the bare id is not the key that was written"
+        );
+    }
+
+    /// A route that needs its own number can still say so beside the bare name,
+    /// because exact is tried first.
+    #[test]
+    fn an_exact_route_entry_beats_the_bare_name() {
+        let mut cfg = InferencePoolConfig::new().with_default(Some(8));
+        cfg.set_limit("claude-sonnet-5", 24);
+        cfg.set_limit("anthropic/claude-sonnet-5", 4);
+
+        assert_eq!(cfg.limit_for("anthropic/claude-sonnet-5"), Some(4));
+        assert_eq!(cfg.limit_for("claude-sonnet-5"), Some(24));
+    }
+
+    /// Ollama spells the parameter count after a colon, so two sizes of one
+    /// model are two ids. They must not collapse into one pool: the pool a 9b
+    /// can afford is not the one a 70b can.
+    #[test]
+    fn an_ollama_size_tag_is_not_treated_as_a_variant() {
+        let mut cfg = InferencePoolConfig::new().with_default(Some(8));
+        cfg.set_limit("qwen3.5:9b", 16);
+
+        assert_eq!(cfg.limit_for("qwen3.5:9b"), Some(16));
+        assert_eq!(
+            cfg.limit_for("qwen3.5:70b"),
+            Some(8),
+            "the larger model keeps the default, not the 9b's number"
+        );
+        assert_eq!(cfg.limit_for("qwen3.5"), Some(8));
     }
 
     #[test]

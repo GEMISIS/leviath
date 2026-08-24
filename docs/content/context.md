@@ -393,8 +393,15 @@ scratch = { kind = "hashmap", volatility = "rewritten" }  # rebuilt each turn
 | `rewritten` | existing content changes in place | sorted last, where it invalidates nothing but itself |
 
 The default is `rewritten`, which is the pessimistic one. A region nobody has classified is
-assumed to move, so leaving this out never makes a blueprint slower than it was; declaring it
-is what makes it faster.
+assumed to move, so leaving this out never puts a region somewhere that invalidates another;
+declaring it is what earns the caching.
+
+That is worth stating in money, because "safe default" reads as "no decision needed" and the
+region this matters most for is the biggest one you have. A research run measured here left its
+280,000-token findings region undeclared: assumed rewritten, cached at 4%, so the same content
+was re-sent, re-billed and re-processed on every inference for the rest of the stage. Declared
+`grows`, almost all of it caches. The bigger the region, the more the default costs, and the
+biggest region in a blueprint is usually the append-only one tool results land in.
 
 > [!NOTE]
 > The region's **kind** does not answer this, which is why the setting exists. A `pinned`
