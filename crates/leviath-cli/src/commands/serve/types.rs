@@ -122,6 +122,11 @@ pub struct AppState {
     /// The spawn-request restrictions from [`ServeArgs`], resolved once at
     /// startup so every handler reads the same decision.
     pub(super) limits: Arc<ServeLimits>,
+    /// The last answer to "is there anything newer", for `GET /api/update`.
+    ///
+    /// On the state rather than in a `static` so two servers in one process -
+    /// or two tests - cannot write into each other's answer.
+    pub(super) update_check: super::update_cache::UpdateCheckCache,
 }
 
 impl AppState {

@@ -592,6 +592,7 @@ system_prompt = "do it"
     async fn page(dir: &tempfile::TempDir, extra: &str) -> (StatusCode, serde_json::Value) {
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
+            update_check: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
                 agent_paths: vec![dir.path().to_path_buf()],
                 ..Default::default()
@@ -824,6 +825,7 @@ mod tests {
     fn test_state_with_path(path: PathBuf) -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
+            update_check: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
                 agent_paths: vec![path],
                 ..Default::default()

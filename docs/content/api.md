@@ -178,7 +178,7 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/scripts?agent=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks and validators, and the global model providers. Writes need admin. See [below](#tools-and-scripts) |
 | `GET /api/mcp/servers` · `GET /{name}/status` · `POST /{name}/login` · `POST /{name}/test` | MCP servers (add/remove need admin) |
 | `GET /api/doctor` | The checks `lev doctor` runs, as data. A failing check is `ok: false` inside a 200, never an HTTP error |
-| `GET /api/update` | How this copy was installed, and the command that upgrades it. See [below](#asking-how-to-upgrade) |
+| `GET /api/update` | Whether anything newer exists, how this copy was installed, and the command that upgrades it. See [below](#asking-how-to-upgrade) |
 | `GET /api/fs/dirs?path=&hidden=` | One directory level of subdirectory names, for a folder picker. Absolute paths only, fenced by `--workdir-root`; `hidden=true` includes dot-prefixed names |
 | `POST /api/fs/dirs` | Make one directory: `{"path": "<absolute parent>", "name": "<one segment>"}` → `201 {"path", "parent"}`. The same fence as the `GET`; `409` if it already exists. Announced as `fs.mkdir` |
 | `GET /ws` · `GET /ws/agents/{id}` | Live event stream (all agents / one run) |
@@ -527,7 +527,11 @@ The body is exactly what `lev update --check --json` prints, from the same plann
   },
   "agents": [],
   "migrations": [],
-  "config_error": null
+  "config_error": null,
+
+  "latest": "0.4.2",
+  "update_available": true,
+  "checked_at": 1787438706
 }
 ```
 
@@ -542,8 +546,25 @@ a client that hard-codes one package manager's command is right for the users wh
 share its author's machine and wrong for everyone else. Where a daemon does not announce
 `update.plan`, send people to the install page rather than picking a package manager for them.
 
+`latest` is the newest version on this copy's own channel, `update_available` whether that is
+newer than the version it is running, and `checked_at` when the daemon last found out, in unix
+seconds, so you can say how fresh the answer is rather than presenting an hour-old one as
+current. All three are `null` together when the check has not run yet, could not reach the
+network, or had no channel to ask about - one state, "cannot tell", which is the honest thing to
+render. Treat a missing key as an older daemon and a `null` key as an answer.
+
+The daemon looks this up on its own schedule and the route reports whatever the last lookup
+found, so asking on every page load costs nothing and never waits. The lookup runs the same code
+`lev update` does, against the releases published for each channel, so the console and the
+terminal cannot come to different conclusions about the same binary.
+
+Do the comparison with `update_available` rather than against `version` yourself. A client that
+compares against a number it was built with only knows the stable line, so it reports a daemon on
+`alpha` or `beta` as out of date for running something newer.
+
 The route is read-only and available without `--allow-admin`. It works out what an update would
-do and does none of it, makes no network call, and cannot run a command even if asked.
+do and does none of it, makes no network call on the request path, and cannot run a command even
+if asked.
 
 ## Tools and scripts
 

@@ -63,6 +63,10 @@ impl Fixture {
             exe: PathBuf::from(exe),
             home: Some(PathBuf::from("/home/u")),
             brew_prefix: None,
+            // Declines, so these tests keep asserting on a plan built without a
+            // network call - which is what every one of them was written
+            // against. The lookup has its own tests beside it.
+            latest: Arc::new(|_: &str| Err("no network in tests".to_string())),
             agents_dir: self.dir.path().join("agents"),
             config_path: self.dir.path().join("config.toml"),
             runner: Arc::new(move |argv: &[String]| {
@@ -725,7 +729,11 @@ fn the_json_shape_carries_the_method_channel_command_and_rows() {
     .expect("write the config");
     let env = fixture.env_with("/opt/homebrew/bin/lev", true, true, SAMPLE);
 
-    let json = plan_json(&plan(&UpdateArgs::default(), &env), "0.3.4");
+    let json = plan_json(
+        &plan(&UpdateArgs::default(), &env),
+        "0.3.4",
+        &crate::commands::update::latest::LatestCheck::default(),
+    );
 
     assert_eq!(json["version"], "0.3.4");
     assert_eq!(json["install_method"], "homebrew");
@@ -742,7 +750,11 @@ fn the_json_shape_carries_the_method_channel_command_and_rows() {
         "/home/u/dev/target/release/lev",
         &UpdateArgs::default(),
     );
-    let json = plan_json(&plan, "0.3.4");
+    let json = plan_json(
+        &plan,
+        "0.3.4",
+        &crate::commands::update::latest::LatestCheck::default(),
+    );
     assert_eq!(json["install_method"], "unknown");
     assert_eq!(json["channel"], serde_json::Value::Null);
     assert_eq!(json["binary"]["action"], "advise");
@@ -756,6 +768,7 @@ fn the_json_shape_carries_the_method_channel_command_and_rows() {
     let json = plan_json(
         &plan_for(&broken, "/opt/homebrew/bin/lev", &UpdateArgs::default()),
         "0.3.4",
+        &crate::commands::update::latest::LatestCheck::default(),
     );
     assert!(
         json["config_error"].as_str().is_some_and(|e| !e.is_empty()),
@@ -1351,4 +1364,77 @@ fn planning_against_the_real_machine_always_reaches_a_verdict() {
         BinaryStep::Run(commands) => assert!(!commands.is_empty()),
         BinaryStep::Advise(message) => assert!(!message.is_empty()),
     }
+}
+
+/// The line `lev update` prints about whether the update is worth doing. Silent
+/// when the check could not answer: the command was asked how to update, not
+/// whether to, and a failed lookup of something nobody asked for is noise.
+#[test]
+fn the_update_line_speaks_only_when_it_has_something_to_say() {
+    use crate::commands::update::latest::LatestCheck;
+
+    let available = LatestCheck {
+        latest: Some("0.5.0".to_string()),
+        update_available: Some(true),
+        checked_at: Some(1),
+    };
+    let line = super::format_latest(&available, "0.4.0");
+    assert!(line.contains("0.5.0 is available"), "{line}");
+    assert!(line.contains("0.4.0"), "it says what you have: {line}");
+
+    let current = LatestCheck {
+        latest: Some("0.4.0".to_string()),
+        update_available: Some(false),
+        checked_at: Some(1),
+    };
+    assert!(
+        super::format_latest(&current, "0.4.0").contains("newest on this channel"),
+        "a current copy is told so"
+    );
+
+    assert_eq!(
+        super::format_latest(&LatestCheck::default(), "0.4.0"),
+        "",
+        "an unanswered check prints nothing at all"
+    );
+}
+
+/// A copy whose channel could not be worked out is not asked about. The only
+/// answer available would be the stable release compared against a build that
+/// may not be on that line, which is the guess this exists to stop making.
+#[test]
+fn a_copy_with_no_known_channel_is_not_asked_about() {
+    use crate::commands::update::latest::LatestCheck;
+
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let env = {
+        let asked = Arc::clone(&asked);
+        UpdateEnv {
+            latest: Arc::new(move |_: &str| {
+                asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(r#"{"name": "9.9.9"}"#.to_string())
+            }),
+            ..UpdateEnv::for_planning()
+        }
+    };
+
+    // A path no installer uses detects as `Unknown`, which carries no channel.
+    let unknown = plan_for(
+        &Fixture::new(),
+        "/nowhere/at/all/lev",
+        &UpdateArgs::default(),
+    );
+    assert_eq!(
+        super::check_latest(&unknown, &env, "0.4.0"),
+        LatestCheck::default()
+    );
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// The offline env's fetcher is a refusal, not a no-op that quietly returns a
+/// stale-looking answer.
+#[test]
+fn the_offline_env_declines_to_look_anything_up() {
+    let env = UpdateEnv::for_planning_offline();
+    assert!((env.latest)("https://example.invalid").is_err());
 }

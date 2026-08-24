@@ -519,6 +519,7 @@ mod tests {
         let (tx, rx) = broadcast::channel(64);
         (
             AppState {
+                update_check: Default::default(),
                 config: crate::commands::serve::testutil::fixed_config(Config::default()),
                 event_tx: tx,
                 control,

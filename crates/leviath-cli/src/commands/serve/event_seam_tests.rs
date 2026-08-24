@@ -170,6 +170,7 @@ async fn stand_up(runs_dir: &std::path::Path) -> Seam {
         ControlClient::for_home(id, dir.path()).with_build(crate::test_support::TEST_BUILD);
     let (event_tx, _) = broadcast::channel(256);
     let state = AppState {
+        update_check: Default::default(),
         config: crate::commands::serve::testutil::fixed_config(Config::default()),
         event_tx,
         control: control.clone(),

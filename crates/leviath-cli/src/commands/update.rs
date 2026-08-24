@@ -594,7 +594,11 @@ pub fn format_plan(plan: &UpdatePlan, version: &str) -> String {
 
 /// The plan as JSON. Built by hand, like `lev tools` and `lev doctor`, so the
 /// shape is explicit and does not move when a type gains a field.
-pub fn plan_json(plan: &UpdatePlan, version: &str) -> serde_json::Value {
+pub fn plan_json(
+    plan: &UpdatePlan,
+    version: &str,
+    latest: &latest::LatestCheck,
+) -> serde_json::Value {
     let binary = match &plan.binary {
         // `commands` is a list of argv lists. The old `command` key held a
         // single argv and is kept alongside it, holding the last command (the
@@ -629,6 +633,13 @@ pub fn plan_json(plan: &UpdatePlan, version: &str) -> serde_json::Value {
         "version": version,
         "install_method": plan.method.id(),
         "channel": plan.method.channel().map(Channel::id),
+        // All three together, and `null` together. "Not checked yet", "switched
+        // off" and "the check failed" are one answer to a client - nothing to
+        // show - and rendering that honestly as "can't tell" is what a console
+        // already does for a channel it cannot judge.
+        "latest": latest.latest,
+        "update_available": latest.update_available,
+        "checked_at": latest.checked_at,
         "binary": binary,
         "agents": agents,
         "migrations": migrations,
@@ -704,6 +715,13 @@ pub struct UpdateEnv {
     pub runner: CommandRunner,
     /// How to ask a yes/no question.
     pub confirm: Confirm,
+    /// How to ask what the newest release on this channel is.
+    ///
+    /// A seam beside `runner` and `confirm` for the same reason: it reaches
+    /// outside the process, so a test has to be able to answer for it. Also the
+    /// switch for turning the check off - an air-gapped install passes one that
+    /// declines, and every caller renders that as "can't tell" already.
+    pub latest: latest::ReleaseFetcher,
     /// The migrations to consider, in order. Production passes [`MIGRATIONS`].
     pub migrations: &'static [Migration],
 }
@@ -727,6 +745,19 @@ impl UpdateEnv {
             std::sync::Arc::new(refuse_to_run),
             std::sync::Arc::new(say_no),
         )
+    }
+
+    /// [`Self::for_planning`], with the update check switched off.
+    ///
+    /// For a caller that must not touch the network on this path at all - the
+    /// API route answers from a cache and refreshes elsewhere, so a fetcher
+    /// that declines is the honest thing to hand it rather than one it is
+    /// trusted not to call.
+    pub fn for_planning_offline() -> Self {
+        Self {
+            latest: std::sync::Arc::new(|_: &str| Err("check not run on this path".to_string())),
+            ..Self::for_planning()
+        }
     }
 
     /// The real machine, with the caller's own way to run a command and ask a
@@ -753,6 +784,7 @@ impl UpdateEnv {
             config_path: crate::config::Config::config_path(),
             runner,
             confirm,
+            latest: std::sync::Arc::new(latest::fetch_release),
             migrations: MIGRATIONS,
         }
     }
@@ -959,20 +991,51 @@ fn migrate_config(args: &UpdateArgs, env: &UpdateEnv, plan: &UpdatePlan) -> anyh
     Ok(())
 }
 
+/// Ask what the newest release on this copy's channel is.
+///
+/// A copy whose channel could not be worked out is not asked about: the answer
+/// would be the stable release compared against a build that may not be on that
+/// line at all, which is exactly the wrong-in-both-directions guess the console
+/// was making before any of this (issue #600).
+fn check_latest(plan: &UpdatePlan, env: &UpdateEnv, version: &str) -> latest::LatestCheck {
+    match plan.method.channel() {
+        Some(channel) => latest::check_with(channel, version, &env.latest, latest::now_secs()),
+        None => latest::LatestCheck::default(),
+    }
+}
+
+/// The one line `lev update` prints about whether the update is worth doing.
+///
+/// Silent when there is nothing to say. A check that could not run prints
+/// nothing rather than "could not check for updates": the command was asked how
+/// to update, it has answered that, and a failed lookup of a thing the user did
+/// not ask for is noise on a terminal.
+fn format_latest(newest: &latest::LatestCheck, running: &str) -> String {
+    match (newest.update_available, &newest.latest) {
+        (Some(true), Some(latest)) => {
+            format!("\n{latest} is available (you have {running}).\n")
+        }
+        (Some(false), _) => format!("\n{running} is the newest on this channel.\n"),
+        _ => String::new(),
+    }
+}
+
 /// Run `lev update` against an injected environment.
 pub fn execute_with(args: &UpdateArgs, env: &UpdateEnv, version: &str) -> anyhow::Result<()> {
     let plan = plan(args, env);
+    let newest = check_latest(&plan, env, version);
 
     if args.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&plan_json(&plan, version))
+            serde_json::to_string_pretty(&plan_json(&plan, version, &newest))
                 .expect("a plan is plain data and always serializes")
         );
         return Ok(());
     }
 
     print!("{}", format_plan(&plan, version));
+    print!("{}", format_latest(&newest, version));
     if args.check {
         return Ok(());
     }
@@ -985,6 +1048,8 @@ pub fn execute_with(args: &UpdateArgs, env: &UpdateEnv, version: &str) -> anyhow
     migrate_config(args, env, &plan)?;
     Ok(())
 }
+
+pub mod latest;
 
 #[cfg(test)]
 mod tests;

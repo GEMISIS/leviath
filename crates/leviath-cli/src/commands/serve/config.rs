@@ -307,6 +307,7 @@ mod tests {
     fn state_without_a_reachable_ollama() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
+            update_check: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
                 ollama_base_url: Some("http://127.0.0.1:1".to_string()),
                 providers: crate::config::ProviderConfig {
@@ -326,6 +327,7 @@ mod tests {
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
+            update_check: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
@@ -337,6 +339,7 @@ mod tests {
     fn test_state_with_keys() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
+            update_check: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
                 providers: crate::config::ProviderConfig {
                     anthropic_api_key: Some("sk-ant-test".to_string()),
@@ -474,6 +477,7 @@ mod tests {
     async fn get_config_agent_paths_included() {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         let state = AppState {
+            update_check: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
                 agent_paths: vec![
                     std::path::PathBuf::from("/my/agents"),
@@ -509,6 +513,7 @@ mod tests {
     fn test_state_listing_models() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
+            update_check: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
                 providers: crate::config::ProviderConfig {
                     anthropic_base_url: None,
@@ -680,6 +685,7 @@ mod tests {
     fn state_with_config_path(path: std::path::PathBuf) -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
+            update_check: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
@@ -698,6 +704,7 @@ mod tests {
     fn state_watching_config_path(path: std::path::PathBuf) -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
+            update_check: Default::default(),
             config: Arc::new(crate::daemon::config_reload::ConfigReloader::new(
                 path.clone(),
                 Config::default(),
@@ -1171,6 +1178,7 @@ mod tests {
         // this test passed while exercising none of what it is named for.
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         let state = AppState {
+            update_check: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
                 providers: crate::config::ProviderConfig {
                     anthropic_api_key: Some("test-key".to_string()),
