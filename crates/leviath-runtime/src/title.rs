@@ -347,12 +347,95 @@ fn sanitize_title(raw: &str) -> String {
     // check and was then sliced mid-title.
     stripped
         .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
+        .map(strip_control_tokens)
         .map(|l| l.trim_matches(['"', '\'', '`']).trim().to_string())
-        .find(|l| l.len() <= TITLE_MAX_LEN)
+        .filter(|l| !l.is_empty())
+        .find(|l| l.len() <= TITLE_MAX_LEN && !is_degenerate(l) && !echoes_the_instruction(l))
         .unwrap_or_default()
 }
+
+/// Cut a line at the first chat-template control token.
+///
+/// The length rule above is a length rule, and these are short: `<|end_of|`
+/// is 9 bytes and one line, so it sailed through and was rendered to a user as
+/// the name of their run. Nothing else in the codebase handles these - a
+/// search for `<|` found no other site - because every provider that speaks a
+/// real API strips them. A local llama.cpp or a thin OpenAI-compatible gateway
+/// in front of a GGUF does not always, and that is exactly the setup a title
+/// call is cheap enough to be pointed at.
+///
+/// Cutting rather than deleting: a control token means the model stopped
+/// there, so what follows it is another turn's text, not more of this title.
+/// A line that *starts* with one is left empty and skipped.
+fn strip_control_tokens(line: &str) -> &str {
+    match line.split_once("<|") {
+        Some((before, _)) => before.trim(),
+        None => line.trim(),
+    }
+}
+
+/// Whether a line is the model stuck repeating itself.
+///
+/// "response. response. response." is short, single-line, and passes every
+/// other check here. Degenerate output is not a title, and showing one to a
+/// user is worse than showing them the task they typed.
+///
+/// The rule is deliberately blunt: enough words to judge, and almost all of
+/// them the same word. A real title reuses a word now and then ("Ship the ship
+/// docs"), so this needs a run of them before it will refuse.
+fn is_degenerate(line: &str) -> bool {
+    let words: Vec<String> = line
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.len() < DEGENERATE_MIN_WORDS {
+        return false;
+    }
+    let unique: std::collections::HashSet<&String> = words.iter().collect();
+    unique.len() * 2 <= words.len()
+}
+
+/// Below this many words there is not enough of a line to call it a loop:
+/// "Ship it, ship it" is a person being emphatic, not a model wedged. Three is
+/// the smallest that still catches the reported case ("response. response.
+/// response.") while leaving a two-word title alone.
+const DEGENERATE_MIN_WORDS: usize = 3;
+
+/// Whether a line is the model narrating [`TITLE_SYSTEM_PROMPT`] back at us.
+///
+/// A model that is asked for a title and answers "drafting a short title (max
+/// 8 words, no quotes)" has described the job instead of doing it. That reply
+/// is 46 bytes on one line, so the display cap - the whole basis of the
+/// earlier reasoning fix - has nothing to say about it.
+///
+/// Matched on the instruction's own distinctive pairing rather than a list of
+/// words that smell like reasoning. "Title" alone is a legitimate title
+/// ("Title the release notes"); "title" next to this prompt's own constraints
+/// is the model reading the prompt out loud. Being wrong here costs a title
+/// and falls back to the task text, so the bar is set to catch the echo rather
+/// than to be certain about it.
+fn echoes_the_instruction(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    if !lower.contains("title") {
+        return false;
+    }
+    INSTRUCTION_TELLS.iter().any(|tell| lower.contains(tell))
+}
+
+/// Phrases from [`TITLE_SYSTEM_PROMPT`] that a title has no reason to contain,
+/// but a paraphrase of the instruction almost always does.
+const INSTRUCTION_TELLS: [&str; 6] = [
+    "8 words",
+    "eight words",
+    "no quotes",
+    "no explanation",
+    "short title",
+    "the given task",
+];
 
 /// Opening tags a model may wrap its reasoning in, with the closer that ends
 /// each. Ollama returns thinking in its own field and Anthropic in its own
@@ -697,8 +780,12 @@ pub fn collect_title(
         if title.is_empty() {
             record_title_failure(
                 &mut meta,
+                // Not "nothing short enough" any more: length is only one of
+                // the reasons a reply is refused now, and a run whose reply
+                // was a stop token or the instruction read back deserves a
+                // reason that is true of it.
                 format!(
-                    "{}/{} replied with nothing short enough to be a title",
+                    "{}/{} replied with nothing usable as a title",
                     outcome.provider_name, outcome.model
                 ),
             );
@@ -1542,7 +1629,7 @@ mod tests {
         assert_eq!(world.get::<RunMetadata>(e).unwrap().title, None);
         assert_eq!(
             world.get::<RunMetadata>(e).unwrap().title_error.as_deref(),
-            Some("mock/m replied with nothing short enough to be a title"),
+            Some("mock/m replied with nothing usable as a title"),
             "the provider answered, so this is the model's verdict, not the route's"
         );
     }
@@ -1932,6 +2019,92 @@ mod tests {
         // Comfortably inside the cap in bytes, so it is a title.
         let short = "字".repeat(8);
         assert_eq!(sanitize_title(&short), short);
+    }
+
+    /// The three chips from issue #587, verbatim as they were reported from a
+    /// live console, each proving one hole the display cap could not see.
+    ///
+    /// All three are short, single-line, and free of reasoning tags, so the
+    /// earlier fix - "reasoning is longer than a title" - had nothing to say
+    /// about any of them. They were stored, and shown to a user as the names
+    /// of their runs.
+    #[test]
+    fn sanitize_refuses_the_three_replies_that_were_shown_to_a_user() {
+        // A chat-template control token, cut short exactly as it appeared.
+        assert_eq!(sanitize_title("<|end_of|"), "");
+        // The model describing the job instead of doing it.
+        assert_eq!(
+            sanitize_title("drafting a short title (max 8 words, no quotes)"),
+            ""
+        );
+        // The model wedged.
+        assert_eq!(sanitize_title("response. response. response."), "");
+
+        // Every one of them would have passed the cap on its own, which is
+        // the point: the cap was the only check there was.
+        for reply in [
+            "<|end_of|",
+            "drafting a short title (max 8 words, no quotes)",
+            "response. response. response.",
+        ] {
+            assert!(reply.len() <= TITLE_MAX_LEN);
+        }
+    }
+
+    /// A control token ends the turn, so what precedes it is the whole title
+    /// and what follows is another turn's text.
+    #[test]
+    fn sanitize_cuts_a_title_at_a_control_token_rather_than_dropping_it() {
+        assert_eq!(
+            sanitize_title("Cache Warmup<|end_of_text|>"),
+            "Cache Warmup"
+        );
+        assert_eq!(
+            sanitize_title("Queue Drain Fix <|eot_id|>"),
+            "Queue Drain Fix"
+        );
+        assert_eq!(
+            sanitize_title("Ship the parser<|im_end|>\nnot this line"),
+            "Ship the parser"
+        );
+        // Nothing before the token means nothing to show, so the next line
+        // gets its turn rather than the run being left with an empty name.
+        assert_eq!(
+            sanitize_title("<|endoftext|>\nReal Title Here"),
+            "Real Title Here"
+        );
+    }
+
+    /// The repetition check has to leave ordinary titles alone. A person
+    /// writes a repeated word on purpose often enough that refusing on any
+    /// repeat would cost more titles than it saves.
+    #[test]
+    fn sanitize_allows_a_title_that_merely_repeats_a_word() {
+        assert_eq!(sanitize_title("Ship the ship docs"), "Ship the ship docs");
+        assert_eq!(sanitize_title("Run run"), "Run run");
+        assert_eq!(
+            sanitize_title("Fix the fix that broke the fix"),
+            "Fix the fix that broke the fix"
+        );
+    }
+
+    /// "Title" is a perfectly good word for a title to contain. Only the
+    /// instruction's own constraints alongside it mean the model is reading
+    /// the prompt out loud.
+    #[test]
+    fn sanitize_allows_a_title_that_is_genuinely_about_titles() {
+        assert_eq!(
+            sanitize_title("Title the release notes"),
+            "Title the release notes"
+        );
+        assert_eq!(
+            sanitize_title("Fix run title truncation"),
+            "Fix run title truncation"
+        );
+        // And still refuses the paraphrases, whichever way they are worded.
+        assert_eq!(sanitize_title("A short title, at most eight words"), "");
+        assert_eq!(sanitize_title("Writing a title for the given task"), "");
+        assert_eq!(sanitize_title("Title: no explanation, no quotes"), "");
     }
 
     /// `<think>` is not the only spelling. A local GGUF writes its reasoning
