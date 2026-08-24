@@ -186,7 +186,7 @@ jsonschema = { version = "0.49", default-features = false }
 # conformance is JSON Schema (above) or an agent's own Rhai validator, so none
 # of these needs its format's schema language.
 quick-xml = "0.41"
-yaml-rust2 = "0.11"
+yaml-rust2 = "0.12"
 csv = "1.4"
 async-trait = "0.1"
 futures = "0.3"
