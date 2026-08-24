@@ -362,6 +362,7 @@ mod tests {
     ) -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
         AppState {
+            update_check: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
@@ -756,6 +757,7 @@ for line in sys.stdin:
         std::fs::create_dir(&store).unwrap();
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
         AppState {
+            update_check: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
@@ -810,6 +812,7 @@ for line in sys.stdin:
         std::fs::write(&file, b"x").unwrap();
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
         let state = AppState {
+            update_check: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),

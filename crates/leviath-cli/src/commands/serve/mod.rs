@@ -25,6 +25,7 @@ mod tools;
 mod tree;
 mod types;
 mod update;
+mod update_cache;
 mod websocket;
 
 #[cfg(test)]
@@ -272,6 +273,7 @@ async fn execute_with_shutdown(
     let (event_tx, _) = broadcast::channel::<ServerEvent>(256);
 
     let state = AppState {
+        update_check: Default::default(),
         config: Arc::new(crate::daemon::config_reload::ConfigReloader::new(
             Config::config_path(),
             cfg,
@@ -788,6 +790,7 @@ mod tests {
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
+            update_check: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: no_daemon_control(),

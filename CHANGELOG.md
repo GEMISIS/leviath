@@ -25,6 +25,22 @@ same list.
   `[model_providers.<name>] serves` list for a script that has none. Per-stage
   models are unaffected: this decides the route, so a tiered blueprint keeps
   each stage on the model its author picked.
+- Added: `GET /api/update` reports `latest`, `update_available` and `checked_at`
+  alongside the install method and command, so a console can tell whether an
+  update is worth mentioning instead of inferring it. It was comparing the
+  daemon's version against a number baked into the site at deploy time, which
+  only knows the stable channel and is as stale as the last build - so a daemon
+  on `alpha` or `beta` was unjudgeable, and the people most likely to want an
+  update prompt were the ones who could not have one. All three are `null`
+  together when the check has not run, could not reach the network, or had no
+  channel to ask about, which is the "cannot tell" a client already renders.
+- Added: `lev update` says whether the version you have is the newest on your
+  channel, from the same lookup the API uses and through the same
+  `plan_json`, so the terminal and the console cannot disagree about the same
+  binary. The route answers from the daemon's cached result and never waits on
+  a network call: asking on every page load costs nothing and at most starts a
+  lookup for whoever asks next.
+
 - Fixed: a turn in which the model only wrote to its own context left no trace
   in the stage log. Those calls are resolved by the dispatcher rather than the
   tool lane, and the lane is where `[tool]` lines are written, so a batch made

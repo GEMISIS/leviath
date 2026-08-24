@@ -135,6 +135,7 @@ mod tests {
     fn app_with(control: ControlClient) -> Router {
         let (tx, _) = broadcast::channel(16);
         let state = AppState {
+            update_check: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control,
