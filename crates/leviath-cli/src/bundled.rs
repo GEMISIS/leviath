@@ -373,15 +373,16 @@ mod tests {
         );
     }
 
-    /// The share of a model's context window one region may hold before this
-    /// test insists it say how it changes and where it stops.
+    /// A `temporary` region on a percentage budget must declare `volatility` and
+    /// a `max_tokens` ceiling, because both defaults fail quietly and only at
+    /// scale.
     ///
-    /// Below this a mis-declared region is a rounding error; at and above it the
-    /// region is most of what every inference carries.
-    const BULK_REGION_PERCENT: f64 = 0.20;
-
-    /// A bulk `temporary` region must declare `volatility` and a `max_tokens`
-    /// ceiling, because both defaults fail quietly and only at scale.
+    /// Keyed on the kind rather than on how large the percentage looks. An
+    /// earlier version of this test only examined regions at 20% or more, on the
+    /// reasoning that a smaller one could not matter - which stopped being true
+    /// the moment those percentages were lowered and their guard-rails did the
+    /// scaling instead. The percentage is not what makes a region worth checking;
+    /// accumulating tool output is, and `temporary` is the kind that does it.
     ///
     /// `volatility` defaults to `rewritten`, which assumes the whole region
     /// changes every turn and so caches none of it. That is right for a
@@ -419,8 +420,7 @@ mod tests {
                 .iter()
                 .filter_map(|region| match region.budget {
                     BudgetSpec::Percent { percent, max, .. }
-                        if percent >= BULK_REGION_PERCENT
-                            && region.kind == RegionKind::Temporary =>
+                        if region.kind == RegionKind::Temporary =>
                     {
                         Some((region, percent, max))
                     }
@@ -453,7 +453,7 @@ mod tests {
         }
         assert!(
             checked > 0,
-            "no bulk temporary region was examined -- this test now proves nothing"
+            "no temporary region on a percentage budget was examined -- this test now proves nothing"
         );
     }
 

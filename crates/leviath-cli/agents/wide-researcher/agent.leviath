@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.4.5"
+version = "0.4.6"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 max_child_depth = 2
 entry_stage = "survey"
@@ -695,10 +695,15 @@ format             = { kind = "pinned", budget = "1%", seed = { literal = "Cite 
 # `rewritten`, which assumes the whole region changes every turn and so caches
 # none of it - measured at 4% cache hits on a run where this region held 280K
 # tokens, every one of them re-sent and re-paid on every single inference.
-# `max_tokens` is the ceiling the percentage alone stopped providing: 30% was
-# written against a 200K-token window, and the same 30% of a 1M-token model is
-# 300K tokens of raw scrape carried into every later stage.
-landscape          = { kind = "temporary",      budget = "30%", volatility = "grows", max_tokens = 60000 }
+# The percentage is what sizes it, and it is lower than it looks: this region is
+# re-sent on every inference for the rest of the stage, so its size multiplies
+# cost and latency rather than being paid once. 30% was written against a
+# 200K-token window and became 300K tokens of raw scrape on a 1M-token model,
+# which is where a measured run spent most of $137. `min_tokens` keeps a small
+# window from resolving to less than one fetched page; `max_tokens` is a
+# backstop for a window nobody ships yet, deliberately far above the percentage
+# so that the percentage, not the cap, is what decides on every model in use.
+landscape          = { kind = "temporary",      budget = "8%", volatility = "grows", min_tokens = 16000, max_tokens = 150000 }
 deep_dives         = { kind = "sliding_window", max_items = 15, budget = "8%" }
 # What the parallel researcher workers hand back, one entry each. Pinned: it is
 # the whole point of the fan-out, and compare reads it directly.

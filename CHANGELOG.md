@@ -36,6 +36,21 @@ same list.
   now, and a taken port says so and names `--port`. The startup line reports the
   address the socket actually got, so `--port 0` prints the port the system
   chose instead of `:0`.
+- Changed: the accumulating regions in the bundled blueprints are sized by their
+  percentage again, rather than by an absolute cap that overrode it. Capping a
+  `30%` region at 60,000 tokens stopped it ballooning on a large model, but the
+  cap then decided the size on every model above 200K and the percentage decided
+  nothing across the whole range anyone runs on. Each is now a lower percentage
+  with guard-rails either side: `min_tokens` so a small window does not resolve
+  the region below one fetched page, and `max_tokens` set far enough above what
+  the percentage yields to be a backstop for a window nobody ships yet. A
+  `raw_findings` region now resolves to 16K at 200K, 83K at 1M and 150K at 2M,
+  where before it was 60K at every one of them.
+- Changed: the test behind those regions is keyed on the region's kind rather
+  than on how large its percentage looks. It previously examined only regions at
+  20% or more, which stopped covering anything the moment those percentages were
+  lowered - it caught its own blind spot through the vacuity check rather than
+  passing on an empty set.
 
 - Fixed: `deep-researcher` carried the same ceiling just lifted from
   `researcher` - its report is written from `claims`, and `claims` was a 40-item

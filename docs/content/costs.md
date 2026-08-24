@@ -123,8 +123,10 @@ inference after it grows. [Structured context](/docs/context) is where this is g
 - An edge `transform` decides what crosses a stage boundary. A `clear` on a region the next
   stage does not read is the cheapest change available: a report-rewriting stage does not need
   the transcript of the research that produced it.
-- `max_tokens` on a region is a ceiling, not a reservation. Setting one alongside a percentage
-  budget caps the region at the smaller of the two.
+- `max_tokens` on a region is a ceiling, not a reservation, and `min_tokens` a floor. Alongside a
+  percentage budget they bound what it resolves to rather than replacing it. Keep the ceiling
+  well above what the percentage yields on the models you run, or it, and not the percentage, is
+  what sizes the region.
 
 ## Know what you actually paid
 
@@ -182,7 +184,7 @@ A region that accumulates - the one tool results land in - is re-sent on every i
 rest of the stage. Whether you pay full price for it each time comes down to one field:
 
 ```toml
-raw_findings = { kind = "temporary", budget = "30%", volatility = "grows", max_tokens = 60000 }
+raw_findings = { kind = "temporary", budget = "8%", volatility = "grows", min_tokens = 16000, max_tokens = 150000 }
 ```
 
 `volatility` defaults to `rewritten`, which tells the assembler the whole region changes every
@@ -191,10 +193,19 @@ of fetched pages. On a measured run, a 280,000-token findings region left at the
 4% of the prompt: the same content re-sent, re-billed, and re-processed on every call, which is
 latency as much as cost. Declared `grows`, the settled head caches and only the tail is new.
 
-`max_tokens` is the ceiling the percentage on its own does not give you. A percentage is written
-against whatever window the author had in mind, and the model's window is not a constant: `30%`
-was 60,000 tokens against a 200K-token model and is 300,000 against a 1M-token one, with nothing
-in the blueprint changed. Setting both caps the region at the smaller of the two.
+The percentage is the number to get right, and for an accumulating region it should be lower
+than feels natural. This region is re-sent on every inference for the rest of the stage, so its
+size multiplies cost and latency instead of being paid once. `30%` sounds like a third of the
+budget; against a 1M-token model it is 300,000 tokens carried into every call, which is where a
+measured run spent most of $137.
+
+`min_tokens` and `max_tokens` are guard-rails on that percentage, not replacements for it. The
+floor keeps a small-context model from resolving the region below one fetched page. The ceiling
+is a backstop for a window nobody ships yet, and it is deliberately set far above what the
+percentage yields today: a cap that binds on the models you actually run makes the percentage
+decorative, which is the failure mode in the other direction. If your region resolves to the
+same number on a 200K model and a 1M one, the cap is doing the deciding and the percentage is
+not.
 
 See [structured context](/docs/context) for the full set of region fields.
 
