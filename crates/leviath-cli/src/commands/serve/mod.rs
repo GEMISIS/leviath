@@ -402,17 +402,27 @@ async fn execute_with_shutdown(
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     let scheme = tls::scheme(tls.as_ref());
-    tracing::info!("Listening on {}://{}", scheme, addr);
-    println!("Leviath API server listening on {scheme}://{addr}");
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    // Bound before anything says it is listening. Announcing first meant a
+    // taken port printed "Leviath API server listening on http://127.0.0.1:3000"
+    // and *then* died on a bare `os error 48`, which reads as a server that
+    // started and crashed rather than one that never started (issue #586).
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| bind_error(&e, &args.host, args.port))?;
+    // The address the socket actually got, not the one that was asked for:
+    // `--port 0` means "you pick", and the port it picked is the only useful
+    // thing to print.
+    let bound = listener
+        .local_addr()
+        .expect("infallible: a freshly bound TcpListener always has a local address");
+    tracing::info!("Listening on {}://{}", scheme, bound);
+    println!("Leviath API server listening on {scheme}://{bound}");
+
     if let Some(ready) = ready {
         // A test-only observer failing to receive (e.g. it already gave up
         // after a timeout) shouldn't stop the server from starting for real.
-        let local_addr = listener
-            .local_addr()
-            .expect("infallible: a freshly bound TcpListener always has a local address");
-        let _ = ready.send(local_addr);
+        let _ = ready.send(bound);
     }
 
     match tls_config {
@@ -427,6 +437,31 @@ async fn execute_with_shutdown(
     }
 
     Ok(())
+}
+
+/// Turn a failed bind into something a person can act on.
+///
+/// The default port is 3000, which collides with most of the JavaScript world
+/// and a fair number of agent runtimes, so "the port is taken" is the ordinary
+/// failure here rather than an exotic one. It used to surface as a bare
+/// `os error 48` / `os error 10048` with no mention of the flag that fixes it.
+///
+/// Deliberately does not fall back to another port. The console at
+/// leviath.dev polls a fixed `http://127.0.0.1:3000`, so a server that quietly
+/// moved would be a server it can never find: a clear error beats a silent
+/// no-connect. `--port 0` remains the way to ask the OS to choose, and the
+/// startup line then reports what it chose.
+fn bind_error(err: &std::io::Error, host: &str, port: u16) -> anyhow::Error {
+    match err.kind() {
+        std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+            "port {port} on {host} is already in use, so the API server could not start. \
+             Pass `--port <port>` to listen somewhere else, or `--port 0` to let the \
+             system pick a free one (the port it picks is printed on startup). \
+             To find what holds it: `lsof -i :{port}` on macOS and Linux, \
+             `netstat -ano | findstr :{port}` on Windows."
+        ),
+        _ => anyhow::anyhow!("could not listen on {host}:{port}: {err}"),
+    }
 }
 
 /// Serve over TLS on an already-bound listener, until `shutdown` resolves.
@@ -688,6 +723,25 @@ mod tests {
     #[should_panic(expected = "execute should fail when port is already in use")]
     fn assert_execute_failed_on_port_in_use_panics_when_ok() {
         assert_execute_failed_on_port_in_use(&Ok(()));
+    }
+
+    /// See [`assert_execute_failed_on_malformed_config`] - same rationale, for
+    /// the region that checks a bind failure explains itself.
+    fn assert_error_says(result: &anyhow::Result<()>, expected: &str) {
+        let message = match result {
+            Err(e) => e.to_string(),
+            Ok(()) => String::from("<the call succeeded>"),
+        };
+        assert!(
+            message.contains(expected),
+            "bind error should mention {expected}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "bind error should mention --port")]
+    fn assert_error_says_panics_when_the_message_is_missing() {
+        assert_error_says(&Ok(()), "--port");
     }
 
     /// See [`assert_execute_failed_on_malformed_config`] - same rationale,
@@ -1761,12 +1815,13 @@ system_prompt = "Run"
     }).await;
     }
 
-    /// Covers the `TcpListener::bind(addr).await?` error path deterministically
+    /// Covers the generic (non-`AddrInUse`) arm of [`bind_error`] deterministically
     /// by binding to a reserved TEST-NET-1 address (RFC 5737, `192.0.2.0/24`)
     /// that is never assigned to a local interface, so the bind always fails
     /// with `EADDRNOTAVAIL`. (A prior version reused an already-bound ephemeral
     /// port, which occasionally let the second bind succeed under parallel-test
-    /// load and left this region uncovered - a genuine flake.)
+    /// load and left this region uncovered - a genuine flake. The port-in-use
+    /// case now has its own test below, which binds first on purpose.)
     #[tokio::test]
     async fn execute_with_unbindable_address_returns_bind_error() {
         // Isolated: this reaches `Config::load()`, which reads process-wide
@@ -1787,9 +1842,52 @@ system_prompt = "Run"
                 };
                 let result = execute(args, no_daemon_control()).await;
                 assert_execute_failed_on_port_in_use(&result);
+                // Names the address it could not have, rather than leaving the
+                // reader with a bare errno.
+                assert_error_says(&result, "could not listen on 192.0.2.1:8080");
             },
         )
         .await;
+    }
+
+    /// The failure people actually hit: the default port is 3000, and 3000 is
+    /// taken on a great many developer machines. Holds an ephemeral port for
+    /// the duration so the collision is certain rather than hoped for, then
+    /// asserts the error names the flag that fixes it (issue #586).
+    #[tokio::test]
+    async fn execute_on_a_taken_port_names_the_port_flag() {
+        let held = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binding an ephemeral loopback port always succeeds");
+        let port = held
+            .local_addr()
+            .expect("a bound listener always has a local address")
+            .port();
+        crate::config::with_isolated_config_path_async(
+            "serve-port-taken",
+            |_fake_dir| async move {
+                let args = ServeArgs {
+                    port,
+                    host: "127.0.0.1".to_string(),
+                    cors: None,
+                    token: Some("test-token".to_string()),
+                    allow_admin: false,
+                    workdir_root: None,
+                    no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
+                };
+                let result = execute(args, no_daemon_control()).await;
+                assert_execute_failed_on_port_in_use(&result);
+                assert_error_says(
+                    &result,
+                    &format!("port {port} on 127.0.0.1 is already in use"),
+                );
+                assert_error_says(&result, "--port <port>");
+            },
+        )
+        .await;
+        drop(held);
     }
 
     #[tokio::test]
