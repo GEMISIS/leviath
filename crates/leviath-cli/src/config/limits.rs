@@ -381,6 +381,13 @@ pub struct LimitsConfig {
     /// global one. This is the per-model pool the engine has always had - it
     /// simply had no way to be configured.
     ///
+    /// The bare name covers every route to that model, so one line reaches it
+    /// whether it is called directly or through a gateway that prefixes the
+    /// vendor - `claude-sonnet-5` also sets the pool for
+    /// `anthropic/claude-sonnet-5`. Writing the full gateway id instead keeps
+    /// the entry specific to that route, and an exact id beside a bare one wins
+    /// for the route it names.
+    ///
     /// A `BTreeMap` so the file this is written back to keeps its order.
     ///
     /// Read once at daemon start, so a change needs a daemon restart.

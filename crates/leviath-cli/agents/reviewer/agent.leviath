@@ -1,6 +1,6 @@
 [agent]
 name = "reviewer"
-version = "0.2.2"
+version = "0.2.3"
 description = "Code review agent - discover, scan, review the areas in parallel, then deep review and report, with error recovery and multi-provider fallback"
 entry_stage = "discover"
 
@@ -366,7 +366,15 @@ workflow        = { kind = "pinned", budget = "2%", required = true, required_me
 worker_findings = { kind = "clearable", budget = "20%" }
 
 # Accumulated review findings and the running severity tally.
-findings        = { kind = "temporary", budget = "20%" }
+# Declared `grows` because it is appended to and never rewritten: tool results
+# land here and earlier ones stay put. Undeclared it would default to
+# `rewritten`, which assumes the whole region changes every turn and so caches
+# none of it - measured at 4% cache hits on a run where this region held 280K
+# tokens, every one of them re-sent and re-paid on every single inference.
+# `max_tokens` is the ceiling the percentage alone stopped providing: 30% was
+# written against a 200K-token window, and the same 30% of a 1M-token model is
+# 300K tokens of raw scrape carried into every later stage.
+findings        = { kind = "temporary", budget = "20%", volatility = "grows", max_tokens = 40000 }
 severity_index  = { kind = "pinned",    budget = "2%" }
 report          = { kind = "clearable", budget = "7%" }
 

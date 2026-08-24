@@ -1,6 +1,6 @@
 [agent]
 name = "data-analyst"
-version = "0.1.2"
+version = "0.1.3"
 description = "Data analyst - searches the web for data on a subject, builds a clean CSV of it, and hands back a ready-to-use summary of what the numbers say"
 entry_stage = "scope"
 
@@ -304,7 +304,15 @@ sources_index = { kind = "pinned", budget = "3%", volatility = "grows", required
 caveats       = { kind = "pinned", budget = "2%", volatility = "grows" }
 
 # Raw pages and search results (bulk, evictable).
-raw_sources   = { kind = "temporary", budget = "25%" }
+# Declared `grows` because it is appended to and never rewritten: tool results
+# land here and earlier ones stay put. Undeclared it would default to
+# `rewritten`, which assumes the whole region changes every turn and so caches
+# none of it - measured at 4% cache hits on a run where this region held 280K
+# tokens, every one of them re-sent and re-paid on every single inference.
+# `max_tokens` is the ceiling the percentage alone stopped providing: 30% was
+# written against a 200K-token window, and the same 30% of a 1M-token model is
+# 300K tokens of raw scrape carried into every later stage.
+raw_sources   = { kind = "temporary", budget = "25%", volatility = "grows", max_tokens = 50000 }
 # The workers' consolidated rows, on the way into the merge. Its budget is what
 # each worker's share is divided from, so it gets the largest slice here.
 worker_rows   = { kind = "clearable", budget = "40%" }

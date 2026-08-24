@@ -268,6 +268,90 @@ pub fn install_bundled(agent: &BundledAgent, agents_dir: &Path) -> anyhow::Resul
 mod tests {
     use super::*;
 
+    /// The share of a model's context window one region may hold before this
+    /// test insists it say how it changes and where it stops.
+    ///
+    /// Below this a mis-declared region is a rounding error; at and above it the
+    /// region is most of what every inference carries.
+    const BULK_REGION_PERCENT: f64 = 0.20;
+
+    /// A bulk `temporary` region must declare `volatility` and a `max_tokens`
+    /// ceiling, because both defaults fail quietly and only at scale.
+    ///
+    /// `volatility` defaults to `rewritten`, which assumes the whole region
+    /// changes every turn and so caches none of it. That is right for a
+    /// scratchpad and wrong for the append-only region tool results land in,
+    /// where it was worth 4% cache hits instead of most of the region on a
+    /// measured run. A percentage with no ceiling is written against whatever
+    /// window the author had in mind, so the same `30%` became 300K tokens once
+    /// the model grew a 1M-token window, re-sent on every call.
+    ///
+    /// Scoped to `temporary` because that is the kind that accumulates tool
+    /// output: a `compacting` workspace of the same size is genuinely rewritten
+    /// and manages its own size by compacting, so neither assertion holds there.
+    ///
+    /// An invariant over discovered blueprints rather than a list of known ones:
+    /// the next bulk region somebody adds is the one this is here to catch.
+    #[test]
+    fn a_bulk_temporary_region_says_how_it_changes_and_where_it_stops() {
+        use leviath_core::BudgetSpec;
+        use leviath_core::region::{RegionKind, Volatility};
+
+        let mut checked = 0;
+        for agent in BUNDLED_AGENTS {
+            let manifest = agent
+                .files
+                .iter()
+                .find(|(rel, _)| *rel == "agent.leviath")
+                .map(|(_, c)| *c)
+                .expect("every bundled agent ships a manifest");
+            let blueprint = leviath_core::manifest::parse_manifest(manifest)
+                .expect("every bundled manifest parses");
+
+            let bulk = blueprint
+                .context_layout
+                .regions
+                .iter()
+                .filter_map(|region| match region.budget {
+                    BudgetSpec::Percent { percent, max, .. }
+                        if percent >= BULK_REGION_PERCENT
+                            && region.kind == RegionKind::Temporary =>
+                    {
+                        Some((region, percent, max))
+                    }
+                    _ => None,
+                });
+
+            for (region, percent, max) in bulk {
+                checked += 1;
+                let share = percent * 100.0;
+                // Both figures are computed here rather than in the failure
+                // message: an argument expression evaluated only on failure is
+                // its own uncovered region on an assertion that has to pass.
+                let on_a_wide_window = percent * 1000.0;
+                assert_ne!(
+                    region.volatility,
+                    Volatility::Rewritten,
+                    "{}: `{}` holds {share:.0}% of the window as accumulated tool output but \
+                     is `rewritten`, so none of it is ever cached",
+                    agent.name,
+                    region.name,
+                );
+                assert!(
+                    max.is_some(),
+                    "{}: `{}` is {share:.0}% of the window with no `max_tokens`, so a \
+                     1M-token model gives it {on_a_wide_window:.0}K tokens on every call",
+                    agent.name,
+                    region.name,
+                );
+            }
+        }
+        assert!(
+            checked > 0,
+            "no bulk temporary region was examined -- this test now proves nothing"
+        );
+    }
+
     /// Every assertion here is an invariant over *all* discovered blueprints.
     /// Naming individual agents would turn adding or renaming one into a test
     /// edit, and would stop testing the property the moment the list drifted.
@@ -446,6 +530,13 @@ mod tests {
     /// asking for 30% - 314,573 tokens - and getting the 40,000 its guard-rail
     /// allowed. The percentages were decorative from about 167k upward.
     ///
+    /// The bulk capture regions have since been given their caps back, at the
+    /// size each was authored for, because uncapped was the worse failure of the
+    /// two: 30% of a 1M-token window is 300,000 tokens of raw scrape re-sent on
+    /// every inference, measured at $128 and 45 minutes on one research run. A
+    /// cap on the region that accumulates is not the clamped layout this test
+    /// forbids - the regions the agent reasons in still scale.
+    ///
     /// Stated as a ratio rather than a per-region ceiling so it holds whatever
     /// the percentages are: resolve each layout against two windows a little
     /// over 5x apart, and the room must scale with them. A layout clamped by
@@ -459,8 +550,14 @@ mod tests {
     fn every_bundled_layout_scales_with_the_model_window() {
         const NARROW: usize = 200_000;
         const WIDE: usize = 1_048_576;
-        // The windows are 5.24x apart; require most of that to survive.
-        const MIN_GROWTH: f64 = 4.0;
+        // The windows are 5.24x apart. A layout clamped by absolute caps scores
+        // 1.0; a layout with one deliberate ceiling on its bulk region scores
+        // just under 4. The bar sits between those, near the clamped end, so it
+        // still fails decisively on what it is for while leaving room for the
+        // considered cap this test's own contract promises to allow. It was 4.0
+        // when no bundled region carried a cap, which left no such room: the
+        // smallest layout landed at 3.97 the day one did.
+        const MIN_GROWTH: f64 = 3.5;
 
         let room = |layout: &leviath_core::ContextLayout, window: usize| -> usize {
             layout

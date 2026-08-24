@@ -1,6 +1,6 @@
 [agent]
 name = "researcher"
-version = "0.4.1"
+version = "0.4.2"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 max_child_depth = 2
 entry_stage = "gather"
@@ -375,7 +375,15 @@ sources_index  = { kind = "pinned", budget = "3%", volatility = "grows", require
 format         = { kind = "pinned", budget = "1%", seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Write every marker as a link to the source it cites - `[[n]](<url>)`, which renders as [n] and clicks through - so a reader can check a claim without scrolling to the bibliography and pasting a URL by hand. Use the URL from that source's `sources_index` line; a source that has a local path instead of a URL stays a bare [n]. The bibliography entry keeps its full URL either way. Mark each finding's confidence as high / medium / low based on source count and credibility. Credibility is about what a source IS, not how authoritative it sounds: only the primary artifact - the paper, the spec, the model card, the official docs, the registry or leaderboard - can be high for a factual claim about that artifact. A roundup, listicle or vendor blog is medium at best however confident its title, and a number that appears in exactly one such page with nothing corroborating it is low and says so. A claim about something the task names only as a comparison rests on what THIS run read about it, not on the credibility of your own topic's sources: grade it on that, and when a figure reaches you through a source that mentions a study rather than one that reports it, say so and grade it down." }, volatility = "stable" }
 
 # Raw source material (bulk, evictable).
-raw_findings   = { kind = "temporary", budget = "30%" }
+# Declared `grows` because it is appended to and never rewritten: tool results
+# land here and earlier ones stay put. Undeclared it would default to
+# `rewritten`, which assumes the whole region changes every turn and so caches
+# none of it - measured at 4% cache hits on a run where this region held 280K
+# tokens, every one of them re-sent and re-paid on every single inference.
+# `max_tokens` is the ceiling the percentage alone stopped providing: 30% was
+# written against a 200K-token window, and the same 30% of a 1M-token model is
+# 300K tokens of raw scrape carried into every later stage.
+raw_findings   = { kind = "temporary", budget = "30%", volatility = "grows", max_tokens = 60000 }
 # Extracted claims (with source refs) and cross-source conflicts.
 claims         = { kind = "sliding_window", max_items = 30, budget = "7%" }
 contradictions = { kind = "clearable",      budget = "3%" }
