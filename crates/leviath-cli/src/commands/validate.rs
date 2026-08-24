@@ -822,7 +822,22 @@ system_prompt = "hi"
     /// arrange.
     #[tokio::test]
     async fn a_machine_with_no_https_client_has_no_registry_to_prime() {
-        let config = crate::config::Config::default();
+        // Both providers are pinned, because a client is only ever built for a
+        // provider that registers. A default config registers whichever ones the
+        // machine happens to offer: the key comes from the environment, and
+        // Ollama registers on answering at its default address. On a developer
+        // machine running Ollama that is enough to reach the failure; on CI,
+        // where neither is present, nothing registers, no client is asked for,
+        // and an empty registry builds cleanly. Naming a key and an address that
+        // resolves nowhere makes the test the same everywhere.
+        let config = crate::config::Config {
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("sk-ant-test".to_string()),
+                ..Default::default()
+            },
+            ollama_base_url: Some("http://127.0.0.1:1/".to_string()),
+            ..Default::default()
+        };
         // The purpose-built error rather than a TLS-backend trick: which
         // backend refuses a bogus configuration differs by platform, so that
         // version passed on macOS and failed on Linux.
