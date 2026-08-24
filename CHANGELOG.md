@@ -13,6 +13,13 @@ same list.
 
 ## Unreleased
 
+- Fixed: a turn in which the model only wrote to its own context left no trace
+  in the stage log. Those calls are resolved by the dispatcher rather than the
+  tool lane, and the lane is where `[tool]` lines are written, so a batch made
+  entirely of them went straight past the only place that records what ran -
+  while still counting towards the run's tool-call total. A run could report
+  tool calls beside a log holding none of them, which reads as a lost log
+  rather than as an agent that spent its turn taking notes.
 - Added: `GET /api/update` reports how this copy of Leviath was installed and
   the command that upgrades it, as the same JSON `lev update --check --json`
   prints. The browser console had no way to ask, so it printed one hard-coded

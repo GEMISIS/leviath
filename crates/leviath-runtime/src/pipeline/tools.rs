@@ -291,6 +291,9 @@ type DispatchToolsQuery = (
     (
         Option<&'static RunMetadata>,
         Option<&'static crate::pipeline::response::StageProgress>,
+        // Only for the all-inline batch below, which returns before
+        // `collect_tools` (the usual writer of `[tool]` lines) ever sees it.
+        Option<&'static mut crate::pipeline::response::StageIoBuffer>,
     ),
     Option<&'static crate::components::OutputValidators>,
     // For the submit_output guard: a submission that is exactly the name of a
@@ -369,7 +372,7 @@ pub fn dispatch_tools(
         auto_gate,
         in_flight,
         cursor,
-        (metadata, stage_progress),
+        (metadata, stage_progress, mut io_buffer),
         validators,
         blueprint,
     ) in agents.iter_mut()
@@ -692,6 +695,25 @@ pub fn dispatch_tools(
         if lane_calls.is_empty() {
             // Nothing async to run - apply the context results now and loop back.
             let merged = merge_in_call_order(&result.tool_calls, &context_results);
+            // Log the calls here, because this batch never reaches
+            // `collect_tools` - the usual writer of `[tool]` lines - and so
+            // left no trace anywhere a person can read. A batch of only
+            // inline-resolved calls (context tools, a refusal, a gate denial)
+            // still counts towards `meta.tool_calls`, so a run could report
+            // tool calls next to a stage log that recorded none of them, which
+            // is exactly how an empty activity panel came to look like a
+            // dropped-log bug (issues #589, #595). A mixed batch is already
+            // covered: `collect_tools` zips over every call, inline ones
+            // included.
+            if let Some(buffer) = io_buffer.as_deref_mut() {
+                let idx = cursor.map_or(0, |c| c.index);
+                for (call, (_id, tool_result)) in result.tool_calls.iter().zip(merged.iter()) {
+                    buffer.logs.push((
+                        idx,
+                        format!("[tool] {}: {}", call.name, one_line(tool_result, 200)),
+                    ));
+                }
+            }
             apply_tool_results(
                 &mut window,
                 &result.response,
