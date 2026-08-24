@@ -268,6 +268,111 @@ pub fn install_bundled(agent: &BundledAgent, agents_dir: &Path) -> anyhow::Resul
 mod tests {
     use super::*;
 
+    /// The words a prompt wraps in backticks, which is how these blueprints
+    /// refer to a region.
+    fn backticked_words(prompt: &str) -> Vec<String> {
+        prompt
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|w| {
+                !w.is_empty()
+                    && w.chars()
+                        .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+            })
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// A stage prompt must not send the model to a region the blueprint does
+    /// not have.
+    ///
+    /// `wide-researcher`'s adversarial pass told the model to "go through
+    /// `claims`, `contradictions` and `analysis`" - three regions belonging to
+    /// `deep-researcher`, which is where the stage had been copied from. Nothing
+    /// failed. The stage ran, found nothing to attack because it was looking for
+    /// regions that were not there, wrote a token gesture and passed the report
+    /// through unchallenged. A copied stage keeps working right up until it
+    /// mentions a region by name, which is exactly the edit nobody re-reads.
+    ///
+    /// Matched on the backticked names a prompt uses, against the regions the
+    /// blueprint declares plus the ones the runtime supplies. Anything else in
+    /// backticks - a tool, a filename, a TOML key - is not a region and does not
+    /// belong in the comparison, so the check runs against the set of names that
+    /// ARE regions somewhere in the bundled set: a name that is a region in one
+    /// blueprint and undeclared in another is the mistake being caught.
+    #[test]
+    fn no_stage_prompt_names_a_region_its_blueprint_does_not_have() {
+        // Supplied by the runtime rather than declared, so a prompt may name
+        // them anywhere.
+        const RUNTIME_REGIONS: [&str; 4] = [
+            "conversation",
+            "tool_results",
+            "final_output",
+            "stage_instructions",
+        ];
+
+        let parsed: Vec<_> = BUNDLED_AGENTS
+            .iter()
+            .map(|agent| {
+                let manifest = agent
+                    .files
+                    .iter()
+                    .find(|(rel, _)| *rel == "agent.leviath")
+                    .map(|(_, c)| *c)
+                    .expect("every bundled agent ships a manifest");
+                let blueprint = leviath_core::manifest::parse_manifest(manifest)
+                    .expect("every bundled manifest parses");
+                (agent.name, blueprint)
+            })
+            .collect();
+
+        // Every name that is a region in at least one bundled blueprint. A word
+        // in backticks is only held to this if it names a region somewhere.
+        let mut region_vocabulary: std::collections::HashSet<&str> =
+            RUNTIME_REGIONS.into_iter().collect();
+        for (_, blueprint) in &parsed {
+            for region in &blueprint.context_layout.regions {
+                region_vocabulary.insert(region.name.as_str());
+            }
+        }
+
+        let mut checked = 0;
+        for (name, blueprint) in &parsed {
+            let declared: std::collections::HashSet<&str> = blueprint
+                .context_layout
+                .regions
+                .iter()
+                .map(|r| r.name.as_str())
+                .chain(RUNTIME_REGIONS)
+                .collect();
+
+            for stage in &blueprint.stages {
+                let prompts = ["system_prompt", "split_prompt"]
+                    .iter()
+                    .filter_map(|k| stage.config.get(*k).and_then(|v| v.as_str()))
+                    .chain(stage.transition_prompt.as_deref());
+                for named in prompts.flat_map(backticked_words) {
+                    if !region_vocabulary.contains(named.as_str()) {
+                        continue;
+                    }
+                    checked += 1;
+                    assert!(
+                        declared.contains(named.as_str()),
+                        "{name}: stage `{}` tells the model to use region `{named}`, which this \
+                         blueprint does not declare. It is a region in another bundled blueprint, \
+                         so this is a stage copied across without renaming its regions.",
+                        stage.name,
+                    );
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "no prompt named a region -- this test now proves nothing"
+        );
+    }
+
     /// The share of a model's context window one region may hold before this
     /// test insists it say how it changes and where it stops.
     ///

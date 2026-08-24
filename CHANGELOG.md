@@ -13,6 +13,36 @@ same list.
 
 ## Unreleased
 
+- Fixed: `wide-researcher`'s adversarial pass told the model to go through
+  `claims`, `contradictions` and `analysis` - three regions that belong to
+  `deep-researcher`, which is where the stage had been copied from. Nothing
+  failed: the stage ran, found nothing to attack because it was looking for
+  regions that were not there, and passed the report through unchallenged. It
+  now reads the regions this blueprint actually has, and a test asserts over
+  every bundled blueprint that a stage prompt never names a region its own
+  blueprint does not declare.
+- Fixed: the `deep_dive` stage wrote nothing. On a measured run it spent 77
+  seconds, made no tool call, and left its `deep_dives` region empty, while
+  `compare` next door - which gates its edge on having written `comparisons` -
+  filled its region every pass. The edge out of `deep_dive` is now gated the
+  same way, so a focused read that records nothing cannot be mistaken for one
+  that never happened.
+- Fixed: a research report is written from the `claims` region, and `claims` was
+  a 30-item sliding window, so claim 31 evicted claim 1 and no run could deliver
+  more than 30 findings however much it read. Measured: an agent that consumed
+  8.8M tokens and cost $35 handed back 2,596 bytes, fewer than one that consumed
+  462K and cost $2.41, because both filled the same 30 slots. The window is now
+  wide enough that the token budget is what bounds it.
+- Changed: the researcher's summarize stage no longer asks for a "concise"
+  report. Concision is right for a report a person reads and wrong for one
+  another agent reads, and this blueprint is both - as a fan-out worker its
+  report IS the hand-off, so anything left out is deleted from the run. Length
+  now follows the material.
+- Added: `deep_dive` and `challenge` state in their transition prompts that
+  going back to `survey` is available and when to take it. Both already had that
+  edge and neither used it; an edge a transition prompt does not mention is one
+  the model does not weigh.
+
 - Fixed: a per-model inference pool configured under the model's own name did
   nothing when the resolver reached that model through a gateway. The same model
   carries a different id per route - `claude-sonnet-5` direct,
