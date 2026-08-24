@@ -226,47 +226,18 @@ impl RiskyExecutors for RealExecutors {
     }
 }
 
-/// Real `lev update`: the four things the command needs from the machine, wired
-/// into the tested core.
+/// Real `lev update`: this machine, plus a terminal's way to run a command and
+/// ask a question, wired into the tested core.
 ///
-/// Resolving the executable is the load-bearing one. A Homebrew `bin/lev` is a
-/// symlink into the Cellar, and the Cellar path is the only place the formula
-/// name - and so the channel - is written down, so the link has to be followed
-/// before detection can read anything off it.
+/// The machine half lives in `UpdateEnv::real` rather than here, because
+/// `GET /api/update` needs exactly the same discovery and only differs in what
+/// it is willing to do with the answer.
 fn real_update(args: commands::update::UpdateArgs) -> anyhow::Result<()> {
-    let home = dirs::home_dir();
-    let exe = std::env::current_exe()?;
-    // A path that cannot be canonicalized is used as it came: worse detection,
-    // never a failed command.
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
-
-    let env = commands::update::UpdateEnv {
-        exe,
-        agents_dir: commands::setup::real_agents_dir(home.as_deref()),
-        home,
-        brew_prefix: brew_prefix(),
-        config_path: leviath_cli::config::Config::config_path(),
-        runner: std::sync::Arc::new(run_upgrade),
-        confirm: std::sync::Arc::new(ask_yes_no),
-        migrations: commands::update::MIGRATIONS,
-    };
+    let env = commands::update::UpdateEnv::real(
+        std::sync::Arc::new(run_upgrade),
+        std::sync::Arc::new(ask_yes_no),
+    );
     commands::update::execute_with(&args, &env, env!("CARGO_PKG_VERSION"))
-}
-
-/// What `brew --prefix` says, when there is a `brew` to ask. Any failure is a
-/// `None`: it only ever adds evidence, and a machine without Homebrew is the
-/// ordinary case rather than an error.
-fn brew_prefix() -> Option<std::path::PathBuf> {
-    let output = leviath_sys::child_command("brew")
-        .arg("--prefix")
-        .output()
-        .ok()?;
-    let prefix = String::from_utf8(output.stdout).ok()?;
-    let prefix = prefix.trim();
-    match prefix.is_empty() {
-        true => None,
-        false => Some(std::path::PathBuf::from(prefix)),
-    }
 }
 
 /// Run the upgrade command, letting it draw on the terminal it inherits - a

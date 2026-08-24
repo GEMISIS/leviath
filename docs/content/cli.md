@@ -736,7 +736,7 @@ $ lev update --check
 
 lev 0.3.5, installed with Homebrew (formula leviath-beta, beta channel)
 
-  binary   brew upgrade leviath-beta
+  binary   brew update && brew upgrade leviath-beta
   agents   1 of 7 would change
              data-analyst - update 0.0.1 → 0.0.2
   config   nothing to migrate

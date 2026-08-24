@@ -178,6 +178,7 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/scripts?agent=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks and validators, and the global model providers. Writes need admin. See [below](#tools-and-scripts) |
 | `GET /api/mcp/servers` · `GET /{name}/status` · `POST /{name}/login` · `POST /{name}/test` | MCP servers (add/remove need admin) |
 | `GET /api/doctor` | The checks `lev doctor` runs, as data. A failing check is `ok: false` inside a 200, never an HTTP error |
+| `GET /api/update` | How this copy was installed, and the command that upgrades it. See [below](#asking-how-to-upgrade) |
 | `GET /api/fs/dirs?path=&hidden=` | One directory level of subdirectory names, for a folder picker. Absolute paths only, fenced by `--workdir-root`; `hidden=true` includes dot-prefixed names |
 | `POST /api/fs/dirs` | Make one directory: `{"path": "<absolute parent>", "name": "<one segment>"}` → `201 {"path", "parent"}`. The same fence as the `GET`; `409` if it already exists. Announced as `fs.mkdir` |
 | `GET /ws` · `GET /ws/agents/{id}` | Live event stream (all agents / one run) |
@@ -506,6 +507,44 @@ which are errors rather than quiet fallbacks. The workers still share the daemon
 (`[limits] max_concurrent_inferences`, 8 by default), so an unlimited fan-out queues at the model
 rather than running away.
 
+## Asking how to upgrade
+
+`GET /api/update` answers how this copy of Leviath was installed and what command brings it
+up to date. Like `GET /api/tools`, it exists because the answer is a fact about the machine
+that no client can work out for itself, and guessing it wrong is worse than not saying.
+
+The body is exactly what `lev update --check --json` prints, from the same planner:
+
+```json
+{
+  "version": "0.4.0",
+  "install_method": "scoop",
+  "channel": "stable",
+  "binary": {
+    "action": "run",
+    "commands": [["scoop", "update"], ["scoop", "update", "leviath"]],
+    "command": ["scoop", "update", "leviath"]
+  },
+  "agents": [],
+  "migrations": [],
+  "config_error": null
+}
+```
+
+`install_method` is one of `homebrew`, `scoop`, `cargo`, `script` or `unknown`. `binary.action`
+is either `run`, carrying a `commands` list of argv lists to run in order, or `advise`, carrying
+a `message` to show instead. A `cargo install` copy is always `advise`: rebuilding it is a full
+compile, which is not something to start on someone's behalf. So is a binary sitting somewhere
+no installer puts one, where the honest answer is to point at the install docs.
+
+Render `binary.commands` rather than composing your own. That is the whole point of the route:
+a client that hard-codes one package manager's command is right for the users who happen to
+share its author's machine and wrong for everyone else. Where a daemon does not announce
+`update.plan`, send people to the install page rather than picking a package manager for them.
+
+The route is read-only and available without `--allow-admin`. It works out what an update would
+do and does none of it, makes no network call, and cannot run a command even if asked.
+
 ## Tools and scripts
 
 `GET /api/tools` answers what an agent on **this** machine can call, which is not a question a
@@ -626,6 +665,7 @@ than that feature, not broken.
 | `blueprints.validate.name` | `POST /api/blueprints/validate` accepting an installed name, not only a body |
 | `blueprints.fan_outs` | `fan_outs` on the detail route. See [fan-out limits](#fan-out-limits) |
 | `tools.list` | `GET /api/tools?agent=`, what an agent here can actually call |
+| `update.plan` | `GET /api/update`, how this copy was installed and the command that upgrades it. See [asking how to upgrade](#asking-how-to-upgrade) |
 | `scripts.read` | The `GET` half of the scripts routes |
 | `scripts.write` | That this build serves the write half. Whether *this* daemon mounts it is `--allow-admin`, which you find out by calling one and reading the status |
 | `scripts.providers` | `provider` as a fifth script `kind`, the machine's drop-in model providers |

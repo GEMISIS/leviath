@@ -153,6 +153,13 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // re-implementing the parser's defaults.
     "blueprints.fan_outs",
     "tools.list",
+    // `GET /api/update`: how this copy was installed, and the command that
+    // upgrades it. Announced because the fallback is guessing, and the console
+    // guessed wrong for every user who was not on a Mac - it printed one
+    // hard-coded `brew upgrade` at everybody. A client with this asks; a client
+    // without it should send people to the install docs rather than pick a
+    // package manager on their behalf.
+    "update.plan",
     "scripts.read",
     // Announced whether or not `--allow-admin` was passed, which is a narrower
     // claim than the others on this list: it says this build serves the write

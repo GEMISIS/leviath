@@ -1265,3 +1265,90 @@ fn agreed_asks_unless_yes_already_answered() {
     assert!(!agreed(&UpdateArgs::default(), &env, "anything?"));
     assert_eq!(fixture.recorder.asked(), vec!["anything?".to_string()]);
 }
+
+// ─── The real machine ─────────────────────────────────────────────────────────
+
+/// An `Output` carrying `stdout`, for the parsing test below. The status is
+/// borrowed from a real spawn because `ExitStatus` cannot be constructed
+/// portably, and it is the one field `brew_prefix_from` never reads.
+#[cfg(test)]
+fn output_with(stdout: &[u8]) -> std::process::Output {
+    let status = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+        .arg("--a-flag-that-lists-no-tests-and-runs-none")
+        .arg("--list")
+        .output()
+        .expect("spawning the test binary to borrow an ExitStatus")
+        .status;
+    std::process::Output {
+        status,
+        stdout: stdout.to_vec(),
+        stderr: Vec::new(),
+    }
+}
+
+/// `brew --prefix` is evidence, never a requirement, so every way of not
+/// answering has to come out as "no evidence" rather than as a failure.
+///
+/// The empty case is the one worth stating outright: an empty prefix is not
+/// merely useless, it is dangerous. [`detect`] asks whether the executable path
+/// `starts_with` the prefix, and every path starts with an empty one - so a
+/// blank answer from `brew` would make every install on the machine look like a
+/// Homebrew install.
+#[test]
+fn brew_prefix_treats_every_non_answer_as_no_evidence() {
+    // No `brew` on this machine at all.
+    assert_eq!(brew_prefix_from(None), None);
+    // A `brew` that answered with nothing, or with only whitespace.
+    assert_eq!(brew_prefix_from(Some(output_with(b""))), None);
+    assert_eq!(brew_prefix_from(Some(output_with(b"  \n "))), None);
+    // Output that is not text.
+    assert_eq!(brew_prefix_from(Some(output_with(&[0xff, 0xfe]))), None);
+    // And the answer it is there for, trailing newline and all.
+    assert_eq!(
+        brew_prefix_from(Some(output_with(b"/opt/homebrew\n"))),
+        Some(PathBuf::from("/opt/homebrew"))
+    );
+}
+
+/// The cached wrapper resolves, and keeps resolving to the same thing. Which
+/// answer it gives is a fact about whatever machine is running the tests, not
+/// about this code - the parsing is pinned above - so this asserts only that
+/// the cache works.
+#[test]
+fn brew_prefix_is_cached_and_stable() {
+    assert_eq!(brew_prefix(), brew_prefix());
+}
+
+/// A planning environment describes this machine and refuses to act on it.
+///
+/// The refusals matter more than they look. `plan` never reaches them, so
+/// nothing today would notice if they were no-ops - and a no-op runner is
+/// exactly how a caller who wired this into `execute_with` would get an update
+/// that looked successful and changed nothing.
+#[test]
+fn a_planning_environment_describes_the_machine_and_refuses_to_change_it() {
+    let env = UpdateEnv::for_planning();
+    assert_eq!(env.migrations.len(), MIGRATIONS.len());
+    assert!(env.config_path.ends_with("config.toml"));
+
+    let refused = (env.runner)(&["brew".to_string(), "upgrade".to_string()]);
+    let message = refused
+        .expect_err("a planning env runs nothing")
+        .to_string();
+    assert!(message.contains("built for planning only"), "{message}");
+    assert!(!(env.confirm)("upgrade?"));
+}
+
+/// Whatever this test binary is, planning against it reaches a verdict rather
+/// than failing. That is what `UpdateEnv::real` is infallible for: a copy in a
+/// place no installer uses is `Unknown` with advice, which is an answer, and
+/// refusing to answer is not.
+#[test]
+fn planning_against_the_real_machine_always_reaches_a_verdict() {
+    let plan = plan(&UpdateArgs::default(), &UpdateEnv::for_planning());
+    assert!(!plan.method.describe().is_empty());
+    match &plan.binary {
+        BinaryStep::Run(commands) => assert!(!commands.is_empty()),
+        BinaryStep::Advise(message) => assert!(!message.is_empty()),
+    }
+}
