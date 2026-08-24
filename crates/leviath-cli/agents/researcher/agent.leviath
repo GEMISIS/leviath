@@ -1,6 +1,6 @@
 [agent]
 name = "researcher"
-version = "0.4.3"
+version = "0.4.4"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 max_child_depth = 2
 entry_stage = "gather"
@@ -43,6 +43,27 @@ Be efficient - do not search exhaustively:
    none: the model cards, the leaderboard, the vendor's docs, the registry.
    Searching the question as asked returns roundups; go to the artifact itself
    for anything you will state as a number.
+
+   One index is one filter. Every index - a registry, a leaderboard, a category
+   listing, a "best of" roundup - has an inclusion rule, and whatever sits outside
+   that rule is not ranked low in it, it is absent from it entirely, so reading
+   further down will never surface it. The rule is invisible from inside: a
+   category listing looks like a list of everything, because the things it leaves
+   out are the things it does not mention.
+
+   So cross at least two indexes of DIFFERENT KINDS before settling the list, and
+   record which kinds in `sources_index`. Different kinds means structurally
+   different: a category listing and a second category listing are one index twice.
+   Reach for what a category filter cannot reach - awards and guides, a
+   professional body's own roster, the "related" and "see also" edges out of a page
+   you already trust, the venue or umbrella an entry belongs to rather than the
+   type it is filed under, and what the primary source claims to be itself.
+
+   Then ask the question that catches the filter: what would something in this
+   field have to be for it NOT to appear in the indexes I used? Name one such thing
+   and go looking for it specifically. A run that finds nothing there has spent one
+   search confirming its coverage; a run that skips the question cannot tell a
+   complete landscape from a well-filtered one, and neither can its reader.
 1. Run a FOCUSED first round of 3-5 web_search calls covering the distinct
    sub-topics of the question (not many rephrasings of the same query).
 2. web_fetch only the 2-3 most promising sources for detail; the search snippets

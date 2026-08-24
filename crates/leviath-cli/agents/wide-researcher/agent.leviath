@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.4.4"
+version = "0.4.5"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 max_child_depth = 2
 entry_stage = "survey"
@@ -54,6 +54,27 @@ A "which one should I use" question has an index too, even when it names none:
 the model cards, the leaderboard, the vendor's own docs, the package registry.
 Searching the question as asked returns roundups and listicles; go to the
 artifact itself for anything you are going to state as a number.
+
+One index is one filter. Every index - a registry, a leaderboard, a category
+listing, a "best of" roundup - has an inclusion rule, and whatever sits outside
+that rule is not ranked low in it, it is absent from it entirely, so reading
+further down will never surface it. The rule is invisible from inside: a
+category listing looks like a list of everything, because the things it leaves
+out are the things it does not mention.
+
+So cross at least two indexes of DIFFERENT KINDS before settling the list, and
+record which kinds in `sources_index`. Different kinds means structurally
+different: a category listing and a second category listing are one index twice.
+Reach for what a category filter cannot reach - awards and guides, a
+professional body's own roster, the "related" and "see also" edges out of a page
+you already trust, the venue or umbrella an entry belongs to rather than the
+type it is filed under, and what the primary source claims to be itself.
+
+Then ask the question that catches the filter: what would something in this
+field have to be for it NOT to appear in the indexes I used? Name one such thing
+and go looking for it specifically. A run that finds nothing there has spent one
+search confirming its coverage; a run that skips the question cannot tell a
+complete landscape from a well-filtered one, and neither can its reader.
 
 Today's date is in the `environment` region. Treat it as authoritative over
 anything you remember: your training has a cutoff and this run does not. Judge
@@ -378,8 +399,21 @@ citing `sources_index` per the rules in `format`. Include:
 Every `[n]` in the prose is a link to its source - `[[n]](<url>)` - so the
 reader can click through from the claim.
 
-Write concisely - the reader wants the lay of the land quickly. Cite sources for
-non-obvious claims.
+Write densely, not briefly. The reader wants the lay of the land quickly, and
+that is a reason to cut throat-clearing, restated questions and summaries of
+summaries - it is not a reason to cover fewer candidates. Coverage is the
+deliverable here: a survey that names four of the twelve things the run
+investigated has thrown away most of what it was asked for, and the reader has
+no way to tell that the other eight were ever looked at.
+
+The long tail is where this stage earns its keep. The obvious entries are the
+ones the reader could have found alone in ten minutes; the one they could not is
+usually the one a shorter draft drops first, because it is unfamiliar and takes
+a sentence more to explain. If the run gathered something that does not fit the
+main recommendation, it goes in with what makes it different rather than being
+cut for tidiness.
+
+Cite sources for non-obvious claims.
 
 A qualifier travels with the claim it qualifies. If the evidence says "yes, with
 offload" or "tight", or the figure came from one uncorroborated page, the
