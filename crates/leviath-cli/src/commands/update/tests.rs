@@ -1438,3 +1438,45 @@ fn the_offline_env_declines_to_look_anything_up() {
     let env = UpdateEnv::for_planning_offline();
     assert!((env.latest)("https://example.invalid").is_err());
 }
+
+/// The switch is on when nobody has said otherwise, and an existing config
+/// written before the key existed means on.
+///
+/// `#[serde(default)]` on a `bool` is `false`, so getting this wrong would have
+/// silently switched the check off for every install that upgraded into it -
+/// the opposite of what leaving a key out means.
+#[test]
+fn the_update_check_is_on_unless_a_config_turns_it_off() {
+    let absent: crate::config::Config =
+        toml::from_str("").expect("an empty config is a valid config");
+    assert!(absent.update_check, "a config that says nothing means on");
+    assert!(
+        crate::config::Config::default().update_check,
+        "and so does the default"
+    );
+
+    let off: crate::config::Config =
+        toml::from_str("update_check = false").expect("a valid config");
+    assert!(!off.update_check);
+}
+
+/// Switched off, the env declines to look anything up - so the CLI and the API
+/// both report "cannot tell" rather than one of them quietly still asking.
+#[test]
+fn a_config_that_turns_the_check_off_declines_to_ask() {
+    let on =
+        UpdateEnv::real_with_config(Arc::new(|_: &[String]| Ok(())), Arc::new(|_| false), true);
+    let off =
+        UpdateEnv::real_with_config(Arc::new(|_: &[String]| Ok(())), Arc::new(|_| false), false);
+
+    assert!(
+        (off.latest)("https://example.invalid").is_err(),
+        "switched off, nothing is looked up"
+    );
+    // The `on` env carries the real fetcher. Asserting on its identity rather
+    // than calling it: calling it would reach the network from a test.
+    assert!(
+        !std::ptr::addr_eq(Arc::as_ptr(&on.latest), Arc::as_ptr(&off.latest)),
+        "the two envs do not share one fetcher"
+    );
+}

@@ -39,7 +39,12 @@ same list.
   `plan_json`, so the terminal and the console cannot disagree about the same
   binary. The route answers from the daemon's cached result and never waits on
   a network call: asking on every page load costs nothing and at most starts a
-  lookup for whoever asks next.
+  lookup for whoever asks next. `update_check = false` in the config turns the
+  lookup off for an install that should make no outbound request nobody asked
+  for; the routes still answer, reporting `null` for whether anything newer
+  exists. On by default, through a named serde default rather than a bare
+  `#[serde(default)]`, which for a bool would have silently switched it off for
+  every config written before the key existed.
 
 - Fixed: a turn in which the model only wrote to its own context left no trace
   in the stage log. Those calls are resolved by the dispatcher rather than the

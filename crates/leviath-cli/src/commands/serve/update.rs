@@ -44,11 +44,17 @@ pub(super) async fn get_update(
     // and handing this path a fetcher it is trusted not to call is how a later
     // edit turns a fast route into a slow one with nothing to catch it.
     let plan = plan(&args, &UpdateEnv::for_planning_offline());
-    // Reports what is known now and, if that has gone stale, starts a lookup
-    // for whoever asks next. Never waits on one.
-    state
-        .update_check
-        .read_and_maybe_refresh(plan.method.channel(), API_VERSION);
+    // Reports what is known now and, if that has gone stale, starts a lookup for
+    // whoever asks next. Never waits on one.
+    //
+    // The config is read per request rather than at startup, so turning the
+    // check off takes effect on the next page load instead of on the next
+    // restart - the same way every other setting this server reads behaves.
+    if state.current_config().update_check {
+        state
+            .update_check
+            .read_and_maybe_refresh(plan.method.channel(), API_VERSION);
+    }
     Json(plan_json(&plan, API_VERSION, &state.update_check.peek()))
 }
 
@@ -97,6 +103,80 @@ mod tests {
         let state = test_state();
         assert_eq!(state.update_check.peek(), Default::default());
         assert!(declines("https://example.invalid").is_err());
+    }
+
+    /// With the check switched off in config, the route still answers - it just
+    /// never looks anything up.
+    ///
+    /// The whole route degrading to a 500, or to a missing key, would be worse
+    /// than the guessing this replaced: a client cannot tell "switched off" from
+    /// "this daemon is too old to ask" unless the keys are there and `null`.
+    #[tokio::test]
+    async fn a_config_that_turns_the_check_off_still_answers() {
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting = {
+            let asked = std::sync::Arc::clone(&asked);
+            std::sync::Arc::new(move |_: &str| {
+                asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(r#"{"name": "9.9.9"}"#.to_string())
+            })
+        };
+        // Called once here so the counter starts from a known, non-zero place.
+        // A fetcher that is never called at all leaves its body unexecuted,
+        // which reads as untested code rather than as the point of the test -
+        // and this way the assertion below is that the count did not MOVE,
+        // which is the same claim without that gap.
+        assert!(counting("https://example.invalid/probe").is_ok());
+        let baseline = asked.load(std::sync::atomic::Ordering::SeqCst);
+
+        let (tx, _) = tokio::sync::broadcast::channel(64);
+        let state = super::super::types::AppState {
+            update_check: super::super::update_cache::UpdateCheckCache::with_fetcher(counting),
+            config: crate::commands::serve::testutil::fixed_config(crate::config::Config {
+                update_check: false,
+                ..crate::config::Config::default()
+            }),
+            event_tx: tx,
+            control: crate::commands::serve::testutil::no_daemon_client(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
+        };
+
+        let app = Router::new()
+            .route("/api/update", get(get_update))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/update")
+                    .body(Body::empty())
+                    .expect("a GET with no body always builds"),
+            )
+            .await
+            .expect("the router is infallible");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("the body is a small JSON document");
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("the route answers with JSON");
+
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            baseline,
+            "switched off means the route looked nothing up"
+        );
+        for key in ["latest", "update_available", "checked_at"] {
+            assert_eq!(
+                body.get(key),
+                Some(&serde_json::Value::Null),
+                "`{key}` is present and null, which is an answer a client can render"
+            );
+        }
+        assert!(
+            body.get("install_method").is_some(),
+            "the rest of the answer is unaffected"
+        );
     }
 
     /// The route answers, and answers with the shape the console reads: an
