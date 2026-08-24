@@ -13,6 +13,29 @@ same list.
 
 ## Unreleased
 
+- Fixed: `deep-researcher` carried the same ceiling just lifted from
+  `researcher` - its report is written from `claims`, and `claims` was a 40-item
+  sliding window, so a run above a fan-out of up to twelve workers could deliver
+  forty findings however much they handed back. Every worker's findings funnel
+  through those slots, which makes it the level where the ceiling cost most.
+- Fixed: the research blueprints told the model to find "the authoritative index
+  for the domain" and stopped there, so a run settled its whole candidate list
+  from one index without ever learning what that index leaves out. Every index
+  has an inclusion rule, and the rule is invisible from inside: a category
+  listing looks like a list of everything, because the things it excludes are
+  the ones it does not mention. On a measured run every candidate came from
+  category listings, and a well-regarded subject filed under a different
+  category was never a candidate at all - it appeared twice in 32M tokens, both
+  times as page furniture. The survey stages now require crossing two
+  structurally different kinds of index and asking what would have to be true of
+  something for it to appear in neither.
+- Changed: `wide-researcher`'s overview no longer asks the model to "write
+  concisely". Density is worth asking for and brevity is not: the entries a
+  shorter draft drops first are the unfamiliar ones that take a sentence more to
+  explain, which are also the ones the reader could not have found alone. It now
+  asks for coverage, and for the long tail to arrive with what makes it
+  different.
+
 - Fixed: `wide-researcher`'s adversarial pass told the model to go through
   `claims`, `contradictions` and `analysis` - three regions that belong to
   `deep-researcher`, which is where the stage had been copied from. Nothing
