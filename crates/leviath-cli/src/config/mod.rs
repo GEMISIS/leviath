@@ -2686,6 +2686,7 @@ google_api_key = "AIza-existing"
             api_key: Some("gsk-SECRET-VALUE".to_string()),
             base_url: Some("https://api.groq.example".to_string()),
             rate_limit: None,
+            serves: Vec::new(),
             extra: HashMap::from([
                 (
                     "org_token".to_string(),

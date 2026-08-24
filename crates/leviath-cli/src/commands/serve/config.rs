@@ -1028,6 +1028,7 @@ mod tests {
                 api_key: Some("sk-secret-value".to_string()),
                 base_url: Some("https://api.groq.com".to_string()),
                 rate_limit: None,
+                serves: Vec::new(),
                 extra: [(
                     "signing_secret".to_string(),
                     toml::Value::String("hunter2".to_string()),

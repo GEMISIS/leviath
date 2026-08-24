@@ -94,6 +94,7 @@ fn build(src: &str, executor: Arc<FakeExecutor>) -> Result<RhaiProvider> {
             name: "test".to_string(),
             init_config: serde_json::json!({}),
             caps: HashMap::new(),
+            serves: Vec::new(),
             rate_limit: None,
             request_timeout_secs: None,
             env_allowlist: no_env_allowlist(),
@@ -113,6 +114,7 @@ fn build_rl(
             name: "test".to_string(),
             init_config: serde_json::json!({}),
             caps: HashMap::new(),
+            serves: Vec::new(),
             rate_limit,
             request_timeout_secs: None,
             env_allowlist: no_env_allowlist(),
@@ -150,6 +152,7 @@ fn a_script_model_is_priced_from_config_and_otherwise_not_at_all() {
             name: "test".to_string(),
             init_config: serde_json::json!({}),
             caps,
+            serves: Vec::new(),
             rate_limit: None,
             request_timeout_secs: None,
             env_allowlist: no_env_allowlist(),
@@ -202,6 +205,7 @@ fn from_source_initialize_receives_config() {
             name: "test".into(),
             init_config: serde_json::json!({ "model": "cfg-model" }),
             caps: HashMap::new(),
+            serves: Vec::new(),
             rate_limit: None,
             request_timeout_secs: None,
             env_allowlist: no_env_allowlist(),
@@ -223,6 +227,7 @@ fn from_script_reads_missing_file() {
             name: "test".to_string(),
             init_config: serde_json::json!({}),
             caps: HashMap::new(),
+            serves: Vec::new(),
             rate_limit: None,
             request_timeout_secs: None,
             env_allowlist: no_env_allowlist(),
@@ -251,6 +256,7 @@ fn from_script_loads_real_file() {
             name: "test".to_string(),
             init_config: serde_json::json!({}),
             caps: HashMap::new(),
+            serves: Vec::new(),
             rate_limit: None,
             request_timeout_secs: None,
             env_allowlist: no_env_allowlist(),
@@ -465,6 +471,7 @@ fn capabilities_and_metadata() {
             name: "test".into(),
             init_config: serde_json::json!({}),
             caps,
+            serves: Vec::new(),
             rate_limit: None,
             request_timeout_secs: None,
             env_allowlist: no_env_allowlist(),
@@ -753,6 +760,7 @@ fn sample_groq_script_compiles_and_initializes() {
             name: "groq".to_string(),
             init_config: serde_json::json!({ "api_key": "test-key" }),
             caps: HashMap::new(),
+            serves: Vec::new(),
             rate_limit: None,
             request_timeout_secs: None,
             env_allowlist: no_env_allowlist(),
@@ -817,6 +825,7 @@ fn a_script_sees_each_system_block_region_and_volatility() {
             name: "test".to_string(),
             init_config: serde_json::json!({}),
             caps: HashMap::new(),
+            serves: Vec::new(),
             rate_limit: None,
             request_timeout_secs: None,
             env_allowlist: no_env_allowlist(),
@@ -950,4 +959,127 @@ fn from_source_rejects_a_script_with_no_inference() {
         message.contains("fn inference(state, request)"),
         "{message}"
     );
+}
+
+// ─── Serving an open route ────────────────────────────────────────────────────
+
+/// A script provider that reports nothing claims nothing.
+///
+/// The default `serves_model` reads the compiled-in capability table, which a
+/// script does not have: `capabilities` answers the same base for every model
+/// it has no override for, so the default said "no" to everything and a local
+/// model could never win a blueprint entry that named it (issue #598). Refusing
+/// is still the right answer when there is no evidence - a provider that
+/// claimed every model would be far worse - so this pins that floor.
+#[test]
+fn a_script_with_nothing_to_report_claims_no_models() {
+    let p = build(GOOD_PROVIDER, Arc::new(FakeExecutor::default())).expect("it compiles");
+    assert_eq!(p.serves_model("deepseek-v4-flash"), None);
+    assert_eq!(p.serves_model("anything-at-all"), None);
+}
+
+/// `[model_providers.<name>] serves` is how a script with no `list_models` says
+/// what it answers for. Static, so it needs no priming.
+#[test]
+fn a_declared_serves_list_wins_an_open_route() {
+    let p = RhaiProvider::from_source(
+        GOOD_PROVIDER,
+        Arc::new(FakeExecutor::default()),
+        ScriptProviderSettings {
+            name: "test".to_string(),
+            init_config: serde_json::json!({}),
+            caps: HashMap::new(),
+            serves: vec!["deepseek-v4-flash".to_string()],
+            rate_limit: None,
+            request_timeout_secs: None,
+            env_allowlist: no_env_allowlist(),
+        },
+    )
+    .expect("the script compiles");
+
+    assert_eq!(
+        p.serves_model("deepseek-v4-flash"),
+        Some("deepseek-v4-flash".to_string())
+    );
+    // And still refuses one it was not told about.
+    assert_eq!(p.serves_model("claude-opus-5"), None);
+}
+
+/// A `[model_capabilities.<model>]` entry is somebody describing that model for
+/// this provider, which is also them saying it serves it.
+#[test]
+fn a_capability_override_is_enough_to_claim_a_model() {
+    let mut caps = HashMap::new();
+    caps.insert(
+        "custom-model".to_string(),
+        ModelCapabilityOverride {
+            max_context_tokens: Some(4096),
+            ..Default::default()
+        },
+    );
+    let p = RhaiProvider::from_source(
+        GOOD_PROVIDER,
+        Arc::new(FakeExecutor::default()),
+        ScriptProviderSettings {
+            name: "test".to_string(),
+            init_config: serde_json::json!({}),
+            caps,
+            serves: Vec::new(),
+            rate_limit: None,
+            request_timeout_secs: None,
+            env_allowlist: no_env_allowlist(),
+        },
+    )
+    .expect("the script compiles");
+
+    assert_eq!(
+        p.serves_model("custom-model"),
+        Some("custom-model".to_string())
+    );
+    assert_eq!(p.serves_model("some-other-model"), None);
+}
+
+/// Priming asks `list_models` once, so the synchronous resolve path has an
+/// answer without going to the network itself.
+///
+/// The namespace case is the one that matters in practice: a gateway reports
+/// `vendor/model` and a blueprint names `model`, so matching only whole ids
+/// would deny every model a namespacing provider serves.
+#[tokio::test]
+async fn priming_lets_a_script_answer_from_its_own_catalogue() {
+    let src = "// @provider mock\n\
+               fn initialize(config) { #{} }\n\
+               fn inference(state, request) { #{ content: \"x\" } }\n\
+               fn list_models(state) { [ #{ id: \"deepseek/deepseek-v4-flash\", \
+               display_name: \"Flash\", max_context_tokens: 131072, \
+               max_output_tokens: 8192 } ] }";
+    let p = build(src, Arc::new(FakeExecutor::default())).expect("it compiles");
+
+    // Nothing before priming: the catalogue is empty and nothing else claims it.
+    assert_eq!(p.serves_model("deepseek-v4-flash"), None);
+
+    p.prime_capabilities().await.expect("list_models answers");
+
+    // The blueprint's bare name matches the gateway's namespaced id, and the
+    // id handed back is the one to actually send.
+    assert_eq!(
+        p.serves_model("deepseek-v4-flash"),
+        Some("deepseek/deepseek-v4-flash".to_string())
+    );
+    // The whole id works too, for a caller that already has it.
+    assert_eq!(
+        p.serves_model("deepseek/deepseek-v4-flash"),
+        Some("deepseek/deepseek-v4-flash".to_string())
+    );
+    assert_eq!(p.serves_model("claude-opus-5"), None);
+}
+
+/// A script with no `list_models` primes to a no-op rather than an error, so a
+/// provider that simply does not implement the optional entry point is not a
+/// start-up warning every time.
+#[tokio::test]
+async fn priming_a_script_without_list_models_is_a_no_op() {
+    let p = build(GOOD_PROVIDER, Arc::new(FakeExecutor::default())).expect("it compiles");
+    p.prime_capabilities().await.expect("nothing to do is fine");
+    assert_eq!(p.serves_model("deepseek-v4-flash"), None);
 }

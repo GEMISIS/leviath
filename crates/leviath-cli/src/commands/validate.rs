@@ -682,11 +682,18 @@ async fn primed_registry_with(
     config: Option<&crate::config::Config>,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> Option<leviath_runtime::ProviderRegistry> {
+    let config = config?;
     let registry =
-        crate::commands::run::build_provider_registry_from_config_with(config?, build_client)
+        crate::commands::run::build_provider_registry_from_config_with(config, build_client)
             .ok()?;
     registry
-        .prime_capabilities(std::time::Duration::from_secs(VALIDATE_PRIME_TIMEOUT_SECS))
+        .prime_capabilities(
+            std::time::Duration::from_secs(VALIDATE_PRIME_TIMEOUT_SECS),
+            // So `lev validate` reports the model a run would really use on a
+            // machine whose default is a script provider, rather than the one
+            // it would have used before that provider could answer.
+            Some(config.default_provider.as_str()),
+        )
         .await;
     Some(registry)
 }

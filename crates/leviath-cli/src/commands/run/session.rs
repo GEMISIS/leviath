@@ -339,6 +339,7 @@ fn script_provider_spec(
         script: mp.script.clone(),
         rate_limit: mp.rate_limit.clone(),
         init_config: serde_json::Value::Object(cfg),
+        serves: mp.serves.clone(),
     }
 }
 
@@ -571,6 +572,7 @@ mod tests {
                 requests_per_minute: 30,
                 tokens_per_minute: 1000,
             }),
+            serves: Vec::new(),
             extra,
         };
         let spec = script_provider_spec(&mp);

@@ -153,6 +153,17 @@ pub struct ModelProviderConfig {
     #[serde(default)]
     pub rate_limit: Option<leviath_providers::RateLimitConfig>,
 
+    /// Model ids this provider serves, so a blueprint entry naming one of them
+    /// with no provider can resolve here.
+    ///
+    /// Only needed by a script with no `list_models`: one that has it is asked
+    /// directly, and its answer is preferred over this list. Without either,
+    /// the provider claims no models and can only be reached by a blueprint
+    /// that pins it, which is what made a local model unreachable however the
+    /// machine set `default_provider` (issue #598).
+    #[serde(default)]
+    pub serves: Vec<String>,
+
     /// Any additional keys, forwarded verbatim into the script's `initialize`.
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
