@@ -35,6 +35,7 @@ request_timeout_secs = 900           # per-request HTTP timeout to a provider
 taint_tracking       = false         # global master switch, see below
 batch_tool_hint      = true          # global master switch, see below
 shell_hint           = true          # global master switch, see below
+update_check         = true          # ask whether a newer release exists
 ```
 
 | Key | Type | Default | Notes |
@@ -48,6 +49,7 @@ shell_hint           = true          # global master switch, see below
 | `taint_tracking` | bool | `false` | Turns on [taint tracking](/docs/security) for every agent. With it off, an agent can still opt in itself |
 | `batch_tool_hint` | bool | `true` | Adds a short hint telling the model it may batch independent tool calls |
 | `shell_hint` | bool | `true` | Adds a short hint describing the shell a stage will get. Only says anything on Windows today |
+| `update_check` | bool | `true` | Lets this copy ask whether a newer release exists on its own channel, at most once an hour. Set `false` on an air-gapped machine, or anywhere an outbound request nobody asked for is the problem. Off, `lev update` still says how to update and [`GET /api/update`](/docs/api#asking-how-to-upgrade) still answers; both report `null` for whether anything newer exists |
 
 All three of those cascade: a stage setting beats an agent setting, which beats this file.
 

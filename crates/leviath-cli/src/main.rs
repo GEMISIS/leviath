@@ -233,9 +233,16 @@ impl RiskyExecutors for RealExecutors {
 /// `GET /api/update` needs exactly the same discovery and only differs in what
 /// it is willing to do with the answer.
 fn real_update(args: commands::update::UpdateArgs) -> anyhow::Result<()> {
-    let env = commands::update::UpdateEnv::real(
+    // A config that will not load is not a reason to refuse the check: the
+    // default is on, and `lev update` on a machine with a broken config is
+    // exactly when somebody wants to know whether a newer build exists.
+    let update_check = leviath_cli::config::Config::load()
+        .map(|c| c.update_check)
+        .unwrap_or(true);
+    let env = commands::update::UpdateEnv::real_with_config(
         std::sync::Arc::new(run_upgrade),
         std::sync::Arc::new(ask_yes_no),
+        update_check,
     );
     commands::update::execute_with(&args, &env, env!("CARGO_PKG_VERSION"))
 }

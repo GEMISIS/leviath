@@ -755,8 +755,25 @@ impl UpdateEnv {
     /// trusted not to call.
     pub fn for_planning_offline() -> Self {
         Self {
-            latest: std::sync::Arc::new(|_: &str| Err("check not run on this path".to_string())),
+            latest: std::sync::Arc::new(decline_update_check),
             ..Self::for_planning()
+        }
+    }
+
+    /// [`Self::real`], with the update check switched off when the config says
+    /// so.
+    ///
+    /// Declining rather than skipping: every caller already renders "could not
+    /// find out" honestly, so switching the check off and failing to reach the
+    /// network land in the same place, and there is no second code path where
+    /// one of them could behave differently.
+    pub fn real_with_config(runner: CommandRunner, confirm: Confirm, update_check: bool) -> Self {
+        match update_check {
+            true => Self::real(runner, confirm),
+            false => Self {
+                latest: std::sync::Arc::new(decline_update_check),
+                ..Self::real(runner, confirm)
+            },
         }
     }
 
@@ -989,6 +1006,15 @@ fn migrate_config(args: &UpdateArgs, env: &UpdateEnv, plan: &UpdatePlan) -> anyh
     config.save_to_path_public(&env.config_path)?;
     println!("  wrote {path}");
     Ok(())
+}
+
+/// A fetcher that does not look anything up.
+///
+/// Used both by the path that must not touch the network and by an install that
+/// has turned the check off. One function for both, because "did not ask" is a
+/// single outcome and a caller cannot act on which reason it was.
+fn decline_update_check(_: &str) -> Result<String, String> {
+    Err("the update check is not enabled on this path".to_string())
 }
 
 /// Ask what the newest release on this copy's channel is.

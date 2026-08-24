@@ -192,6 +192,22 @@ pub struct Config {
     #[serde(default)]
     pub taint_tracking: bool,
 
+    /// Whether this copy may ask whether a newer release exists.
+    ///
+    /// On by default: the question is asked once an hour at most, the answer is
+    /// what stops a console either nagging somebody who is current or staying
+    /// silent for somebody who is not, and a check that reaches nothing simply
+    /// reports that it could not tell.
+    ///
+    /// Set `update_check = false` where reaching out is the problem rather than
+    /// the frequency - an air-gapped install, or a machine that should make no
+    /// outbound request nobody asked for. Off, `lev update` still says how to
+    /// update and `GET /api/update` still answers; both report `null` for
+    /// whether there is anything newer, which every client already renders as
+    /// "cannot tell".
+    #[serde(default = "default_update_check")]
+    pub update_check: bool,
+
     /// Runtime resource limits (inference concurrency + iteration caps).
     #[serde(default)]
     pub limits: LimitsConfig,
@@ -298,6 +314,7 @@ impl Default for Config {
             agent_paths: Vec::new(),
             openrouter_api_key: None,
             ollama_base_url: None,
+            update_check: default_update_check(),
             mcp_servers: Vec::new(),
             default_model: None,
             model_capabilities: HashMap::new(),
@@ -1018,6 +1035,15 @@ pub(crate) fn default_true() -> bool {
 /// table the user has no reason to know about and says nothing about what to
 /// add. Kept in sync with [`Config::default`] by
 /// `an_empty_config_file_parses_to_the_defaults`.
+/// The update check is on when the key is absent.
+///
+/// A named default rather than `#[serde(default)]`, which for a `bool` is
+/// `false` - so an existing config with no `update_check` line would have had
+/// the check switched off, which is the opposite of what leaving it out means.
+fn default_update_check() -> bool {
+    true
+}
+
 pub(crate) fn default_provider_name() -> String {
     "anthropic".to_string()
 }
@@ -3517,6 +3543,7 @@ enabled = false
         tool_perms.insert("bash".to_string(), ToolPolicy::Allow);
 
         let config = Config {
+            update_check: true,
             default_provider: "anthropic".to_string(),
             providers: ProviderConfig {
                 anthropic_api_key: Some("sk-ant-key".to_string()),
