@@ -65,10 +65,10 @@ out are the things it does not mention.
 So cross at least two indexes of DIFFERENT KINDS before settling the list, and
 record which kinds in `sources_index`. Different kinds means structurally
 different: a category listing and a second category listing are one index twice.
-Reach for what a category filter cannot reach - awards and guides, a
-professional body's own roster, the "related" and "see also" edges out of a page
-you already trust, the venue or umbrella an entry belongs to rather than the
-type it is filed under, and what the primary source claims to be itself.
+Reach for what a category filter cannot reach: awards and guides, a
+professional body's own roster, the "related" and "see also" edges out of a
+page you already trust, whatever an entry sits inside rather than the type it
+is filed under, and what the primary source says it is in its own words.
 
 Then ask the question that catches the filter: what would something in this
 field have to be for it NOT to appear in the indexes I used? Name one such thing
@@ -541,9 +541,10 @@ the report is going to assert, ask the uncomfortable question:
 - Is anything MISSING? Read `sources_index` and ask what kind of source is not
   in it. A survey that found its candidates through category listings has only
   what that category is indexed under, and the best answer is often filed
-  somewhere else - a different category, an award or a guide, a venue rather
-  than its type. Name what is absent and where it would be found: absence is a
-  finding, and this is the last stage that can still go and get it.
+  somewhere else: a different category, an award or a guide, whatever it sits
+  inside rather than the type it is. Name what is absent and where it would be
+  found. Absence is a finding, and this is the last stage that can still go and
+  get it.
 
 Write each challenge to `challenges` (context_append) as one line:
 `[!] <the claim> - <what is wrong with the support> - <what would settle it>`
