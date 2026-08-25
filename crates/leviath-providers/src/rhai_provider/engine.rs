@@ -4,7 +4,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use base64::Engine as _;
 use rhai::{Dynamic, Engine, EvalAltResult, FnPtr, Map, NativeCallContext};
 use tokio::sync::{mpsc, oneshot};
 
@@ -85,8 +84,16 @@ fn register_pure_fns(engine: &mut Engine, env_allowlist: Arc<Vec<String>>) {
     engine.register_fn("encode_uri", |s: &str| {
         leviath_scripting::tool::percent_encode(s)
     });
+    // Both from `leviath_scripting::tool`, which is where `encode_uri` above
+    // already comes from and for the same reason: a script reaching a function
+    // by one name in the tool engine and a different implementation of it here
+    // is a difference nobody finds until a `.rhai` works in one and not the
+    // other.
     engine.register_fn("encode_base64", |s: &str| {
-        base64::engine::general_purpose::STANDARD.encode(s)
+        leviath_scripting::tool::encode_base64(s)
+    });
+    engine.register_fn("decode_base64", |s: &str| {
+        leviath_scripting::tool::decode_base64(s)
     });
     engine.register_fn("env_var", move |name: &str| {
         env_var_fn(name, &env_allowlist)

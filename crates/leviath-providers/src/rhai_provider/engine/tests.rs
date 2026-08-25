@@ -259,6 +259,29 @@ fn to_json_is_valid_json_for_nested_and_scalar_shapes() {
 }
 
 #[test]
+fn decode_base64_round_trips_and_reports_its_failures() {
+    let engine = build_init_engine(no_env_allowlist());
+
+    // A provider script that encodes something can now read it back, and the
+    // implementation is the one the tool engine offers under the same name.
+    let out: String = engine
+        .eval(r#"decode_base64(encode_base64("provider · 🐙"))"#)
+        .expect("round trips");
+    assert_eq!(out, "provider · 🐙");
+
+    // A value written by anything else decodes too.
+    let decoded: String = engine.eval(r#"decode_base64("aGk=")"#).expect("decodes");
+    assert_eq!(decoded, "hi");
+
+    // And a failure is an error the script sees, not an empty string it would
+    // carry on with.
+    let err = engine
+        .eval::<String>(r#"decode_base64("not base64!")"#)
+        .expect_err("refused");
+    assert!(err.to_string().contains("not valid base64"), "{err}");
+}
+
+#[test]
 fn encode_uri_passes_unreserved_and_encodes_rest() {
     let engine = build_init_engine(no_env_allowlist());
     let out: String = engine.eval(r#"encode_uri("Aa0-_.~ /?")"#).unwrap();

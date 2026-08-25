@@ -2603,7 +2603,6 @@ name = "leviath-providers"
 version = "0.5.0"
 dependencies = [
  "async-trait",
- "base64 0.23.1",
  "bytes",
  "futures-core",
  "leviath-core",
@@ -2653,6 +2652,7 @@ dependencies = [
 name = "leviath-scripting"
 version = "0.5.0"
 dependencies = [
+ "base64 0.23.1",
  "leviath-core",
  "rhai",
  "serde",
