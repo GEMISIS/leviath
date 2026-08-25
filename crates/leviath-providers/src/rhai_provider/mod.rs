@@ -20,7 +20,8 @@
 //! Required: `initialize(config) -> Map` (runs **offline** - no network host
 //! functions are registered for it) and `inference(state, request) -> Map`.
 //! Optional: `stream(state, request, on_chunk)`, `count_tokens(state, text,
-//! model) -> int`, `list_models(state) -> Array`.
+//! model) -> int`, `list_models(state) -> Array`,
+//! `warm_models(state, models) -> ()`.
 
 mod convert;
 mod engine;
@@ -124,6 +125,7 @@ pub struct RhaiProvider {
     has_stream: bool,
     has_count_tokens: bool,
     has_list_models: bool,
+    has_warm_models: bool,
     /// `[security] allow_env_vars`: credential-shaped environment variables this
     /// script may read via `env_var`. Held so each per-call execution engine is
     /// built with the same policy the init engine was.
@@ -226,6 +228,7 @@ impl RhaiProvider {
         let has_stream = has_fn(&ast, "stream", 3);
         let has_count_tokens = has_fn(&ast, "count_tokens", 3);
         let has_list_models = has_fn(&ast, "list_models", 1);
+        let has_warm_models = has_fn(&ast, "warm_models", 2);
 
         Ok(Self {
             name,
@@ -239,6 +242,7 @@ impl RhaiProvider {
             has_stream,
             has_count_tokens,
             has_list_models,
+            has_warm_models,
             env_allowlist,
             served_models: Arc::new(Mutex::new(Vec::new())),
             declared_models: Arc::new(serves),
@@ -596,6 +600,31 @@ impl Provider for RhaiProvider {
         let models = self.list_models().await?;
         let ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
         *leviath_core::sync::lock(&self.served_models) = ids;
+        Ok(())
+    }
+
+    async fn warm_models(&self, models: &[String]) -> Result<()> {
+        if !self.has_warm_models {
+            return Ok(());
+        }
+        let ast = self.ast.clone();
+        let state = (*self.state).clone();
+        // Handed the whole list, the way every other provider is: a script knows
+        // which of these it serves and the caller does not.
+        let wanted: rhai::Array = models.iter().map(|m| Dynamic::from(m.clone())).collect();
+        // The script's return value is discarded on purpose: warming is what it
+        // did, not what it said.
+        let _ = self
+            .dispatch(
+                self.request_timeout_secs,
+                Box::new(move |engine| {
+                    let mut scope = Scope::new();
+                    engine
+                        .call_fn::<Dynamic>(&mut scope, &ast, "warm_models", (state, wanted))
+                        .map_err(map_rhai_err)
+                }),
+            )
+            .await?;
         Ok(())
     }
 

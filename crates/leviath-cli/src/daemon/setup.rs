@@ -275,6 +275,10 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // install can't fan out unbounded requests against provider rate limits),
     // alongside the per-model overrides and the per-provider caps.
     let pool_config = parts.config.limits.inference_pools();
+    // Kept before the world takes ownership: the spawn preprocessor warms this
+    // run's models through the same registry the world will infer on, so both
+    // see one set of learned windows rather than two.
+    let pp_providers = parts.providers.clone();
     let mut world = PipelineWorld::new(
         parts.providers,
         tool_service.clone(),
@@ -501,13 +505,22 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // advertises them (they'd otherwise land one turn late - issue #97).
     let pp_pool = parts.mcp_pool.clone();
     let pp_agents_dir = leviath_core::paths::agents_dir();
+    // The models too, and for a reason the MCP warming does not have: a stage's
+    // percentage region budgets resolve once, at spawn, into absolute numbers.
+    // A model whose real window is only knowable once it is loaded - which is
+    // every Ollama model - would otherwise have every region in the run sized
+    // against a guess from its name, and nothing later corrects it.
+    let pp_default_provider = parts.config.default_provider.clone();
     host.set_spawn_preprocessor(Box::new(move |args| {
         let pool = pp_pool.clone();
         let blueprint_path = args.blueprint_path.clone();
         let agents_dir = pp_agents_dir.clone();
+        let providers = pp_providers.clone();
+        let default_provider = pp_default_provider.clone();
         Box::pin(async move {
             warm_blueprint_mcp(&pool, &blueprint_path).await;
             warm_fanout_worker_mcp(&pool, &blueprint_path, agents_dir.as_deref()).await;
+            warm_blueprint_models(&providers, &blueprint_path, &default_provider).await;
         })
     }));
 
@@ -638,6 +651,67 @@ async fn warm_blueprint_mcp(pool: &crate::daemon::mcp_pool::McpPool, blueprint_p
 /// the parent's own blueprint, already warmed by [`warm_blueprint_mcp`], so they
 /// are skipped here. A worker source that can't be read/resolved is skipped.
 /// Extracted from the preprocessor closure so its body is unit-testable.
+/// Every model a blueprint's stages name, bare and deduplicated.
+///
+/// Every entry, not the first of each stage: which one a stage lands on depends
+/// on what this machine has keys for, and that resolution happens later, inside
+/// the spawn. Warming the whole set is what makes the answer right whichever way
+/// it goes, and a provider ignores the names it does not serve, so the extra
+/// ones cost nothing on the providers they are not for.
+///
+/// The provider half of an entry is dropped on purpose. A blueprint may name a
+/// model with no provider at all - that is the point of `models = ["gpt-5.5"]` -
+/// so the name is the only part every entry is guaranteed to have.
+fn blueprint_model_names(blueprint: &leviath_core::Blueprint) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for stage in &blueprint.stages {
+        for entry in &stage.model.models {
+            if !entry.model.is_empty() {
+                seen.insert(entry.model.clone());
+            }
+        }
+    }
+    seen.into_iter().collect()
+}
+
+/// Warm the models this blueprint's stages name, before the run is built.
+///
+/// A blueprint that will not read or parse warms nothing: the spawn that follows
+/// is about to fail on the same file and say so properly, and a second complaint
+/// from here would only be noise in front of it.
+async fn warm_blueprint_models(
+    providers: &leviath_runtime::ProviderRegistry,
+    blueprint_path: &str,
+    default_provider: &str,
+) {
+    let Ok(content) = std::fs::read_to_string(blueprint_path) else {
+        return;
+    };
+    let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
+        return;
+    };
+    let models = blueprint_model_names(&blueprint);
+    providers
+        .warm_models(
+            &models,
+            std::time::Duration::from_secs(MODEL_WARM_TIMEOUT_SECS),
+            Some(default_provider),
+        )
+        .await;
+}
+
+/// How long the whole warm-up may take per provider before a run starts anyway.
+///
+/// Generous because it covers a genuinely cold local model - a 32B-class one
+/// measured at 7.9 seconds to load on a developer machine, and a larger one on a
+/// slower disk will take longer. A model already resident answers in about two
+/// tenths of a second, which is the case this is paid in on every run after the
+/// first.
+///
+/// It is a ceiling, not a wait: crossing it means the run starts on the compiled
+/// table rather than that the run is refused.
+const MODEL_WARM_TIMEOUT_SECS: u64 = 90;
+
 async fn warm_fanout_worker_mcp(
     pool: &crate::daemon::mcp_pool::McpPool,
     blueprint_path: &str,
@@ -1206,6 +1280,80 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         )
         .unwrap();
         manifest
+    }
+
+    /// Every entry across every stage, deduplicated, with the provider half
+    /// dropped: a blueprint may name a model with no provider at all, so the
+    /// name is the only part every entry is guaranteed to have.
+    #[test]
+    fn blueprint_models_are_every_entry_deduplicated() {
+        let manifest = r#"
+[agent]
+name = "m"
+version = "0.1.0"
+entry_stage = "one"
+
+[stages.one]
+system_prompt = "x"
+model = { models = ["shared", { provider = "ollama", model = "local:latest" }] }
+
+[stages.two]
+system_prompt = "y"
+model = { models = ["shared", "other", ""] }
+"#;
+        let blueprint =
+            leviath_core::manifest::parse_manifest(manifest).expect("the fixture parses");
+
+        assert_eq!(
+            blueprint_model_names(&blueprint),
+            vec![
+                "local:latest".to_string(),
+                "other".to_string(),
+                "shared".to_string()
+            ],
+            "sorted and deduplicated, providers dropped, and the empty entry \
+             skipped - no provider serves a nameless model, and passing one \
+             would ask every provider about nothing"
+        );
+    }
+
+    /// A stage that names no model is not a stage with no model: the parser
+    /// fills in the build's default, and that is the one a run would use, so it
+    /// is the one worth warming. Asserted because "names nothing" and "warms
+    /// nothing" read like the same statement and are not.
+    #[test]
+    fn a_stage_naming_no_model_yields_the_default_it_would_run() {
+        let manifest = r#"
+[agent]
+name = "m"
+version = "0.1.0"
+entry_stage = "one"
+
+[stages.one]
+system_prompt = "x"
+"#;
+        let blueprint =
+            leviath_core::manifest::parse_manifest(manifest).expect("the fixture parses");
+        assert_eq!(
+            blueprint_model_names(&blueprint),
+            vec!["claude-sonnet-4-6".to_string()],
+            "the default a model-less stage resolves to is what a run would use"
+        );
+    }
+
+    /// A path that will not read, and a file that will not parse, both warm
+    /// nothing. The spawn that follows fails on the same file and says so
+    /// properly; a second complaint from here would be noise in front of it.
+    #[tokio::test]
+    async fn an_unreadable_or_unparsable_blueprint_warms_nothing() {
+        let registry = leviath_runtime::ProviderRegistry::new();
+
+        warm_blueprint_models(&registry, "/no/such/blueprint.leviath", "anthropic").await;
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let bad = dir.path().join("broken.leviath");
+        std::fs::write(&bad, "this is not TOML at all {{{").expect("writes");
+        warm_blueprint_models(&registry, &bad.display().to_string(), "anthropic").await;
     }
 
     #[tokio::test]

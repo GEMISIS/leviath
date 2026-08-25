@@ -130,6 +130,15 @@ fn estimated_block_tokens(block: &crate::ContentBlock) -> usize {
     }
 }
 
+/// How long a model warmed for a run stays resident with nothing calling it.
+///
+/// Long enough to cover the gap between warming and the run's first inference,
+/// and to survive the pauses between a run's turns, without pinning memory for
+/// the rest of the day on a machine that ran one agent this morning. Ollama's
+/// own default is five minutes; this says so explicitly rather than depending on
+/// a default that is a server setting somebody may have changed.
+const WARM_KEEP_ALIVE: &str = "5m";
+
 fn effective_window(show: &serde_json::Value) -> Option<usize> {
     let parameters = show.get("parameters")?.as_str()?;
     parameters.lines().find_map(|line| {
@@ -301,7 +310,11 @@ impl OllamaProvider {
             .unwrap_or_default()
     }
 
-    async fn learn_model_windows(&self) -> Result<HashMap<String, usize>> {
+    /// The models this server has pulled, by name.
+    ///
+    /// Sorted, so a caller that walks them asks `/api/show` in a stable order -
+    /// which is what lets a test drive a fixed response sequence.
+    async fn installed_model_names(&self) -> Result<Vec<String>> {
         let tags = self
             .client
             .get(format!("{}/api/tags", self.base_url))
@@ -310,8 +323,7 @@ impl OllamaProvider {
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
         let tags = crate::provider::check_http_response(tags, None).await?;
         let tags: serde_json::Value = crate::provider::decode_json(tags).await?;
-
-        let names: Vec<String> = tags
+        let mut names: Vec<String> = tags
             .get("models")
             .and_then(|m| m.as_array())
             .map(|entries| {
@@ -321,6 +333,54 @@ impl OllamaProvider {
                     .collect()
             })
             .unwrap_or_default();
+        names.sort();
+        Ok(names)
+    }
+
+    /// Load one model into memory without generating anything.
+    ///
+    /// A `/api/generate` carrying a model and no prompt is Ollama's own way to
+    /// say "load this": it answers `done_reason: "load"` having produced no
+    /// tokens. Measured on a developer machine, 7.9s for a cold 32B-class model
+    /// and 0.2s for one already resident - so the cost of doing this before
+    /// every run is paid once, not each time.
+    ///
+    /// Never fails the caller. A model that will not load leaves the run to
+    /// proceed on the compiled table, which is what it would have used anyway;
+    /// refusing to start a run because a warm-up did not work would trade a
+    /// wrong window for no run at all.
+    async fn load_model(&self, model: &str) {
+        let sent = self
+            .client
+            .post(format!("{}/api/generate", self.base_url))
+            .json(&serde_json::json!({ "model": model, "keep_alive": WARM_KEEP_ALIVE }))
+            .send()
+            .await;
+        match sent {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => {
+                // Read out before the macro: a field value inside `warn!` is its
+                // own region, evaluated only when the log fires, which leaves it
+                // uncovered even on the test that takes this arm.
+                let status = response.status();
+                tracing::warn!(
+                    model = %model,
+                    %status,
+                    "Ollama refused to load this model, so its context window is \
+                     whatever its name suggests"
+                );
+            }
+            Err(e) => tracing::warn!(
+                model = %model,
+                error = %e,
+                "could not reach Ollama to load this model, so its context \
+                 window is whatever its name suggests"
+            ),
+        }
+    }
+
+    async fn learn_model_windows(&self) -> Result<HashMap<String, usize>> {
+        let names = self.installed_model_names().await?;
 
         // What is loaded right now, and at what size. `/api/ps` reports the
         // window the runner actually allocated for a model it has resident,
@@ -702,6 +762,33 @@ impl Provider for OllamaProvider {
     ///
     /// Failure is a warning upstream, not an error: a daemon whose Ollama is not
     /// running must still start, with the compiled table in charge.
+    async fn warm_models(&self, models: &[String]) -> Result<()> {
+        // Only what this server actually has. Asking it to load a model it does
+        // not hold makes it try to *pull* one, which is a download nobody asked
+        // for at the start of a run.
+        let held = self.installed_model_names().await?;
+        let wanted: Vec<&String> = models.iter().filter(|m| held.contains(m)).collect();
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        for model in &wanted {
+            self.load_model(model).await;
+        }
+        // Re-read now they are resident. This is the point of the exercise: a
+        // loaded model reports through `/api/ps` the window the runner really
+        // allocated, where a cold one leaves only what its Modelfile pins and,
+        // failing that, a guess from its name.
+        let windows = self.learn_model_windows().await?;
+        let learned = windows.len();
+        *leviath_core::sync::lock(&self.api_windows) = windows;
+        tracing::debug!(
+            warmed = wanted.len(),
+            models = learned,
+            "warmed Ollama models and re-read their windows"
+        );
+        Ok(())
+    }
+
     async fn prime_capabilities(&self) -> Result<()> {
         let windows = self.learn_model_windows().await?;
         let count = windows.len();
@@ -3127,6 +3214,146 @@ mod tests {
     // ─── effective window ───────────────────────────────────────────────────
 
     /// `parameters` is a text block, and `num_ctx` is the line that matters.
+    /// The point of the whole thing: a model that is cold reports only what its
+    /// name suggests, and the same model once loaded reports what the runner
+    /// really allocated. Warming is what moves it from the first to the second
+    /// *before* a run sizes its regions.
+    #[tokio::test]
+    async fn warming_a_model_replaces_the_guess_with_what_the_runner_allocated() {
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            // warm_models: what is installed, then the load, then the re-read.
+            (200, "OK", tags_body(&["qwen3.8:latest"])),
+            (200, "OK", br#"{"done":true,"done_reason":"load"}"#.to_vec()),
+            (200, "OK", tags_body(&["qwen3.8:latest"])),
+            (200, "OK", ps_body(&[("qwen3.8:latest", 262_144)])),
+        ])
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+
+        // Cold: the name is all there is, and the name says 131072.
+        assert_eq!(
+            provider.capabilities("qwen3.8:latest").max_context_tokens,
+            131_072
+        );
+
+        provider
+            .warm_models(&["qwen3.8:latest".to_string()])
+            .await
+            .expect("warms");
+
+        let after = provider.capabilities("qwen3.8:latest");
+        assert_eq!(after.max_context_tokens, 262_144);
+        assert_eq!(after.limits_source, LimitsSource::Api);
+    }
+
+    /// A server that is not there at all is the same as one that refuses: the
+    /// run proceeds on the compiled table. Nothing about a warm-up is worth
+    /// failing a run over.
+    #[tokio::test]
+    async fn a_server_that_cannot_be_reached_does_not_fail_the_warm_up() {
+        // Port 1 needs privileges to bind, so nothing of ours is listening.
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "http://127.0.0.1:1".to_string(),
+        );
+
+        // The tag fetch is the first thing warm_models does, so an unreachable
+        // server surfaces there rather than at the load.
+        assert!(
+            provider
+                .warm_models(&["anything:latest".to_string()])
+                .await
+                .is_err(),
+            "reported to the caller, which logs it and starts the run anyway"
+        );
+
+        // And the load itself, reached directly, is silent about it.
+        provider.load_model("anything:latest").await;
+    }
+
+    /// A model this server has not pulled is not loaded, because asking Ollama
+    /// to load one it does not hold makes it download one - which is not a thing
+    /// to start on somebody's behalf at the beginning of a run.
+    #[tokio::test]
+    async fn a_model_the_server_does_not_have_is_not_pulled() {
+        // One response only: the tag list. A load attempt would find nothing to
+        // serve and fail the test rather than quietly downloading.
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![(
+            200,
+            "OK",
+            tags_body(&["installed:latest"]),
+        )])
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+
+        provider
+            .warm_models(&["never-pulled:latest".to_string()])
+            .await
+            .expect("returns without loading anything");
+    }
+
+    /// Every provider is handed the whole list, so most of what arrives belongs
+    /// to somebody else. Names this server does not have are simply skipped.
+    #[tokio::test]
+    async fn models_belonging_to_other_providers_are_ignored() {
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", tags_body(&["local:latest"])),
+            (200, "OK", br#"{"done":true,"done_reason":"load"}"#.to_vec()),
+            (200, "OK", tags_body(&["local:latest"])),
+            (200, "OK", ps_body(&[("local:latest", 8_192)])),
+        ])
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+
+        provider
+            .warm_models(&[
+                "claude-sonnet-5".to_string(),
+                "local:latest".to_string(),
+                "gpt-5.5".to_string(),
+            ])
+            .await
+            .expect("warms only its own");
+
+        assert_eq!(
+            provider.capabilities("local:latest").max_context_tokens,
+            8_192
+        );
+    }
+
+    /// A server that will not load a model does not fail the run. The warm-up is
+    /// an improvement on the compiled table, and refusing to start because it
+    /// did not work would trade a wrong window for no run.
+    #[tokio::test]
+    async fn a_load_that_fails_still_leaves_the_run_startable() {
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", tags_body(&["stubborn:latest"])),
+            (500, "Server Error", b"no".to_vec()),
+            (200, "OK", tags_body(&["stubborn:latest"])),
+            (200, "OK", ps_body(&[])),
+            // Nothing loaded, so the re-read falls through to the Modelfile.
+            (200, "OK", show_body(None)),
+        ])
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+
+        provider
+            .warm_models(&["stubborn:latest".to_string()])
+            .await
+            .expect("a refused load is not an error to the caller");
+    }
+
     /// `/api/ps` is the only endpoint that reports the window the runner
     /// actually allocated, so a model it names is not re-derived from anything
     /// `/api/show` says.

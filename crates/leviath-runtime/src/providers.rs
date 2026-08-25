@@ -100,6 +100,61 @@ impl ProviderRegistry {
         }
     }
 
+    /// Get every model a run is about to use ready, before it starts.
+    ///
+    /// `models` is what the blueprint names, bare and deduplicated. Every
+    /// provider is asked and each takes the ones it serves: the caller does not
+    /// know which model belongs to whom, and a blueprint may name a model with
+    /// no provider at all, which is the case this has to keep working.
+    ///
+    /// Bounded per provider and never fatal. A run whose warm-up timed out is a
+    /// run that starts on the compiled table - the same table it would have used
+    /// if this had never been called - so the failure costs accuracy, not the
+    /// run.
+    ///
+    /// `also` names a script provider to include, for the same reason
+    /// [`prime_capabilities`](Self::prime_capabilities) takes one: a script
+    /// provider is compiled on demand, so the ones on disk are not enumerable
+    /// here, and the machine's default is the one worth the compile.
+    pub async fn warm_models(
+        &self,
+        models: &[String],
+        timeout: std::time::Duration,
+        also: Option<&str>,
+    ) {
+        if models.is_empty() {
+            return;
+        }
+        let mut targets: Vec<(String, Arc<dyn Provider>)> = self
+            .providers
+            .iter()
+            .map(|(name, provider)| (name.clone(), provider.clone()))
+            .collect();
+        if let Some(name) = also
+            && !self.providers.contains_key(name)
+            && let Some(provider) = self.get(name)
+        {
+            targets.push((name.to_string(), provider));
+        }
+        for (name, provider) in targets {
+            match tokio::time::timeout(timeout, provider.warm_models(models)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(
+                    provider = %name,
+                    error = %e,
+                    "could not warm this provider's models before the run, so any \
+                     it serves are sized from the table compiled into this build"
+                ),
+                Err(_) => tracing::warn!(
+                    provider = %name,
+                    timeout_secs = timeout.as_secs(),
+                    "timed out warming this provider's models before the run, so \
+                     any it serves are sized from the table compiled into this build"
+                ),
+            }
+        }
+    }
+
     /// Check if a provider is available: registered natively, or resolvable
     /// (loadable) as a script provider right now. Used at stage-model selection;
     /// network-free because script `initialize` runs offline.
@@ -191,10 +246,38 @@ mod tests {
     struct StubProvider {
         primed: Arc<std::sync::atomic::AtomicUsize>,
         outcome: PrimeOutcome,
+        /// Every list this stub was handed to warm, in order.
+        warmed: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl StubProvider {
+        fn new(outcome: PrimeOutcome) -> Self {
+            Self {
+                primed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                outcome,
+                warmed: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
     }
 
     #[async_trait::async_trait]
     impl Provider for StubProvider {
+        async fn warm_models(&self, models: &[String]) -> Result<(), ProviderError> {
+            self.warmed
+                .lock()
+                .expect("not poisoned")
+                .push(models.to_vec());
+            match self.outcome {
+                PrimeOutcome::Ok => Ok(()),
+                PrimeOutcome::Fails => Err(ProviderError::ApiError("no".to_string())),
+                PrimeOutcome::Hangs => {
+                    // Longer than any timeout a test passes.
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    Ok(())
+                }
+            }
+        }
+
         async fn prime_capabilities(&self) -> Result<(), ProviderError> {
             self.primed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -280,6 +363,7 @@ mod tests {
         Arc::new(StubProvider {
             primed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             outcome: PrimeOutcome::Ok,
+            warmed: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
 
@@ -306,9 +390,71 @@ mod tests {
             Arc::new(StubProvider {
                 primed: primed.clone(),
                 outcome,
+                warmed: Arc::new(std::sync::Mutex::new(Vec::new())),
             }),
             primed,
         )
+    }
+
+    /// Every provider is asked, because the caller does not know which model
+    /// belongs to whom - and a blueprint may name one with no provider at all,
+    /// which is the case this has to keep working.
+    #[tokio::test]
+    async fn warming_asks_every_provider_for_the_whole_list() {
+        let a = Arc::new(StubProvider::new(PrimeOutcome::Ok));
+        let b = Arc::new(StubProvider::new(PrimeOutcome::Ok));
+        let mut registry = ProviderRegistry::new();
+        registry.register("a".to_string(), a.clone());
+        registry.register("b".to_string(), b.clone());
+
+        let models = vec!["one".to_string(), "two".to_string()];
+        registry
+            .warm_models(&models, std::time::Duration::from_secs(5), None)
+            .await;
+
+        for stub in [&a, &b] {
+            let seen = stub.warmed.lock().expect("not poisoned").clone();
+            assert_eq!(seen, vec![models.clone()], "asked once, with everything");
+        }
+    }
+
+    /// Nothing to warm means nobody is disturbed - a run whose blueprint names
+    /// no models should not cost a round of provider calls.
+    #[tokio::test]
+    async fn warming_nothing_asks_nobody() {
+        let stub = Arc::new(StubProvider::new(PrimeOutcome::Ok));
+        let mut registry = ProviderRegistry::new();
+        registry.register("a".to_string(), stub.clone());
+
+        registry
+            .warm_models(&[], std::time::Duration::from_secs(5), None)
+            .await;
+
+        assert!(stub.warmed.lock().expect("not poisoned").is_empty());
+    }
+
+    /// A provider that fails or hangs does not stop the run: warming is an
+    /// improvement on the compiled table, and a run that could not be warmed
+    /// still runs on it.
+    #[tokio::test]
+    async fn a_failing_or_hanging_provider_does_not_block_the_run() {
+        let fails = Arc::new(StubProvider::new(PrimeOutcome::Fails));
+        let hangs = Arc::new(StubProvider::new(PrimeOutcome::Hangs));
+        let mut registry = ProviderRegistry::new();
+        registry.register("fails".to_string(), fails.clone());
+        registry.register("hangs".to_string(), hangs.clone());
+
+        // Returns rather than hanging, which is the whole assertion.
+        registry
+            .warm_models(
+                &["m".to_string()],
+                std::time::Duration::from_millis(50),
+                None,
+            )
+            .await;
+
+        assert_eq!(fails.warmed.lock().expect("not poisoned").len(), 1);
+        assert_eq!(hangs.warmed.lock().expect("not poisoned").len(), 1);
     }
 
     #[tokio::test]
@@ -431,6 +577,55 @@ mod tests {
 
     /// Priming reaches the script provider a machine names as its default, so
     /// it can answer what it serves on the synchronous resolve path (#598).
+    /// A script provider is compiled on demand rather than enumerated, so the
+    /// ones on disk are invisible to the loop above. The machine's default is
+    /// reached the same way priming reaches it - otherwise a run whose models
+    /// live on a local script provider warms everything except the one provider
+    /// that needed it.
+    #[tokio::test]
+    async fn warming_also_reaches_the_named_script_provider() {
+        use crate::script_provider::ScriptProviderLayer;
+        use std::collections::HashMap;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("spark.rhai"),
+            "fn initialize(config) { #{} }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }\n\
+             fn warm_models(state, models) { if models[0] != \"local-fast\" \
+             { throw \"got \" + models[0] } }\n\
+             fn list_models(state) { [ #{ id: \"local-fast\", display_name: \"F\", \
+             max_context_tokens: 4096, max_output_tokens: 512 } ] }",
+        )
+        .unwrap();
+        let layer = ScriptProviderLayer::new(
+            dir.path().to_path_buf(),
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            Vec::new(),
+        );
+        let reg = ProviderRegistry::new().with_script_layer(Arc::new(layer));
+
+        // The script throws unless it is handed exactly this, and a throw is
+        // swallowed as a warning - so the assertion is that the call reached it
+        // at all, which `serves_model` answering afterwards demonstrates.
+        reg.warm_models(
+            &["local-fast".to_string()],
+            std::time::Duration::from_secs(5),
+            Some("spark"),
+        )
+        .await;
+
+        assert_eq!(
+            reg.get("spark")
+                .expect("resolves")
+                .serves_model("local-fast"),
+            None,
+            "warming does not prime; the two are separate questions"
+        );
+    }
+
     #[tokio::test]
     async fn priming_also_reaches_the_named_script_provider() {
         use crate::script_provider::ScriptProviderLayer;
@@ -501,6 +696,7 @@ mod tests {
         let p = StubProvider {
             primed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             outcome: PrimeOutcome::Ok,
+            warmed: Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         assert_eq!(p.name(), "stub");
         assert_eq!(p.count_tokens("abcd", "m").await, 4);
