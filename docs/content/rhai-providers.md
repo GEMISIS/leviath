@@ -169,7 +169,8 @@ below does. Never assemble the body by joining strings. A model reply routinely 
 a newline or a backslash, and escaping those by hand is where a provider script breaks weeks later
 on one unusual page.
 - Env and encoding: `env_var(name)` (returns a string or `()`), `encode_uri(str)`,
-  `encode_base64(str)`.
+  `encode_base64(str)`, `decode_base64(str)`. The base64 pair is the same implementation
+  [tool scripts get](/docs/rhai-tools), including how `decode_base64` reports a failure.
 - Tokens: `count_tokens_heuristic(text, hint)` where `hint` is `"openai"`, `"anthropic"`,
   `"gemini"`, or `"general"`.
 

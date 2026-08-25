@@ -64,9 +64,15 @@ tool's `@requires` line is not a gate: it only filters which platforms discover 
 
 | Group | Functions |
 |---|---|
-| JSON and encoding | `parse_json`, `to_json`, `encode_uri`, `html_to_text` |
+| JSON and encoding | `parse_json`, `to_json`, `encode_uri`, `encode_base64`, `decode_base64`, `html_to_text` |
 | Strings | `contains`, `starts_with`, `ends_with`, `trim`, `join`, `split` |
 | Content | `count_tokens`, `is_json`, `is_markdown`, `is_mermaid`, `is_empty`, `content_format` |
+
+`decode_base64` fails rather than returning something wrong, in two ways worth telling apart. Input
+that is not valid base64 says so. Input that is valid base64 but decodes to bytes that are not UTF-8
+says *that* - base64 carries any bytes, a Rhai string holds text, so a script decoding an image has
+asked for something the function cannot return. Both reach the model as an `[error]` line naming
+your tool, so a script that hits one stops rather than carrying on with an empty string.
 
 ## A complete tool
 

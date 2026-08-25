@@ -39,7 +39,6 @@ bytes = "1"
 # a pause and resume restores a window full of ids from the last one.
 rand = { workspace = true }
 rhai = { workspace = true }
-base64 = { workspace = true }
 # The Claude Code transport hands its system prompt to the CLI as a file: an
 # assembled context routinely exceeds Linux's 128 KB cap on a single argv entry.
 tempfile = "3"

@@ -13,6 +13,20 @@ same list.
 
 ## Unreleased
 
+- Added: `decode_base64` for Rhai scripts, and `encode_base64` for tool scripts,
+  which had neither. The provider engine has offered `encode_base64` for some
+  time with no way to read a value back, and the tool engine offered no base64
+  at all - so a tool fetching a JSON API that returns a base64 field could not
+  open it, and a provider script could write one it could not read.
+  `decode_base64` fails rather than returning something wrong, and says which of
+  the two failures happened: input that is not valid base64, and input that is
+  valid base64 but decodes to bytes that are not UTF-8. The second is not a typo
+  on the caller's part - base64 carries any bytes and a Rhai string holds text -
+  so the two need different fixes and the message says so.
+- Changed: both engines now call one implementation, the way they already share
+  `encode_uri`. Two functions reachable by the same name from two engines is a
+  difference nobody finds until a script works in one and not the other.
+
 - Fixed: `GET /api/models` published a guess for every provider whose real
   answer is a network call away. It built a registry and listed straight away,
   never priming, so the token limits it reported came from a table matched

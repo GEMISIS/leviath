@@ -13,6 +13,7 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
+base64 = { workspace = true }
 leviath-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

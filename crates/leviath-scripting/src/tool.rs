@@ -666,6 +666,12 @@ fn register_host_functions(engine: &mut Engine, host: Arc<dyn ScriptHost>) {
     engine.register_fn("html_to_text", |s: &str| -> HostRes<String> {
         guard_str("html_to_text", &mut || Ok(html_to_text(s)))
     });
+    engine.register_fn("encode_base64", |s: &str| -> HostRes<String> {
+        guard_str("encode_base64", &mut || Ok(encode_base64(s)))
+    });
+    engine.register_fn("decode_base64", |s: &str| -> HostRes<String> {
+        guard_str("decode_base64", &mut || decode_base64(s))
+    });
 }
 
 /// `parse_json(str)` host function: JSON string → Rhai value.
@@ -685,6 +691,48 @@ fn parse_json_fn(s: &str) -> HostRes<Dynamic> {
 fn to_json_fn(v: &Dynamic) -> HostRes<String> {
     let json: serde_json::Value = rhai::serde::from_dynamic(v)?;
     Ok(json.to_string())
+}
+
+/// Standard base64, with padding.
+///
+/// Public for the same reason [`percent_encode`] is: the script *provider*
+/// engine offers scripts a function of this name too, and two encoders reachable
+/// by one name is a difference waiting to be found by whoever writes a `.rhai`
+/// that works in one engine and not the other.
+pub fn encode_base64(input: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(input)
+}
+
+/// Standard base64 back to text.
+///
+/// Errors rather than returning something wrong, in the two ways this can fail:
+/// input that is not valid base64, and input that decodes to bytes that are not
+/// UTF-8. The second is the one worth stating, because it is not a typo on the
+/// caller's part - base64 carries arbitrary bytes, a Rhai string is text, and a
+/// script that decodes a PNG has asked for something this cannot return. The
+/// message says which of the two happened, since the fixes are unrelated.
+pub fn decode_base64(input: &str) -> HostRes<String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(input)
+        .map_err(|e| {
+            Box::new(EvalAltResult::ErrorRuntime(
+                format!("decode_base64: not valid base64: {e}").into(),
+                Position::NONE,
+            ))
+        })?;
+    String::from_utf8(bytes).map_err(|e| {
+        Box::new(EvalAltResult::ErrorRuntime(
+            format!(
+                "decode_base64: decoded {} bytes that are not UTF-8 text ({e}). \
+                 Base64 can carry any bytes; a Rhai string holds text.",
+                e.as_bytes().len()
+            )
+            .into(),
+            Position::NONE,
+        ))
+    })
 }
 
 /// Percent-encode a string for use in a URL query component. Unreserved
@@ -1345,6 +1393,27 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         assert_eq!(out, "Hi& bye");
     }
 
+    /// Exercises the registered bindings rather than the free functions: a
+    /// script calls both by name and gets its own text back. This is the part
+    /// that was missing - the tool engine offered neither.
+    #[test]
+    fn execute_base64_round_trip_via_script() {
+        let tool = tool_from("// @tool t\ndecode_base64(encode_base64(\"round trip · 🐙\"))");
+        let out = execute(&tool, serde_json::json!({}), FakeHost::arc());
+        assert_eq!(out, "round trip · 🐙");
+    }
+
+    /// A script decoding something that is not base64 gets the error as its
+    /// output, prefixed like any other tool failure, rather than an empty
+    /// string it would carry on with.
+    #[test]
+    fn execute_decode_base64_failure_reaches_the_script() {
+        let tool = tool_from("// @tool t\ndecode_base64(\"not base64!\")");
+        let out = execute(&tool, serde_json::json!({}), FakeHost::arc());
+        assert!(out.starts_with("[error] t:"), "got: {out}");
+        assert!(out.contains("not valid base64"), "got: {out}");
+    }
+
     #[test]
     fn execute_missing_optional_param_reads_as_unit() {
         // Mirrors the issue's `params.count == ()` idiom.
@@ -1731,6 +1800,69 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
     fn encode_uri_non_ascii() {
         // '€' (U+20AC) is 3 UTF-8 bytes E2 82 AC.
         assert_eq!(percent_encode("€"), "%E2%82%AC");
+    }
+
+    /// Round-trips, including the bytes that make base64 worth having: a
+    /// multi-byte character, and the padding cases at each input length mod 3.
+    #[test]
+    fn base64_round_trips_through_both_directions() {
+        for original in [
+            "",
+            "a",
+            "ab",
+            "abc",
+            "hello, world",
+            "€ · 🐙",
+            "line\nbreak\ttab",
+            "{\"json\": [1, 2, 3]}",
+        ] {
+            let encoded = encode_base64(original);
+            let decoded = decode_base64(&encoded).expect("what we encoded decodes");
+            assert_eq!(decoded, original, "round trip of {original:?}");
+        }
+    }
+
+    /// Standard alphabet with padding, so a script's output matches what any
+    /// other base64 tool produces for the same input.
+    #[test]
+    fn base64_is_the_standard_padded_alphabet() {
+        assert_eq!(encode_base64("a"), "YQ==");
+        assert_eq!(encode_base64("ab"), "YWI=");
+        assert_eq!(encode_base64("abc"), "YWJj");
+        // `?` and `>` are the pair that separate the standard alphabet from the
+        // URL-safe one: standard encodes them with `+` and `/`.
+        assert_eq!(encode_base64("\u{00ff}\u{00fe}"), "w7/Dvg==");
+    }
+
+    /// Input that is not base64 is an error, not a silent empty string.
+    #[test]
+    fn decoding_something_that_is_not_base64_says_so() {
+        let err = decode_base64("not base64 at all!").expect_err("refused");
+        let message = err.to_string();
+        assert!(message.contains("decode_base64"), "{message}");
+        assert!(message.contains("not valid base64"), "{message}");
+    }
+
+    /// Valid base64 carrying bytes that are not text is refused, and the message
+    /// says which of the two failures happened - the fixes are unrelated.
+    #[test]
+    fn decoding_bytes_that_are_not_text_explains_which_failure_it_was() {
+        // A PNG's magic number: valid base64, not valid UTF-8.
+        let png_header = encode_base64_bytes(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a]);
+        let err = decode_base64(&png_header).expect_err("refused");
+        let message = err.to_string();
+        assert!(message.contains("not UTF-8 text"), "{message}");
+        assert!(
+            !message.contains("not valid base64"),
+            "the two failures are told apart: {message}"
+        );
+    }
+
+    /// Encode arbitrary bytes, for the test above. Not offered to scripts: a
+    /// Rhai string is text, so there is nothing for a byte encoder to take.
+    fn encode_base64_bytes(bytes: &[u8]) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 
     #[test]
