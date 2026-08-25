@@ -871,6 +871,21 @@ fn agreed(args: &UpdateArgs, env: &UpdateEnv, question: &str) -> bool {
     args.yes || (env.confirm)(question)
 }
 
+/// Whether to offer the binary upgrade at all.
+///
+/// `false` only when the check positively says this copy is current: then
+/// running a package manager over a binary with nothing to fetch is a prompt
+/// somebody has to decline before reaching the blueprint and migration steps
+/// they actually came for - which is the whole case for somebody who installed
+/// the new binary their own way.
+///
+/// `None` is "could not find out", not "already current". The check may be
+/// switched off, the network may be gone, or the copy may have no channel to
+/// ask about. Offering the upgrade is the honest response to not knowing.
+fn binary_step_needed(newest: &latest::LatestCheck) -> bool {
+    newest.update_available != Some(false)
+}
+
 /// Step one: the binary.
 fn update_binary(args: &UpdateArgs, env: &UpdateEnv, plan: &UpdatePlan) -> anyhow::Result<()> {
     let commands = match &plan.binary {
@@ -1067,7 +1082,10 @@ pub fn execute_with(args: &UpdateArgs, env: &UpdateEnv, version: &str) -> anyhow
     }
 
     println!("\nbinary");
-    update_binary(args, env, &plan)?;
+    match binary_step_needed(&newest) {
+        true => update_binary(args, env, &plan)?,
+        false => println!("  {version} is the newest on this channel"),
+    }
     println!("\nblueprints");
     update_agents(args, env, &plan);
     println!("\nconfig");

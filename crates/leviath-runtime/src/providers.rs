@@ -71,14 +71,32 @@ impl ProviderRegistry {
             .iter()
             .map(|(name, provider)| (name.clone(), provider.clone()))
             .collect();
-        // Only when it is not already registered natively: a native provider of
-        // the same name wins everywhere else, and priming it twice would be a
-        // second network call for one answer.
-        if let Some(name) = also
-            && !self.providers.contains_key(name)
-            && let Some(provider) = self.get(name)
-        {
-            targets.push((name.to_string(), provider));
+        // Every script provider this machine configured, plus the one named as
+        // its default.
+        //
+        // Configured, not every `.rhai` on disk: compiling the lot to ask what
+        // each serves is the cost this registry exists to avoid. But a provider
+        // with a `[model_providers.<name>]` block is not "a script on disk" -
+        // somebody wrote its name and its key down. Leaving those unprimed is
+        // what made a working `list_models` go unasked the moment its provider
+        // stopped being the default, so the provider claimed no models and no
+        // blueprint could route to it without pinning it by name.
+        let configured = self
+            .script_layer
+            .as_ref()
+            .map(|l| l.configured_names())
+            .unwrap_or_default();
+        for name in configured.iter().map(String::as_str).chain(also) {
+            // Only when it is not already registered natively: a native provider
+            // of the same name wins everywhere else, and priming it twice would
+            // be a second network call for one answer. Nor twice over, for one
+            // that is both configured and the default.
+            if self.providers.contains_key(name) || targets.iter().any(|(n, _)| n == name) {
+                continue;
+            }
+            if let Some(provider) = self.get(name) {
+                targets.push((name.to_string(), provider));
+            }
         }
         for (name, provider) in targets {
             match tokio::time::timeout(timeout, provider.prime_capabilities()).await {
@@ -623,6 +641,51 @@ mod tests {
                 .serves_model("local-fast"),
             None,
             "warming does not prime; the two are separate questions"
+        );
+    }
+
+    /// The bug this fixes, in the shape it was found in: a script provider with
+    /// a config block, a working `list_models`, and a machine whose
+    /// `default_provider` is something else. It claimed no models, so no
+    /// blueprint could route to it without pinning it by name, and its
+    /// `list_models` was never asked.
+    #[tokio::test]
+    async fn priming_reaches_a_configured_script_provider_that_is_not_the_default() {
+        use crate::script_provider::{ScriptProviderLayer, ScriptProviderSpec};
+        use std::collections::HashMap;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("cerebras.rhai"),
+            "fn initialize(config) { #{} }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }\n\
+             fn list_models(state) { [ #{ id: \"gpt-oss-120b\", display_name: \"O\", \
+             max_context_tokens: 131000, max_output_tokens: 8192 } ] }",
+        )
+        .unwrap();
+
+        let mut overrides = HashMap::new();
+        overrides.insert("cerebras".to_string(), ScriptProviderSpec::default());
+        let layer = ScriptProviderLayer::new(
+            dir.path().to_path_buf(),
+            overrides,
+            HashMap::new(),
+            None,
+            Vec::new(),
+        );
+        let reg = ProviderRegistry::new().with_script_layer(Arc::new(layer));
+
+        // The default is something else entirely, which is the whole point.
+        reg.prime_capabilities(std::time::Duration::from_secs(5), Some("openrouter"))
+            .await;
+
+        assert_eq!(
+            reg.get("cerebras")
+                .expect("resolves")
+                .serves_model("gpt-oss-120b"),
+            Some("gpt-oss-120b".to_string()),
+            "a configured provider is asked what it serves even when it is not \
+             the default"
         );
     }
 

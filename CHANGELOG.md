@@ -33,6 +33,31 @@ same list.
   this one does not. Only on a definite no: a provider that claims nothing cannot
   tell us the pair is wrong, and treating silence as rejection would throw away
   every route to it.
+- Fixed: a script provider with a `[model_providers.<name>]` block was only
+  asked what it serves when it happened to be the machine's `default_provider`.
+  Every other one claimed no models however good its `list_models`, so no
+  blueprint could route to it without pinning it by name - and switching the
+  default was enough to break a provider that had worked the day before.
+  Priming now reaches every configured script provider. Still not every `.rhai`
+  on disk: compiling the lot is the cost the registry exists to avoid, but a
+  provider somebody wrote a config block for is not "a script on disk".
+- Added: a run says which Rhai scripts it needed and could not use.
+  `flags.broken_scripts` on `meta.json` and the API, `complete (broken script)`
+  in `lev ps`, and a `⚠ N broken scripts` badge in `lev dash`. A broken output
+  validator is skipped rather than fatal - reading a script bug as "the answer
+  is wrong" would burn the retry budget on it - so the run completed, reported
+  success, and the only trace was a line in the daemon log. An answer nobody
+  checked looked exactly like an answer that passed.
+- Added: `lev validate` compiles the machine's global script tools and script
+  providers, not just the blueprint's own `tools/`. Nothing checked them until a
+  run needed one, and by then a broken provider reads as "the agent cannot find
+  a model" rather than "this file does not compile".
+- Changed: `lev update` does not offer to run a package manager when it knows
+  this copy is already the newest on its channel. It still updates bundled
+  blueprints and applies config migrations, which is what somebody who installed
+  the binary their own way came for - and what they previously had to decline an
+  upgrade prompt to reach. A check that could not run still offers the upgrade:
+  not knowing is not the same as being current.
 
 - Added: `decode_base64` for Rhai scripts, and `encode_base64` for tool scripts,
   which had neither. The provider engine has offered `encode_base64` for some

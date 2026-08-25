@@ -71,6 +71,17 @@ impl Dashboard {
             },
             Span::styled("· ", Style::default().fg(C_DIM)),
             Span::styled(agent.id.clone(), Style::default().fg(C_DIM)),
+            // A run whose script could not be used looks exactly like a healthy
+            // one otherwise: a broken output validator is skipped rather than
+            // fatal, so the run completes and reports success. This is the only
+            // place that says the result went unchecked.
+            match agent.broken_scripts.len() {
+                0 => Span::raw(""),
+                n => Span::styled(
+                    format!(" · ⚠ {n} broken script{}", if n == 1 { "" } else { "s" }),
+                    Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
+                ),
+            },
         ]);
         frame.render_widget(
             Paragraph::new(hdr_line).style(Style::default().bg(Color::Rgb(20, 20, 30))),
@@ -184,6 +195,7 @@ mod tests {
             tokens_out: 50,
             cached_tokens: 10,
             iteration: 3,
+            broken_scripts: Vec::new(),
             waiting_prompt: None,
             wait_reason: None,
             pending_request: None,
@@ -204,6 +216,61 @@ mod tests {
             accepts_messages: true,
             taint_summary: vec![],
         }
+    }
+
+    /// A run whose script could not be used looks exactly like a healthy one
+    /// otherwise - it completes and reports success - so this badge is the only
+    /// thing on screen that says the result went unchecked.
+    #[test]
+    fn render_header_breadcrumb_flags_a_broken_script() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-broken", AgentDisplayStatus::Complete);
+        agent.broken_scripts = vec!["shape.rhai".to_string()];
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 1);
+                dash.render_header_breadcrumb(f, area, &agent);
+            })
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("1 broken script"), "{buf}");
+        assert!(!buf.contains("scripts"), "singular for one: {buf}");
+    }
+
+    /// Two of them read as two.
+    #[test]
+    fn render_header_breadcrumb_pluralises_broken_scripts() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-broken", AgentDisplayStatus::Complete);
+        agent.broken_scripts = vec!["a.rhai".to_string(), "b.rhai".to_string()];
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 1);
+                dash.render_header_breadcrumb(f, area, &agent);
+            })
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("2 broken scripts"), "{buf}");
+    }
+
+    /// And a healthy run carries no badge at all.
+    #[test]
+    fn render_header_breadcrumb_is_quiet_when_nothing_is_broken() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let agent = make_test_agent("run-ok", AgentDisplayStatus::Complete);
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 1);
+                dash.render_header_breadcrumb(f, area, &agent);
+            })
+            .unwrap();
+        assert!(!rendered_buffer(&terminal).contains("broken"));
     }
 
     #[test]

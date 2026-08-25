@@ -1480,3 +1480,117 @@ fn a_config_that_turns_the_check_off_declines_to_ask() {
         "the two envs do not share one fetcher"
     );
 }
+
+/// The whole point of the change: somebody who installed the new binary their
+/// own way runs `lev update` for the blueprints, and is not first asked to run a
+/// package manager over a binary with nothing to fetch.
+#[test]
+fn a_current_copy_is_not_offered_a_binary_upgrade() {
+    use crate::commands::update::latest::LatestCheck;
+
+    let current = LatestCheck {
+        latest: Some("0.5.0".to_string()),
+        update_available: Some(false),
+        checked_at: Some(1),
+    };
+    assert!(
+        super::format_latest(&current, "0.5.0").contains("newest on this channel"),
+        "and it says so rather than staying silent"
+    );
+}
+
+/// Not knowing is not the same as being current. A check that could not run -
+/// switched off, no network, no channel to ask about - still offers the upgrade,
+/// because refusing to offer it would be acting on an answer nobody has.
+#[test]
+fn an_unanswered_check_still_offers_the_upgrade() {
+    use crate::commands::update::latest::LatestCheck;
+
+    let unknown = LatestCheck::default();
+    assert_eq!(
+        unknown.update_available, None,
+        "the state that must not be read as `already current`"
+    );
+    assert_eq!(
+        super::format_latest(&unknown, "0.5.0"),
+        "",
+        "and nothing is claimed about it on the terminal"
+    );
+}
+
+/// The decision the binary step turns on, as data.
+#[test]
+fn the_binary_step_is_skipped_only_on_a_definite_current() {
+    use crate::commands::update::latest::LatestCheck;
+
+    let current = LatestCheck {
+        latest: Some("0.5.0".to_string()),
+        update_available: Some(false),
+        checked_at: Some(1),
+    };
+    assert!(
+        !super::binary_step_needed(&current),
+        "nothing to fetch, so nothing to offer"
+    );
+
+    let behind = LatestCheck {
+        update_available: Some(true),
+        ..current.clone()
+    };
+    assert!(super::binary_step_needed(&behind));
+
+    assert!(
+        super::binary_step_needed(&LatestCheck::default()),
+        "not knowing is not the same as being current"
+    );
+}
+
+/// End to end: a copy the check says is current runs no package-manager command
+/// at all, and still goes on to the blueprint and migration steps.
+///
+/// This is the case somebody who installed the binary their own way is in, and
+/// before this they had to decline a `brew upgrade` prompt to reach the parts
+/// they came for.
+#[test]
+fn a_current_copy_runs_no_upgrade_command_but_still_updates_blueprints() {
+    with_tracing(|| {
+        let fixture = Fixture::new();
+        let args = UpdateArgs {
+            yes: true,
+            ..UpdateArgs::default()
+        };
+        // A Homebrew copy, so the plan *would* carry `brew update && brew
+        // upgrade` - and a fetcher that reports this very version as newest.
+        let mut env = fixture.env("/opt/homebrew/Cellar/leviath/0.3.4/bin/lev", true, true);
+        env.latest = Arc::new(|_: &str| Ok(r#"{"name": "0.3.4"}"#.to_string()));
+
+        execute_with(&args, &env, "0.3.4").expect("nothing to run, nothing to fail");
+
+        assert!(
+            fixture.recorder.ran().is_empty(),
+            "no command was offered: {:?}",
+            fixture.recorder.ran()
+        );
+    });
+}
+
+/// And the other way: a copy that is behind is still offered the upgrade.
+#[test]
+fn a_copy_that_is_behind_still_runs_the_upgrade() {
+    with_tracing(|| {
+        let fixture = Fixture::new();
+        let args = UpdateArgs {
+            yes: true,
+            ..UpdateArgs::default()
+        };
+        let mut env = fixture.env("/opt/homebrew/Cellar/leviath/0.3.4/bin/lev", true, true);
+        env.latest = Arc::new(|_: &str| Ok(r#"{"name": "9.9.9"}"#.to_string()));
+
+        execute_with(&args, &env, "0.3.4").expect("the runner succeeds");
+
+        assert!(
+            !fixture.recorder.ran().is_empty(),
+            "a copy that is behind is offered the upgrade"
+        );
+    });
+}

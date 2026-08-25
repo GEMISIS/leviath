@@ -617,7 +617,7 @@ fn the_format_check_reports_before_the_schema_check() {
 fn validators_with(source: &str) -> crate::components::OutputValidators {
     let compiled =
         leviath_scripting::output_validator::compile("v.rhai", source).expect("fixture compiles");
-    crate::components::OutputValidators(std::collections::HashMap::from([(
+    crate::components::OutputValidators::new(std::collections::HashMap::from([(
         "v.rhai".to_string(),
         std::sync::Arc::new(compiled),
     )]))
@@ -710,6 +710,58 @@ fn a_broken_validator_records_the_submission_unchecked() {
         output.is_some(),
         "a script bug must not cost the agent its answer"
     );
+    assert_eq!(
+        vals.broken_names(),
+        vec!["v.rhai".to_string()],
+        "and the run records which script it could not use, so the failure is \
+         not only a line in the daemon log"
+    );
+}
+
+/// Once per script, not once per retry. A validator that throws throws every
+/// time, so a stage that submits three corrections would otherwise report the
+/// same broken script three times.
+#[test]
+fn a_broken_validator_is_recorded_once_however_often_it_is_hit() {
+    let vals = validators_with(r#"fn validate(content) { throw "still broken" }"#);
+    let mut w = win();
+    for _ in 0..3 {
+        handle_output_tool(
+            &json!({"content": "an answer"}),
+            &OutputContext {
+                spec: Some(&spec_with_validator("a2ui")),
+                validators: Some(&vals),
+                stage: "summary",
+                stage_names: &[],
+                workdir: None,
+            },
+            0,
+            &mut w,
+        );
+    }
+    assert_eq!(vals.broken_names(), vec!["v.rhai".to_string()]);
+}
+
+/// A validator that works records nothing: the flag means "a script this run
+/// needed could not be used", and a clean run has to be able to say so by
+/// carrying an empty list.
+#[test]
+fn a_working_validator_records_nothing() {
+    let vals = validators_with("fn validate(content) { () }");
+    let mut w = win();
+    handle_output_tool(
+        &json!({"content": "an answer"}),
+        &OutputContext {
+            spec: Some(&spec_with_validator("a2ui")),
+            validators: Some(&vals),
+            stage: "summary",
+            stage_names: &[],
+            workdir: None,
+        },
+        0,
+        &mut w,
+    );
+    assert!(vals.broken_names().is_empty());
 }
 
 /// A blueprint naming a validator that was never compiled (a caller overrode

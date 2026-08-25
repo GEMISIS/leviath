@@ -182,7 +182,8 @@ pub fn handle_output_tool(
     // than treated as a rejection: reading it as "the answer is wrong" would
     // burn the retry budget on a script bug and end the run with nothing.
     if let Some(script) = spec.and_then(|s| s.validator.as_deref())
-        && let Some(validator) = validators.and_then(|v| v.0.get(script))
+        && let Some(held) = validators
+        && let Some(validator) = held.compiled.get(script)
     {
         match leviath_scripting::output_validator::validate(validator, content) {
             leviath_scripting::output_validator::Verdict::Invalid(reason) => {
@@ -192,11 +193,18 @@ pub fn handle_output_tool(
                 );
             }
             leviath_scripting::output_validator::Verdict::Unusable(reason) => {
-                tracing::warn!(
-                    stage = %stage,
-                    error = %reason,
-                    "output validator failed to run; recording the submission unchecked"
-                );
+                // Once per script, not once per retry: a validator that throws
+                // throws every time, and the same stage submitting again would
+                // otherwise repeat the same line.
+                if held.note_broken(script) {
+                    tracing::warn!(
+                        stage = %stage,
+                        script = %script,
+                        error = %reason,
+                        "output validator failed to run; recording the submission \
+                         unchecked and flagging the script on this run"
+                    );
+                }
             }
             leviath_scripting::output_validator::Verdict::Valid => {}
         }

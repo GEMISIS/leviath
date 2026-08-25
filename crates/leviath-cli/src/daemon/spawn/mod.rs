@@ -264,7 +264,7 @@ fn attach_run_record(
     {
         let mut entity_mut = world.entity_mut(entity);
         if !parts.output_validators.is_empty() {
-            entity_mut.insert(leviath_runtime::components::OutputValidators(
+            entity_mut.insert(leviath_runtime::components::OutputValidators::new(
                 parts.output_validators,
             ));
         }
@@ -2258,7 +2258,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             .world()
             .get::<leviath_runtime::components::OutputValidators>(entity)
             .expect("the compiled validator reaches the entity");
-        assert!(validators.0.contains_key("shape.rhai"));
+        assert!(validators.compiled.contains_key("shape.rhai"));
     }
 
     /// And an agent that names none carries none, rather than an empty

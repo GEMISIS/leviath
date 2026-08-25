@@ -158,6 +158,13 @@ pub struct RunListEntry {
     /// daemon that omits it.
     #[serde(default)]
     pub splits_degraded: usize,
+    /// Rhai scripts this run needed and could not use, by name.
+    ///
+    /// See [`leviath_core::run_meta`] for why these are worth surfacing: the
+    /// runtime skips a broken script rather than failing the run, which is right
+    /// and was also silent. Defaulted for an older daemon that omits it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub broken_scripts: Vec<String>,
     /// How much of this run's `[read_paths]` its config granted at spawn.
     /// `None` for a blueprint that declares none, which is nearly every agent.
     ///

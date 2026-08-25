@@ -115,6 +115,10 @@ impl WorldHost {
             splits_degraded: world
                 .get::<crate::persistence::RunOutcomeFlags>(entity)
                 .map_or(0, |f| f.0.splits_degraded),
+            broken_scripts: world
+                .get::<crate::persistence::RunOutcomeFlags>(entity)
+                .map(|f| f.0.broken_scripts.clone())
+                .unwrap_or_default(),
             empty_output: world
                 .get::<crate::persistence::RunOutcomeFlags>(entity)
                 .is_some_and(|f| {

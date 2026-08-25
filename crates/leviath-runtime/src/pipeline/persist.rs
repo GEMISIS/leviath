@@ -116,6 +116,24 @@ type ReflectInteractionStatusQuery = (
     Option<&'static AwaitingInteraction>,
 );
 
+/// Copy the scripts a run could not use onto its flags.
+///
+/// Folded in at persist time rather than written when the validator failed: the
+/// tool path holds a `&` borrow of the component and has no world access, so the
+/// component records the names and this is where they meet the run's flags.
+///
+/// Overwritten rather than appended, because the component holds the whole set -
+/// the last write is the complete answer, and appending would repeat a script on
+/// every heartbeat.
+fn fold_broken_scripts(
+    flags: &mut crate::persistence::RunOutcomeFlags,
+    validators: Option<&crate::components::OutputValidators>,
+) {
+    if let Some(validators) = validators {
+        flags.0.broken_scripts = validators.broken_names();
+    }
+}
+
 /// Persistence-dispatch system: for each agent carrying run metadata whose
 /// (iteration, stage, status) has changed since its last snapshot, build the
 /// `meta.json` + `context.json` value snapshot and hand it to the persistence
@@ -265,6 +283,7 @@ type PersistenceQuery = (
         Option<&'static crate::interaction_points::InteractionPointCursor>,
         Option<&'static crate::interaction_points::InteractionPointRounds>,
         Option<&'static crate::persistence::RunOutcomeFlags>,
+        Option<&'static crate::components::OutputValidators>,
         Option<&'static crate::persistence::FinalOutput>,
         // The remaining reasons a run can be parked. Read here because this is
         // where they are queryable, and recorded on `meta.json` so a client
@@ -308,6 +327,7 @@ pub fn dispatch_persistence(
             ip_cursor,
             ip_rounds,
             outcome_flags,
+            validators,
             final_output,
             gate_prompt,
             waiting_for_children,
@@ -401,7 +421,8 @@ pub fn dispatch_persistence(
         // Tree links, for a deterministic restart-time rebuild of the graph.
         let depth = parent_ref.map(|p| p.depth).unwrap_or(0);
         let max_child_depth = children.map(|c| c.max_child_depth).unwrap_or(0);
-        let flags = outcome_flags.cloned().unwrap_or_default();
+        let mut flags = outcome_flags.cloned().unwrap_or_default();
+        fold_broken_scripts(&mut flags, validators);
         // Read the progress stamp *after* the update above, so a write that
         // carried progress reports `now` and a heartbeat-only write reports
         // whenever the run last moved. That difference is the whole signal: it is
@@ -522,5 +543,63 @@ pub fn dispatch_persistence(
             fanout,
             interactions,
         })));
+    }
+}
+
+#[cfg(test)]
+mod broken_script_tests {
+    use super::fold_broken_scripts;
+    use crate::components::OutputValidators;
+    use crate::persistence::RunOutcomeFlags;
+
+    /// A run with no validators leaves the flag alone rather than clearing it,
+    /// which is what an agent naming no validator looks like.
+    #[test]
+    fn no_validators_leaves_the_flags_untouched() {
+        let mut flags = RunOutcomeFlags::default();
+        flags.0.broken_scripts = vec!["kept.rhai".to_string()];
+        fold_broken_scripts(&mut flags, None);
+        assert_eq!(flags.0.broken_scripts, vec!["kept.rhai".to_string()]);
+    }
+
+    /// The names the component collected reach the run's flags, which is what
+    /// puts them on `meta.json`, `lev ps`, the API and the dashboard.
+    #[test]
+    fn the_components_names_reach_the_flags() {
+        let validators = OutputValidators::new(std::collections::HashMap::new());
+        validators.note_broken("shape.rhai");
+        validators.note_broken("other.rhai");
+
+        let mut flags = RunOutcomeFlags::default();
+        fold_broken_scripts(&mut flags, Some(&validators));
+
+        assert_eq!(
+            flags.0.broken_scripts,
+            vec!["other.rhai".to_string(), "shape.rhai".to_string()],
+            "sorted, so two writes of the same set match"
+        );
+    }
+
+    /// Overwritten, not appended: the component holds the whole set, so a
+    /// heartbeat that folds again must not repeat what it folded last time.
+    #[test]
+    fn folding_twice_does_not_repeat_a_script() {
+        let validators = OutputValidators::new(std::collections::HashMap::new());
+        validators.note_broken("shape.rhai");
+
+        let mut flags = RunOutcomeFlags::default();
+        fold_broken_scripts(&mut flags, Some(&validators));
+        fold_broken_scripts(&mut flags, Some(&validators));
+
+        assert_eq!(flags.0.broken_scripts, vec!["shape.rhai".to_string()]);
+    }
+
+    /// A healthy run says so by carrying an empty list.
+    #[test]
+    fn a_run_with_working_validators_records_nothing() {
+        let validators = OutputValidators::new(std::collections::HashMap::new());
+        let mut flags = RunOutcomeFlags::default();
+        fold_broken_scripts(&mut flags, Some(&validators));
+        assert!(flags.0.broken_scripts.is_empty());
     }
 }

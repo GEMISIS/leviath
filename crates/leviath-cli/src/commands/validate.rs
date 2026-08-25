@@ -410,6 +410,7 @@ fn execute_reporting_outcome(
     if !args.json {
         print_success(&checked.blueprint);
         print_script_tool_report(&path);
+        print_global_script_report();
         if args.graph {
             println!();
             println!("{}", graph_text(&checked.blueprint, args.width));
@@ -654,6 +655,85 @@ fn print_script_tool_report(path: &std::path::Path) {
             s.path.display(),
             s.reason
         );
+    }
+}
+
+/// Check the machine's own Rhai scripts: the global tools every agent gets, and
+/// the model providers a blueprint can route to.
+///
+/// Reported here because nothing else checks them until a run needs one, and by
+/// then the failure is a skipped tool an agent never sees advertised or a
+/// provider that claims no models - both of which read as "the agent is being
+/// stupid" rather than "a script on this machine does not compile".
+///
+/// Warnings, not failures: a broken global script does not make *this*
+/// blueprint invalid, and `lev validate` is being asked about the blueprint.
+fn print_global_script_report() {
+    print_global_script_report_in(
+        leviath_core::paths::tools_dir().as_deref(),
+        leviath_core::paths::providers_dir().as_deref(),
+    );
+}
+
+/// [`print_global_script_report`], with the two directories injected.
+///
+/// Both are the real machine's in production and a temp dir in a test - the
+/// same seam every other path-reading check here takes, and the only way to
+/// exercise a broken script without breaking the developer's own install.
+fn print_global_script_report_in(
+    tools: Option<&std::path::Path>,
+    providers: Option<&std::path::Path>,
+) {
+    if let Some(dir) = tools.filter(|d| d.is_dir()) {
+        let (set, skipped) = leviath_scripting::ScriptToolSet::discover(&[dir.to_path_buf()]);
+        if !set.is_empty() || !skipped.is_empty() {
+            println!("  {} global script tool(s) in ~/.leviath/tools", set.len());
+        }
+        for s in &skipped {
+            println!(
+                "  ⚠ Warning: global script tool '{}' will not load: {}",
+                s.path.display(),
+                s.reason
+            );
+        }
+    }
+
+    let Some(dir) = providers.filter(|d| d.is_dir()) else {
+        return;
+    };
+    let mut scripts: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "rhai"))
+        .collect();
+    // Sorted, so two runs of the command list them the same way.
+    scripts.sort();
+    if scripts.is_empty() {
+        return;
+    }
+    println!(
+        "  {} script provider(s) in ~/.leviath/providers",
+        scripts.len()
+    );
+    for path in scripts {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("<unnamed>");
+        match std::fs::read_to_string(&path) {
+            Err(e) => println!("  ⚠ Warning: script provider '{name}' cannot be read: {e}"),
+            Ok(source) => {
+                // The same check a load performs, through the same engine, so
+                // the verdict here is the verdict the daemon would reach: it
+                // compiles against the hardened engine and requires the entry
+                // points a provider cannot run without.
+                if let Err(e) = leviath_providers::rhai_provider::check_source(name, &source) {
+                    println!("  ⚠ Warning: script provider '{name}' will not load: {e}");
+                }
+            }
+        }
     }
 }
 
@@ -1807,6 +1887,94 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
                 .unwrap()
                 .is_success()
         );
+    }
+
+    /// The machine's own scripts are checked too, because nothing else looks at
+    /// them until a run needs one - and by then a broken provider reads as "the
+    /// agent cannot find a model" rather than "this file does not compile".
+    #[test]
+    fn global_scripts_are_reported_and_broken_ones_named() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let tools = dir.path().join("tools");
+        let providers = dir.path().join("providers");
+        std::fs::create_dir_all(&tools).expect("creates");
+        std::fs::create_dir_all(&providers).expect("creates");
+
+        std::fs::write(
+            providers.join("good.rhai"),
+            "fn initialize(config) { #{} }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }",
+        )
+        .expect("writes");
+        std::fs::write(providers.join("broken.rhai"), "fn initialize(c) { ((( }").expect("writes");
+
+        // A global tool that will not load, so the skipped-tool arm runs too.
+        std::fs::write(tools.join("bad.rhai"), "no directive\nlet").expect("writes");
+
+        // Prints rather than returns, so this asserts it does not panic on any
+        // of the paths: a readable dir, a compiling provider, a broken one, and
+        // a tool that will not load.
+        print_global_script_report_in(Some(&tools), Some(&providers));
+    }
+
+    /// A tools directory with nothing in it prints no heading either.
+    #[test]
+    fn an_empty_tools_dir_says_nothing() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let tools = dir.path().join("tools");
+        std::fs::create_dir_all(&tools).expect("creates");
+
+        print_global_script_report_in(Some(&tools), None);
+    }
+
+    /// A providers directory with nothing in it prints nothing, rather than a
+    /// heading over an empty list.
+    #[test]
+    fn an_empty_providers_dir_says_nothing() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let providers = dir.path().join("providers");
+        std::fs::create_dir_all(&providers).expect("creates");
+        // A file that is not a script is not a script.
+        std::fs::write(providers.join("README.md"), "not a script").expect("writes");
+
+        print_global_script_report_in(None, Some(&providers));
+    }
+
+    /// A path that is a file rather than a directory is not readable as one, and
+    /// that is an answer rather than a panic.
+    #[test]
+    fn a_providers_path_that_is_not_a_directory_is_skipped() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let not_a_dir = dir.path().join("providers");
+        std::fs::write(&not_a_dir, "this is a file").expect("writes");
+
+        print_global_script_report_in(None, Some(&not_a_dir));
+    }
+
+    /// A machine with neither directory says nothing at all, which is the
+    /// ordinary case for someone who has never written a script.
+    #[test]
+    fn no_global_script_dirs_is_silent() {
+        print_global_script_report_in(None, None);
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let missing = dir.path().join("not-there");
+        print_global_script_report_in(Some(&missing), Some(&missing));
+    }
+
+    /// A provider script that cannot be read is reported rather than skipped:
+    /// a file the daemon will fail to load is worth the same line as one that
+    /// will not compile.
+    #[test]
+    fn an_unreadable_provider_script_is_reported() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let providers = dir.path().join("providers");
+        std::fs::create_dir_all(&providers).expect("creates");
+        // A directory named `*.rhai` reads as a file to the scan and fails at
+        // `read_to_string`, which is the arm being covered.
+        std::fs::create_dir(providers.join("adir.rhai")).expect("creates");
+
+        print_global_script_report_in(None, Some(&providers));
     }
 
     #[test]

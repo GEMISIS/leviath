@@ -218,6 +218,7 @@ condition = "llm_choice"
             tokens_out: 0,
             cached_tokens: 0,
             iteration: 2,
+            broken_scripts: Vec::new(),
             waiting_prompt: None,
             wait_reason: None,
             pending_request: None,

@@ -857,6 +857,7 @@ mod tests {
             tokens_out: 50,
             cached_tokens: 10,
             iteration: 3,
+            broken_scripts: Vec::new(),
             waiting_prompt: None,
             wait_reason: None,
             pending_request: None,
