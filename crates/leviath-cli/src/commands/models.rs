@@ -1,6 +1,7 @@
 //! `lev models` - Inspect available models and their capabilities.
 
 use clap::{Args, Subcommand};
+use leviath_providers::LimitsSource;
 use leviath_providers::{ModelCapabilities, ModelInfo};
 
 use super::run::build_provider_registry_from_config;
@@ -162,6 +163,7 @@ fn builtin_table() -> Vec<BuiltinEntry> {
                     supports_system_prompt: true,
                     max_context_tokens: $ctx,
                     max_output_tokens: $out,
+                    limits_source: LimitsSource::Builtin,
                 },
             }
         };
@@ -1075,6 +1077,7 @@ mod tests {
             supports_system_prompt: true,
             max_context_tokens: 100_000,
             max_output_tokens: 8_192,
+            limits_source: LimitsSource::Builtin,
         };
         // Should not panic
         print_model_detail("test-model", Some("Test Model"), "test", &caps, false);
@@ -1531,6 +1534,7 @@ mod tests {
             supports_system_prompt: false,
             max_context_tokens: 1000,
             max_output_tokens: 500,
+            limits_source: LimitsSource::Builtin,
         };
         // Should not panic with all features disabled
         print_model_detail("test-model", Some("Test"), "test", &caps, false);
@@ -2412,6 +2416,7 @@ mod tests {
                         supports_system_prompt: false,
                         max_context_tokens: 1,
                         max_output_tokens: 1,
+                        limits_source: LimitsSource::Builtin,
                     }
                     .into(),
                 );
@@ -2451,6 +2456,7 @@ mod tests {
                         supports_system_prompt: false,
                         max_context_tokens: 1,
                         max_output_tokens: 1,
+                        limits_source: LimitsSource::Builtin,
                     }
                     .into(),
                 );

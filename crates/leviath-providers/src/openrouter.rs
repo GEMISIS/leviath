@@ -7,8 +7,8 @@ use crate::openai_compat::{
     OpenAiSseStream, parse_openai_response, send_chat_request, temperature_refused,
 };
 use crate::provider::{
-    InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride, ModelInfo,
-    Provider, ProviderConfig, ProviderError, Result, StreamChunk,
+    InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
+    ModelInfo, Provider, ProviderConfig, ProviderError, Result, StreamChunk,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -333,6 +333,7 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
             supports_system_prompt: true,
             max_context_tokens: 1_048_576,
             max_output_tokens: 65_536,
+            limits_source: LimitsSource::Builtin,
         };
     }
     // ── Meta Llama 4 Scout - 10M context ─────────────────────────────────
@@ -344,6 +345,7 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
             supports_system_prompt: true,
             max_context_tokens: 10_000_000,
             max_output_tokens: 32_768,
+            limits_source: LimitsSource::Builtin,
         };
     }
     // ── Meta Llama 4 (Maverick + others) - 1M context ────────────────────
@@ -355,6 +357,7 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
             supports_system_prompt: true,
             max_context_tokens: 1_048_576,
             max_output_tokens: 32_768,
+            limits_source: LimitsSource::Builtin,
         };
     }
     // ── DeepSeek R1 - reasoning-only, no tools, no temperature ───────────
@@ -366,6 +369,7 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
             supports_system_prompt: true,
             max_context_tokens: 163_840,
             max_output_tokens: 32_768,
+            limits_source: LimitsSource::Builtin,
         };
     }
     // ── DeepSeek V4 Pro - 1M context, 384K output ────────────────────────
@@ -377,6 +381,7 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
             supports_system_prompt: true,
             max_context_tokens: 1_048_576,
             max_output_tokens: 393_216,
+            limits_source: LimitsSource::Builtin,
         };
     }
     // ── DeepSeek V4 Flash / V3.x ─────────────────────────────────────────
@@ -388,6 +393,7 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
             supports_system_prompt: true,
             max_context_tokens: 1_048_576,
             max_output_tokens: 65_536,
+            limits_source: LimitsSource::Builtin,
         };
     }
     // ── Mistral Large ─────────────────────────────────────────────────────
@@ -399,6 +405,7 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
             supports_system_prompt: true,
             max_context_tokens: 262_144,
             max_output_tokens: 32_768,
+            limits_source: LimitsSource::Builtin,
         };
     }
     // ── Mistral Medium / Small ────────────────────────────────────────────
@@ -410,6 +417,7 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
             supports_system_prompt: true,
             max_context_tokens: 131_072,
             max_output_tokens: 32_768,
+            limits_source: LimitsSource::Builtin,
         };
     }
     // ── Qwen 3.6+ / Qwen3 Coder - 1M context ────────────────────────────
@@ -421,6 +429,7 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
             supports_system_prompt: true,
             max_context_tokens: 1_048_576,
             max_output_tokens: 65_536,
+            limits_source: LimitsSource::Builtin,
         };
     }
     // ── Qwen3 general ─────────────────────────────────────────────────────
@@ -432,6 +441,7 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
             supports_system_prompt: true,
             max_context_tokens: 131_072,
             max_output_tokens: 32_768,
+            limits_source: LimitsSource::Builtin,
         };
     }
     // ── Anthropic models via OpenRouter - inherit direct-provider flags ───
@@ -447,6 +457,7 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
             supports_system_prompt: true,
             max_context_tokens: 1_000_000,
             max_output_tokens: 128_000,
+            limits_source: LimitsSource::Builtin,
         };
     }
     // ── OpenAI o-series via OpenRouter - no temperature ───────────────────
@@ -458,6 +469,7 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
             supports_system_prompt: true,
             max_context_tokens: 200_000,
             max_output_tokens: 100_000,
+            limits_source: LimitsSource::Builtin,
         };
     }
     // ── OpenAI GPT-5.x via OpenRouter ────────────────────────────────────
@@ -469,6 +481,7 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
             supports_system_prompt: true,
             max_context_tokens: 1_050_000,
             max_output_tokens: 128_000,
+            limits_source: LimitsSource::Builtin,
         };
     }
     // ── Conservative fallback for unknown OpenRouter models ───────────────
@@ -489,6 +502,7 @@ const FALLBACK_CAPABILITIES: ModelCapabilities = ModelCapabilities {
     supports_system_prompt: true,
     max_context_tokens: 128_000,
     max_output_tokens: 8_192,
+    limits_source: LimitsSource::Builtin,
 };
 
 impl OpenRouterProvider {
@@ -529,6 +543,7 @@ impl OpenRouterProvider {
         ModelCapabilities {
             max_context_tokens: api.context_length,
             max_output_tokens: api.max_completion_tokens.unwrap_or(base.max_output_tokens),
+            limits_source: LimitsSource::Api,
             ..base
         }
     }
@@ -840,8 +855,14 @@ impl Provider for OpenRouterProvider {
 
             let base_caps = self.capabilities(&id);
             let capabilities = ModelCapabilities {
+                // `context_length` is read from this response, so the label
+                // says so. The output fallback is left as it was: changing what
+                // a listing reports for an entry that names no
+                // `max_completion_tokens` is a behaviour change, and this is a
+                // labelling fix.
                 max_context_tokens: context_length,
                 max_output_tokens: max_completion_tokens.unwrap_or(8192),
+                limits_source: LimitsSource::Api,
                 ..base_caps
             };
 
@@ -1241,6 +1262,7 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 99,
                 max_output_tokens: 10,
+                limits_source: LimitsSource::Builtin,
             }
             .into(),
         );

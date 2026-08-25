@@ -197,6 +197,13 @@ pub(super) async fn validate_config_key(Json(req): Json<ValidateKeyReq>) -> Json
     Json(ValidateKeyResp { valid, message })
 }
 
+/// How long the models route waits for a provider to describe its own models.
+///
+/// Shorter than the daemon's start-up prime: this is a page load, and a limit
+/// that arrives after the page has rendered is worth less than a fast answer
+/// that admits which numbers are guesses.
+const MODELS_PRIME_TIMEOUT_SECS: u64 = 5;
+
 pub(super) async fn get_models(State(state): State<AppState>) -> Json<Vec<ModelEntry>> {
     models_with(&state, &leviath_providers::provider::build_http_client).await
 }
@@ -246,6 +253,26 @@ pub(super) async fn list_models_from_config(
     ) else {
         return Vec::new();
     };
+    // Ask each provider what its models are before asking what they can hold.
+    //
+    // Without this the route published the compiled-in guess for every provider
+    // whose real answer is a network call away - which is most of them, and
+    // includes the two that had learned to fetch it. Measured against a running
+    // server: Ollama reported a name-matched 131,072 for a model whose server
+    // says 262,144, and OpenRouter reported builtin limits for all 418 of its
+    // models. Only Google looked right, and only because its listing reads the
+    // limits inline rather than through the primed table.
+    //
+    // The route already makes one network call per provider to list at all, so
+    // this is a second bounded one, not a new class of cost. A provider that
+    // does not answer in time keeps its compiled table and says so through
+    // `limits_source`.
+    registry
+        .prime_capabilities(
+            std::time::Duration::from_secs(MODELS_PRIME_TIMEOUT_SECS),
+            None,
+        )
+        .await;
     let mut models = Vec::new();
 
     for provider_name in registry.resolvable_names() {
@@ -265,6 +292,7 @@ pub(super) async fn list_models_from_config(
                     display_name: m.display_name,
                     max_context_tokens: m.capabilities.max_context_tokens,
                     max_output_tokens: m.capabilities.max_output_tokens,
+                    limits_source: limits_source_label(m.capabilities.limits_source),
                     supports_tools: m.capabilities.supports_tools,
                 });
             }
@@ -272,6 +300,36 @@ pub(super) async fn list_models_from_config(
     }
 
     models
+}
+
+/// The wire spelling of a [`LimitsSource`].
+///
+/// Written out here rather than serialized from the enum so the API's
+/// vocabulary is visible at the boundary that publishes it: a rename in the
+/// providers crate should not silently change what a console reads.
+fn limits_source_label(source: leviath_providers::LimitsSource) -> String {
+    match source {
+        leviath_providers::LimitsSource::Api => "api",
+        leviath_providers::LimitsSource::Builtin => "builtin",
+        leviath_providers::LimitsSource::Override => "override",
+    }
+    .to_string()
+}
+
+#[cfg(test)]
+mod limits_source_label_tests {
+    use super::limits_source_label;
+    use leviath_providers::LimitsSource;
+
+    /// The three spellings a client switches on. Pinned here because they are
+    /// the wire vocabulary: renaming the enum in the providers crate must not
+    /// quietly change what a console reads, and only this test would notice.
+    #[test]
+    fn every_source_has_its_wire_spelling() {
+        assert_eq!(limits_source_label(LimitsSource::Api), "api");
+        assert_eq!(limits_source_label(LimitsSource::Builtin), "builtin");
+        assert_eq!(limits_source_label(LimitsSource::Override), "override");
+    }
 }
 
 #[cfg(test)]

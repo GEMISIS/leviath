@@ -2,7 +2,7 @@
 
 // Re-exported so `use crate::provider::*` keeps working: the types moved for
 // structural reasons (the 1200-line rule), not as an interface change.
-pub use crate::capabilities::{ModelCapabilities, ModelCapabilityOverride};
+pub use crate::capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOverride};
 use async_trait::async_trait;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
@@ -1158,6 +1158,7 @@ mod tests {
             supports_system_prompt: true,
             max_context_tokens: 400_000,
             max_output_tokens: 64_000,
+            limits_source: LimitsSource::Builtin,
         }
     }
 
@@ -1197,6 +1198,7 @@ mod tests {
             supports_system_prompt: false,
             max_context_tokens: 7,
             max_output_tokens: 9,
+            limits_source: LimitsSource::Builtin,
         });
         let merged = full.apply_to(base());
         assert!(merged.supports_temperature);

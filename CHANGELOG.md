@@ -13,6 +13,34 @@ same list.
 
 ## Unreleased
 
+- Fixed: `GET /api/models` published a guess for every provider whose real
+  answer is a network call away. It built a registry and listed straight away,
+  never priming, so the token limits it reported came from a table matched
+  against each model's name. Measured against a running server: Ollama reported
+  131,072 for a model its own server serves at 262,144, and all 418 OpenRouter
+  models carried compiled figures despite that provider having fetched the real
+  ones for some time. The route now primes first, with a five second budget, and
+  a provider that does not answer in time keeps its table and says so.
+- Added: Google reports its own token limits to the runtime. The native
+  `/v1beta/models` listing has always read `inputTokenLimit` and
+  `outputTokenLimit` and handed them to the model picker, while `capabilities()`
+  - which is what percentage region budgets resolve against - answered from
+  family defaults matched off the model's name. The authoritative numbers were
+  being fetched and thrown away.
+- Added: Ollama asks `/api/ps` before `/api/show`. That endpoint reports the
+  window the runner actually allocated for a loaded model, which is the only
+  figure that is an observation rather than an inference: `num_ctx` is what a
+  Modelfile asked for, and the architecture length in `model_info` is what the
+  weights allow rather than what the server will serve. A model nothing has
+  called yet still falls back to `num_ctx`.
+- Added: `limits_source` on every `GET /api/models` entry - `api`, `builtin` or
+  `override` - so a client can tell a limit the provider reported from one this
+  build matched off a model's name. They look identical once printed and are not
+  worth the same: a window that is wrong by a factor of two makes every
+  percentage region in the run wrong by the same factor, and nothing downstream
+  can tell. Anthropic and OpenAI report `builtin` and always will: neither
+  `/models` endpoint carries token limits at all.
+
 - Fixed: the research blueprints crossed to the right index and then asked it
   the wrong question. Told to reach past category listings, a survey searched an
   awards guide - exactly the kind a category filter cannot reach - and appended

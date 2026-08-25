@@ -26,6 +26,46 @@ pub struct ModelCapabilities {
 
     /// Maximum number of output tokens
     pub max_output_tokens: usize,
+
+    /// Where the two token limits above came from.
+    ///
+    /// Carried beside them because they are published - `GET /api/models` and
+    /// `lev models` both print them - and a number read from the provider and a
+    /// number matched off a substring of the model's name look identical once
+    /// printed. They are not worth the same: percentage region budgets resolve
+    /// against `max_context_tokens`, so a guess that is wrong by 2x makes every
+    /// region in the run wrong by 2x, and nothing downstream can tell.
+    #[serde(default)]
+    pub limits_source: LimitsSource,
+}
+
+/// How a model's token limits were arrived at.
+///
+/// Ordered by how much it is worth trusting, least first, so `max` picks the
+/// better of two answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitsSource {
+    /// Matched from the model's name against a table compiled into this build.
+    ///
+    /// The default, and the honest answer for a provider whose API does not
+    /// report limits at all: Anthropic's and OpenAI's `/models` both return an
+    /// id and a display name and nothing about size. It is also the answer when
+    /// a provider that *could* say has not been asked yet, since
+    /// `prime_capabilities` runs at daemon start-up and a short-lived command
+    /// may not have waited for it.
+    #[default]
+    Builtin,
+
+    /// Read from the provider's own API for this model.
+    Api,
+
+    /// Set by the operator in `[model_capabilities]`.
+    ///
+    /// Ranked above the API because someone who wrote the number down is
+    /// correcting something, and the usual something is an API answer that did
+    /// not match what the endpoint actually served.
+    Override,
 }
 
 impl Default for ModelCapabilities {
@@ -37,6 +77,7 @@ impl Default for ModelCapabilities {
             supports_system_prompt: true,
             max_context_tokens: 8192,
             max_output_tokens: 4096,
+            limits_source: LimitsSource::Builtin,
         }
     }
 }
@@ -101,7 +142,20 @@ impl ModelCapabilityOverride {
                 .unwrap_or(base.supports_system_prompt),
             max_context_tokens: self.max_context_tokens.unwrap_or(base.max_context_tokens),
             max_output_tokens: self.max_output_tokens.unwrap_or(base.max_output_tokens),
+            // Only a limit the operator actually named makes this theirs. An
+            // entry that corrects `supports_temperature` and says nothing about
+            // size would otherwise relabel an API-read window as hand-set, and
+            // the label is there to say how much the number is worth.
+            limits_source: match self.names_a_limit() {
+                true => LimitsSource::Override,
+                false => base.limits_source,
+            },
         }
+    }
+
+    /// Whether this entry sets either token limit.
+    pub fn names_a_limit(&self) -> bool {
+        self.max_context_tokens.is_some() || self.max_output_tokens.is_some()
     }
 }
 

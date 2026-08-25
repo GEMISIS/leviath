@@ -346,6 +346,7 @@ fn script_provider_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use leviath_providers::LimitsSource;
 
     #[test]
     fn build_provider_registry_with_empty_config() {
@@ -891,6 +892,7 @@ mod tests {
                 supports_system_prompt: true,
                 max_context_tokens: 9999,
                 max_output_tokens: 999,
+                limits_source: LimitsSource::Builtin,
             }
             .into(),
         );
@@ -939,6 +941,7 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 99,
                 max_output_tokens: 99,
+                limits_source: LimitsSource::Builtin,
             }
             .into(),
         );

@@ -173,7 +173,7 @@ Base path `/api`; all JSON unless noted.
 | `GET/POST /api/agents/{id}/interaction` | Read / answer a pending question |
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation. The listing is paginated and takes `q`; the detail carries the manifest, the regions and the [fan-out limits](#fan-out-limits) |
 | `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key |
-| `GET /api/models` | Enumerate models |
+| `GET /api/models` | Enumerate models, with each one's token limits and where they came from |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
 | `GET /api/scripts?agent=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks and validators, and the global model providers. Writes need admin. See [below](#tools-and-scripts) |
 | `GET /api/mcp/servers` · `GET /{name}/status` · `POST /{name}/login` · `POST /{name}/test` | MCP servers (add/remove need admin) |
@@ -616,6 +616,13 @@ without an `agent`, since the answer is the same either way.
 
 Each listed provider carries a `provider` object with what its leading `// @` comments declare:
 `description`, `default_model`, `max_context_tokens`, `max_output_tokens` and `supports_streaming`.
+
+Each entry from `GET /api/models` also carries `limits_source`: `api` when the provider reported the
+token limits itself, `builtin` when this build matched them off the model's name, and `override`
+when a `[model_capabilities]` entry set them. Read it before treating a window as a fact - a
+`builtin` figure for a model the table does not know is a guess, and region budgets resolve against
+it. Which providers can report, and from where, is in
+[where a window comes from](/docs/configuration#where-a-window-comes-from).
 That is what lets a console show the catalog without fetching and re-parsing every script. No other
 kind carries the key at all.
 

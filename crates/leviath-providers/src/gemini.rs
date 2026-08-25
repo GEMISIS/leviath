@@ -6,8 +6,8 @@ use crate::openai_compat::{
 #[cfg(test)]
 use crate::provider::FinishReason;
 use crate::provider::{
-    InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride, ModelInfo,
-    Provider, ProviderConfig, ProviderError, Result, StreamChunk,
+    InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
+    ModelInfo, Provider, ProviderConfig, ProviderError, Result, StreamChunk,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -82,6 +82,17 @@ pub struct GeminiProvider {
     /// Rate limiter
     rate_limiter: Option<RateLimiter>,
 
+    /// Per-model limits as the native API reported them, filled by
+    /// [`Provider::prime_capabilities`].
+    ///
+    /// The listing has always read these - `inputTokenLimit` and
+    /// `outputTokenLimit` off `/v1beta/models` - and only ever handed them to
+    /// the model picker. The runtime sizes percentage region budgets through
+    /// the sync `capabilities()` path, which could not await a fetch and so
+    /// answered from a table of family defaults matched off the model's name.
+    /// The authoritative numbers were being fetched and thrown away.
+    api_limits: std::sync::Arc<std::sync::Mutex<HashMap<String, (usize, usize)>>>,
+
     /// Per-model capability overrides
     capability_overrides: HashMap<String, ModelCapabilityOverride>,
 }
@@ -94,6 +105,7 @@ impl GeminiProvider {
             api_key,
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
             rate_limiter: None,
+            api_limits: Default::default(),
             capability_overrides: HashMap::new(),
         }
     }
@@ -108,6 +120,7 @@ impl GeminiProvider {
                 "https://generativelanguage.googleapis.com/v1beta/openai".to_string()
             }),
             rate_limiter,
+            api_limits: Default::default(),
             capability_overrides: HashMap::new(),
         }
     }
@@ -125,6 +138,7 @@ impl GeminiProvider {
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
             capability_overrides: overrides,
+            api_limits: Default::default(),
         }
     }
 
@@ -172,6 +186,26 @@ impl GeminiProvider {
             supports_system_prompt: true,
             max_context_tokens,
             max_output_tokens,
+            limits_source: LimitsSource::Builtin,
+        }
+    }
+
+    /// `base` with the token limits the API reported, when it has reported any.
+    ///
+    /// Only the two sizes. The rest of `ModelCapabilities` is about how a
+    /// request must be shaped - whether tools work, whether temperature is
+    /// accepted - and the listing describes what a model is, not the quirks of
+    /// talking to it. Same split as the Ollama provider makes, for the same
+    /// reason: each source answers the question it can answer.
+    fn api_corrected(&self, model: &str, base: ModelCapabilities) -> ModelCapabilities {
+        match leviath_core::sync::lock(&self.api_limits).get(model) {
+            Some(&(max_context_tokens, max_output_tokens)) => ModelCapabilities {
+                max_context_tokens,
+                max_output_tokens,
+                limits_source: LimitsSource::Api,
+                ..base
+            },
+            None => base,
         }
     }
 
@@ -334,11 +368,47 @@ impl Provider for GeminiProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
+        let base = self.api_corrected(model, self.builtin_capabilities(model));
         // Merged, not swapped: an entry names only what it corrects.
         match self.capability_overrides.get(model) {
-            Some(o) => o.apply_to(self.builtin_capabilities(model)),
-            None => self.builtin_capabilities(model),
+            Some(o) => o.apply_to(base),
+            None => base,
         }
+    }
+
+    /// Learn every model's real token limits from the native listing.
+    ///
+    /// Reuses `list_models` rather than fetching separately: it already asks the
+    /// one endpoint that answers this, and a second request shaped slightly
+    /// differently is how the runtime and the model picker come to disagree
+    /// about the same model.
+    ///
+    /// A compat base URL has no native listing, so nothing is learned and the
+    /// family defaults stay in charge - the same outcome as an unreachable API,
+    /// and reported the same way by `limits_source`.
+    async fn prime_capabilities(&self) -> Result<()> {
+        let models = self.list_models().await?;
+        let learned: HashMap<String, (usize, usize)> = models
+            .into_iter()
+            // Only what the API actually reported. `list_models_native` starts
+            // each entry from the family defaults, so an entry the listing said
+            // nothing about would otherwise be stored as if it had - relabelling
+            // a guess as authoritative, which is worse than the guess.
+            .filter(|m| m.capabilities.limits_source == LimitsSource::Api)
+            .map(|m| {
+                (
+                    m.id,
+                    (
+                        m.capabilities.max_context_tokens,
+                        m.capabilities.max_output_tokens,
+                    ),
+                )
+            })
+            .collect();
+        let count = learned.len();
+        *leviath_core::sync::lock(&self.api_limits) = learned;
+        tracing::debug!(models = count, "learned Gemini model token limits");
+        Ok(())
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
@@ -383,11 +453,16 @@ impl GeminiProvider {
                 // Start from the family defaults, then override with the API's
                 // authoritative limits where present.
                 let mut capabilities = self.capabilities(&id);
+                // `limits_source` moves only when the listing supplied a limit,
+                // so an entry that carried neither stays labelled as the guess
+                // it is.
                 if let Some(ctx) = item.get("inputTokenLimit").and_then(|v| v.as_u64()) {
                     capabilities.max_context_tokens = ctx as usize;
+                    capabilities.limits_source = LimitsSource::Api;
                 }
                 if let Some(out) = item.get("outputTokenLimit").and_then(|v| v.as_u64()) {
                     capabilities.max_output_tokens = out as usize;
+                    capabilities.limits_source = LimitsSource::Api;
                 }
                 Some(ModelInfo {
                     id,
@@ -481,6 +556,89 @@ mod tests {
     use crate::test_support::always_on_tracing_guard;
     use leviath_testkit::{spawn_mock_server, spawn_mock_server_truncated_body};
 
+    /// The gap this closes: the native listing has always read the real limits
+    /// and only ever handed them to the model picker, while the runtime sized
+    /// its percentage region budgets from a table matched off the model's name.
+    #[tokio::test]
+    async fn priming_teaches_capabilities_what_the_listing_already_knew() {
+        let body = br#"{"models":[
+            {"name":"models/gemini-3.5-flash","displayName":"Flash",
+             "inputTokenLimit":2000000,"outputTokenLimit":8192}
+        ]}"#;
+        let url = leviath_testkit::spawn_mock_server(200, "OK", body).await;
+        let provider = GeminiProvider::new(reqwest::Client::new(), "k".to_string())
+            .with_base_url(Some(format!("{url}/v1beta/openai")));
+
+        let before = provider.capabilities("gemini-3.5-flash");
+        assert_eq!(
+            before.limits_source,
+            LimitsSource::Builtin,
+            "unprimed, the family default is all there is"
+        );
+
+        provider.prime_capabilities().await.expect("primes");
+
+        let after = provider.capabilities("gemini-3.5-flash");
+        assert_eq!(after.max_context_tokens, 2_000_000);
+        assert_eq!(after.max_output_tokens, 8_192);
+        assert_eq!(after.limits_source, LimitsSource::Api);
+    }
+
+    /// An entry the listing said nothing about is not stored as if it had. The
+    /// listing starts each model from the family defaults, so recording those
+    /// would relabel a guess as authoritative - worse than the guess, because
+    /// nothing downstream would know to doubt it.
+    #[tokio::test]
+    async fn a_model_the_listing_gave_no_limits_for_is_not_learned() {
+        let body = br#"{"models":[{"name":"models/gemini-bare","displayName":"Bare"}]}"#;
+        let url = leviath_testkit::spawn_mock_server(200, "OK", body).await;
+        let provider = GeminiProvider::new(reqwest::Client::new(), "k".to_string())
+            .with_base_url(Some(format!("{url}/v1beta/openai")));
+
+        provider.prime_capabilities().await.expect("primes");
+
+        let caps = provider.capabilities("gemini-bare");
+        assert_eq!(
+            caps.limits_source,
+            LimitsSource::Builtin,
+            "nothing was reported, so nothing is claimed"
+        );
+    }
+
+    /// An operator's entry is the last word, and says so, because someone who
+    /// wrote the number down is usually correcting exactly what the API said.
+    #[tokio::test]
+    async fn an_operator_override_outranks_the_api() {
+        let body = br#"{"models":[
+            {"name":"models/gemini-3.5-flash","inputTokenLimit":2000000,"outputTokenLimit":8192}
+        ]}"#;
+        let url = leviath_testkit::spawn_mock_server(200, "OK", body).await;
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "gemini-3.5-flash".to_string(),
+            ModelCapabilityOverride {
+                max_context_tokens: Some(64_000),
+                ..Default::default()
+            },
+        );
+        let provider = GeminiProvider::with_overrides(
+            reqwest::Client::new(),
+            "k".to_string(),
+            overrides,
+            None,
+        )
+        .with_base_url(Some(format!("{url}/v1beta/openai")));
+
+        provider.prime_capabilities().await.expect("primes");
+
+        let caps = provider.capabilities("gemini-3.5-flash");
+        assert_eq!(caps.max_context_tokens, 64_000, "the operator's number");
+        assert_eq!(
+            caps.max_output_tokens, 8_192,
+            "and the API's for what the operator did not name"
+        );
+        assert_eq!(caps.limits_source, LimitsSource::Override);
+    }
     #[test]
     fn test_provider_name() {
         let provider = GeminiProvider::new(
@@ -583,6 +741,7 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 1,
                 max_output_tokens: 1,
+                limits_source: LimitsSource::Builtin,
             }
             .into(),
         );
@@ -751,6 +910,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: "http://127.0.0.1:19997".to_string(),
             rate_limiter: None,
+            api_limits: Default::default(),
             capability_overrides: HashMap::new(),
         }
     }
@@ -778,6 +938,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: format!("{}/openai", base),
             rate_limiter: None,
+            api_limits: Default::default(),
             capability_overrides: HashMap::new(),
         };
         let tokens = provider.count_tokens("anything", "gemini-3.5-flash").await;
@@ -792,6 +953,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: format!("{}/openai", base),
             rate_limiter: None,
+            api_limits: Default::default(),
             capability_overrides: HashMap::new(),
         };
         // 8 chars / 4 = 2 (heuristic fallback)
@@ -808,6 +970,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: "http://127.0.0.1:19997/openai".to_string(),
             rate_limiter: None,
+            api_limits: Default::default(),
             capability_overrides: HashMap::new(),
         };
         let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
@@ -822,6 +985,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: format!("{}/openai", base),
             rate_limiter: None,
+            api_limits: Default::default(),
             capability_overrides: HashMap::new(),
         };
         let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
@@ -836,6 +1000,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: format!("{}/openai", base),
             rate_limiter: None,
+            api_limits: Default::default(),
             capability_overrides: HashMap::new(),
         };
         let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
@@ -854,6 +1019,7 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 42,
                 max_output_tokens: 10,
+                limits_source: LimitsSource::Builtin,
             }
             .into(),
         );
@@ -1097,6 +1263,7 @@ mod tests {
             api_key: "test-key".to_string(),
             base_url: format!("{}/openai", base),
             rate_limiter: None,
+            api_limits: Default::default(),
             capability_overrides: HashMap::new(),
         }
     }
@@ -1151,6 +1318,7 @@ mod tests {
             api_key: "test-key".to_string(),
             base_url: "http://127.0.0.1:19997/openai".to_string(),
             rate_limiter: None,
+            api_limits: Default::default(),
             capability_overrides: HashMap::new(),
         };
         let err = provider.list_models().await.unwrap_err();
