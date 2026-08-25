@@ -50,6 +50,24 @@ by point:
 - Region hooks and policy rules get **nothing**. They are pure data transforms over the `ctx` they
   are handed.
 
+### What every script can call
+
+Available at every extension point, including the ones that get no host access at all, because none
+of these reach outside the process - they only transform values the script already holds:
+
+| Group | Functions |
+|---|---|
+| Strings | `contains`, `starts_with`, `ends_with`, `trim`, `join`, `split` |
+| Content | `count_tokens`, `is_json`, `is_markdown`, `is_mermaid`, `is_empty`, `content_format` |
+| JSON | `parse_json`, `to_json` |
+
+On top of that, tool and provider scripts get `encode_uri`, `encode_base64`, `decode_base64` and
+`html_to_text`, and the host functions that do reach outside - which is what
+[`[tool_script_permissions]`](/docs/configuration#tool_script_permissions) governs. The full list
+per point is on that point's own page: [tools](/docs/rhai-tools),
+[providers](/docs/rhai-providers), [regions](/docs/rhai-regions), [hooks](/docs/rhai-hooks),
+[validators](/docs/rhai-validators).
+
 Names are matched exactly, and the match is enforced. A script missing the function its surface
 needs, or defining it with the wrong arity, fails at spawn with a compile error rather than
 silently never firing. `lev validate` and `lev tools` catch it before a run does.
