@@ -532,6 +532,51 @@ async fn count_tokens_script_non_int_falls_back() {
     assert_eq!(p.count_tokens("abcdefgh", "llama").await, 2);
 }
 
+// ── warm_models ──────────────────────────────────────────────────────────────
+
+/// A script with no `warm_models` is not asked, and says so by succeeding: most
+/// providers have nothing to get ready and should not have to write a stub.
+#[tokio::test]
+async fn warm_models_is_optional() {
+    let src = format!("{NOOP_INIT}fn inference(s, r) {{ #{{}} }}");
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    p.warm_models(&["anything".to_string()]).await.unwrap();
+}
+
+/// A script that defines it is handed the whole list the run named, and decides
+/// for itself which of them are its own - the caller cannot know.
+#[tokio::test]
+async fn warm_models_receives_every_model_the_run_named() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
+         fn warm_models(state, models) {{ \
+           if models.len != 2 {{ throw \"expected two, got \" + models.len }} \
+           if models[0] != \"first\" {{ throw \"wrong first: \" + models[0] }} \
+           if models[1] != \"second\" {{ throw \"wrong second: \" + models[1] }} \
+         }}"
+    );
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    p.warm_models(&["first".to_string(), "second".to_string()])
+        .await
+        .expect("the script saw exactly what the run named");
+}
+
+/// A script that throws while warming reports it, so the caller can log which
+/// provider could not get ready rather than starting the run in silence.
+#[tokio::test]
+async fn a_throwing_warm_models_is_reported() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
+         fn warm_models(state, models) {{ throw \"cannot reach the box\" }}"
+    );
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    let err = p
+        .warm_models(&["m".to_string()])
+        .await
+        .expect_err("the throw reaches the caller");
+    assert!(err.to_string().contains("cannot reach the box"), "{err}");
+}
+
 // ── list_models ──────────────────────────────────────────────────────────────
 
 #[tokio::test]

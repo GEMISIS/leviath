@@ -13,6 +13,27 @@ same list.
 
 ## Unreleased
 
+- Added: providers are asked to get a run's models ready before it starts, through
+  a new `Provider::warm_models` that defaults to doing nothing. Ollama implements
+  it, because it is the one provider where "ready" is a state the machine has to
+  be put into: it serves a model out of memory and can only report the window it
+  truly allocated for one it has resident. A run whose first inference loads the
+  model had already sized its context regions against a guess from the model's
+  name by then, and percentage budgets resolve once, at spawn, into absolute
+  numbers - so that guess was not corrected later, it was what the whole run used.
+  Measured on a developer machine: 7.9 seconds for a cold 32B-class model and 0.2
+  seconds for one already resident, so the cost is paid once rather than per run.
+  Script providers can implement `warm_models(state, models)` too.
+- Fixed: a bare `--model` override put pairs in the fallback list that nobody
+  asked for and nothing serves. The override replaces the model on every entry
+  while leaving each entry's provider alone, so `--model gpt-5.5` against a stage
+  listing `{provider = "anthropic", ...}` produced `anthropic/gpt-5.5`, which sat
+  there until a failover reached it and moved the run onto a route that cannot
+  answer. A renamed pair is now dropped when some provider serves that model and
+  this one does not. Only on a definite no: a provider that claims nothing cannot
+  tell us the pair is wrong, and treating silence as rejection would throw away
+  every route to it.
+
 - Added: `decode_base64` for Rhai scripts, and `encode_base64` for tool scripts,
   which had neither. The provider engine has offered `encode_base64` for some
   time with no way to read a value back, and the tool engine offered no base64

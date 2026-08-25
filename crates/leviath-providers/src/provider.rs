@@ -930,6 +930,32 @@ pub trait Provider: Send + Sync {
         Ok(())
     }
 
+    /// Get `models` ready, just before a run that intends to use them starts.
+    ///
+    /// `models` is every model the run's blueprint names, bare (no provider
+    /// prefix) and deduplicated. A provider takes the ones it serves and ignores
+    /// the rest - the caller does not know which are whose, and asking each
+    /// provider is how a model named without a provider still reaches the one
+    /// that has it.
+    ///
+    /// Defaults to doing nothing, which is right for every provider whose models
+    /// are always ready. It exists for the ones where "ready" is a state the
+    /// machine has to be put into: Ollama serves a model out of memory and can
+    /// only report the window it truly allocated for one it has resident, so a
+    /// run whose first inference loads the model has already sized its context
+    /// regions against a guess by then. Percentage budgets resolve once, at
+    /// spawn, into absolute numbers - so that guess is not corrected later, it
+    /// is what the whole run uses.
+    ///
+    /// Called before the run is built, and awaited, because arriving after the
+    /// spawn would be arriving after the only moment it could have helped. It is
+    /// bounded by the caller and its failures are warnings: a run that could not
+    /// be warmed still runs, on whatever the compiled table says.
+    async fn warm_models(&self, models: &[String]) -> Result<()> {
+        let _ = models;
+        Ok(())
+    }
+
     /// List models available from this provider.
     ///
     /// Returns an empty list by default; providers may override to enumerate
@@ -1115,6 +1141,23 @@ mod stream_once {
 mod tests {
 
     use super::*;
+
+    /// Most providers have nothing to get ready, which is what the default is
+    /// for. Exercised through a real one rather than a stub: a stub written for
+    /// this would need four other methods nothing calls, and those would be the
+    /// untested code instead.
+    #[tokio::test]
+    async fn a_provider_that_needs_no_warming_accepts_the_call() {
+        let anthropic = crate::AnthropicProvider::new(
+            build_http_client(None).expect("a test client builds"),
+            "sk-ant-test".to_string(),
+        );
+
+        anthropic
+            .warm_models(&["claude-sonnet-5".to_string()])
+            .await
+            .expect("the default does nothing, successfully, and asks no network");
+    }
 
     /// A temperature reaches the wire as the number that was written.
     ///

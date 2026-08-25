@@ -130,8 +130,53 @@ pub fn resolve_stage_candidates(
             .clone()
             .unwrap_or_else(|| entry.model.clone());
         if !entry.provider.is_empty() {
-            if registry.has(&entry.provider) {
+            if !registry.has(&entry.provider) {
+                continue;
+            }
+            // A pinned pair is the author naming a route, and it is taken on
+            // trust: a provider whose catalogue this build cannot see would
+            // otherwise have every pin to it thrown away.
+            //
+            // A *renamed* pair is nobody's route. A bare `--model` override
+            // replaces the model on every entry while leaving each entry's
+            // provider alone, so `--model gpt-5.5` against a stage listing
+            // `{provider = "anthropic", ...}` produces `anthropic/gpt-5.5` - a
+            // pair no one asked for and no provider serves. It sits in the
+            // fallback list until a failover reaches it, and then the run moves
+            // itself onto a route that cannot answer. So a renamed pair has to
+            // earn its place by the same test an open route does.
+            let renamed = override_model.is_some() && model != entry.model;
+            // Dropped only on a definite no. A provider that claims nothing -
+            // one whose catalogue this build cannot see, or a script that never
+            // primed - cannot tell us the pair is wrong, and treating silence as
+            // rejection would throw away every route to it. So the question is
+            // asked of the registry as a whole: if *somebody* serves the renamed
+            // model, then who serves it is knowable, and a provider that does
+            // not is definitively the wrong place to send it. If nobody claims
+            // it, nothing here knows better than the entry already did.
+            let usable = !renamed
+                || !registry
+                    .native_providers()
+                    .into_iter()
+                    .any(|(_, p)| p.serves_model(model_key(&model)).is_some())
+                || registry
+                    .native_providers()
+                    .into_iter()
+                    .find(|(name, _)| *name == entry.provider)
+                    .is_some_and(|(_, provider)| {
+                        provider.serves_model(model_key(&model)).is_some()
+                    });
+            if usable {
                 push(entry.provider.clone(), model);
+            } else {
+                tracing::warn!(
+                    provider = %entry.provider,
+                    model = %model,
+                    listed_model = %entry.model,
+                    "the --model override renamed this entry onto a provider that \
+                     does not serve it, so the pair is skipped rather than left \
+                     for a failover to land on"
+                );
             }
             continue;
         }
@@ -1494,6 +1539,54 @@ mod tests {
         let registry = registry_with(&["anthropic", "openai", "ollama"]);
         let got = resolve_stage_candidates(&cfg, Some("ollama/llama"), &defaults, &registry);
         assert_eq!(pairs(&got), vec![("ollama", "llama")]);
+    }
+
+    /// A bare `--model` override replaces the model on every entry and leaves
+    /// each entry's provider alone, so it invents pairs nobody asked for. One
+    /// that no provider serves used to sit in the fallback list until a failover
+    /// reached it and moved the run onto a route that cannot answer.
+    #[test]
+    fn a_rename_onto_a_provider_that_does_not_serve_it_is_dropped() {
+        let cfg = model_cfg(vec![("anthropic", "sonnet"), ("openrouter", "gpt")]);
+        let registry = registry_serving(&[
+            ("anthropic", &["sonnet", "opus"][..]),
+            ("openrouter", &["gpt", "gpt-5.5"][..]),
+        ]);
+
+        let got =
+            resolve_stage_candidates(&cfg, Some("gpt-5.5"), &ModelDefaults::default(), &registry);
+
+        assert_eq!(
+            pairs(&got),
+            vec![("openrouter", "gpt-5.5")],
+            "anthropic does not serve gpt-5.5, so no failover can land there"
+        );
+    }
+
+    /// The other half of the same rule: silence is not a no. A provider whose
+    /// catalogue this build cannot see keeps its pins, because rejecting a pair
+    /// nothing can vouch for would throw away every route to such a provider.
+    #[test]
+    fn a_rename_is_kept_when_no_provider_can_vouch_for_the_model() {
+        let cfg = model_cfg(vec![("anthropic", "sonnet"), ("openrouter", "gpt")]);
+        // These providers claim nothing at all.
+        let registry = registry_with(&["anthropic", "openrouter"]);
+
+        let got = resolve_stage_candidates(
+            &cfg,
+            Some("some-new-model"),
+            &ModelDefaults::default(),
+            &registry,
+        );
+
+        assert_eq!(
+            pairs(&got),
+            vec![
+                ("anthropic", "some-new-model"),
+                ("openrouter", "some-new-model")
+            ],
+            "nobody could say, so the entries stand as they did before"
+        );
     }
 
     #[test]
