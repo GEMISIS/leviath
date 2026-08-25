@@ -7,8 +7,8 @@ use crate::openai_compat::{
 #[cfg(test)]
 use crate::provider::FinishReason;
 use crate::provider::{
-    InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride, ModelInfo,
-    Provider, ProviderConfig, ProviderError, Result, StreamChunk,
+    InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
+    ModelInfo, Provider, ProviderConfig, ProviderError, Result, StreamChunk,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -132,6 +132,7 @@ impl OpenAIProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 1_050_000,
                 max_output_tokens: 128_000,
+                limits_source: LimitsSource::Builtin,
             }
         // GPT-5.x family (5.4, 5.4-mini, 5.4-nano, 5-mini) - 400K context, 128K output
         } else if model.starts_with("gpt-5") {
@@ -142,6 +143,7 @@ impl OpenAIProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 400_000,
                 max_output_tokens: 128_000,
+                limits_source: LimitsSource::Builtin,
             }
         // GPT-4.1 family - 1M context (must check before generic gpt-4)
         } else if model.starts_with("gpt-4.1") {
@@ -152,6 +154,7 @@ impl OpenAIProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 1_047_576,
                 max_output_tokens: 32_768,
+                limits_source: LimitsSource::Builtin,
             }
         // o-series reasoning models (o3, o4) - no temperature, 200K context
         } else if model.starts_with("o3") || model.starts_with("o4") {
@@ -162,6 +165,7 @@ impl OpenAIProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 200_000,
                 max_output_tokens: 100_000,
+                limits_source: LimitsSource::Builtin,
             }
         } else {
             ModelCapabilities::default()
@@ -761,6 +765,7 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 1,
                 max_output_tokens: 1,
+                limits_source: LimitsSource::Builtin,
             }
             .into(),
         );
@@ -925,6 +930,7 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 1,
                 max_output_tokens: 1,
+                limits_source: LimitsSource::Builtin,
             }
             .into(),
         );

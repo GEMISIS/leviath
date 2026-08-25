@@ -649,7 +649,9 @@ max_output_tokens    = 4096
 ```
 
 `lev models show <model>` prints the values a run will actually use, with any correction already
-applied.
+applied. `GET /api/models` carries the same numbers plus a `limits_source` of `api`, `builtin` or
+`override`, so a client can tell a figure the provider reported from one this build matched off the
+model's name. The two are not worth the same and they look identical once printed.
 
 ### Where a window comes from
 
@@ -657,11 +659,29 @@ Three sources, narrowest first:
 
 1. A `[model_capabilities]` entry, if you wrote one. Your number is the last word, which is how you
    correct an API that is itself wrong.
-2. What the provider's own API reports, read once when the daemon starts. OpenRouter fronts far more
-   models than any compiled table can name, so its `/models` endpoint is the only current answer for
-   most of them.
-3. The table compiled into this build, and for an OpenRouter model it does not name, a conservative
-   128,000 tokens.
+2. What the provider's own API reports, read once when the daemon starts, and again whenever
+   `GET /api/models` is asked. Which providers can answer, and from where:
+
+   | provider | reads | notes |
+   |---|---|---|
+   | OpenRouter | `/models` | `context_length` and `top_provider.max_completion_tokens`. Fronts far more models than any compiled table can name |
+   | Google | `/v1beta/models` | `inputTokenLimit` and `outputTokenLimit`. Needs the native base URL; an OpenAI-compat one has no such listing |
+   | Ollama | `/api/ps`, then `/api/show` | See below |
+   | Anthropic, OpenAI | nothing | Neither `/models` reports token limits at all, so the compiled table is the only answer available |
+
+3. The table compiled into this build, matched against the model's name, and for an OpenRouter model
+   it does not name, a conservative 128,000 tokens.
+
+Ollama is asked twice because the two endpoints answer different questions. `/api/ps` reports the
+window the runner **actually allocated** for a model it currently has loaded, which is the only
+figure that is an observation rather than an inference, so it is taken as final. For anything not
+loaded, `/api/show` gives the `num_ctx` the model's Modelfile pins. Its `model_info` also carries the
+architecture's maximum, and that is deliberately *not* used: it is what the weights allow rather than
+what the server will serve, and on a model whose Modelfile pins 32 768 against a 262 144 architecture
+it would replace one overestimate with a much larger one.
+
+So a warm Ollama model reports its true window and a cold one that pins no `num_ctx` still falls back
+to the compiled table. Calling a model once is enough to make it warm.
 
 The reason this order matters is that region budgets are percentages of the window. A `budget = "30%"`
 region on a model that really holds 1M tokens is 314,572 tokens if the window is known, and 38,400

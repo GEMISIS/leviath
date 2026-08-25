@@ -127,6 +127,7 @@ impl ClaudeCodeProvider {
             supports_system_prompt: true,
             max_context_tokens: 200_000 - INJECTION_RESERVE_TOKENS,
             max_output_tokens: max_output,
+            limits_source: LimitsSource::Builtin,
         }
     }
 
@@ -564,6 +565,7 @@ mod tests {
                 supports_system_prompt: true,
                 max_context_tokens: 100_000,
                 max_output_tokens: 8_000,
+                limits_source: LimitsSource::Builtin,
             }
             .into(),
         );

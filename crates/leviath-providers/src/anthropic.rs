@@ -1,9 +1,9 @@
 //! Anthropic Claude provider implementation.
 
 use crate::provider::{
-    FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride,
-    ModelInfo, Provider, ProviderConfig, ProviderError, Result, StreamChunk, TokenUsage, ToolCall,
-    ToolCallDelta,
+    FinishReason, InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities,
+    ModelCapabilityOverride, ModelInfo, Provider, ProviderConfig, ProviderError, Result,
+    StreamChunk, TokenUsage, ToolCall, ToolCallDelta,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -339,6 +339,7 @@ impl AnthropicProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 1_000_000,
                 max_output_tokens: 128_000,
+                limits_source: LimitsSource::Builtin,
             };
         }
         // Sonnet 5 - 1M context, 128K output, no temperature
@@ -350,6 +351,7 @@ impl AnthropicProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 1_000_000,
                 max_output_tokens: 128_000,
+                limits_source: LimitsSource::Builtin,
             };
         }
         // Fable 5 / Mythos 5 - top-tier, 1M context, 128K output, no temperature
@@ -361,6 +363,7 @@ impl AnthropicProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 1_000_000,
                 max_output_tokens: 128_000,
+                limits_source: LimitsSource::Builtin,
             };
         }
         // Opus 4.8 / 4.7 - 1M context, 128K output, no temperature
@@ -372,6 +375,7 @@ impl AnthropicProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 1_000_000,
                 max_output_tokens: 128_000,
+                limits_source: LimitsSource::Builtin,
             };
         }
         // Opus 4.6 - 1M context, 128K output, temperature supported
@@ -383,6 +387,7 @@ impl AnthropicProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 1_000_000,
                 max_output_tokens: 128_000,
+                limits_source: LimitsSource::Builtin,
             };
         }
         // Sonnet 4.6 - 1M context, 128K output, temperature supported
@@ -394,6 +399,7 @@ impl AnthropicProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 1_000_000,
                 max_output_tokens: 128_000,
+                limits_source: LimitsSource::Builtin,
             };
         }
         // Haiku 4.5 - 200K context, 64K output, temperature supported
@@ -405,6 +411,7 @@ impl AnthropicProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 200_000,
                 max_output_tokens: 64_000,
+                limits_source: LimitsSource::Builtin,
             };
         }
         // Generic Claude 4.x fallback (e.g. older 4.5 snapshots)
@@ -419,6 +426,7 @@ impl AnthropicProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 1_000_000,
                 max_output_tokens: 32_768,
+                limits_source: LimitsSource::Builtin,
             };
         }
         ModelCapabilities::default()
@@ -1758,6 +1766,7 @@ mod tests {
                 supports_system_prompt: true,
                 max_context_tokens: 1_000_000,
                 max_output_tokens: 32_768,
+                limits_source: LimitsSource::Builtin,
             }
             .into(),
         );
@@ -2471,6 +2480,7 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 42,
                 max_output_tokens: 10,
+                limits_source: LimitsSource::Builtin,
             }
             .into(),
         );

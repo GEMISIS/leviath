@@ -3,8 +3,8 @@
 //! Ollama provides local LLM execution via NDJSON streaming.
 
 use crate::provider::{
-    FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride,
-    ModelInfo, Provider, ProviderError, Result, StreamChunk, TokenUsage,
+    FinishReason, InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities,
+    ModelCapabilityOverride, ModelInfo, Provider, ProviderError, Result, StreamChunk, TokenUsage,
 };
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -197,6 +197,7 @@ impl OllamaProvider {
         match windows.get(model) {
             Some(&max_context_tokens) => ModelCapabilities {
                 max_context_tokens,
+                limits_source: LimitsSource::Api,
                 ..base
             },
             None => base,
@@ -267,6 +268,39 @@ impl OllamaProvider {
     }
 
     /// Ask the server for every installed model's effective window.
+    /// Windows for the models the server currently has loaded, from `/api/ps`.
+    ///
+    /// Never fails the caller: this is an improvement on what `/api/show` can
+    /// say, not a requirement. A server that will not answer, or answers in a
+    /// shape this does not recognise, leaves an empty map and the caller carries
+    /// on with the Modelfile's `num_ctx`.
+    async fn loaded_windows(&self) -> HashMap<String, usize> {
+        let Ok(response) = self
+            .client
+            .get(format!("{}/api/ps", self.base_url))
+            .send()
+            .await
+        else {
+            return HashMap::new();
+        };
+        let Ok(body) = response.json::<serde_json::Value>().await else {
+            return HashMap::new();
+        };
+        body.get("models")
+            .and_then(|m| m.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let name = entry.get("name")?.as_str()?.to_string();
+                        let window = entry.get("context_length")?.as_u64()? as usize;
+                        Some((name, window))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     async fn learn_model_windows(&self) -> Result<HashMap<String, usize>> {
         let tags = self
             .client
@@ -288,8 +322,29 @@ impl OllamaProvider {
             })
             .unwrap_or_default();
 
-        let mut windows = HashMap::with_capacity(names.len());
+        // What is loaded right now, and at what size. `/api/ps` reports the
+        // window the runner actually allocated for a model it has resident,
+        // which is the only answer that is not an inference from configuration:
+        // `num_ctx` is what a Modelfile asked for and the architecture length is
+        // what the weights allow, but this is what the server is serving.
+        //
+        // Measured on a developer machine, `qwen3.8:latest` pins no `num_ctx`
+        // and reports 262144 here, against the 131072 its name was matched to.
+        // Nothing in `/api/show` could have said so: it carries the Modelfile
+        // and the architecture and nothing about the server's own default.
+        //
+        // Loaded models only, which is the whole limitation. A model nothing has
+        // called yet is absent and falls through to `num_ctx` below, so this
+        // helps most on the machine that is actually using Ollama - which is the
+        // machine whose budgets are about to be resolved against the answer.
+        let mut windows = self.loaded_windows().await;
+
         for name in names {
+            // `/api/ps` already answered for this one, from the runner rather
+            // than from configuration. Nothing in `/api/show` outranks that.
+            if windows.contains_key(&name) {
+                continue;
+            }
             let show = self
                 .client
                 .post(format!("{}/api/show", self.base_url))
@@ -322,6 +377,7 @@ impl OllamaProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 131_072,
                 max_output_tokens: 8192,
+                limits_source: LimitsSource::Builtin,
             }
         // Mistral / Mixtral - tool-capable
         } else if model.contains("mistral") || model.contains("mixtral") {
@@ -332,6 +388,7 @@ impl OllamaProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 32_768,
                 max_output_tokens: 4096,
+                limits_source: LimitsSource::Builtin,
             }
         // Phi-4 - tool-capable, 128K context
         } else if model.contains("phi-4") || model.contains("phi4") {
@@ -342,6 +399,7 @@ impl OllamaProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 131_072,
                 max_output_tokens: 8192,
+                limits_source: LimitsSource::Builtin,
             }
         // DeepSeek R1 - reasoning, no tool calls
         } else if model.contains("deepseek-r1") {
@@ -352,6 +410,7 @@ impl OllamaProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 131_072,
                 max_output_tokens: 8192,
+                limits_source: LimitsSource::Builtin,
             }
         // DeepSeek general - tool-capable
         } else if model.contains("deepseek") {
@@ -362,6 +421,7 @@ impl OllamaProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 131_072,
                 max_output_tokens: 8192,
+                limits_source: LimitsSource::Builtin,
             }
         // Gemma - no tool support
         } else if model.contains("gemma") {
@@ -372,6 +432,7 @@ impl OllamaProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 131_072,
                 max_output_tokens: 8192,
+                limits_source: LimitsSource::Builtin,
             }
         // CodeLlama - no tool support
         } else if model.contains("codellama") {
@@ -382,6 +443,7 @@ impl OllamaProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 16_384,
                 max_output_tokens: 4096,
+                limits_source: LimitsSource::Builtin,
             }
         } else {
             // Conservative fallback for unknown local models
@@ -392,6 +454,7 @@ impl OllamaProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 8192,
                 max_output_tokens: 4096,
+                limits_source: LimitsSource::Builtin,
             }
         }
     }
@@ -961,6 +1024,7 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 42,
                 max_output_tokens: 10,
+                limits_source: LimitsSource::Builtin,
             }
             .into(),
         );
@@ -1687,6 +1751,7 @@ mod tests {
                 supports_system_prompt: false,
                 max_context_tokens: 99,
                 max_output_tokens: 99,
+                limits_source: LimitsSource::Builtin,
             }
             .into(),
         );
@@ -2300,6 +2365,7 @@ mod tests {
                 supports_system_prompt: true,
                 max_context_tokens: 8192,
                 max_output_tokens: 4096,
+                limits_source: LimitsSource::Builtin,
             }
             .into(),
         );
@@ -2906,9 +2972,11 @@ mod tests {
     /// `/api/show` that follows finds nothing listening.
     #[tokio::test]
     async fn priming_reports_a_show_call_that_never_connects() {
-        let (url, _bodies) =
-            leviath_testkit::spawn_mock_sequence(vec![(200, "OK", tags_body(&["qwen3.8:latest"]))])
-                .await;
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", tags_body(&["qwen3.8:latest"])),
+            (200, "OK", ps_body(&[])),
+        ])
+        .await;
         let provider = OllamaProvider::with_base_url(
             crate::provider::build_http_client(None).expect("a test client builds"),
             url,
@@ -2921,6 +2989,7 @@ mod tests {
     async fn priming_reports_a_show_body_that_is_not_json() {
         let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
             (200, "OK", tags_body(&["qwen3.8:latest"])),
+            (200, "OK", ps_body(&[])),
             (200, "OK", b"not json".to_vec()),
         ])
         .await;
@@ -2937,6 +3006,7 @@ mod tests {
     async fn priming_reports_a_show_call_the_server_refuses() {
         let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
             (200, "OK", tags_body(&["qwen3.8:latest"])),
+            (200, "OK", ps_body(&[])),
             (500, "Internal Server Error", b"boom".to_vec()),
         ])
         .await;
@@ -2988,6 +3058,7 @@ mod tests {
     async fn a_guessed_window_is_announced_once_per_model() {
         let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
             (200, "OK", tags_body(&["qwen3.8-32k:latest"])),
+            (200, "OK", ps_body(&[])),
             (200, "OK", show_body(Some(32768))),
         ])
         .await;
@@ -3019,6 +3090,7 @@ mod tests {
     async fn a_window_read_from_the_server_is_not_announced() {
         let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
             (200, "OK", tags_body(&["qwen3.8-32k:latest"])),
+            (200, "OK", ps_body(&[])),
             (200, "OK", show_body(Some(32768))),
         ])
         .await;
@@ -3055,6 +3127,98 @@ mod tests {
     // ─── effective window ───────────────────────────────────────────────────
 
     /// `parameters` is a text block, and `num_ctx` is the line that matters.
+    /// `/api/ps` is the only endpoint that reports the window the runner
+    /// actually allocated, so a model it names is not re-derived from anything
+    /// `/api/show` says.
+    #[tokio::test]
+    async fn a_loaded_model_takes_its_window_from_what_is_running() {
+        let body = br#"{"models":[
+            {"name":"qwen3.8:latest","model":"qwen3.8:latest","context_length":262144},
+            {"name":"gemma3:4b","model":"gemma3:4b","context_length":8192}
+        ]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = OllamaProvider::with_base_url(reqwest::Client::new(), url);
+
+        let loaded = provider.loaded_windows().await;
+        assert_eq!(loaded.get("qwen3.8:latest"), Some(&262_144));
+        assert_eq!(loaded.get("gemma3:4b"), Some(&8_192));
+    }
+
+    /// A field of the wrong shape is skipped like a missing one. `/api/ps` is
+    /// another program's output, so "present but not what it should be" is a
+    /// state worth surviving rather than one worth trusting.
+    #[tokio::test]
+    async fn a_ps_entry_with_wrongly_typed_fields_is_skipped() {
+        let body = br#"{"models":[
+            {"name":42,"context_length":8192},
+            {"name":"bad-window:latest","context_length":"lots"},
+            {"name":"good:latest","context_length":16384}
+        ]}"#;
+        let url = leviath_testkit::spawn_mock_server(200, "OK", body).await;
+        let provider = OllamaProvider::with_base_url(reqwest::Client::new(), url);
+
+        let loaded = provider.loaded_windows().await;
+        assert_eq!(loaded.len(), 1, "only the well-formed entry is kept");
+        assert_eq!(loaded.get("good:latest"), Some(&16_384));
+    }
+
+    /// What the runner has loaded is not re-derived from the Modelfile. A model
+    /// `/api/ps` answered for is skipped entirely when the prime walks the tag
+    /// list, so `/api/show` is not even asked about it.
+    #[tokio::test]
+    async fn a_model_already_answered_by_ps_is_not_asked_about_again() {
+        // Only two responses: the tag list and the `ps` answer. A third request
+        // would find nothing to serve, so this failing to skip shows up as an
+        // error rather than as a wrong number.
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", tags_body(&["warm:latest"])),
+            (200, "OK", ps_body(&[("warm:latest", 262_144)])),
+        ])
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+
+        provider.prime_capabilities().await.expect("primes");
+
+        assert_eq!(
+            provider.capabilities("warm:latest").max_context_tokens,
+            262_144,
+            "the window the runner allocated"
+        );
+    }
+
+    /// The endpoint is an improvement, not a dependency: a server that will not
+    /// answer it leaves the caller on the Modelfile's `num_ctx` rather than
+    /// failing the prime.
+    #[tokio::test]
+    async fn an_unavailable_ps_endpoint_is_not_an_error() {
+        let url = spawn_mock_server(500, "Server Error", b"nope").await;
+        let provider = OllamaProvider::with_base_url(reqwest::Client::new(), url);
+        assert!(provider.loaded_windows().await.is_empty());
+
+        let garbage = spawn_mock_server(200, "OK", b"not json").await;
+        let provider = OllamaProvider::with_base_url(reqwest::Client::new(), garbage);
+        assert!(provider.loaded_windows().await.is_empty());
+    }
+
+    /// An entry missing either half is skipped rather than half-recorded.
+    #[tokio::test]
+    async fn a_ps_entry_without_a_window_is_skipped() {
+        let body = br#"{"models":[
+            {"name":"no-window:latest"},
+            {"context_length":4096},
+            {"name":"good:latest","context_length":16384}
+        ]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = OllamaProvider::with_base_url(reqwest::Client::new(), url);
+
+        let loaded = provider.loaded_windows().await;
+        assert_eq!(loaded.len(), 1, "only the complete entry is kept");
+        assert_eq!(loaded.get("good:latest"), Some(&16_384));
+    }
+
     #[test]
     fn the_effective_window_comes_from_num_ctx() {
         let show = serde_json::json!({
@@ -3118,6 +3282,18 @@ mod tests {
         .expect("serializes")
     }
 
+    /// An `/api/ps` answer naming the loaded models and their served windows.
+    ///
+    /// Empty is the interesting default: it says nothing is loaded, which is
+    /// what sends the prime on to `/api/show` and the Modelfile's `num_ctx`.
+    fn ps_body(loaded: &[(&str, usize)]) -> Vec<u8> {
+        let models: Vec<serde_json::Value> = loaded
+            .iter()
+            .map(|(n, ctx)| serde_json::json!({ "name": n, "context_length": ctx }))
+            .collect();
+        serde_json::to_vec(&serde_json::json!({ "models": models })).expect("serializes")
+    }
+
     fn tags_body(names: &[&str]) -> Vec<u8> {
         let models: Vec<serde_json::Value> = names
             .iter()
@@ -3132,6 +3308,7 @@ mod tests {
     async fn priming_replaces_the_window_the_name_suggested() {
         let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
             (200, "OK", tags_body(&["qwen3.8-32k:latest"])),
+            (200, "OK", ps_body(&[])),
             (200, "OK", show_body(Some(32768))),
         ])
         .await;
@@ -3168,6 +3345,7 @@ mod tests {
     async fn a_model_naming_no_window_leaves_the_table_in_charge() {
         let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
             (200, "OK", tags_body(&["qwen3.8:latest"])),
+            (200, "OK", ps_body(&[])),
             (200, "OK", show_body(None)),
         ])
         .await;
@@ -3190,6 +3368,7 @@ mod tests {
     async fn an_explicit_override_still_wins_over_the_server() {
         let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
             (200, "OK", tags_body(&["qwen3.8-32k:latest"])),
+            (200, "OK", ps_body(&[])),
             (200, "OK", show_body(Some(32768))),
         ])
         .await;

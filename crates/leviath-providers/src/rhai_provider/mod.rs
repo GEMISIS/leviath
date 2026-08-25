@@ -39,8 +39,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::provider::{
-    InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride, ModelInfo,
-    Provider, ProviderError, RateLimitConfig, Result, StreamChunk, ToolCallDelta,
+    InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
+    ModelInfo, Provider, ProviderError, RateLimitConfig, Result, StreamChunk, ToolCallDelta,
 };
 use crate::rate_limit::RateLimiter;
 
@@ -532,6 +532,7 @@ impl Provider for RhaiProvider {
         let base = ModelCapabilities {
             max_context_tokens: self.meta.max_context_tokens,
             max_output_tokens: self.meta.max_output_tokens,
+            limits_source: LimitsSource::Builtin,
             supports_streaming: true,
             ..Default::default()
         };

@@ -6,6 +6,7 @@ use super::*;
 use crate::inference_pool::{InferencePoolConfig, InferencePools};
 use crate::test_support::hints;
 use leviath_core::{Region, RegionKind};
+use leviath_providers::LimitsSource;
 use tokio::sync::mpsc;
 
 /// A provider whose capabilities can be toggled for the temperature branch.
@@ -46,6 +47,7 @@ impl Provider for Cfg {
         leviath_providers::ModelCapabilities {
             supports_temperature: self.supports_temperature,
             max_output_tokens: self.max_output,
+            limits_source: LimitsSource::Builtin,
             ..Default::default()
         }
     }

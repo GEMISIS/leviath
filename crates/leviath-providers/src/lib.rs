@@ -31,7 +31,7 @@ pub mod tokenizer;
 mod test_support;
 
 pub use anthropic::AnthropicProvider;
-pub use capabilities::{ModelCapabilities, ModelCapabilityOverride};
+pub use capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOverride};
 pub use claude_code::ClaudeCodeProvider;
 pub use gemini::GeminiProvider;
 pub use ollama::OllamaProvider;

@@ -1063,6 +1063,14 @@ pub(super) struct ModelEntry {
     pub(super) display_name: Option<String>,
     pub(super) max_context_tokens: usize,
     pub(super) max_output_tokens: usize,
+    /// Where the two limits above came from: `api`, `builtin` or `override`.
+    ///
+    /// Published because they are numbers a client acts on and the two kinds
+    /// are not worth the same. `api` is what the provider says; `builtin` is
+    /// this build matching the model's name against a compiled table, which is
+    /// the only answer available for a provider whose API does not report
+    /// limits at all, and is a guess that can be wrong by a factor of two.
+    pub(super) limits_source: String,
     pub(super) supports_tools: bool,
 }
 
