@@ -17,6 +17,7 @@ fn healthy_daemon() -> DaemonHealth {
 fn entry(run_id: &str, status: AgentStatus) -> RunListEntry {
     RunListEntry {
         splits_degraded: 0,
+        broken_scripts: Vec::new(),
         run_id: run_id.to_string(),
         title: None,
         status,
@@ -101,6 +102,25 @@ fn status_cell_falls_back_to_the_bare_status() {
     );
 }
 
+/// A run that finished on a script it could not use says so. Nothing else about
+/// it looks wrong: a broken output validator is skipped rather than fatal, so
+/// the run completes and reports success with its answer never checked.
+#[test]
+fn status_cell_marks_a_run_whose_script_could_not_be_used() {
+    let mut e = entry("r", AgentStatus::Complete);
+    e.broken_scripts = vec!["shape.rhai".to_string()];
+    assert_eq!(status_cell(&e), "complete (broken script)");
+
+    // Ranked above the fan-out note: that one says how the run got here, this
+    // one says the result was never checked.
+    e.splits_degraded = 1;
+    assert_eq!(status_cell(&e), "complete (broken script)");
+
+    // And below "no output", which is still the worse of the three.
+    e.empty_output = true;
+    assert_eq!(status_cell(&e), "complete (no output)");
+}
+
 /// Same question one level down. A stage whose whole job was to start workers
 /// and started none leaves its merge stage working from nothing, and that is
 /// invisible from the far side without saying so here.
@@ -112,6 +132,17 @@ fn status_cell_marks_a_run_whose_fan_out_handed_out_nothing() {
     // Producing no output at all is the worse of the two, so it wins.
     e.empty_output = true;
     assert_eq!(status_cell(&e), "complete (no output)");
+}
+
+/// The offline table says it too, from `meta.json`. Two formatters, and the
+/// live one is the one a person watching a run actually reads - so a fix to one
+/// that misses the other is a fix nobody sees.
+#[test]
+fn offline_status_cell_marks_a_broken_script() {
+    let mut meta = on_disk("r", RunStatus::Complete, 1_000);
+    meta.flags.broken_scripts = vec!["shape.rhai".to_string()];
+    let run = &offline_runs(vec![meta], Some(&live_set(&[])), 2_000)[0];
+    assert_eq!(offline_status_cell(run), "complete (broken script)");
 }
 
 /// The offline table says the same thing, from `meta.json` rather than the live

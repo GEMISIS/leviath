@@ -149,6 +149,9 @@ pub struct OfflineRun {
     pub empty_output: bool,
     /// Fan-outs that handed out no work. See `RunFlags::splits_degraded`.
     pub splits_degraded: usize,
+    /// Rhai scripts this run needed and could not use. See
+    /// `RunFlags::broken_scripts`.
+    pub broken_scripts: Vec<String>,
     /// Whether the run submitted a final output. The flag only; read the answer
     /// itself with `lev result <run-id>`.
     #[serde(default)]
@@ -183,6 +186,7 @@ pub fn offline_runs(
             last_progress_at: m.last_progress_at,
             empty_output: m.flags.empty_output,
             splits_degraded: m.flags.splits_degraded,
+            broken_scripts: m.flags.broken_scripts.clone(),
             has_final_output: m.final_output.is_some(),
         })
         .collect()
@@ -197,6 +201,12 @@ fn offline_status_cell(run: &OfflineRun) -> String {
     }
     if run.empty_output {
         return format!("{status} (no output)");
+    }
+    // Before the fan-out note: a script that could not be used says something
+    // about the run's *result* being unchecked, which is worth more than a note
+    // about how it got there.
+    if !run.broken_scripts.is_empty() {
+        return format!("{status} (broken script)");
     }
     match run.splits_degraded > 0 {
         true => format!("{status} (fan-out empty)"),
@@ -269,6 +279,12 @@ fn status_cell(entry: &RunListEntry) -> String {
         // reads as a deliberate pause somebody can undo whenever they like.
         (AgentStatus::Paused, Some(reason)) => format!("paused: {reason}"),
         (status, _) if entry.empty_output => format!("{status} (no output)"),
+        // A script the run needed and could not use is the quietest failure of
+        // the lot: a broken output validator is skipped rather than fatal, so
+        // the run completes, reports success, and its answer was never checked.
+        // Ranked above the fan-out note, which says how the run got here rather
+        // than what is wrong with its result.
+        (status, _) if !entry.broken_scripts.is_empty() => format!("{status} (broken script)"),
         // A fan-out that handed out no work is the same class of quiet failure:
         // the run finished, and a stage whose whole job was to start workers
         // started none, so whatever merged them merged nothing.

@@ -229,6 +229,19 @@ impl ScriptProviderLayer {
         Some(self.dir.join(joined))
     }
 
+    /// The script providers this machine has a `[model_providers.<name>]` block
+    /// for, as distinct from every `.rhai` sitting in the directory.
+    ///
+    /// The distinction is what makes priming affordable. Compiling every script
+    /// on disk to ask what it serves is the cost the registry exists to avoid,
+    /// and it is a real one - but a provider with a config block is not "every
+    /// script on disk". Somebody wrote its name, its key and its base URL down.
+    /// Leaving those unprimed is what made a working `list_models` go unasked
+    /// the moment its provider stopped being the machine's default.
+    pub fn configured_names(&self) -> Vec<String> {
+        (self.config)().overrides.keys().cloned().collect()
+    }
+
     /// Every script provider this layer could resolve right now, in no
     /// particular order: the `.rhai` files sitting in its directory, plus any
     /// name with a `[model_providers]` entry (which may point its `script` at a

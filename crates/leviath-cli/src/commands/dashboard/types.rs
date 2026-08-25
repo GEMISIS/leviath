@@ -334,6 +334,13 @@ pub struct DashboardAgent {
     pub cached_tokens: usize,
     /// Inference turns taken in the current stage.
     pub iteration: usize,
+    /// Rhai scripts this run needed and could not use.
+    ///
+    /// Shown because the run does not otherwise look any different: a broken
+    /// output validator is skipped rather than fatal, so the run completes,
+    /// reports success, and the only trace is a line in the daemon log. Empty
+    /// on a healthy run and on one written before the field existed.
+    pub broken_scripts: Vec<String>,
     /// The question a waiting run is asking, in one line, for the list row.
     pub waiting_prompt: Option<String>,
     /// Why a waiting run is parked, when `meta.json` says.
@@ -700,6 +707,7 @@ mod tests {
             tokens_out: 50,
             cached_tokens: 0,
             iteration: 1,
+            broken_scripts: Vec::new(),
             waiting_prompt: None,
             wait_reason: None,
             pending_request: None,

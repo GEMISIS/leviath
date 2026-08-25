@@ -161,6 +161,15 @@ pub struct ModelProviderConfig {
     /// the provider claims no models and can only be reached by a blueprint
     /// that pins it, which is what made a local model unreachable however the
     /// machine set `default_provider` (issue #598).
+    /// Serialized even when empty, deliberately. Skipping it would tidy the
+    /// `serves = []` a save-back writes into every provider block - but
+    /// `Config::unknown_config_keys` decides whether a key is read by
+    /// round-tripping the file through serde, on the stated invariant that "a
+    /// field they set is a field that serializes". A field that vanishes when
+    /// empty breaks that: `lev doctor` would report a correctly-spelled
+    /// `serves = []` as a key read by nothing. The line is inert, not harmful -
+    /// what made this provider unreachable was priming, fixed separately - so it
+    /// is not worth breaking that invariant to remove.
     #[serde(default)]
     pub serves: Vec<String>,
 

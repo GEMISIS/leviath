@@ -63,11 +63,28 @@ operation budget so a runaway script stops instead of hanging the run. You get t
 [standard helpers](/docs/scripting), including `parse_json`.
 
 A validator that throws, loops forever, or returns something that is neither `()` nor a string is
-treated as **broken, not as a rejection**. The submission is recorded and a warning is logged.
+treated as **broken, not as a rejection**. The submission is recorded, and the run says so.
 
 That distinction matters. If a script bug read as "this answer is wrong", the agent would retry
 against a validator that can never pass. It would burn its whole budget and end with no answer at
 all. A bug in your validator should cost you a warning, not the agent's work.
+
+Where the run says so:
+
+| Surface | What you see |
+|---|---|
+| `lev ps` | `complete (broken script)` on the run's status |
+| `lev dash` | `⚠ 1 broken script` in the run's detail header |
+| `meta.json`, the API | `flags.broken_scripts`, naming each script |
+
+Named rather than counted, because the useful question is which one. Recorded once per script
+however many times the stage submits - a validator that throws throws every time.
+
+The failure would otherwise be invisible: the run completes, reports success, and the only trace is
+a line in the daemon log. An answer nobody checked looks exactly like an answer that passed.
+
+`lev validate` compiles the machine's global tools and script providers as well as the blueprint's
+own, so a script that will not load is something you can find before a run needs it.
 
 ## When it runs
 

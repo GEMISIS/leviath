@@ -91,12 +91,53 @@ pub struct GateAutoApprove;
 /// the end of a long run) and looked up when a submission arrives. Absent when
 /// the blueprint names none, which is nearly every agent.
 #[derive(Component, Clone, Default)]
-pub struct OutputValidators(
-    pub  std::collections::HashMap<
+pub struct OutputValidators {
+    /// The compiled validators, by the script path a stage names.
+    pub compiled: std::collections::HashMap<
         String,
         std::sync::Arc<leviath_scripting::output_validator::OutputValidator>,
     >,
-);
+    /// Which of them threw, so the run can say a script it needed did not work.
+    ///
+    /// Recorded here rather than handed back through
+    /// [`crate::output_tool::handle_output_tool`], which answers the model and
+    /// has no third channel to spare. The component that holds the validators is
+    /// the thing that knows one failed, and interior mutability is what lets it
+    /// say so from a `&` borrow on the tool path.
+    ///
+    /// A set, because a validator that throws once throws every time: the same
+    /// stage retrying would otherwise report the same broken script repeatedly.
+    pub broken: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+}
+
+impl OutputValidators {
+    /// Build from the compiled set, with nothing yet known to be broken.
+    pub fn new(
+        compiled: std::collections::HashMap<
+            String,
+            std::sync::Arc<leviath_scripting::output_validator::OutputValidator>,
+        >,
+    ) -> Self {
+        Self {
+            compiled,
+            broken: Default::default(),
+        }
+    }
+
+    /// Note that `script` could not be used, and answer whether this is the
+    /// first time - so a caller logs it once rather than once per retry.
+    pub fn note_broken(&self, script: &str) -> bool {
+        leviath_core::sync::lock(&self.broken).insert(script.to_string())
+    }
+
+    /// The scripts noted broken, in a stable order.
+    pub fn broken_names(&self) -> Vec<String> {
+        leviath_core::sync::lock(&self.broken)
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
 
 /// `--yolo`'s counterpart for blueprint-declared interaction points: approve
 /// them without opening a prompt.

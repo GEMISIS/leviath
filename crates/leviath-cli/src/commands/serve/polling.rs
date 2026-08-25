@@ -417,6 +417,7 @@ fn completion_payload(
         // leaves its merge stage working from nothing, and a caller reading only
         // `status` cannot tell that from a run whose fan-out was genuinely empty.
         "splits_degraded": meta.flags.splits_degraded,
+        "broken_scripts": meta.flags.broken_scripts,
     })
 }
 
