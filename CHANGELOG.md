@@ -60,6 +60,27 @@ same list.
   the path; `t` there still narrows it to the path and the options. This is the
   same pair of pictures The Lair shows on the web.
 
+- Changed: a provider that answered and then went quiet is waited out longer
+  than one that was never there. Four attempts at 1s, 2s and 4s is seven seconds
+  of tolerance, after which the run parks and waits for somebody to type
+  `lev resume` - and almost nothing that interrupts a network is over in seven
+  seconds. A wifi handover, a VPN reconnecting, a laptop waking all outlast it,
+  so runs were reliably parked for conditions that would have cleared on their
+  own. A timeout or a connection that died part-way now starts at five seconds
+  and doubles, covering about thirty-five. A name that does not resolve or a
+  port that refuses keeps the fast schedule, because that answer is instant and
+  identical however long you wait. `inference_retry_attempts` still sets how
+  many tries there are, and the five-minute ceiling on one call's waiting is
+  unchanged.
+
+- Fixed: a script tool's `web_fetch` no longer reuses a connection the far end
+  has already closed. That client pools deliberately, and reqwest holds an idle
+  connection for ninety seconds while plenty of servers drop theirs sooner, so a
+  fetch could fail on a socket that was dead before it was picked up. It now
+  keeps one for thirty seconds, and bounds the handshake separately so a host
+  that accepts a connection and then does nothing cannot hold the agent's other
+  fetches behind it.
+
 - Changed: a model that can stream is now asked to. It makes no difference to
   what an agent sees - the chunks are folded back into one finished turn before
   anything reads it, because half a sentence is not something a run can act on -

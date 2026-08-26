@@ -309,11 +309,16 @@ is retried before the agent is failed and its finished work is thrown away. Only
 failure is retried at all: a reset connection, a timeout, a 429, a 5xx. A rejected key or an
 over-long request fails on the first answer, because the second would be the same.
 
-There are two schedules, and only the blip one is configurable. An ordinary blip waits
+There are three schedules, and only the blip one is configurable. An ordinary blip waits
 `inference_retry_base_ms` and doubles, so the default four attempts are 1s, 2s, 4s. A **capacity**
 refusal - a 429, or Anthropic's 529 "overloaded" - waits 15s, 30s, then 60s per further attempt
 instead, because an overload window lasts minutes and a second of waiting only buys another refusal.
-When the provider sends a `Retry-After`, that answer wins over both, capped at a minute.
+A call that **reached the provider** and then went quiet - a timeout, or an answer that stopped
+part-way - starts at 5s and doubles, so the same four attempts cover about thirty-five seconds:
+that failure usually means the network moved underneath the run, and a wifi handover or a VPN
+reconnecting outlasts seven seconds every time. A name that does not resolve or a port that refuses
+keeps the fast schedule, since that answer is instant and identical however long you wait. When the
+provider sends a `Retry-After`, that answer wins over all of them, capped at a minute.
 
 Raising `inference_retry_attempts` is therefore how a run rides out a longer outage: `6` gives a
 capacity failure about four minutes of waiting rather than about one and a half. Whatever you set,
