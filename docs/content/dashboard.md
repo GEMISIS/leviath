@@ -36,9 +36,10 @@ panel and answer. `lev respond` does the same from the shell.
 - **Agent run table**: title and run id, blueprint, stage, status, tokens, and start time, with
   sub-agents nested under their parent. Titles are auto-generated per run. The model, iteration,
   and context-window occupancy live in the detail view.
-- **Detail view**: the blueprint's stage graph as a band under the header (the flat stage tabs
+- **Detail view**: the run's path as a band under the header (the flat stage tabs
   on a short terminal), a context-window visualization, and content panes for **Output**,
-  **Logs**, and **Context** (JSON). Markdown is rendered. `g` opens the graph full screen.
+  **Logs**, and **Context** (JSON). Markdown is rendered. `t` swaps the band to the whole
+  blueprint, and `g` opens the blueprint full screen.
 - **Interactions**: answer an agent's question (free-text, edit, multiple-choice, tool-approval, or
   confirm) or send it a mid-run message.
 - **Agents**: the catalog of agents this machine can run (`a`), and an editor that builds one on
@@ -179,6 +180,8 @@ for a run whose blueprint could not be read, the flat tab strip stays.
 | `Home` / `End` (or `b` / `e`) | Jump to the beginning / end |
 | `l` / `o` / `c` | Switch the pane to Logs / Output / Context |
 | `g` | Open the stage graph explorer |
+| `t` | Swap the band between the run's path and the whole blueprint |
+| `R` | Re-snake the path, undoing boxes you moved by hand |
 | `Enter` / Space | Fold or unfold the row under the Context tree's cursor |
 | `[` / `]` | Jump to the previous / next region in the Context view |
 | `,` / `.` | Step back and forward through context history |
@@ -215,10 +218,27 @@ The one caveat is a *live* run whose region evicts from the front: entry numbers
 expansion, which is already true within a single session and is why this is a convenience rather
 than a promise.
 
+### The path band
+
+The rows under the detail view's header draw the run's path: one box per stage **visit**, in the
+order the run walked them, snaking across rows so it stays compact and grows a row at a time while
+the run is still going. A stage entered three times is three boxes - `implement`, `implement (2)`,
+`implement (3)` - because the order is the story, and each says when it was entered and how many
+iterations it took. The rows alternate direction, so the last box of a row sits directly above the
+first box of the next and the hand-off between them is a short vertical hop rather than a jump back
+across the canvas. The band grows a row taller when the path wraps; past that it pans, keeping the
+stage the run is in on screen. This is the same picture The Lair's run view draws on the web.
+
+`t` swaps the band to the whole blueprint, painted with what the run has done to it, and back
+again. Boxes can be dragged and the canvas panned; a box you move stays where you put it as the
+path grows, and `R` throws the arrangement away and snakes it again. On a terminal too short to
+give the band its rows, the flat stage strip stays.
+
 ### Stage explorer
 
 `g` in the detail view opens the full-screen stage explorer for any run (a linear blueprint is a
-chain; a graph blueprint is a graph):
+chain; a graph blueprint is a graph). Where the band is what the run did, the explorer is the map
+of everything it could do:
 
 - **Graph** draws the blueprint on a canvas: stages are boxes on layers, transitions are routed
   edges. The layers run left to right when that fits the terminal and top to bottom when only that
@@ -227,10 +247,11 @@ chain; a graph blueprint is a graph):
   spins in the run's colour, stages it has been through show a visit count (`×2`) and the time of
   their last visit, the last transition it took is animated while the run is still going, and
   revisit loops run along a lane
-  beside the boxes. While a run is on the canvas the picture is the path and the options: the
-  stages the run has been through and the one it is in, the transitions between them, and the
-  transitions it can take from where it is with the stages they lead to. Everything else waits
-  off screen until `t` shows the whole graph, so a stage never sits there without a line to it.
+  beside the boxes. The whole blueprint is on show, so you can see what the run has not done as
+  well as what it has. `t` narrows it to the path and the options - the stages the run has been
+  through and the one it is in, the transitions between them, and the transitions it can take from
+  where it is with the stages they lead to - and everything else waits off screen, so a stage never
+  sits there without a line to it.
   The escape edges (`error`, `dead_end`, `stuck`, `max_iterations`) are hidden until you ask for
   them, because nearly every stage has one to the same hub; with the path in focus, `e` shows the
   escapes from the current stage. A fan-out stage that is running shows its worker counts.
@@ -249,7 +270,7 @@ chain; a graph blueprint is a graph):
 | `+` / `-` , `0` | Zoom in / out, back to 100% |
 | `f` | Fit the whole graph on screen |
 | `r` | Turn the graph: left to right or top to bottom |
-| `t` | The whole graph, or only the path taken and what comes next |
+| `t` | The whole graph (the default), or only the path taken and what comes next |
 | `e` | Show or hide the escape edges |
 | `Tab` / `Shift-Tab` | Switch between Graph and Timeline |
 | `?` / `F1` | Help |

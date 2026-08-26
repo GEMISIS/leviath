@@ -41,6 +41,24 @@ same list.
 - Changed: a fallback whose provider says it does not carry that model is
   dropped from a stage's failover chain rather than left in it, so a failover
   cannot spend a step dispatching to a pair the API will reject.
+- Changed: the dashboard's detail view draws the run's path instead of its
+  blueprint. One box per stage visit, in the order the run walked them, snaking
+  across rows so it stays compact and grows a row at a time while you watch:
+  three passes through `implement` are three boxes, `implement`,
+  `implement (2)` and `implement (3)`, each with the time it was entered and
+  the iterations it took. Before this the band painted the run onto the whole
+  blueprint, which answers a different question - the visited stages kept their
+  blueprint layer and slot, so a path read as a sparse slice of a big picture
+  with the revisits collapsed into a `×3` badge, and the band usually had to pan
+  to show any of it. The rows alternate direction so the last box of a row sits
+  directly above the first box of the next, which turns the hand-off between
+  them into a short vertical hop; the band grows a row taller when the path
+  wraps and pans past that, keeping the current stage on screen. `t` swaps the
+  band to the whole blueprint and back, boxes drag and the canvas pans, and `R`
+  re-snakes a path you have rearranged. The stage explorer on `g` now opens on
+  the whole blueprint rather than the path, since the band beside it is already
+  the path; `t` there still narrows it to the path and the options. This is the
+  same pair of pictures The Lair shows on the web.
 
 ## 0.5.1 - 2026-08-26
 
