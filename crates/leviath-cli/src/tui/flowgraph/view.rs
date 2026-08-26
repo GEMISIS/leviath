@@ -23,12 +23,10 @@ use ratatui::widgets::Block;
 use crate::blueprint_edit::Positions;
 use crate::tui::theme::C_ACCENT;
 
-use super::content::{
-    NODE_HEIGHT, NodeStatus, RunPhase, StageNodeContent, WorkerCounts, edge_style, node_width,
-    palette,
-};
+use super::content::{NodeStatus, RunPhase, StageNodeContent, WorkerCounts, edge_style, palette};
 use super::layout::{self, Direction, GraphLayout};
 use super::model::{EdgeClass, StageEdge, StageGraph};
+use super::snake::{LayoutMode, handles_snake, metrics, route_snake, snake_per_row};
 
 /// What a run has done to one stage, for the overlay.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -42,6 +40,11 @@ pub(crate) struct StageLive {
     pub(crate) visits: usize,
     /// When it was last entered, `HH:MM:SS`.
     pub(crate) last_seen: Option<String>,
+    /// Iterations taken in this stage. On the blueprint that is only known
+    /// for the stage the run is in, and comes through
+    /// [`LiveOverlay::iteration`] instead; on a run's path every box is one
+    /// visit, so each carries its own count.
+    pub(crate) iterations: Option<usize>,
 }
 
 /// Everything the canvas needs to paint a run onto the blueprint, rebuilt
@@ -126,6 +129,7 @@ pub(crate) struct FlowView {
     /// (rataflow treats the press as the start of a pan, and a pan must keep
     /// the selection, so the click is told apart here.)
     pane_press: Option<(u16, u16)>,
+    mode: LayoutMode,
     direction: Direction,
     /// Until the user turns the graph by hand, the first draw picks the
     /// direction that fits.
@@ -154,11 +158,6 @@ pub(crate) struct FlowView {
     max_stem: f64,
 }
 
-/// Box size and gaps: `(node_w, node_h, gap_x, gap_y)`.
-fn metrics(longest_id: usize) -> (f64, f64, f64, f64) {
-    (node_width(longest_id), NODE_HEIGHT, 8.0, 1.0)
-}
-
 /// Put saved positions on the boxes, and any box without one to the right
 /// of the rightmost saved box (the way The Lair appends a new stage), so an
 /// arrangement survives a stage being added.
@@ -169,8 +168,19 @@ fn apply_positions(
     node_h: f64,
     gap_x: f64,
     gap_y: f64,
+    snake: bool,
 ) {
     if positions.is_empty() {
+        return;
+    }
+    // On a snake the boxes that were not moved by hand keep the cell the
+    // layout gave them; only the moved ones are restored. Appending would
+    // put every new visit off to the right of the arrangement instead of on
+    // the next cell of the path.
+    if snake {
+        for (id, (x, y)) in positions {
+            flow.set_node_position(id, (*x, *y));
+        }
         return;
     }
     let mut right = f64::MIN;
@@ -299,6 +309,14 @@ fn handles(direction: Direction, edit: bool) -> Vec<Handle> {
     ]
 }
 
+/// Place `graph`'s boxes the way `mode` asks for.
+fn relayout(graph: &StageGraph, mode: LayoutMode) -> GraphLayout {
+    match mode {
+        LayoutMode::Layered => layout::layout(graph),
+        LayoutMode::Snake { per_row } => layout::snake(graph, per_row),
+    }
+}
+
 /// The canvas for `graph` laid out in `direction`: the nodes, the edges
 /// remembered for live restyling, and the longest lane a visible edge needs.
 fn build(
@@ -315,7 +333,8 @@ fn build(
         .map(|n| n.id.trim_start_matches("ext:").chars().count())
         .max()
         .unwrap_or(0);
-    let (node_w, node_h, gap_x, gap_y) = metrics(longest);
+    let snake = layout.wrap.is_some();
+    let (node_w, node_h, gap_x, gap_y) = metrics(longest, snake);
 
     let nodes: Vec<Node<StageNodeContent>> = graph
         .nodes
@@ -327,7 +346,11 @@ fn build(
                 (node_w, node_h),
                 StageNodeContent::from_node(n),
             )
-            .with_handles(handles(direction, edit))
+            .with_handles(if snake {
+                handles_snake()
+            } else {
+                handles(direction, edit)
+            })
             // An external blueprint is drawn, not edited: nothing connects to
             // it and it cannot be moved.
             .with_connectable(edit && n.kind != super::model::NodeKind::ExternalBlueprint)
@@ -346,7 +369,10 @@ fn build(
         .map(|(i, e)| {
             let from_layer = layout.layer_of(&e.from).unwrap_or(0);
             let to_layer = layout.layer_of(&e.to).unwrap_or(0);
-            let (src, tgt, loops_back, stem) = route(direction, e.class, from_layer, to_layer);
+            let (src, tgt, loops_back, stem) = match (layout.cell(&e.from), layout.cell(&e.to)) {
+                (Some(from), Some(to)) => route_snake(from, to),
+                _ => route(direction, e.class, from_layer, to_layer),
+            };
             if e.class != EdgeClass::Escape {
                 max_stem = max_stem.max(stem);
             }
@@ -389,7 +415,7 @@ fn build(
         .with_deselect_on_pane_click(false)
         .with_locked(locked);
     flow.set_node_positions(layout.positions(direction, node_w, node_h, gap_x, gap_y));
-    apply_positions(&mut flow, positions, node_w, node_h, gap_x, gap_y);
+    apply_positions(&mut flow, positions, node_w, node_h, gap_x, gap_y, snake);
     if edit {
         // A path that exists is not drawn twice, whichever handles a drag
         // would route it through; and a box cannot be wired to itself on
@@ -414,22 +440,42 @@ impl FlowView {
     /// explorer is unlocked, so boxes can be dragged into a better
     /// arrangement and clicked to select.
     pub(crate) fn new(graph: Arc<StageGraph>, locked: bool) -> Self {
-        Self::build_view(graph, locked, false, Positions::new())
+        Self::build_view(graph, locked, false, Positions::new(), LayoutMode::Layered)
+    }
+
+    /// Build the canvas for a run's path (see [`super::path`]): a chain
+    /// snaked `per_row` boxes to a row. Unlocked, so the boxes can be dragged
+    /// into a better arrangement and clicked to select, and never an editor -
+    /// what happened is not editable.
+    pub(crate) fn new_path(graph: Arc<StageGraph>, per_row: usize) -> Self {
+        Self::build_view(
+            graph,
+            false,
+            false,
+            Positions::new(),
+            LayoutMode::Snake { per_row },
+        )
     }
 
     /// Build the canvas as an editor: handles show and connect, boxes drag,
     /// every edge is drawn, and `positions` (from an earlier session) place
     /// the boxes.
     pub(crate) fn new_editor(graph: Arc<StageGraph>, positions: Positions) -> Self {
-        let mut view = Self::build_view(graph, false, true, positions);
+        let mut view = Self::build_view(graph, false, true, positions, LayoutMode::Layered);
         view.show_all = true;
         view.show_escape = true;
         view.sync_visibility();
         view
     }
 
-    fn build_view(graph: Arc<StageGraph>, locked: bool, edit: bool, positions: Positions) -> Self {
-        let layout = layout::layout(&graph);
+    fn build_view(
+        graph: Arc<StageGraph>,
+        locked: bool,
+        edit: bool,
+        positions: Positions,
+        mode: LayoutMode,
+    ) -> Self {
+        let layout = relayout(&graph, mode);
         let (flow, edges, max_stem) = build(
             &graph,
             &layout,
@@ -448,6 +494,7 @@ impl FlowView {
             positions,
             events: Vec::new(),
             pane_press: None,
+            mode,
             direction: Direction::LeftToRight,
             auto_direction: true,
             show_escape: false,
@@ -473,12 +520,42 @@ impl FlowView {
         self.rebuild(self.direction.rotated());
     }
 
+    /// Throw away every box the user dragged and lay the graph out again.
+    ///
+    /// A snake has no other way round to be turned, so `r` re-snakes it
+    /// instead - the Lair's "Re-snake" button by another name.
+    pub(crate) fn reset_layout(&mut self) {
+        self.positions.clear();
+        self.rebuild(self.direction);
+    }
+
+    /// Snake the same path `per_row` boxes to a row. A no-op when it already
+    /// is, so it is safe to call every draw.
+    fn resnake(&mut self, per_row: usize) {
+        if self.mode == (LayoutMode::Snake { per_row }) {
+            return;
+        }
+        self.mode = LayoutMode::Snake { per_row };
+        self.layout = relayout(&self.graph, self.mode);
+        self.rebuild(self.direction);
+    }
+
+    /// Draw a longer path on the same canvas, keeping the boxes the user
+    /// moved by hand where they left them (the Lair merges its own dragged
+    /// nodes over a fresh snake the same way). Everything else takes its new
+    /// cell, so a run that has just reached another stage grows by one box
+    /// rather than rearranging itself.
+    pub(crate) fn replace_path(&mut self, graph: Arc<StageGraph>) {
+        let positions = self.positions.clone();
+        self.replace_graph(graph, positions);
+    }
+
     /// Draw a different graph on the same canvas (the editor after an edit):
     /// selection by id, viewport, direction and toggles carry over;
     /// `positions` place the boxes.
     pub(crate) fn replace_graph(&mut self, graph: Arc<StageGraph>, positions: Positions) {
         self.graph = graph;
-        self.layout = layout::layout(&self.graph);
+        self.layout = relayout(&self.graph, self.mode);
         self.positions = positions;
         let area = self.last_area;
         self.rebuild(self.direction);
@@ -574,6 +651,16 @@ impl FlowView {
         }
     }
 
+    /// The longest node id on the canvas, which is what a box is sized for.
+    fn longest_id(&self) -> usize {
+        self.graph
+            .nodes
+            .iter()
+            .map(|n| n.id.trim_start_matches("ext:").chars().count())
+            .max()
+            .unwrap_or(0)
+    }
+
     /// The longest edge lane, in rows above or below the nodes.
     pub(crate) fn max_stem(&self) -> f64 {
         self.max_stem
@@ -601,6 +688,14 @@ impl FlowView {
     }
 
     /// Switch between the whole graph and the run's path and options.
+    /// Show the whole graph, or only what the run touched. The explorer
+    /// opens on the whole one: it is the map, and the band beside it is
+    /// already the path.
+    pub(crate) fn set_show_all(&mut self, show_all: bool) {
+        self.show_all = show_all;
+        self.sync_visibility();
+    }
+
     pub(crate) fn toggle_all(&mut self) {
         self.show_all = !self.show_all;
         self.sync_visibility();
@@ -681,20 +776,20 @@ impl FlowView {
         // Inside the block's border, less a cell of margin each side.
         let (inner_w, inner_h) = (f64::from(area.width) - 4.0, f64::from(area.height) - 4.0);
         let fits = |(w, h): (f64, f64)| w <= inner_w && h <= inner_h;
+        let longest = self.longest_id();
         let extent = |dir: Direction| {
-            let longest = self
-                .graph
-                .nodes
-                .iter()
-                .map(|n| n.id.trim_start_matches("ext:").chars().count())
-                .max()
-                .unwrap_or(0);
-            let (node_w, node_h, gap_x, gap_y) = metrics(longest);
+            let (node_w, node_h, gap_x, gap_y) = metrics(longest, self.mode != LayoutMode::Layered);
             self.layout.extent(dir, node_w, node_h, gap_x, gap_y)
         };
-        let other = self.direction.rotated();
-        if self.auto_direction && !fits(extent(self.direction)) && fits(extent(other)) {
-            self.rebuild(other);
+        // A path has no other way round to be turned; what it does with a
+        // wider or narrower canvas is fit more or fewer boxes to a row.
+        if self.mode == LayoutMode::Layered {
+            let other = self.direction.rotated();
+            if self.auto_direction && !fits(extent(self.direction)) && fits(extent(other)) {
+                self.rebuild(other);
+            }
+        } else {
+            self.resnake(snake_per_row(longest, area.width));
         }
         if fits(self.world_extent()) {
             self.fit();
@@ -744,7 +839,10 @@ impl FlowView {
             KeyCode::Char('-') => self.flow.zoom_out(),
             KeyCode::Char('0') => self.flow.reset_zoom(),
             KeyCode::Char('f') => self.fit(),
-            KeyCode::Char('r') => self.rotate(),
+            KeyCode::Char('r') => match self.mode {
+                LayoutMode::Layered => self.rotate(),
+                LayoutMode::Snake { .. } => self.reset_layout(),
+            },
             KeyCode::Char('e') => self.toggle_escape(),
             KeyCode::Char('t') => self.toggle_all(),
             _ => return false,
@@ -776,6 +874,18 @@ impl FlowView {
         }
         let response = self.flow.handle_mouse_event(event);
         if !self.edit {
+            // A path is rebuilt every time the run reaches a new stage, so a
+            // box the user dragged somewhere better has to be remembered or
+            // the next visit would snap it back. Kept in memory only: a
+            // visit is not a stage, and there is nothing to save it against.
+            if matches!(self.mode, LayoutMode::Snake { .. })
+                && response
+                    .events()
+                    .iter()
+                    .any(|ev| matches!(ev, rataflow::FlowEvent::NodeDragEnded { .. }))
+            {
+                self.positions = self.positions();
+            }
             return true;
         }
         let at = (event.column, event.row);
@@ -843,7 +953,7 @@ impl FlowView {
                     run: live.run.unwrap_or(RunPhase::Active),
                     times: visits.max(1),
                 };
-                content.iteration = Some(live.iteration);
+                content.iteration = record.and_then(|r| r.iterations).or(Some(live.iteration));
                 if content.kind_label == "fan-out" {
                     content.workers = live.workers;
                 }
@@ -854,6 +964,7 @@ impl FlowView {
                     times: visits.max(1),
                     errored: r.errored,
                 };
+                content.iteration = r.iterations;
             }
         }
 
@@ -1068,6 +1179,41 @@ mode = "output"
         FlowView::new(graph(), false)
     }
 
+    /// A run's path of `n` visits, as the band builds one.
+    fn path_view(n: usize, per_row: usize) -> FlowView {
+        let visits: Vec<super::super::path::Visit> = (0..n)
+            .map(|i| super::super::path::Visit {
+                stage: format!("s{i}"),
+                at: None,
+                iterations: 0,
+            })
+            .collect();
+        FlowView::new_path(
+            Arc::new(super::super::path::run_path(None, &visits)),
+            per_row,
+        )
+    }
+
+    #[test]
+    fn a_path_snakes_and_re_wraps_to_the_canvas_it_gets() {
+        let mut v = path_view(8, 4);
+        // A 140-cell canvas fits four 28-cell boxes and their gaps to a row.
+        draw(&mut v, 140, 40);
+        let row_of = |v: &FlowView, id: &str| v.node_rect(id).expect("drawn").1;
+        assert_eq!(row_of(&v, "s0"), row_of(&v, "s3"), "one row of four");
+        assert!(row_of(&v, "s4") > row_of(&v, "s3"), "and then the next");
+        // Boxes are never shrunk, so a narrow canvas fits fewer to a row and
+        // the path is snaked again rather than zoomed out.
+        draw(&mut v, 80, 40);
+        assert_eq!(v.zoom(), 1.0);
+        assert!(row_of(&v, "s2") > row_of(&v, "s1"), "wrapped sooner");
+        // Turning a path has no meaning, so `r` puts it back instead.
+        let before = v.positions();
+        v.handle_key(KeyCode::Char('r'));
+        assert_eq!(v.direction(), Direction::LeftToRight);
+        assert_eq!(v.positions(), before);
+    }
+
     fn draw(view: &mut FlowView, w: u16, h: u16) -> (Terminal<TestBackend>, String) {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
@@ -1186,6 +1332,7 @@ mode = "output"
                     errored: false,
                     visits: 1,
                     last_seen: Some("10:00:00".into()),
+                    iterations: None,
                 },
                 StageLive {
                     name: "implement".into(),
@@ -1193,6 +1340,7 @@ mode = "output"
                     errored: true,
                     visits: 2,
                     last_seen: None,
+                    iterations: None,
                 },
                 StageLive {
                     name: "review".into(),
@@ -1200,6 +1348,7 @@ mode = "output"
                     errored: false,
                     visits: 0,
                     last_seen: None,
+                    iterations: None,
                 },
                 StageLive {
                     name: "done".into(),
@@ -1207,6 +1356,7 @@ mode = "output"
                     errored: false,
                     visits: 0,
                     last_seen: None,
+                    iterations: None,
                 },
             ],
             workers: Some(WorkerCounts {

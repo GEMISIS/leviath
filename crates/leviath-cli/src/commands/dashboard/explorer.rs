@@ -41,7 +41,16 @@ impl Dashboard {
                 // back as it was: viewport, dragged boxes, direction, toggles.
                 let view = match self.explorer_cache.take() {
                     Some((cached_run, view)) if cached_run == run_id => view,
-                    _ => FlowView::new(graph, false),
+                    _ => {
+                        // The explorer is the map: the whole blueprint, with
+                        // the run lit on it. The band beside it is already
+                        // the path, so opening this on the path too would
+                        // show the same picture twice. A canvas the user has
+                        // been in before comes back as they left it.
+                        let mut view = FlowView::new(graph, false);
+                        view.set_show_all(true);
+                        view
+                    }
                 };
                 self.stage_explorer = Some(ExplorerState::new(run_id, view));
             }
@@ -70,7 +79,7 @@ impl Dashboard {
             explorer.view.tick(elapsed);
         }
         if let Some(band) = self.detail_band.as_mut() {
-            band.view.tick(elapsed);
+            band.view_mut().tick(elapsed);
         }
         if let Some(Ok(view)) = self.new_run_preview.as_mut().map(|p| p.view.as_mut()) {
             view.tick(elapsed);
@@ -193,6 +202,10 @@ impl Dashboard {
                     errored: record.is_some_and(|r| r.status == StageRunStatus::Error),
                     visits: visit_count(visits, &name),
                     last_seen: last_visit(visits, &name).map(|v| clock(v.entered_at)),
+                    // One box per stage here, so a revisited stage has no
+                    // single iteration count; the current one's comes
+                    // through `LiveOverlay::iteration`.
+                    iterations: None,
                     name,
                 }
             })
@@ -203,6 +216,22 @@ impl Dashboard {
             .collect();
         let last_transition = taken.last().cloned();
 
+        LiveOverlay {
+            current: (!agent.stage.is_empty()).then(|| agent.stage.clone()),
+            run: Some(run_phase(&agent.status)),
+            iteration: agent.iteration,
+            stages,
+            workers: self.worker_counts_for(agent),
+            taken,
+            last_transition,
+            tick: self.tick_count,
+        }
+    }
+
+    /// How the children a fan-out stage spawned are getting on, for the box
+    /// of whichever stage the run is in. `None` when the run has no children
+    /// at all, which is every run that has not fanned out.
+    pub(super) fn worker_counts_for(&self, agent: &DashboardAgent) -> Option<WorkerCounts> {
         let mut workers = WorkerCounts::default();
         let mut has_workers = false;
         for child in self
@@ -221,17 +250,7 @@ impl Dashboard {
                 _ => workers.running += 1,
             }
         }
-
-        LiveOverlay {
-            current: (!agent.stage.is_empty()).then(|| agent.stage.clone()),
-            run: Some(run_phase(&agent.status)),
-            iteration: agent.iteration,
-            stages,
-            workers: has_workers.then_some(workers),
-            taken,
-            last_transition,
-            tick: self.tick_count,
-        }
+        has_workers.then_some(workers)
     }
 
     /// Give a graph canvas first refusal on a mouse event. Returns whether the
@@ -299,7 +318,7 @@ impl Dashboard {
                 .as_mut()
                 .filter(|e| e.tab == ExplorerTab::Graph)
                 .map(|e| &mut e.view),
-            PaneId::DetailBand => self.detail_band.as_mut().map(|b| &mut b.view),
+            PaneId::DetailBand => self.detail_band.as_mut().map(|b| b.view_mut()),
             PaneId::NewRunPreview => {
                 let open = self.new_run_screen;
                 self.new_run_preview
@@ -537,6 +556,13 @@ condition = "llm_choice"
             dash.stage_explorer.as_ref().unwrap().view.selection(),
             Selection::Node("plan".into())
         );
+        // The explorer is the map: it opens on the whole blueprint, and `t`
+        // filters it down to the path the run took. (The band beside it is
+        // already the path, so opening on that would say the same thing
+        // twice.)
+        assert!(dash.stage_explorer.as_ref().unwrap().view.show_all());
+        dash.handle_key(key(KeyCode::Char('t')));
+        assert!(!dash.stage_explorer.as_ref().unwrap().view.show_all());
         dash.handle_key(key(KeyCode::Char('t')));
         assert!(dash.stage_explorer.as_ref().unwrap().view.show_all());
         dash.handle_key(key(KeyCode::Char('e')));

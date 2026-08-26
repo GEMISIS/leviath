@@ -538,6 +538,11 @@ impl Dashboard {
             KeyCode::Char('g') => {
                 self.open_stage_explorer();
             }
+            // The band's two pictures: the run's path, or the whole
+            // blueprint. (`r` is resume in this view, so re-snaking the path
+            // takes the shifted one.)
+            KeyCode::Char('t') if self.band_shown() => self.toggle_band_mode(),
+            KeyCode::Char('R') if self.band_shown() => self.reset_band_layout(),
             // Home/End are the documented jumps; b/e stay as the historical
             // aliases. (`detail_scroll` counts up from the bottom, so "top of
             // the document" is the maximum offset.)

@@ -42,6 +42,10 @@ pub(crate) struct GraphLayout {
     pub(crate) nodes: Vec<NodeSlot>,
     /// Highest layer index in `nodes`.
     pub(crate) max_layer: usize,
+    /// Set by [`snake`]: how many nodes a row holds before the path wraps.
+    /// With it, `layer` is the node's place in the sequence rather than a
+    /// column, and the whole layout is read as a wrapped grid instead.
+    pub(crate) wrap: Option<usize>,
 }
 
 impl GraphLayout {
@@ -53,6 +57,14 @@ impl GraphLayout {
     /// The layer `name` sits in.
     pub(crate) fn layer_of(&self, name: &str) -> Option<usize> {
         self.slot_of(name).map(|n| n.layer)
+    }
+
+    /// Which row and column `name` sits on, for a snaking layout. `None`
+    /// for a layered one, where a node has a layer and a slot instead.
+    pub(crate) fn cell(&self, name: &str) -> Option<(usize, usize)> {
+        let per_row = self.wrap?;
+        let slot = self.slot_of(name)?;
+        Some(snake_cell(slot.layer, per_row))
     }
 
     /// Node names on `layer`, ordered by slot.
@@ -74,6 +86,25 @@ impl GraphLayout {
         gap_x: f64,
         gap_y: f64,
     ) -> Vec<(String, (f64, f64))> {
+        // A snake is a wrapped grid, not a stack of layers: the sequence
+        // index gives the cell directly, and short rows are NOT centred the
+        // way short layers are. Centring is what makes a diamond read as a
+        // diamond, but here it would shift the last row off the column its
+        // first node has to share with the row above, and that shared column
+        // is the whole point of snaking.
+        if let Some(per_row) = self.wrap {
+            return self
+                .nodes
+                .iter()
+                .map(|node| {
+                    let (row, col) = snake_cell(node.layer, per_row);
+                    (
+                        node.name.clone(),
+                        (col as f64 * (node_w + gap_x), row as f64 * (node_h + gap_y)),
+                    )
+                })
+                .collect();
+        }
         let widest = (0..=self.max_layer)
             .map(|l| self.layer_nodes(l).len())
             .fold(0, usize::max);
@@ -220,7 +251,53 @@ pub(crate) fn layout(graph: &StageGraph) -> GraphLayout {
         })
         .collect();
 
-    GraphLayout { nodes, max_layer }
+    GraphLayout {
+        nodes,
+        max_layer,
+        wrap: None,
+    }
+}
+
+/// Lay `graph`'s nodes out as a snaking path: `per_row` of them left to
+/// right, then the next `per_row` right to left on the row below, and so on.
+///
+/// Nodes are taken in graph order, which for a run's path is the order the
+/// run walked it. The row direction alternates so the last node of a row ends
+/// up directly above the first node of the next one: the hand-off between
+/// rows is then a short vertical hop rather than a full-width jump back
+/// across the canvas, which is what keeps a path readable while it is still
+/// being drawn. (The Lair's run view snakes for the same reason.)
+///
+/// Edges are not consulted at all: the path is a chain, and its shape is its
+/// order.
+pub(crate) fn snake(graph: &StageGraph, per_row: usize) -> GraphLayout {
+    let per_row = per_row.max(1);
+    let nodes: Vec<NodeSlot> = graph
+        .ids()
+        .enumerate()
+        .map(|(index, name)| NodeSlot {
+            name: name.to_string(),
+            layer: index,
+            slot: 0,
+        })
+        .collect();
+    GraphLayout {
+        max_layer: nodes.len().saturating_sub(1),
+        nodes,
+        wrap: Some(per_row),
+    }
+}
+
+/// Which row and column a sequence index lands on for a snake `per_row` wide.
+fn snake_cell(index: usize, per_row: usize) -> (usize, usize) {
+    let row = index / per_row;
+    let in_row = index % per_row;
+    let col = if row.is_multiple_of(2) {
+        in_row
+    } else {
+        per_row - 1 - in_row
+    };
+    (row, col)
 }
 
 #[cfg(test)]
@@ -270,6 +347,77 @@ mod tests {
     }
 
     const P: EdgeClass = EdgeClass::Primary;
+
+    /// A chain of `n` nodes, the shape a run's path always has.
+    fn chain(n: usize) -> StageGraph {
+        let names: Vec<String> = (0..n).map(|i| format!("s{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let edges: Vec<(&str, &str, EdgeClass, bool)> = refs
+            .windows(2)
+            .map(|pair| (pair[0], pair[1], P, false))
+            .collect();
+        graph("s0", &refs, &edges)
+    }
+
+    #[test]
+    fn a_snake_wraps_every_per_row_and_turns_round() {
+        let l = snake(&chain(10), 4);
+        assert_eq!(l.max_layer, 9);
+        assert_eq!(l.wrap, Some(4));
+        // Sequence index, not a column: every node is its own "layer".
+        assert_eq!(l.layer_of("s7"), Some(7));
+        // Row 0 runs left to right, row 1 right to left, row 2 left again.
+        assert_eq!(l.cell("s0"), Some((0, 0)));
+        assert_eq!(l.cell("s3"), Some((0, 3)));
+        assert_eq!(l.cell("s4"), Some((1, 3)));
+        assert_eq!(l.cell("s7"), Some((1, 0)));
+        assert_eq!(l.cell("s8"), Some((2, 0)));
+        assert_eq!(l.cell("s9"), Some((2, 1)));
+        assert_eq!(l.cell("nope"), None);
+        // A layered layout has no cells to give.
+        assert_eq!(layout(&chain(3)).cell("s0"), None);
+    }
+
+    #[test]
+    fn the_last_box_of_a_row_sits_directly_above_the_first_of_the_next() {
+        // The whole point of snaking: the hand-off between rows is a short
+        // vertical hop, not a jump back across the canvas.
+        let pos = snake(&chain(10), 4).positions(Direction::LeftToRight, 10.0, 3.0, 4.0, 1.0);
+        let at = |n: &str| pos.iter().find(|(id, _)| id == n).unwrap().1;
+        assert_eq!(at("s4").0, at("s3").0, "same column across the row change");
+        assert!(at("s4").1 > at("s3").1, "and one row down");
+        assert!(at("s5").0 < at("s4").0, "row 1 runs the other way");
+        assert_eq!(at("s8").0, at("s7").0);
+        assert!(at("s9").0 > at("s8").0, "row 2 runs left to right again");
+        // Columns step by the box plus its gap, rows by the box plus theirs;
+        // a short last row is NOT centred, or it would lose the shared
+        // column above.
+        assert_eq!(at("s0"), (0.0, 0.0));
+        assert_eq!(at("s1"), (14.0, 0.0));
+        assert_eq!(at("s4"), (42.0, 4.0));
+        assert_eq!(at("s8"), (0.0, 8.0));
+        assert_eq!(
+            snake(&chain(10), 4).extent(Direction::LeftToRight, 10.0, 3.0, 4.0, 1.0),
+            (52.0, 11.0)
+        );
+    }
+
+    #[test]
+    fn a_snake_one_wide_is_a_column_and_an_empty_one_lays_out_nothing() {
+        // `per_row` is clamped up: a zero would divide by it.
+        let l = snake(&chain(3), 0);
+        assert_eq!(l.wrap, Some(1));
+        assert_eq!(l.cell("s0"), Some((0, 0)));
+        assert_eq!(l.cell("s1"), Some((1, 0)));
+        assert_eq!(l.cell("s2"), Some((2, 0)));
+        let empty = snake(&graph("a", &[], &[]), 4);
+        assert_eq!(empty.max_layer, 0);
+        assert!(
+            empty
+                .positions(Direction::LeftToRight, 1.0, 1.0, 1.0, 1.0)
+                .is_empty()
+        );
+    }
 
     #[test]
     fn a_linear_chain_gets_one_node_per_layer() {

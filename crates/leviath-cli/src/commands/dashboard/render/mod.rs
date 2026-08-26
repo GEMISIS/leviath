@@ -175,7 +175,11 @@ impl Dashboard {
         let info_h: u16 = 4; // task + workdir/stats strip (2 content + 2 border lines)
         // The stage row: the graph band on a tall terminal, the three-row
         // strip otherwise (the band would cost every other pane its rows).
-        let tabs_h: u16 = Self::stage_row_height(area.height, &agent);
+        // The band's height follows the run's path, so the archive has to be
+        // read before the rows are handed out - otherwise a run whose path
+        // has already wrapped opens short and jumps a frame later.
+        self.ensure_history(&agent.id);
+        let tabs_h: u16 = self.stage_row_height(area, &agent);
         let context_h: u16 = if agent.context_snapshot.is_some() || !agent.stages.is_empty() {
             5
         } else {
