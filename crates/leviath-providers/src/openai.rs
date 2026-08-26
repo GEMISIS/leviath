@@ -408,7 +408,7 @@ impl Provider for OpenAIProvider {
             .header("Authorization", format!("Bearer {}", self.api_key))
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| ProviderError::transport("listing models", &e))?;
 
         let status = response.status();
         if !status.is_success() {

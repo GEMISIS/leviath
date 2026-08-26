@@ -191,6 +191,31 @@ pub fn runtime_error(msg: impl Into<String>) -> Box<EvalAltResult> {
 /// surface as `ErrorRuntime` carrying a map; a bare `throw "text"` surfaces as a
 /// string. `kind` (when present) wins; otherwise `transient` selects
 /// `RequestFailed` vs `Other`.
+/// A [`FailureKind`] by the label a script writes.
+///
+/// Matched against the labels the built-in providers use, so a script and a
+/// native provider describing the same failure describe it the same way. An
+/// unknown name is ignored rather than rejected: a script written against a
+/// later build must not fail on this build because it named a kind that does
+/// not exist here yet.
+fn named_failure_kind(name: &str) -> Option<crate::provider::FailureKind> {
+    use crate::provider::FailureKind;
+    [
+        FailureKind::DnsFailure,
+        FailureKind::ConnectionRefused,
+        FailureKind::TlsFailure,
+        FailureKind::Timeout,
+        FailureKind::ConnectionDropped,
+        FailureKind::Transport,
+        FailureKind::BadRequest,
+        FailureKind::NotFound,
+        FailureKind::ServerError,
+        FailureKind::MalformedResponse,
+    ]
+    .into_iter()
+    .find(|k| k.label() == name)
+}
+
 pub fn map_rhai_err(err: Box<EvalAltResult>) -> ProviderError {
     if let EvalAltResult::ErrorRuntime(val, _) = &*err {
         if let Some(map) = val.clone().try_cast::<Map>() {
@@ -201,6 +226,22 @@ pub fn map_rhai_err(err: Box<EvalAltResult>) -> ProviderError {
             };
             let kind = get_str("kind");
             let message = get_str("message").unwrap_or_else(|| "provider script error".to_string());
+            // A script may say what actually went wrong, which is the half the
+            // caller cannot work out for itself: `kind` says how to *treat* the
+            // failure - retry, fail over, give up - while `failure_kind` says
+            // what it *was*. A script talking to its own endpoint knows the
+            // difference between a refused connection and a rejected key, and
+            // without this it could only fold both into "transport" or "api".
+            //
+            // Prefixed onto the message rather than held beside it, the same way
+            // a built-in provider carries it, so both arrive at the log and the
+            // API through one channel.
+            let message = match get_str("failure_kind").and_then(|name| named_failure_kind(&name)) {
+                Some(kind) if !message.starts_with('[') => {
+                    format!("[{}] {message} - {}", kind.label(), kind.remedy())
+                }
+                _ => message,
+            };
             let transient = map
                 .get("transient")
                 .and_then(|d| d.as_bool().ok())
@@ -263,5 +304,108 @@ mod cost_tests {
     fn a_script_provider_that_says_nothing_leaves_the_call_unpriced() {
         let usage = serde_json::json!({"prompt_tokens": 12, "completion_tokens": 4});
         assert_eq!(parse_usage(Some(&usage)).reported_cost_usd, None);
+    }
+}
+
+#[cfg(test)]
+mod failure_kind_tests {
+    use super::*;
+    use crate::provider::FailureKind;
+
+    fn thrown(map: Map) -> ProviderError {
+        map_rhai_err(Box::new(EvalAltResult::ErrorRuntime(
+            rhai::Dynamic::from_map(map),
+            rhai::Position::NONE,
+        )))
+    }
+
+    /// A script that knows what went wrong can say so, and it arrives the same
+    /// way a built-in provider's does.
+    #[test]
+    fn a_script_can_name_what_actually_went_wrong() {
+        let mut map = Map::new();
+        map.insert("kind".into(), "transport".into());
+        map.insert("failure_kind".into(), "connection-refused".into());
+        map.insert("message".into(), "could not reach my box".into());
+
+        let err = thrown(map);
+        assert_eq!(err.failure_kind(), Some(FailureKind::ConnectionRefused));
+        let text = err.to_string();
+        assert!(text.contains("could not reach my box"), "{text}");
+        assert!(text.contains("check the provider is running"), "{text}");
+    }
+
+    /// `kind` and `failure_kind` answer different questions and both are kept:
+    /// one decides how the runtime treats the failure, the other says what it
+    /// was. A `failure_kind` must not quietly change the first.
+    #[test]
+    fn naming_the_failure_does_not_change_how_it_is_treated() {
+        let mut map = Map::new();
+        map.insert("kind".into(), "api".into());
+        map.insert("failure_kind".into(), "server-error".into());
+        map.insert("message".into(), "HTTP 402 out of credits".into());
+
+        // Still `Unavailable`, because `api` + a 402 in the message is what
+        // decides failover - the label rides along without disturbing it.
+        // Asserted through `unavailable_reason`, which is what actually decides
+        // failover, rather than on the variant's shape: a `matches!` inside an
+        // assertion that always passes leaves its other arm uncovered, and the
+        // reason is the more useful claim anyway.
+        assert_eq!(
+            thrown(map).unavailable_reason(),
+            Some(crate::provider::UnavailableReason::CreditsExhausted),
+            "the label must not disturb how the failure is treated"
+        );
+    }
+
+    /// A script written against a later build must not fail on this one for
+    /// naming a kind this build has never heard of.
+    #[test]
+    fn an_unknown_failure_kind_is_ignored_rather_than_refused() {
+        let mut map = Map::new();
+        map.insert("kind".into(), "transport".into());
+        map.insert("failure_kind".into(), "quantum-decoherence".into());
+        map.insert("message".into(), "something odd".into());
+
+        let err = thrown(map);
+        assert_eq!(err.failure_kind(), None);
+        assert!(err.to_string().contains("something odd"));
+    }
+
+    /// A script that says nothing gets what it always got.
+    #[test]
+    fn a_script_that_names_no_failure_kind_is_unchanged() {
+        let mut map = Map::new();
+        map.insert("kind".into(), "transport".into());
+        map.insert("message".into(), "plain old failure".into());
+
+        let err = thrown(map);
+        assert_eq!(err.failure_kind(), None);
+        assert!(err.to_string().contains("plain old failure"));
+    }
+
+    /// Every label a built-in provider can produce is one a script may name, so
+    /// the two vocabularies cannot drift apart.
+    #[test]
+    fn every_builtin_label_is_nameable_from_a_script() {
+        for kind in [
+            FailureKind::DnsFailure,
+            FailureKind::ConnectionRefused,
+            FailureKind::TlsFailure,
+            FailureKind::Timeout,
+            FailureKind::ConnectionDropped,
+            FailureKind::Transport,
+            FailureKind::BadRequest,
+            FailureKind::NotFound,
+            FailureKind::ServerError,
+            FailureKind::MalformedResponse,
+        ] {
+            let label = kind.label();
+            assert_eq!(
+                named_failure_kind(label),
+                Some(kind),
+                "{label} is not nameable"
+            );
+        }
     }
 }

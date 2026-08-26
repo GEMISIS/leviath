@@ -3,6 +3,7 @@
 // Re-exported so `use crate::provider::*` keeps working: the types moved for
 // structural reasons (the 1200-line rule), not as an interface change.
 pub use crate::capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOverride};
+pub use crate::failure::FailureKind;
 use async_trait::async_trait;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
@@ -121,6 +122,15 @@ impl UnavailableReason {
 /// rather than the first number anywhere in the text: an error body quoting a
 /// token count must not be mistaken for a status.
 fn leading_http_status(message: &str) -> Option<u16> {
+    // A `[kind]` prefix may sit in front of the status now that a failure
+    // carries what it was. Stepping over it keeps a message classifiable
+    // whichever layer labelled it: a prefix that hid the status here would have
+    // silently stopped a 402 from failing over, which is the behaviour the
+    // status extraction exists to drive.
+    let message = match message.strip_prefix('[') {
+        Some(rest) => rest.split_once("] ").map_or(message, |(_, after)| after),
+        None => message,
+    };
     let rest = message.strip_prefix("HTTP ")?;
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
@@ -129,7 +139,8 @@ fn leading_http_status(message: &str) -> Option<u16> {
 /// Errors that can occur during provider operations.
 #[derive(Error, Debug)]
 pub enum ProviderError {
-    /// HTTP request failed
+    /// HTTP request failed. The string carries the kind as a `[label]` prefix
+    /// when the caller knew it - see [`ProviderError::transport`].
     #[error("Request failed: {0}")]
     RequestFailed(String),
 
@@ -1074,7 +1085,18 @@ pub async fn check_http_response(
     }
     if !status.is_success() {
         let error_body = response.text().await.unwrap_or_else(|e| e.to_string());
-        let detail = format!("HTTP {}: {}", status, error_body);
+        // The kind rides in front of the status so it survives every layer that
+        // only passes strings - including a Rhai script, which sees the message
+        // and nothing else. A bare status left "their endpoint is down" and
+        // "your base_url has a typo" reading identically.
+        let kind = FailureKind::from_status(status.as_u16());
+        let detail = format!(
+            "[{}] HTTP {}: {} - {}",
+            kind.label(),
+            status,
+            error_body,
+            kind.remedy()
+        );
         // An out-of-credits or bad-key response is worth telling apart: the
         // runtime fails over on it and counts it against the provider's
         // circuit breaker, where a plain `ApiError` would just kill the run.
@@ -1444,6 +1466,139 @@ mod tests {
     }
 
     // ─── Provider-fatal classification (issue #201) ─────────────────────────
+
+    /// A labelled message still classifies. The `[kind]` prefix goes in front
+    /// of the status, and a prefix that hid it would have silently stopped a 402
+    /// from failing over - which is the behaviour the status extraction exists
+    /// to drive, and the bug the prefix introduced before this.
+    #[test]
+    fn a_labelled_message_still_yields_its_status() {
+        assert_eq!(
+            UnavailableReason::from_message("[server-error] HTTP 402: out of credits"),
+            Some(UnavailableReason::CreditsExhausted)
+        );
+        assert_eq!(
+            UnavailableReason::from_message("HTTP 401: bad key"),
+            Some(UnavailableReason::AuthFailed),
+            "an unlabelled message is unaffected"
+        );
+        assert_eq!(
+            UnavailableReason::from_message("[not-a-kind HTTP 402: unterminated"),
+            None,
+            "an unclosed bracket is not a prefix to step over"
+        );
+    }
+
+    /// Against the real network stack, because this is the whole point: these
+    /// used to arrive as one string and `Display` on a `reqwest::Error` says the
+    /// same sentence for all of them.
+    #[tokio::test]
+    async fn a_hostname_that_does_not_resolve_is_told_from_a_port_that_refuses() {
+        let client = build_http_client(Some(2)).expect("a client builds");
+
+        let dns = client
+            .get("http://no-such-host-anywhere-12345.invalid/v1/models")
+            .send()
+            .await
+            .expect_err("does not resolve");
+        assert_eq!(FailureKind::from_reqwest(&dns), FailureKind::DnsFailure);
+
+        // Port 1 needs privileges to bind, so nothing of ours is listening.
+        let refused = client
+            .get("http://127.0.0.1:1/v1/models")
+            .send()
+            .await
+            .expect_err("refused");
+        assert_eq!(
+            FailureKind::from_reqwest(&refused),
+            FailureKind::ConnectionRefused
+        );
+    }
+
+    /// The statuses that are not already an `UnavailableReason`. 404 has its own
+    /// kind because it reads as "the provider is broken" when it is usually a
+    /// base URL pointing at the wrong path.
+    #[test]
+    fn a_status_is_placed_by_whose_fault_it_is() {
+        assert_eq!(FailureKind::from_status(400), FailureKind::BadRequest);
+        assert_eq!(FailureKind::from_status(404), FailureKind::NotFound);
+        assert_eq!(FailureKind::from_status(500), FailureKind::ServerError);
+        assert_eq!(FailureKind::from_status(503), FailureKind::ServerError);
+        assert_eq!(FailureKind::from_status(418), FailureKind::BadRequest);
+    }
+
+    /// Every kind has a label and a remedy, because both are published: the
+    /// label to logs and the API, the remedy to whoever has to fix it.
+    #[test]
+    fn every_kind_is_labelled_and_has_a_remedy() {
+        for kind in [
+            FailureKind::DnsFailure,
+            FailureKind::ConnectionRefused,
+            FailureKind::TlsFailure,
+            FailureKind::Timeout,
+            FailureKind::ConnectionDropped,
+            FailureKind::Transport,
+            FailureKind::BadRequest,
+            FailureKind::NotFound,
+            FailureKind::ServerError,
+            FailureKind::MalformedResponse,
+        ] {
+            // Read out first: an argument evaluated only on failure is its own
+            // uncovered region on an assertion that has to pass.
+            let label = kind.label();
+            assert!(!label.is_empty());
+            assert!(!kind.remedy().is_empty(), "{label}");
+            assert!(
+                !label.contains(' '),
+                "a label is one token for a metrics attribute: {label}"
+            );
+        }
+    }
+
+    /// The kind survives the round trip through the message, which is the only
+    /// channel that reaches a Rhai script and comes back.
+    #[tokio::test]
+    async fn the_kind_is_readable_back_off_the_error() {
+        let client = build_http_client(Some(2)).expect("a client builds");
+        let e = client
+            .get("http://127.0.0.1:1/v1/models")
+            .send()
+            .await
+            .expect_err("refused");
+
+        let err = ProviderError::transport("sending the request", &e);
+        assert_eq!(err.failure_kind(), Some(FailureKind::ConnectionRefused));
+
+        let text = err.to_string();
+        assert!(text.contains("sending the request"), "{text}");
+        assert!(text.contains("check the provider is running"), "{text}");
+    }
+
+    /// An error carrying no label answers `None` rather than guessing one.
+    #[test]
+    fn an_unlabelled_error_names_no_kind() {
+        assert_eq!(
+            ProviderError::RequestFailed("no label here".to_string()).failure_kind(),
+            None
+        );
+        assert_eq!(
+            ProviderError::ApiError("[not-a-kind] something".to_string()).failure_kind(),
+            None
+        );
+        // A parse failure is a kind without needing a label: the variant is the
+        // statement.
+        assert_eq!(
+            ProviderError::InvalidResponse("bad json".to_string()).failure_kind(),
+            Some(FailureKind::MalformedResponse)
+        );
+        assert_eq!(
+            ProviderError::RateLimitExceeded {
+                retry_after_secs: None
+            }
+            .failure_kind(),
+            None
+        );
+    }
 
     #[test]
     fn classify_maps_the_provider_fatal_statuses() {

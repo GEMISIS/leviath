@@ -240,7 +240,7 @@ impl GeminiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| ProviderError::transport("reaching the provider", &e))?;
         let response = crate::provider::check_http_response(response, None).await?;
         let value: serde_json::Value = crate::provider::decode_json(response).await?;
         value
@@ -432,7 +432,7 @@ impl GeminiProvider {
             .header("x-goog-api-key", &self.api_key)
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| ProviderError::transport("listing models", &e))?;
         let response = crate::provider::check_http_response(response, None).await?;
         let body: serde_json::Value = crate::provider::decode_json(response).await?;
 
@@ -488,7 +488,7 @@ impl GeminiProvider {
             .header("Authorization", format!("Bearer {}", self.api_key))
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| ProviderError::transport("listing models", &e))?;
         let response = crate::provider::check_http_response(response, None).await?;
         let body: serde_json::Value = crate::provider::decode_json(response).await?;
 

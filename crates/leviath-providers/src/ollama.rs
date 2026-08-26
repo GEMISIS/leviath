@@ -320,7 +320,7 @@ impl OllamaProvider {
             .get(format!("{}/api/tags", self.base_url))
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| ProviderError::transport("listing Ollama models", &e))?;
         let tags = crate::provider::check_http_response(tags, None).await?;
         let tags: serde_json::Value = crate::provider::decode_json(tags).await?;
         let mut names: Vec<String> = tags
@@ -411,7 +411,7 @@ impl OllamaProvider {
                 .json(&serde_json::json!({ "model": name }))
                 .send()
                 .await
-                .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+                .map_err(|e| ProviderError::transport("reading an Ollama model", &e))?;
             let show = crate::provider::check_http_response(show, None).await?;
             let show: serde_json::Value = crate::provider::decode_json(show).await?;
             if let Some(window) = effective_window(&show) {
@@ -803,7 +803,7 @@ impl Provider for OllamaProvider {
             .get(format!("{}/api/tags", self.base_url))
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| ProviderError::transport("listing Ollama models", &e))?;
 
         // Shared classification, as above. A bare `RequestFailed` here would
         // read as a retryable network fault; the status is what says whether
