@@ -1491,9 +1491,16 @@ mod tests {
 
     /// Against the real network stack, because this is the whole point: these
     /// used to arrive as one string and `Display` on a `reqwest::Error` says the
-    /// same sentence for all of them.
+    /// same sentence for both of them.
+    ///
+    /// Which kind a dead port produces is the OS's business and not the same
+    /// everywhere - a Windows runner drops the SYN and the request times out
+    /// where a Unix box answers with a refusal - so what is asserted here is the
+    /// part that is true everywhere: the two are told apart, and neither is
+    /// mistaken for the other. Exactly which kind each chain maps to is settled
+    /// by the `connect_failure` tests, which do not go near a socket.
     #[tokio::test]
-    async fn a_hostname_that_does_not_resolve_is_told_from_a_port_that_refuses() {
+    async fn a_name_that_does_not_resolve_is_told_from_a_port_with_nothing_behind_it() {
         let client = build_http_client(Some(2)).expect("a client builds");
 
         let dns = client
@@ -1503,23 +1510,34 @@ mod tests {
             .expect_err("does not resolve");
         assert_eq!(FailureKind::from_reqwest(&dns), FailureKind::DnsFailure);
 
-        // A port nothing is listening on: an ephemeral port is claimed and the
-        // listener dropped, so the OS answers the connection with a refusal.
-        // Port 1 was used here and is not reliable - a Windows runner drops the
-        // SYN rather than refusing it, and the connection times out instead,
-        // which is a different kind and a different remedy.
+        // A port nothing is listening on: an ephemeral one is claimed and the
+        // listener dropped straight away, which is a port no other process holds.
+        // Port 1 was used here, on the reasoning that binding it needs privileges
+        // - true, and not the same thing as nothing being behind it.
         let closed = {
             let claimed = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
             claimed.local_addr().expect("has an address")
         };
-        let refused = client
+        let dead_port = client
             .get(format!("http://{closed}/v1/models"))
             .send()
             .await
-            .expect_err("refused");
-        assert_eq!(
-            FailureKind::from_reqwest(&refused),
-            FailureKind::ConnectionRefused
+            .expect_err("nothing answers");
+        let dead = FailureKind::from_reqwest(&dead_port);
+        assert_ne!(
+            dead,
+            FailureKind::DnsFailure,
+            "a port with nothing behind it is not a name that did not resolve"
+        );
+        // Membership rather than `matches!`, and the message read out first: an
+        // arm no platform takes and an argument only a failure evaluates are
+        // both uncovered regions on an assertion that has to pass.
+        let seen = format!("{dead:?}");
+        let plausible = [FailureKind::ConnectionRefused, FailureKind::Timeout].contains(&dead);
+        assert!(
+            plausible,
+            "a dead port is refused where the OS refuses and timed out where it \
+             drops the SYN, and nothing else: {seen}"
         );
     }
 
@@ -1565,30 +1583,33 @@ mod tests {
 
     /// The kind survives the round trip through the message, which is the only
     /// channel that reaches a Rhai script and comes back.
+    ///
+    /// Driven by a server that accepts and never answers, because that is the
+    /// one real failure every platform agrees on: a dead port is refused on some
+    /// and timed out on others, and this test is about the round trip rather
+    /// than about which kind went into it.
     #[tokio::test]
     async fn the_kind_is_readable_back_off_the_error() {
-        let client = build_http_client(Some(2)).expect("a client builds");
-        // A port nothing is listening on: an ephemeral port is claimed and the
-        // listener dropped, so the OS answers the connection with a refusal.
-        // Port 1 was used here and is not reliable - a Windows runner drops the
-        // SYN rather than refusing it, and the connection times out instead,
-        // which is a different kind and a different remedy.
-        let closed = {
-            let claimed = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
-            claimed.local_addr().expect("has an address")
-        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+        let addr = listener.local_addr().expect("has an address");
+        std::thread::spawn(move || {
+            let _held = listener.accept();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+
+        let client = build_http_client(Some(1)).expect("a client builds");
         let e = client
-            .get(format!("http://{closed}/v1/models"))
+            .get(format!("http://{addr}/v1/models"))
             .send()
             .await
-            .expect_err("refused");
+            .expect_err("never answers");
 
         let err = ProviderError::transport("sending the request", &e);
-        assert_eq!(err.failure_kind(), Some(FailureKind::ConnectionRefused));
+        assert_eq!(err.failure_kind(), Some(FailureKind::Timeout));
 
         let text = err.to_string();
         assert!(text.contains("sending the request"), "{text}");
-        assert!(text.contains("check the provider is running"), "{text}");
+        assert!(text.contains("reachable but slow or wedged"), "{text}");
     }
 
     /// An error carrying no label answers `None` rather than guessing one.
