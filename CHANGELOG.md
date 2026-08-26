@@ -13,6 +13,18 @@ same list.
 
 ## Unreleased
 
+- Fixed: `lev update` removes the `serves = []` that older builds wrote into
+  every `[model_providers.*]` block. The line never meant anything - `serves` is
+  the fallback list a script provider with no `list_models` uses, and an empty
+  one is the same as no entry - but it reads as a declaration that the provider
+  serves nothing, which is exactly what a provider whose `list_models` was never
+  asked looks like from outside. So it took the blame for a routing failure it
+  had no part in.
+- Changed: `serves` distinguishes "not mentioned" from "mentioned as empty".
+  They were one empty `Vec`, which is what made the stale line unremovable: a
+  save-back writes whatever the field holds, and an empty `Vec` writes as
+  `serves = []` however it got there.
+
 - Added: providers are asked to get a run's models ready before it starts, through
   a new `Provider::warm_models` that defaults to doing nothing. Ollama implements
   it, because it is the one provider where "ready" is a state the machine has to

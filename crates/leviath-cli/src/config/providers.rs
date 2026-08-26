@@ -161,17 +161,21 @@ pub struct ModelProviderConfig {
     /// the provider claims no models and can only be reached by a blueprint
     /// that pins it, which is what made a local model unreachable however the
     /// machine set `default_provider` (issue #598).
-    /// Serialized even when empty, deliberately. Skipping it would tidy the
-    /// `serves = []` a save-back writes into every provider block - but
-    /// `Config::unknown_config_keys` decides whether a key is read by
-    /// round-tripping the file through serde, on the stated invariant that "a
-    /// field they set is a field that serializes". A field that vanishes when
-    /// empty breaks that: `lev doctor` would report a correctly-spelled
-    /// `serves = []` as a key read by nothing. The line is inert, not harmful -
-    /// what made this provider unreachable was priming, fixed separately - so it
-    /// is not worth breaking that invariant to remove.
-    #[serde(default)]
-    pub serves: Vec<String>,
+    /// `None` when the file does not mention it, `Some` when it does - including
+    /// `Some(vec![])` for an explicit `serves = []`.
+    ///
+    /// The two are different states and were conflated as one empty `Vec`, which
+    /// is what made the stale `serves = []` unremovable: a save-back writes
+    /// whatever the field holds, and an empty `Vec` writes as `serves = []`
+    /// however it got there. `None` writes nothing, which is what lets the
+    /// `stale-empty-serves` migration take the line out.
+    ///
+    /// Skipping `None` does not break the invariant `Config::unknown_config_keys`
+    /// rests on - "a field they set is a field that serializes". A field they set
+    /// is `Some`, and `Some` always serializes, `serves = []` included. `None` is
+    /// the field they did *not* set, which was never in the file to be reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serves: Option<Vec<String>>,
 
     /// Any additional keys, forwarded verbatim into the script's `initialize`.
     #[serde(flatten)]
