@@ -13,6 +13,21 @@ same list.
 
 ## Unreleased
 
+- Added: a failed provider call says what actually went wrong. Every transport
+  failure used to arrive as one string, and `Display` on a `reqwest` error says
+  the same sentence whether the hostname did not resolve, the port refused, the
+  certificate was not trusted, or the request timed out - so "could not reach the
+  provider" covered four different problems with four different remedies. The
+  kind is now worked out where the typed error still exists, carried in the
+  message so it survives every layer that only passes strings, and logged as a
+  `failure_kind` field. HTTP statuses are split too: a 404 (usually a `base_url`
+  path or a model that is not there) reads differently from a 400, and both
+  differently from a 5xx.
+- Added: a Rhai provider can supply `failure_kind` alongside `kind` when it
+  throws. `kind` says how the runtime should treat the failure; `failure_kind`
+  says what it was. A name this build does not know is ignored rather than
+  refused, so a script written against a later version still runs.
+
 - Fixed: `lev update` removes the `serves = []` that older builds wrote into
   every `[model_providers.*]` block. The line never meant anything - `serves` is
   the fallback list a script provider with no `list_models` uses, and an empty

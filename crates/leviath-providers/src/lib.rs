@@ -15,6 +15,7 @@ pub mod capabilities;
 pub mod claude_code;
 #[cfg(feature = "debug-http")]
 pub mod debug_http;
+pub mod failure;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
@@ -39,7 +40,7 @@ pub use openai::OpenAIProvider;
 pub use openrouter::OpenRouterProvider;
 pub use pricing::{CostTotals, ModelPricing};
 pub use provider::{
-    ContentBlock, DEFAULT_INFERENCE_TIMEOUT_SECS, FinishReason, InferenceRequest,
+    ContentBlock, DEFAULT_INFERENCE_TIMEOUT_SECS, FailureKind, FinishReason, InferenceRequest,
     InferenceResponse, Message, MessageContent, ModelInfo, Provider, ProviderConfig, ProviderError,
     RateLimitConfig, Result, RetryAdvice, SystemBlock, TokenUsage, Tool, ToolCall,
     UnavailableReason, build_http_client,

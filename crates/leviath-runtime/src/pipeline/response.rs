@@ -255,6 +255,27 @@ pub fn collect_inference(
                 // is not this request's problem: every later request to it
                 // fails the same way. Move the stage to the next candidate and
                 // try again rather than killing the run (issue #201).
+                // Logged before the failover decision, and for every failure
+                // rather than only the ones that fail over. A call that dies
+                // without a fallback is exactly the one somebody has to
+                // diagnose, and it used to leave nothing but the error text -
+                // which for a transport failure is the same sentence whether
+                // the hostname was wrong, the port was closed, or the
+                // certificate had expired.
+                tracing::warn!(
+                    provider = %called_provider,
+                    model = %called_model,
+                    failure_kind = err
+                        .failure_kind()
+                        .map(leviath_providers::FailureKind::label)
+                        .unwrap_or("unclassified"),
+                    unavailable_reason = err
+                        .unavailable_reason()
+                        .map(leviath_providers::UnavailableReason::label)
+                        .unwrap_or("none"),
+                    error = %err,
+                    "provider call failed"
+                );
                 let next = err.unavailable_reason().and_then(|_| {
                     let si = inference.as_deref_mut()?;
                     (!si.fallbacks.is_empty()).then(|| si.fallbacks.remove(0))

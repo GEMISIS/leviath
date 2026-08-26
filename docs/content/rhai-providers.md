@@ -191,6 +191,43 @@ throw #{ message: "429",  kind: "rate_limited" };         // name the class exac
 A `kind` of `rate_limited`, `api`, or `transport` takes precedence over `transient` when you need
 the error classed exactly.
 
+### Saying what actually went wrong
+
+`kind` says how the runtime should *treat* a failure - retry it, fail over, give up. `failure_kind`
+says what it *was*, which is the half nobody downstream can work out for itself:
+
+```rhai
+throw #{
+  kind: "transport",                    // how to treat it
+  failure_kind: "connection-refused",   // what it was
+  message: "nothing listening on :8080",
+};
+```
+
+It reaches the daemon log as a `failure_kind` field, and the run's error text carries the remedy
+for that kind. Without it a script could only fold a refused connection, an expired certificate and
+a request that timed out into one word, which is the state the built-in providers were in.
+
+The names are the ones the built-in providers use, so a script and a native provider describing the
+same failure describe it the same way:
+
+| | |
+|---|---|
+| `dns-failure` | the hostname did not resolve |
+| `connection-refused` | nothing accepted the connection |
+| `tls-failure` | the handshake failed |
+| `timeout` | reachable, but no answer in time |
+| `connection-dropped` | the answer stopped arriving |
+| `transport` | could not be reached, more precisely unknown |
+| `bad-request` | the provider rejected the request itself |
+| `not-found` | 404 - usually a `base_url` path or a model that is not there |
+| `server-error` | 5xx - their end, and may pass on a retry |
+| `malformed-response` | an answer this build could not parse |
+
+A name this build does not know is ignored rather than refused, so a script written against a later
+version still runs here. Omitting `failure_kind` entirely is fine - it is extra detail, not a
+requirement.
+
 ## A complete provider
 
 This is a full OpenAI-compatible provider. Save it as `~/.leviath/providers/groq.rhai`, set

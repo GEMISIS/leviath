@@ -520,7 +520,7 @@ impl AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| ProviderError::transport("sending the request", &e))?;
         let response = crate::provider::check_http_response(response, None).await?;
         let value: serde_json::Value = crate::provider::decode_json(response).await?;
         value
@@ -911,7 +911,7 @@ impl Provider for AnthropicProvider {
             .header("anthropic-version", "2023-06-01")
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| ProviderError::transport("listing models", &e))?;
 
         // Shared classification here too. `is_transient` treats
         // `RequestFailed` as retryable, so classifying by status is what keeps
@@ -922,7 +922,7 @@ impl Provider for AnthropicProvider {
         let body: serde_json::Value = response
             .json()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| ProviderError::transport("reaching the provider", &e))?;
 
         let data = body.get("data").and_then(|d| d.as_array()).ok_or_else(|| {
             ProviderError::RequestFailed("missing 'data' field in /models response".to_string())
