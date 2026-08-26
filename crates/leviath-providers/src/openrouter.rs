@@ -771,6 +771,19 @@ impl Provider for OpenRouterProvider {
         })
     }
 
+    /// The gateway's own listing, once priming has read it.
+    ///
+    /// Only the primed catalogue counts. The compiled-in table that
+    /// [`Self::serves_model`] falls back to lists a few dozen of the hundreds
+    /// this gateway carries, so reporting it here would call every model it
+    /// does not happen to mention a model OpenRouter refuses - which is the
+    /// opposite of true. An empty catalogue is "not asked yet", not "serves
+    /// nothing".
+    fn served_catalog(&self) -> Option<Vec<String>> {
+        let windows = leviath_core::sync::lock(&self.api_windows);
+        (!windows.is_empty()).then(|| windows.keys().cloned().collect())
+    }
+
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
         leviath_core::sync::lock(&self.api_pricing)
             .get(model)
@@ -2112,6 +2125,30 @@ mod tests {
              offers it rather than degrading to nothing"
         );
         assert_eq!(provider.serves_model("nobody-has-heard-of-this"), None);
+    }
+
+    /// The gateway may publish a catalogue only once it has read one. The
+    /// compiled-in table `serves_model` falls back to lists a few dozen of the
+    /// hundreds this gateway carries, so reporting it as complete would call
+    /// every model it does not mention a model OpenRouter refuses.
+    #[tokio::test]
+    async fn only_a_primed_gateway_publishes_a_catalogue() {
+        let unprimed = provider_with_url("http://127.0.0.1:1".to_string());
+        assert_eq!(
+            unprimed.served_catalog(),
+            None,
+            "an unprimed gateway has read no catalogue, and its table is not one"
+        );
+
+        let body = br#"{"data":[{"id":"openai/gpt-5.5","context_length":400000}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+        provider.prime_capabilities().await.expect("primes");
+
+        assert_eq!(
+            provider.served_catalog(),
+            Some(vec!["openai/gpt-5.5".to_string()])
+        );
     }
 
     /// An entry with no `id` cannot be looked up by one, so it is skipped.

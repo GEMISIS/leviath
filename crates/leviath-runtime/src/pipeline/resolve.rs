@@ -76,7 +76,12 @@ pub fn resolve_stage_model(
 /// The last segment is the model; anything before it is the vendor namespace a
 /// gateway prefixes. A local model with no slash (`qwen3.5:9b`) is already its
 /// own key.
-fn model_key(model: &str) -> &str {
+///
+/// Public because every layer that compares two model names has to compare them
+/// the same way. `lev validate` and the provider registry both grew their own
+/// copy of this rule, and three copies of "what counts as the same model" would
+/// not have stayed equal.
+pub fn model_key(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model)
 }
 
@@ -301,10 +306,16 @@ pub fn resolve_stage_candidates(
     // unregistered one is not a fallback but a phantom that parks the run on
     // `StallReason::ProviderMissing`. `user_default_model` hands one back
     // whenever a bare `--model` override is in play, so filter here.
+    //
+    // A pair whose provider is here and says it does not carry that model is a
+    // phantom of the same kind: the failover step lands on it, the API refuses
+    // the id, and the run has spent a step going nowhere. The head is not
+    // filtered here - `resolve_stages` refuses it outright, because a stage
+    // silently running the next model down is the thing being fixed.
     let tail: Vec<ModelEntry> = candidates
         .split_off(1)
         .into_iter()
-        .filter(|e| registry.has(&e.provider))
+        .filter(|e| registry.has(&e.provider) && !registry.refuses_model(&e.provider, &e.model))
         .collect();
     candidates.extend(tail);
     candidates
@@ -645,6 +656,25 @@ pub fn resolve_stages(
                     providers_tried(&stage.model, model_override, defaults)
                 ));
             }
+            // The provider is here and says it does not carry this model. That
+            // is a different failure from the one above and needs its own end:
+            // the provider answers, so nothing fails over, and the run would
+            // spend its whole life posting a model id the API rejects.
+            //
+            // Refused rather than skipped on purpose. Dropping the head and
+            // promoting the next entry is what the blueprint author cannot see
+            // - a stage they pinned to one model quietly running another - and
+            // it is the behaviour this check exists to end. Only a provider
+            // that published a complete catalogue can get here, so the answer
+            // is evidence rather than an absence of it (`refuses_model`).
+            if registry.refuses_model(&head.provider, &head.model) {
+                return Err(format!(
+                    "stage '{}' names {}/{}, which provider '{}' does not serve. \
+                     Run `lev models list --provider {}` to see what it carries, \
+                     then name one of those in the stage's models list.",
+                    stage.name, head.provider, head.model, head.provider, head.provider,
+                ));
+            }
             // Empty `available_tools` exposes no tools; otherwise filter the full
             // set by name (alias-resolved). A name matching nothing (a typo, or an
             // MCP tool whose server isn't installed) is simply omitted. An
@@ -770,7 +800,7 @@ mod tests {
     async fn a_script_provider_named_as_default_wins_an_open_route() {
         let (registry, _dir) = registry_with_script_default(&["local-fast"]);
         registry
-            .prime_capabilities(std::time::Duration::from_secs(5), Some("spark"))
+            .prime_capabilities(std::time::Duration::from_secs(5), &["spark"])
             .await;
         let defaults = ModelDefaults {
             provider: "spark".to_string(),
@@ -797,7 +827,7 @@ mod tests {
     async fn preferring_a_script_provider_keeps_each_stage_on_its_own_model() {
         let (registry, _dir) = registry_with_script_default(&["cheap-model", "costly-model"]);
         registry
-            .prime_capabilities(std::time::Duration::from_secs(5), Some("spark"))
+            .prime_capabilities(std::time::Duration::from_secs(5), &["spark"])
             .await;
         let defaults = ModelDefaults {
             provider: "spark".to_string(),
@@ -819,7 +849,7 @@ mod tests {
     async fn a_stage_that_refuses_the_user_default_does_not_get_the_script() {
         let (registry, _dir) = registry_with_script_default(&["local-fast"]);
         registry
-            .prime_capabilities(std::time::Duration::from_secs(5), Some("spark"))
+            .prime_capabilities(std::time::Duration::from_secs(5), &["spark"])
             .await;
         let defaults = ModelDefaults {
             provider: "spark".to_string(),
@@ -853,6 +883,7 @@ mod tests {
                 (*name).to_string(),
                 Arc::new(FakeProvider {
                     serves: models.iter().map(|m| (*m).to_string()).collect(),
+                    catalog: None,
                 }),
             );
         }
@@ -864,6 +895,10 @@ mod tests {
         /// Models this provider claims. Empty is the ordinary fixture: the
         /// resolver only asks `has()` for a route-pinned entry.
         serves: Vec<String>,
+        /// The complete catalogue this provider publishes, if it publishes one.
+        /// `None` is the ordinary fixture and means "will not say", which no
+        /// caller may read as a refusal.
+        catalog: Option<Vec<String>>,
     }
     #[async_trait::async_trait]
     impl leviath_providers::Provider for FakeProvider {
@@ -893,6 +928,25 @@ mod tests {
                 .any(|m| m == model_key)
                 .then(|| model_key.to_string())
         }
+        fn served_catalog(&self) -> Option<Vec<String>> {
+            self.catalog.clone()
+        }
+    }
+
+    /// A registry whose providers each publish a complete catalogue, for the
+    /// checks that may only refuse a pair on a definite no.
+    fn registry_publishing(providers: &[(&str, &[&str])]) -> ProviderRegistry {
+        let mut r = ProviderRegistry::new();
+        for (name, models) in providers {
+            r.register(
+                (*name).to_string(),
+                Arc::new(FakeProvider {
+                    serves: models.iter().map(|m| (*m).to_string()).collect(),
+                    catalog: Some(models.iter().map(|m| (*m).to_string()).collect()),
+                }),
+            );
+        }
+        r
     }
 
     #[tokio::test]
@@ -1139,6 +1193,81 @@ mod tests {
         assert!(err.contains("plan"), "names the stage: {err}");
         assert!(err.contains("ghost"), "names what it tried: {err}");
         assert!(err.contains("lev setup"), "says what to do: {err}");
+    }
+
+    /// A provider that is here and says it does not carry the model.
+    ///
+    /// Distinct from "no usable provider" above: this provider answers, so
+    /// nothing fails over and the run would spend its life posting a model id
+    /// the API rejects. Refused rather than skipped on purpose - promoting the
+    /// next entry is the silent substitution this check exists to end.
+    #[test]
+    fn resolve_stages_refuses_a_model_the_provider_does_not_carry() {
+        let stage = leviath_core::Stage::new(
+            "plan".to_string(),
+            model_cfg(vec![("groq", "llama-3.1-70b")]),
+        );
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+
+        let err = resolve_stages(
+            &bp,
+            None,
+            &ModelDefaults::default(),
+            &registry_publishing(&[("groq", &["llama-4-scout"])]),
+            catalog(&[]),
+            false,
+            None,
+        )
+        .expect_err("groq published a catalogue and this model is not in it");
+
+        assert!(err.contains("plan"), "names the stage: {err}");
+        assert!(err.contains("groq/llama-3.1-70b"), "names the pair: {err}");
+        assert!(err.contains("lev models list"), "says what to do: {err}");
+    }
+
+    /// The same shape, against a provider that publishes nothing. A provider
+    /// that will not say what it serves cannot refuse anything, so the stage
+    /// resolves exactly as it did before this check existed.
+    #[test]
+    fn resolve_stages_allows_a_model_an_unpublishing_provider_never_denied() {
+        let stage = leviath_core::Stage::new(
+            "plan".to_string(),
+            model_cfg(vec![("groq", "llama-3.1-70b")]),
+        );
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+
+        let resolved = resolve_stages(
+            &bp,
+            None,
+            &ModelDefaults::default(),
+            &registry_with(&["groq"]),
+            catalog(&[]),
+            false,
+            None,
+        )
+        .expect("silence is not a refusal");
+
+        assert_eq!(resolved[0].model, "llama-3.1-70b");
+    }
+
+    /// A fallback the provider will refuse is dropped rather than kept, so a
+    /// failover cannot spend a step landing on it. The head is not filtered
+    /// this way - `resolve_stages` refuses it outright instead.
+    #[test]
+    fn a_fallback_the_provider_refuses_is_dropped_from_the_chain() {
+        let cfg = model_cfg(vec![
+            ("groq", "llama-4-scout"),
+            ("groq", "llama-3.1-70b"),
+            ("groq", "llama-4-maverick"),
+        ]);
+        let registry = registry_publishing(&[("groq", &["llama-4-scout", "llama-4-maverick"])]);
+
+        let picked = resolve_stage_candidates(&cfg, None, &ModelDefaults::default(), &registry);
+
+        let models: Vec<&str> = picked.iter().map(|e| e.model.as_str()).collect();
+        assert_eq!(models, ["llama-4-scout", "llama-4-maverick"], "{picked:?}");
     }
 
     #[test]

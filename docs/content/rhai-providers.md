@@ -402,6 +402,23 @@ and the provider answered.
 > `lev doctor -m <name>/<model>` goes one step further and bills a real inference. Both exit
 > non-zero on failure.
 
+Once the script is wired in, `lev validate` checks the model ids against it. A script that answers
+`list_models` has named everything it takes, so a stage pinning `<name>/<model>` for a model outside
+that list is an `unserved-model` error and a refused spawn rather than a run on some other model. A
+script with no `list_models` can be checked the same way by writing the list down:
+
+```toml
+[model_providers.groq]
+script = "groq"
+serves = ["llama-4-scout", "llama-4-maverick"]
+```
+
+`serves` is read straight from the file, so this works with no network and no key, which is what
+makes it usable in CI. A script that offers neither is reported as `catalog-unchecked`: it loaded,
+but it has never said what it takes, so nothing can tell a good model id from a bad one. A script
+that will not compile is a provider that is not there at all, and that stays
+`no-reachable-provider`.
+
 If `lev serve` is running, `POST /api/scripts/validate` with `kind: "provider"` answers the same
 question without a run and without a key: it compiles the text and checks that `initialize(config)`
 and `inference(state, request)` are both there. The rest of the [scripts

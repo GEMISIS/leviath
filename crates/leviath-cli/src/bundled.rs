@@ -1455,6 +1455,11 @@ mod tests {
             available_providers: None,
             read_paths: None,
             safe_commands_granted: None,
+            // No machine to ask, which is the point: this test asserts what a
+            // bundled blueprint says about itself, not what one install happens
+            // to have configured.
+            provider_catalogs: std::collections::HashMap::new(),
+            unrouted_models: std::collections::HashSet::new(),
             model_windows: crate::commands::models::builtin_model_windows(),
         }
     }

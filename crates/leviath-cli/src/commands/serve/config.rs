@@ -270,7 +270,7 @@ pub(super) async fn list_models_from_config(
     registry
         .prime_capabilities(
             std::time::Duration::from_secs(MODELS_PRIME_TIMEOUT_SECS),
-            None,
+            &[],
         )
         .await;
     let mut models = Vec::new();

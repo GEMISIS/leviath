@@ -11,6 +11,37 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+- Fixed: a stage naming a model its provider does not carry is now a validation
+  error and a refused spawn, instead of a run on some other model. Nothing had
+  ever checked a model id against the provider that would serve it: pinned
+  `provider/model` pairs were taken on trust at resolution, and `lev validate`
+  only compared them to a table compiled into the build covering Anthropic,
+  OpenAI and Google. A custom Rhai provider was therefore never checked at all,
+  so a stage pinned to `groq/llama-3.1-70b` on a `groq.rhai` that serves nothing
+  of that name validated clean, spawned clean, and quietly ran on whatever the
+  fallback chain reached. `lev validate` now asks each provider the blueprint
+  pins what it serves, using the same primed registry the runtime resolves
+  against, and reports `unserved-model` as an error - which `--json` carries and
+  the exit code reflects. The daemon refuses such a spawn with the provider and
+  model named.
+- Added: `catalog-unchecked`, a warning naming a script provider that loaded but
+  has neither a `list_models(state)` function nor a `[model_providers.<name>]
+  serves` list, so it has never said what it takes and its model ids went
+  unchecked. `serves` is read from `config.toml` with no network and no key,
+  which makes it the way to get a script provider checked in CI.
+- Changed: `no-reachable-provider` now judges an entry that names a model and no
+  provider, which is the form every bundled blueprint is written in. It used to
+  skip any stage holding one, because it had no registry to ask which providers
+  serve a bare name; it now has the resolver's own answer. A stage naming a
+  single misspelled model produced no finding at all before this and now says so.
+  Its message lists entries the way the blueprint writes them, bare or
+  `provider/model`, rather than provider names alone.
+- Changed: a fallback whose provider says it does not carry that model is
+  dropped from a stage's failover chain rather than left in it, so a failover
+  cannot spend a step dispatching to a pair the API will reject.
+
 ## 0.5.1 - 2026-08-26
 
 - Changed: `lev ps`, the TUI and the HTTP API describe a run's time the same

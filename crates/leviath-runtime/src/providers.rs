@@ -59,13 +59,14 @@ impl ProviderRegistry {
     /// rather than however long a connect takes to give up.
     ///
     /// Script providers are consulted only when `also` names one - in practice
-    /// the machine's `default_provider`. `get` compiles them on demand, so
+    /// the machine's `default_provider`, and for `lev validate` the providers
+    /// the blueprint in front of it pins. `get` compiles them on demand, so
     /// priming the lot would compile every `.rhai` provider on disk whether or
-    /// not a run touches one; priming the one a machine has actually chosen
-    /// costs a single compile of a script that is about to be used anyway, and
-    /// it is what lets that provider answer [`Provider::serves_model`] and so
-    /// win an open route (issue #598).
-    pub async fn prime_capabilities(&self, timeout: std::time::Duration, also: Option<&str>) {
+    /// not a run touches one; priming the ones a caller has actually named
+    /// costs a compile of a script that is about to be used anyway, and it is
+    /// what lets that provider answer [`Provider::serves_model`] and so win an
+    /// open route (issue #598).
+    pub async fn prime_capabilities(&self, timeout: std::time::Duration, also: &[&str]) {
         let mut targets: Vec<(String, Arc<dyn Provider>)> = self
             .providers
             .iter()
@@ -86,7 +87,11 @@ impl ProviderRegistry {
             .as_ref()
             .map(|l| l.configured_names())
             .unwrap_or_default();
-        for name in configured.iter().map(String::as_str).chain(also) {
+        for name in configured
+            .iter()
+            .map(String::as_str)
+            .chain(also.iter().copied())
+        {
             // Only when it is not already registered natively: a native provider
             // of the same name wins everywhere else, and priming it twice would
             // be a second network call for one answer. Nor twice over, for one
@@ -184,6 +189,31 @@ impl ProviderRegistry {
                 .is_some_and(|l| l.get_or_load(name).is_some())
     }
 
+    /// Whether `provider` is registered here and can prove it does not serve
+    /// `model`.
+    ///
+    /// `false` is the answer to three different questions - there is no such
+    /// provider, it serves the model, or it will not say what it serves - and
+    /// they are folded together on purpose. Every caller of this is deciding
+    /// whether to refuse something, and all three mean "do not refuse". Only a
+    /// provider that published a complete catalogue can put a name outside it,
+    /// so a `true` here is always evidence rather than an absence of it.
+    ///
+    /// Compared by [`crate::pipeline::model_key`], so a gateway's namespaced
+    /// `openai/gpt-5.5` answers for a blueprint that wrote `gpt-5.5`.
+    pub fn refuses_model(&self, provider: &str, model: &str) -> bool {
+        let Some(p) = self.get(provider) else {
+            return false;
+        };
+        let Some(catalog) = p.served_catalog() else {
+            return false;
+        };
+        let key = crate::pipeline::model_key(model);
+        !catalog
+            .iter()
+            .any(|id| crate::pipeline::model_key(id) == key)
+    }
+
     /// Get all *natively-registered* provider names. Script providers are
     /// resolved on demand and so are not enumerated here - see
     /// [`resolvable_names`](Self::resolvable_names) for the set that includes
@@ -266,6 +296,10 @@ mod tests {
         outcome: PrimeOutcome,
         /// Every list this stub was handed to warm, in order.
         warmed: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+        /// The catalogue this stub publishes, if it publishes one. `None` is
+        /// the ordinary fixture and means "will not say", which no caller may
+        /// read as a refusal.
+        catalog: Option<Vec<String>>,
     }
 
     impl StubProvider {
@@ -274,6 +308,15 @@ mod tests {
                 primed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 outcome,
                 warmed: Arc::new(std::sync::Mutex::new(Vec::new())),
+                catalog: None,
+            }
+        }
+
+        /// The same stub, publishing a complete catalogue.
+        fn publishing(models: &[&str]) -> Self {
+            Self {
+                catalog: Some(models.iter().map(|m| (*m).to_string()).collect()),
+                ..Self::new(PrimeOutcome::Ok)
             }
         }
     }
@@ -328,6 +371,47 @@ mod tests {
         fn capabilities(&self, _model: &str) -> ModelCapabilities {
             ModelCapabilities::default()
         }
+        fn served_catalog(&self) -> Option<Vec<String>> {
+            self.catalog.clone()
+        }
+    }
+
+    /// `refuses_model` folds three different "no" answers into `false`, because
+    /// every caller of it is deciding whether to refuse and all three mean "do
+    /// not". Only a published catalogue can produce a `true`.
+    #[test]
+    fn refuses_model_only_says_yes_on_a_published_catalogue() {
+        let mut reg = ProviderRegistry::new();
+        reg.register(
+            "groq".to_string(),
+            Arc::new(StubProvider::publishing(&["llama-4-scout"])),
+        );
+        // A native provider that publishes nothing: silence, never a refusal.
+        reg.register("quiet".to_string(), mock());
+
+        assert!(
+            reg.refuses_model("groq", "llama-3.1-70b"),
+            "not in the list"
+        );
+        assert!(!reg.refuses_model("groq", "llama-4-scout"), "in the list");
+        assert!(!reg.refuses_model("quiet", "anything"), "published nothing");
+        assert!(!reg.refuses_model("absent", "anything"), "no such provider");
+    }
+
+    /// A gateway namespaces its ids and a blueprint names the model, so the two
+    /// are compared by model key. Comparing raw strings would make every
+    /// gateway route look like a model the gateway refuses.
+    #[test]
+    fn refuses_model_compares_by_model_key() {
+        let mut reg = ProviderRegistry::new();
+        reg.register(
+            "openrouter".to_string(),
+            Arc::new(StubProvider::publishing(&["openai/gpt-5.5"])),
+        );
+
+        assert!(!reg.refuses_model("openrouter", "gpt-5.5"));
+        assert!(!reg.refuses_model("openrouter", "openai/gpt-5.5"));
+        assert!(reg.refuses_model("openrouter", "gpt-4"));
     }
 
     /// What an *enumeration* needs, and what `provider_names` cannot give it:
@@ -378,11 +462,7 @@ mod tests {
     }
 
     fn mock() -> Arc<dyn Provider> {
-        Arc::new(StubProvider {
-            primed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            outcome: PrimeOutcome::Ok,
-            warmed: Arc::new(std::sync::Mutex::new(Vec::new())),
-        })
+        Arc::new(StubProvider::new(PrimeOutcome::Ok))
     }
 
     #[test]
@@ -407,8 +487,7 @@ mod tests {
         (
             Arc::new(StubProvider {
                 primed: primed.clone(),
-                outcome,
-                warmed: Arc::new(std::sync::Mutex::new(Vec::new())),
+                ..StubProvider::new(outcome)
             }),
             primed,
         )
@@ -482,7 +561,7 @@ mod tests {
         reg.register("prime".to_string(), p);
         reg.register("other".to_string(), mock());
 
-        reg.prime_capabilities(std::time::Duration::from_secs(5), None)
+        reg.prime_capabilities(std::time::Duration::from_secs(5), &[])
             .await;
         assert_eq!(primed.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
@@ -494,7 +573,7 @@ mod tests {
         let mut reg = ProviderRegistry::new();
         let (bad, bad_calls) = priming(PrimeOutcome::Fails);
         reg.register("bad".to_string(), bad);
-        reg.prime_capabilities(std::time::Duration::from_secs(5), None)
+        reg.prime_capabilities(std::time::Duration::from_secs(5), &[])
             .await;
         assert_eq!(bad_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
@@ -508,7 +587,7 @@ mod tests {
         // With the clock paused this returns as soon as the timeout is the only
         // thing left to wait on, so a regression here fails by hanging the
         // suite rather than by sleeping through it.
-        reg.prime_capabilities(std::time::Duration::from_secs(10), None)
+        reg.prime_capabilities(std::time::Duration::from_secs(10), &[])
             .await;
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
@@ -676,7 +755,7 @@ mod tests {
         let reg = ProviderRegistry::new().with_script_layer(Arc::new(layer));
 
         // The default is something else entirely, which is the whole point.
-        reg.prime_capabilities(std::time::Duration::from_secs(5), Some("openrouter"))
+        reg.prime_capabilities(std::time::Duration::from_secs(5), &["openrouter"])
             .await;
 
         assert_eq!(
@@ -721,7 +800,7 @@ mod tests {
             None
         );
 
-        reg.prime_capabilities(std::time::Duration::from_secs(5), Some("spark"))
+        reg.prime_capabilities(std::time::Duration::from_secs(5), &["spark"])
             .await;
 
         assert_eq!(
@@ -740,7 +819,7 @@ mod tests {
         let (p, primed) = priming(PrimeOutcome::Ok);
         reg.register("prime".to_string(), p);
 
-        reg.prime_capabilities(std::time::Duration::from_secs(5), Some("prime"))
+        reg.prime_capabilities(std::time::Duration::from_secs(5), &["prime"])
             .await;
         assert_eq!(primed.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
@@ -750,17 +829,13 @@ mod tests {
     #[tokio::test]
     async fn naming_a_provider_that_does_not_resolve_is_harmless() {
         let reg = ProviderRegistry::new();
-        reg.prime_capabilities(std::time::Duration::from_secs(5), Some("nope"))
+        reg.prime_capabilities(std::time::Duration::from_secs(5), &["nope"])
             .await;
     }
 
     #[tokio::test]
     async fn stub_provider_methods_are_exercised() {
-        let p = StubProvider {
-            primed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            outcome: PrimeOutcome::Ok,
-            warmed: Arc::new(std::sync::Mutex::new(Vec::new())),
-        };
+        let p = StubProvider::new(PrimeOutcome::Ok);
         assert_eq!(p.name(), "stub");
         assert_eq!(p.count_tokens("abcd", "m").await, 4);
         assert_eq!(p.max_context_tokens("m"), 8192);

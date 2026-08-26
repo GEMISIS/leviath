@@ -161,6 +161,7 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 | error | `unparseable-safe-command` | A `[safe_commands] shell` entry no call can ever match. See below |
 | error | `output-missing-submit-tool` | A stage must produce an output and has no way to submit one. See below |
 | error | `orphan-stage-permission` | A `[stages.X.tool_permissions]` key names a tool the stage never granted. It reads as a grant and is not one. |
+| error | `unserved-model` | A stage names a model the provider that would run it does not carry. See below |
 | warning | `stage-missing-model` | No `[stages.X.model]` block, so the stage runs on whatever your `default_provider` is. |
 | warning | `stage-missing-mode` | No `mode`, so the stage runs as `autonomous`. |
 | warning | `stage-missing-max-iterations` | Unbounded unless `[limits] default_max_iterations` is set. Fan-out stages are exempt. |
@@ -169,7 +170,8 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 | warning | `blocking-tool-in-autonomous-stage` | An autonomous stage grants a tool that waits for a person. See below |
 | warning | `implicit-shell-policy` | A shell grant with no policy behind it. See below |
 | warning | `unknown-model` | A model this build has not heard of. See below |
-| warning | `no-reachable-provider` | Nothing in the stage's models list is configured here, so it falls through to your default model. |
+| warning | `catalog-unchecked` | A script provider that will not say which models it serves, so a name against it went unchecked. See below |
+| warning | `no-reachable-provider` | Nothing in the stage's models list can run here, so it falls through to your default model. See below |
 | warning | `compact-summarizes-deliverable` | A `compact` edge would hand a `required` region to the summarizer. See below |
 | warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `[read_paths]` shape. |
 | warning | `dead-end-possible` | Every route out of a stage can run out of budget. See below |
@@ -180,7 +182,7 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 | note | `safe-commands-declared` | The blueprint declares `[safe_commands]`. Declaring is not granting. See below |
 | note | `command-seed`, `read-paths-declared` | Things worth knowing before you run the blueprint. See below |
 
-Thirteen of those findings need more than a phrase.
+Fifteen of those findings need more than a phrase.
 
 **`unknown-tool`** means the name matches no built-in, no sub-agent tool, and no `tools/*.rhai`
 file. The stage then advertises one tool fewer, so the model is told a tool it was meant to have
@@ -203,8 +205,36 @@ killed. Set `allow_blocking_tools = true` on the stage to say you meant it.
 **`implicit-shell-policy`** matters because the default is `ask`. An unattended run waits on that
 prompt rather than being denied.
 
-**`unknown-model`** is checked only against providers with a closed catalog. Ollama, OpenRouter and
-script providers are never checked.
+**`unserved-model`** is the one model finding that fails the command, because it is the one that can
+be proved. The provider is configured here, it published the full list of what it carries, and the
+model the stage names is not on it. That is a typo or a renamed model rather than anything about your
+machine, so a stage naming one is refused at spawn too. The message carries a few of the ids the
+provider does list; `lev models list --provider <name>` prints the rest.
+
+A provider publishes its list either by answering `list_models` (a Rhai provider, or a gateway whose
+catalogue Leviath has read) or by having one written down under `[model_providers.<name>] serves`.
+The `serves` route needs no network and no key, which makes it the way to get a script provider
+checked in CI.
+
+**`catalog-unchecked`** is the same question with no answer: the script provider loaded, but it has
+neither a `list_models(state)` function nor a `serves` list, so it has never said what it takes and
+nothing here can tell a good model id from a bad one. It is a warning rather than an error because
+saying nothing is not a refusal. It exists so that "checked and fine" and "never checked" stop
+looking identical. Only script providers are named this way; a built-in that keeps quiet is either
+covered by `unknown-model` below or has a genuinely open catalog.
+
+**`unknown-model`** is the older, weaker check: the table of models compiled into this build, which
+covers Anthropic, OpenAI and Google. It is skipped for any provider that answered for itself, since
+a live catalog knows about models released after this build was cut. A provider that neither
+publishes a catalog nor appears in that table is not checked at all, which is what keeps an open
+catalog (Ollama serves whatever you have pulled) from raising false alarms.
+
+**`no-reachable-provider`** means every entry in the stage's list names something this install cannot
+run: a pinned entry whose provider is not configured, or a bare model name nothing here serves. One
+entry that works is enough to keep the stage quiet, since the list is an ordered set of fallbacks and
+a machine declining some of the options is the normal case. This is also the check that catches a
+misspelled model in a stage that names only one: nothing serves `claude-sonet-5`, so the stage would
+have fallen through to your default model without saying so.
 
 **`compact-summarizes-deliverable`** means a later stage reads a paraphrase of a region you marked
 `required`. Set `summarizable = false` on the region.

@@ -5,6 +5,7 @@
 //! agent work" and those answer "should this agent be allowed to".
 
 use super::*;
+use leviath_runtime::pipeline::model_key;
 
 /// Fields the stage left to a default: `mode`, `model`, and `max_iterations`.
 pub(super) fn lint_declarations(stage: &leviath_core::Stage, keys: StageKeys) -> Vec<LintFinding> {
@@ -555,11 +556,80 @@ pub(super) fn lint_graph(blueprint: &Blueprint) -> Vec<LintFinding> {
     findings
 }
 
+/// A few names out of a catalogue, for a message that has to fit on a line.
+///
+/// The count is worth carrying even when the list is short: "it lists 2" and
+/// "it lists 340" send someone to different places, the first to a typo in the
+/// script's own `list_models` and the second to a typo in the blueprint.
+fn sample_catalog(ids: &[String]) -> String {
+    const SHOWN: usize = 3;
+    let head: Vec<&str> = ids.iter().take(SHOWN).map(String::as_str).collect();
+    match ids.len() > SHOWN {
+        true => format!("{} and {} more", head.join(", "), ids.len() - SHOWN),
+        false => head.join(", "),
+    }
+}
+
 /// Models and providers the install cannot resolve.
 pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<LintFinding> {
     let mut findings = Vec::new();
 
     for entry in &stage.model.models {
+        // What the provider itself said, when this install asked it. It beats
+        // every check below: a live catalogue knows about models released after
+        // this build, and about a script provider's models that no build could
+        // know.
+        match env.provider_catalogs.get(&entry.provider) {
+            Some(ProviderCatalog::Complete(ids)) => {
+                let key = model_key(&entry.model);
+                if !ids.iter().any(|id| model_key(id) == key) {
+                    findings.push(
+                        LintFinding::new(
+                            LintSeverity::Error,
+                            "unserved-model",
+                            format!(
+                                "names {}/{}, which provider '{}' does not serve (it lists {})",
+                                entry.provider,
+                                entry.model,
+                                entry.provider,
+                                sample_catalog(ids),
+                            ),
+                        )
+                        .in_stage(&stage.name)
+                        .with_fix(format!(
+                            "run `lev models list --provider {}` and name one of those",
+                            entry.provider
+                        )),
+                    );
+                }
+                // Checked against the provider's own answer, so the compiled
+                // table below has nothing left to add and would only put a
+                // second, weaker finding on the same entry.
+                continue;
+            }
+            Some(ProviderCatalog::ScriptSaidNothing) => {
+                findings.push(
+                    LintFinding::new(
+                        LintSeverity::Warning,
+                        "catalog-unchecked",
+                        format!(
+                            "names {}/{}, and provider '{}' does not say which models \
+                             it serves, so the name went unchecked",
+                            entry.provider, entry.model, entry.provider
+                        ),
+                    )
+                    .in_stage(&stage.name)
+                    .with_fix(format!(
+                        "give {}.rhai a `list_models(state)`, or list its models under \
+                         `[model_providers.{}] serves`",
+                        entry.provider, entry.provider
+                    )),
+                );
+                continue;
+            }
+            None => {}
+        }
+
         // A provider with no catalog here is open-ended (Ollama serves whatever
         // is pulled, OpenRouter's list runs to hundreds, a script provider
         // defines its own). Checking a model against a catalog that does not
@@ -594,38 +664,56 @@ pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lin
     // saying is that *nothing* in the list does, which is the shape that
     // reaches the runtime as "no usable provider" at spawn.
     //
-    // An entry that pins no provider is not evidence either way here. It names a
-    // model and leaves the route open, and which providers serve that model is a
-    // question for the resolver, which has a registry; this check does not. So an
-    // open entry counts as reachable rather than as a provider named and missing
-    // - before that, a blueprint written entirely in the current form failed this
-    // check every time and was told it would "fall back to your default model",
-    // having tried providers it never named.
-    let pinned: Vec<&str> = stage
-        .model
-        .models
-        .iter()
-        .filter(|e| !e.provider.is_empty())
-        .map(|e| e.provider.as_str())
-        .collect();
-    if let Some(available) = &env.available_providers
+    // An entry is reachable when this install can actually run it: a pinned one
+    // needs its provider registered, an open one needs something that serves
+    // its model.
+    //
+    // That second half used to be unanswerable here. The check had no registry,
+    // so it counted an open entry as reachable on the grounds that the resolver
+    // knew better, and skipped itself entirely on any stage holding one - the
+    // form every bundled blueprint is written in. It now has the resolver's own
+    // answer in `unrouted_models`, so a stage whose every entry names something
+    // this machine cannot run is reported whichever form its entries take.
+    //
+    // `unrouted_models` is empty both when nobody asked and when everything
+    // routes, and both read as reachable here. That is the safe direction: a
+    // question nobody asked must not turn into a finding.
+    let reachable = |e: &leviath_core::blueprint::ModelEntry| match e.provider.is_empty() {
+        true => !env.unrouted_models.contains(&e.model),
+        false => env
+            .available_providers
+            .as_ref()
+            .is_some_and(|a| a.contains(&e.provider)),
+    };
+    if env.available_providers.is_some()
         && !stage.model.models.is_empty()
-        && pinned.len() == stage.model.models.len()
-        && !pinned.iter().any(|p| available.contains(&p.to_string()))
+        && !stage.model.models.iter().any(reachable)
     {
-        let tried: Vec<&str> = pinned.clone();
+        // Written the way the blueprint writes them, so the list in the message
+        // can be found in the file: a bare name for an entry that left the route
+        // open, `provider/model` for one that pinned it. Rendering an open entry
+        // as `/gpt-5.5` would show a route it does not claim to have.
+        let tried: Vec<String> = stage
+            .model
+            .models
+            .iter()
+            .map(|e| match e.provider.is_empty() {
+                true => e.model.clone(),
+                false => format!("{}/{}", e.provider, e.model),
+            })
+            .collect();
         findings.push(
             LintFinding::new(
                 LintSeverity::Warning,
                 "no-reachable-provider",
                 format!(
-                    "names no provider this install can reach (tried {}), so it \
+                    "names nothing this install can run (tried {}), so it \
                      falls back to your default model",
                     tried.join(", ")
                 ),
             )
             .in_stage(&stage.name)
-            .with_fix("run `lev setup` to configure one of them, or add a provider you have"),
+            .with_fix("run `lev setup` to configure one of them, or name a model you have"),
         );
     }
 

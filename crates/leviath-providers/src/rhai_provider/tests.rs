@@ -1128,3 +1128,57 @@ async fn priming_a_script_without_list_models_is_a_no_op() {
     p.prime_capabilities().await.expect("nothing to do is fine");
     assert_eq!(p.serves_model("deepseek-v4-flash"), None);
 }
+
+/// `served_catalog` is what separates "this script says it does not serve that"
+/// from "this script has not been asked", and only the first may refuse
+/// anything. Before priming a script with a `list_models` has said nothing yet,
+/// so it publishes nothing.
+#[tokio::test]
+async fn a_script_publishes_its_catalogue_only_once_it_has_answered() {
+    let src = "// @provider mock\n\
+               fn initialize(config) { #{} }\n\
+               fn inference(state, request) { #{ content: \"x\" } }\n\
+               fn list_models(state) { [ #{ id: \"llama-4-scout\", \
+               display_name: \"Scout\", max_context_tokens: 131072, \
+               max_output_tokens: 8192 } ] }";
+    let p = build(src, Arc::new(FakeExecutor::default())).expect("it compiles");
+
+    assert_eq!(p.served_catalog(), None, "unprimed says nothing");
+
+    p.prime_capabilities().await.expect("list_models answers");
+
+    assert_eq!(p.served_catalog(), Some(vec!["llama-4-scout".to_string()]));
+}
+
+/// A script with neither `list_models` nor a `serves` list has said nothing at
+/// all, and nothing must not read as "serves nothing" - that would make every
+/// model named against it wrong.
+#[tokio::test]
+async fn a_script_that_names_no_models_publishes_no_catalogue() {
+    let p = build(GOOD_PROVIDER, Arc::new(FakeExecutor::default())).expect("it compiles");
+    p.prime_capabilities().await.expect("nothing to do is fine");
+    assert_eq!(p.served_catalog(), None);
+}
+
+/// `[model_providers.<name>] serves` is a complete catalogue too, and a static
+/// one: it answers with no priming and no network, which is what lets a script
+/// with no `list_models` still be checked.
+#[test]
+fn a_declared_serves_list_is_a_catalogue_without_priming() {
+    let p = RhaiProvider::from_source(
+        GOOD_PROVIDER,
+        Arc::new(FakeExecutor::default()),
+        ScriptProviderSettings {
+            name: "test".to_string(),
+            init_config: serde_json::json!({}),
+            caps: HashMap::new(),
+            serves: vec!["only-this-one".to_string()],
+            rate_limit: None,
+            request_timeout_secs: None,
+            env_allowlist: no_env_allowlist(),
+        },
+    )
+    .expect("it compiles");
+
+    assert_eq!(p.served_catalog(), Some(vec!["only-this-one".to_string()]));
+}

@@ -120,6 +120,28 @@ impl LintFinding {
     }
 }
 
+/// What one provider answered when asked what models it takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderCatalog {
+    /// It named everything it carries. A model outside this list is a model it
+    /// will refuse, so naming one is a fault in the blueprint rather than a
+    /// fact about the machine.
+    Complete(Vec<String>),
+
+    /// It is reachable but would not say what it carries, and it is a script
+    /// provider - one with neither a `list_models` function nor a
+    /// `[model_providers.<name>] serves` list.
+    ///
+    /// Only script providers are recorded this way. Every built-in whose
+    /// catalogue this build cannot see is either covered by the compiled-in
+    /// table that `unknown-model` reads (Anthropic, OpenAI, Google) or has an
+    /// open catalogue where silence is the correct answer (Ollama serves
+    /// whatever has been pulled). A script provider is the one case where the
+    /// silence is the author's to fix, and where saying nothing is what let a
+    /// wrong model id reach a run unremarked.
+    ScriptSaidNothing,
+}
+
 /// Facts about the machine the blueprint will run on, which the manifest alone
 /// cannot supply.
 ///
@@ -160,6 +182,31 @@ pub struct LintEnv {
     /// or not at all.
     pub safe_commands_granted: Option<bool>,
 
+    /// What each provider the blueprint names says it serves, read off the same
+    /// primed registry the runtime resolves against.
+    ///
+    /// A provider absent from this map was not asked - either nobody built a
+    /// registry (the daemon's offline lint) or this install cannot reach it -
+    /// and its entries go unchecked. See [`ProviderCatalog`] for what the two
+    /// present states mean.
+    pub provider_catalogs: HashMap<String, ProviderCatalog>,
+
+    /// Bare model names the blueprint leaves unrouted: it names the model and
+    /// no provider, and nothing this install can reach claims to serve it.
+    ///
+    /// Asked of the registry exactly as [`resolve_stage_candidates`] asks it,
+    /// so this is the set of entries resolution silently drops. It is what
+    /// lets `no-reachable-provider` judge an open entry at all: without it that
+    /// check had to assume every open entry was fine, and so skipped itself on
+    /// every blueprint written in the form they are all written in.
+    ///
+    /// Empty when nobody asked, which is indistinguishable from "everything
+    /// routes". Both mean the same thing to the check that reads it - treat the
+    /// entry as reachable - so an unasked question cannot become a finding.
+    ///
+    /// [`resolve_stage_candidates`]: leviath_runtime::pipeline::resolve_stage_candidates
+    pub unrouted_models: HashSet<String>,
+
     /// Context-window size per `(provider, model)`, for the models this build
     /// ships a capability row for.
     ///
@@ -195,6 +242,14 @@ impl LintEnv {
             available_providers: None,
             read_paths: None,
             safe_commands_granted: None,
+            // Both empty for the same reason `available_providers` is `None`:
+            // reading a provider's catalogue means building and priming a
+            // registry, which is a network call per provider, and the daemon
+            // already refuses a spawn that names a model its provider will not
+            // serve. Doing it again here would cost every agent a round of
+            // priming to say something the spawn says louder a moment later.
+            provider_catalogs: HashMap::new(),
+            unrouted_models: HashSet::new(),
             model_windows: crate::commands::models::builtin_model_windows(),
         }
     }
@@ -213,6 +268,77 @@ impl LintEnv {
                 .filter(|p| registry.as_ref().is_ok_and(|r| r.has(p)))
                 .collect(),
         );
+        self
+    }
+
+    /// Add what each provider the blueprint pins says it serves, and which of
+    /// the blueprint's unpinned model names nothing here routes.
+    ///
+    /// Takes the registry the caller already built and primed rather than
+    /// building another. `with_providers` builds its own because it only needs
+    /// a name lookup; this needs the *primed* one, since an unprimed provider
+    /// has no catalogue to report and would turn every check below into a
+    /// shrug. `lev validate` primes once, at `primed_registry`, and hands the
+    /// same registry here.
+    pub fn with_provider_catalogs(
+        mut self,
+        blueprint: &Blueprint,
+        config: &crate::config::Config,
+        registry: &leviath_runtime::ProviderRegistry,
+    ) -> Self {
+        use leviath_runtime::pipeline::model_key;
+
+        let entries = || blueprint.stages.iter().flat_map(|s| s.model.models.iter());
+
+        for name in entries()
+            .map(|e| e.provider.as_str())
+            .filter(|p| !p.is_empty())
+        {
+            if self.provider_catalogs.contains_key(name) {
+                continue;
+            }
+            // Not reachable here is not the same question, and
+            // `no-reachable-provider` already answers it. Leaving the name out
+            // of the map is what keeps a machine that simply lacks a provider
+            // from being told its blueprint is wrong.
+            let Some(provider) = registry.get(name) else {
+                continue;
+            };
+            let catalog = match provider.served_catalog() {
+                Some(models) => ProviderCatalog::Complete(models),
+                // Only a script provider's silence is worth reporting - see
+                // `ProviderCatalog::ScriptSaidNothing`. `script_provider_named`
+                // answers `None` for a native provider of the same name, which
+                // is exactly the distinction wanted.
+                None if registry.script_provider_named(name).is_some() => {
+                    ProviderCatalog::ScriptSaidNothing
+                }
+                None => continue,
+            };
+            self.provider_catalogs.insert(name.to_string(), catalog);
+        }
+
+        // The open entries, asked the way the resolver asks: does *any*
+        // registered provider claim this model. A script provider is not in
+        // `native_providers`, so the machine's default is offered the question
+        // too, matching `resolve_stage_candidates`.
+        let default_script = registry.script_provider_named(&config.default_provider);
+        for model in entries()
+            .filter(|e| e.provider.is_empty())
+            .map(|e| &e.model)
+        {
+            let key = model_key(model);
+            let routed = registry
+                .native_providers()
+                .iter()
+                .any(|(_, p)| p.serves_model(key).is_some())
+                || default_script
+                    .as_ref()
+                    .is_some_and(|p| p.serves_model(key).is_some());
+            if !routed {
+                self.unrouted_models.insert(model.clone());
+            }
+        }
         self
     }
 

@@ -789,6 +789,15 @@ impl Provider for OllamaProvider {
         Ok(())
     }
 
+    // No `served_catalog` here, deliberately. `/api/tags` reports what this
+    // machine has **pulled**, not what Ollama serves: `ollama run` fetches a
+    // model on demand, so a name the listing omits is one nobody has downloaded
+    // yet rather than one that does not exist. Publishing it as a complete
+    // catalogue would make every bundled blueprint - all of which end with an
+    // Ollama entry so a local box can use it - fail validation on a machine
+    // that has not pulled that model. The default `None` keeps those entries
+    // unchecked, which is the honest answer.
+
     async fn prime_capabilities(&self) -> Result<()> {
         let windows = self.learn_model_windows().await?;
         let count = windows.len();
