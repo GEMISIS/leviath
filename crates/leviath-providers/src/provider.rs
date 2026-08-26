@@ -657,6 +657,15 @@ pub struct ToolCallDelta {
 
     /// Partial arguments JSON string
     pub arguments_delta: String,
+
+    /// See [`ToolCall::thought_signature`]. Sent on the delta that opens this
+    /// index, like the id and the name.
+    ///
+    /// Streaming had no way to carry one, which was survivable only while
+    /// nothing streamed: Gemini 3.x refuses a function call replayed without
+    /// the signature it issued, so a streamed tool call would have been
+    /// rejected on the very next turn.
+    pub thought_signature: Option<String>,
 }
 
 /// Configuration for a provider instance.
@@ -887,6 +896,13 @@ fn outbound_builder(timeout_secs: Option<u64>) -> reqwest::ClientBuilder {
         ))
 }
 
+// Folding a streamed answer back into one response. Its own file because "how a
+// provider is called" and "how the pieces of an answer are put back together"
+// are two subjects, and this one has enough of it to push the module past the
+// structure limit.
+mod stream;
+pub use stream::collect_stream;
+
 /// Trait for LLM providers.
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -913,6 +929,7 @@ pub trait Provider: Send + Sync {
                     id: Some(tc.id.clone()),
                     name: Some(tc.name.clone()),
                     arguments_delta: tc.arguments.to_string(),
+                    thought_signature: tc.thought_signature.clone(),
                 })
                 .collect(),
             tokens: Some(response.tokens_used),

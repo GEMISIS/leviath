@@ -76,6 +76,11 @@ fn default_interaction_timeout_secs() -> u64 {
     leviath_runtime::interaction_hub::DEFAULT_INTERACTION_TIMEOUT_SECS
 }
 
+/// Streamed inference is on unless the operator says otherwise.
+fn default_stream_inference() -> bool {
+    true
+}
+
 fn default_inference_retry_attempts() -> u32 {
     leviath_runtime::DEFAULT_RETRY_ATTEMPTS
 }
@@ -124,6 +129,24 @@ pub struct LimitsConfig {
     /// round-trip per inference for providers with a remote count endpoint.
     #[serde(default)]
     pub exact_token_counting: bool,
+
+    /// Whether a model that can stream is asked to. Defaults to `true`.
+    ///
+    /// It makes no difference to what an agent sees: the chunks are folded back
+    /// into one finished turn either way, because a half-written sentence is
+    /// not something a run can act on. It makes a great deal of difference to
+    /// the connection. A buffered call sends nothing back until the model has
+    /// finished thinking, so a long turn is a socket that has been silent for
+    /// minutes - and a NAT, a VPN or a corporate proxy takes a silent socket
+    /// for a dead one and closes it, failing a request that was going fine.
+    ///
+    /// Set it to `false` if a provider's stream misbehaves; the buffered path
+    /// stays as it was. A provider that does not advertise streaming for the
+    /// model in hand is called the old way regardless.
+    ///
+    /// Read once at daemon start, so a change needs a daemon restart.
+    #[serde(default = "default_stream_inference")]
+    pub stream_inference: bool,
 
     /// Wall-clock timeout (seconds) for a Rhai script tool's `shell()` host call,
     /// mirroring the built-in shell tool's own 60-second cap so a script can't
@@ -501,6 +524,7 @@ impl Default for LimitsConfig {
             max_agents_per_run: 0,
             default_max_iterations: default_default_max_iterations(),
             exact_token_counting: false,
+            stream_inference: default_stream_inference(),
             script_shell_timeout_secs: default_script_shell_timeout_secs(),
             script_http_timeout_secs: default_script_http_timeout_secs(),
             script_http_max_per_host: default_script_http_max_per_host(),

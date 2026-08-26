@@ -141,6 +141,7 @@ max_concurrent_inferences = 8    # in-flight requests per model without its own 
 max_concurrent_tools      = 8    # agents whose tool batches may run at once, daemon-wide
 default_max_iterations    = 50   # fallback cap for a stage that sets none
 exact_token_counting      = false
+stream_inference          = true # ask a model that can stream to stream
 script_shell_timeout_secs = 60
 mcp_idle_disconnect_secs  = 60   # disconnect an MCP server no agent has used for this long
 stall_timeout_secs        = 60   # fail a run that can never dispatch
@@ -168,6 +169,7 @@ cerebras = 1                     # every model this provider serves, together
 | `max_concurrent_tools` | `8` | Size of the shared tool worker pool. Clamped to at least 1 |
 | `default_max_iterations` | `50` | A stage's own `max_iterations` always wins |
 | `exact_token_counting` | `false` | Count each request exactly before sending it. See below |
+| `stream_inference` | `true` | Ask a model that can stream to stream. See below |
 | `script_shell_timeout_secs` | `60` | Cap on a Rhai script tool's `shell()` host call |
 | `mcp_idle_disconnect_secs` | `60` | Disconnect an [MCP server](/docs/mcp) no agent has used for this long. It reconnects on next use |
 | `stall_timeout_secs` | `60` | Fail a run that can never dispatch. See below |
@@ -186,11 +188,20 @@ cerebras = 1                     # every model this provider serves, together
 | `notify_spend_usd` | empty | Dollar figures to be told about while a run is still going. See below |
 | `max_agents_per_run` | `0` | Most agents one run may create, sub-agents included. `0` is no ceiling. See below |
 
-Eleven of those need more than a table cell.
+Twelve of those need more than a table cell.
 
 **`exact_token_counting`** measures each assembled request before sending it and refuses one that
 would overflow the window. On providers with a remote counting endpoint that costs a network round
 trip per inference, so it is off by default.
+
+**`stream_inference`** asks a model that can stream to stream. It changes nothing an agent sees:
+the chunks are folded back into one finished turn before anything reads it, because half a sentence
+is not something a run can act on. What it changes is the connection. A buffered call sends nothing
+back until the model has finished thinking, so a long turn is a socket that has been silent for
+minutes, and a NAT, a VPN or a corporate proxy takes a silent socket for a dead one and closes it -
+failing a request that was going perfectly well. Set it to `false` if a provider's stream
+misbehaves; a provider that does not offer streaming for the model in hand is called the old way
+regardless.
 
 **`max_agents_per_run`** is what makes a run's cost predictable:
 

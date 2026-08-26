@@ -3588,6 +3588,7 @@ enabled = false
                 max_agents_per_run: 0,
                 default_max_iterations: Some(99),
                 exact_token_counting: false,
+                stream_inference: true,
                 script_shell_timeout_secs: 45,
                 script_http_timeout_secs: 15,
                 script_http_max_per_host: 2,

@@ -1075,6 +1075,10 @@ fn parse_sse_event(buffer: &mut String, tool_index: &mut usize) -> Option<Stream
                             id: None,
                             name: None,
                             arguments_delta: partial.to_string(),
+                            // Anthropic signs nothing: the signature is a
+                            // Gemini 3.x requirement carried on the
+                            // OpenAI-shaped wire.
+                            thought_signature: None,
                         }],
                         tokens: None,
                         finish_reason: None,
@@ -1105,6 +1109,7 @@ fn parse_sse_event(buffer: &mut String, tool_index: &mut usize) -> Option<Stream
                         id: Some(id),
                         name: Some(name),
                         arguments_delta: String::new(),
+                        thought_signature: None,
                     }],
                     tokens: None,
                     finish_reason: None,

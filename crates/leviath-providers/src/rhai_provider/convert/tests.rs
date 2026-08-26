@@ -106,6 +106,26 @@ fn chunk_with_tools_tokens_finish() {
     assert_eq!(c.tool_calls[0].arguments_delta, "{\"a\":");
     assert_eq!(c.tokens.unwrap().total_tokens, 9);
     assert_eq!(c.finish_reason, Some(FinishReason::Complete));
+    assert!(
+        c.tool_calls[0].thought_signature.is_none(),
+        "a script that says nothing about signatures is not made to invent one"
+    );
+}
+
+/// A script fronting an endpoint that signs its tool calls passes the signature
+/// through, because the model it is fronting will demand it back on the next
+/// turn and only the script knows it is there.
+#[test]
+fn chunk_carries_a_thought_signature_a_script_supplied() {
+    let c = chunk_from_dynamic(dyn_from_json(
+        r#"{"tool_calls":[{"index":0,"id":"x","name":"f","arguments_delta":"{}",
+                "thought_signature":"sig-abc"}]}"#,
+    ))
+    .unwrap();
+    assert_eq!(
+        c.tool_calls[0].thought_signature.as_deref(),
+        Some("sig-abc")
+    );
 }
 
 #[test]

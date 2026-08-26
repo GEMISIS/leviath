@@ -471,6 +471,7 @@ fn build_world(pools: InferencePools) -> (World, mpsc::UnboundedReceiver<Inferen
         wake: Arc::new(Notify::new()),
         runtime: Handle::current(),
         exact_token_counting: false,
+        stream_inference: true,
     });
     (world, rx)
 }

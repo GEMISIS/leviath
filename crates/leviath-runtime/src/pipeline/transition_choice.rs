@@ -207,6 +207,11 @@ pub fn dispatch_transition_choice(
             // Routing responses are tiny (≤256 tokens) and always fit; skip the
             // extra count call for them.
             exact_token_counting: false,
+            // And buffered for the same reason: a stage name is one short
+            // answer that arrives in one piece. Streaming exists here to keep a
+            // long silent generation from being mistaken for a dead socket, and
+            // this call is never long enough for that to arise.
+            stream: false,
         };
         let cancel = crate::cancel::CancelToken::new();
         // Supervised for the same reason as the inference lane: the agent is

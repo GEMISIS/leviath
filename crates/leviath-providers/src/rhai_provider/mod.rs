@@ -398,6 +398,7 @@ fn collapse_chunk(response: InferenceResponse) -> StreamChunk {
                 id: Some(tc.id.clone()),
                 name: Some(tc.name.clone()),
                 arguments_delta: tc.arguments.to_string(),
+                thought_signature: tc.thought_signature.clone(),
             })
             .collect(),
         tokens: Some(response.tokens_used),

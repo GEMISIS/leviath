@@ -60,6 +60,28 @@ same list.
   the path; `t` there still narrows it to the path and the options. This is the
   same pair of pictures The Lair shows on the web.
 
+- Changed: a model that can stream is now asked to. It makes no difference to
+  what an agent sees - the chunks are folded back into one finished turn before
+  anything reads it, because half a sentence is not something a run can act on -
+  and every difference to the connection. A buffered call sends nothing back
+  until the model has finished thinking, so a long turn was a socket that had
+  been silent for minutes, and a NAT, a VPN or a corporate proxy takes a silent
+  socket for a dead one and closes it, failing a request that was going
+  perfectly well. Every provider had implemented streaming and nothing in the
+  daemon had ever called it. `[limits] stream_inference = false` returns to
+  buffering, and a provider that does not offer streaming for the model in hand
+  is called the old way regardless.
+
+- Fixed: a streamed call reports its tokens, its cost and its tool calls the way
+  a buffered one does. Three things had to be true before streaming could be
+  turned on and none of them were. An OpenAI-shaped stream reports no usage
+  unless asked, and OpenRouter never asked - so a streamed run there would have
+  priced itself at zero, on the one provider whose usage carries the price the
+  account was actually charged rather than an estimate. The chunk that carries
+  that price was also the one arm that dropped it. And a streamed tool call had
+  nowhere to carry the `thought_signature` Gemini 3.x issues and then demands
+  back, so the next turn would have been refused.
+
 - Fixed: a failed model call says what went wrong. `FailureKind` shipped in
   0.5.1 and never reached the one call that matters: every provider's `infer`
   and `infer_stream` goes through a single send, and that send threw the typed

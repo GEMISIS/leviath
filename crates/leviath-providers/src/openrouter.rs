@@ -690,7 +690,7 @@ impl Provider for OpenRouterProvider {
         }
 
         let mut body = self.build_request_body(request);
-        body["stream"] = serde_json::Value::Bool(true);
+        crate::openai_compat::make_streaming(&mut body);
         let url = format!("{}/chat/completions", self.base_url);
 
         let response = send_chat_request(

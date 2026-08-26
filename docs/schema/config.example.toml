@@ -38,6 +38,7 @@ max_concurrent_inferences = 8
 max_concurrent_tools = 8
 default_max_iterations = 50
 exact_token_counting = false
+stream_inference = true
 script_shell_timeout_secs = 60
 stall_timeout_secs = 60
 dead_cycles_before_relief = 10

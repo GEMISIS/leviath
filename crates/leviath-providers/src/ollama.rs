@@ -949,6 +949,8 @@ impl Stream for OllamaNdjsonStream {
                                 id: Some(next_tool_call_id()),
                                 name: Some(name),
                                 arguments_delta: arguments.to_string(),
+                                // Local models sign nothing.
+                                thought_signature: None,
                             });
                         }
                     }

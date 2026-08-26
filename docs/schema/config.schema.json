@@ -126,6 +126,11 @@
           "type": "boolean",
           "default": false
         },
+        "stream_inference": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask a model that can stream to stream. The chunks are folded back into one finished turn either way; what changes is that the connection keeps moving."
+        },
         "script_shell_timeout_secs": {
           "type": "integer",
           "minimum": 0,

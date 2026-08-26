@@ -634,6 +634,7 @@ mod tests {
             wake: Arc::new(Notify::new()),
             runtime: Handle::current(),
             exact_token_counting: false,
+            stream_inference: true,
         });
         (world, cs_rx)
     }

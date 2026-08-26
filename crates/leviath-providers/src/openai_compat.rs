@@ -257,6 +257,38 @@ fn wants_signed_tool_calls(model: &str) -> bool {
     model.contains("gemini")
 }
 
+/// Turn a built chat body into a streaming one.
+///
+/// Exists because `stream = true` on its own is a trap: an OpenAI-shaped API
+/// reports no usage at all for a streamed call unless `stream_options` asks for
+/// it, so a provider that sets one key and not the other bills every streamed
+/// turn as free. OpenRouter did exactly that, and OpenRouter is the provider
+/// where it costs most - its usage chunk carries the price the account was
+/// actually charged, which for a model we hold no published rates for is the
+/// only figure there is.
+///
+/// One function so the pairing is not something each provider has to remember.
+/// Anthropic is deliberately not a caller: its own protocol reports usage on
+/// `message_start` and `message_delta` without being asked, and
+/// `stream_options` is not part of it.
+pub fn make_streaming(body: &mut serde_json::Value) {
+    body["stream"] = serde_json::Value::Bool(true);
+    body["stream_options"] = serde_json::json!({ "include_usage": true });
+}
+
+/// The opaque per-call signature Gemini 3.x issues under `extra_content.google`
+/// and then demands back verbatim on the turn that answers the call.
+///
+/// One reader for the buffered and the streamed shape, because they carry it in
+/// the same place and getting it wrong in one of them is invisible until a run
+/// makes a second turn: a call replayed without its signature is refused, and
+/// the refusal names the field rather than the code path that dropped it.
+fn thought_signature_of(call: &serde_json::Value) -> Option<String> {
+    call.pointer("/extra_content/google/thought_signature")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 /// Fold every unsigned function call, and the result that answered it, into the
 /// assistant's own words.
 ///
@@ -746,15 +778,7 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
                 .unwrap_or("{}");
             let arguments: serde_json::Value = serde_json::from_str(arguments_str)
                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-            // Gemini 3.x returns an opaque `thought_signature` per function
-            // call under `extra_content.google` and rejects a follow-up that
-            // omits it, so capture it here and replay it verbatim below.
-            let thought_signature = tc
-                .get("extra_content")
-                .and_then(|e| e.get("google"))
-                .and_then(|g| g.get("thought_signature"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+            let thought_signature = thought_signature_of(tc);
             tool_calls.push(ToolCall {
                 id,
                 name,
@@ -974,14 +998,22 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                         // Same normalisation as the non-streaming path: the
                         // details come back out of `prompt_tokens` so the three
                         // input counts stay disjoint.
-                        tokens: Some(TokenUsage::new(
-                            prompt_tokens
-                                .saturating_sub(cached_tokens)
-                                .saturating_sub(cache_write_tokens),
-                            cached_tokens,
-                            cache_write_tokens,
-                            completion_tokens,
-                        )),
+                        tokens: Some(
+                            TokenUsage::new(
+                                prompt_tokens
+                                    .saturating_sub(cached_tokens)
+                                    .saturating_sub(cache_write_tokens),
+                                cached_tokens,
+                                cache_write_tokens,
+                                completion_tokens,
+                            )
+                            // And the same cost passthrough, which this arm was
+                            // missing. A choice-less usage chunk is exactly how
+                            // OpenRouter reports what it charged, so the one
+                            // shape that carries a real price was the one that
+                            // dropped it.
+                            .with_reported_cost(usage.get("cost").and_then(|v| v.as_f64())),
+                        ),
                         finish_reason: None,
                     })));
                 }
@@ -1016,6 +1048,10 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                         id,
                         name,
                         arguments_delta: args.to_string(),
+                        // Arrives on the delta that opens the call, beside the
+                        // id and the name, and read the same way the buffered
+                        // path reads it.
+                        thought_signature: thought_signature_of(tc),
                     });
                 }
             }
@@ -1156,6 +1192,80 @@ mod tests {
 
         let kind = err.failure_kind().expect("classified");
         assert!(kind.provider_was_reached());
+    }
+
+    /// Asking to stream means asking for usage too, and the two travel
+    /// together so that no provider can set one and forget the other.
+    ///
+    /// OpenRouter did forget, which was harmless only while nothing streamed:
+    /// its choice-less usage chunk is where the price the account was charged
+    /// arrives, so a streamed run would have reported every turn as free.
+    #[test]
+    fn asking_to_stream_asks_for_the_usage_as_well() {
+        let mut body = serde_json::json!({ "model": "m" });
+        super::make_streaming(&mut body);
+        assert_eq!(body["stream"], serde_json::json!(true));
+        assert_eq!(
+            body["stream_options"],
+            serde_json::json!({ "include_usage": true })
+        );
+    }
+
+    /// The price a provider states survives a streamed call.
+    ///
+    /// The usage arrives in a chunk with no `choices`, and that arm was the one
+    /// that built its `TokenUsage` without the cost passthrough its sibling
+    /// had - so the one shape that carries a real invoice figure was the one
+    /// that dropped it.
+    #[test]
+    fn a_usage_only_chunk_keeps_the_cost_the_provider_reported() {
+        let mut buf = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "usage": {
+                    "prompt_tokens": 50,
+                    "completion_tokens": 25,
+                    "cost": 0.00123
+                }
+            })
+        );
+        let chunk = super::parse_openai_sse_event(&mut buf)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let tokens = chunk.tokens.expect("a usage chunk carries usage");
+        assert_eq!(tokens.reported_cost_usd, Some(0.00123));
+    }
+
+    /// A streamed tool call carries the signature the model issued for it.
+    ///
+    /// Gemini 3.x refuses a function call replayed without its
+    /// `thought_signature`, and `ToolCallDelta` had nowhere to put one - so a
+    /// streamed tool call would have been rejected on the following turn, with
+    /// an error naming the field rather than the path that lost it.
+    #[test]
+    fn a_streamed_tool_call_carries_its_thought_signature() {
+        let mut buf = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "choices": [{
+                    "delta": { "tool_calls": [{
+                        "index": 0,
+                        "id": "call-1",
+                        "function": { "name": "read_file", "arguments": "{}" },
+                        "extra_content": { "google": { "thought_signature": "sig-abc" } }
+                    }]}
+                }]
+            })
+        );
+        let chunk = super::parse_openai_sse_event(&mut buf)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            chunk.tool_calls[0].thought_signature.as_deref(),
+            Some("sig-abc")
+        );
     }
 
     /// The refusal that killed a run, and the shapes that must NOT trip it.
