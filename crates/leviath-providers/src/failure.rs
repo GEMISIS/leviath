@@ -132,18 +132,11 @@ impl FailureKind {
             // because the concrete error types live in private dependencies of
             // `reqwest` and are not nameable from here.
             //
-            // Only the phrases these libraries actually emit, taken from real
-            // failures rather than guessed. An earlier version of this looked
-            // for "tls" and "certificate" and caught neither: rustls answers a
-            // plaintext port with "received corrupt message of type
-            // invalidcontenttype", which contains no word anyone would think to
-            // search for.
-            //
             // Anything unrecognised stays `Transport` rather than being folded
             // into the nearest guess. A wrong remedy sends somebody to check
             // their certificates when the port was closed, which is worse than
             // "could not be reached".
-            return connect_failure(&error_chain_text(e));
+            return connect_failure(io_error_kind(e), &error_chain_text(e));
         }
         FailureKind::Transport
     }
@@ -162,22 +155,49 @@ impl FailureKind {
     }
 }
 
-/// Place a connect-stage failure by what its cause chain says.
+/// The `std::io::ErrorKind` underneath a `reqwest` failure, when there is one.
 ///
-/// A free function taking the text, so every arm is reachable from a test: a
-/// chain that matches nothing cannot be produced from a real socket on demand,
-/// and it is the arm that most needs to be right - it is what stops an
-/// unrecognised failure being folded into the nearest guess.
+/// A refused connection arrives as a real `io::Error` three layers down the
+/// cause chain, and its `kind()` is the same value on every platform. The text
+/// is not: the same refusal reads "connection refused (os error 61)" on macOS,
+/// "os error 111" on Linux, and "No connection could be made because the target
+/// machine actively refused it. (os error 10061)" on Windows. Matching on the
+/// kind is what makes this classifier say the same thing on all three.
+fn io_error_kind(e: &(dyn std::error::Error + 'static)) -> Option<std::io::ErrorKind> {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return Some(io.kind());
+        }
+        source = cause.source();
+    }
+    None
+}
+
+/// Place a connect-stage failure, by its `io::ErrorKind` where it has one and
+/// by what its cause chain says where it does not.
 ///
-/// The phrases are ones these libraries actually emit, taken from real failures.
-/// An earlier version looked for "tls" and "certificate" and caught neither:
-/// rustls answers a plaintext port with "received corrupt message of type
-/// invalidcontenttype", which contains no word anyone would think to search for.
-fn connect_failure(chain: &str) -> FailureKind {
-    const DNS: [&str; 3] = [
+/// A free function taking both, so every arm is reachable from a test: a chain
+/// that matches nothing cannot be produced from a real socket on demand, and it
+/// is the arm that most needs to be right - it is what stops an unrecognised
+/// failure being folded into the nearest guess.
+///
+/// The kind is tried first because it is portable. Text is the fallback, and it
+/// carries the cases the standard library has no kind for - a name that did not
+/// resolve and a handshake that failed both arrive as `Uncategorized` or as no
+/// `io::Error` at all. Those phrases are ones these libraries really emit, taken
+/// from measured failures: an earlier version looked for "tls" and "certificate"
+/// and caught neither, because rustls answers a plaintext port with "received
+/// corrupt message of type invalidcontenttype", which contains no word anyone
+/// would think to search for.
+fn connect_failure(io: Option<std::io::ErrorKind>, chain: &str) -> FailureKind {
+    use std::io::ErrorKind;
+
+    const DNS: [&str; 4] = [
         "dns error",
         "failed to lookup address",
         "name or service not known",
+        "no such host is known",
     ];
     const TLS: [&str; 6] = [
         "certificate",
@@ -187,15 +207,25 @@ fn connect_failure(chain: &str) -> FailureKind {
         "unknown issuer",
         "protocol version",
     ];
-    const REFUSED: [&str; 3] = ["connection refused", "os error 61", "os error 111"];
 
+    // A name that did not resolve can surface with a socket error underneath it
+    // on some stacks, so the text is asked first where it is unambiguous.
     if DNS.iter().any(|p| chain.contains(p)) {
         return FailureKind::DnsFailure;
+    }
+    match io {
+        Some(ErrorKind::ConnectionRefused) => return FailureKind::ConnectionRefused,
+        Some(ErrorKind::TimedOut) => return FailureKind::Timeout,
+        Some(ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted) => {
+            return FailureKind::ConnectionDropped;
+        }
+        _ => {}
     }
     if TLS.iter().any(|p| chain.contains(p)) {
         return FailureKind::TlsFailure;
     }
-    if REFUSED.iter().any(|p| chain.contains(p)) {
+    // Kept for a stack that reports a refusal with no `io::Error` to read.
+    if chain.contains("connection refused") || chain.contains("actively refused") {
         return FailureKind::ConnectionRefused;
     }
     // Deliberately not "probably refused". A wrong remedy sends somebody to
@@ -308,6 +338,11 @@ mod tests {
             use std::io::Write;
             let mut socket = listener.accept().expect("the client connects").0;
             let _ = socket.write_all(b"HTTP/1.1 200 OK\r\n\r\n");
+            // Held open. Returning here closes the socket, and a close with the
+            // client's handshake still unread sends a reset that discards the
+            // bytes just written - so rustls would report a dropped connection
+            // rather than the plaintext it was meant to choke on.
+            std::thread::sleep(std::time::Duration::from_secs(30));
         });
 
         let client = build_http_client(Some(5)).expect("a client builds");
@@ -333,16 +368,105 @@ mod tests {
 
 #[cfg(test)]
 mod connect_failure_tests {
-    use super::{FailureKind, connect_failure};
+    use super::{FailureKind, connect_failure, error_chain_text, io_error_kind};
+    use std::io::ErrorKind;
 
-    /// Each family, by a phrase these libraries really emit.
+    /// An error with nothing socket-shaped anywhere in its chain, which no real
+    /// connect failure produces - every one of those has an `io::Error` a few
+    /// layers down. Worth stating anyway: the answer is "nothing to read", not a
+    /// guess, and the text is left to place the failure on its own.
     #[test]
-    fn each_recognised_family_is_placed() {
+    fn an_error_with_no_socket_beneath_it_claims_nothing() {
+        #[derive(Debug)]
+        struct Bare;
+        impl std::fmt::Display for Bare {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("nothing socket-shaped here")
+            }
+        }
+        impl std::error::Error for Bare {}
+
+        // Put through the pair together, which is how it is really reached:
+        // nothing to read from the kind, so the text has to place it alone.
+        assert_eq!(io_error_kind(&Bare), None);
+        assert_eq!(
+            connect_failure(io_error_kind(&Bare), &error_chain_text(&Bare)),
+            FailureKind::Transport
+        );
+    }
+
+    /// And one that is buried rather than outermost, which is where a real one
+    /// always sits: `reqwest` wraps it three deep.
+    #[test]
+    fn a_buried_socket_error_is_still_found() {
+        #[derive(Debug)]
+        struct Wrapper(std::io::Error);
+        impl std::fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("sending the request")
+            }
+        }
+        impl std::error::Error for Wrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let wrapped = Wrapper(std::io::Error::from(ErrorKind::ConnectionRefused));
+        assert_eq!(io_error_kind(&wrapped), Some(ErrorKind::ConnectionRefused));
+        // The chain text reaches the buried layer too, which is what the
+        // fallback reads when the kind says nothing.
+        let chain = error_chain_text(&wrapped);
+        assert!(chain.contains("sending the request"), "{chain}");
+        assert!(chain.contains("refused"), "{chain}");
+    }
+
+    /// The portable half. These are the kinds a socket really reports, and the
+    /// reason this is matched at all: the same refusal is "os error 61" on
+    /// macOS, "os error 111" on Linux and "os error 10061" on Windows, so a
+    /// classifier built on the text alone answers differently per platform.
+    #[test]
+    fn a_socket_error_kind_places_the_failure_on_any_platform() {
+        for (kind, expected) in [
+            (ErrorKind::ConnectionRefused, FailureKind::ConnectionRefused),
+            (ErrorKind::TimedOut, FailureKind::Timeout),
+            (ErrorKind::ConnectionReset, FailureKind::ConnectionDropped),
+            (ErrorKind::ConnectionAborted, FailureKind::ConnectionDropped),
+        ] {
+            // Deliberately with no text to lean on: the kind alone has to carry it.
+            assert_eq!(connect_failure(Some(kind), ""), expected, "{kind:?}");
+        }
+    }
+
+    /// A kind this does not place falls through to the text rather than being
+    /// answered from the kind alone.
+    #[test]
+    fn an_unplaced_kind_defers_to_the_text() {
+        assert_eq!(
+            connect_failure(Some(ErrorKind::Other), "invalid peer certificate"),
+            FailureKind::TlsFailure
+        );
+        assert_eq!(
+            connect_failure(Some(ErrorKind::Other), "nothing recognisable"),
+            FailureKind::Transport
+        );
+    }
+
+    /// The text half, by phrases these libraries really emit. DNS and TLS have
+    /// no `io::ErrorKind` of their own, so this is the only signal for them.
+    #[test]
+    fn each_recognised_family_is_placed_from_the_text() {
         for chain in [
             "client error (connect) | dns error: failed to lookup address information",
             "name or service not known",
+            // Windows says this where Unix says "failed to lookup address".
+            "no such host is known. (os error 11001)",
         ] {
-            assert_eq!(connect_failure(chain), FailureKind::DnsFailure, "{chain}");
+            assert_eq!(
+                connect_failure(None, chain),
+                FailureKind::DnsFailure,
+                "{chain}"
+            );
         }
         for chain in [
             "received corrupt message of type invalidcontenttype",
@@ -351,18 +475,38 @@ mod connect_failure_tests {
             "tls error",
             "peer misbehaved: protocol version",
         ] {
-            assert_eq!(connect_failure(chain), FailureKind::TlsFailure, "{chain}");
+            assert_eq!(
+                connect_failure(None, chain),
+                FailureKind::TlsFailure,
+                "{chain}"
+            );
         }
         for chain in [
             "tcp connect error: connection refused (os error 61)",
-            "os error 111",
+            // Windows phrasing, which shares no word with the Unix one.
+            "no connection could be made because the target machine actively \
+             refused it. (os error 10061)",
         ] {
             assert_eq!(
-                connect_failure(chain),
+                connect_failure(None, chain),
                 FailureKind::ConnectionRefused,
                 "{chain}"
             );
         }
+    }
+
+    /// A resolution failure is named as one even when a socket error sits
+    /// underneath it, because "check the hostname" and "check the port" send
+    /// somebody to different places.
+    #[test]
+    fn a_name_that_did_not_resolve_outranks_the_socket_kind() {
+        assert_eq!(
+            connect_failure(
+                Some(ErrorKind::ConnectionRefused),
+                "dns error: failed to lookup address information"
+            ),
+            FailureKind::DnsFailure
+        );
     }
 
     /// The arm that matters most and cannot be produced from a real socket: a
@@ -372,10 +516,10 @@ mod connect_failure_tests {
     #[test]
     fn an_unrecognised_chain_is_not_guessed_at() {
         assert_eq!(
-            connect_failure("something nobody here has seen before"),
+            connect_failure(None, "something nobody here has seen before"),
             FailureKind::Transport
         );
-        assert_eq!(connect_failure(""), FailureKind::Transport);
+        assert_eq!(connect_failure(None, ""), FailureKind::Transport);
     }
 }
 

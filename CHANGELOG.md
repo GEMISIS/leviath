@@ -20,9 +20,11 @@ same list.
   provider" covered four different problems with four different remedies. The
   kind is now worked out where the typed error still exists, carried in the
   message so it survives every layer that only passes strings, and logged as a
-  `failure_kind` field. HTTP statuses are split too: a 404 (usually a `base_url`
-  path or a model that is not there) reads differently from a 400, and both
-  differently from a 5xx.
+  `failure_kind` field. A refusal is placed by the socket error underneath it
+  rather than by its wording, so Windows, macOS and Linux all name it the same
+  thing. HTTP statuses are split too: a 404 (usually a `base_url` path or a model
+  that is not there) reads differently from a 400, and both differently from a
+  5xx.
 - Added: a Rhai provider can supply `failure_kind` alongside `kind` when it
   throws. `kind` says how the runtime should treat the failure; `failure_kind`
   says what it was. A name this build does not know is ignored rather than

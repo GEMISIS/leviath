@@ -1503,9 +1503,17 @@ mod tests {
             .expect_err("does not resolve");
         assert_eq!(FailureKind::from_reqwest(&dns), FailureKind::DnsFailure);
 
-        // Port 1 needs privileges to bind, so nothing of ours is listening.
+        // A port nothing is listening on: an ephemeral port is claimed and the
+        // listener dropped, so the OS answers the connection with a refusal.
+        // Port 1 was used here and is not reliable - a Windows runner drops the
+        // SYN rather than refusing it, and the connection times out instead,
+        // which is a different kind and a different remedy.
+        let closed = {
+            let claimed = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+            claimed.local_addr().expect("has an address")
+        };
         let refused = client
-            .get("http://127.0.0.1:1/v1/models")
+            .get(format!("http://{closed}/v1/models"))
             .send()
             .await
             .expect_err("refused");
@@ -1560,8 +1568,17 @@ mod tests {
     #[tokio::test]
     async fn the_kind_is_readable_back_off_the_error() {
         let client = build_http_client(Some(2)).expect("a client builds");
+        // A port nothing is listening on: an ephemeral port is claimed and the
+        // listener dropped, so the OS answers the connection with a refusal.
+        // Port 1 was used here and is not reliable - a Windows runner drops the
+        // SYN rather than refusing it, and the connection times out instead,
+        // which is a different kind and a different remedy.
+        let closed = {
+            let claimed = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+            claimed.local_addr().expect("has an address")
+        };
         let e = client
-            .get("http://127.0.0.1:1/v1/models")
+            .get(format!("http://{closed}/v1/models"))
             .send()
             .await
             .expect_err("refused");
