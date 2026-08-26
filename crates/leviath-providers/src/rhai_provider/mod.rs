@@ -586,6 +586,29 @@ impl Provider for RhaiProvider {
         None
     }
 
+    /// The catalogue this script publishes, when it publishes one.
+    ///
+    /// The same two sources [`Self::serves_model`] consults, in the same order,
+    /// but reported as a whole so a caller can tell "this provider says it
+    /// does not serve that" from "this provider has not been asked". A script
+    /// with a `list_models` that primed, or a `[model_providers.<name>] serves`
+    /// list, has named everything it takes; a script with neither has said
+    /// nothing, and `None` keeps it unchecked rather than having every model
+    /// named against it called wrong.
+    ///
+    /// `[model_capabilities]` entries are deliberately left out. One of those
+    /// is somebody describing a model, which `serves_model` reads as a claim to
+    /// serve it, but a handful of described models is not a statement that the
+    /// rest are refused.
+    fn served_catalog(&self) -> Option<Vec<String>> {
+        let served = leviath_core::sync::lock(&self.served_models);
+        if !served.is_empty() {
+            return Some(served.clone());
+        }
+        drop(served);
+        (!self.declared_models.is_empty()).then(|| (*self.declared_models).clone())
+    }
+
     /// Ask the script what it serves, once, so [`Self::serves_model`] can answer
     /// on the synchronous resolve path.
     ///

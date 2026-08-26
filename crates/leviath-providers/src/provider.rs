@@ -989,6 +989,27 @@ pub trait Provider: Send + Sync {
         self.serves_model_from_table(model_key)
     }
 
+    /// Every model id this provider will accept, when it is in a position to
+    /// say so.
+    ///
+    /// The difference between this and [`Self::serves_model`] is what a `None`
+    /// means. `serves_model` answers `None` both for a model a provider has
+    /// definitely never heard of and for one it simply cannot check, and a
+    /// caller holding the two together cannot refuse anything: refusing on
+    /// "cannot check" would deny a model that works. So the two are separated
+    /// here. `Some` is a **complete** list, and a name outside it is a name
+    /// this provider will reject. `None` is "cannot say" and every caller
+    /// treats it as "do not check", never as a refusal.
+    ///
+    /// Defaults to `None`, which is the right answer for a provider whose
+    /// catalogue is open (Ollama serves whatever has been pulled, and a name
+    /// missing from that is a model nobody has fetched yet rather than a model
+    /// that does not exist), and for one whose catalogue this build only knows
+    /// from a compiled-in table that may be older than the API.
+    fn served_catalog(&self) -> Option<Vec<String>> {
+        None
+    }
+
     /// [`Self::serves_model`] answered from the compiled-in capability table.
     ///
     /// Split out so an override can fall back to it: a gateway answers from its
@@ -2183,6 +2204,20 @@ mod tests {
         let provider = MinimalProvider;
         let models = provider.list_models().await.unwrap();
         assert!(models.is_empty());
+    }
+
+    /// A provider that has not implemented `served_catalog` says "cannot say",
+    /// never "serves nothing". The difference decides whether a caller may
+    /// refuse a model, and the default has to be the one that refuses nothing -
+    /// an empty `Some(vec![])` here would make every model named against every
+    /// unimplemented provider wrong.
+    ///
+    /// Contrast `serves_model` just above, which answers `None` for both "not
+    /// mine" and "cannot say". Separating the two is the whole point of this
+    /// method existing.
+    #[test]
+    fn default_served_catalog_says_nothing_rather_than_nothing_served() {
+        assert_eq!(MinimalProvider.served_catalog(), None);
     }
 
     /// A provider that has not implemented `pricing` reports no rates, and that

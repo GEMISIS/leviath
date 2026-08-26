@@ -429,6 +429,13 @@ fn execute_reporting_outcome(
         env = env
             .with_providers(&checked.blueprint, config)
             .with_read_paths(&checked.blueprint, config, &workdir);
+        // The primed registry, not a fresh one. A provider that has not been
+        // asked what it serves has no catalogue to report, and a check reading
+        // an empty catalogue would call every model wrong - so this is the one
+        // builder that takes the registry the caller already warmed.
+        if let Some(registry) = registry {
+            env = env.with_provider_catalogs(&checked.blueprint, config, registry);
+        }
     }
     let findings = lint_manifest(&checked.content, &checked.blueprint, &env);
     let (errors, warnings) = match args.json {
@@ -746,8 +753,34 @@ fn print_global_script_report_in(
 /// an install with no reachable provider.
 async fn primed_registry(
     config: Option<&crate::config::Config>,
+    pinned: &[String],
 ) -> Option<leviath_runtime::ProviderRegistry> {
-    primed_registry_with(config, &leviath_providers::provider::build_http_client).await
+    primed_registry_with(
+        config,
+        pinned,
+        &leviath_providers::provider::build_http_client,
+    )
+    .await
+}
+
+/// Every provider the blueprint pins by name, deduplicated.
+///
+/// A script provider is compiled on demand, so one that is neither configured
+/// nor the machine default is never primed and has no catalogue to report -
+/// which would leave the very entries that named it unchecked. Priming exactly
+/// the ones this blueprint mentions costs a compile of a script the author is
+/// already using.
+fn pinned_providers(blueprint: &leviath_core::Blueprint) -> Vec<String> {
+    let mut names: Vec<String> = blueprint
+        .stages
+        .iter()
+        .flat_map(|s| s.model.models.iter())
+        .filter(|e| !e.provider.is_empty())
+        .map(|e| e.provider.clone())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
 }
 
 /// [`primed_registry`], with client construction injected.
@@ -760,19 +793,24 @@ async fn primed_registry(
 ///     crate::commands::run::build_provider_registry_from_config_with
 async fn primed_registry_with(
     config: Option<&crate::config::Config>,
+    pinned: &[String],
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> Option<leviath_runtime::ProviderRegistry> {
     let config = config?;
     let registry =
         crate::commands::run::build_provider_registry_from_config_with(config, build_client)
             .ok()?;
+    // The machine's default, so `lev validate` reports the model a run would
+    // really use on a machine whose default is a script provider rather than
+    // the one it would have used before that provider could answer. Plus every
+    // provider this blueprint pins, so the catalogue check has something to
+    // check against - see `pinned_providers`.
+    let mut also: Vec<&str> = vec![config.default_provider.as_str()];
+    also.extend(pinned.iter().map(String::as_str));
     registry
         .prime_capabilities(
             std::time::Duration::from_secs(VALIDATE_PRIME_TIMEOUT_SECS),
-            // So `lev validate` reports the model a run would really use on a
-            // machine whose default is a script provider, rather than the one
-            // it would have used before that provider could answer.
-            Some(config.default_provider.as_str()),
+            &also,
         )
         .await;
     Some(registry)
@@ -805,7 +843,13 @@ pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
     // table until it is asked. Without this, `validate` and the daemon disagree
     // about which model a stage runs, and the tool whose job is saying what will
     // happen is the one that does not know.
-    let registry = primed_registry(config.as_ref()).await;
+    // Parsed here only to learn which providers to prime; the real parse, with
+    // its error reporting, happens inside `execute_reporting_outcome`. A
+    // manifest that will not parse primes nothing extra and is reported there.
+    let pinned = check_manifest(std::path::Path::new(&args.path))
+        .map(|c| pinned_providers(&c.blueprint))
+        .unwrap_or_default();
+    let registry = primed_registry(config.as_ref(), &pinned).await;
 
     match execute_reporting_outcome(&args, config.as_ref(), registry.as_ref())? {
         ValidateOutcome::Success => Ok(()),
@@ -898,7 +942,7 @@ system_prompt = "hi"
     #[tokio::test]
     async fn no_config_means_no_registry_to_prime() {
         assert!(
-            primed_registry(None).await.is_none(),
+            primed_registry(None, &[]).await.is_none(),
             "nothing to build a registry from"
         );
     }
@@ -930,7 +974,7 @@ system_prompt = "hi"
         // version passed on macOS and failed on Linux.
         let no_client = |_: Option<u64>| Err(leviath_providers::provider::malformed_url_error());
         assert!(
-            primed_registry_with(Some(&config), &no_client)
+            primed_registry_with(Some(&config), &[], &no_client)
                 .await
                 .is_none(),
             "no client, so no providers, so nothing to say"

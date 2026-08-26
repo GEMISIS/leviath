@@ -173,7 +173,7 @@ pub async fn setup_daemon_host_with(
             // answer what it serves and win an open route (issue #598). No
             // effect when the default is a native provider, which is already
             // in the list.
-            Some(config.default_provider.as_str()),
+            &[config.default_provider.as_str()],
         )
         .await;
     // MCP connections are shared across agents; the workdir here only seeds the

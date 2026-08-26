@@ -880,6 +880,183 @@ max_iterations = 10
     assert!(lint(&toml, &env).is_empty());
 }
 
+/// A provider that published its whole catalogue and does not list the model:
+/// the one case where naming a model is provably a fault in the blueprint
+/// rather than a fact about the machine, so it is an error.
+///
+/// This is what a Rhai provider with a `list_models` answers, and what nothing
+/// checked before: `known_models` covers three built-in providers, so a stage
+/// pinned to a script provider's model was never looked at, validated clean,
+/// spawned clean and ran on whatever the fallback chain reached.
+#[test]
+fn a_model_outside_a_complete_catalog_is_an_error() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "groq", model = "llama-3.1-70b" }] }
+max_iterations = 10
+"#,
+    );
+    let env = LintEnv {
+        provider_catalogs: HashMap::from([(
+            "groq".to_string(),
+            ProviderCatalog::Complete(vec![
+                "llama-4-scout".to_string(),
+                "llama-4-maverick".to_string(),
+            ]),
+        )]),
+        ..LintEnv::default()
+    };
+    let findings = lint(&toml, &env);
+    assert_eq!(codes(&findings), ["unserved-model"]);
+    assert!(findings[0].is_error(), "{findings:?}");
+    // The message carries what the provider does list, because "not that one"
+    // without "these instead" sends someone back to the same guess.
+    assert!(
+        findings[0]
+            .message
+            .contains("llama-4-scout, llama-4-maverick"),
+        "{findings:?}"
+    );
+}
+
+/// A catalogue too long to print is summarised with a count, because "it lists
+/// 2" and "it lists 340" send someone to different places: the first to a typo
+/// in the script's own `list_models`, the second to a typo in the blueprint.
+#[test]
+fn a_long_catalog_is_summarised_with_a_count() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "gateway", model = "nope" }] }
+max_iterations = 10
+"#,
+    );
+    let env = LintEnv {
+        provider_catalogs: HashMap::from([(
+            "gateway".to_string(),
+            ProviderCatalog::Complete(
+                (0..10)
+                    .map(|i| format!("model-{i}"))
+                    .collect::<Vec<String>>(),
+            ),
+        )]),
+        ..LintEnv::default()
+    };
+    let findings = lint(&toml, &env);
+    assert_eq!(codes(&findings), ["unserved-model"]);
+    assert!(
+        findings[0]
+            .message
+            .contains("model-0, model-1, model-2 and 7 more"),
+        "{findings:?}"
+    );
+}
+
+/// A gateway namespaces its ids and a blueprint names the model, so the two are
+/// compared by model key. Comparing the raw strings would call every gateway
+/// route a model the gateway refuses.
+#[test]
+fn a_namespaced_catalog_id_answers_for_a_bare_model_name() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "openrouter", model = "gpt-5.5" }] }
+max_iterations = 10
+"#,
+    );
+    let env = LintEnv {
+        provider_catalogs: HashMap::from([(
+            "openrouter".to_string(),
+            ProviderCatalog::Complete(vec!["openai/gpt-5.5".to_string()]),
+        )]),
+        ..LintEnv::default()
+    };
+    assert!(lint(&toml, &env).is_empty());
+}
+
+/// A script provider with neither a `list_models` nor a `serves` list has said
+/// nothing, and nothing is not a refusal. A warning, because the alternative -
+/// staying silent - is what makes "checked and fine" and "never checked" look
+/// identical.
+#[test]
+fn a_script_provider_that_names_no_models_warns_rather_than_errors() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "quiet", model = "anything-at-all" }] }
+max_iterations = 10
+"#,
+    );
+    let env = LintEnv {
+        provider_catalogs: HashMap::from([(
+            "quiet".to_string(),
+            ProviderCatalog::ScriptSaidNothing,
+        )]),
+        ..LintEnv::default()
+    };
+    let findings = lint(&toml, &env);
+    assert_eq!(codes(&findings), ["catalog-unchecked"]);
+    assert!(!findings[0].is_error(), "{findings:?}");
+    // The fix names both ways out, since the author picks by what their script
+    // can do rather than by preference.
+    let fix = findings[0].fix.as_deref().unwrap_or_default();
+    assert!(
+        fix.contains("list_models") && fix.contains("serves"),
+        "{fix}"
+    );
+}
+
+/// The provider's own catalogue is better evidence than a table compiled into
+/// this build, so a live answer settles the entry and the compiled table is not
+/// asked again. Two findings on one entry, one calling it wrong and one calling
+/// it merely unrecognised, is a report nobody can act on.
+#[test]
+fn a_live_catalogue_supersedes_the_compiled_table() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-9" }] }
+max_iterations = 10
+"#,
+    );
+    let env = LintEnv {
+        // The table this build ships has not heard of it...
+        known_models: vec![("anthropic".to_string(), "claude-sonnet-5".to_string())],
+        // ...but the provider itself says it serves it, which is the newer fact.
+        provider_catalogs: HashMap::from([(
+            "anthropic".to_string(),
+            ProviderCatalog::Complete(vec!["claude-sonnet-9".to_string()]),
+        )]),
+        ..LintEnv::default()
+    };
+    assert!(
+        lint(&toml, &env).is_empty(),
+        "the live catalogue answered, so unknown-model has nothing to add"
+    );
+}
+
+/// A provider absent from the map was never asked, and an unasked question is
+/// not a finding. This is the machine that simply does not have that provider,
+/// which `no-reachable-provider` speaks to instead.
+#[test]
+fn a_provider_nobody_asked_about_is_not_checked() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "groq", model = "llama-3.1-70b" }] }
+max_iterations = 10
+"#,
+    );
+    assert!(lint(&toml, &LintEnv::default()).is_empty());
+}
+
 #[test]
 fn a_model_present_in_the_catalog_passes() {
     let env = LintEnv {
@@ -897,8 +1074,12 @@ fn a_model_present_in_the_catalog_passes() {
 /// every time, and was told it would "fall back to your default model" having
 /// "tried" a list of empty strings: `(tried , )`.
 ///
-/// Which providers serve a bare model is a question for the resolver, which has
-/// a registry. This check does not, so an open entry is not evidence either way.
+/// Which providers serve a bare model is a question for a registry, and this
+/// env has none: `unrouted_models` is empty, which is a question nobody asked
+/// rather than an answer of "nothing serves these". So an open entry counts as
+/// reachable and the check stays quiet - see
+/// [`an_open_entry_nothing_serves_is_warned_about`] for what happens once
+/// something has actually asked.
 #[test]
 fn a_stage_naming_models_without_providers_is_not_warned_about() {
     let toml = manifest(
@@ -920,8 +1101,9 @@ max_iterations = 10
     );
 }
 
-/// A stage that pins every route and has none of them is still warned about,
-/// which is the case the check exists for.
+/// One open entry among pinned ones leaves the stage undecided, as long as
+/// nobody has said whether that entry routes. The open entry might be served
+/// here; an empty `unrouted_models` is not the claim that it is not.
 #[test]
 fn a_stage_pinning_only_unreachable_providers_is_still_warned_about() {
     let toml = manifest(
@@ -940,6 +1122,63 @@ max_iterations = 10
     assert!(
         !codes(&findings).contains(&"no-reachable-provider"),
         "one open entry is enough to leave this undecided: {findings:?}"
+    );
+}
+
+/// The case an empty `unrouted_models` could never reach: something did ask
+/// the registry, and the answer was that nothing here serves the one model the
+/// stage names.
+///
+/// This is the shape a typo makes. Before the registry's answer reached this
+/// check, a stage naming a single misspelled model produced no finding at all:
+/// the old test required every entry to pin a provider, and this one pins none.
+#[test]
+fn an_open_entry_nothing_serves_is_warned_about() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = ["gorq-turbo-9"] }
+max_iterations = 10
+"#,
+    );
+    let env = LintEnv {
+        available_providers: Some(known_tools(&["ollama"])),
+        unrouted_models: known_tools(&["gorq-turbo-9"]),
+        ..LintEnv::default()
+    };
+    let findings = lint(&toml, &env);
+    assert_eq!(codes(&findings), ["no-reachable-provider"]);
+    // Rendered bare, the way the blueprint wrote it. `/gorq-turbo-9` would show
+    // a route the entry does not claim to have.
+    assert!(
+        findings[0].message.contains("tried gorq-turbo-9"),
+        "{findings:?}"
+    );
+}
+
+/// One entry that routes is enough, however the others are written. The list is
+/// an ordered set of fallbacks, and a machine declining some of the options is
+/// the normal case rather than a fault.
+#[test]
+fn one_routable_open_entry_keeps_the_stage_quiet() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = ["gorq-turbo-9", "qwen3.5:9b", { provider = "openai", model = "gpt-5.5" }] }
+max_iterations = 10
+"#,
+    );
+    let env = LintEnv {
+        available_providers: Some(known_tools(&["ollama"])),
+        unrouted_models: known_tools(&["gorq-turbo-9"]),
+        ..LintEnv::default()
+    };
+    let findings = lint(&toml, &env);
+    assert!(
+        !codes(&findings).contains(&"no-reachable-provider"),
+        "qwen3.5:9b routes, so the stage has somewhere to run: {findings:?}"
     );
 }
 
@@ -962,7 +1201,9 @@ max_iterations = 10
     let findings = lint(&toml, &env);
     assert_eq!(codes(&findings), ["no-reachable-provider"]);
     assert!(
-        findings[0].message.contains("anthropic, openai"),
+        findings[0]
+            .message
+            .contains("anthropic/claude-sonnet-5, openai/gpt-5.5"),
         "{findings:?}"
     );
 }
@@ -2372,4 +2613,199 @@ fn an_unenforceable_required_region_is_named_once_across_stages() {
         .filter(|c| *c == "required-region-unenforceable")
         .count();
     assert_eq!(hits, 1);
+}
+
+// ─── with_provider_catalogs ───────────────────────────────────────────────────
+
+/// A blueprint pinning `<provider>/<model>` on its one stage, for the builder
+/// tests below.
+fn blueprint_pinning(pairs: &[(&str, &str)]) -> leviath_core::Blueprint {
+    let listed = pairs
+        .iter()
+        .map(|(p, m)| format!("{{ provider = \"{p}\", model = \"{m}\" }}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let toml = manifest(&format!(
+        "[stages.main]\nmode = \"autonomous\"\n\
+         model = {{ models = [{listed}] }}\nmax_iterations = 10\n"
+    ));
+    leviath_core::manifest::parse_manifest(&toml).expect("the fixture parses")
+}
+
+/// A blueprint naming models and leaving every route open.
+fn blueprint_open(models: &[&str]) -> leviath_core::Blueprint {
+    let listed = models
+        .iter()
+        .map(|m| format!("\"{m}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let toml = manifest(&format!(
+        "[stages.main]\nmode = \"autonomous\"\n\
+         model = {{ models = [{listed}] }}\nmax_iterations = 10\n"
+    ));
+    leviath_core::manifest::parse_manifest(&toml).expect("the fixture parses")
+}
+
+/// A registry holding one script provider, written to disk so the layer
+/// compiles it the way it would in production.
+///
+/// `list_models` returns a fixed array rather than calling out, so the
+/// catalogue is real without the test touching the network.
+fn script_registry(
+    name: &str,
+    serves: Option<&[&str]>,
+) -> (leviath_runtime::ProviderRegistry, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let body = match serves {
+        Some(models) => {
+            let entries = models
+                .iter()
+                .map(|m| {
+                    format!(
+                        "#{{ id: \"{m}\", display_name: \"{m}\", \
+                         max_context_tokens: 8192, max_output_tokens: 1024 }}"
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("fn list_models(state) {{ [{entries}] }}\n")
+        }
+        None => String::new(),
+    };
+    std::fs::write(
+        dir.path().join(format!("{name}.rhai")),
+        format!(
+            "fn initialize(config) {{ #{{}} }}\n\
+             fn inference(state, request) {{ #{{ content: \"x\" }} }}\n{body}"
+        ),
+    )
+    .expect("the script writes");
+    let layer = leviath_runtime::script_provider::ScriptProviderLayer::new(
+        dir.path().to_path_buf(),
+        HashMap::new(),
+        HashMap::new(),
+        None,
+        Vec::new(),
+    );
+    let registry =
+        leviath_runtime::ProviderRegistry::new().with_script_layer(std::sync::Arc::new(layer));
+    (registry, dir)
+}
+
+/// The case the whole check exists for: a Rhai provider that answers
+/// `list_models` publishes a complete catalogue, and the blueprint's model is
+/// then checkable.
+#[tokio::test]
+async fn a_script_providers_catalogue_reaches_the_lint() {
+    let (registry, _dir) = script_registry("groq", Some(&["llama-4-scout"]));
+    registry
+        .prime_capabilities(std::time::Duration::from_secs(5), &["groq"])
+        .await;
+    let bp = blueprint_pinning(&[("groq", "llama-3.1-70b")]);
+
+    let env = LintEnv::default().with_provider_catalogs(
+        &bp,
+        &crate::config::Config::default(),
+        &registry,
+    );
+
+    assert_eq!(
+        env.provider_catalogs.get("groq"),
+        Some(&ProviderCatalog::Complete(vec![
+            "llama-4-scout".to_string()
+        ]))
+    );
+    assert!(
+        lint_manifest("", &bp, &env)
+            .iter()
+            .any(|f| f.code == "unserved-model"),
+        "the catalogue is what makes the model checkable"
+    );
+}
+
+/// A script provider with no `list_models` is recorded as having said nothing,
+/// which is a warning rather than a refusal.
+#[tokio::test]
+async fn a_silent_script_provider_is_recorded_as_such() {
+    let (registry, _dir) = script_registry("quiet", None);
+    registry
+        .prime_capabilities(std::time::Duration::from_secs(5), &["quiet"])
+        .await;
+    let bp = blueprint_pinning(&[("quiet", "anything")]);
+
+    let env = LintEnv::default().with_provider_catalogs(
+        &bp,
+        &crate::config::Config::default(),
+        &registry,
+    );
+
+    assert_eq!(
+        env.provider_catalogs.get("quiet"),
+        Some(&ProviderCatalog::ScriptSaidNothing)
+    );
+}
+
+/// A provider this install cannot reach is left out of the map entirely, so its
+/// entries go unchecked. That is `no-reachable-provider`'s question, and
+/// answering it here as well would tell a machine that simply lacks a provider
+/// that its blueprint is wrong.
+#[tokio::test]
+async fn an_unreachable_provider_is_left_out_of_the_map() {
+    let (registry, _dir) = script_registry("groq", Some(&["llama-4-scout"]));
+    let bp = blueprint_pinning(&[("nobody-has-this", "some-model")]);
+
+    let env = LintEnv::default().with_provider_catalogs(
+        &bp,
+        &crate::config::Config::default(),
+        &registry,
+    );
+
+    assert!(
+        env.provider_catalogs.is_empty(),
+        "{:?}",
+        env.provider_catalogs
+    );
+}
+
+/// The same provider named twice in a stage's list is asked once. Asking again
+/// would compile the script a second time for an answer already in hand.
+#[tokio::test]
+async fn a_provider_named_twice_is_asked_once() {
+    let (registry, _dir) = script_registry("groq", Some(&["llama-4-scout"]));
+    registry
+        .prime_capabilities(std::time::Duration::from_secs(5), &["groq"])
+        .await;
+    let bp = blueprint_pinning(&[("groq", "llama-4-scout"), ("groq", "llama-3.1-70b")]);
+
+    let env = LintEnv::default().with_provider_catalogs(
+        &bp,
+        &crate::config::Config::default(),
+        &registry,
+    );
+
+    assert_eq!(env.provider_catalogs.len(), 1);
+}
+
+/// An open entry is answered the way the resolver answers it, so the machine's
+/// default script provider is asked too. Without that, a local box serving
+/// exactly the model the blueprint named would be reported as unrouted.
+#[tokio::test]
+async fn an_open_entry_is_routed_through_the_default_script_provider() {
+    let (registry, _dir) = script_registry("spark", Some(&["local-fast"]));
+    registry
+        .prime_capabilities(std::time::Duration::from_secs(5), &["spark"])
+        .await;
+    let bp = blueprint_open(&["local-fast", "nobody-serves-this"]);
+    let config = crate::config::Config {
+        default_provider: "spark".to_string(),
+        ..crate::config::Config::default()
+    };
+
+    let env = LintEnv::default().with_provider_catalogs(&bp, &config, &registry);
+
+    assert_eq!(
+        env.unrouted_models,
+        known_tools(&["nobody-serves-this"]),
+        "the default script provider serves local-fast, so only the other is unrouted"
+    );
 }
