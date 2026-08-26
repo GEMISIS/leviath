@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Leviath HTTP API",
-    "version": "0.5.0",
+    "version": "0.5.1",
     "description": "The REST and WebSocket surface `lev serve` puts in front of the shared-world daemon. Every route requires a bearer token. Paths here are checked against the router in crates/leviath-cli/src/commands/serve/mod.rs by a test in that file, so a route added without a spec entry fails the build. See https://leviath.dev/docs/api.",
     "license": {
       "name": "MIT"
@@ -1841,6 +1841,27 @@
               "null"
             ],
             "description": "Unix seconds; null until the stage is left."
+          },
+          "active": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "How long this stage actually spent working, as against how long it was the cursor. Null on records written before Leviath kept the clock, which is distinct from a stage that did no work. A stage the run is parked in - paused, or holding a prompt open - is still the cursor stage, so started_at..ended_at counts time nothing spent working.",
+            "properties": {
+              "banked_secs": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Seconds from spans that have already ended."
+              },
+              "since": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Unix seconds when the span in progress began, or null while the clock is stopped. The working total is banked_secs plus now - since when since is set."
+              }
+            }
           }
         }
       },
