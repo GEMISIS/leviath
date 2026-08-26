@@ -346,8 +346,7 @@ impl Provider for OpenAIProvider {
 
         let mut body =
             build_openai_request_body_with(request, TokenLimitField::MaxCompletionTokens);
-        body["stream"] = serde_json::Value::Bool(true);
-        body["stream_options"] = serde_json::json!({ "include_usage": true });
+        crate::openai_compat::make_streaming(&mut body);
         let response = self.post_chat(request, body).await?;
 
         let byte_stream = response.bytes_stream();

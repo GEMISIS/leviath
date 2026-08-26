@@ -446,12 +446,19 @@ pub fn dispatch_inference(
                         .entity(entity)
                         .insert(crate::pipeline::PromptEstimate(window.current_tokens));
                 });
+                // A provider that does not advertise streaming for this model
+                // is called the old way whatever the config says: `infer_stream`
+                // has a default that buffers and then emits one chunk, so
+                // asking anyway would pay for the fold and gain nothing.
+                let stream =
+                    stage.stream_inference && provider.capabilities(&si.model).supports_streaming;
                 let job = InferenceJob {
                     entity,
                     provider,
                     request,
                     permit,
                     exact_token_counting: stage.exact_token_counting,
+                    stream,
                 };
                 let cancel = crate::cancel::CancelToken::new();
                 // Supervised: this agent is about to become `AwaitingInference`,

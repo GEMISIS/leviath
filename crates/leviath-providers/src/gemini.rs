@@ -303,8 +303,7 @@ impl Provider for GeminiProvider {
         }
 
         let mut body = build_openai_request_body(request);
-        body["stream"] = serde_json::Value::Bool(true);
-        body["stream_options"] = serde_json::json!({ "include_usage": true });
+        crate::openai_compat::make_streaming(&mut body);
         let url = format!("{}/chat/completions", self.base_url);
 
         let response = send_chat_request(

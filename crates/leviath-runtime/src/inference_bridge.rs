@@ -147,6 +147,20 @@ pub struct InferenceJob {
     /// context window. Off by default - the runtime's cheap `len/4` estimates
     /// drive normal budgeting; this is the opt-in accurate guard.
     pub exact_token_counting: bool,
+    /// Ask the provider to stream this answer and fold the chunks back into one
+    /// response, rather than waiting for the whole thing at once.
+    ///
+    /// The agent sees no difference - it gets a finished turn either way, which
+    /// is all it can act on. What differs is the socket. A buffered call sends
+    /// nothing back until the model has finished thinking, so a long turn is a
+    /// connection that has been silent for minutes, and anything on the path
+    /// that reaps idle connections - a NAT, a VPN, a corporate proxy - takes it
+    /// as dead and closes it. The run then fails on a request that was going
+    /// perfectly well. A streamed call has bytes moving the whole time.
+    ///
+    /// Set from `[limits] stream_inference` and off for a model whose provider
+    /// does not advertise streaming.
+    pub stream: bool,
 }
 
 /// Flatten a request into the text whose tokens we count for the budget guard:
@@ -260,6 +274,7 @@ pub async fn run_inference_job(
         request,
         permit,
         exact_token_counting,
+        stream,
     } = job;
     let started = std::time::Instant::now();
     // Opt-in accurate pre-flight budget guard: count the assembled request
@@ -297,7 +312,21 @@ pub async fn run_inference_job(
         let mut attempt = 1u32;
         let mut spent = Duration::ZERO;
         loop {
-            match provider.infer(&request).await {
+            // Both arms produce the same finished `InferenceResponse`; the
+            // difference is entirely in how the bytes crossed the wire. A
+            // stream that dies part-way through reports a dropped connection,
+            // which is transient, so it retries here exactly as a failed send
+            // does rather than costing the run its turn.
+            let call = async {
+                match stream {
+                    true => {
+                        let chunks = provider.infer_stream(&request).await?;
+                        leviath_providers::collect_stream(chunks).await
+                    }
+                    false => provider.infer(&request).await,
+                }
+            };
+            match call.await {
                 Ok(response) => break Ok(response),
                 Err(e) => match backoff_after(&retry, &e, attempt, spent) {
                     Some(delay) => {
@@ -433,6 +462,7 @@ mod tests {
             request: test_request(),
             permit: pools.try_acquire("p", "m").expect("free pool"),
             exact_token_counting: false,
+            stream: false,
         }
     }
 
@@ -460,6 +490,7 @@ mod tests {
             request: test_request(),
             permit,
             exact_token_counting: false,
+            stream: false,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let cancel = crate::cancel::CancelToken::new();
@@ -512,6 +543,7 @@ mod tests {
             request: test_request(),
             permit,
             exact_token_counting: false,
+            stream: false,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let policy = RetryPolicy {
@@ -634,6 +666,7 @@ mod tests {
             request: test_request(), // max_tokens: 100
             permit: pools.try_acquire("p", "m").expect("free pool"),
             exact_token_counting: exact,
+            stream: false,
         }
     }
 
@@ -813,6 +846,40 @@ mod tests {
                 None => Err(ProviderError::Other("exhausted".to_string())),
             }
         }
+        /// Deliberately independent of `steps`: a test scripts `infer` to fail
+        /// and then asks for a stream, so a success here can only mean the
+        /// streaming door was used. A recorded flag could not prove that - the
+        /// trait's default `infer_stream` is built on `infer`, so "streamed"
+        /// and "buffered then wrapped" would look identical.
+        async fn infer_stream(
+            &self,
+            _req: &InferenceRequest,
+        ) -> leviath_providers::Result<
+            std::pin::Pin<
+                Box<
+                    dyn futures_core::Stream<
+                            Item = leviath_providers::Result<
+                                leviath_providers::provider::StreamChunk,
+                            >,
+                        > + Send,
+                >,
+            >,
+        > {
+            Ok(Box::pin(tokio_stream::iter(vec![
+                Ok(leviath_providers::provider::StreamChunk {
+                    delta: "streamed".to_string(),
+                    tool_calls: Vec::new(),
+                    tokens: None,
+                    finish_reason: None,
+                }),
+                Ok(leviath_providers::provider::StreamChunk {
+                    delta: String::new(),
+                    tool_calls: Vec::new(),
+                    tokens: Some(leviath_providers::TokenUsage::new(7, 0, 0, 3)),
+                    finish_reason: Some(leviath_providers::FinishReason::Complete),
+                }),
+            ])))
+        }
         async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
             1
         }
@@ -825,6 +892,80 @@ mod tests {
         fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
             leviath_providers::ModelCapabilities::default()
         }
+    }
+
+    /// A job marked to stream is streamed, and the caller gets back the same
+    /// finished turn it would have got from a buffered call.
+    ///
+    /// The flag was the whole point of the change: `infer_stream` had been
+    /// implemented on every provider and called by nothing in production, so
+    /// every real inference held a socket that went silent for as long as the
+    /// model took to think.
+    #[tokio::test]
+    async fn a_job_marked_to_stream_takes_the_streaming_path() {
+        let pools = InferencePools::new(InferencePoolConfig::new());
+        let job = InferenceJob {
+            entity: Entity::from_raw_u32(7)
+                .expect("a small literal index is always a valid entity id"),
+            // `infer` is scripted to fail outright, so an `Ok` below can only
+            // have come through `infer_stream`.
+            provider: Arc::new(Scripted {
+                steps: std::sync::Mutex::new(vec![Step::Permanent].into()),
+                calls: std::sync::Mutex::new(0),
+            }),
+            request: test_request(),
+            permit: pools.try_acquire("p", "m").expect("free pool"),
+            exact_token_counting: false,
+            stream: true,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_inference_job(
+            job,
+            tx,
+            Arc::new(Notify::new()),
+            no_delay(1),
+            crate::cancel::CancelToken::new(),
+        )
+        .await;
+
+        let outcome = rx.try_recv().expect("outcome sent");
+        let response = outcome.result.expect("the streamed call succeeded");
+        assert_eq!(response.content, "streamed");
+        // Folded, not merely forwarded: the usage chunk arrives separately from
+        // the text and has to survive the trip.
+        assert_eq!(response.tokens_used.completion_tokens, 3);
+    }
+
+    /// And a job that is not marked to stream still buffers, so turning the
+    /// switch off is a real escape hatch rather than a no-op.
+    #[tokio::test]
+    async fn a_job_not_marked_to_stream_calls_infer() {
+        let pools = InferencePools::new(InferencePoolConfig::new());
+        let job = InferenceJob {
+            entity: Entity::from_raw_u32(7)
+                .expect("a small literal index is always a valid entity id"),
+            provider: Arc::new(Scripted {
+                steps: std::sync::Mutex::new(vec![Step::Permanent].into()),
+                calls: std::sync::Mutex::new(0),
+            }),
+            request: test_request(),
+            permit: pools.try_acquire("p", "m").expect("free pool"),
+            exact_token_counting: false,
+            stream: false,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_inference_job(
+            job,
+            tx,
+            Arc::new(Notify::new()),
+            no_delay(1),
+            crate::cancel::CancelToken::new(),
+        )
+        .await;
+
+        let outcome = rx.try_recv().expect("outcome sent");
+        let err = outcome.result.expect_err("`infer` was scripted to fail");
+        assert!(err.to_string().contains("permanent"));
     }
 
     /// A policy whose every backoff is zero, so a job-level test drives the

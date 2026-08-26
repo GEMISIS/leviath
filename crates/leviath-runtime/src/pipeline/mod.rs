@@ -192,6 +192,9 @@ pub struct InferenceStage {
     /// that would overflow the model's context window (see
     /// `InferenceJob::exact_token_counting`). Off by default.
     pub exact_token_counting: bool,
+    /// Whether a model that can stream is called that way. On by default; see
+    /// `InferenceJob::stream`.
+    pub stream_inference: bool,
 }
 
 /// Truncate `text` to at most `max_chars` characters, never splitting a

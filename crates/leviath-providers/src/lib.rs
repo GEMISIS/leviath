@@ -43,7 +43,7 @@ pub use provider::{
     ContentBlock, DEFAULT_INFERENCE_TIMEOUT_SECS, FailureKind, FinishReason, InferenceRequest,
     InferenceResponse, Message, MessageContent, ModelInfo, Provider, ProviderConfig, ProviderError,
     RateLimitConfig, Result, RetryAdvice, SystemBlock, TokenUsage, Tool, ToolCall,
-    UnavailableReason, build_http_client,
+    UnavailableReason, build_http_client, collect_stream,
 };
 pub use rhai_provider::RhaiProvider;
 

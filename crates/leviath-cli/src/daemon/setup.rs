@@ -289,6 +289,10 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     );
     // Opt-in accurate pre-inference budget guard (off by default).
     world.set_exact_token_counting(parts.config.limits.exact_token_counting);
+    // Streamed inference (on by default), so a long generation keeps bytes
+    // moving instead of holding a socket that looks idle to everything between
+    // here and the provider.
+    world.set_stream_inference(parts.config.limits.stream_inference);
     // How long a run may sit unable to dispatch before the watchdog fails it
     // rather than leaving it "running" for ever (issue #190).
     world

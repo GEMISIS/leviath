@@ -372,6 +372,10 @@ impl PipelineWorld {
             wake: wake.clone(),
             runtime,
             exact_token_counting: false,
+            // On unless the operator turns it off: a buffered call is a socket
+            // that goes silent for as long as the model thinks, which is what
+            // anything on the path that reaps idle connections kills.
+            stream_inference: true,
         });
         world.insert_resource(crate::context_transform::ContentSummaryResults(cs_rx));
         world.insert_resource(crate::title::TitleSink(title_tx));
@@ -625,6 +629,17 @@ impl PipelineWorld {
         self.world
             .resource_mut::<crate::pipeline::InferenceStage>()
             .exact_token_counting = enabled;
+    }
+
+    /// Turn streamed inference off (or back on) for this world - see
+    /// `inference_bridge::InferenceJob::stream`. Call once at startup, before
+    /// serving.
+    pub fn set_stream_inference(&mut self, enabled: bool) {
+        // Same invariant as `set_exact_token_counting`: `InferenceStage` is
+        // inserted by every `PipelineWorld::new` path.
+        self.world
+            .resource_mut::<crate::pipeline::InferenceStage>()
+            .stream_inference = enabled;
     }
 
     /// Install the shared interaction hub as a world resource and attach this
@@ -1471,6 +1486,33 @@ mod tests {
                 .world()
                 .resource::<crate::pipeline::InferenceStage>()
                 .exact_token_counting
+        );
+    }
+
+    /// Streaming is on unless someone turns it off, and the switch reaches the
+    /// stage rather than being accepted and dropped.
+    ///
+    /// The default is the load-bearing half: it is what stops a long generation
+    /// holding a socket that everything between here and the provider reads as
+    /// idle. The setter is the escape hatch for a provider whose stream
+    /// misbehaves, and an escape hatch that silently does nothing is worse than
+    /// none.
+    #[tokio::test]
+    async fn set_stream_inference_toggles_the_stage_flag() {
+        let mut world = build_world(ProviderRegistry::new());
+        assert!(
+            world
+                .world()
+                .resource::<crate::pipeline::InferenceStage>()
+                .stream_inference,
+            "on by default"
+        );
+        world.set_stream_inference(false);
+        assert!(
+            !world
+                .world()
+                .resource::<crate::pipeline::InferenceStage>()
+                .stream_inference
         );
     }
 

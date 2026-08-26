@@ -142,6 +142,13 @@ fn parse_tool_call_deltas(json: &Value) -> Vec<ToolCallDelta> {
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string(),
+                    // A script talking to an endpoint that signs its tool calls
+                    // can pass the signature straight through; one that does
+                    // not simply omits the key.
+                    thought_signature: tc
+                        .get("thought_signature")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
                 })
                 .collect()
         })

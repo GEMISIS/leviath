@@ -915,6 +915,7 @@ mod tests {
             wake: Arc::new(Notify::new()),
             runtime: Handle::current(),
             exact_token_counting: false,
+            stream_inference: true,
         });
         world.insert_resource(TitleSink(title_tx));
         (world, title_rx)
