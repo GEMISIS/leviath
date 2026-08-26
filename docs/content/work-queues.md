@@ -3,7 +3,7 @@ title: External work queues
 description: Poll lev ps --all --json to tell a live run from a dead one, without leaking slots or cancelling work that is still going.
 group: Integrations
 group_order: 5
-order: 4
+order: 5
 ---
 
 # Driving Leviath from an external work queue

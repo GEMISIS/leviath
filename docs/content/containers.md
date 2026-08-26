@@ -3,7 +3,7 @@ title: Containers and CI
 description: Running Leviath as a container-per-job step, and the one thing to get right, that `lev run` returns before the agent finishes.
 group: Integrations
 group_order: 5
-order: 3
+order: 4
 ---
 
 # Running Leviath in a container or CI job
