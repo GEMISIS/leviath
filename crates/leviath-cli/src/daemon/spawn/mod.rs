@@ -271,6 +271,10 @@ fn attach_run_record(
         entity_mut.insert((
             metadata,
             TokenTotals::default(),
+            // Stopped and empty; a reloaded run gets its banked working time put
+            // back by `recovery::reload_persisted_agents`, and the persistence
+            // system starts the clock on its first tick.
+            leviath_runtime::persistence::RunClock::default(),
             PersistWatermark::default(),
             // Fresh counters; a reloaded run gets its accumulated flags put back
             // by `recovery::reload_persisted_agents`.

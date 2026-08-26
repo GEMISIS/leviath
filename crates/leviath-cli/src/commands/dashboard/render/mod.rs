@@ -338,8 +338,8 @@ mod tests {
             depth: 0,
             started_at: chrono::Utc::now().timestamp() - 60,
             last_progress_at: None,
-            active_until: None,
-            waiting_secs: 0,
+            runtime_secs: 0,
+            clock_now: 0,
             graph: None,
             accepts_messages: true,
             taint_summary: vec![],
@@ -937,6 +937,7 @@ mod tests {
         agent.num_stages = 3;
         agent.stages = vec![
             crate::runstate::StageRecord {
+                active: Default::default(),
                 name: "plan".to_string(),
                 index: 0,
                 status: crate::runstate::StageRunStatus::Complete,
@@ -952,6 +953,7 @@ mod tests {
                 ended_at: Some(chrono::Utc::now().timestamp() - 30),
             },
             crate::runstate::StageRecord {
+                active: Default::default(),
                 name: "implement".to_string(),
                 index: 1,
                 status: crate::runstate::StageRunStatus::Active,
@@ -967,6 +969,7 @@ mod tests {
                 ended_at: None,
             },
             crate::runstate::StageRecord {
+                active: Default::default(),
                 name: "review".to_string(),
                 index: 2,
                 status: crate::runstate::StageRunStatus::Pending,

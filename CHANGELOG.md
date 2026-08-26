@@ -13,6 +13,20 @@ same list.
 
 ## Unreleased
 
+- Fixed: a run's duration counts only the time it was working. The dashboard
+  timed a run from `started_at` against the wall clock, so a run left paused, or
+  sitting on a question nobody had answered, went on climbing while nothing was
+  happening on its behalf - and the timer the dashboard did keep was rebuilt
+  from transitions it had watched, so a pause that began before it opened, or
+  while it was closed, was counted as work. The daemon now keeps the clock
+  itself and records it on `meta.json` (and per stage on `stages.json`) as
+  `active`, so every reader gets the same figure. It runs while the run is
+  inferring, calling tools, or held for its own fan-out workers and sub-agents,
+  and stops for paused, blocked on a person, parked until the machine is fixed,
+  and finished. It survives a pause, a resume and a daemon restart, and a
+  restart does not bill the run for the outage. Runs written by an older build
+  have no clock and still report their wall-clock span.
+
 - Changed: a provider that answers slowly keeps its place in the rotation four
   times longer than one that cannot be reached at all, so the default pulls it
   after twelve consecutive failures rather than three. Both were counted the

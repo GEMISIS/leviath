@@ -1108,6 +1108,7 @@ mod tests {
     /// A `stages.json` entry, so a log test can say which stages exist.
     fn stage_rec(index: usize, name: &str) -> leviath_core::run_meta::StageRecord {
         leviath_core::run_meta::StageRecord {
+            active: Default::default(),
             name: name.to_string(),
             index,
             status: leviath_core::run_meta::StageRunStatus::Complete,

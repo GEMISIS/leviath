@@ -814,6 +814,7 @@ async fn a_deep_search_finds_text_only_present_in_a_stage_log_and_says_where() {
         crate::runstate::write_stages_index(
             "run-deep",
             &[leviath_core::run_meta::StageRecord {
+                active: Default::default(),
                 name: "review".to_string(),
                 index: 0,
                 status: leviath_core::run_meta::StageRunStatus::Complete,
@@ -1129,6 +1130,7 @@ async fn a_log_search_can_match_the_operational_stream() {
         crate::runstate::write_stages_index(
             "run-ops",
             &[leviath_core::run_meta::StageRecord {
+                active: Default::default(),
                 name: "work".to_string(),
                 index: 0,
                 status: leviath_core::run_meta::StageRunStatus::Complete,
@@ -1232,6 +1234,7 @@ async fn deep_sources_stop_once_the_highlight_budget_is_full() {
         crate::runstate::write_stages_index(
             "run-full",
             &[leviath_core::run_meta::StageRecord {
+                active: Default::default(),
                 name: "work".to_string(),
                 index: 0,
                 status: leviath_core::run_meta::StageRunStatus::Complete,
@@ -1375,6 +1378,7 @@ async fn deep_sources_that_read_files_and_find_nothing_are_quiet() {
         crate::runstate::write_stages_index(
             "run-deepquiet",
             &[leviath_core::run_meta::StageRecord {
+                active: Default::default(),
                 name: "work".to_string(),
                 index: 0,
                 status: leviath_core::run_meta::StageRunStatus::Complete,

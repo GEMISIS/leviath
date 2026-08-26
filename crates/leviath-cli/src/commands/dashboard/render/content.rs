@@ -872,8 +872,8 @@ mod tests {
             depth: 0,
             started_at: chrono::Utc::now().timestamp() - 60,
             last_progress_at: None,
-            active_until: None,
-            waiting_secs: 0,
+            runtime_secs: 0,
+            clock_now: 0,
             graph: None,
             accepts_messages: true,
             taint_summary: vec![],
@@ -1333,6 +1333,7 @@ mod tests {
     /// compares against.
     fn make_stage_record(name: &str) -> crate::runstate::StageRecord {
         crate::runstate::StageRecord {
+            active: Default::default(),
             name: name.to_string(),
             index: 0,
             status: crate::runstate::StageRunStatus::Active,
@@ -1706,6 +1707,7 @@ hint = "after plan"
 "#,
         );
         agent.stages = vec![crate::runstate::StageRecord {
+            active: Default::default(),
             name: "main".to_string(),
             index: 0,
             status: crate::runstate::StageRunStatus::Active,
@@ -1763,6 +1765,7 @@ name = "g"
             graph_from("[agent]\nname = \"g\"\n[stages.main]\n[stages.main.transitions]\n");
         // Two records named "main" -> visited count 2, exercising the plural "s".
         let rec = crate::runstate::StageRecord {
+            active: Default::default(),
             name: "main".to_string(),
             index: 0,
             status: crate::runstate::StageRunStatus::Active,
@@ -1803,6 +1806,7 @@ condition = "error"
 "#,
         );
         agent.stages = vec![crate::runstate::StageRecord {
+            active: Default::default(),
             name: "main".to_string(),
             index: 0,
             status: crate::runstate::StageRunStatus::Active,
@@ -1914,6 +1918,7 @@ transform = "clear"
 "#,
         );
         agent.stages = vec![crate::runstate::StageRecord {
+            active: Default::default(),
             name: "implement".to_string(),
             index: 1,
             status: crate::runstate::StageRunStatus::Active,
@@ -1950,6 +1955,7 @@ transform = "clear"
         agent.graph =
             graph_from("[agent]\nname = \"g\"\n[stages.plan]\n[stages.plan.transitions]\n");
         agent.stages = vec![crate::runstate::StageRecord {
+            active: Default::default(),
             name: "plan".to_string(),
             index: 0,
             status: crate::runstate::StageRunStatus::Complete,
@@ -1981,6 +1987,7 @@ transform = "clear"
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         agent.graph = graph_from("[agent]\nname = \"g\"\n[stages.main]\n[stages.next]\n");
         agent.stages = vec![crate::runstate::StageRecord {
+            active: Default::default(),
             name: "main".to_string(),
             index: 0,
             status: crate::runstate::StageRunStatus::Active,
@@ -2316,6 +2323,7 @@ transform = "clear"
         dash.stage_content_mode = StageContentMode::Output;
         let mut agent = make_test_agent("run-sn", AgentDisplayStatus::Active);
         agent.stages = vec![crate::runstate::StageRecord {
+            active: Default::default(),
             name: "analyze".to_string(),
             index: 0,
             status: crate::runstate::StageRunStatus::Active,

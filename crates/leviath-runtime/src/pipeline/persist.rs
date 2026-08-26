@@ -213,11 +213,19 @@ pub fn reflect_interaction_status(
 ///
 /// `started_at`/`ended_at` are stamped once and never overwritten, so repeated
 /// calls are idempotent.
+///
+/// `running` is the run's working clock (see
+/// [`clock_runs`](leviath_core::run_meta::clock_runs)), passed in rather than
+/// derived from `status` because the agent status alone cannot tell a stage
+/// parked on a person from one parked on its own sub-agents. The cursor stage
+/// tracks it; every other stage's clock is stopped, because a stage the run has
+/// left is not working no matter what the run is doing.
 pub(crate) fn reconcile_stage_ledger(
     ledger: &mut StageLedger,
     cursor_index: usize,
     status: &AgentStatus,
     now: i64,
+    running: bool,
 ) {
     use leviath_core::run_meta::StageRunStatus;
     let active = crate::persistence::stage_status_from(status);
@@ -231,6 +239,7 @@ pub(crate) fn reconcile_stage_ledger(
             if rec.started_at.is_none() {
                 rec.started_at = Some(now);
             }
+            rec.active.get_or_insert_default().observe(now, running);
             if active == StageRunStatus::Complete && rec.ended_at.is_none() {
                 rec.ended_at = Some(now);
             }
@@ -243,6 +252,8 @@ pub(crate) fn reconcile_stage_ledger(
         // stage that somehow slipped between two ticks as never entered - and
         // calling a stage that did work `Skipped` is a worse error than the one
         // being fixed. A stage with tokens against its name ran.
+        // Not the cursor, so not working, whatever the run is doing.
+        rec.active.get_or_insert_default().observe(now, false);
         rec.entered |= rec.prompt_tokens > 0 || rec.completion_tokens > 0;
         if !rec.entered {
             rec.status = match run_is_over {
@@ -292,6 +303,10 @@ type PersistenceQuery = (
         Option<&'static super::WaitingForChildren>,
         Option<&'static crate::components::AwaitingInteraction>,
         Option<&'static super::PausedForSetup>,
+        // Optional so a world that builds agents by hand (tests, embedded
+        // hosts) still persists; those runs simply keep no working clock and
+        // fall back to wall-clock age when read.
+        Option<&'static mut crate::persistence::RunClock>,
     ),
 );
 
@@ -333,16 +348,60 @@ pub fn dispatch_persistence(
             waiting_for_children,
             awaiting_interaction,
             paused_for_setup,
+            clock,
         ),
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
         let now = chrono::Utc::now().timestamp();
 
+        let status = crate::persistence::run_status_from(&state.status);
+        // The parking markers, gathered here because this is where they are
+        // queryable, and recorded on `meta.json` so a client does not have to
+        // reconstruct them from what it can see.
+        //
+        // `interaction` is left for the write path below. Naming which prompt is
+        // holding the run costs a scan of the hub, and it only ever refines a
+        // wait that the other markers have already established - so the clock,
+        // which runs every tick, does not pay for it.
+        let mut parked = leviath_core::run_meta::WaitMarkers {
+            gate_prompt: gate_prompt.is_some_and(|g| g.0 > 0),
+            interaction_point: awaiting_point.is_some(),
+            fan_out_outstanding: fan_out_waiting.map(|f| f.outstanding()),
+            // The count needs each child's status, which this query cannot
+            // reach; the listing computes it live. Recording the reason without
+            // the number is the honest half.
+            children_outstanding: waiting_for_children
+                .map(|_| children.map(|c| c.children.len()).unwrap_or(0)),
+            interaction: None,
+            awaiting_interaction: awaiting_interaction.is_some(),
+            needs_setup: paused_for_setup.map(|p| leviath_core::run_meta::SetupNeeded {
+                blocker: p.blocker,
+                remedy: p.remedy.clone(),
+            }),
+        };
+
+        // Advance the run's working clock every tick, not only on the writes
+        // below: what it measures is time, and a run that pauses and resumes
+        // between two heartbeats would otherwise have both transitions land on
+        // the same reading and cancel out.
+        let running = leviath_core::run_meta::clock_runs(
+            &status,
+            leviath_core::run_meta::wait_reason_from(
+                matches!(state.status, AgentStatus::Waiting | AgentStatus::Paused),
+                &parked,
+            )
+            .as_ref(),
+        );
+        let active = clock.map(|mut clock| {
+            clock.0.observe(now, running);
+            clock.0
+        });
+
         // Reconcile the stage ledger every persist tick so status/timestamps track
         // the agent regardless of whether the run-level watermark changed.
         if let Some(ledger) = ledger.as_deref_mut() {
-            reconcile_stage_ledger(ledger, cursor.index, &state.status, now);
+            reconcile_stage_ledger(ledger, cursor.index, &state.status, now, running);
         }
 
         // Always flush any buffered per-stage output/log lines.
@@ -355,7 +414,6 @@ pub fn dispatch_persistence(
         };
         let has_appends = !output_appends.is_empty() || !log_appends.is_empty();
 
-        let status = crate::persistence::run_status_from(&state.status);
         let current = (state.iteration, cursor.index, status);
         let watermark_changed = watermark.last.as_ref() != Some(&current);
         // Deliberately *not* folded into `current`: a title is not the agent
@@ -428,6 +486,13 @@ pub fn dispatch_persistence(
         // whenever the run last moved. That difference is the whole signal: it is
         // what lets an observer reading `meta.json` tell a slow run from a wedged
         // one, which `updated_at` (which is `now` either way) cannot.
+        // Now name the prompt, on the path that writes it.
+        parked.interaction = hub.as_ref().and_then(|h| {
+            h.pending()
+                .into_iter()
+                .find(|(agent_id, _)| *agent_id == state.agent_id)
+                .map(|(_, req)| req.kind)
+        });
         let meta = build_run_meta(
             crate::persistence::RunMetaSources {
                 md,
@@ -435,27 +500,7 @@ pub fn dispatch_persistence(
                 totals,
                 flags: &flags,
                 final_output,
-                parked: leviath_core::run_meta::WaitMarkers {
-                    gate_prompt: gate_prompt.is_some_and(|g| g.0 > 0),
-                    interaction_point: awaiting_point.is_some(),
-                    fan_out_outstanding: fan_out_waiting.map(|f| f.outstanding()),
-                    // The count needs each child's status, which this query
-                    // cannot reach; the listing computes it live. Recording
-                    // the reason without the number is the honest half.
-                    children_outstanding: waiting_for_children
-                        .map(|_| children.map(|c| c.children.len()).unwrap_or(0)),
-                    interaction: hub.as_ref().and_then(|h| {
-                        h.pending()
-                            .into_iter()
-                            .find(|(agent_id, _)| *agent_id == state.agent_id)
-                            .map(|(_, req)| req.kind)
-                    }),
-                    awaiting_interaction: awaiting_interaction.is_some(),
-                    needs_setup: paused_for_setup.map(|p| leviath_core::run_meta::SetupNeeded {
-                        blocker: p.blocker,
-                        remedy: p.remedy.clone(),
-                    }),
-                },
+                parked,
             },
             crate::persistence::RunPosition {
                 stage_index: cursor.index,
@@ -463,6 +508,7 @@ pub fn dispatch_persistence(
                 last_progress_at: watermark.last_progress_at(),
                 depth,
                 max_child_depth,
+                active,
             },
         );
         let context = build_context_snapshot(window, &state.current_stage);

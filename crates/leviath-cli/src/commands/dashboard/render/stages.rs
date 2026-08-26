@@ -165,7 +165,7 @@ impl Dashboard {
         s: &crate::runstate::StageRecord,
         agent: &DashboardAgent,
     ) -> Line<'static> {
-        use crate::commands::dashboard::helpers::{elapsed_str, elapsed_str_until};
+        use crate::commands::dashboard::helpers::duration_str;
 
         // Only the tab matching the agent's current stage index may show live
         // (spinner / ticking-duration) treatment. A stage record can be left
@@ -175,24 +175,14 @@ impl Dashboard {
         // actually running.
         let is_current_tab = i == agent.stage_index;
 
-        // Compute stage duration string
-        let dur_str = match (s.started_at, s.ended_at) {
-            (Some(start), Some(end)) => {
-                let secs = (end - start).max(0) as u64;
-                if secs < 60 {
-                    format!(" {}s", secs)
-                } else {
-                    format!(" {}m{}s", secs / 60, secs % 60)
-                }
-            }
-            (Some(start), None) if s.status == StageRunStatus::Active && is_current_tab => {
-                let effective_start = start + agent.waiting_secs as i64;
-                let dur = if let Some(until) = agent.active_until {
-                    elapsed_str_until(effective_start, until)
-                } else {
-                    elapsed_str(effective_start)
-                };
-                format!(" {}", dur)
+        // How long the stage has been working, on the same clock as the run's
+        // own: a stage the run is paused in is still the cursor stage, and
+        // measuring it wall-clock counted the pause as time it spent.
+        let dur_str = match s.started_at.is_some() {
+            true if s.ended_at.is_some()
+                || (s.status == StageRunStatus::Active && is_current_tab) =>
+            {
+                format!(" {}", duration_str(s.active_runtime_secs(agent.clock_now)))
             }
             _ => String::new(),
         };
@@ -288,8 +278,8 @@ mod tests {
             depth: 0,
             started_at: chrono::Utc::now().timestamp() - 60,
             last_progress_at: None,
-            active_until: None,
-            waiting_secs: 0,
+            runtime_secs: 0,
+            clock_now: 0,
             graph: None,
             accepts_messages: true,
             taint_summary: vec![],
@@ -298,6 +288,7 @@ mod tests {
 
     fn make_stage_record(name: &str, status: StageRunStatus) -> StageRecord {
         StageRecord {
+            active: Default::default(),
             name: name.to_string(),
             index: 0,
             entered: !matches!(status, StageRunStatus::Pending | StageRunStatus::Skipped),
@@ -505,19 +496,25 @@ mod tests {
         assert!(text.contains("2m5s"));
     }
 
+    /// The live stage tab shows the stage's own working time, so a stage the run
+    /// is parked in stops counting rather than tracking the wall clock.
     #[test]
-    fn build_stage_tab_title_active_current_tab_uses_active_until() {
+    fn build_stage_tab_title_active_current_tab_reads_the_stage_clock() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-active-until", AgentDisplayStatus::Active);
         agent.stage_index = 0;
-        agent.active_until = Some(chrono::Utc::now().timestamp());
+        agent.clock_now = 10_000;
         let mut record = make_stage_record("plan", StageRunStatus::Active);
-        record.started_at = Some(chrono::Utc::now().timestamp() - 30);
+        // Entered an hour ago on the wall clock; 40 seconds of that was work.
+        record.started_at = Some(6_400);
         record.ended_at = None;
-        // is_current_tab (i == agent.stage_index) with an active_until set
-        // exercises elapsed_str_until() instead of elapsed_str().
+        record.active = Some(leviath_core::run_meta::ActiveClock {
+            banked_secs: 40,
+            since: None,
+        });
         let line = dash.build_stage_tab_title(0, &record, &agent);
-        assert!(!line.spans.is_empty());
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("40s"), "{text}");
     }
 
     #[test]

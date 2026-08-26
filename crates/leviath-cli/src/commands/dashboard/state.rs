@@ -654,11 +654,21 @@ impl Dashboard {
             // never flips on its own.
             let pending_request = self.pending_interactions.get(&run.run_id).cloned();
 
+            let stale = self.looks_stale(&run);
+            // The moment to read the run's working clock at. Nothing is driving
+            // an abandoned run, so its clock stopped when its record was last
+            // written; reading that one against the wall clock would have its
+            // timer climb forever.
+            let clock_now = match stale {
+                true => run.updated_at,
+                false => self.now_secs(),
+            };
+
             let status = match run.status {
                 RunStatus::Starting | RunStatus::Running => {
                     if pending_request.is_some() {
                         AgentDisplayStatus::Waiting
-                    } else if self.looks_stale(&run) {
+                    } else if stale {
                         AgentDisplayStatus::Stale
                     } else {
                         AgentDisplayStatus::Active
@@ -741,37 +751,8 @@ impl Dashboard {
                 agent.tokens_out = run.completion_tokens;
                 agent.cached_tokens = run.cached_tokens;
                 agent.title = run.title.clone();
-                // Paused freezes the elapsed timer the same way a wait does:
-                // nothing is running, so the clock should not tick against it.
-                let now_is_waiting = matches!(
-                    status,
-                    AgentDisplayStatus::Waiting
-                        | AgentDisplayStatus::CompleteInteractive
-                        | AgentDisplayStatus::Paused
-                );
-                let is_terminal = matches!(
-                    status,
-                    AgentDisplayStatus::Complete
-                        | AgentDisplayStatus::Cancelled
-                        | AgentDisplayStatus::Error(_)
-                );
-                if now_is_waiting {
-                    // Entering or staying in a wait - freeze timer at entry point
-                    if agent.active_until.is_none() {
-                        agent.active_until = Some(run.updated_at);
-                    }
-                } else {
-                    // Leaving a wait - accumulate how long we were waiting
-                    if let Some(wait_start) = agent.active_until.take() {
-                        agent.waiting_secs += (run.updated_at - wait_start).max(0) as u64;
-                    }
-                    // A terminal agent (complete / cancelled / error) is no longer
-                    // running, so freeze its elapsed timer at the transition time
-                    // instead of letting it tick up against the wall clock.
-                    if is_terminal {
-                        agent.active_until = Some(run.updated_at);
-                    }
-                }
+                agent.clock_now = clock_now;
+                agent.runtime_secs = run.active_runtime_secs(clock_now);
                 agent.status = status;
                 agent.workdir = run.workdir.clone();
                 agent.context_snapshot = context_snapshot.clone();
@@ -873,23 +854,8 @@ impl Dashboard {
                     depth: 0,
                     started_at: run.started_at,
                     last_progress_at: run.last_progress_at,
-                    // Freeze the elapsed timer for agents that are already waiting
-                    // or terminal when first observed; only genuinely-running
-                    // agents tick against the wall clock.
-                    active_until: if matches!(
-                        run.status,
-                        RunStatus::WaitingInput
-                            | RunStatus::CompleteInteractive
-                            | RunStatus::Paused
-                            | RunStatus::Complete
-                            | RunStatus::Cancelled
-                            | RunStatus::Error
-                    ) {
-                        Some(run.updated_at)
-                    } else {
-                        None
-                    },
-                    waiting_secs: 0,
+                    runtime_secs: run.active_runtime_secs(clock_now),
+                    clock_now,
                     graph: load_stage_graph(&run.agent_path),
                     accepts_messages: true,
                     taint_summary: vec![], // default; stage-level control via agent state
@@ -1211,8 +1177,8 @@ mod tests {
             depth: 0,
             started_at: 1000,
             last_progress_at: None,
-            active_until: None,
-            waiting_secs: 0,
+            runtime_secs: 0,
+            clock_now: 0,
             graph: None,
             accepts_messages: true,
             taint_summary: vec![],
@@ -2972,38 +2938,56 @@ mod tests {
         );
     }
 
-    /// A paused run shows PAUSED with its elapsed timer frozen, both when first
-    /// observed and when an already-tracked ACTIVE row flips to paused on a
-    /// later sync (the disk is authoritative - this is what makes the `p`
-    /// key's optimistic flip stick instead of reverting to ACTIVE).
+    /// A paused run shows PAUSED with its timer stopped, both when an
+    /// already-tracked ACTIVE row flips to paused on a later sync (the disk is
+    /// authoritative - this is what makes the `p` key's optimistic flip stick
+    /// instead of reverting to ACTIVE) and when the dashboard opens on a run
+    /// that was already paused.
+    ///
+    /// The second case is the one that used to be wrong: the dashboard rebuilt
+    /// the timer from transitions it had watched, so a pause it never saw start,
+    /// because it was closed or because the run was paused before it opened,
+    /// counted as work.
     #[test]
-    fn sync_from_run_state_paused_run_shows_paused_with_frozen_timer() {
+    fn sync_from_run_state_paused_run_shows_paused_with_a_stopped_timer() {
         crate::runstate::with_isolated_runs_dir("sync-paused-run", |_d| {
             let run_id = "test-sync-paused";
             cleanup_run(run_id);
             let mut meta = make_run_meta(run_id, RunStatus::Running);
+            meta.active = Some(leviath_core::run_meta::ActiveClock {
+                banked_secs: 30,
+                since: Some(meta.started_at),
+            });
             runstate::create_run(&meta).unwrap();
 
             let mut dash = make_test_dashboard();
             dash.sync_from_run_state();
             let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
             assert_eq!(agent.status, AgentDisplayStatus::Active);
-            assert!(agent.active_until.is_none());
+            assert!(
+                agent.runtime_secs >= 30,
+                "a running run counts its open span too"
+            );
 
-            // The daemon pauses the run and persists the new status.
+            // The daemon pauses the run, banking the span, and persists it.
             meta.status = RunStatus::Paused;
+            meta.active = Some(leviath_core::run_meta::ActiveClock {
+                banked_secs: 45,
+                since: None,
+            });
             runstate::write_meta(&meta).unwrap();
             dash.sync_from_run_state();
             let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
             assert_eq!(agent.status, AgentDisplayStatus::Paused);
-            assert!(agent.active_until.is_some(), "timer frozen while paused");
+            assert_eq!(agent.runtime_secs, 45, "the timer stops while paused");
 
-            // A dashboard opened while the run is already paused agrees.
+            // A dashboard opened while the run is already paused agrees, however
+            // long ago the pause started.
             let mut fresh = make_test_dashboard();
             fresh.sync_from_run_state();
             let agent = fresh.agents.iter().find(|a| a.id == run_id).unwrap();
             assert_eq!(agent.status, AgentDisplayStatus::Paused);
-            assert!(agent.active_until.is_some());
+            assert_eq!(agent.runtime_secs, 45);
 
             cleanup_run(run_id);
         });
@@ -3030,7 +3014,6 @@ mod tests {
                 assert_eq!(agent.status, AgentDisplayStatus::Waiting);
                 assert_eq!(agent.waiting_prompt.as_deref(), Some("What next?"));
                 assert!(agent.pending_request.is_some());
-                assert!(agent.active_until.is_some());
 
                 cleanup_run(run_id);
             },
@@ -3097,7 +3080,6 @@ mod tests {
                 let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
                 assert_eq!(agent.status, AgentDisplayStatus::CompleteInteractive);
                 assert!(agent.waiting_prompt.is_some());
-                assert!(agent.active_until.is_some());
 
                 cleanup_run(run_id);
             },
@@ -3404,28 +3386,28 @@ mod tests {
     }
 
     #[test]
-    fn sync_from_run_state_existing_agent_enters_waiting_toasts_and_freezes_timer() {
+    fn sync_from_run_state_existing_agent_enters_waiting_toasts_and_stops_timer() {
         crate::runstate::with_isolated_runs_dir(
-            "sync_from_run_state_existing_agent_enters_waiting_toasts_and_freezes_timer",
+            "sync_from_run_state_existing_agent_enters_waiting_toasts_and_stops_timer",
             |_d| {
                 let run_id = "test-sync-existing-enters-waiting";
                 cleanup_run(run_id);
-                let meta = make_run_meta(run_id, RunStatus::Running);
+                let mut meta = make_run_meta(run_id, RunStatus::Running);
+                meta.active = Some(leviath_core::run_meta::ActiveClock {
+                    banked_secs: 0,
+                    since: Some(meta.started_at),
+                });
                 runstate::create_run(&meta).unwrap();
 
                 let mut dash = make_test_dashboard();
                 dash.sync_from_run_state();
-                assert!(
-                    dash.agents
-                        .iter()
-                        .find(|a| a.id == run_id)
-                        .unwrap()
-                        .active_until
-                        .is_none()
-                );
 
                 let mut meta2 = make_run_meta(run_id, RunStatus::WaitingInput);
                 meta2.updated_at = meta.started_at + 42;
+                meta2.active = Some(leviath_core::run_meta::ActiveClock {
+                    banked_secs: 42,
+                    since: None,
+                });
                 runstate::write_meta(&meta2).unwrap();
                 let req = interaction::InteractionRequest::free_text("req1", "Q?", "main", true);
                 dash.pending_interactions
@@ -3434,7 +3416,7 @@ mod tests {
 
                 let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
                 assert_eq!(agent.status, AgentDisplayStatus::Waiting);
-                assert_eq!(agent.active_until, Some(meta2.updated_at));
+                assert_eq!(agent.runtime_secs, 42);
                 assert_eq!(agent.waiting_prompt.as_deref(), Some("Q?"));
                 assert!(
                     dash.toasts
@@ -3447,15 +3429,23 @@ mod tests {
         );
     }
 
+    /// Leaving a wait does not add the wait to the run's time.
+    ///
+    /// The dashboard no longer reconstructs any of this: the run's own clock is
+    /// what it reads, so a wait it never observed costs nothing either.
     #[test]
-    fn sync_from_run_state_existing_agent_leaves_waiting_accumulates_waiting_secs() {
+    fn sync_from_run_state_leaving_a_wait_does_not_bill_the_wait() {
         crate::runstate::with_isolated_runs_dir(
-            "sync_from_run_state_existing_agent_leaves_waiting_accumulates_waiting_secs",
+            "sync_from_run_state_leaving_a_wait_does_not_bill_the_wait",
             |_d| {
                 let run_id = "test-sync-existing-leaves-waiting";
                 cleanup_run(run_id);
                 let mut meta = make_run_meta(run_id, RunStatus::WaitingInput);
                 meta.updated_at = meta.started_at + 10;
+                meta.active = Some(leviath_core::run_meta::ActiveClock {
+                    banked_secs: 10,
+                    since: None,
+                });
                 runstate::create_run(&meta).unwrap();
                 let req = interaction::InteractionRequest::free_text("req1", "Q?", "main", true);
 
@@ -3463,24 +3453,27 @@ mod tests {
                 dash.pending_interactions
                     .insert(run_id.to_string(), req.clone());
                 dash.sync_from_run_state();
-                let entered_wait_at = dash
-                    .agents
-                    .iter()
-                    .find(|a| a.id == run_id)
-                    .unwrap()
-                    .active_until
-                    .unwrap();
+                let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+                assert_eq!(agent.runtime_secs, 10);
 
-                // Now the run resumes (Running) - clear the interaction and re-sync.
+                // The answer lands 25 seconds later and the run goes again. The
+                // daemon restarts the clock; none of the wait was banked.
                 dash.pending_interactions.remove(run_id);
                 let mut meta2 = make_run_meta(run_id, RunStatus::Running);
-                meta2.updated_at = entered_wait_at + 25;
+                let resumed_at = meta.updated_at + 25;
+                meta2.updated_at = resumed_at;
+                meta2.active = Some(leviath_core::run_meta::ActiveClock {
+                    banked_secs: 10,
+                    since: Some(resumed_at),
+                });
                 runstate::write_meta(&meta2).unwrap();
                 dash.sync_from_run_state();
 
                 let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-                assert!(agent.active_until.is_none());
-                assert_eq!(agent.waiting_secs, 25);
+                assert!(
+                    agent.runtime_secs >= 10,
+                    "the banked 10s survives the resume"
+                );
                 assert!(agent.waiting_prompt.is_none());
                 assert!(agent.pending_request.is_none());
                 assert!(agent.last_answered_request_id.is_none());

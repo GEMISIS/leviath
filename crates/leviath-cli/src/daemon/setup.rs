@@ -1738,6 +1738,7 @@ system_prompt = "x"
         let run_dir = runs.path().join("resumed");
         std::fs::create_dir_all(&run_dir).unwrap();
         let meta = leviath_core::run_meta::RunMeta {
+            active: Default::default(),
             run_id: "resumed".to_string(),
             agent_name: "coder".to_string(),
             agent_path: manifest.to_string_lossy().to_string(),
@@ -1848,6 +1849,7 @@ system_prompt = "x"
         let run_dir = runs.path().join("late");
         std::fs::create_dir_all(&run_dir).unwrap();
         let meta = leviath_core::run_meta::RunMeta {
+            active: Default::default(),
             run_id: "late".to_string(),
             agent_name: "coder".to_string(),
             agent_path: manifest.to_string_lossy().to_string(),
