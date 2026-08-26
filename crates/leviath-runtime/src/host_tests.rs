@@ -3184,6 +3184,8 @@ async fn a_zero_window_keeps_nothing() {
 async fn a_run_is_listed_once_however_often_it_is_recorded() {
     let mut host = host_with(vec![]);
     let entry = |status| RunListEntry {
+        started_at: None,
+        active: None,
         splits_degraded: 0,
         broken_scripts: Vec::new(),
         run_id: "worker-1".to_string(),
@@ -3217,6 +3219,8 @@ async fn the_listing_of_finished_runs_is_capped() {
     for i in 0..=MAX_RETAINED_FINISHED {
         host.record_finished(
             RunListEntry {
+                started_at: None,
+                active: None,
                 splits_degraded: 0,
                 broken_scripts: Vec::new(),
                 run_id: format!("worker-{i}"),

@@ -111,6 +111,13 @@ impl WorldHost {
             last_progress_at: world
                 .get::<crate::pipeline::PersistWatermark>(entity)
                 .and_then(|w| w.last_progress_at()),
+            started_at: metadata.map(|m| m.started_at),
+            // Read live off the entity rather than from the last snapshot, so a
+            // listing between two persist writes reports the same figure the
+            // dashboard reads off disk a moment later.
+            active: world
+                .get::<crate::persistence::RunClock>(entity)
+                .map(|c| c.0),
             unattended: metadata.is_some_and(|m| m.unattended),
             splits_degraded: world
                 .get::<crate::persistence::RunOutcomeFlags>(entity)

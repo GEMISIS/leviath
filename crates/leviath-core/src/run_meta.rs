@@ -230,7 +230,7 @@ impl ActiveClock {
         match (running, self.since) {
             (true, None) => self.since = Some(now),
             (false, Some(started)) => {
-                self.banked_secs += (now - started).max(0) as u64;
+                self.banked_secs += crate::duration::between(started, now);
                 self.since = None;
             }
             _ => {}
@@ -249,7 +249,7 @@ impl ActiveClock {
 
     /// Working seconds at `now`, counting the span in progress.
     pub fn total_secs(&self, now: i64) -> u64 {
-        self.banked_secs + self.since.map_or(0, |s| (now - s).max(0) as u64)
+        self.banked_secs + self.since.map_or(0, |s| crate::duration::between(s, now))
     }
 }
 
@@ -827,12 +827,33 @@ impl RunMeta {
         }
     }
 
+    /// How long ago this run was launched, at `now`.
+    ///
+    /// One of the three spans a reader can ask a run about, and they answer
+    /// different questions - keep them apart:
+    ///
+    /// - **age** ([`Self::age_secs`]): how long since it was launched. Says
+    ///   nothing about whether it has done anything.
+    /// - **working** ([`Self::active_runtime_secs`]): how long it actually spent
+    ///   working. This is the one to call a run's duration.
+    /// - **last moved** (from [`Self::last_progress_at`]): how long since it made
+    ///   progress. A health signal, not a duration: it is how a wedged run is
+    ///   told from a slow one. No accessor, because the surfaces that show it
+    ///   read it off a live listing row rather than off a `RunMeta`.
+    ///
+    /// Every surface reads these rather than doing the arithmetic itself, so
+    /// `lev ps`, the dashboard and the HTTP API cannot disagree about what a run
+    /// has been doing.
+    pub fn age_secs(&self, now: i64) -> u64 {
+        crate::duration::between(self.started_at, now)
+    }
+
     /// How long this run has actually been working, at `now`.
     ///
     /// This is the number to show as a run's duration. Wall-clock age answers a
     /// different question, and answers it misleadingly: a run left paused, or
     /// sitting on a question nobody has answered, kept climbing while nothing
-    /// was happening on its behalf.
+    /// was happening on its behalf. See the sibling spans on [`Self::age_secs`].
     ///
     /// A run written before the clock existed carries no spans at all, so it
     /// falls back to the wall-clock span it used to report - a finished run that
@@ -840,7 +861,7 @@ impl RunMeta {
     pub fn active_runtime_secs(&self, now: i64) -> u64 {
         match self.active {
             Some(clock) => clock.total_secs(now),
-            None => (self.updated_at - self.started_at).max(0) as u64,
+            None => crate::duration::between(self.started_at, self.updated_at),
         }
     }
 
@@ -1061,7 +1082,7 @@ impl StageRecord {
         let Some(started) = self.started_at else {
             return 0;
         };
-        (self.ended_at.unwrap_or(now) - started).max(0) as u64
+        crate::duration::between(started, self.ended_at.unwrap_or(now))
     }
 
     /// A stage the run has not entered yet: [`StageRunStatus::Pending`], zero
@@ -1188,6 +1209,26 @@ mod tests {
         ] {
             assert!(!clock_runs(&status, None), "{status} should stop the clock");
         }
+    }
+
+    /// Age and working time are different questions, and a paused run is where
+    /// they come apart.
+    #[test]
+    fn age_is_the_wall_clock_span_whatever_the_run_was_doing() {
+        let mut meta = sample_meta();
+        meta.started_at = 1_000;
+        meta.active = Some(ActiveClock {
+            banked_secs: 20,
+            since: None,
+        });
+        assert_eq!(meta.age_secs(4_600), 3_600, "an hour old");
+        assert_eq!(
+            meta.active_runtime_secs(4_600),
+            20,
+            "twenty seconds of work"
+        );
+        // A clock corrected backwards reads as brand new, not as a huge age.
+        assert_eq!(meta.age_secs(500), 0);
     }
 
     #[test]

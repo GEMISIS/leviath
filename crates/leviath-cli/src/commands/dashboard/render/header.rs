@@ -6,10 +6,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
 
-use crate::commands::dashboard::helpers::{duration_str, format_tokens, truncate};
+use crate::commands::dashboard::helpers::{format_tokens, truncate};
 use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::*;
+use leviath_core::duration;
 
 impl Dashboard {
     pub(in crate::commands::dashboard) fn render_header_breadcrumb(
@@ -18,9 +19,12 @@ impl Dashboard {
         hdr_area: Rect,
         agent: &DashboardAgent,
     ) {
-        // Working time, not age: a run that has sat paused since yesterday has
-        // been alive for a day and has not been doing anything for most of it.
-        let elapsed = duration_str(agent.runtime_secs);
+        // Both spans, because they answer different questions and a run can look
+        // very different under each: how long it has been working, and how long
+        // it has existed. A run that has sat paused since yesterday reads `12m
+        // work · 19h old`, which is the whole story in two figures.
+        let elapsed = duration::precise(agent.runtime_secs);
+        let age = duration::compact(duration::between(agent.started_at, agent.clock_now));
         let status_color = agent.status.color();
         let spinner_frame = SPINNER[(self.tick_count as usize) % SPINNER.len()];
         let status_span = match &agent.status {
@@ -58,7 +62,8 @@ impl Dashboard {
                 format!(" {}↓", format_tokens(agent.tokens_out)),
                 Style::default().fg(C_DIM),
             ),
-            Span::styled(format!(" · {} ", elapsed), Style::default().fg(C_DIM)),
+            Span::styled(format!(" · {} work", elapsed), Style::default().fg(C_DIM)),
+            Span::styled(format!(" · {} old ", age), Style::default().fg(C_DIM)),
             if agent.accepts_messages {
                 Span::styled("💬 ", Style::default().fg(C_SUCCESS))
             } else {

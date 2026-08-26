@@ -18,7 +18,8 @@ pub const PS_LONG_ABOUT: &str = "\
 List agent runs in the shared-world daemon.
 
 Columns: RUN, STATUS, STAGE (with position when the blueprint has several),
-ITER (iterations in the current stage), TOOLS (tool calls so far), and AGE.
+ITER (iterations in the current stage), TOOLS (tool calls so far), and the three
+time columns AGE, WORK and MOVED.
 
 TITLE sits after RUN when at least one listed run has a generated title, on the
 same terms as READS below: a column nobody can fill costs every reader width and
@@ -30,9 +31,24 @@ the same as being allowed to read them: your config.toml has to grant them too,
 so `0/2` means the run is up and every such read will be refused. `lev validate
 <agent>` names the entries and prints the stanza to add.
 
-AGE is how long since the run last actually moved - a new iteration, a new
+Three time columns, because a run can look very different under each and the
+difference is usually what you are trying to see - alive for an hour, at work for
+ten minutes of it, and holding a prompt open for the rest:
+
+AGE is how long since the run was launched. It says nothing about whether the run
+has done anything.
+
+WORK is how long the run actually spent working: inferring, calling tools, or
+held for its own fan-out workers and sub-agents. The clock stops for everything
+that is not the run's doing - paused, blocked on a person, parked until the
+machine is fixed, finished - so this, not AGE, is the run's duration.
+
+MOVED is how long since the run last actually moved - a new iteration, a new
 stage, or a change of status. It is not the `updated_at` in meta.json, which
-also advances on a 30-second heartbeat and so stays fresh on a wedged run.
+also advances on a 30-second heartbeat and so stays fresh on a wedged run. This
+column was headed AGE before; a script reading the table should read --json,
+where every row carries `age_secs` and `working_secs` computed and the raw stamps
+beside them.
 
 Statuses:
   active     running a turn, or waiting on the model or a tool
@@ -87,7 +103,9 @@ is.
 finished runs apart from the ones the daemon is still hosting. A row's
 \"has_final_output\" says whether the agent handed something back; read the
 answer itself with `lev result <run-id>` (it can be large, so it is not
-inlined here).
+inlined here). Every row carries \"age_secs\" and \"working_secs\" already
+computed, the same two keys the HTTP API serves, plus the raw \"started_at\",
+\"last_progress_at\" and \"active\" they come from.
 
 --all adds a NOT RUNNING block, read from the runs dir rather than the daemon's
 memory. The retention window above covers the minutes after a run ends; this
@@ -144,6 +162,21 @@ pub struct OfflineRun {
     /// Unix seconds when the run last actually moved, when it is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_progress_at: Option<i64>,
+    /// The run's working stopwatch as it was last persisted. `None` on a run
+    /// written before the clock existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<leviath_core::run_meta::ActiveClock>,
+    /// How long the run has existed, in seconds, at the moment this listing was
+    /// built. Computed here so a reconciler reads the same figure the table and
+    /// the HTTP API show, rather than three implementations of the arithmetic.
+    pub age_secs: u64,
+    /// How long the run actually spent working, in seconds, at the same moment.
+    ///
+    /// An abandoned run is measured up to the last moment it was known to be up,
+    /// not up to now: its clock is still open on disk with nothing left running
+    /// to close it, so reading it against the wall clock would have a run that
+    /// died last week claim a week's work.
+    pub working_secs: u64,
     /// Whether the run finished having modified nothing, when it could have.
     #[serde(default)]
     pub empty_output: bool,
@@ -176,18 +209,30 @@ pub fn offline_runs(
     on_disk
         .into_iter()
         .filter(|m| !live.is_some_and(|l| l.contains(&m.run_id)))
-        .map(|m| OfflineRun {
-            abandoned: runstate::looks_abandoned(&m, live, now),
-            run_id: m.run_id,
-            status: m.status,
-            error: m.error,
-            started_at: m.started_at,
-            updated_at: m.updated_at,
-            last_progress_at: m.last_progress_at,
-            empty_output: m.flags.empty_output,
-            splits_degraded: m.flags.splits_degraded,
-            broken_scripts: m.flags.broken_scripts.clone(),
-            has_final_output: m.final_output.is_some(),
+        .map(|m| {
+            let abandoned = runstate::looks_abandoned(&m, live, now);
+            // Nothing is driving an abandoned run, so its clock stopped when its
+            // record was last written.
+            let clock_now = match abandoned {
+                true => m.updated_at,
+                false => now,
+            };
+            OfflineRun {
+                abandoned,
+                age_secs: m.age_secs(now),
+                working_secs: m.active_runtime_secs(clock_now),
+                active: m.active,
+                run_id: m.run_id,
+                status: m.status,
+                error: m.error,
+                started_at: m.started_at,
+                updated_at: m.updated_at,
+                last_progress_at: m.last_progress_at,
+                empty_output: m.flags.empty_output,
+                splits_degraded: m.flags.splits_degraded,
+                broken_scripts: m.flags.broken_scripts.clone(),
+                has_final_output: m.final_output.is_some(),
+            }
         })
         .collect()
 }
@@ -220,13 +265,18 @@ pub fn format_offline(runs: &[OfflineRun], now: i64) -> Option<String> {
         return None;
     }
     let shown = runs.len().min(OFFLINE_TABLE_LIMIT);
-    let headers = ["RUN", "STATUS", "LAST MOVED"];
-    let rows: Vec<[String; 3]> = runs[..shown]
+    // The same three spans as the live table, under the same headings: a run
+    // that moves from one block to the other should not appear to change what it
+    // is being measured on.
+    let headers = ["RUN", "STATUS", "AGE", "WORK", "MOVED"];
+    let rows: Vec<[String; 5]> = runs[..shown]
         .iter()
         .map(|r| {
             [
                 r.run_id.clone(),
                 offline_status_cell(r),
+                leviath_core::duration::compact(r.age_secs),
+                leviath_core::duration::compact(r.working_secs),
                 humanize_age(now.saturating_sub(r.last_progress_at.unwrap_or(r.updated_at))),
             ]
         })
@@ -238,7 +288,7 @@ pub fn format_offline(runs: &[OfflineRun], now: i64) -> Option<String> {
             *w = (*w).max(cell.chars().count());
         }
     }
-    let render = |cells: &[String; 3]| {
+    let render = |cells: &[String; 5]| {
         let mut line = String::new();
         for (i, (cell, width)) in cells.iter().zip(widths).enumerate() {
             if i > 0 {
@@ -295,22 +345,40 @@ fn status_cell(entry: &RunListEntry) -> String {
 
 /// A compact age, in the largest unit that keeps the number small: `12s`, `4m`,
 /// `3h`, `2d`. Negative deltas (a clock that moved backwards) read as `0s`.
+///
+/// Thin wrapper on the shared formatter, kept because this file measures spans
+/// as `i64` deltas between stamps and the shared one takes the span itself.
 fn humanize_age(seconds: i64) -> String {
-    let s = seconds.max(0);
-    if s < 60 {
-        format!("{s}s")
-    } else if s < 3600 {
-        format!("{}m", s / 60)
-    } else if s < 86_400 {
-        format!("{}h", s / 3600)
-    } else {
-        format!("{}d", s / 86_400)
+    leviath_core::duration::compact(seconds.max(0) as u64)
+}
+
+/// The AGE cell: how long since the run was launched. A daemon too old to report
+/// `started_at` leaves nothing to measure from, and reads `-`.
+///
+/// Three spans, three columns, because they answer three questions and a run can
+/// look very different under each: AGE is how long it has existed, WORK how much
+/// of that it spent working, MOVED how long since it last got anywhere. This
+/// column used to be headed AGE and show what MOVED now shows.
+fn age_cell(entry: &RunListEntry, now: i64) -> String {
+    match entry.started_at {
+        Some(at) => humanize_age(now.saturating_sub(at)),
+        None => "-".to_string(),
     }
 }
 
-/// The AGE cell: how long since the run last actually moved. A run that has not
-/// persisted a snapshot yet has nothing to measure from and reads `-`.
-fn age_cell(entry: &RunListEntry, now: i64) -> String {
+/// The WORK cell: how long the run actually spent working, which excludes every
+/// stretch it sat paused or waiting on a person. `-` from a daemon that keeps no
+/// working clock.
+fn work_cell(entry: &RunListEntry, now: i64) -> String {
+    match entry.active {
+        Some(clock) => leviath_core::duration::compact(clock.total_secs(now)),
+        None => "-".to_string(),
+    }
+}
+
+/// The MOVED cell: how long since the run last actually moved. A run that has
+/// not persisted a snapshot yet has nothing to measure from and reads `-`.
+fn moved_cell(entry: &RunListEntry, now: i64) -> String {
     match entry.last_progress_at {
         Some(at) => humanize_age(now.saturating_sub(at)),
         None => "-".to_string(),
@@ -446,7 +514,7 @@ pub fn format_runs(
     if show_title {
         headers.push("TITLE");
     }
-    headers.extend(["STATUS", "STAGE", "ITER", "TOOLS", "AGE"]);
+    headers.extend(["STATUS", "STAGE", "ITER", "TOOLS", "AGE", "WORK", "MOVED"]);
     if show_reads {
         headers.push("READS");
     }
@@ -464,6 +532,8 @@ pub fn format_runs(
                 e.iteration.to_string(),
                 e.tool_calls.to_string(),
                 age_cell(e, now),
+                work_cell(e, now),
+                moved_cell(e, now),
             ]);
             if show_reads {
                 cells.push(reads_cell(e));
@@ -523,6 +593,29 @@ pub fn format_runs(
     out
 }
 
+/// Serialize live listing rows with the two computed spans folded in.
+///
+/// The control socket carries raw stamps, because the daemon's `now` and the
+/// reader's are not the same clock and a span computed on one side would be a
+/// small lie on the other. This is the reader's side, so the arithmetic is done
+/// here - and it is done at all so `lev ps --json` and `GET /api/runs` hand a
+/// reconciler the same two keys rather than each expecting it to reimplement the
+/// working-clock rule. See [`leviath_core::duration::annotate_spans`].
+fn annotated(runs: &[RunListEntry], now: i64) -> Vec<serde_json::Value> {
+    runs.iter()
+        .map(|e| {
+            let mut value = serde_json::to_value(e).unwrap_or(serde_json::Value::Null);
+            leviath_core::duration::annotate_spans(
+                &mut value,
+                e.started_at
+                    .map_or(0, |at| leviath_core::duration::between(at, now)),
+                e.active.map_or(0, |c| c.total_secs(now)),
+            );
+            value
+        })
+        .collect()
+}
+
 /// Print the live listing, optionally followed by the runs on disk the daemon is
 /// not hosting. Pure formatting/serialization, so the shape is testable without
 /// a daemon.
@@ -536,7 +629,11 @@ fn print_listing(
     now: i64,
 ) {
     if args.json {
-        let mut body = serde_json::json!({ "runs": runs, "finished": finished, "health": health });
+        let mut body = serde_json::json!({
+            "runs": annotated(runs, now),
+            "finished": annotated(finished, now),
+            "health": health,
+        });
         if let Some(offline) = offline {
             // Only `--all` adds keys, so a plain `--json` keeps the exact shape
             // it had before this flag existed.

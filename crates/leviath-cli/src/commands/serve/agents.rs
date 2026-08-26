@@ -9,6 +9,7 @@ use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
 use leviath_runtime::host::SpawnArgs;
 
 use super::blueprints::discover_blueprints;
+use super::runs::run_json;
 use super::types::*;
 use crate::runstate::{self, ContextSnapshot, RunMeta};
 
@@ -132,7 +133,9 @@ pub(super) async fn spawn_agent(
     }
 }
 
-pub(super) async fn list_agents(Query(query): Query<ListAgentsQuery>) -> Json<Vec<RunMeta>> {
+pub(super) async fn list_agents(
+    Query(query): Query<ListAgentsQuery>,
+) -> Json<Vec<serde_json::Value>> {
     let mut runs = runstate::list_runs();
 
     if let Some(ref status_filter) = query.status {
@@ -140,16 +143,19 @@ pub(super) async fn list_agents(Query(query): Query<ListAgentsQuery>) -> Json<Ve
         runs.retain(|r| filters.iter().any(|f| status_matches(&r.status, f)));
     }
 
-    // `.redacted()`: `RunMeta` carries the webhook signing secret, and this
-    // handler serializes it whole.
-    Json(runs.iter().map(RunMeta::redacted).collect())
+    // `run_json`, not a bare serialization: it is what strips the webhook
+    // signing secret this handler would otherwise hand out whole, and what
+    // gives these runs the same `age_secs`/`working_secs` that `/api/runs`
+    // reports for the very same run.
+    let now = now_secs();
+    Json(runs.iter().map(|m| run_json(m, now)).collect())
 }
 
 pub(super) async fn get_agent(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<RunMeta>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     runstate::read_meta(&id)
-        .map(|m| Json(m.redacted()))
+        .map(|m| Json(run_json(&m, now_secs())))
         .map_err(|_| {
             (
                 StatusCode::NOT_FOUND,
@@ -160,12 +166,12 @@ pub(super) async fn get_agent(
         })
 }
 
-pub(super) async fn agent_children(AxumPath(id): AxumPath<String>) -> Json<Vec<RunMeta>> {
-    let runs = runstate::list_runs();
-    let children: Vec<RunMeta> = runs
+pub(super) async fn agent_children(AxumPath(id): AxumPath<String>) -> Json<Vec<serde_json::Value>> {
+    let now = now_secs();
+    let children: Vec<serde_json::Value> = runstate::list_runs()
         .into_iter()
         .filter(|r| r.parent_run_id.as_deref() == Some(&id))
-        .map(|r| r.redacted())
+        .map(|r| run_json(&r, now))
         .collect();
     Json(children)
 }

@@ -430,12 +430,18 @@ fn known_meta_fields() -> HashSet<String> {
     // `RunMeta` is a struct, so this is always an object; `as_object` keeps
     // that assumption in one place instead of adding a match arm nothing can
     // reach.
-    serde_json::to_value(probe)
+    let mut fields: HashSet<String> = serde_json::to_value(probe)
         .ok()
         .as_ref()
         .and_then(serde_json::Value::as_object)
         .map(|map| map.keys().cloned().collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Not on the struct, but on every item this route serves - see
+    // `build_item`. Left out, `?fields=working_secs` would be refused for a key
+    // the response carries.
+    fields.insert(leviath_core::duration::AGE_SECS_KEY.to_string());
+    fields.insert(leviath_core::duration::WORKING_SECS_KEY.to_string());
+    fields
 }
 
 /// `GET /api/runs`
@@ -855,14 +861,30 @@ fn paginate(runs: Vec<RunMeta>, resolved: &Resolved) -> (Vec<RunMeta>, Option<St
     (after_cursor, next)
 }
 
+/// One run as this server hands it out: redacted, and carrying the two spans a
+/// caller would otherwise have to compute.
+///
+/// The single place a `RunMeta` becomes JSON on any route. `redacted()` is what
+/// strips the webhook signing secret, and a redaction that has to be remembered
+/// per handler is the one that gets forgotten; the same goes for the spans,
+/// which are the reason `/api/runs` and `/api/agents` used to describe the same
+/// run with different keys.
+pub(super) fn run_json(meta: &RunMeta, now: i64) -> serde_json::Value {
+    let mut value = serde_json::to_value(meta.redacted()).unwrap_or(serde_json::Value::Null);
+    leviath_core::duration::annotate_spans(
+        &mut value,
+        meta.age_secs(now),
+        meta.active_runtime_secs(now),
+    );
+    value
+}
+
 /// Build one response item, redacting and then projecting.
 ///
-/// `redacted()` is applied here, at the single place a `RunMeta` becomes JSON on
-/// this route, rather than at each call site - it is what strips the webhook
-/// signing secret, and a redaction that has to be remembered per handler is the
-/// one that gets forgotten.
+/// The spans go on before the projection, so `?fields=working_secs` selects one
+/// the way it selects any other key.
 fn build_item(meta: &RunMeta, resolved: &Resolved, highlights: Option<Vec<Highlight>>) -> RunItem {
-    let mut value = serde_json::to_value(meta.redacted()).unwrap_or(serde_json::Value::Null);
+    let mut value = run_json(meta, now_secs());
     if let (Some(fields), serde_json::Value::Object(map)) = (&resolved.fields, &mut value) {
         map.retain(|key, _| fields.contains(key));
     }
