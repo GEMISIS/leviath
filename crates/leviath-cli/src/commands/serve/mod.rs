@@ -794,7 +794,26 @@ mod tests {
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: no_daemon_control(),
-            mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            mcp: crate::commands::serve::mcp::McpAdmin {
+                // A path nothing else in the binary can reach, and one that does
+                // not exist - `load_from_path` answers a missing file with the
+                // defaults, so the handler is deterministic.
+                //
+                // `McpAdmin::default()` resolves `Config::config_path()`, which
+                // follows `LEVIATH_HOME`, and other tests move that with
+                // `temp_env` while these run. So `GET /api/mcp/servers` was
+                // reading whichever config file the process happened to be
+                // pointed at - the developer's real one on an ordinary run, and
+                // a temp one mid-write on an unlucky one, where a half-written
+                // TOML parses as an error and the route answers 500. That is
+                // what failed `test_router_serves_routes_the_old_hand_copy_missed`
+                // about one run in three, on an assertion about *routing*.
+                config_path: std::env::temp_dir()
+                    .join("leviath-serve-router-tests-no-such-config.toml"),
+                store_path: std::env::temp_dir()
+                    .join("leviath-serve-router-tests-no-such-store.json"),
+                ..Default::default()
+            },
             limits: Default::default(),
         }
     }
