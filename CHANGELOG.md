@@ -11,7 +11,7 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
-## Unreleased
+## 0.5.1 - 2026-08-26
 
 - Changed: `lev ps`, the TUI and the HTTP API describe a run's time the same
   way. There are three spans and they answer different questions - AGE (how long
