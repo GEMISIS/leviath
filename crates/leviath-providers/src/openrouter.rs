@@ -552,13 +552,15 @@ impl OpenRouterProvider {
     /// [`Provider::prime_capabilities`] so the two cannot disagree about what
     /// the endpoint is or how its failures read.
     async fn fetch_models_json(&self) -> Result<serde_json::Value> {
-        let response = self
-            .client
-            .get(format!("{}/models", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .send()
-            .await
-            .map_err(|e| ProviderError::transport("listing models", &e))?;
+        let response = crate::provider::apply_request_timeout(
+            self.client
+                .get(format!("{}/models", self.base_url))
+                .header("Authorization", format!("Bearer {}", self.api_key)),
+            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
+        )
+        .send()
+        .await
+        .map_err(|e| ProviderError::transport("listing models", &e))?;
 
         let status = response.status();
         if !status.is_success() {

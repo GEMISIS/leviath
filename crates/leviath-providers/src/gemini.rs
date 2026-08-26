@@ -232,15 +232,17 @@ impl GeminiProvider {
         let body = serde_json::json!({
             "contents": [{ "role": "user", "parts": [{ "text": text }] }],
         });
-        let response = self
-            .client
-            .post(&url)
-            .header("x-goog-api-key", &self.api_key)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::transport("reaching the provider", &e))?;
+        let response = crate::provider::apply_request_timeout(
+            self.client
+                .post(&url)
+                .header("x-goog-api-key", &self.api_key)
+                .header("Content-Type", "application/json")
+                .json(&body),
+            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
+        )
+        .send()
+        .await
+        .map_err(|e| ProviderError::transport("reaching the provider", &e))?;
         let response = crate::provider::check_http_response(response, None).await?;
         let value: serde_json::Value = crate::provider::decode_json(response).await?;
         value
@@ -426,13 +428,15 @@ impl Provider for GeminiProvider {
 impl GeminiProvider {
     /// Native `/v1beta/models` listing with authoritative per-model token limits.
     async fn list_models_native(&self, native_base: &str) -> Result<Vec<ModelInfo>> {
-        let response = self
-            .client
-            .get(format!("{}/models", native_base))
-            .header("x-goog-api-key", &self.api_key)
-            .send()
-            .await
-            .map_err(|e| ProviderError::transport("listing models", &e))?;
+        let response = crate::provider::apply_request_timeout(
+            self.client
+                .get(format!("{}/models", native_base))
+                .header("x-goog-api-key", &self.api_key),
+            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
+        )
+        .send()
+        .await
+        .map_err(|e| ProviderError::transport("listing models", &e))?;
         let response = crate::provider::check_http_response(response, None).await?;
         let body: serde_json::Value = crate::provider::decode_json(response).await?;
 
@@ -482,13 +486,15 @@ impl GeminiProvider {
     /// OpenAI-compat `/models` listing (no per-model token limits) used only when
     /// the configured base URL isn't the standard native-derivable form.
     async fn list_models_compat(&self) -> Result<Vec<ModelInfo>> {
-        let response = self
-            .client
-            .get(format!("{}/models", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .send()
-            .await
-            .map_err(|e| ProviderError::transport("listing models", &e))?;
+        let response = crate::provider::apply_request_timeout(
+            self.client
+                .get(format!("{}/models", self.base_url))
+                .header("Authorization", format!("Bearer {}", self.api_key)),
+            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
+        )
+        .send()
+        .await
+        .map_err(|e| ProviderError::transport("listing models", &e))?;
         let response = crate::provider::check_http_response(response, None).await?;
         let body: serde_json::Value = crate::provider::decode_json(response).await?;
 

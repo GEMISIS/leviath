@@ -60,6 +60,40 @@ same list.
   the path; `t` there still narrows it to the path and the options. This is the
   same pair of pictures The Lair shows on the web.
 
+- Fixed: a failed model call says what went wrong. `FailureKind` shipped in
+  0.5.1 and never reached the one call that matters: every provider's `infer`
+  and `infer_stream` goes through a single send, and that send threw the typed
+  error away and kept only `Display` on it - the same sentence whether the
+  hostname did not resolve, the port refused, the certificate was not trusted or
+  the request timed out. So a run parked by a network problem told its owner
+  only that something had failed, and the extra patience a provider earns for
+  being slow rather than dead could never be reached: three timeouts still
+  pulled a working provider out of service for every run on the box. The label
+  is attached where the typed error still exists, on the send, on the body read
+  and on a stream that stops mid-answer.
+
+- Fixed: a network problem at a stage boundary parks the run instead of killing
+  it. The same failure one call earlier, on the stage's own inference, paused
+  the run for a `lev resume`; landing it on the "which stage next" call ended
+  the run and threw away every stage it had finished. Which of the two happened
+  was decided by nothing but what was in flight when the network went. Both
+  lanes now read the failure the same way and say the same thing about it, and a
+  run parked mid-choice keeps its pending choice, so a resume asks where to go
+  next rather than re-running the stage that already answered.
+
+- Fixed: a call that sat out the whole 15-minute job deadline parks the run,
+  like every other way of running out of time. It was the one that did not:
+  a provider-side timeout failed over and then parked, while the outer backstop
+  - which only fires when things are *worse* - failed the run outright.
+
+- Fixed: counting a prompt's tokens or listing a provider's models no longer
+  inherits the 15-minute inference deadline. Neither generates anything, so the
+  answer either arrives promptly or is not coming, and both callers already cope
+  without one. The token count is the one that hurt: it runs before the request
+  is sent and outside the deadline that bounds the call itself, so a provider
+  that accepted the connection and answered nothing froze the run there for
+  fifteen minutes with nothing in flight to show for it. They get thirty seconds.
+
 ## 0.5.1 - 2026-08-26
 
 - Changed: `lev ps`, the TUI and the HTTP API describe a run's time the same

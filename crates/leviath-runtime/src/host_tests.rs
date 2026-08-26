@@ -1229,6 +1229,46 @@ async fn a_paused_run_holding_a_landed_response_is_not_parked() {
     );
 }
 
+/// And one waiting to be asked where to go next stays resident for the same
+/// reason: the edges it has to choose between live only on the component.
+///
+/// Page it out and it comes back `ReadyToInfer`, which re-runs the stage that
+/// already answered rather than asking for the routing choice - so the run
+/// pays for a whole stage again and may take a different path the second time.
+/// This became reachable when a transport failure at a stage boundary started
+/// parking the run instead of killing it.
+#[tokio::test]
+async fn a_paused_run_waiting_to_choose_its_next_stage_is_not_parked() {
+    let mut host = host_with(vec![]);
+    host.set_reloader(Box::new(|world, run_id| {
+        let mut state = agent_state(run_id);
+        state.status = AgentStatus::Paused;
+        Some(world.spawn_agent((state,)))
+    }));
+    let e = spawn(&mut host, "run-a", "agent-a");
+    assert!(
+        ask(&mut host, |reply| ControlOp::Pause {
+            run_id: "run-a".to_string(),
+            reply
+        })
+        .await
+    );
+    let mut wm = crate::pipeline::PersistWatermark::default();
+    wm.stamp_status(leviath_core::run_meta::RunStatus::Paused);
+    host.world_mut()
+        .world_mut()
+        .entity_mut(e.entity())
+        .insert((wm, crate::pipeline::AwaitingTransitionChoice(vec![])));
+
+    host.emit_events();
+
+    assert!(
+        host.world.world().get::<AgentState>(e.entity()).is_some(),
+        "the run stays in the world while its routing choice is still pending"
+    );
+    assert!(host.by_run_id.contains_key("run-a"));
+}
+
 /// A paused standalone root whose paused snapshot has been dispatched is
 /// paged out of the world: the entity is gone, but the listing and the
 /// Status op still report it, and a Resume pages it back in.

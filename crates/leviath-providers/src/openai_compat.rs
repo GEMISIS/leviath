@@ -66,10 +66,18 @@ pub async fn send_chat_request(
         builder = builder.header(*name, value);
     }
 
+    // `ProviderError::transport` rather than the raw `e.to_string()` this used
+    // to be. Every provider's `infer` and `infer_stream` comes through here, so
+    // this one line is the whole inference path's classification: without it
+    // `failure_kind()` is `None` for every timeout, reset and refused
+    // connection a run ever hits, the message a paused run shows is `Display`
+    // on a `reqwest::Error` - the same sentence for all four - and the circuit
+    // breaker's patience for a provider that answered slowly (see
+    // `CircuitPolicy::threshold_for`) can never be reached.
     let response = builder.json(body).send().await.map_err(|e| {
         #[cfg(feature = "debug-http")]
         crate::debug_http::log_error(provider_name, url, &e.to_string());
-        ProviderError::RequestFailed(e.to_string())
+        ProviderError::transport("sending the request", &e)
     })?;
 
     #[cfg(feature = "debug-http")]
@@ -881,8 +889,9 @@ impl Stream for OpenAiSseStream {
                     }
                 }
                 std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Some(Err(ProviderError::RequestFailed(
-                        e.to_string(),
+                    return std::task::Poll::Ready(Some(Err(ProviderError::transport(
+                        "reading the response stream",
+                        &e,
                     ))));
                 }
                 std::task::Poll::Ready(None) => {
@@ -1062,6 +1071,93 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
 
 #[cfg(test)]
 mod tests {
+    /// The inference path classifies its own failures, driven *through*
+    /// `send_chat_request` rather than around it.
+    ///
+    /// Every provider's `infer` and `infer_stream` goes through this one
+    /// function, and until this test nothing checked it: the classification
+    /// tests all went in by `list_models`, which is a different door. So
+    /// `failure_kind()` was `None` for every timeout and every reset a run ever
+    /// hit, and both things that read it downstream ran on the unclassified
+    /// default - the sentence a parked run shows a person, and the circuit
+    /// breaker's extra patience for a provider that is slow rather than dead.
+    ///
+    /// A server that accepts the connection and then writes nothing, because
+    /// that is the failure this has to get right: it is the one that means the
+    /// provider is *there*, and telling it from a provider that is not there is
+    /// the whole reason `FailureKind` exists.
+    #[tokio::test]
+    async fn a_failed_send_says_what_kind_of_failure_it_was() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+        let addr = listener.local_addr().expect("has an address");
+        std::thread::spawn(move || {
+            let _held = listener.accept();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+
+        let client = crate::provider::build_http_client(Some(1)).expect("a client builds");
+        let err = super::send_chat_request(
+            &client,
+            "test",
+            &format!("http://{addr}/v1/chat/completions"),
+            &[],
+            &serde_json::json!({ "model": "m" }),
+            None,
+            None,
+        )
+        .await
+        .expect_err("nothing ever answers");
+
+        assert_eq!(
+            err.failure_kind(),
+            Some(crate::FailureKind::Timeout),
+            "the inference path must say what went wrong, not just that something did"
+        );
+        // The remedy travels with it, so the person reading a parked run is told
+        // which knob is theirs rather than being sent to check the network.
+        assert!(
+            err.to_string()
+                .contains(crate::FailureKind::Timeout.remedy())
+        );
+        // And none of this may cost the run its failover: `Unreachable` is what
+        // moves it to the next candidate and, failing that, parks it.
+        assert_eq!(
+            err.unavailable_reason(),
+            Some(crate::UnavailableReason::Unreachable)
+        );
+    }
+
+    /// The other half: a provider that *was* reached gets the patient circuit
+    /// threshold, and one that was not does not. Asserted here, on an error the
+    /// real path produced, because the runtime's own test for the two speeds
+    /// writes the label by hand - which is exactly why the feature could be
+    /// dead in production with that test passing.
+    #[tokio::test]
+    async fn a_timeout_from_the_inference_path_counts_as_having_reached_the_provider() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+        let addr = listener.local_addr().expect("has an address");
+        std::thread::spawn(move || {
+            let _held = listener.accept();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+
+        let client = crate::provider::build_http_client(Some(1)).expect("a client builds");
+        let err = super::send_chat_request(
+            &client,
+            "test",
+            &format!("http://{addr}/v1/chat/completions"),
+            &[],
+            &serde_json::json!({ "model": "m" }),
+            None,
+            None,
+        )
+        .await
+        .expect_err("nothing ever answers");
+
+        let kind = err.failure_kind().expect("classified");
+        assert!(kind.provider_was_reached());
+    }
+
     /// The refusal that killed a run, and the shapes that must NOT trip it.
     ///
     /// A false positive here silently drops the temperature the caller asked

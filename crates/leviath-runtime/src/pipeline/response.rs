@@ -41,6 +41,57 @@ pub(crate) fn to_inference_result(
 /// indentation into the middle of the sentence a user reads.
 const UNREACHABLE_REMEDY: &str = "check the network connection, then `lev resume` this run";
 
+/// Whether a failed provider call is the machine's problem rather than the
+/// run's, and if so what to tell the person who has to fix it.
+///
+/// `None` means the run itself is what went wrong and the caller should fail it.
+///
+/// Two lanes ask - the stage call in [`collect_inference`] and the routing call
+/// at a stage boundary in `collect_transition_choice` - and they used to answer
+/// differently: the stage lane parked, the routing lane killed the run outright.
+/// The same blip, a different outcome, decided by which call happened to be in
+/// flight when the network went. The decision and the wording live here so the
+/// two cannot drift again; what each lane must do to keep its own continuation
+/// alive is still its own business, because those genuinely differ.
+pub(super) fn setup_park(
+    err: &leviath_providers::ProviderError,
+    provider: &str,
+) -> Option<(leviath_core::run_meta::SetupBlocker, String)> {
+    use leviath_core::run_meta::SetupBlocker;
+    use leviath_providers::UnavailableReason;
+
+    match err.unavailable_reason()? {
+        // Running out of credits is an account state, not a defect in the run:
+        // the operator tops up and resumes. Failing here would make the run
+        // permanently unresumable and throw away every iteration it has already
+        // paid for, to punish somebody for a billing lapse. Unattended included
+        // - a harness that cannot rescue a run cancels it instead (issue #456).
+        UnavailableReason::CreditsExhausted => Some((
+            SetupBlocker::CreditsExhausted,
+            format!("out of credits ({err}): top up the account, then `lev resume` this run"),
+        )),
+        // The provider could not be reached and there is no candidate left to
+        // try. That is the network being down, not the run being wrong: the
+        // request never got an answer, so nothing about this run is known to be
+        // bad, and the condition is usually over in seconds and always somebody
+        // else's to fix.
+        //
+        // Reachable only once the retry policy is spent - a transport failure is
+        // transient, so the dispatch job has already tried and backed off
+        // `inference_retry_attempts` times before the outcome gets here.
+        UnavailableReason::Unreachable => Some((
+            SetupBlocker::ProvidersUnavailable,
+            format!("could not reach '{provider}' ({err}): {UNREACHABLE_REMEDY}"),
+        )),
+        // A rejected key or a model the account may not have is a real setup
+        // problem, but one the failover list may still route around, and the
+        // stall watchdog already parks a run whose every candidate is out of
+        // service (see `fail_stalled_dispatch`). Left to the caller's error
+        // path so this change adds no new parking reason.
+        UnavailableReason::AuthFailed | UnavailableReason::Forbidden => None,
+    }
+}
+
 /// What `collect_inference` selects.
 ///
 /// `&'static` is bevy's `WorldQuery` convention, not a claim about
@@ -319,66 +370,12 @@ pub fn collect_inference(
                         .insert(ReadyToInfer);
                     continue;
                 }
-                // Running out of credits with no candidate left is an account
-                // state, not a defect in the run: the operator tops up and
-                // resumes. Failing here would make the run permanently
-                // unresumable, so it pauses instead, still pointed at the same
-                // inference, and a `lev resume` re-dispatches it (issue #413).
-                // Unattended is the exception: a scheduler or a benchmark is
-                // watching for a terminal status and would wait for ever for
-                // one that never comes, so for those a failure is the honest
-                // answer.
-                // Unattended included. A run that hit an empty account has
-                // done real work and needs one edit elsewhere to continue, so
-                // ending it throws that away to punish somebody for a billing
-                // lapse. A harness that cannot rescue it cancels instead
-                // (issue #456).
-                if err.unavailable_reason()
-                    == Some(leviath_providers::UnavailableReason::CreditsExhausted)
-                {
-                    let message = format!(
-                        "out of credits ({err}): top up the account, then \
-                         `lev resume` this run"
-                    );
-                    tracing::warn!(error = %err, "out of credits; pausing the run for a resume");
-                    if let Some(mut buffer) = buffer {
-                        buffer.logs.push((idx, format!("[paused] {message}")));
-                    }
-                    state.status = AgentStatus::Paused;
-                    commands
-                        .entity(outcome.entity)
-                        .remove::<AwaitingInference>()
-                        .remove::<InFlightWork>()
-                        .insert(crate::pipeline::PausedForSetup {
-                            blocker: leviath_core::run_meta::SetupBlocker::CreditsExhausted,
-                            remedy: message,
-                        })
-                        .insert(ReadyToInfer);
-                    continue;
-                }
-                // The provider could not be reached at all and there is no
-                // candidate left to try. That is the network being down, not the
-                // run being wrong: the request never got an answer, so nothing
-                // about this run is known to be bad. Failing here throws away
-                // every iteration it has completed for a condition that is
-                // usually over in seconds and is always somebody else's to fix,
-                // so it parks on the same terms as an empty account (issue
-                // #456) and `lev resume` picks it back up.
-                //
-                // Reachable only once the retry policy is spent - a transport
-                // failure is transient, so `run_inference_job` has already tried
-                // and backed off `inference_retry_attempts` times before the
-                // outcome gets here.
-                if err.unavailable_reason()
-                    == Some(leviath_providers::UnavailableReason::Unreachable)
-                {
-                    let message = format!(
-                        "could not reach '{called_provider}' ({err}): {UNREACHABLE_REMEDY}"
-                    );
+                if let Some((blocker, message)) = setup_park(&err, &called_provider) {
                     tracing::warn!(
                         provider = %called_provider,
+                        blocker = %blocker,
                         error = %err,
-                        "provider unreachable; pausing the run for a resume"
+                        "pausing the run until the machine is fixed"
                     );
                     if let Some(mut buffer) = buffer {
                         buffer.logs.push((idx, format!("[paused] {message}")));
@@ -389,12 +386,12 @@ pub fn collect_inference(
                         .remove::<AwaitingInference>()
                         .remove::<InFlightWork>()
                         .insert(crate::pipeline::PausedForSetup {
-                            blocker: leviath_core::run_meta::SetupBlocker::ProvidersUnavailable,
+                            blocker,
                             remedy: message,
                         })
-                        // Kept on purpose, as the credits park does: the retry is
-                        // already staged, so a resume re-dispatches this same
-                        // inference rather than rebuilding anything.
+                        // Kept on purpose: the retry is already staged, so a
+                        // resume re-dispatches this same inference rather than
+                        // rebuilding anything.
                         .insert(ReadyToInfer);
                     continue;
                 }
