@@ -992,6 +992,7 @@ async fn each_re_drive_reports_providers_out_of_service() {
     circuits.record_failure(
         "openrouter",
         leviath_providers::UnavailableReason::CreditsExhausted,
+        None,
         chrono::Utc::now().timestamp(),
         &policy,
     );

@@ -134,6 +134,12 @@ Three rather than one because a single "payment required" can be one request ask
 tokens than the balance covers, which a smaller request would survive. Three in a row is the
 account.
 
+Timeouts are counted on a longer fuse: four times the number above, so twelve by default. A provider
+that refuses the connection is not serving anyone and the next request proves it again, but one that
+accepts the connection and answers slowly is demonstrably there, and the usual cause is a large
+prompt rather than a dead server. Pulling it after three would take a working provider away from
+every run for the cooldown.
+
 While a provider is out, runs move to their next candidate. A run with none left is failed with an
 error saying so, rather than left sitting there looking healthy. Once the cooldown passes, the next
 request goes through as a probe: if it works the provider is back immediately, and if it fails the

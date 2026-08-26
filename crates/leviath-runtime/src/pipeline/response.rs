@@ -150,21 +150,23 @@ pub fn collect_inference(
         // answer at all proves the provider is serving; a provider-fatal one
         // counts against it and may take it out of service for everyone.
         if let Some(circuits) = circuits.as_deref_mut() {
-            match outcome
-                .result
-                .as_ref()
-                .err()
-                .and_then(|e| e.unavailable_reason())
-            {
+            let failed = outcome.result.as_ref().err();
+            match failed.and_then(|e| e.unavailable_reason()) {
                 Some(reason) => {
-                    if circuits.record_failure(&called_provider, reason, now, &policy) {
+                    // The kind travels with the reason now: a provider that
+                    // accepted the connection and then answered slowly is not
+                    // the same as one that refused it, and the breaker gives the
+                    // first far more rope before taking it away from every run.
+                    let kind = failed.and_then(|e| e.failure_kind());
+                    if circuits.record_failure(&called_provider, reason, kind, now, &policy) {
                         // Loud and once, on the transition only. This is the
                         // alert issue #201 asked for: without it, ten dead
                         // runs in a row look like ten unrelated failures.
                         tracing::error!(
                             provider = %called_provider,
                             reason = reason.label(),
-                            failures = policy.failures_before_open,
+                            failure_kind = kind.map_or("unknown", |k| k.label()),
+                            failures = policy.threshold_for(kind),
                             cooldown_secs = policy.cooldown_secs,
                             "provider circuit opened; no run will be dispatched to it \
                              until it recovers"

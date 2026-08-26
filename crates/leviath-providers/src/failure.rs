@@ -141,6 +141,38 @@ impl FailureKind {
         FailureKind::Transport
     }
 
+    /// Whether the provider was reached at all before this went wrong.
+    ///
+    /// A refusal, a name that did not resolve and a failed handshake all say
+    /// the same thing: nothing is serving at that address, and the next request
+    /// fails identically. A timeout or an answer that stopped arriving say the
+    /// opposite - the connection was established, so the provider is there. It
+    /// may be wedged, or it may be one oversized request against a busy server,
+    /// and those are not distinguishable from here.
+    ///
+    /// The circuit breaker asks, because "not there" is worth taking a provider
+    /// out of service over far sooner than "slow".
+    pub fn provider_was_reached(self) -> bool {
+        match self {
+            FailureKind::Timeout | FailureKind::ConnectionDropped => true,
+            // An answer arrived and was rejected, missing or unparseable, so the
+            // provider was plainly reached. None of these are provider-fatal, so
+            // the breaker never sees them, but the answer is still yes.
+            FailureKind::BadRequest
+            | FailureKind::NotFound
+            | FailureKind::ServerError
+            | FailureKind::MalformedResponse => true,
+            // `Transport` is the unrecognised case, and it is counted as not
+            // reached on purpose: the patient threshold is the one that lets a
+            // dead provider keep taking work, so an unknown failure takes the
+            // strict side.
+            FailureKind::DnsFailure
+            | FailureKind::ConnectionRefused
+            | FailureKind::TlsFailure
+            | FailureKind::Transport => false,
+        }
+    }
+
     /// Place an HTTP status the provider answered with.
     ///
     /// Only the statuses that are not already an [`crate::provider::UnavailableReason`]: 401,
@@ -353,6 +385,37 @@ mod tests {
             .expect_err("the handshake fails");
 
         assert_eq!(FailureKind::from_reqwest(&e), FailureKind::TlsFailure);
+    }
+
+    /// Every kind, and which side of the breaker's question it falls on. Stated
+    /// exhaustively because the consequence of getting one wrong is invisible:
+    /// a provider either loses its place in the rotation too early, or keeps it
+    /// long after it stopped serving.
+    #[test]
+    fn every_kind_says_whether_the_provider_was_reached() {
+        for kind in [
+            FailureKind::Timeout,
+            FailureKind::ConnectionDropped,
+            FailureKind::BadRequest,
+            FailureKind::NotFound,
+            FailureKind::ServerError,
+            FailureKind::MalformedResponse,
+        ] {
+            let label = kind.label();
+            assert!(kind.provider_was_reached(), "{label} reached the provider");
+        }
+        for kind in [
+            FailureKind::DnsFailure,
+            FailureKind::ConnectionRefused,
+            FailureKind::TlsFailure,
+            FailureKind::Transport,
+        ] {
+            let label = kind.label();
+            assert!(
+                !kind.provider_was_reached(),
+                "{label} never got to the provider"
+            );
+        }
     }
 
     /// A message whose bracket never closes is not a prefix, and must not be

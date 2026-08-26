@@ -21,7 +21,7 @@ use super::*;
 
 use std::collections::HashMap;
 
-use leviath_providers::UnavailableReason;
+use leviath_providers::{FailureKind, UnavailableReason};
 use serde::{Deserialize, Serialize};
 
 /// When to open a provider's circuit, and how long to leave it open.
@@ -44,6 +44,29 @@ pub struct CircuitPolicy {
 /// output tokens than the remaining balance covers, which a smaller request
 /// would survive. Three in a row is an account, not a request.
 pub const DEFAULT_FAILURES_BEFORE_OPEN: u32 = 3;
+
+/// How much more patience a provider gets when it is demonstrably there.
+///
+/// A provider that refuses the connection is out of service after
+/// `failures_before_open`. One that accepts the connection and then answers
+/// slowly, or stops mid-answer, gets this many times that budget before its
+/// circuit opens.
+///
+/// Four rather than one because the two failures do not mean the same thing.
+/// Nothing listening on the port is a fact about the provider and the next
+/// request will fail the same way. A timeout is a fact about *one request*: the
+/// usual cause is an oversized prompt against a busy server, not a dead one, and
+/// three of those in a row is an ordinary afternoon on a large run. Opening the
+/// circuit there takes a working provider away from every run on the box for the
+/// whole cooldown, which is a self-inflicted outage.
+///
+/// Four rather than never because a genuinely wedged provider - accepting
+/// connections and answering nothing - is still one that no run should be sent
+/// to, and without a ceiling every run would keep discovering that the slow way.
+///
+/// Derived from the same knob rather than a second one, so `[limits]` keeps a
+/// single dial and `failures_before_open = 0` still disables the breaker whole.
+pub const SLOW_FAILURE_MULTIPLIER: u32 = 4;
 
 /// Default time an open circuit waits before probing again.
 ///
@@ -93,8 +116,30 @@ pub struct ProviderCircuitState {
 #[derive(Resource, Debug, Clone, Default)]
 pub struct ProviderCircuits(HashMap<String, Circuit>);
 
+impl CircuitPolicy {
+    /// Consecutive failures before a failure of `kind` opens the circuit.
+    ///
+    /// `None` - a provider-fatal failure that carries no kind, such as a 402 the
+    /// provider stated outright - takes the strict threshold. Those are the
+    /// provider telling us about itself, which is exactly what the breaker is
+    /// for.
+    pub fn threshold_for(&self, kind: Option<FailureKind>) -> u32 {
+        match kind {
+            Some(k) if k.provider_was_reached() => self
+                .failures_before_open
+                .saturating_mul(SLOW_FAILURE_MULTIPLIER),
+            _ => self.failures_before_open,
+        }
+    }
+}
+
 impl ProviderCircuits {
     /// Count a provider-fatal failure against `provider`.
+    ///
+    /// `kind` decides how much patience the provider gets: one that accepted the
+    /// connection and then answered slowly is given
+    /// [`SLOW_FAILURE_MULTIPLIER`] times the budget of one that could not be
+    /// reached at all. See [`CircuitPolicy::threshold_for`].
     ///
     /// Returns `true` on the transition into the open state, so the caller can
     /// log and alert exactly once rather than on every subsequent failure.
@@ -102,6 +147,7 @@ impl ProviderCircuits {
         &mut self,
         provider: &str,
         reason: UnavailableReason,
+        kind: Option<FailureKind>,
         now: i64,
         policy: &CircuitPolicy,
     ) -> bool {
@@ -112,11 +158,12 @@ impl ProviderCircuits {
         });
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
         entry.reason = reason;
-        if policy.failures_before_open == 0 {
+        let threshold = policy.threshold_for(kind);
+        if threshold == 0 {
             return false; // breaker disabled; keep counting for the record
         }
         let was_open = entry.opened_at.is_some();
-        if entry.consecutive_failures >= policy.failures_before_open {
+        if entry.consecutive_failures >= threshold {
             // Re-stamp on every failure at or past the threshold: a probe that
             // fails must restart the cooldown, not inherit the old one.
             entry.opened_at = Some(now);
@@ -248,9 +295,106 @@ mod tests {
         circuits.record_failure(
             "openrouter",
             UnavailableReason::CreditsExhausted,
+            None,
             now,
             &policy(),
         )
+    }
+
+    /// A slow provider is one that answered the connection, so it keeps its
+    /// place in the rotation far longer than one that refused it.
+    ///
+    /// This is the whole point of the change: three slow calls in a row is an
+    /// ordinary afternoon on a large run, and opening the circuit there takes a
+    /// working provider away from *every* run on the box for the cooldown.
+    #[test]
+    fn a_timeout_does_not_open_the_circuit_where_a_refusal_would() {
+        let slow = Some(FailureKind::Timeout);
+        let mut circuits = ProviderCircuits::default();
+        for now in 0..3 {
+            assert!(
+                !circuits.record_failure("p", UnavailableReason::Unreachable, slow, now, &policy()),
+                "a timeout must not open the circuit at the strict threshold"
+            );
+        }
+        assert!(
+            !circuits.is_open("p", 3, &policy()),
+            "three slow calls is not an outage"
+        );
+
+        // The same three against a provider that could not be reached at all.
+        let dead = Some(FailureKind::ConnectionRefused);
+        let mut refused = ProviderCircuits::default();
+        assert!(!refused.record_failure("p", UnavailableReason::Unreachable, dead, 0, &policy()));
+        assert!(!refused.record_failure("p", UnavailableReason::Unreachable, dead, 1, &policy()));
+        assert!(
+            refused.record_failure("p", UnavailableReason::Unreachable, dead, 2, &policy()),
+            "nothing listening is a fact about the provider, and opens at three"
+        );
+    }
+
+    /// Patient, not infinite. A provider that accepts connections and answers
+    /// nothing is still one no run should be sent to, so the slow threshold has
+    /// a ceiling rather than being waived.
+    #[test]
+    fn a_wedged_provider_still_opens_its_circuit_eventually() {
+        let slow = Some(FailureKind::Timeout);
+        let mut circuits = ProviderCircuits::default();
+        let threshold = policy().threshold_for(slow);
+        assert_eq!(threshold, 12, "three strict, four times the rope");
+
+        let mut opened_at = None;
+        for now in 0..i64::from(threshold) {
+            if circuits.record_failure("p", UnavailableReason::Unreachable, slow, now, &policy()) {
+                opened_at = Some(now + 1);
+            }
+        }
+        assert_eq!(
+            opened_at,
+            Some(i64::from(threshold)),
+            "it opens on the patient threshold, not before and not never"
+        );
+        assert!(circuits.is_open("p", i64::from(threshold), &policy()));
+    }
+
+    /// A failure the provider stated outright carries no transport kind, and
+    /// takes the strict threshold. Those are the provider telling us about
+    /// itself, which is exactly what the breaker is for.
+    #[test]
+    fn a_stated_failure_keeps_the_strict_threshold() {
+        assert_eq!(policy().threshold_for(None), 3);
+        assert_eq!(
+            policy().threshold_for(Some(FailureKind::ConnectionRefused)),
+            3
+        );
+        assert_eq!(
+            policy().threshold_for(Some(FailureKind::ConnectionDropped)),
+            12
+        );
+    }
+
+    /// Zero disables the breaker whole, and multiplying zero must not quietly
+    /// re-enable it for the slow path.
+    #[test]
+    fn a_disabled_breaker_stays_disabled_for_both_thresholds() {
+        let off = CircuitPolicy {
+            failures_before_open: 0,
+            cooldown_secs: 300,
+        };
+        assert_eq!(off.threshold_for(None), 0);
+        assert_eq!(off.threshold_for(Some(FailureKind::Timeout)), 0);
+
+        let mut circuits = ProviderCircuits::default();
+        for now in 0..20 {
+            assert!(!circuits.record_failure(
+                "p",
+                UnavailableReason::Unreachable,
+                Some(FailureKind::Timeout),
+                now,
+                &off
+            ));
+        }
+        assert!(!circuits.is_open("p", 20, &off));
     }
 
     #[test]
@@ -294,7 +438,7 @@ mod tests {
     fn last_reason_reports_the_most_recent_failure_or_nothing() {
         let mut circuits = ProviderCircuits::default();
         assert_eq!(circuits.last_reason("p"), None);
-        circuits.record_failure("p", UnavailableReason::CreditsExhausted, 0, &policy());
+        circuits.record_failure("p", UnavailableReason::CreditsExhausted, None, 0, &policy());
         assert_eq!(
             circuits.last_reason("p"),
             Some(UnavailableReason::CreditsExhausted),
@@ -355,6 +499,7 @@ mod tests {
             assert!(!circuits.record_failure(
                 "openrouter",
                 UnavailableReason::CreditsExhausted,
+                None,
                 t,
                 &disabled
             ));
@@ -383,7 +528,7 @@ mod tests {
         let mut circuits = ProviderCircuits::default();
         for name in ["openrouter", "anthropic"] {
             for t in 0..3 {
-                circuits.record_failure(name, UnavailableReason::AuthFailed, t, &policy());
+                circuits.record_failure(name, UnavailableReason::AuthFailed, None, t, &policy());
             }
         }
         let open = circuits.open_circuits(10, &policy());
@@ -399,9 +544,9 @@ mod tests {
     #[test]
     fn the_latest_reason_wins() {
         let mut circuits = ProviderCircuits::default();
-        circuits.record_failure("p", UnavailableReason::CreditsExhausted, 0, &policy());
-        circuits.record_failure("p", UnavailableReason::AuthFailed, 1, &policy());
-        circuits.record_failure("p", UnavailableReason::AuthFailed, 2, &policy());
+        circuits.record_failure("p", UnavailableReason::CreditsExhausted, None, 0, &policy());
+        circuits.record_failure("p", UnavailableReason::AuthFailed, None, 1, &policy());
+        circuits.record_failure("p", UnavailableReason::AuthFailed, None, 2, &policy());
         let open = circuits.open_circuits(2, &policy());
         assert_eq!(open[0].reason, UnavailableReason::AuthFailed);
     }
@@ -450,7 +595,13 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
         for name in open {
             for _ in 0..policy().failures_before_open {
-                circuits.record_failure(name, UnavailableReason::CreditsExhausted, now, &policy());
+                circuits.record_failure(
+                    name,
+                    UnavailableReason::CreditsExhausted,
+                    None,
+                    now,
+                    &policy(),
+                );
             }
         }
         world.insert_resource(circuits);
@@ -596,6 +747,7 @@ mod tests {
             circuits.record_failure(
                 "openrouter",
                 UnavailableReason::CreditsExhausted,
+                None,
                 now,
                 &default_policy,
             );

@@ -284,6 +284,15 @@ or a rejected key, before that provider is taken out of service for every run. T
 because a single payment error can just be one oversized request. `0` disables it and leaves per-run
 failover to cope alone.
 
+A provider that answered the connection and then went quiet gets four times that budget, so the
+default pulls it after twelve rather than three. The two failures do not mean the same thing:
+nothing listening on the port is a fact about the provider, and the next request fails identically,
+while a timeout is usually a fact about one request - a large prompt against a busy server. Three
+slow calls in a row is an ordinary afternoon on a big run, and pulling a working provider there
+takes it away from every other run for the whole cooldown. Twelve rather than never, because a
+provider that accepts connections and answers nothing is still one no run should be sent to. The
+same knob sets both, so `0` still disables the whole thing.
+
 **`inference_retry_attempts`** and **`inference_retry_base_ms`** set how hard a failed model call
 is retried before the agent is failed and its finished work is thrown away. Only a *transient*
 failure is retried at all: a reset connection, a timeout, a 429, a 5xx. A rejected key or an
