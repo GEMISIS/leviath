@@ -194,6 +194,28 @@ errors. `tail` is a byte budget for how much of the end you get back.
 > in one shared world, so there is no process per run. If you are tracking slots from outside, read
 > [reconciling an external work queue](/docs/work-queues) first.
 
+### How long a run has taken
+
+`updated_at - started_at` is the run's age, which is not how long it took. A run paused overnight,
+or sitting on a question nobody has answered, is hours old and spent almost none of them working.
+
+Every run carries `active`, a working stopwatch that runs while the run is inferring, calling tools
+or held for its own fan-out workers and sub-agents, and stops for everything that is not the run's
+doing: paused, blocked on a person, parked until the machine is fixed, finished. Each stage in
+`stages.json` carries one of its own on the same rule.
+
+```json
+"active": { "banked_secs": 412, "since": 1787720786 }
+```
+
+`banked_secs` is the time from spans that have already ended. `since` is when the span in progress
+began, or `null` when the clock is stopped - so the working total is `banked_secs`, plus
+`now - since` when `since` is set. Reading it that way rather than taking a single number is what
+lets a live run's duration climb between the daemon's writes.
+
+`active` is `null` on runs written before this existed; fall back to `updated_at - started_at`
+there. A finished run has `since: null`, so its total never moves again.
+
 ## Statuses
 
 A run's status is one word, and it is the same word everywhere: on the run itself, in a tree node,

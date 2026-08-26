@@ -201,6 +201,79 @@ impl WaitReason {
     }
 }
 
+/// A stopwatch that runs only while the thing it measures is actually working.
+///
+/// Wall-clock age and working time are different questions, and the difference
+/// is the whole point of this type: a run paused overnight is twelve hours old
+/// and spent eleven of them doing nothing. Age comes from `started_at`; this is
+/// what a reader means by "how long has this taken".
+///
+/// Kept as banked seconds plus the start of the span in progress, rather than a
+/// single total, so a reader that polls between writes still sees the number
+/// climb instead of stepping once per heartbeat.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveClock {
+    /// Seconds banked from spans that have already ended.
+    #[serde(default)]
+    pub banked_secs: u64,
+    /// When the span in progress began, or `None` while the clock is stopped.
+    #[serde(default)]
+    pub since: Option<i64>,
+}
+
+impl ActiveClock {
+    /// Start or stop the clock to match `running`, banking the span that ends.
+    ///
+    /// Idempotent: called every persist tick with the same answer, it does
+    /// nothing, so only genuine transitions move the accounting.
+    pub fn observe(&mut self, now: i64, running: bool) {
+        match (running, self.since) {
+            (true, None) => self.since = Some(now),
+            (false, Some(started)) => {
+                self.banked_secs += (now - started).max(0) as u64;
+                self.since = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Close the span in progress at `as_of`, banking it.
+    ///
+    /// For a clock read back from disk: whatever the run was doing stopped when
+    /// the daemon holding it did, which is the last moment the record was
+    /// written - not now. Without this, a run reloaded after the daemon was down
+    /// for a day comes back claiming a day's work.
+    pub fn settle(&mut self, as_of: i64) {
+        self.observe(as_of, false);
+    }
+
+    /// Working seconds at `now`, counting the span in progress.
+    pub fn total_secs(&self, now: i64) -> u64 {
+        self.banked_secs + self.since.map_or(0, |s| (now - s).max(0) as u64)
+    }
+}
+
+/// Whether a run in this state has its clock running.
+///
+/// It runs while the run is working, and while the run is parked on work of its
+/// own - fan-out workers, sub-agents - because that time is the run taking as
+/// long as it takes. It stops for everything that is not the run's doing:
+/// paused, blocked on a person, parked until the machine is fixed, finished.
+///
+/// A `waiting_input` run with nothing claiming the wait is treated as blocked on
+/// a person, which is the only way it gets there.
+pub fn clock_runs(status: &RunStatus, waiting_on: Option<&WaitReason>) -> bool {
+    match status {
+        RunStatus::Starting | RunStatus::Running => true,
+        RunStatus::WaitingInput => waiting_on.is_some_and(|r| !r.needs_a_person()),
+        RunStatus::Paused
+        | RunStatus::Complete
+        | RunStatus::CompleteInteractive
+        | RunStatus::Error
+        | RunStatus::Cancelled => false,
+    }
+}
+
 impl std::fmt::Display for WaitReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -379,6 +452,16 @@ pub struct RunMeta {
     /// saved context, so it really has just moved.
     #[serde(default)]
     pub last_progress_at: Option<i64>,
+    /// How long this run has actually been working, as against how long it has
+    /// existed. See [`ActiveClock`], and read it through
+    /// [`RunMeta::active_runtime_secs`] rather than directly.
+    ///
+    /// `None` means no clock was kept - a run written by a daemon older than
+    /// this field. Deliberately an `Option` rather than a zeroed clock: a run
+    /// that finished inside a second has a genuine total of zero, and the two
+    /// have different right answers.
+    #[serde(default)]
+    pub active: Option<ActiveClock>,
     /// What went wrong, set alongside [`RunStatus::Error`]. `None` on every
     /// other status.
     pub error: Option<String>,
@@ -723,6 +806,7 @@ impl RunMeta {
             started_at: now,
             updated_at: now,
             last_progress_at: None,
+            active: None,
             error: None,
             title: None,
             title_error: None,
@@ -740,6 +824,23 @@ impl RunMeta {
             flags: RunFlags::default(),
             yolo: false,
             read_paths: None,
+        }
+    }
+
+    /// How long this run has actually been working, at `now`.
+    ///
+    /// This is the number to show as a run's duration. Wall-clock age answers a
+    /// different question, and answers it misleadingly: a run left paused, or
+    /// sitting on a question nobody has answered, kept climbing while nothing
+    /// was happening on its behalf.
+    ///
+    /// A run written before the clock existed carries no spans at all, so it
+    /// falls back to the wall-clock span it used to report - a finished run that
+    /// claims to have taken no time is the worse answer of the two.
+    pub fn active_runtime_secs(&self, now: i64) -> u64 {
+        match self.active {
+            Some(clock) => clock.total_secs(now),
+            None => (self.updated_at - self.started_at).max(0) as u64,
         }
     }
 
@@ -934,9 +1035,35 @@ pub struct StageRecord {
     pub started_at: Option<i64>,
     /// Unix timestamp (seconds); None until the stage ends.
     pub ended_at: Option<i64>,
+    /// How long this stage has actually been working, as against how long it has
+    /// been the cursor. Read it through [`StageRecord::active_runtime_secs`].
+    ///
+    /// A stage the run is parked in - paused, or holding a prompt open - is
+    /// still the cursor stage, so `started_at`..`ended_at` counts time nothing
+    /// spent working. A stage the run re-enters keeps accumulating, the same way
+    /// its token counts do.
+    ///
+    /// `None` on records written before the clock existed; see
+    /// [`RunMeta::active`] for why that is not a zero.
+    #[serde(default)]
+    pub active: Option<ActiveClock>,
 }
 
 impl StageRecord {
+    /// How long this stage has actually been working, at `now`.
+    ///
+    /// Falls back to the wall-clock span for records written before the clock
+    /// existed, for the reason given on [`RunMeta::active_runtime_secs`].
+    pub fn active_runtime_secs(&self, now: i64) -> u64 {
+        if let Some(clock) = self.active {
+            return clock.total_secs(now);
+        }
+        let Some(started) = self.started_at else {
+            return 0;
+        };
+        (self.ended_at.unwrap_or(now) - started).max(0) as u64
+    }
+
     /// A stage the run has not entered yet: [`StageRunStatus::Pending`], zero
     /// tokens, and neither timestamp set.
     pub fn new(name: String, index: usize) -> Self {
@@ -954,6 +1081,7 @@ impl StageRecord {
             runaway_warned: false,
             started_at: None,
             ended_at: None,
+            active: None,
         }
     }
 }
@@ -968,6 +1096,140 @@ fn now_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_clock_banks_only_the_spans_it_was_running_for() {
+        let mut clock = ActiveClock::default();
+        clock.observe(100, true);
+        assert_eq!(clock.since, Some(100));
+        assert_eq!(clock.total_secs(140), 40, "the open span counts");
+
+        // Repeating the same answer is a no-op, so a per-tick call cannot
+        // restart the span and lose the time already in it.
+        clock.observe(120, true);
+        assert_eq!(clock.since, Some(100));
+
+        clock.observe(140, false);
+        assert_eq!(clock.banked_secs, 40);
+        assert_eq!(clock.since, None);
+        // Stopped: the reading no longer moves however long the caller waits.
+        assert_eq!(clock.total_secs(9_999), 40);
+
+        clock.observe(1_000, true);
+        assert_eq!(clock.total_secs(1_010), 50, "a resume adds to the bank");
+    }
+
+    #[test]
+    fn active_clock_ignores_a_clock_that_runs_backwards() {
+        let mut clock = ActiveClock {
+            banked_secs: 5,
+            since: Some(500),
+        };
+        // An `as_of` before the span began (a corrected system clock) banks
+        // nothing rather than wrapping the unsigned total.
+        clock.settle(400);
+        assert_eq!(clock.banked_secs, 5);
+        assert_eq!(clock.since, None);
+        assert_eq!(clock.total_secs(0), 5);
+    }
+
+    #[test]
+    fn settle_closes_an_open_span_at_the_moment_given() {
+        let mut clock = ActiveClock {
+            banked_secs: 10,
+            since: Some(100),
+        };
+        // The daemon died at 130 and the run is reloaded much later: only the
+        // 30 seconds it was actually up count.
+        clock.settle(130);
+        assert_eq!(clock.banked_secs, 40);
+        assert_eq!(clock.total_secs(1_000_000), 40);
+    }
+
+    #[test]
+    fn clock_runs_while_working_or_held_for_the_runs_own_children() {
+        // Working.
+        assert!(clock_runs(&RunStatus::Starting, None));
+        assert!(clock_runs(&RunStatus::Running, None));
+        // Parked on work of its own: still the run taking as long as it takes.
+        assert!(clock_runs(
+            &RunStatus::WaitingInput,
+            Some(&WaitReason::Children { outstanding: 2 })
+        ));
+        assert!(clock_runs(
+            &RunStatus::WaitingInput,
+            Some(&WaitReason::FanOutWorkers { outstanding: 5 })
+        ));
+        // Waiting on a person, in each of the ways it can happen.
+        for reason in [
+            WaitReason::ToolApproval,
+            WaitReason::UserPrompt,
+            WaitReason::TaintGate,
+            WaitReason::InteractionPoint,
+            WaitReason::NeedsSetup {
+                blocker: SetupBlocker::CreditsExhausted,
+                remedy: "top up".to_string(),
+            },
+        ] {
+            assert!(
+                !clock_runs(&RunStatus::WaitingInput, Some(&reason)),
+                "{reason} should stop the clock"
+            );
+        }
+        // An unclaimed wait is a wait: nothing is driving the run.
+        assert!(!clock_runs(&RunStatus::WaitingInput, None));
+        // Paused and every terminal state.
+        for status in [
+            RunStatus::Paused,
+            RunStatus::Complete,
+            RunStatus::CompleteInteractive,
+            RunStatus::Error,
+            RunStatus::Cancelled,
+        ] {
+            assert!(!clock_runs(&status, None), "{status} should stop the clock");
+        }
+    }
+
+    #[test]
+    fn active_runtime_secs_falls_back_to_the_wall_clock_span_when_unrecorded() {
+        // A run written by a build that kept no clock: the span it used to
+        // report is a better answer than "this run took no time".
+        let mut meta = sample_meta();
+        meta.started_at = 1_000;
+        meta.updated_at = 1_600;
+        assert_eq!(meta.active_runtime_secs(9_000), 600);
+
+        // Once the clock exists it is the authority, and the wall-clock span
+        // stops mattering.
+        meta.active = Some(ActiveClock {
+            banked_secs: 20,
+            since: None,
+        });
+        assert_eq!(meta.active_runtime_secs(9_000), 20);
+
+        // And a run that genuinely took no time reports zero, rather than
+        // falling back to a span that would invent one.
+        meta.active = Some(ActiveClock::default());
+        assert_eq!(meta.active_runtime_secs(9_000), 0);
+    }
+
+    #[test]
+    fn stage_active_runtime_secs_falls_back_the_same_way() {
+        let mut rec = StageRecord::new("plan".to_string(), 0);
+        // Never entered: no time, and no timestamp to guess from.
+        assert_eq!(rec.active_runtime_secs(500), 0);
+
+        rec.started_at = Some(100);
+        assert_eq!(rec.active_runtime_secs(160), 60, "still running: up to now");
+        rec.ended_at = Some(130);
+        assert_eq!(rec.active_runtime_secs(160), 30, "finished: up to the end");
+
+        rec.active = Some(ActiveClock {
+            banked_secs: 7,
+            since: None,
+        });
+        assert_eq!(rec.active_runtime_secs(160), 7);
+    }
 
     fn sample_meta() -> RunMeta {
         RunMeta::new(

@@ -79,6 +79,16 @@ pub struct RunMetadata {
     pub model_override: Option<String>,
 }
 
+/// The run's working stopwatch, advanced by the persistence system on every
+/// change of state and snapshotted into `meta.json`.
+///
+/// A component rather than a field on [`RunMetadata`] because the persistence
+/// system is the only thing that moves it, and a component is what that system
+/// can take a `&mut` to. It is restored from `meta.json` on reload, so pausing a
+/// run - which unloads it entirely - does not restart its accounting at zero.
+#[derive(Component, Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct RunClock(pub leviath_core::run_meta::ActiveClock);
+
 /// Running token + tool-call totals accumulated across an agent's inferences, for
 /// the snapshot. Updated by the inference-collect system.
 // No `Eq`: the cost is an `f64`, which has no total equality. `PartialEq` is
@@ -361,6 +371,14 @@ pub struct RunPosition {
     pub depth: usize,
     /// How deep the tree may go.
     pub max_child_depth: usize,
+    /// The run's working stopwatch, already advanced to `now_secs` by the
+    /// caller. Taken already-advanced because deciding whether the clock should
+    /// be running needs the parking markers, and the caller is holding them.
+    ///
+    /// `None` for a world that builds agents without a
+    /// [`RunClock`] - the run then reports its wall-clock span, as runs did
+    /// before the clock existed.
+    pub active: Option<leviath_core::run_meta::ActiveClock>,
 }
 
 /// Build the run metadata (`meta.json`) from an agent's live components, stamping
@@ -388,6 +406,7 @@ pub fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> RunMeta {
         last_progress_at,
         depth,
         max_child_depth,
+        active,
     } = at;
     let status = run_status_from(&state.status);
     let mut flags = flags.0.clone();
@@ -422,6 +441,7 @@ pub fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> RunMeta {
         started_at: md.started_at,
         updated_at: now_secs,
         last_progress_at,
+        active,
         error: match &state.status {
             AgentStatus::Error { message } => Some(message.clone()),
             _ => None,
@@ -820,6 +840,7 @@ mod tests {
                 last_progress_at: None,
                 depth: 0,
                 max_child_depth: 0,
+                active: Default::default(),
             },
         );
         assert_eq!(meta.status, RunStatus::WaitingInput);
@@ -857,6 +878,7 @@ mod tests {
                 last_progress_at: Some(1900),
                 depth: 1,
                 max_child_depth: 4,
+                active: Default::default(),
             },
         );
 
@@ -907,6 +929,7 @@ mod tests {
                 last_progress_at: None,
                 depth: 1,
                 max_child_depth: 4,
+                active: Default::default(),
             },
         );
         assert!(meta.yolo);
@@ -932,6 +955,7 @@ mod tests {
                 last_progress_at: None,
                 depth: 0,
                 max_child_depth: 0,
+                active: Default::default(),
             },
         );
         assert!(!running.flags.empty_output);
@@ -960,6 +984,7 @@ mod tests {
                     last_progress_at: None,
                     depth: 0,
                     max_child_depth: 0,
+                    active: Default::default(),
                 },
             );
             assert!(meta.flags.empty_output);
@@ -983,6 +1008,7 @@ mod tests {
                 last_progress_at: None,
                 depth: 0,
                 max_child_depth: 0,
+                active: Default::default(),
             },
         );
         assert!(!meta.flags.empty_output);
@@ -1007,6 +1033,7 @@ mod tests {
                 last_progress_at: None,
                 depth: 0,
                 max_child_depth: 0,
+                active: Default::default(),
             },
         );
         assert!(!meta.flags.empty_output);
@@ -1032,6 +1059,7 @@ mod tests {
                 last_progress_at: None,
                 depth: 0,
                 max_child_depth: 0,
+                active: Default::default(),
             },
         );
         assert_eq!(meta.status, RunStatus::Error);
@@ -1066,6 +1094,7 @@ mod tests {
                 last_progress_at: None,
                 depth: 0,
                 max_child_depth: 0,
+                active: Default::default(),
             },
         );
         let carried = meta.final_output.expect("the submission reached meta.json");
@@ -1101,6 +1130,7 @@ mod tests {
                 last_progress_at: None,
                 depth: 0,
                 max_child_depth: 0,
+                active: Default::default(),
             },
         );
         assert!(meta.final_output.is_none());

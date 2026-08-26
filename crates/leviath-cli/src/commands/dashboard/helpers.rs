@@ -56,32 +56,12 @@ pub(super) fn format_tokens(n: usize) -> String {
     }
 }
 
-/// Format elapsed seconds as a human-readable duration string.
-pub(super) fn elapsed_str(started_at: i64) -> String {
-    if started_at == 0 {
-        return "-".to_string();
-    }
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let secs = (now - started_at).max(0) as u64;
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m{}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
-
-/// Format elapsed seconds from `started_at` up to `until` (not current time).
-pub(super) fn elapsed_str_until(started_at: i64, until: i64) -> String {
-    if started_at == 0 {
-        return "-".to_string();
-    }
-    let secs = (until - started_at).max(0) as u64;
+/// Format a duration in seconds for display: `45s`, `2m5s`, `1h20m`.
+///
+/// Takes a duration rather than a start timestamp because what the dashboard
+/// shows is working time, which is not a span between two wall-clock moments -
+/// a run that paused overnight has one duration and two very different spans.
+pub(super) fn duration_str(secs: u64) -> String {
     if secs < 60 {
         format!("{}s", secs)
     } else if secs < 3600 {
@@ -212,34 +192,20 @@ mod tests {
     }
 
     #[test]
-    fn test_elapsed_str_zero() {
-        assert_eq!(elapsed_str(0), "-");
+    fn duration_str_reads_seconds_minutes_then_hours() {
+        assert_eq!(duration_str(0), "0s");
+        assert_eq!(duration_str(45), "45s");
+        assert_eq!(duration_str(125), "2m5s");
+        assert_eq!(duration_str(7260), "2h1m");
     }
 
     #[test]
-    fn test_elapsed_str_until_zero() {
-        assert_eq!(elapsed_str_until(0, 100), "-");
-    }
-
-    #[test]
-    fn test_elapsed_str_until_seconds() {
-        assert_eq!(elapsed_str_until(100, 145), "45s");
-    }
-
-    #[test]
-    fn test_elapsed_str_until_minutes() {
-        assert_eq!(elapsed_str_until(100, 225), "2m5s");
-    }
-
-    #[test]
-    fn test_elapsed_str_until_hours() {
-        assert_eq!(elapsed_str_until(100, 7400), "2h1m");
-    }
-
-    #[test]
-    fn test_elapsed_str_until_negative_clamped() {
-        // until < started_at → clamped to 0
-        assert_eq!(elapsed_str_until(200, 100), "0s");
+    fn duration_str_names_the_unit_it_crosses_into() {
+        // The boundaries, where a wrong comparison shows up as `60s`/`60m0s`.
+        assert_eq!(duration_str(59), "59s");
+        assert_eq!(duration_str(60), "1m0s");
+        assert_eq!(duration_str(3599), "59m59s");
+        assert_eq!(duration_str(3600), "1h0m");
     }
 
     // ── Additional coverage tests ──────────────────────────────────────────
@@ -300,26 +266,6 @@ mod tests {
         assert!(!result.is_empty());
         assert!(result.ends_with('…'));
         assert_eq!(result, "Hello …");
-    }
-
-    #[test]
-    fn test_elapsed_str_until_exact_minute() {
-        assert_eq!(elapsed_str_until(1000, 1060), "1m0s");
-    }
-
-    #[test]
-    fn test_elapsed_str_until_exact_hour() {
-        assert_eq!(elapsed_str_until(1000, 4600), "1h0m");
-    }
-
-    #[test]
-    fn test_elapsed_str_until_same_time() {
-        assert_eq!(elapsed_str_until(100, 100), "0s");
-    }
-
-    #[test]
-    fn test_elapsed_str_until_zero_start_returns_dash() {
-        assert_eq!(elapsed_str_until(0, 60), "-");
     }
 
     // OSC52 encoding and the /dev/tty write path now live in `leviath_sys::tty`
@@ -397,44 +343,6 @@ mod tests {
         // 3 days ago → "3d ago"
         let result = relative_time(now - 3 * 86400);
         assert_eq!(result, "3d ago");
-    }
-
-    // ── elapsed_str branches ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_elapsed_str_seconds() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        // Started 45 seconds ago
-        let result = elapsed_str(now - 45);
-        assert!(result.ends_with('s'));
-    }
-
-    #[test]
-    fn test_elapsed_str_minutes() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        // Started 3 min 15 sec ago
-        let result = elapsed_str(now - 195);
-        assert!(result.contains('m'));
-    }
-
-    #[test]
-    fn test_elapsed_str_hours() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        // Started 2 hours 10 minutes ago
-        let result = elapsed_str(now - 7800);
-        assert!(result.contains('h'));
     }
 
     // ── yank_to_clipboard: at least exercises the code path ──────────────────

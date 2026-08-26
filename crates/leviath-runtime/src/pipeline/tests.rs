@@ -1601,8 +1601,8 @@ fn reconcile_stage_ledger_sets_past_active_future_once() {
         leviath_core::run_meta::StageRecord::new("c".to_string(), 2),
     ]);
     // A linear run passes through each stage, so `a` is the cursor first.
-    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 90);
-    reconcile_stage_ledger(&mut led, 1, &AgentStatus::Active, 100);
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 90, true);
+    reconcile_stage_ledger(&mut led, 1, &AgentStatus::Active, 100, true);
     assert_eq!(led.0[0].status, StageRunStatus::Complete);
     assert_eq!(led.0[0].started_at, Some(90));
     assert_eq!(led.0[0].ended_at, Some(100));
@@ -1612,9 +1612,55 @@ fn reconcile_stage_ledger_sets_past_active_future_once() {
     assert_eq!(led.0[2].status, StageRunStatus::Pending);
 
     // Idempotent: a later reconcile doesn't overwrite the stamped timestamps.
-    reconcile_stage_ledger(&mut led, 1, &AgentStatus::Active, 200);
+    reconcile_stage_ledger(&mut led, 1, &AgentStatus::Active, 200, true);
     assert_eq!(led.0[0].ended_at, Some(100));
     assert_eq!(led.0[1].started_at, Some(100));
+}
+
+#[test]
+fn reconcile_stage_ledger_runs_the_cursor_stages_clock_and_no_others() {
+    let mut led = StageLedger(vec![
+        leviath_core::run_meta::StageRecord::new("a".to_string(), 0),
+        leviath_core::run_meta::StageRecord::new("b".to_string(), 1),
+    ]);
+
+    // `a` works for 20 seconds, then the run is paused in it for 500.
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 100, true);
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Paused, 120, false);
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Paused, 620, false);
+    assert_eq!(
+        led.0[0].active_runtime_secs(620),
+        20,
+        "the pause is not the stage working"
+    );
+    assert_eq!(
+        led.0[0].started_at,
+        Some(100),
+        "the wall-clock stamps are untouched"
+    );
+
+    // It resumes, works another 30, and the run moves on to `b`.
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 620, true);
+    reconcile_stage_ledger(&mut led, 1, &AgentStatus::Active, 650, true);
+    assert_eq!(led.0[0].active_runtime_secs(650), 50);
+    assert_eq!(led.0[1].active_runtime_secs(680), 30);
+
+    // A stage the run has left stops accumulating however long `b` goes on.
+    reconcile_stage_ledger(&mut led, 1, &AgentStatus::Active, 9_000, true);
+    assert_eq!(led.0[0].active_runtime_secs(9_000), 50);
+}
+
+#[test]
+fn reconcile_stage_ledger_keeps_the_clock_running_while_held_for_children() {
+    let mut led = StageLedger(vec![leviath_core::run_meta::StageRecord::new(
+        "fan".to_string(),
+        0,
+    )]);
+    // `Waiting` on the agent, but held for its own sub-agents rather than a
+    // person, so `running` is true and the stage keeps counting.
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Waiting, 100, true);
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Waiting, 400, true);
+    assert_eq!(led.0[0].active_runtime_secs(400), 300);
 }
 
 // ─── A stage that never ran says so (#372) ───────────────────────────────────
@@ -1638,8 +1684,8 @@ fn a_stage_the_run_never_entered_is_skipped_not_complete() {
     let mut led = three_stage_ledger();
 
     // plan → answer, stepping straight over error_recovery.
-    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 10);
-    reconcile_stage_ledger(&mut led, 2, &AgentStatus::Complete, 20);
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 10, true);
+    reconcile_stage_ledger(&mut led, 2, &AgentStatus::Complete, 20, false);
 
     assert_eq!(led.0[0].status, StageRunStatus::Complete, "plan ran");
     assert_eq!(
@@ -1657,11 +1703,11 @@ fn a_stage_the_run_never_entered_is_skipped_not_complete() {
 fn an_unentered_stage_stays_pending_until_the_run_ends() {
     use leviath_core::run_meta::StageRunStatus;
     let mut led = three_stage_ledger();
-    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 10);
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 10, true);
     assert_eq!(led.0[1].status, StageRunStatus::Pending);
     assert_eq!(led.0[2].status, StageRunStatus::Pending);
 
-    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Complete, 20);
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Complete, 20, false);
     assert_eq!(led.0[1].status, StageRunStatus::Skipped);
     assert_eq!(led.0[2].status, StageRunStatus::Skipped);
 }
@@ -1678,7 +1724,7 @@ fn an_unentered_stage_is_skipped_on_a_failed_run() {
         AgentStatus::Cancelled,
     ] {
         let mut led = three_stage_ledger();
-        reconcile_stage_ledger(&mut led, 0, &status, 10);
+        reconcile_stage_ledger(&mut led, 0, &status, 10, true);
         assert_eq!(led.0[1].status, StageRunStatus::Skipped, "{status:?}");
     }
 }
@@ -1692,7 +1738,7 @@ fn a_stage_with_billed_tokens_is_never_reported_skipped() {
     let mut led = three_stage_ledger();
     led.0[1].prompt_tokens = 400;
 
-    reconcile_stage_ledger(&mut led, 2, &AgentStatus::Complete, 30);
+    reconcile_stage_ledger(&mut led, 2, &AgentStatus::Complete, 30, false);
     assert_eq!(
         led.0[1].status,
         StageRunStatus::Complete,
@@ -1706,11 +1752,11 @@ fn a_stage_with_billed_tokens_is_never_reported_skipped() {
 fn a_revisited_stage_becomes_active_again() {
     use leviath_core::run_meta::StageRunStatus;
     let mut led = three_stage_ledger();
-    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 10);
-    reconcile_stage_ledger(&mut led, 2, &AgentStatus::Active, 20);
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 10, true);
+    reconcile_stage_ledger(&mut led, 2, &AgentStatus::Active, 20, true);
     assert_eq!(led.0[0].status, StageRunStatus::Complete);
 
-    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 30);
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 30, true);
     assert_eq!(led.0[0].status, StageRunStatus::Active);
     assert_eq!(led.0[2].status, StageRunStatus::Complete);
 }
@@ -1722,7 +1768,7 @@ fn reconcile_stage_ledger_completes_current_stage_on_run_complete() {
         "a".to_string(),
         0,
     )]);
-    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Complete, 50);
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Complete, 50, false);
     assert_eq!(led.0[0].status, StageRunStatus::Complete);
     assert_eq!(led.0[0].ended_at, Some(50));
 }

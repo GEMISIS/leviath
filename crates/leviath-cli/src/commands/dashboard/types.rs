@@ -380,12 +380,19 @@ pub struct DashboardAgent {
     /// Unix timestamp of the run's last recorded progress (`None` before the
     /// first progress mark). Drives the recent-activity sort.
     pub last_progress_at: Option<i64>,
-    /// Frozen wall-clock time (Unix seconds) when the agent entered a waiting state.
-    /// Used to prevent the elapsed timer from incrementing while waiting for input.
-    pub active_until: Option<i64>,
-    /// Total seconds spent waiting for user input across all completed waits.
-    /// Subtracted from elapsed to show only actual running time.
-    pub waiting_secs: u64,
+    /// How long the run has actually been working, as the daemon accounts for
+    /// it: time spent inferring, calling tools, or held for its own sub-agents,
+    /// and none of the time it sat paused or waiting on a person.
+    ///
+    /// Recomputed each sync from the run's own clock rather than reconstructed
+    /// here from transitions the dashboard happened to observe - it used to be
+    /// the latter, so a run that was already paused when the dashboard opened,
+    /// or paused while it was closed, counted the pause as work.
+    pub runtime_secs: u64,
+    /// The moment the sync above read the clock at, for the per-stage clocks the
+    /// stage tabs render. Capped at the run's `updated_at` when nothing is
+    /// driving the run, so an abandoned run's stage does not tick forever.
+    pub clock_now: i64,
     /// The blueprint's stage graph, loaded once when the run first appears.
     /// `None` when the manifest could not be read: the run still shows, the
     /// graph surfaces say why they are empty. Shared, not owned: the detail
@@ -722,8 +729,8 @@ mod tests {
             depth: 0,
             started_at: 1000,
             last_progress_at: None,
-            active_until: None,
-            waiting_secs: 0,
+            runtime_secs: 0,
+            clock_now: 0,
             graph: None,
             accepts_messages: true,
             taint_summary: vec![],

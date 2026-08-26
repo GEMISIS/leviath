@@ -395,11 +395,26 @@ fn reload_one(
     // it, while `meta.json`'s run totals went on looking correct (issue #415).
     // No file (a run from before the ledger, or one that stopped before its
     // first persist) leaves the seeded records as they are.
-    leviath_runtime::restore::restore_stage_ledger(
-        world.world_mut(),
-        entity,
-        &crate::runstate::read_stages_index_from(run_dir),
-    );
+    let mut stage_records = crate::runstate::read_stages_index_from(run_dir);
+    for rec in stage_records.iter_mut() {
+        if let Some(clock) = rec.active.as_mut() {
+            clock.settle(meta.updated_at);
+        }
+    }
+    leviath_runtime::restore::restore_stage_ledger(world.world_mut(), entity, &stage_records);
+
+    // Put the run's working clock back, so a resumed run reports the time it has
+    // actually spent rather than starting over. Settled at `updated_at` first:
+    // a span left open by a daemon that died ended when the daemon did, and
+    // carrying it forward would bill the run for the outage.
+    {
+        let mut clock = world
+            .world_mut()
+            .get_mut::<leviath_runtime::persistence::RunClock>(entity)
+            .expect("build_agent attached a run clock");
+        clock.0 = meta.active.unwrap_or_default();
+        clock.0.settle(meta.updated_at);
+    }
 
     // A run parked until the machine is fixed keeps its reason across a
     // restart. Without this the marker is a live component nothing rebuilds,
@@ -654,6 +669,12 @@ mod tests {
         let dir = runs_dir.join(run_id);
         std::fs::create_dir_all(&dir).unwrap();
         let meta = RunMeta {
+            // A span still open when the daemon died at `updated_at`, so a
+            // reload has something to settle rather than carry forward.
+            active: Some(leviath_core::run_meta::ActiveClock {
+                banked_secs: 5,
+                since: Some(200),
+            }),
             run_id: run_id.to_string(),
             agent_name: "coder".to_string(),
             agent_path: agent_path.to_string(),
@@ -1116,6 +1137,15 @@ mod tests {
         let totals = world.world().get::<TokenTotals>(entity.entity()).unwrap();
         assert_eq!(totals.prompt_tokens, 42);
         assert_eq!(totals.tool_calls, 3);
+        // The working clock comes back so a resumed run keeps its time, with the
+        // span that was open when the daemon died closed at the last moment the
+        // run was known to be up (222) rather than run on to now (999).
+        let clock = world
+            .world()
+            .get::<leviath_runtime::persistence::RunClock>(entity.entity())
+            .unwrap();
+        assert_eq!(clock.0.banked_secs, 27);
+        assert_eq!(clock.0.since, None);
         // ...as are the run's productivity flags, so a resumed run doesn't report
         // itself as having modified nothing.
         let flags = world
@@ -2160,11 +2190,20 @@ mod tests {
             .insert("conversation".to_string(), 900);
         analyze.started_at = Some(10);
         analyze.ended_at = Some(20);
+        analyze.active = Some(leviath_core::run_meta::ActiveClock {
+            banked_secs: 8,
+            since: None,
+        });
         let mut implement = StageRecord::new("implement".to_string(), 1);
         implement.status = StageRunStatus::Active;
         implement.entered = true;
         implement.prompt_tokens = 77;
         implement.started_at = Some(20);
+        // The stage the run was in when the daemon died, its span still open.
+        implement.active = Some(leviath_core::run_meta::ActiveClock {
+            banked_secs: 3,
+            since: Some(200),
+        });
         let removed = StageRecord::new("removed_stage".to_string(), 7);
         std::fs::write(
             runs.path().join("run-stages").join("stages.json"),
@@ -2203,6 +2242,10 @@ mod tests {
         assert_eq!(ledger.0[0].completion_tokens, 56);
         assert_eq!(ledger.0[0].cached_tokens, 7);
         assert_eq!(ledger.0[0].cache_write_tokens, 8);
+        // A finished stage's clock comes back untouched; the one left open is
+        // closed at the run's `updated_at` (222), not carried on to now (999).
+        assert_eq!(ledger.0[0].active_runtime_secs(999), 8);
+        assert_eq!(ledger.0[1].active_runtime_secs(999), 3 + 22);
         assert_eq!(ledger.0[0].first_call_prompt_tokens, Some(400));
         assert!(ledger.0[0].runaway_warned);
         assert_eq!(ledger.0[0].region_tokens.get("conversation"), Some(&900));

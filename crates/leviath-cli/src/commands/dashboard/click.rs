@@ -199,8 +199,8 @@ mod tests {
             depth: 0,
             started_at: 1000,
             last_progress_at: None,
-            active_until: None,
-            waiting_secs: 0,
+            runtime_secs: 0,
+            clock_now: 0,
             graph: None,
             accepts_messages: true,
             taint_summary: vec![],
@@ -373,6 +373,7 @@ mod tests {
         let mut agent = make_test_agent("run-1");
         agent.stages = (0..3)
             .map(|i| crate::runstate::StageRecord {
+                active: Default::default(),
                 name: format!("stage{i}"),
                 index: i,
                 status: crate::runstate::StageRunStatus::Pending,

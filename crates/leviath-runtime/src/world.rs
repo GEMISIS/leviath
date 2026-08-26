@@ -2292,7 +2292,7 @@ mod tests {
             },
             crate::persistence::TokenTotals::default(),
             crate::pipeline::PersistWatermark::default(),
-            ReadyToInfer,
+            (crate::persistence::RunClock::default(), ReadyToInfer),
         ));
 
         world.run_until_idle(20).await;
@@ -2318,6 +2318,10 @@ mod tests {
         let meta = meta.expect("final Complete snapshot flushed to disk");
         assert_eq!(meta.run_id, "run-42");
         assert!(dir.path().join("run-42").join("context.json").exists());
+        // The run kept a working clock, and it is stopped now the run is over -
+        // a finished run's duration must not go on climbing when it is read.
+        let clock = meta.active.expect("a run carrying a RunClock records one");
+        assert_eq!(clock.since, None, "the clock stops at the terminal status");
     }
 
     #[tokio::test]

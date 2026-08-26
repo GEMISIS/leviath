@@ -6,9 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
 
-use crate::commands::dashboard::helpers::{
-    elapsed_str, elapsed_str_until, format_tokens, truncate,
-};
+use crate::commands::dashboard::helpers::{duration_str, format_tokens, truncate};
 use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::*;
@@ -20,12 +18,9 @@ impl Dashboard {
         hdr_area: Rect,
         agent: &DashboardAgent,
     ) {
-        let effective_start = agent.started_at + agent.waiting_secs as i64;
-        let elapsed = if let Some(until) = agent.active_until {
-            elapsed_str_until(effective_start, until)
-        } else {
-            elapsed_str(effective_start)
-        };
+        // Working time, not age: a run that has sat paused since yesterday has
+        // been alive for a day and has not been doing anything for most of it.
+        let elapsed = duration_str(agent.runtime_secs);
         let status_color = agent.status.color();
         let spinner_frame = SPINNER[(self.tick_count as usize) % SPINNER.len()];
         let status_span = match &agent.status {
@@ -210,8 +205,8 @@ mod tests {
             depth: 0,
             started_at: chrono::Utc::now().timestamp() - 60,
             last_progress_at: None,
-            active_until: None,
-            waiting_secs: 0,
+            runtime_secs: 0,
+            clock_now: 0,
             graph: None,
             accepts_messages: true,
             taint_summary: vec![],
@@ -403,12 +398,14 @@ mod tests {
     }
 
     #[test]
-    fn render_header_breadcrumb_with_active_until() {
+    fn render_header_breadcrumb_shows_working_time_not_age() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-frozen", AgentDisplayStatus::Waiting);
-        agent.active_until = Some(chrono::Utc::now().timestamp() - 30);
+        // Alive for an hour, at work for 30 seconds of it.
+        agent.started_at = chrono::Utc::now().timestamp() - 3600;
+        agent.runtime_secs = 30;
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 120, 1);
@@ -417,6 +414,7 @@ mod tests {
             .unwrap();
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("WAITING"), "{buf}");
+        assert!(buf.contains("30s"), "{buf}");
     }
 
     #[test]
@@ -442,6 +440,7 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-stok", AgentDisplayStatus::Active);
         agent.stages.push(crate::runstate::StageRecord {
+            active: Default::default(),
             name: "main".to_string(),
             index: 0,
             status: crate::runstate::StageRunStatus::Active,
