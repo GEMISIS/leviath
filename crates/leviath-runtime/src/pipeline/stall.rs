@@ -775,6 +775,7 @@ mod tests {
             circuits.record_failure(
                 "ghost",
                 leviath_providers::UnavailableReason::CreditsExhausted,
+                None,
                 NOW - 3 + i,
                 &policy,
             );
@@ -815,6 +816,7 @@ mod tests {
             circuits.record_failure(
                 "ghost",
                 leviath_providers::UnavailableReason::CreditsExhausted,
+                None,
                 NOW - 3 + i,
                 &policy,
             );
@@ -873,7 +875,7 @@ mod tests {
             world.insert_resource(StallTimeout(60));
             let mut circuits = super::super::circuit::ProviderCircuits::default();
             let policy = super::super::circuit::CircuitPolicy::default();
-            circuits.record_failure("ghost", reason, NOW - 1, &policy);
+            circuits.record_failure("ghost", reason, None, NOW - 1, &policy);
             world.insert_resource(circuits);
             let e = spawn_stalled(&mut world, StallReason::ProviderCircuitOpen, 61);
 

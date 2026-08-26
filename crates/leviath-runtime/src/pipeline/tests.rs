@@ -584,6 +584,7 @@ async fn dispatch_parks_an_agent_whose_provider_circuit_is_open() {
     circuits.record_failure(
         "cfg",
         leviath_providers::UnavailableReason::CreditsExhausted,
+        None,
         chrono::Utc::now().timestamp(),
         &policy,
     );
@@ -621,6 +622,7 @@ async fn dispatch_proceeds_once_the_cooldown_lets_a_probe_through() {
     circuits.record_failure(
         "cfg",
         leviath_providers::UnavailableReason::CreditsExhausted,
+        None,
         chrono::Utc::now().timestamp() - 61,
         &policy,
     );
@@ -1365,6 +1367,66 @@ fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
         !world
             .resource::<ProviderCircuits>()
             .is_open("dead", now, &policy)
+    );
+}
+
+/// The breaker's two speeds, end to end.
+///
+/// A provider that refused the connection is not serving anyone and the next
+/// request proves it again. One that accepted the connection and then went
+/// quiet is demonstrably there, and the usual cause is an oversized prompt
+/// against a busy server - so it keeps its place four times longer before being
+/// taken away from every run on the box.
+#[test]
+fn a_slow_provider_keeps_its_place_where_a_refused_one_loses_it() {
+    let policy = CircuitPolicy {
+        failures_before_open: 2,
+        cooldown_secs: 300,
+    };
+    let now = chrono::Utc::now().timestamp();
+
+    // The label is the channel: `failure_kind` reads it back off the message,
+    // which is the only thing that survives into a Rhai provider and out again.
+    let fail_with = |label: &str| {
+        leviath_providers::ProviderError::RequestFailed(format!(
+            "[{label}] sending the request: the call did not complete"
+        ))
+    };
+
+    let strikes = |label: &str, count: usize| {
+        let (mut world, tx) = world_with_results();
+        world.insert_resource(ProviderCircuits::default());
+        world.insert_resource(policy);
+        for _ in 0..count {
+            let e = world
+                .spawn((agent_state(), AwaitingInference, stage_with_fallback()))
+                .id();
+            tx.send(InferenceOutcome {
+                latency: std::time::Duration::ZERO,
+                entity: e,
+                result: Err(fail_with(label)),
+                pricing: None,
+            })
+            .unwrap();
+            run_collect(&mut world);
+        }
+        world
+            .resource::<ProviderCircuits>()
+            .is_open("dead", now, &policy)
+    };
+
+    assert!(
+        strikes("connection-refused", 2),
+        "nothing listening is a fact about the provider, and opens at the threshold"
+    );
+    assert!(!strikes("timeout", 2), "two slow answers is not an outage");
+    assert!(
+        !strikes("timeout", 7),
+        "nor is seven, one short of four times the threshold"
+    );
+    assert!(
+        strikes("timeout", 8),
+        "but a provider that has answered nothing eight times running is wedged"
     );
 }
 

@@ -13,6 +13,18 @@ same list.
 
 ## Unreleased
 
+- Changed: a provider that answers slowly keeps its place in the rotation four
+  times longer than one that cannot be reached at all, so the default pulls it
+  after twelve consecutive failures rather than three. Both were counted the
+  same, and they do not mean the same thing: nothing listening on the port is a
+  fact about the provider, while a timeout is usually a fact about one request -
+  a large prompt against a busy server. Three of those in a row is an ordinary
+  afternoon on a big run, and pulling a working provider there took it away from
+  every other run for the full five-minute cooldown. Twelve rather than never,
+  because a provider that accepts connections and answers nothing is still one
+  no run should be sent to. `provider_failures_before_open` sets both, so `0`
+  still disables the breaker outright.
+
 - Added: a failed provider call says what actually went wrong. Every transport
   failure used to arrive as one string, and `Display` on a `reqwest` error says
   the same sentence whether the hostname did not resolve, the port refused, the

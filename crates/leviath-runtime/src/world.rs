@@ -1418,6 +1418,7 @@ mod tests {
         circuits.record_failure(
             "openrouter",
             leviath_providers::UnavailableReason::CreditsExhausted,
+            None,
             chrono::Utc::now().timestamp(),
             &policy,
         );
@@ -1444,6 +1445,7 @@ mod tests {
             circuits.record_failure(
                 "openrouter",
                 leviath_providers::UnavailableReason::AuthFailed,
+                None,
                 chrono::Utc::now().timestamp(),
                 &default_policy,
             );
@@ -2079,6 +2081,7 @@ mod tests {
         circuits.record_failure(
             "openrouter",
             leviath_providers::UnavailableReason::CreditsExhausted,
+            None,
             chrono::Utc::now().timestamp(),
             &policy,
         );
