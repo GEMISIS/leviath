@@ -12132,6 +12132,100 @@ fn collect_choice_holds_an_outcome_that_lands_on_a_paused_agent() {
     );
 }
 
+/// A network that is down at a stage boundary parks the run, exactly as it does
+/// one call earlier on the stage's own inference.
+///
+/// These two lanes used to disagree. The same failure, a second apart, either
+/// paused the run for a `lev resume` or killed it and threw away every stage it
+/// had finished - decided by nothing more than which call happened to be in
+/// flight when the network went.
+#[test]
+fn collect_choice_parks_a_run_the_provider_could_not_be_reached_for() {
+    let (mut world, tx) = world_with_transition_results();
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        stage_named("b", None, false, None),
+    ]);
+    let e = spawn_responding_agent(
+        &mut world,
+        bp,
+        vec![si("m0"), si("m1")],
+        vec![plain_edge("b")],
+    );
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(leviath_providers::ProviderError::labelled(
+            leviath_providers::FailureKind::Timeout,
+            "sending the request",
+            "the provider never answered",
+        )),
+        pricing: None,
+    })
+    .unwrap();
+
+    run_collect_transition(&mut world);
+
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Paused
+    );
+    let parked = world
+        .get::<crate::pipeline::PausedForSetup>(e)
+        .expect("parked rather than failed");
+    assert_eq!(
+        parked.blocker,
+        leviath_core::run_meta::SetupBlocker::ProvidersUnavailable
+    );
+    // The routing choice is put back, not the stage: a resume asks where to go
+    // next rather than re-running the stage that already answered.
+    assert!(
+        world.get::<AwaitingTransitionChoice>(e).is_some(),
+        "the pending choice is restored for the resume"
+    );
+    assert!(world.get::<AwaitingTransitionResponse>(e).is_none());
+    assert_eq!(
+        world.get::<StageCursor>(e).unwrap().index,
+        0,
+        "a parked run has not moved on"
+    );
+}
+
+/// The other side of the same arm: a failure that *is* the run's own problem
+/// still fails the stage. Parking everything would turn a blueprint that cannot
+/// route into a run that waits for a person who has nothing to fix.
+#[test]
+fn collect_choice_still_fails_a_stage_on_an_error_nobody_can_resume_past() {
+    let (mut world, tx) = world_with_transition_results();
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        stage_named("b", None, false, None),
+    ]);
+    let e = spawn_responding_agent(
+        &mut world,
+        bp,
+        vec![si("m0"), si("m1")],
+        vec![plain_edge("b")],
+    );
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(leviath_providers::ProviderError::InvalidResponse(
+            "not JSON".to_string(),
+        )),
+        pricing: None,
+    })
+    .unwrap();
+
+    run_collect_transition(&mut world);
+
+    assert!(world.get::<crate::pipeline::PausedForSetup>(e).is_none());
+    assert!(matches!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Error { .. }
+    ));
+}
+
 #[test]
 fn collect_choice_enters_chosen_stage() {
     let (mut world, tx) = world_with_transition_results();

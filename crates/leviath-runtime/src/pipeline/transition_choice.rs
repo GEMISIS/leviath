@@ -321,6 +321,39 @@ pub fn collect_transition_choice(
         let response = match outcome.result {
             Ok(response) => response,
             Err(err) => {
+                // An empty account or a network that is down is not this run's
+                // fault, and it was not a moment ago either - the same failure
+                // one call earlier, on the stage's own inference, parks the run
+                // for a resume. Landing it at a stage boundary used to kill the
+                // run instead, throwing away every completed stage over a blip
+                // that is usually gone in seconds.
+                let provider = &stage_infs.0[cursor.index].provider_name;
+                if let Some((blocker, message)) =
+                    crate::pipeline::response::setup_park(&err, provider)
+                {
+                    tracing::warn!(
+                        provider = %provider,
+                        blocker = %blocker,
+                        error = %err,
+                        "pausing the run until the machine is fixed"
+                    );
+                    state.status = AgentStatus::Paused;
+                    commands
+                        .entity(outcome.entity)
+                        .remove::<AwaitingTransitionResponse>()
+                        .remove::<InFlightWork>()
+                        .insert(crate::pipeline::PausedForSetup {
+                            blocker,
+                            remedy: message,
+                        })
+                        // Put the run back where dispatch found it, so a resume
+                        // asks for the routing choice again rather than
+                        // re-running the stage that already answered. The edges
+                        // are the same ones dispatch was handed; `resp` is the
+                        // copy it carried through the call.
+                        .insert(crate::pipeline::AwaitingTransitionChoice(resp.0.clone()));
+                    continue;
+                }
                 commands
                     .entity(outcome.entity)
                     .remove::<AwaitingTransitionResponse>();

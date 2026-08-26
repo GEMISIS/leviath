@@ -279,6 +279,14 @@ impl WorldHost {
             // Either one keeps the run resident until it is resumed.
             && world.get::<crate::pipeline::InFlightWork>(entity).is_none()
             && world.get::<crate::pipeline::HeldInference>(entity).is_none()
+            // A routing choice waiting to be asked is the same kind of live,
+            // unpersisted continuation: the edges it has to choose between live
+            // only on the component. Page the run out and it comes back
+            // `ReadyToInfer`, which re-runs the stage that already answered
+            // instead of asking where to go next.
+            && world
+                .get::<crate::pipeline::AwaitingTransitionChoice>(entity)
+                .is_none()
     }
 
     /// Whether a terminal agent is safe to unload: it has no **live** parent that

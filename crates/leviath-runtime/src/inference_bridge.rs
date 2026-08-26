@@ -328,11 +328,23 @@ pub async fn run_inference_job(
         }
         outcome = tokio::time::timeout(retry.job_timeout, attempts) => match outcome {
             Ok(result) => result,
-            Err(_elapsed) => Err(leviath_providers::ProviderError::Other(format!(
-                "inference exceeded the {}s job timeout and was aborted to free the \
-                 pool slot (a stalled or never-completing response)",
-                retry.job_timeout.as_secs()
-            ))),
+            // A timeout, said the same way the provider's own would have said
+            // it. This used to be `ProviderError::Other`, which is neither
+            // transient nor `Unreachable`, so the two ways a call can run out of
+            // time ended in opposite places: a provider-side timeout failed
+            // over and then parked the run for a resume, while sitting out the
+            // whole job deadline - the *worse* of the two - killed it outright
+            // and threw away every stage it had finished. The wall is the same
+            // wall; only which timer noticed differs.
+            Err(_elapsed) => Err(leviath_providers::ProviderError::labelled(
+                leviath_providers::FailureKind::Timeout,
+                "waiting for the provider",
+                &format!(
+                    "the call was aborted after the {}s job timeout to free the pool slot \
+                     (a stalled or never-completing response)",
+                    retry.job_timeout.as_secs()
+                ),
+            )),
         },
     };
     drop(permit); // free the pool slot before the collect system runs
@@ -520,6 +532,22 @@ mod tests {
         let outcome = rx.try_recv().expect("outcome sent");
         let err = outcome.result.expect_err("hung call should error");
         assert!(err.to_string().contains("job timeout"), "got: {err}");
+        // …said the way the provider's own timeout would have said it. This was
+        // a `ProviderError::Other`, which is neither transient nor
+        // `Unreachable`, so the two ways a call can run out of time ended in
+        // opposite places: a provider-side timeout failed over and then parked
+        // the run for a resume, while sitting out the whole job deadline - the
+        // worse of the two - killed the run and threw away every finished
+        // stage.
+        assert_eq!(
+            err.failure_kind(),
+            Some(leviath_providers::FailureKind::Timeout)
+        );
+        assert_eq!(
+            err.unavailable_reason(),
+            Some(leviath_providers::UnavailableReason::Unreachable),
+            "so it fails over, and parks the run when there is nowhere left to go"
+        );
         // …and its pool slot is free again for the next agent.
         assert!(
             pools.try_acquire("p", "m").is_some(),

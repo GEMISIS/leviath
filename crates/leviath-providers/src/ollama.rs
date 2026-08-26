@@ -315,12 +315,13 @@ impl OllamaProvider {
     /// Sorted, so a caller that walks them asks `/api/show` in a stable order -
     /// which is what lets a test drive a fixed response sequence.
     async fn installed_model_names(&self) -> Result<Vec<String>> {
-        let tags = self
-            .client
-            .get(format!("{}/api/tags", self.base_url))
-            .send()
-            .await
-            .map_err(|e| ProviderError::transport("listing Ollama models", &e))?;
+        let tags = crate::provider::apply_request_timeout(
+            self.client.get(format!("{}/api/tags", self.base_url)),
+            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
+        )
+        .send()
+        .await
+        .map_err(|e| ProviderError::transport("listing Ollama models", &e))?;
         let tags = crate::provider::check_http_response(tags, None).await?;
         let tags: serde_json::Value = crate::provider::decode_json(tags).await?;
         let mut names: Vec<String> = tags
@@ -405,13 +406,15 @@ impl OllamaProvider {
             if windows.contains_key(&name) {
                 continue;
             }
-            let show = self
-                .client
-                .post(format!("{}/api/show", self.base_url))
-                .json(&serde_json::json!({ "model": name }))
-                .send()
-                .await
-                .map_err(|e| ProviderError::transport("reading an Ollama model", &e))?;
+            let show = crate::provider::apply_request_timeout(
+                self.client
+                    .post(format!("{}/api/show", self.base_url))
+                    .json(&serde_json::json!({ "model": name })),
+                Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
+            )
+            .send()
+            .await
+            .map_err(|e| ProviderError::transport("reading an Ollama model", &e))?;
             let show = crate::provider::check_http_response(show, None).await?;
             let show: serde_json::Value = crate::provider::decode_json(show).await?;
             if let Some(window) = effective_window(&show) {
@@ -807,12 +810,13 @@ impl Provider for OllamaProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        let response = self
-            .client
-            .get(format!("{}/api/tags", self.base_url))
-            .send()
-            .await
-            .map_err(|e| ProviderError::transport("listing Ollama models", &e))?;
+        let response = crate::provider::apply_request_timeout(
+            self.client.get(format!("{}/api/tags", self.base_url)),
+            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
+        )
+        .send()
+        .await
+        .map_err(|e| ProviderError::transport("listing Ollama models", &e))?;
 
         // Shared classification, as above. A bare `RequestFailed` here would
         // read as a retryable network fault; the status is what says whether
@@ -986,8 +990,9 @@ impl Stream for OllamaNdjsonStream {
                     }
                 }
                 std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Some(Err(ProviderError::RequestFailed(
-                        e.to_string(),
+                    return std::task::Poll::Ready(Some(Err(ProviderError::transport(
+                        "reading the response stream",
+                        &e,
                     ))));
                 }
                 std::task::Poll::Ready(None) => {

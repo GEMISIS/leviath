@@ -292,9 +292,22 @@ impl ProviderError {
     /// exists, and carried in the message so it survives every layer that only
     /// passes strings.
     pub fn transport(context: &str, e: &reqwest::Error) -> Self {
-        let kind = FailureKind::from_reqwest(e);
+        ProviderError::labelled(FailureKind::from_reqwest(e), context, &e.to_string())
+    }
+
+    /// The same error, for the places no `reqwest::Error` ever reaches.
+    ///
+    /// [`ProviderError::transport`] is this with the kind worked out from the
+    /// typed error. The dispatch layer's own job timeout is what needs the
+    /// other door: it fires *above* the provider, so there is no `reqwest`
+    /// error to ask - but a run that sat out the whole deadline hit the same
+    /// wall as one whose HTTP timeout fired, and it has to read the same and be
+    /// treated the same. One formatter so a reader never has to learn two
+    /// shapes, and so `failure_kind` can keep reading the label back with one
+    /// parser.
+    pub fn labelled(kind: FailureKind, context: &str, detail: &str) -> Self {
         ProviderError::RequestFailed(format!(
-            "[{}] {context}: {e} - {}",
+            "[{}] {context}: {detail} - {}",
             kind.label(),
             kind.remedy()
         ))

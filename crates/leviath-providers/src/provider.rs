@@ -712,6 +712,23 @@ pub struct RateLimitConfig {
 /// configured value).
 pub const DEFAULT_INFERENCE_TIMEOUT_SECS: u64 = 900;
 
+/// The deadline for a call that is *about* inference rather than inference
+/// itself: counting a prompt's tokens, listing what a provider serves.
+///
+/// These carried the 15-minute inference ceiling, which is the wrong number for
+/// them by two orders of magnitude. Nothing generates here, so the whole answer
+/// is one small body that either comes back promptly or is not coming, and both
+/// callers already cope with not getting one - `count_tokens` falls back to the
+/// local heuristic, a failed model list is reported and the provider is asked
+/// again later.
+///
+/// Getting it wrong is not academic: `count_tokens` runs on the dispatch path,
+/// *before* the request is sent and outside the `job_timeout` that bounds the
+/// call itself, so a provider that accepts the connection and never answers
+/// used to freeze the run there for fifteen minutes with nothing in flight to
+/// show for it.
+pub const SIDE_CALL_TIMEOUT_SECS: u64 = 30;
+
 /// Apply the per-call inference deadline to an outbound provider request.
 ///
 /// When `request_timeout_secs` is `Some`, sets a hard per-request total timeout
@@ -1153,7 +1170,7 @@ pub async fn decode_json<T: serde::de::DeserializeOwned>(response: reqwest::Resp
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| ProviderError::RequestFailed(format!("reading response body: {e}")))?;
+        .map_err(|e| ProviderError::transport("reading the response body", &e))?;
     serde_json::from_slice(&bytes).map_err(|e| ProviderError::InvalidResponse(e.to_string()))
 }
 

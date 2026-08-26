@@ -515,12 +515,13 @@ impl AnthropicProvider {
             "model": model,
             "messages": [{ "role": "user", "content": text }],
         });
-        let response = self
-            .apply_headers(self.client.post(&url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::transport("sending the request", &e))?;
+        let response = crate::provider::apply_request_timeout(
+            self.apply_headers(self.client.post(&url)).json(&body),
+            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
+        )
+        .send()
+        .await
+        .map_err(|e| ProviderError::transport("sending the request", &e))?;
         let response = crate::provider::check_http_response(response, None).await?;
         let value: serde_json::Value = crate::provider::decode_json(response).await?;
         value
@@ -904,14 +905,16 @@ impl Provider for AnthropicProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        let response = self
-            .client
-            .get(format!("{}/models", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .send()
-            .await
-            .map_err(|e| ProviderError::transport("listing models", &e))?;
+        let response = crate::provider::apply_request_timeout(
+            self.client
+                .get(format!("{}/models", self.base_url))
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01"),
+            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
+        )
+        .send()
+        .await
+        .map_err(|e| ProviderError::transport("listing models", &e))?;
 
         // Shared classification here too. `is_transient` treats
         // `RequestFailed` as retryable, so classifying by status is what keeps
@@ -1001,8 +1004,9 @@ impl Stream for AnthropicSseStream {
                     }
                 }
                 std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Some(Err(ProviderError::RequestFailed(
-                        e.to_string(),
+                    return std::task::Poll::Ready(Some(Err(ProviderError::transport(
+                        "reading the response stream",
+                        &e,
                     ))));
                 }
                 std::task::Poll::Ready(None) => {
