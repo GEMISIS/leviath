@@ -8,9 +8,15 @@ order: 1
 
 # Running Leviath under another tool
 
-If you already use an orchestrator like [Gas City](/docs/gas-city) or
-[OpenHands](https://docs.all-hands.dev/), you have something deciding *which* work happens: which
-issue gets picked up, which repo it runs in, who reviews the result. What you plug into it decides *how* one piece of that work actually gets done.
+If you already use an orchestrator, you have something deciding *which* work happens: which issue
+gets picked up, which repo it runs in, who reviews the result. What you plug into it decides *how*
+one piece of that work actually gets done.
+
+Orchestrators come in two shapes here. [Gas City](/docs/gas-city) and
+[OpenHands](https://docs.all-hands.dev/) coordinate coding workflows across repos and issues.
+[OpenClaw](/docs/openclaw) and [Hermes Agent](https://hermes-agent.nousresearch.com/docs/) are
+always-on gateway agents that reach for a coding harness when a task needs one. Both shapes want
+the same thing from Leviath.
 
 That second job is what Leviath is. Your orchestrator keeps doing the coordinating. Leviath takes
 one task and runs it as a multi-stage agent with structured context, its own tools, and whichever
@@ -18,7 +24,7 @@ models you configured.
 
 ```mermaid
 flowchart TD
-  ORCH["Your orchestrator<br/>Gas City / OpenHands / CI"]
+  ORCH["Your orchestrator<br/>Gas City / OpenClaw / OpenHands / Hermes / CI"]
   ORCH -->|"stdio JSON-RPC"| ACP["lev agent-client"]
   ORCH -->|"one process per job"| RUN["lev run"]
   ORCH -->|"HTTP + WebSocket"| API["lev serve"]
@@ -35,7 +41,7 @@ flowchart TD
 
 | You want | Use | Covered in |
 |---|---|---|
-| A host that already speaks the Agent Client Protocol | `lev agent-client` | [Agent Client Protocol](/docs/agent-client-protocol) |
+| A host that already speaks the Agent Client Protocol | `lev agent-client` | [Agent Client Protocol](/docs/agent-client-protocol), [Gas City](/docs/gas-city), [OpenClaw](/docs/openclaw) |
 | One run per job, usually in a container | `lev run` | [CLI reference](/docs/cli) |
 | A long-lived service that several jobs share | `lev serve` | [HTTP API](/docs/api) |
 | Leviath inside your own Rust program | the `leviath` crate | [Embedding](/docs/embedding) |
@@ -45,12 +51,18 @@ JSON-RPC over its stdin and stdout, use `lev agent-client`, because you get stre
 in-turn tool approvals for free. If it thinks in terms of "run this command in this container until
 it exits", use `lev run`.
 
+Not every host can speak it. Hermes Agent implements the
+[Agent Client Protocol as a server](https://hermes-agent.nousresearch.com/docs/user-guide/features/acp)
+rather than a client, so it reaches Leviath the second way, through its terminal tool running
+`lev run`.
+
 ## Three things worth knowing up front
 
 **Approvals need somewhere to go.** By default Leviath asks before a tool call that changes
 something. Under an orchestrator there is usually nobody there to answer, so a run would stop and
 wait indefinitely. Either run with `--yolo`, or list the specific tools you trust with `--allow`.
-The [Gas City page](/docs/gas-city) covers what this looks like in practice.
+The [Gas City](/docs/gas-city) and [OpenClaw](/docs/openclaw) pages cover both cases, the host that
+cannot answer and the host that answers with a default you may not want.
 
 **The daemon outlives your command.** `lev run` hands the agent to a background
 [daemon](/docs/daemon) and returns. In a container that exits as soon as the command finishes, that

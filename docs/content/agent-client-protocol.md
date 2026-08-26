@@ -88,12 +88,12 @@ carries no field for it.
 ## Permission handling
 
 Hosts that implement the client-side methods advertise capabilities at `initialize`, and the agent
-surfaces tool approvals as `session/request_permission` requests the host answers. Hosts that send
-no capabilities (Gas City sends none) cannot answer such a request, so instead of deadlocking, the
-question is surfaced as output and the turn stays in flight. Answer it from Leviath's own
-surfaces, `lev respond` or `lev dash`, and the run continues; unanswered, it is denied after
-`[limits] interaction_timeout_secs`. Use `--yolo` (or scoped `--allow` flags) to run unattended
-against such a host.
+surfaces tool approvals as `session/request_permission` requests the host answers. OpenClaw's acpx
+backend answers them. Hosts that send no capabilities (Gas City sends none) cannot answer such a
+request, so instead of deadlocking, the question is surfaced as output and the turn stays in
+flight. Answer it from Leviath's own surfaces, `lev respond` or `lev dash`, and the run continues;
+unanswered, it is denied after `[limits] interaction_timeout_secs`. Use `--yolo` (or scoped
+`--allow` flags) to run unattended against such a host.
 
 ## Connecting a host
 
@@ -104,8 +104,8 @@ streams back as the run progresses.
 lev agent-client --agent coder --yolo
 ```
 
-[Gas City](/docs/gas-city) has a page of its own, with the `city.toml` stanza and the timeouts worth
-adjusting.
+[Gas City](/docs/gas-city) and [OpenClaw](/docs/openclaw) have pages of their own, with the config
+each one wants and the settings worth adjusting.
 
 > [!NOTE]
 > Editor integration is a thin front end over the daemon, exactly like `lev run` and `lev serve`. It
