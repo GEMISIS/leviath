@@ -471,6 +471,22 @@ static HTTP_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
     std::sync::LazyLock::new(|| {
         reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(30))
+            // This client pools on purpose (see above), which is the one place
+            // in the tree where a *stale* pooled connection is possible at all -
+            // the provider client keeps no idle connections. reqwest holds an
+            // idle connection for 90 seconds by default, and plenty of servers
+            // close theirs sooner; reusing one the far end has already dropped
+            // fails a request that never really started. Half the server's
+            // usual minute is comfortably inside anyone's window, and a fresh
+            // handshake on a fetch that arrives more than 30 seconds after the
+            // last one costs nothing anybody can measure.
+            .pool_idle_timeout(Duration::from_secs(30))
+            // Bound the handshake as well as the whole request: without this a
+            // host that accepts the SYN and then does nothing sat here for the
+            // full 30 seconds with the per-host permit held, so one bad host
+            // could hold up the agent's other fetches.
+            .connect_timeout(Duration::from_secs(10))
+            .tcp_keepalive(Duration::from_secs(30))
             // Re-check every redirect hop. Validating only the URL the script
             // passed is not enough: a perfectly public page answering `302
             // Location: http://169.254.169.254/` lands on the cloud metadata

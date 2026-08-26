@@ -52,6 +52,28 @@ pub const CAPACITY_BASE_DELAY_SECS: u64 = 15;
 /// refusal but keeps one header from parking a run for an hour.
 pub const CAPACITY_MAX_DELAY_SECS: u64 = 60;
 
+/// The first backoff, in seconds, after a failure that *reached* the provider -
+/// a timeout, or an answer that stopped part-way.
+///
+/// Bigger than the ordinary blip delay because the two describe different
+/// events. A reset connection or a 500 is usually gone by the next attempt, so a
+/// second of waiting is the right price. A connection that was established and
+/// then went quiet is the network changing underneath the run - a wifi handover,
+/// a VPN reconnecting, a laptop coming back from sleep - and those take tens of
+/// seconds, not one.
+///
+/// The default four attempts spent 1s, 2s and 4s: seven seconds of tolerance,
+/// after which the run is parked and needs a person to type `lev resume`. Almost
+/// no real network interruption is over in seven seconds, so the run was
+/// reliably parked for a condition that would have cleared on its own. At five
+/// seconds the same four attempts cover about thirty-five, which most of them
+/// do outlast.
+///
+/// Not a separate config key. `inference_retry_attempts` already sets how long a
+/// run rides out a bad patch, and [`MAX_TOTAL_BACKOFF_SECS`] still caps the lot,
+/// so no run waits longer than it could before.
+pub const REACHED_BASE_DELAY_SECS: u64 = 5;
+
 /// The ceiling on the *cumulative* backoff of a single inference job, in
 /// seconds, across every retry it makes.
 ///
@@ -92,6 +114,10 @@ pub struct RetryPolicy {
     /// Ceiling on one capacity backoff, and on an honored `Retry-After`.
     /// Defaults to [`CAPACITY_MAX_DELAY_SECS`].
     pub capacity_max_delay: Duration,
+    /// Base backoff for a failure that reached the provider and then stopped -
+    /// a timeout, or an answer that died part-way - doubling per attempt as
+    /// [`Self::base_delay`] does. Defaults to [`REACHED_BASE_DELAY_SECS`].
+    pub reached_base_delay: Duration,
     /// Ceiling on the sum of every backoff this job sleeps. Once it is spent the
     /// job stops retrying and reports the last error, whatever
     /// [`Self::max_attempts`] still allowed. Defaults to
@@ -119,6 +145,7 @@ impl Default for RetryPolicy {
             base_delay: Duration::from_millis(DEFAULT_RETRY_BASE_DELAY_MS),
             capacity_base_delay: Duration::from_secs(CAPACITY_BASE_DELAY_SECS),
             capacity_max_delay: Duration::from_secs(CAPACITY_MAX_DELAY_SECS),
+            reached_base_delay: Duration::from_secs(REACHED_BASE_DELAY_SECS),
             max_total_backoff: Duration::from_secs(MAX_TOTAL_BACKOFF_SECS),
             // The unified default inference deadline. A stage's
             // `request_timeout_secs` overrides this per stage (see
@@ -228,9 +255,20 @@ pub(crate) fn backoff_after(
         (true, None) => {
             exponential(policy.capacity_base_delay, attempt).min(policy.capacity_max_delay)
         }
-        // An ordinary blip - a reset connection, a 500 - keeps the fast
-        // schedule it has always had.
-        (false, _) => exponential(policy.base_delay, attempt),
+        // Not at capacity. Which schedule depends on whether the provider was
+        // ever reached: a name that did not resolve or a port that refused is
+        // answered instantly and identically, so waiting longer buys nothing,
+        // while a call that connected and then went quiet is the network moving
+        // underneath the run and needs tens of seconds, not one.
+        (false, _) => match error
+            .failure_kind()
+            .is_some_and(|k| k.provider_was_reached())
+        {
+            true => exponential(policy.reached_base_delay, attempt),
+            // An ordinary blip - a reset connection, a 500 - keeps the fast
+            // schedule it has always had.
+            false => exponential(policy.base_delay, attempt),
+        },
     };
     Some(delay.min(remaining))
 }
@@ -977,6 +1015,7 @@ mod tests {
             base_delay: Duration::ZERO,
             capacity_base_delay: Duration::ZERO,
             capacity_max_delay: Duration::ZERO,
+            reached_base_delay: Duration::ZERO,
             ..RetryPolicy::default()
         }
     }
@@ -1071,18 +1110,83 @@ mod tests {
     // nobody runs. The job-level tests above drive the same loop with every
     // delay set to zero, which proves the loop and the schedule separately.
 
+    /// A transient failure carrying no kind - a Rhai provider's own error, or
+    /// anything `reqwest` could not place. Unclassified takes the fast
+    /// schedule, which is the conservative side: it is the behaviour every
+    /// transient failure had before kinds existed.
     fn blip() -> ProviderError {
         ProviderError::RequestFailed("connection reset by peer".to_string())
+    }
+
+    /// A failure that reached the provider and then stopped.
+    fn reached(kind: leviath_providers::FailureKind) -> ProviderError {
+        ProviderError::labelled(kind, "sending the request", "no answer came")
     }
 
     fn overloaded() -> ProviderError {
         ProviderError::ApiError("HTTP 529 Overloaded".to_string())
     }
 
+    /// A call that connected and then went quiet waits long enough for the
+    /// network to come back.
+    ///
+    /// The fast schedule gives four attempts seven seconds, and then the run is
+    /// parked until a person types `lev resume`. Almost nothing that interrupts
+    /// a network is over in seven seconds - a wifi handover, a VPN reconnecting,
+    /// a laptop waking - so a run was reliably parked for a condition that would
+    /// have cleared on its own. Five seconds doubling covers about thirty-five.
+    ///
+    /// A provider that was never reached keeps the fast schedule: a name that
+    /// does not resolve or a port that refuses answers instantly and identically
+    /// however long you wait, so waiting buys nothing.
+    #[test]
+    fn a_provider_that_went_quiet_is_waited_out_longer_than_one_that_was_never_there() {
+        let policy = RetryPolicy::default();
+        let spent = Duration::ZERO;
+
+        for kind in [
+            leviath_providers::FailureKind::Timeout,
+            leviath_providers::FailureKind::ConnectionDropped,
+        ] {
+            assert_eq!(
+                backoff_after(&policy, &reached(kind), 1, spent),
+                Some(Duration::from_secs(5))
+            );
+            assert_eq!(
+                backoff_after(&policy, &reached(kind), 3, spent),
+                Some(Duration::from_secs(20))
+            );
+        }
+
+        for kind in [
+            leviath_providers::FailureKind::DnsFailure,
+            leviath_providers::FailureKind::ConnectionRefused,
+            leviath_providers::FailureKind::TlsFailure,
+        ] {
+            assert_eq!(
+                backoff_after(&policy, &reached(kind), 1, spent),
+                Some(Duration::from_secs(1)),
+                "nothing was there to answer, so waiting changes nothing"
+            );
+        }
+
+        // And the ceiling still governs: whatever the schedule, a job stops
+        // once its whole backoff budget is spent.
+        assert_eq!(
+            backoff_after(
+                &policy,
+                &reached(leviath_providers::FailureKind::Timeout),
+                1,
+                policy.max_total_backoff
+            ),
+            None
+        );
+    }
+
     #[test]
     fn an_ordinary_blip_keeps_the_fast_schedule() {
-        // The common case must not get slower: 1s, 2s, 4s, then give up on the
-        // fourth attempt.
+        // An unclassified transient must not get slower: 1s, 2s, 4s, then give
+        // up on the fourth attempt.
         let policy = RetryPolicy::default();
         let spent = Duration::ZERO;
         assert_eq!(
