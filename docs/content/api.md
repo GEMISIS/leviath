@@ -196,13 +196,28 @@ errors. `tail` is a byte budget for how much of the end you get back.
 
 ### How long a run has taken
 
-`updated_at - started_at` is the run's age, which is not how long it took. A run paused overnight,
-or sitting on a question nobody has answered, is hours old and spent almost none of them working.
+Three spans, and they answer different questions. A run paused overnight is hours old and spent
+almost none of them working, so reporting one where the reader wanted the other is how a healthy
+run comes to look stuck and a stuck one healthy.
 
-Every run carries `active`, a working stopwatch that runs while the run is inferring, calling tools
-or held for its own fan-out workers and sub-agents, and stops for everything that is not the run's
-doing: paused, blocked on a person, parked until the machine is fixed, finished. Each stage in
-`stages.json` carries one of its own on the same rule.
+| span | key | what it means |
+| --- | --- | --- |
+| **age** | `age_secs` | How long since the run was launched. Says nothing about whether it has done anything |
+| **working** | `working_secs` | How long it actually spent working. Call this the run's duration |
+| **last moved** | `last_progress_at` | When it last actually moved. A health signal, not a duration: it is how a wedged run is told from a slow one |
+
+`age_secs` and `working_secs` are computed server-side and appear on every run object this API
+serves - `GET /api/runs`, `GET /api/agents`, `GET /api/agents/{id}`, `GET /api/agents/{id}/children`
+- alongside the raw stamps they come from. `?fields=` selects them like any other key. The same two
+keys, on the same definitions, come back from `lev ps --json`.
+
+The working clock stops for everything that is not the run's doing - paused, blocked on a person,
+parked until the machine is fixed, finished - and keeps running while the run is inferring, calling
+tools, or held for its own fan-out workers and sub-agents. Each stage in `stages.json` keeps one of
+its own on the same rule.
+
+To track a live run between the daemon's writes, read the clock itself rather than the computed
+figure, which was true at `server_time`:
 
 ```json
 "active": { "banked_secs": 412, "since": 1787720786 }
@@ -210,11 +225,10 @@ doing: paused, blocked on a person, parked until the machine is fixed, finished.
 
 `banked_secs` is the time from spans that have already ended. `since` is when the span in progress
 began, or `null` when the clock is stopped - so the working total is `banked_secs`, plus
-`now - since` when `since` is set. Reading it that way rather than taking a single number is what
-lets a live run's duration climb between the daemon's writes.
+`now - since` when `since` is set.
 
-`active` is `null` on runs written before this existed; fall back to `updated_at - started_at`
-there. A finished run has `since: null`, so its total never moves again.
+`active` is `null` on runs written before this existed, and `working_secs` then falls back to
+`updated_at - started_at`. A finished run has `since: null`, so its total never moves again.
 
 ## Statuses
 

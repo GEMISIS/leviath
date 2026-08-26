@@ -139,6 +139,22 @@ pub struct RunListEntry {
     /// cannot be used to tell a working run from a wedged one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_progress_at: Option<i64>,
+    /// Unix seconds when this run was launched, for its age.
+    ///
+    /// The listing carried only `last_progress_at`, so `lev ps` could report how
+    /// long since a run moved and had no way to say how long it had existed - it
+    /// printed the first under the heading of the second. Defaulted for an older
+    /// daemon that omits it, which then reads as an unknown age rather than as a
+    /// run launched at the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    /// The run's working stopwatch: how much of its age it spent actually
+    /// working. See [`ActiveClock`](leviath_core::run_meta::ActiveClock).
+    ///
+    /// `None` from a daemon older than the clock, which reads as an unknown
+    /// working time rather than as zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<leviath_core::run_meta::ActiveClock>,
     /// Whether this run is unattended (`--yolo`). An unattended run should never
     /// be sitting on a prompt; if it is, something dropped the flag.
     #[serde(default)]

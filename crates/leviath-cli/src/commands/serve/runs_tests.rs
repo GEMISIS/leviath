@@ -606,6 +606,79 @@ async fn the_handler_pages_and_reports_a_total_and_a_server_time() {
     .await;
 }
 
+/// Every run this API serves carries the two computed spans, and they are
+/// projectable like any other key.
+///
+/// The point is not that the arithmetic is right - `leviath_core::duration` owns
+/// that - but that the route serves the keys at all, on the same names, so a
+/// client is never handed a run it has to time itself.
+#[tokio::test]
+async fn every_run_carries_the_computed_age_and_working_spans() {
+    crate::runstate::with_isolated_runs_dir_async("runs-handler-spans", |_d| async move {
+        let mut m = meta_at("run-timed", 100);
+        // Launched a long time ago; twelve minutes of that was work, and the
+        // clock is stopped, so the figure is exact rather than racing the test.
+        m.started_at = chrono::Utc::now().timestamp() - 3_600;
+        m.active = Some(leviath_core::run_meta::ActiveClock {
+            banked_secs: 720,
+            since: None,
+        });
+        create_run(&m).unwrap();
+
+        let page = page_of(&[]).await;
+        let item = &page.items[0].meta;
+        assert_eq!(item["working_secs"], 720);
+        assert!(
+            item["age_secs"].as_u64().unwrap_or(0) >= 3_600,
+            "age is the wall-clock span, not the working one: {item}"
+        );
+        assert_eq!(
+            item["started_at"], m.started_at,
+            "the raw stamps are still there for a caller that wants them"
+        );
+
+        // Projectable: a caller asking for one span gets that and nothing else.
+        let page = page_of(&[("fields", "run_id,working_secs")]).await;
+        let item = &page.items[0].meta;
+        assert_eq!(item["working_secs"], 720);
+        assert!(
+            item.get("age_secs").is_none(),
+            "fields did not ask for it: {item}"
+        );
+    })
+    .await;
+}
+
+/// `/api/agents` and `/api/runs` describe the same run the same way.
+///
+/// They are separate routes with separate handlers, and `/api/agents` used to
+/// serialize a bare `RunMeta` - so the same run came back timed on one and
+/// untimed on the other, which is the drift this shares one function to prevent.
+#[tokio::test]
+async fn the_agents_route_times_a_run_the_same_way_the_runs_route_does() {
+    crate::runstate::with_isolated_runs_dir_async("runs-handler-agents-agree", |_d| async move {
+        let mut m = meta_at("run-both", 100);
+        m.started_at = chrono::Utc::now().timestamp() - 1_800;
+        m.active = Some(leviath_core::run_meta::ActiveClock {
+            banked_secs: 300,
+            since: None,
+        });
+        create_run(&m).unwrap();
+
+        let from_runs = page_of(&[]).await.items[0].meta.clone();
+        let from_agents =
+            super::super::agents::get_agent(axum::extract::Path("run-both".to_string()))
+                .await
+                .expect("the run is there")
+                .0;
+
+        assert_eq!(from_agents["working_secs"], from_runs["working_secs"]);
+        assert_eq!(from_agents["working_secs"], 300);
+        assert_eq!(from_agents["run_id"], from_runs["run_id"]);
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn the_handler_filters_by_the_status_spelling_it_serves() {
     crate::runstate::with_isolated_runs_dir_async("runs-handler-status", |_d| async move {

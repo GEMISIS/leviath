@@ -13,6 +13,22 @@ same list.
 
 ## Unreleased
 
+- Changed: `lev ps`, the TUI and the HTTP API describe a run's time the same
+  way. There are three spans and they answer different questions - AGE (how long
+  since it was launched), WORK (how much of that it spent working) and MOVED (how
+  long since it last got anywhere) - and each surface used to show a different
+  subset of them under names that did not match. `lev ps`'s `AGE` column was in
+  fact MOVED, which the `--all` block already called `LAST MOVED`; the TUI showed
+  neither; the HTTP API served raw stamps and left the arithmetic to the client.
+  Now the live and offline `lev ps` tables both head all three, the TUI header
+  reads `12m3s work · 1h old`, and every run object from `GET /api/runs`,
+  `GET /api/agents`, `GET /api/agents/{id}`, `GET /api/agents/{id}/children` and
+  `lev ps --json` carries `age_secs` and `working_secs` computed alongside the raw
+  stamps. One formatter and one set of accessors back all of them.
+
+  If you parse the `lev ps` table, the column you want is now headed `MOVED`;
+  `lev ps --json` is the stable place to read it from.
+
 - Fixed: a run's duration counts only the time it was working. The dashboard
   timed a run from `started_at` against the wall clock, so a run left paused, or
   sitting on a question nobody had answered, went on climbing while nothing was

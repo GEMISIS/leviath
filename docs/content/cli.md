@@ -385,10 +385,10 @@ See [Human-in-the-loop](/docs/interaction) for what raises these.
 ### Reading `lev ps`
 
 ```
-RUN                             TITLE                  STATUS                  STAGE         ITER   TOOLS  AGE
-solo-1785568852-9fa61fd279dd    Retry backoff audit    waiting: tool approval  work          1      1      41s
-busy-1785568852-384bad04c9ac    Index the changelog    active                  work          13824  13824  0s
-waiter-1785568852-7895a2209850  Split the log sweep    waiting: children(1)    delegate 1/2  2      1      41s
+RUN                             TITLE                  STATUS                  STAGE         ITER   TOOLS  AGE  WORK  MOVED
+solo-1785568852-9fa61fd279dd    Retry backoff audit    waiting: tool approval  work          1      1      12m  41s   41s
+busy-1785568852-384bad04c9ac    Index the changelog    active                  work          13824  13824  12m   12m  0s
+waiter-1785568852-7895a2209850  Split the log sweep    waiting: children(1)    delegate 1/2  2      1      12m  12m   41s
 
 1 run needs an answer: lev respond
 ```
@@ -397,11 +397,33 @@ waiter-1785568852-7895a2209850  Split the log sweep    waiting: children(1)    d
 when at least one listed run has one - a run whose titling was turned off or did not finish leaves
 the cell empty rather than widening every row for nothing.
 
-`AGE` is how long since the run last moved: a new iteration, a new stage, or a change of
-status. It is deliberately not `meta.json`'s `updated_at`, which also advances on a
-30-second heartbeat so that observers can tell a live daemon from a dead one. A fresh
-`updated_at` is therefore not evidence of progress; a fresh `AGE` is. The same figure is
+### Age, work, and moved
+
+Three columns, because a run can look very different under each and the difference is
+usually the thing you are trying to see. The first row above is the case: alive for twelve
+minutes, at work for forty-one seconds of them, and holding a prompt open for the rest.
+
+`AGE` is how long since the run was launched. It says nothing about whether the run has
+done anything.
+
+`WORK` is how long the run actually spent working. The clock runs while it is inferring,
+calling tools, or held for its own fan-out workers and sub-agents, and stops for
+everything that is not the run's doing: paused, blocked on a person, parked until the
+machine is fixed, finished. This is the figure to call a run's duration - `AGE` counts the
+overnight pause, and this does not. It is written to disk as `active` in `meta.json`, and
+each stage keeps one of its own in `stages.json`.
+
+`MOVED` is how long since the run last actually moved: a new iteration, a new stage, or a
+change of status. It is deliberately not `meta.json`'s `updated_at`, which also advances
+on a 30-second heartbeat so that observers can tell a live daemon from a dead one. A fresh
+`updated_at` is therefore not evidence of progress; a fresh `MOVED` is. The same figure is
 written to disk as `last_progress_at`, so a script can read it without the daemon.
+
+> [!NOTE]
+> `MOVED` was headed `AGE` before, and showed what `MOVED` shows now. If you have a script
+> reading the table, read `lev ps --json` instead: every row there carries `started_at`,
+> `last_progress_at` and `active` raw, plus `age_secs` and `working_secs` already computed
+> - the same two keys the [HTTP API](/docs/api#how-long-a-run-has-taken) serves.
 
 `lev ps` lists what the daemon is holding, plus the runs that finished within the
 retention window above. `lev ps --all` adds a second block read from the runs dir instead,
@@ -410,9 +432,9 @@ accounted for:
 
 ```
 NOT RUNNING
-RUN                             STATUS               LAST MOVED
-coder-1785568100-a1b2c3d4e5f6   complete             4m
-coder-1785567000-c3d4e5f6a1b2   error                1h
+RUN                             STATUS               AGE  WORK  MOVED
+coder-1785568100-a1b2c3d4e5f6   complete             1h   22m   4m
+coder-1785567000-c3d4e5f6a1b2   error                3h   1m    1h
 router-1785560000-e5f6a1b2c3d4  running (abandoned)  2h
 ```
 

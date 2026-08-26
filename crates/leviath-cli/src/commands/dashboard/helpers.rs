@@ -56,21 +56,6 @@ pub(super) fn format_tokens(n: usize) -> String {
     }
 }
 
-/// Format a duration in seconds for display: `45s`, `2m5s`, `1h20m`.
-///
-/// Takes a duration rather than a start timestamp because what the dashboard
-/// shows is working time, which is not a span between two wall-clock moments -
-/// a run that paused overnight has one duration and two very different spans.
-pub(super) fn duration_str(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m{}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
-
 /// The native clipboard tools tried, in order, before falling back to OSC52.
 const NATIVE_CLIPBOARD_CMDS: &[(&str, &[&str])] = &[
     ("pbcopy", &[]),
@@ -189,23 +174,6 @@ mod tests {
     #[test]
     fn test_relative_time_zero() {
         assert_eq!(relative_time(0), "-");
-    }
-
-    #[test]
-    fn duration_str_reads_seconds_minutes_then_hours() {
-        assert_eq!(duration_str(0), "0s");
-        assert_eq!(duration_str(45), "45s");
-        assert_eq!(duration_str(125), "2m5s");
-        assert_eq!(duration_str(7260), "2h1m");
-    }
-
-    #[test]
-    fn duration_str_names_the_unit_it_crosses_into() {
-        // The boundaries, where a wrong comparison shows up as `60s`/`60m0s`.
-        assert_eq!(duration_str(59), "59s");
-        assert_eq!(duration_str(60), "1m0s");
-        assert_eq!(duration_str(3599), "59m59s");
-        assert_eq!(duration_str(3600), "1h0m");
     }
 
     // ── Additional coverage tests ──────────────────────────────────────────

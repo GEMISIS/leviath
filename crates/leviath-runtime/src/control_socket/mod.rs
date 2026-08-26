@@ -892,6 +892,8 @@ mod tests {
     /// expected response can't drift apart.
     fn listing_entry() -> RunListEntry {
         RunListEntry {
+            started_at: None,
+            active: None,
             splits_degraded: 0,
             broken_scripts: Vec::new(),
             run_id: "run-a".to_string(),

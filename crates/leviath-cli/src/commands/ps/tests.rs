@@ -16,6 +16,8 @@ fn healthy_daemon() -> DaemonHealth {
 
 fn entry(run_id: &str, status: AgentStatus) -> RunListEntry {
     RunListEntry {
+        started_at: None,
+        active: None,
         splits_degraded: 0,
         broken_scripts: Vec::new(),
         run_id: run_id.to_string(),
@@ -203,12 +205,87 @@ fn humanize_age_picks_the_largest_small_unit() {
     assert_eq!(humanize_age(-5), "0s");
 }
 
+/// The three time columns measure three different things, and a run in the
+/// middle of a long pause is where they come apart: alive for an hour, at work
+/// for ten minutes of it, and moved a minute ago.
 #[test]
-fn age_cell_reads_from_last_progress_not_the_heartbeat() {
-    let mut e = entry("run-a", AgentStatus::Active);
-    assert_eq!(age_cell(&e, 1_000), "-", "no snapshot yet, nothing to age");
-    e.last_progress_at = Some(940);
-    assert_eq!(age_cell(&e, 1_000), "1m");
+fn the_three_time_cells_measure_three_different_spans() {
+    let mut e = entry("run-a", AgentStatus::Paused);
+    // Nothing known yet reads as unknown, not as zero, in all three.
+    assert_eq!(age_cell(&e, 1_000), "-");
+    assert_eq!(work_cell(&e, 1_000), "-");
+    assert_eq!(moved_cell(&e, 1_000), "-");
+
+    let now = 10_000;
+    e.started_at = Some(now - 3_600);
+    e.last_progress_at = Some(now - 60);
+    e.active = Some(leviath_core::run_meta::ActiveClock {
+        banked_secs: 600,
+        since: None,
+    });
+    assert_eq!(age_cell(&e, now), "1h", "how long it has existed");
+    assert_eq!(work_cell(&e, now), "10m", "how much of that it worked");
+    assert_eq!(moved_cell(&e, now), "1m", "how long since it got anywhere");
+
+    // A running clock keeps counting between writes; a stopped one does not.
+    e.active = Some(leviath_core::run_meta::ActiveClock {
+        banked_secs: 600,
+        since: Some(now - 120),
+    });
+    assert_eq!(work_cell(&e, now), "12m");
+}
+
+/// `lev ps --json` hands a reconciler the same two computed keys the HTTP API
+/// does, so which one it polls is a choice about transport and not about what
+/// the numbers mean.
+#[test]
+fn the_json_listing_carries_the_same_computed_spans_the_http_api_serves() {
+    let now = 10_000;
+    let mut e = entry("run-a", AgentStatus::Paused);
+    e.started_at = Some(now - 3_600);
+    e.active = Some(leviath_core::run_meta::ActiveClock {
+        banked_secs: 600,
+        since: None,
+    });
+
+    let rows = annotated(std::slice::from_ref(&e), now);
+    let row = &rows[0];
+    assert_eq!(row[leviath_core::duration::AGE_SECS_KEY], 3_600);
+    assert_eq!(row[leviath_core::duration::WORKING_SECS_KEY], 600);
+    // The raw stamps survive alongside them.
+    assert_eq!(row["started_at"], now - 3_600);
+    assert_eq!(row["active"]["banked_secs"], 600);
+
+    // A daemon too old to report either reads as zero rather than dropping the
+    // key: a reconciler branching on presence would then treat every run from
+    // an older daemon as a different shape.
+    let bare = annotated(&[entry("run-b", AgentStatus::Active)], now);
+    assert_eq!(bare[0][leviath_core::duration::AGE_SECS_KEY], 0);
+    assert_eq!(bare[0][leviath_core::duration::WORKING_SECS_KEY], 0);
+}
+
+/// The table heads all three spans, and heads them apart.
+#[test]
+fn the_table_shows_age_work_and_moved_as_separate_columns() {
+    let now = 10_000;
+    let mut e = entry("run-a", AgentStatus::Paused);
+    e.started_at = Some(now - 3_600);
+    e.last_progress_at = Some(now - 60);
+    e.active = Some(leviath_core::run_meta::ActiveClock {
+        banked_secs: 600,
+        since: None,
+    });
+
+    let out = format_runs(&[e], &[], &healthy_daemon(), now);
+    let header = out.lines().next().unwrap_or_default();
+    assert!(header.contains("AGE"), "{out}");
+    assert!(header.contains("WORK"), "{out}");
+    assert!(header.contains("MOVED"), "{out}");
+    // One run, three different figures on one row.
+    let row = out.lines().nth(1).unwrap_or_default();
+    assert!(row.contains("1h"), "{out}");
+    assert!(row.contains("10m"), "{out}");
+    assert!(row.contains("1m"), "{out}");
 }
 
 #[test]

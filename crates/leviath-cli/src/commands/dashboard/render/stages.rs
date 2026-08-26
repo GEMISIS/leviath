@@ -165,7 +165,7 @@ impl Dashboard {
         s: &crate::runstate::StageRecord,
         agent: &DashboardAgent,
     ) -> Line<'static> {
-        use crate::commands::dashboard::helpers::duration_str;
+        use leviath_core::duration::precise;
 
         // Only the tab matching the agent's current stage index may show live
         // (spinner / ticking-duration) treatment. A stage record can be left
@@ -182,7 +182,7 @@ impl Dashboard {
             true if s.ended_at.is_some()
                 || (s.status == StageRunStatus::Active && is_current_tab) =>
             {
-                format!(" {}", duration_str(s.active_runtime_secs(agent.clock_now)))
+                format!(" {}", precise(s.active_runtime_secs(agent.clock_now)))
             }
             _ => String::new(),
         };

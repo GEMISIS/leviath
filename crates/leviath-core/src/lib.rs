@@ -14,6 +14,7 @@ pub mod blueprint;
 pub mod cache;
 pub mod config;
 pub mod credentials;
+pub mod duration;
 pub mod error;
 pub mod interaction;
 pub mod layout;
