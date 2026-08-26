@@ -617,6 +617,37 @@ const SCRIPT_HTTP_RETRIES: u32 = 2;
 static ALLOW_LOCAL_REDIRECTS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// The lock every test that touches [`ALLOW_LOCAL_REDIRECTS`] must hold.
+///
+/// The atomic is process-wide, so in a test binary - where everything runs in
+/// one process, in parallel - a test that writes it races every test that reads
+/// it, and the loser sees the other test's value with no hint that is what
+/// happened. A refusal test quietly succeeds, or a permitted-hop test is refused
+/// and blames the thing it was actually checking.
+///
+/// It lives next to the atomic rather than inside one module's test block
+/// because the writers are not all in one module: `setup_daemon_host_with`
+/// mirrors the config into it at daemon start-up, so a test that stands up a
+/// host is a writer too - and that was the one with no idea it had to take this.
+/// An async mutex rather than a `std` one because the writers await: standing up
+/// a daemon host is an `async fn`, so a `std` guard held across it is
+/// `clippy::await_holding_lock` - and the lint is right, the guard would be
+/// pinned to whatever thread the future resumed on. This one also cannot be
+/// poisoned, which matters for a lock every test in three modules takes: a test
+/// that panicked holding it has already said why, and failing every later test
+/// as well would bury that one real failure.
+#[cfg(test)]
+pub(crate) static REDIRECT_MIRROR: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Take the [`REDIRECT_MIRROR`] lock from synchronous code.
+///
+/// Async callers should `REDIRECT_MIRROR.lock().await` instead; this is for the
+/// plain `#[test]`s and for a `spawn_blocking` body, neither of which can.
+#[cfg(test)]
+pub(crate) fn lock_redirect_mirror() -> tokio::sync::MutexGuard<'static, ()> {
+    REDIRECT_MIRROR.blocking_lock()
+}
+
 /// Apply `[security] allow_local_network` to redirect following for this process.
 pub fn set_local_network_allowed(allow: bool) {
     ALLOW_LOCAL_REDIRECTS.store(allow, std::sync::atomic::Ordering::Relaxed);
@@ -1599,17 +1630,6 @@ mod tests {
         );
     }
 
-    /// `ALLOW_LOCAL_REDIRECTS` is process-wide, so every test that writes it
-    /// races every test that reads it. Tests run in parallel in one process;
-    /// without this, a test that sets the mirror to `true` makes a concurrent
-    /// test's redirect refusal silently succeed instead.
-    static REDIRECT_MIRROR: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Take the redirect-mirror lock.
-    fn lock_redirect_mirror() -> std::sync::MutexGuard<'static, ()> {
-        REDIRECT_MIRROR.lock().expect("redirect mirror lock")
-    }
-
     /// The redirect mirror is a separate process-wide value; setting it must not
     /// change what the host itself decides.
     #[test]
@@ -1932,11 +1952,14 @@ mod tests {
             listener, app,
         )));
 
-        // The mirror is taken, read and restored entirely inside the blocking
-        // closure: holding a `std` guard across an `.await` is a deadlock the
-        // scheduler is free to arrange.
+        // The guard is taken out here and moved into the closure, so it covers
+        // the whole request and is released when the closure ends. Taking it
+        // inside would mean `blocking_lock` on a runtime worker thread, and
+        // awaiting it out here while a `std` guard stayed live would pin the
+        // guard to whichever thread the future resumed on.
+        let guard = REDIRECT_MIRROR.lock().await;
         let out = tokio::task::spawn_blocking(move || {
-            let _guard = lock_redirect_mirror();
+            let _guard = guard;
             let previous = local_network_allowed();
             set_local_network_allowed(false);
             let result = RealScriptIo.http_get(&format!("http://{addr}/bounce"), BTreeMap::new());
@@ -1967,8 +1990,9 @@ mod tests {
             listener, app,
         )));
 
+        let guard = REDIRECT_MIRROR.lock().await;
         let out = tokio::task::spawn_blocking(move || {
-            let _guard = lock_redirect_mirror();
+            let _guard = guard;
             // Loopback hops are permitted here, so the *count* is what stops it.
             let previous = local_network_allowed();
             set_local_network_allowed(true);

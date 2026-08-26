@@ -882,6 +882,12 @@ mod tests {
 
     #[tokio::test]
     async fn setup_daemon_host_builds_a_working_host() {
+        // `setup_daemon_host_with` mirrors `[security] allow_local_network`
+        // into a process-wide atomic, which makes this test a writer of the
+        // switch the script-host redirect tests read. Without the lock, standing
+        // up a host here flipped that switch mid-request over there and the
+        // refusal it saw was this test's config, not its own.
+        let _redirect = crate::daemon::script_host::REDIRECT_MIRROR.lock().await;
         // Config::default has no MCP servers → the shared MCP connect is a no-op.
         // An empty runs dir → restart recovery finds nothing to reload.
         // A key for the manifest's provider, because a spawn whose stages have
@@ -931,6 +937,12 @@ mod tests {
     /// otherwise claim the run was alive for ever, records the failure in it.
     #[tokio::test]
     async fn spawner_records_the_failure_in_the_run_dir_it_staked_out() {
+        // `setup_daemon_host_with` mirrors `[security] allow_local_network`
+        // into a process-wide atomic, which makes this test a writer of the
+        // switch the script-host redirect tests read. Without the lock, standing
+        // up a host here flipped that switch mid-request over there and the
+        // refusal it saw was this test's config, not its own.
+        let _redirect = crate::daemon::script_host::REDIRECT_MIRROR.lock().await;
         let runs = tempfile::tempdir().unwrap();
         let mut host = setup_daemon_host(
             Config::default(),
@@ -1012,6 +1024,9 @@ mod tests {
     /// dir is untouched is what keeps that from coming back.
     #[tokio::test]
     async fn spawner_writes_the_placeholder_under_the_hosts_runs_dir() {
+        // A writer of the redirect mirror, like every test that stands up a
+        // host: see `setup_daemon_host_builds_a_working_host`.
+        let _redirect = crate::daemon::script_host::REDIRECT_MIRROR.lock().await;
         let runs = tempfile::tempdir().unwrap();
         // The assertion below is "spawning wrote nothing into the *global* runs
         // dir", which is only decidable if no other test can write there while
@@ -1070,6 +1085,9 @@ mod tests {
     /// must be terminated on disk instead.
     #[tokio::test]
     async fn cancelling_an_unreloadable_run_terminates_it_on_disk() {
+        // A writer of the redirect mirror, like every test that stands up a
+        // host: see `setup_daemon_host_builds_a_working_host`.
+        let _redirect = crate::daemon::script_host::REDIRECT_MIRROR.lock().await;
         let runs = tempfile::tempdir().unwrap();
         let mut host = setup_daemon_host(
             Config::default(),
@@ -1972,6 +1990,12 @@ system_prompt = "x"
 
     #[tokio::test]
     async fn the_daemon_refuses_to_start_without_a_usable_https_client() {
+        // `setup_daemon_host_with` mirrors `[security] allow_local_network`
+        // into a process-wide atomic, which makes this test a writer of the
+        // switch the script-host redirect tests read. Without the lock, standing
+        // up a host here flipped that switch mid-request over there and the
+        // refusal it saw was this test's config, not its own.
+        let _redirect = crate::daemon::script_host::REDIRECT_MIRROR.lock().await;
         // Better than accepting runs it could never infer for: the error names
         // the cause, where the previous behaviour was a panic at start-up.
         let dir = tempfile::tempdir().expect("tempdir");
