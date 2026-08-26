@@ -2646,6 +2646,39 @@ fn blueprint_open(models: &[&str]) -> leviath_core::Blueprint {
     leviath_core::manifest::parse_manifest(&toml).expect("the fixture parses")
 }
 
+/// A natively registered provider serving a fixed set of models, for the open
+/// entries: a script provider is resolved on demand and so is never in
+/// `native_providers`, which is the list the resolver asks first.
+struct NativeProvider(Vec<String>);
+
+#[async_trait::async_trait]
+impl leviath_providers::Provider for NativeProvider {
+    async fn infer(
+        &self,
+        _r: &leviath_providers::InferenceRequest,
+    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+        Err(leviath_providers::ProviderError::Other("t".to_string()))
+    }
+    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _m: &str) -> usize {
+        1000
+    }
+    fn name(&self) -> &str {
+        "native"
+    }
+    fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+        leviath_providers::ModelCapabilities::default()
+    }
+    fn serves_model(&self, model_key: &str) -> Option<String> {
+        self.0
+            .iter()
+            .any(|m| m == model_key)
+            .then(|| model_key.to_string())
+    }
+}
+
 /// A registry holding one script provider, written to disk so the layer
 /// compiles it the way it would in production.
 ///
@@ -2807,5 +2840,63 @@ async fn an_open_entry_is_routed_through_the_default_script_provider() {
         env.unrouted_models,
         known_tools(&["nobody-serves-this"]),
         "the default script provider serves local-fast, so only the other is unrouted"
+    );
+}
+
+/// The ordinary shape: a natively registered provider answers the open-route
+/// question, exactly as `resolve_stage_candidates` asks it.
+///
+/// The script-provider tests above cannot reach this path at all - a script
+/// provider is compiled on demand and so is never in `native_providers` - so
+/// without a native provider in the registry the loop that asks them runs zero
+/// times.
+#[test]
+fn a_native_provider_answers_the_open_route_question() {
+    let mut registry = leviath_runtime::ProviderRegistry::new();
+    registry.register(
+        "anthropic".to_string(),
+        std::sync::Arc::new(NativeProvider(vec!["claude-sonnet-5".to_string()])),
+    );
+    let bp = blueprint_open(&["claude-sonnet-5", "nobody-serves-this"]);
+
+    let env = LintEnv::default().with_provider_catalogs(
+        &bp,
+        &crate::config::Config::default(),
+        &registry,
+    );
+
+    assert_eq!(
+        env.unrouted_models,
+        known_tools(&["nobody-serves-this"]),
+        "anthropic serves one of the two, so only the other is unrouted"
+    );
+    assert!(
+        env.provider_catalogs.is_empty(),
+        "an open entry pins no provider, so there is no catalogue to record"
+    );
+}
+
+/// A native provider that publishes nothing is left unchecked rather than
+/// reported. Only a script provider's silence is worth naming: every built-in
+/// is either covered by the compiled-in table `unknown-model` reads or has a
+/// genuinely open catalogue.
+#[test]
+fn a_silent_native_provider_is_not_reported_as_unchecked() {
+    let mut registry = leviath_runtime::ProviderRegistry::new();
+    registry.register(
+        "anthropic".to_string(),
+        std::sync::Arc::new(NativeProvider(vec!["claude-sonnet-5".to_string()])),
+    );
+    let bp = blueprint_pinning(&[("anthropic", "claude-sonnet-5")]);
+
+    let env = LintEnv::default().with_provider_catalogs(
+        &bp,
+        &crate::config::Config::default(),
+        &registry,
+    );
+
+    assert!(
+        env.provider_catalogs.is_empty(),
+        "a native provider that publishes nothing is not `catalog-unchecked`"
     );
 }
