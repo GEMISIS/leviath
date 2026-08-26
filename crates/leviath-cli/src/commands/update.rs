@@ -351,11 +351,45 @@ pub struct Migration {
     pub apply: fn(&mut Config) -> Vec<String>,
 }
 
+/// Why `serves = []` is worth a migration at all.
+///
+/// It never meant anything. `serves` is the model list a script provider with no
+/// `list_models` falls back to, and an empty one is the same as no entry - so the
+/// line has always been inert. It got written because the field serialized even
+/// when empty, and a save-back writes every field, so `lev setup` and every
+/// config migration stamped it into each `[model_providers.*]` block.
+///
+/// Inert is not harmless once somebody is debugging. It reads as a declaration
+/// that the provider serves nothing, which is exactly what a provider whose
+/// `list_models` was never asked looks like from outside - so it got the blame
+/// for a routing failure it had no part in. The real fault was priming, fixed
+/// separately; this removes the thing that pointed at the wrong culprit.
+///
 /// The migrations this build knows about, oldest first.
 ///
-/// Empty, and honestly so: nothing in a released `config.toml` has to change to
-/// work with this version. Adding one is adding an entry here.
-pub const MIGRATIONS: &[Migration] = &[];
+/// Adding one is adding an entry here.
+pub const MIGRATIONS: &[Migration] = &[Migration {
+    name: "stale-empty-serves",
+    description: "remove `serves = []` from [model_providers.*] - it never meant anything",
+    applies: |config, _raw| {
+        config
+            .model_providers
+            .values()
+            .any(|p| p.serves.as_ref().is_some_and(Vec::is_empty))
+    },
+    apply: |config| {
+        let mut done = Vec::new();
+        for (name, provider) in &mut config.model_providers {
+            if provider.serves.as_ref().is_some_and(Vec::is_empty) {
+                provider.serves = None;
+                done.push(format!(
+                    "removed empty `serves` from [model_providers.{name}]"
+                ));
+            }
+        }
+        done
+    },
+}];
 
 // ─── The plan ─────────────────────────────────────────────────────────────────
 

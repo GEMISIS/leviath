@@ -634,11 +634,35 @@ fn a_migration_is_selected_by_its_predicate_over_the_config_and_the_raw_toml() {
     assert!(plan(&UpdateArgs::default(), &env).migrations.is_empty());
 }
 
+/// Every shipped migration is named, described, and does nothing to a config
+/// that has already taken it.
+///
+/// This replaced an assertion that the list was empty, which was true until a
+/// released `config.toml` first had something in it worth changing. Emptiness
+/// was never the property worth holding - these are, because a migration ships
+/// forever and runs on every `lev update` after the one that needed it.
 #[test]
-fn the_shipped_migration_list_is_empty_and_that_is_deliberate() {
-    // No released config.toml has to change to work with this build. The list
-    // is the place a future one goes; the tests above prove it would run.
-    assert!(MIGRATIONS.is_empty());
+fn every_shipped_migration_is_named_and_idempotent() {
+    assert!(
+        !MIGRATIONS.is_empty(),
+        "the machinery is exercised by what ships, not only by a sample"
+    );
+    for migration in MIGRATIONS {
+        assert!(!migration.name.is_empty(), "a migration needs a name");
+        assert!(
+            !migration.description.is_empty(),
+            "{}: needs a line saying what it changes",
+            migration.name
+        );
+        // A default config has taken every migration by construction: it is
+        // what a fresh install writes.
+        let fresh = crate::config::Config::default();
+        assert!(
+            !(migration.applies)(&fresh, &toml::Table::new()),
+            "{}: applies to a config that never needed it",
+            migration.name
+        );
+    }
 }
 
 // ─── Rendering ────────────────────────────────────────────────────────────────
@@ -1593,4 +1617,69 @@ fn a_copy_that_is_behind_still_runs_the_upgrade() {
             "a copy that is behind is offered the upgrade"
         );
     });
+}
+
+/// The migration on the shape it was written for: a real config carrying the
+/// stale line, run through `applies` and `apply`, and saved.
+#[test]
+fn the_stale_serves_migration_removes_the_line_and_leaves_the_rest() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "default_provider = \"openrouter\"\n\n\
+         [model_providers.cerebras]\n\
+         base_url = \"https://api.cerebras.ai/v1\"\n\
+         serves = []\n\n\
+         [model_providers.keeps-its-list]\n\
+         serves = [\"a-model\"]\n",
+    )
+    .expect("writes");
+
+    let mut config =
+        crate::config::Config::load_from_path_public(&path).expect("the fixture parses");
+    let raw: toml::Table =
+        toml::from_str(&std::fs::read_to_string(&path).expect("reads")).expect("parses");
+
+    let migration = &crate::commands::update::MIGRATIONS[0];
+    assert!(
+        (migration.applies)(&config, &raw),
+        "a config carrying the stale line needs it"
+    );
+
+    let done = (migration.apply)(&mut config);
+    assert_eq!(done.len(), 1, "one provider changed, not both: {done:?}");
+    assert!(done[0].contains("cerebras"), "{done:?}");
+
+    config.save_to_path_public(&path).expect("saves");
+    let written = std::fs::read_to_string(&path).expect("reads back");
+
+    assert!(
+        !written.contains("serves = []"),
+        "the empty one is gone:\n{written}"
+    );
+    assert!(
+        written.contains("a-model"),
+        "and a real list is untouched:\n{written}"
+    );
+    assert!(
+        written.contains("cerebras"),
+        "as is the provider itself:\n{written}"
+    );
+
+    // Run again and it has nothing to do, which is what makes it safe to keep
+    // shipping after everyone has taken it.
+    let after = crate::config::Config::load_from_path_public(&path).expect("still parses");
+    let raw_after: toml::Table = toml::from_str(&written).expect("parses");
+    assert!(!(migration.applies)(&after, &raw_after));
+}
+
+/// A config that never had the line is left alone entirely.
+#[test]
+fn the_stale_serves_migration_does_not_apply_to_a_clean_config() {
+    let config = crate::config::Config::default();
+    let raw = toml::Table::new();
+    assert!(!(crate::commands::update::MIGRATIONS[0].applies)(
+        &config, &raw
+    ));
 }
