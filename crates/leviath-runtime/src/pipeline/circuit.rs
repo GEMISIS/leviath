@@ -301,6 +301,45 @@ mod tests {
         )
     }
 
+    /// Failures have to be *consecutive*, and a success in between is what
+    /// makes them not.
+    ///
+    /// The existing cover only checked that a success closes an already-open
+    /// circuit. The case that actually happens is quieter: a provider that
+    /// times out now and then, works in between, and never has three bad calls
+    /// in a row. Without the reset those add up over an afternoon and the
+    /// provider is pulled for a fault it does not have.
+    #[test]
+    fn a_success_in_between_means_the_failures_are_not_consecutive() {
+        let mut circuits = ProviderCircuits::default();
+        // The strict threshold, so the count is the only thing under test.
+        let dead = Some(FailureKind::ConnectionRefused);
+        let hit = |c: &mut ProviderCircuits, now: i64| {
+            c.record_failure("p", UnavailableReason::Unreachable, dead, now, &policy())
+        };
+
+        assert!(!hit(&mut circuits, 0));
+        assert!(!hit(&mut circuits, 1));
+        circuits.record_success("p");
+        // Three more failures have now happened in total. Counting them all
+        // would open the circuit here; counting them in a row does not.
+        assert!(!hit(&mut circuits, 2), "the count restarted at the success");
+        assert!(!circuits.is_open("p", 2, &policy()));
+
+        assert!(!hit(&mut circuits, 3));
+        circuits.record_success("p");
+        assert!(!hit(&mut circuits, 4));
+        assert!(
+            !circuits.is_open("p", 4, &policy()),
+            "five failures, never three in a row, and the provider stays in service"
+        );
+
+        // And an actual run of three still opens it, so the reset has not
+        // disarmed the breaker.
+        assert!(!hit(&mut circuits, 5));
+        assert!(hit(&mut circuits, 6), "three in a row is still an outage");
+    }
+
     /// A slow provider is one that answered the connection, so it keeps its
     /// place in the rotation far longer than one that refused it.
     ///

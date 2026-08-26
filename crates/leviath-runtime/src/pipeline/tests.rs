@@ -1370,6 +1370,68 @@ fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
     );
 }
 
+/// A provider that fails intermittently is not a provider that is failing.
+///
+/// Timeout, success, timeout, success, timeout is three failed calls and no
+/// fault: the provider answered in between, which is the whole definition of
+/// "not consecutive". This drives it through `collect_inference` rather than the
+/// breaker alone, because the reset lives in the wiring - the success arm has to
+/// actually be reached for the count to clear.
+#[test]
+fn a_success_between_failures_clears_the_count_end_to_end() {
+    let policy = CircuitPolicy {
+        failures_before_open: 3,
+        cooldown_secs: 300,
+    };
+    let now = chrono::Utc::now().timestamp();
+    let (mut world, tx) = world_with_results();
+    world.insert_resource(ProviderCircuits::default());
+    world.insert_resource(policy);
+
+    // The strict threshold, so this measures the count and not the patience
+    // added for slow providers.
+    let send = |world: &mut World, ok: bool| {
+        let e = world
+            .spawn((agent_state(), AwaitingInference, stage_with_fallback()))
+            .id();
+        let result = if ok {
+            Ok(resp("hi"))
+        } else {
+            Err(leviath_providers::ProviderError::RequestFailed(
+                "[connection-refused] sending the request: the call did not complete".to_string(),
+            ))
+        };
+        tx.send(InferenceOutcome {
+            latency: std::time::Duration::ZERO,
+            entity: e,
+            result,
+            pricing: None,
+        })
+        .unwrap();
+        run_collect(world);
+    };
+
+    for ok in [false, true, false, true, false] {
+        send(&mut world, ok);
+    }
+    assert!(
+        !world
+            .resource::<ProviderCircuits>()
+            .is_open("dead", now, &policy),
+        "three failures with successes between them is not three in a row"
+    );
+
+    // Two more with nothing in between finally makes a run of three.
+    send(&mut world, false);
+    send(&mut world, false);
+    assert!(
+        world
+            .resource::<ProviderCircuits>()
+            .is_open("dead", now, &policy),
+        "three consecutive failures still opens the circuit"
+    );
+}
+
 /// The breaker's two speeds, end to end.
 ///
 /// A provider that refused the connection is not serving anyone and the next
