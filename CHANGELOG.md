@@ -11,7 +11,7 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
-## Unreleased
+## 0.5.2 - 2026-08-27
 
 - Fixed: a stage naming a model its provider does not carry is now a validation
   error and a refused spawn, instead of a run on some other model. Nothing had
