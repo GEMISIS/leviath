@@ -3617,16 +3617,12 @@ fn empty_response_never_nudges_a_stage_whose_output_is_reviewed() {
         0,
         "and not counted as a nudge"
     );
-    // Nothing was injected - the model is not told to go do work it has no
-    // tool for, which is what sent it asking the user for one.
-    assert!(
-        world
-            .get::<ContextWindow>(e)
-            .unwrap()
-            .get_region("conversation")
-            .unwrap()
-            .content
-            .is_empty(),
+    // Nothing was injected beyond the reply itself - the model is not told
+    // to go do work it has no tool for, which is what sent it asking the
+    // user for one.
+    assert_eq!(
+        conversation_text(&world, e),
+        "r",
         "nothing is injected: no nudge telling the model to go do work it \
          has no tool for, which is what sent it asking the user for one"
     );
@@ -3680,7 +3676,8 @@ fn empty_response_respects_a_stage_that_disables_its_nudge() {
     run_empty(&mut world);
     assert!(world.get::<ResolveTransition>(e).is_some());
     assert_eq!(world.get::<StageProgress>(e).unwrap().text_only_nudges, 0);
-    assert!(conversation_text(&world, e).is_empty());
+    // The reply is kept; no nudge follows it.
+    assert_eq!(conversation_text(&world, e), "r");
 }
 
 #[test]
@@ -3789,7 +3786,8 @@ fn empty_response_reads_the_global_nudge_component() {
         .id();
     run_empty(&mut world);
     assert!(world.get::<ResolveTransition>(e).is_some());
-    assert!(conversation_text(&world, e).is_empty());
+    // The reply is kept; no nudge follows it.
+    assert_eq!(conversation_text(&world, e), "r");
 }
 
 #[test]
@@ -16674,4 +16672,48 @@ fn cut_off_arguments_refusal_quotes_the_tail() {
         long.contains(&format!("ending `{}é`", "x".repeat(39))),
         "{long}"
     );
+}
+
+/// An accepted text-only reply stays in the conversation. It used to vanish,
+/// so a gate that bounced the stage back was talking to a model with no
+/// memory of its own draft.
+#[test]
+fn empty_response_keeps_the_reply_it_accepts() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_result(false),
+            StageProgress {
+                total_tool_calls: 2,
+                ..Default::default()
+            },
+            nudge_bp(false),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    assert_eq!(conversation_text(&world, e), "r");
+
+    // An empty reply leaves no empty turn behind.
+    let mut blank = infer_result_only(false);
+    blank.response = "  ".to_string();
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            blank,
+            StageProgress {
+                total_tool_calls: 2,
+                ..Default::default()
+            },
+            nudge_bp(false),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    assert_eq!(conversation_text(&world, e), "");
 }
