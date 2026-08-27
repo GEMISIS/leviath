@@ -300,6 +300,7 @@ mod tests {
             region_tokens: Default::default(),
             first_call_prompt_tokens: None,
             runaway_warned: false,
+            output_cap_raised: false,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ended_at: if status == StageRunStatus::Complete {
                 Some(chrono::Utc::now().timestamp())

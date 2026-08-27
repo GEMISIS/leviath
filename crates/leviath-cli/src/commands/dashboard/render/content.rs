@@ -1345,6 +1345,7 @@ mod tests {
             region_tokens: Default::default(),
             first_call_prompt_tokens: None,
             runaway_warned: false,
+            output_cap_raised: false,
             started_at: None,
             ended_at: None,
         }
@@ -1719,6 +1720,7 @@ hint = "after plan"
             region_tokens: Default::default(),
             first_call_prompt_tokens: None,
             runaway_warned: false,
+            output_cap_raised: false,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ended_at: None,
         }];
@@ -1777,6 +1779,7 @@ name = "g"
             region_tokens: Default::default(),
             first_call_prompt_tokens: None,
             runaway_warned: false,
+            output_cap_raised: false,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ended_at: None,
         };
@@ -1818,6 +1821,7 @@ condition = "error"
             region_tokens: Default::default(),
             first_call_prompt_tokens: None,
             runaway_warned: false,
+            output_cap_raised: false,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ended_at: None,
         }];
@@ -1930,6 +1934,7 @@ transform = "clear"
             region_tokens: Default::default(),
             first_call_prompt_tokens: None,
             runaway_warned: false,
+            output_cap_raised: false,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ended_at: None,
         }];
@@ -1967,6 +1972,7 @@ transform = "clear"
             region_tokens: Default::default(),
             first_call_prompt_tokens: None,
             runaway_warned: false,
+            output_cap_raised: false,
             started_at: Some(chrono::Utc::now().timestamp() - 60),
             ended_at: Some(chrono::Utc::now().timestamp() - 10),
         }];
@@ -1999,6 +2005,7 @@ transform = "clear"
             region_tokens: Default::default(),
             first_call_prompt_tokens: None,
             runaway_warned: false,
+            output_cap_raised: false,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ended_at: None,
         }];
@@ -2335,6 +2342,7 @@ transform = "clear"
             region_tokens: Default::default(),
             first_call_prompt_tokens: None,
             runaway_warned: false,
+            output_cap_raised: false,
             started_at: None,
             ended_at: None,
         }];
