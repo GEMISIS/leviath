@@ -4,12 +4,30 @@ on:
   schedule:
     # Every Thursday at 9am PST (4pm UTC)
     - cron: '0 16 * * 4'
+    # Backstop, four hours later. GitHub does not guarantee a scheduled event
+    # is ever delivered, and on 2026-08-27 it dropped the 16:00 dispatch
+    # outright (the nightly alpha ran ten hours late the same day). A weekly
+    # cron with no second chance turns one dropped event into a week with no
+    # stable release. `check-beta` already refuses to ship a version stable
+    # carries, so a redundant run is a fifteen-second no-op.
+    - cron: '0 20 * * 4'
   workflow_dispatch:
     inputs:
       force:
         description: Deploy even if the version was not bumped
         type: boolean
         default: false
+
+# Two scheduled slots plus manual dispatch means two runs can be alive at
+# once. They must not overlap: `check-beta` reads what stable currently
+# carries, so a second run that clears that gate before the first publishes
+# would deploy the same version again, and `Determine version tag` would
+# disambiguate it into a junk `vX.Y.Z+<date>` release. Queued rather than
+# cancelled, because the in-flight run may be midway through a crates.io
+# publish; the queued one re-reads stable afterwards and skips.
+concurrency:
+  group: prod-release
+  cancel-in-progress: false
 
 # Default to read-only; only the deploy job needs to write releases.
 permissions:
