@@ -11,6 +11,37 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+- Added: a stage's model chain can be reordered with the mouse in the agent
+  editor. Each model row carries a `⠿` grip; press it, drag up or down the
+  chain, and let go. The rows reorder as you drag, so the drop is what you
+  saw, and the document is only written on release - one undo entry for the
+  whole move, and none at all for a drop back where it started. The grip is a
+  small target on purpose: dragging anywhere else on the row still selects
+  text, so a model id stays something you can highlight and copy. `←` `→` on a
+  model row still move it a place at a time.
+- Changed: moving a model in the chain lifts and inserts rather than swapping
+  with its neighbour. The two agree for the single step the arrow keys make,
+  but a drag crosses several rows at once, and swapping the ends of such a
+  move would fling the entry the pointer had just passed back to where the
+  dragged one started.
+- Fixed: deleting a run now deletes the sub-agent runs beneath it. A fan-out
+  worker or a `sub_agent` spawn is a run of its own, but it exists because
+  something started it and it is drawn nested under that run, so deleting the
+  parent alone left the children on disk with nothing above them. That was not
+  a handful of stale rows: the dashboard treats a run whose parent is absent as
+  a root, so deleting a research run with nine workers under it emptied one row
+  and promoted nine. `DELETE /api/runs/{id}`, the bulk `DELETE /api/runs`, and
+  `d` in the dashboard all take the whole tree now, deepest first. The walk
+  only goes downwards - deleting one worker leaves the run that started it and
+  the workers beside it exactly where they were.
+- Changed: a live sub-agent run refuses its parent's delete with a **409**
+  naming the run to cancel, the same way the route already refused to delete a
+  run it could see was live. Half a tree is not a state anything downstream
+  knows how to read. The dashboard's delete confirmation now says how many
+  sub-agent runs go with the selection before you answer.
+
 ## 0.5.2 - 2026-08-27
 
 - Fixed: a stage naming a model its provider does not carry is now a validation

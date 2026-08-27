@@ -992,6 +992,37 @@ fn remove_run(id: &str) -> Result<(), (StatusCode, String)> {
     })
 }
 
+/// Whether every member of `ids` may go, or the reason one of them may not.
+///
+/// A live sub-agent blocks the whole delete rather than being skipped: half a
+/// tree is not a state anything downstream knows how to read, and removing the
+/// parent of a running agent is exactly what [`deletable`] refuses to do for
+/// the run named directly. The reason names the sub-agent, because "cancel it
+/// before deleting it" about a run the caller never mentioned is unactionable.
+fn deletable_family(root: &str, ids: &[String], force: bool) -> Result<(), (StatusCode, String)> {
+    for id in ids {
+        deletable(id, force).map_err(|(code, msg)| {
+            if id == root {
+                (code, msg)
+            } else {
+                (
+                    code,
+                    format!("{msg}. It is a sub-agent run of '{root}', deleted with it"),
+                )
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// Remove every run in `ids`, stopping at the first failure.
+fn remove_family(ids: &[String]) -> Result<(), (StatusCode, String)> {
+    for id in ids {
+        remove_run(id)?;
+    }
+    Ok(())
+}
+
 /// `DELETE /api/runs/{id}`: remove a finished run's record from disk.
 ///
 /// Separate from `DELETE /api/agents/{id}`, which cancels. The two verbs mean
@@ -1003,6 +1034,12 @@ fn remove_run(id: &str) -> Result<(), (StatusCode, String)> {
 /// transcript. That is the point of the route. A console that offered a
 /// "Delete" which only hid the run locally would tell somebody clearing a
 /// sensitive transcript that it was gone when it was not.
+///
+/// It is also the whole sub-agent tree - see [`runstate::family_of`]. Deleting a parent and
+/// leaving its children behind left them on disk with nothing above them, and
+/// a client that nests runs under their parent (the dashboard does) has
+/// nowhere to draw them but the top level, so a delete read as a promotion.
+/// Deleting a child never touches its parent or its siblings.
 ///
 /// **409** on a live run - removing a directory out from under a running agent
 /// is a different and much larger feature, and refusing is the honest answer.
@@ -1016,8 +1053,10 @@ pub(super) async fn delete_run(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // `run_dir` maps an unsafe id to a path that cannot exist, so a traversal
     // attempt arrives here as an ordinary miss rather than a removed directory.
-    deletable(&id, query.force.unwrap_or(false)).map_err(|(code, msg)| err(code, msg))?;
-    remove_run(&id).map_err(|(code, msg)| err(code, msg))?;
+    let ids = runstate::family_of(&id);
+    deletable_family(&id, &ids, query.force.unwrap_or(false))
+        .map_err(|(code, msg)| err(code, msg))?;
+    remove_family(&ids).map_err(|(code, msg)| err(code, msg))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1030,6 +1069,10 @@ pub(super) async fn delete_run(
 /// live run has still correctly deleted the rest, so this answers 200 with the
 /// per-run verdicts rather than failing the whole request. The single-run route
 /// is the one that reports a status per outcome.
+///
+/// Every named run takes its sub-agent tree with it, as on the single-run
+/// route, so `deleted` can hold ids the caller never mentioned. Reporting them
+/// is the point: they are the runs that are now gone.
 ///
 /// Neither parameter is a **400** rather than "every run": a bulk delete with no
 /// predicate is much more likely to be a client that failed to build its query
@@ -1066,14 +1109,22 @@ pub(super) async fn delete_runs(
         }
     };
 
-    let mut deleted = Vec::new();
+    let mut deleted: Vec<String> = Vec::new();
     let mut skipped = Vec::new();
     for id in targets {
+        // A sweep by `before` selects a parent and its children independently,
+        // and naming a parent already took its children; either way the second
+        // mention is of a run this request has just removed, which is a
+        // deletion rather than the 404 `deletable` would report.
+        if deleted.contains(&id) {
+            continue;
+        }
+        let ids = runstate::family_of(&id);
         // Never forced. A sweep names runs by a predicate rather than one at a
         // time, so an unreadable record inside it is far likelier to be
         // collateral than the thing the operator meant to clear.
-        match deletable(&id, false).and_then(|()| remove_run(&id)) {
-            Ok(()) => deleted.push(id),
+        match deletable_family(&id, &ids, false).and_then(|()| remove_family(&ids)) {
+            Ok(()) => deleted.extend(ids),
             Err((_, reason)) => skipped.push(SkippedRun { id, reason }),
         }
     }

@@ -67,10 +67,15 @@ pub(crate) fn hint_blocks(
     tools: &[Tool],
     os: &str,
 ) -> Vec<leviath_providers::SystemBlock> {
+    // `Stable`, and it matters: these blocks are the first bytes of every
+    // request and never change, but the default volatility is `Rewritten`,
+    // and the Anthropic breakpoint chooser reads that as "the prefix moves
+    // from block zero". Measured on a research run, no request ever got its
+    // stable-prefix marker for that reason alone.
     let always = |text: &str| leviath_providers::SystemBlock {
         text: text.to_string(),
         cache_hint: leviath_core::CacheHint::Always,
-        volatility: leviath_core::Volatility::default(),
+        volatility: leviath_core::Volatility::Stable,
         region: String::new(),
     };
     let mut blocks = Vec::new();
@@ -123,6 +128,9 @@ pub(crate) struct PriorCalls {
     /// How far the estimate ran under what the provider charged, or `None`
     /// before anything was measured (issue #485).
     pub(crate) calibration: Option<crate::pipeline::PromptCalibration>,
+    /// A reply in this stage was cut off at the output cap, so the cap goes
+    /// out at the model's maximum instead of the stage's setting.
+    pub(crate) raise_output_cap: bool,
 }
 
 /// Build the [`InferenceRequest`] for an agent from its context window + stage
@@ -145,6 +153,7 @@ pub(crate) fn build_request(
         system_hash: previous_system_hash,
         block_hashes: previous_block_hashes,
         calibration,
+        raise_output_cap,
     } = prior;
     let assembled = window.assemble_with_meta(&crate::custom_region::AssembleMeta {
         stage_name: stage_name.to_string(),
@@ -162,9 +171,19 @@ pub(crate) fn build_request(
     let spent = crate::pipeline::calibrated_tokens(window.current_tokens, calibration.as_ref());
     let remaining = window.max_tokens.saturating_sub(spent);
     let caps = provider.capabilities(&stage.model);
-    let output_cap = config
-        .and_then(|c| c.max_output_tokens)
-        .unwrap_or(caps.max_output_tokens);
+    let output_cap = match config.and_then(|c| c.max_output_tokens.as_ref()) {
+        None => caps.max_output_tokens,
+        Some(cap) => cap.resolve(caps.max_context_tokens, caps.max_output_tokens, |region| {
+            window.get_region(region).map(|r| r.max_tokens)
+        }),
+    };
+    // The stage's cap is what the last reply did not fit under. The model's
+    // own maximum is the most room a retry can be given; a reply that does
+    // not fit that either gets asked for in pieces (`cut_off_nudge`).
+    let output_cap = match raise_output_cap {
+        true => output_cap.max(caps.max_output_tokens),
+        false => output_cap,
+    };
     let max_tokens = remaining.min(output_cap).max(MIN_OUTPUT_TOKENS);
     if remaining < MIN_OUTPUT_TOKENS {
         // The prompt has filled the window and left nothing to answer with.
@@ -427,6 +446,7 @@ pub fn dispatch_inference(
                         system_hash: prefix.map(|p| p.0),
                         block_hashes: block_prefix.map(|b| b.0.clone()).unwrap_or_default(),
                         calibration: calibration.copied(),
+                        raise_output_cap: progress.is_some_and(|p| p.raise_output_cap),
                     },
                 );
                 // Remembered for the next request, which is the only way the

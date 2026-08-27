@@ -1,6 +1,6 @@
 [agent]
 name = "researcher"
-version = "0.4.6"
+version = "0.4.7"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 max_child_depth = 2
 entry_stage = "gather"
@@ -291,6 +291,12 @@ Citations are load-bearing, so two rules bind absolutely:
 Confidence describes the evidence, not how sure the prose sounds.
 """
 
+# `raw_findings` is the raw material - every fetched page - and this stage's
+# instructions work from `claims`, `contradictions` and `sources_index`. Left
+# in, it is re-sent on every call for nothing.
+[stages.summarize.context]
+hide = ["raw_findings"]
+
 [stages.summarize.transitions.summary]
 hint = "The report is written"
 
@@ -338,11 +344,20 @@ Say what this research produced, for whoever asked for it.
 
 Lead with the answer to the question, in two or three sentences. Then the two or
 three findings that matter most, each with its confidence level. Name the report
-file you wrote so they can read the whole thing.
+file you wrote so they can read the whole thing: give its exact path, as you
+passed it to `write_file`, on a line of its own. When you are a worker in a
+fan-out, the agent that spawned you reads that file by that name, and a name
+it has to guess at is a report it never sees.
 
 Do not re-derive anything or re-list every source. This is the summary someone
 reads instead of the report, not a second copy of it.
 """
+
+# `raw_findings` is the raw material - every fetched page - and this stage's
+# instructions work from `claims`, `contradictions` and `sources_index`. Left
+# in, it is re-sent on every call for nothing.
+[stages.summary.context]
+hide = ["raw_findings"]
 
 [stages.summary.transitions]
 

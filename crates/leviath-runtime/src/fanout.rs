@@ -333,6 +333,11 @@ fn split_round_framing(round: usize, previous: &[String]) -> String {
     )
 }
 
+/// How many workers one pass of [`fan_out_collect`] will start before
+/// handing the tick back. A bound on how long one fan-out can hold the driver
+/// thread; the queue drains over the following passes of the same wake.
+pub(crate) const MAX_WORKER_STARTS_PER_PASS: usize = 4;
+
 /// One unit of work produced by a fan-out call.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkItem {
@@ -684,12 +689,29 @@ pub fn fan_out_collect(world: &mut World) {
         // fan-out is paused, in which case the queue stays where it is. Reaping
         // above still runs: a worker that finished before the pause landed has a
         // result worth keeping.
+        //
+        // At most `MAX_WORKER_STARTS_PER_PASS` per pass. Starting a worker
+        // means reading and checking its blueprint, compiling its script
+        // tools and building its sandbox, on the driver thread, with every
+        // other run frozen; the rest of the queue starts on the next pass of
+        // the same wake, after the other systems have had their turn.
+        let mut started_this_pass = 0usize;
         while !w.paused && w.active.len() < w.max_workers {
+            if started_this_pass >= MAX_WORKER_STARTS_PER_PASS {
+                break;
+            }
             let Some(item) = w.pending.pop_front() else {
                 break;
             };
+            let started_at = std::time::Instant::now();
             match start_worker(world, parent, &w.config, &item) {
                 Ok(child) => {
+                    started_this_pass += 1;
+                    tracing::info!(
+                        item = %item.id,
+                        spawn_ms = started_at.elapsed().as_millis() as u64,
+                        "fan-out worker started"
+                    );
                     // Capture the worker's run-id so the waiting state persists.
                     let run_id = world
                         .get::<crate::persistence::RunMetadata>(child)
@@ -1291,6 +1313,7 @@ mod tests {
             routing: None,
             accepts_messages: true,
             context_layout: None,
+            context_hide: Vec::new(),
             system_prompt: None,
             output: None,
         }
@@ -1348,6 +1371,7 @@ mod tests {
                     tool_calls: vec![],
                     tokens_used: 0,
                     timestamp: 0,
+                    cut_off_at: None,
                 },
                 ProcessResponse,
             ))
@@ -1437,6 +1461,7 @@ mod tests {
             tool_calls: vec![],
             tokens_used: 0,
             timestamp: 0,
+            cut_off_at: None,
         });
     }
 
@@ -2469,9 +2494,11 @@ mod tests {
         assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
     }
 
-    /// `max_workers = 0` is unlimited: every item starts on the first collect
-    /// pass, and the persisted state carries the cap as the largest number
-    /// there is, which round-trips through JSON like any other.
+    /// `max_workers = 0` is unlimited: every item starts within the same wake
+    /// (at most `MAX_WORKER_STARTS_PER_PASS` per pass, so the tick is never
+    /// held for the whole queue), and the persisted state carries the cap as
+    /// the largest number there is, which round-trips through JSON like any
+    /// other.
     #[test]
     fn collect_with_max_workers_zero_starts_every_item_at_once() {
         let mut world = World::new();
@@ -2482,6 +2509,13 @@ mod tests {
             r#"[{"id":"a"},{"id":"b"},{"id":"c"},{"id":"d"},{"id":"e"}]"#,
         );
         split(&mut world, e);
+        fan_out_collect(&mut world);
+        assert_eq!(
+            world.get::<SubAgentChildren>(e).unwrap().children.len(),
+            MAX_WORKER_STARTS_PER_PASS,
+            "one pass starts a bounded number and hands the tick back"
+        );
+        assert_eq!(world.get::<FanOutWaiting>(e).unwrap().pending.len(), 1);
         fan_out_collect(&mut world);
         assert_eq!(world.get::<SubAgentChildren>(e).unwrap().children.len(), 5);
         let state = world.get::<FanOutWaiting>(e).unwrap().to_state();
@@ -2742,6 +2776,7 @@ mod tests {
                     tool_calls: vec![],
                     tokens_used: 0,
                     timestamp: 0,
+                    cut_off_at: None,
                 },
                 crate::persistence::FinalOutput(leviath_core::output::FinalOutput::new(
                     "changed src/lib.rs; the failing test now passes",
@@ -2773,6 +2808,7 @@ mod tests {
                     tool_calls: vec![],
                     tokens_used: 0,
                     timestamp: 0,
+                    cut_off_at: None,
                 },
             ))
             .id();
@@ -2910,6 +2946,7 @@ mod tests {
                     tool_calls: vec![],
                     tokens_used: 0,
                     timestamp: 0,
+                    cut_off_at: None,
                 },
             ))
             .id();

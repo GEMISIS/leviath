@@ -119,8 +119,27 @@ request_timeout_secs = 120         # per-stage inference wall-clock cap
 
 [stages.analyze.model.parameters]  # free-form, passed through to the provider
 temperature = 0.2
-max_tokens  = 8000
+max_output_tokens = "40%"          # see below; everything else goes to the provider as written
 ```
+
+`max_output_tokens` is the one parameter Leviath reads itself: it is the most one reply may
+contain. Three forms:
+
+| Form | Meaning |
+|---|---|
+| `max_output_tokens = 8000` | a fixed number of tokens, sent as written |
+| `max_output_tokens = "40%"` | that share of the model's context window |
+| `max_output_tokens = "100% of claims"` | that share of the `claims` region's budget, for a stage whose reply fills a region |
+
+The table form `{ percent = 100, of = "claims" }` is the same as the last one. A relative cap is
+resolved when each request is built, against whichever model the stage landed on, and is never
+more than that model's own maximum. A cap the loader cannot read fails the load, because a limit
+that silently becomes "no limit" is the kind of typo that only shows up as a bill.
+
+Prefer a relative cap for a stage that writes something whose size follows the material (a report,
+a rewrite of a file). A fixed number is easy to set smaller than the thing being written, and a
+reply cut off by its cap is not an answer: the runtime sends it back with the reason and retries
+once at the model's maximum, but the first attempt is still paid for.
 
 Model selection is per stage, and only per stage. Two mistakes here are quiet ones. A top-level
 `[model]` block parses and is read by nothing, and a stage naming no model takes the host default
@@ -229,6 +248,21 @@ preview through every one of its calls, and a summary stage further on can still
 `conversation`, `tool_results` and `final_output` are always visible, whatever a stage declares.
 The first two hold the typed tool-call turns the next stage's own turns attach to, and an answer
 submitted early has to survive to the end.
+
+Re-declaring a layout is the heavy form. When a stage only needs to leave one or two regions out,
+name them instead:
+
+```toml
+[stages.polish.context]
+hide = ["sources"]        # everything else is carried exactly as the global layout says
+```
+
+`hide` is the right tool for the common case: a region of raw material (fetched pages, tool
+output) that an early stage fills and a late stage never reads. Left in, it is re-sent on every
+call of every later stage; a report-polishing stage in the bundled deep-researcher was carrying
+125,000 tokens of sources it had no instruction to look at. A name that matches no region fails
+the load, and the always-visible regions above cannot be hidden. The hidden set is decided afresh
+by each stage: a stage that declares neither `regions` nor `hide` carries everything.
 
 ## Seed commands
 

@@ -382,8 +382,28 @@ impl Dashboard {
         }
     }
 
-    /// `←`/`→` on a model entry: move it in the chain.
+    /// `←`/`→` on a model entry: move it one place along the chain.
     pub(super) fn editor_move_model(&mut self, index: usize, delta: isize) {
+        let Some(to) = index.checked_add_signed(delta) else {
+            return;
+        };
+        self.editor_reorder_model(index, to);
+    }
+
+    /// Put the chain's `from`th entry at `to`, the cursor following it.
+    ///
+    /// Lift-and-insert rather than a swap. The two agree for the one-step
+    /// move the arrow keys make, but a drag crosses several rows at once, and
+    /// swapping its ends would fling the entry the pointer had just passed
+    /// all the way back to where the dragged one started.
+    ///
+    /// Out-of-range and standing-still are both no-ops, so a drop back where
+    /// it began costs nothing - not even an undo entry.
+    ///
+    /// The cursor is a field index and `from`/`to` are chain indices; on the
+    /// model tab the chain is drawn first, so the two are the same number and
+    /// the shift applies directly.
+    pub(super) fn editor_reorder_model(&mut self, from: usize, to: usize) {
         let stage = self.editor().panel_stage().expect("a stage field");
         let mut chain = self
             .editor()
@@ -391,16 +411,16 @@ impl Dashboard {
             .stage(&stage)
             .map(|s| s.models)
             .unwrap_or_default();
-        let to = index as isize + delta;
-        if index >= chain.len() || to < 0 || to as usize >= chain.len() {
+        if from >= chain.len() || to >= chain.len() || from == to {
             return;
         }
-        chain.swap(index, to as usize);
+        let entry = chain.remove(from);
+        chain.insert(to, entry);
         // The stage is the one the panel shows, so the write cannot be
-        // refused; the cursor follows the entry.
+        // refused.
         self.editor_mutate(|d| d.set_models(&stage, &chain));
         let editor = self.editor();
-        editor.cursor = (editor.cursor as isize + delta) as usize;
+        editor.cursor = (editor.cursor + to).saturating_sub(from);
     }
 
     /// `←`/`→`/Enter on a segment: the next rule for the region.

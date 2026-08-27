@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 
 use super::super::state::Dashboard;
-use super::editor::{Focus, Overlay, PickerFor};
+use super::editor::{Focus, ModelDrag, Overlay, PickerFor};
 use super::inspector::{Panel, StageTab};
 use crate::tui::flowgraph::CanvasEvent;
 use crate::tui::widgets::line_edit::{EditOutcome, LineEdit};
@@ -245,6 +245,9 @@ impl Dashboard {
     /// A click on the inspector: the row under it takes the cursor and the
     /// keys; a click on a stage tab switches to it; a second click on the
     /// row the cursor is on opens it, like Enter.
+    ///
+    /// Pressing a model row's grip picks the entry up instead, and dragging
+    /// moves it along the chain until the button comes up. See [`ModelDrag`].
     pub(in crate::commands::dashboard) fn editor_inspector_mouse(
         &mut self,
         event: MouseEvent,
@@ -254,6 +257,34 @@ impl Dashboard {
         };
         if editor.overlay.is_some() || editor.line.is_some() || editor.add_stage.is_some() {
             return false;
+        }
+        // A drag that began on a grip owns the mouse until it is released,
+        // wherever the pointer wanders. Answering these itself is what stops
+        // the fall-through from starting a text selection over the inspector
+        // half-way through the gesture.
+        if let Some(drag) = editor.model_drag {
+            match event.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if let Some((to, _)) = editor
+                        .hit
+                        .grips
+                        .iter()
+                        .find(|(_, cells)| cells.y == event.row)
+                    {
+                        editor.model_drag = Some(ModelDrag { to: *to, ..drag });
+                        editor.cursor = *to;
+                    }
+                    return true;
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    editor.model_drag = None;
+                    // A no-op when it landed where it started, undo stack
+                    // included.
+                    self.editor_reorder_model(drag.from, drag.to);
+                    return true;
+                }
+                _ => {}
+            }
         }
         if event.kind != MouseEventKind::Down(MouseButton::Left) {
             return false;
@@ -279,6 +310,16 @@ impl Dashboard {
             };
             editor.cursor = 0;
             editor.focus = Focus::Inspector;
+            return true;
+        }
+        // The grip is checked before the row it sits on: pressing it picks the
+        // entry up rather than opening the model chooser on a second click.
+        if let Some((m, _)) = hit.grips.iter().find(|(_, cells)| {
+            event.row == cells.y && event.column >= cells.x && event.column < cells.x + cells.width
+        }) {
+            editor.focus = Focus::Inspector;
+            editor.cursor = *m;
+            editor.model_drag = Some(ModelDrag { from: *m, to: *m });
             return true;
         }
         let was = (editor.focus, editor.cursor);
