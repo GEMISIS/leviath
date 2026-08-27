@@ -107,6 +107,9 @@ pub enum Commands {
     /// Show a run's per-stage token ledger, where a staged agent's cost lives
     Stages(commands::stages::StagesArgs),
 
+    /// Show where a run's wall-clock time went: model calls, tools, waiting on children
+    Timeline(commands::timeline::TimelineArgs),
+
     /// Print what an agent handed back when a run finished
     Result(commands::result::ResultArgs),
 
@@ -268,6 +271,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Daemon(args) => ex.daemon(args).await,
         Commands::Context(args) => commands::context::execute(args).await,
         Commands::Stages(args) => commands::stages::execute(args).await,
+        Commands::Timeline(args) => commands::timeline::execute(args).await,
         Commands::Result(args) => commands::result::execute(args).await,
         Commands::Mcp(args) => ex.mcp(args).await,
         Commands::Auth(args) => ex.auth(args).await,
@@ -653,6 +657,21 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_routes_timeline() {
+        let result = dispatch(
+            Commands::Timeline(commands::timeline::TimelineArgs {
+                run_id: "no-such-run".to_string(),
+                json: false,
+                calls: false,
+                tree: false,
+            }),
+            &MockRisky,
+        )
+        .await;
+        assert!(result.is_err(), "no journal for a run that never ran");
     }
 
     #[tokio::test]
