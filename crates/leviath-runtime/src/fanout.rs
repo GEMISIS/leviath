@@ -1348,6 +1348,7 @@ mod tests {
                     tool_calls: vec![],
                     tokens_used: 0,
                     timestamp: 0,
+                    cut_off_at: None,
                 },
                 ProcessResponse,
             ))
@@ -1437,6 +1438,7 @@ mod tests {
             tool_calls: vec![],
             tokens_used: 0,
             timestamp: 0,
+            cut_off_at: None,
         });
     }
 
@@ -2742,6 +2744,7 @@ mod tests {
                     tool_calls: vec![],
                     tokens_used: 0,
                     timestamp: 0,
+                    cut_off_at: None,
                 },
                 crate::persistence::FinalOutput(leviath_core::output::FinalOutput::new(
                     "changed src/lib.rs; the failing test now passes",
@@ -2773,6 +2776,7 @@ mod tests {
                     tool_calls: vec![],
                     tokens_used: 0,
                     timestamp: 0,
+                    cut_off_at: None,
                 },
             ))
             .id();
@@ -2910,6 +2914,7 @@ mod tests {
                     tool_calls: vec![],
                     tokens_used: 0,
                     timestamp: 0,
+                    cut_off_at: None,
                 },
             ))
             .id();

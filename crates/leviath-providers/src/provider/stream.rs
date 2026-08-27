@@ -106,11 +106,10 @@ impl PartialToolCall {
         ToolCall {
             id: self.id,
             name: self.name,
-            // An empty or unparseable argument string becomes an empty object,
-            // which is what the buffered path does with the same input: a tool
-            // that takes no arguments is sent `{}` rather than nothing.
-            arguments: serde_json::from_str(&self.arguments)
-                .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+            // Same rule as the buffered path: empty text is `{}`, text that is
+            // not JSON is kept as text so a call cut off mid-argument is
+            // reported rather than run with nothing.
+            arguments: crate::provider::parse_tool_arguments(&self.arguments),
             thought_signature: self.thought_signature,
         }
     }
@@ -208,6 +207,41 @@ mod tests {
         // turn rather than failing anything here.
         assert_eq!(call.thought_signature.as_deref(), Some("sig-abc"));
         assert_eq!(response.finish_reason, FinishReason::ToolCall);
+    }
+
+    /// A tool call whose arguments stopped arriving mid-JSON (the reply hit its
+    /// output cap) is handed on as the text it had, not as `{}`: the runtime
+    /// turns that shape into a refusal that tells the model what happened.
+    #[tokio::test]
+    async fn collect_stream_keeps_a_cut_off_tool_call_argument_as_text() {
+        let stream = chunks(vec![
+            StreamChunk {
+                delta: String::new(),
+                tool_calls: vec![ToolCallDelta {
+                    index: 0,
+                    id: Some("call-1".to_string()),
+                    name: Some("write_file".to_string()),
+                    arguments_delta: "{\"path\": \"report.md\", \"content\": \"# Title".to_string(),
+                    thought_signature: None,
+                }],
+                tokens: None,
+                finish_reason: None,
+            },
+            StreamChunk {
+                delta: String::new(),
+                tool_calls: Vec::new(),
+                tokens: None,
+                finish_reason: Some(FinishReason::TokenLimit),
+            },
+        ]);
+
+        let response = collect_stream(stream).await.expect("a complete stream");
+
+        assert_eq!(response.finish_reason, FinishReason::TokenLimit);
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            serde_json::json!("{\"path\": \"report.md\", \"content\": \"# Title")
+        );
     }
 
     /// Usage chunks add up rather than replacing one another.

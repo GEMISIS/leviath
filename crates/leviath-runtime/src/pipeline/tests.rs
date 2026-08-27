@@ -3395,6 +3395,7 @@ fn infer_result_only(with_tools: bool) -> crate::components::InferenceResult {
         },
         tokens_used: 0,
         timestamp: 0,
+        cut_off_at: None,
     }
 }
 
@@ -3471,6 +3472,7 @@ fn process_response_counts_edits_by_path() {
                 ],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             StageProgress::default(),
             ProcessResponse,
@@ -4529,6 +4531,7 @@ fn infer_with(
             tool_calls: calls,
             tokens_used: 0,
             timestamp: 0,
+            cut_off_at: None,
         },
     )
 }
@@ -5248,6 +5251,7 @@ async fn a_refused_submission_leaves_an_earlier_answer_alone() {
                 ],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             output_window(),
             ReadyForTools,
@@ -5561,6 +5565,7 @@ async fn dispatch_tools_refuses_arguments_that_fail_the_advertised_schema() {
         ],
         tokens_used: 0,
         timestamp: 0,
+        cut_off_at: None,
     };
     let e = world
         .spawn((
@@ -5605,6 +5610,7 @@ async fn dispatch_tools_skips_validation_when_the_schema_does_not_compile() {
         tool_calls: vec![fcall("c1", "typod", serde_json::json!({"whatever": true}))],
         tokens_used: 0,
         timestamp: 0,
+        cut_off_at: None,
     };
     let e = world
         .spawn((
@@ -5650,6 +5656,7 @@ async fn dispatch_tools_validates_through_a_tool_alias() {
         tool_calls: vec![fcall("c1", canonical, serde_json::json!({}))],
         tokens_used: 0,
         timestamp: 0,
+        cut_off_at: None,
     };
     let e = world
         .spawn((
@@ -5702,6 +5709,7 @@ async fn dispatch_tools_validates_an_mcp_style_schema() {
         ],
         tokens_used: 0,
         timestamp: 0,
+        cut_off_at: None,
     };
     let e = world
         .spawn((
@@ -6561,6 +6569,7 @@ fn collect_tools_applies_and_loops_back_to_infer() {
                 tool_calls: vec![tc("c1", "read")],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             AwaitingTools,
         ))
@@ -12644,6 +12653,7 @@ fn collect_tools_records_one_activity_per_call_with_error_detection() {
                 tool_calls: vec![tc("c1", "read_file"), tc("c2", "write_file")],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             AwaitingTools,
             crate::telemetry::StageActivity::default(),
@@ -14046,6 +14056,7 @@ fn spawn_after(world: &mut World, src: &str) -> Entity {
                 tool_calls: vec![],
                 tokens_used: 7,
                 timestamp: 0,
+                cut_off_at: None,
             },
             hook_scripts(src, &["after_inference"]),
         ))
@@ -14323,6 +14334,7 @@ fn after_inference_sees_tool_call_names_but_cannot_change_them() {
                 }],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             hook_scripts(
                 r#"fn after_inference(ctx) { #{ action: "modify", value: ctx.tool_calls[0] } }"#,
@@ -14358,6 +14370,7 @@ fn after_inference_skips_an_out_of_range_stage() {
                 tool_calls: vec![],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             hook_scripts(
                 r#"fn after_inference(ctx) { #{ action: "cancel" } }"#,
@@ -14387,6 +14400,7 @@ fn after_inference_skips_a_stage_that_declared_none() {
                 tool_calls: vec![],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             hook_scripts(
                 r#"fn after_inference(ctx) { #{ action: "cancel" } }"#,
@@ -14445,6 +14459,7 @@ fn spawn_tool_hooked(
                 tool_calls: calls,
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             hook_scripts(src, &["on_tool_call"]),
         ))
@@ -14530,6 +14545,7 @@ fn on_tool_call_cannot_mark_its_own_calls_approved() {
                 tool_calls: vec![call("shell", serde_json::json!({"command": "ls"}))],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             crate::taint::TaintGate::new(leviath_core::taint::SecurityConfig::default()),
             hook_scripts(
@@ -14730,6 +14746,7 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
                 tool_calls: vec![call("shell", serde_json::json!({}))],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             hook_scripts(
                 r#"fn on_tool_call(ctx) { #{ action: "cancel" } }"#,
@@ -14752,6 +14769,7 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
                 tool_calls: vec![call("shell", serde_json::json!({}))],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             hook_scripts(
                 r#"fn on_tool_call(ctx) { #{ action: "cancel" } }"#,
@@ -16432,4 +16450,228 @@ fn collect_tools_counts_no_searches_when_none_were_made() {
     );
     assert_eq!(flags.searches_run, 0);
     assert_eq!(flags.searches_empty, 0);
+}
+
+// ── a reply cut off at the output cap ──
+//
+// A deep-researcher run lost twenty minutes to five identical 23,000-token
+// replies: the stage's `max_output_tokens` was below the report it was asked
+// to rewrite, the provider said so (`finish_reason = length`), and nothing
+// downstream listened. These pin every link of the chain that now does.
+
+/// The provider's "cut off" verdict reaches the stored result, with the size
+/// the reply had reached, and a reply that finished on its own carries none.
+#[test]
+fn to_inference_result_records_where_a_cut_off_reply_stopped() {
+    let mut response = resp("half a report");
+    response.tokens_used.completion_tokens = 23_050;
+    response.finish_reason = leviath_providers::FinishReason::TokenLimit;
+    assert_eq!(to_inference_result(&response).cut_off_at, Some(23_050));
+    assert_eq!(to_inference_result(&resp("done")).cut_off_at, None);
+}
+
+/// A cut-off reply arms the raised cap whether or not it carried tool calls:
+/// the retry either way needs the room the model actually has.
+#[test]
+fn process_response_arms_the_raised_cap_when_the_reply_was_cut_off() {
+    let mut world = World::new();
+    let mut result = infer_result_only(false);
+    result.cut_off_at = Some(8_192);
+    let e = world
+        .spawn((result, StageProgress::default(), ProcessResponse))
+        .id();
+    run_process(&mut world);
+    assert!(world.get::<StageProgress>(e).unwrap().raise_output_cap);
+    assert!(world.get::<ReadyForTransition>(e).is_some());
+
+    let plain = world
+        .spawn((
+            infer_result_only(true),
+            StageProgress::default(),
+            ProcessResponse,
+        ))
+        .id();
+    run_process(&mut world);
+    assert!(!world.get::<StageProgress>(plain).unwrap().raise_output_cap);
+}
+
+/// Once armed, the request goes out at the model's maximum rather than the
+/// stage's setting; before that the stage's setting stands.
+#[test]
+fn build_request_raises_the_cap_to_the_model_maximum_after_a_cut_off() {
+    let cfg = InferenceConfig {
+        temperature: None,
+        max_output_tokens: Some(100),
+        extra_params: Default::default(),
+        batch_tool_hint: false,
+        shell_hint: false,
+        request_timeout_secs: None,
+    };
+    let si = stage("m", vec![], None);
+    let raised = build_request(
+        &window(),
+        Some(&cfg),
+        &si,
+        &provider(true, 9_000),
+        "polish",
+        0,
+        crate::pipeline::inference::PriorCalls {
+            raise_output_cap: true,
+            ..Default::default()
+        },
+    )
+    .0;
+    assert_eq!(raised.max_tokens, 9_000);
+    let plain = build_request(
+        &window(),
+        Some(&cfg),
+        &si,
+        &provider(true, 9_000),
+        "polish",
+        0,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+    assert_eq!(plain.max_tokens, 100);
+}
+
+/// The polish case: tool calls were made earlier in the stage, so the old
+/// rule accepted the cut-off text as the answer and dropped it. Now the text
+/// is kept, the cause is stated, and the model goes again.
+#[test]
+fn empty_response_sends_a_cut_off_reply_back_with_the_reason() {
+    let mut world = World::new();
+    let mut result = infer_result_only(false);
+    result.response = "# Report (first half)".to_string();
+    result.cut_off_at = Some(23_050);
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            result,
+            StageProgress {
+                total_tool_calls: 2,
+                ..Default::default()
+            },
+            nudge_bp(true),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert!(world.get::<ResolveTransition>(e).is_none());
+    assert_eq!(world.get::<StageProgress>(e).unwrap().cut_off_nudges, 1);
+    let text = conversation_text(&world, e);
+    assert!(text.contains("# Report (first half)"), "{text}");
+    assert!(
+        text.contains("[System] Your previous reply was cut off by the output limit after 23050"),
+        "{text}"
+    );
+}
+
+/// A cut-off reply with no text (the whole reply was a tool call) stores
+/// nothing but still says why the call did not run; and once the budget is
+/// spent the stage takes what it has rather than paying for a fourth try.
+#[test]
+fn empty_response_stops_resending_a_cut_off_reply_after_the_budget() {
+    let mut world = World::new();
+    let mut result = infer_result_only(false);
+    result.response = String::new();
+    result.cut_off_at = Some(8_192);
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            result.clone(),
+            StageProgress::default(),
+            nudge_bp(false),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    let text = conversation_text(&world, e);
+    assert!(
+        text.starts_with("[System] Your previous reply was cut off"),
+        "{text}"
+    );
+
+    let spent = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            result,
+            StageProgress {
+                total_tool_calls: 1,
+                cut_off_nudges: MAX_CUT_OFF_NUDGES,
+                ..Default::default()
+            },
+            nudge_bp(false),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ResolveTransition>(spent).is_some());
+    assert!(world.get::<ReadyToInfer>(spent).is_none());
+}
+
+/// Arguments that arrived as text (a call cut off mid-JSON) are refused with
+/// the cause instead of being run with nothing, and the refusal reads as
+/// "never happened" so a cut-off write cannot satisfy a modification gate.
+#[tokio::test]
+async fn dispatch_tools_refuses_a_call_whose_arguments_were_cut_off() {
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let result = crate::components::InferenceResult {
+        response: String::new(),
+        tool_calls: vec![fcall(
+            "c1",
+            "write_file",
+            serde_json::json!("{\"path\": \"report.md\", \"content\": \"# Local LLM hardw"),
+        )],
+        tokens_used: 0,
+        timestamp: 0,
+        cut_off_at: Some(24_000),
+    };
+    let e = world
+        .spawn((
+            agent_state(),
+            offering(&["write_file"]),
+            result,
+            conv_window(),
+            ReadyForTools,
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    let text = conversation_text(&world, e);
+    assert!(text.contains("[error] 'write_file' was not run"), "{text}");
+    assert!(text.contains("51 characters arrived, ending `"), "{text}");
+    assert!(text.contains("# Local LLM hardw`"), "{text}");
+    assert!(jrx.try_recv().is_err(), "nothing reached the tool lane");
+    assert!(call_had_no_effect(&cut_off_arguments_refusal(
+        "write_file",
+        "{"
+    )));
+}
+
+/// The tail quoted back is the last forty characters, or all of a shorter
+/// argument, and is cut on a character boundary.
+#[test]
+fn cut_off_arguments_refusal_quotes_the_tail() {
+    let short = cut_off_arguments_refusal("t", "{\"a\": 1");
+    assert!(
+        short.contains("(7 characters arrived, ending `{\"a\": 1`)"),
+        "{short}"
+    );
+    let long = cut_off_arguments_refusal("t", &format!("{}é", "x".repeat(60)));
+    assert!(
+        long.contains(&format!("ending `{}é`", "x".repeat(39))),
+        "{long}"
+    );
 }

@@ -597,6 +597,12 @@ pub enum FinishReason {
 
     /// Model requested stop
     Stop,
+
+    /// The provider gave a reason this build does not recognise. Kept apart
+    /// from [`FinishReason::Complete`] so a new way of stopping (a content
+    /// filter, a gateway's own error marker) is visible in the journal rather
+    /// than passing as a finished answer.
+    Unknown,
 }
 
 impl PartialEq for FinishReason {
@@ -903,8 +909,32 @@ pub fn parse_openai_finish_reason(reason: &str) -> FinishReason {
         "stop" => FinishReason::Complete,
         "tool_calls" => FinishReason::ToolCall,
         "length" => FinishReason::TokenLimit,
-        _ => FinishReason::Complete,
+        other => {
+            tracing::debug!(
+                reason = other,
+                "unrecognised finish_reason from the provider"
+            );
+            FinishReason::Unknown
+        }
     }
+}
+
+/// Turn the argument text of a tool call into the value the runtime executes.
+///
+/// Empty text is a call with no arguments, and becomes `{}` so a tool that
+/// takes none is still called. Text that is not JSON is **kept as text**
+/// rather than replaced by `{}`: the usual reason it is not JSON is that the
+/// reply hit its output cap mid-argument, and executing the tool with nothing
+/// hid that from the model. It re-sent the same oversized call and was cut
+/// off the same way, five times in a row, before the stage gave up. A string
+/// where an object should be fails schema validation, and the runtime reads
+/// the string shape as "this call was cut off" and says so back to the model.
+pub fn parse_tool_arguments(raw: &str) -> serde_json::Value {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return serde_json::Value::Object(serde_json::Map::new());
+    }
+    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
 }
 
 /// How long a response's `Retry-After` header asks the caller to wait.
@@ -1762,12 +1792,24 @@ mod tests {
         );
     }
 
+    /// Empty text is a call with no arguments; JSON is JSON; anything else
+    /// is kept as the text it was, for the runtime to report as cut off.
     #[test]
-    fn parse_finish_reason_unknown_defaults_to_complete() {
+    fn tool_arguments_parse_or_are_kept_as_text() {
+        assert_eq!(parse_tool_arguments("  "), serde_json::json!({}));
         assert_eq!(
-            parse_openai_finish_reason("unknown"),
-            FinishReason::Complete
+            parse_tool_arguments("{\"a\": 1}"),
+            serde_json::json!({"a": 1})
         );
+        assert_eq!(
+            parse_tool_arguments("{\"path\": \"re"),
+            serde_json::json!("{\"path\": \"re")
+        );
+    }
+
+    #[test]
+    fn parse_finish_reason_unknown_is_kept_apart_from_complete() {
+        assert_eq!(parse_openai_finish_reason("unknown"), FinishReason::Unknown);
     }
 
     // ─── Serialization round-trips ──────────────────────────────────────────

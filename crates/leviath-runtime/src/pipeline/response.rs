@@ -31,6 +31,8 @@ pub(crate) fn to_inference_result(
             .collect(),
         tokens_used: response.tokens_used.total_tokens,
         timestamp: chrono::Utc::now().timestamp(),
+        cut_off_at: (response.finish_reason == leviath_providers::FinishReason::TokenLimit)
+            .then_some(response.tokens_used.completion_tokens),
     }
 }
 
@@ -528,6 +530,15 @@ pub struct StageProgress {
     pub total_tool_calls: usize,
     /// Consecutive text-only responses that were nudged toward tool use.
     pub text_only_nudges: usize,
+    /// Replies the output cap cut off that were sent back with an explanation
+    /// instead of being taken as the answer. Bounded by
+    /// `MAX_CUT_OFF_NUDGES` so a model that cannot fit its reply in the
+    /// model's own maximum still ends the stage.
+    pub cut_off_nudges: usize,
+    /// Set once a reply in this stage was cut off: the next requests go out
+    /// with the output cap raised to the model's maximum, since the stage's
+    /// own cap is what the reply did not fit under. Reset with the stage.
+    pub raise_output_cap: bool,
     /// Inferences run in this stage (per-stage, unlike the run-cumulative
     /// `AgentState.iteration`), for enforcing the stage's `max_iterations`.
     pub iterations: usize,
@@ -623,6 +634,13 @@ pub fn process_response(
     for (entity, result, mut progress, totals) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         progress.iterations += 1; // per-stage inference count (for max_iterations)
+        // Whatever the reply held, the cap it did not fit under is not worth
+        // sending again: a cut-off tool call is refused with the reason by
+        // `dispatch_tools`, a cut-off text by `handle_empty_response`, and
+        // both retries need the room the model actually has.
+        if result.cut_off_at.is_some() {
+            progress.raise_output_cap = true;
+        }
         let mut e = commands.entity(entity);
         e.remove::<ProcessResponse>();
         if result.tool_calls.is_empty() {
@@ -720,6 +738,33 @@ pub fn handle_empty_response(
             stage.and_then(|s| s.nudge.as_ref()),
             stage_output_is_reviewed(bp, cursor),
         );
+        // A reply the output cap cut off is not the stage's answer, however
+        // many tool calls came before it. Keep what arrived so the model can
+        // see it, say what happened, and go again with the cap raised (see
+        // `StageProgress::raise_output_cap`). Bounded separately from the
+        // text-only nudge: that one is off for a reviewed stage, and a
+        // reviewed stage's document is exactly the reply most likely to be
+        // cut off.
+        if let Some(cut_off_at) = infer.cut_off_at
+            && progress.cut_off_nudges < MAX_CUT_OFF_NUDGES
+        {
+            progress.cut_off_nudges += 1;
+            if !infer.response.trim().is_empty() {
+                let response_tokens = leviath_core::estimate_tokens(&infer.response);
+                let _ = window.add_typed_entry(
+                    "conversation",
+                    leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
+                    infer.response.clone(),
+                    response_tokens,
+                );
+            }
+            inject_system_nudge(&mut window, &cut_off_nudge(cut_off_at));
+            commands
+                .entity(entity)
+                .remove::<ReadyForTransition>()
+                .insert(ReadyToInfer);
+            continue;
+        }
         if progress.total_tool_calls > 0 || !nudge.enabled || progress.text_only_nudges >= nudge.max
         {
             commands
@@ -756,6 +801,28 @@ pub fn handle_empty_response(
                 .insert(ReadyToInfer);
         }
     }
+}
+
+/// How many times a stage sends a cut-off reply back before accepting what
+/// it has. The first retry goes out with the cap raised to the model's
+/// maximum, so a second cut-off means the reply does not fit the model at all
+/// and the nudge asks for it in pieces; a third means the model is not
+/// listening, and the stage ends rather than paying for a fourth.
+pub(crate) const MAX_CUT_OFF_NUDGES: usize = 3;
+
+/// The `[System]` line sent back with a cut-off reply.
+///
+/// It names the cause and the two ways out, because the reply that got cut
+/// off was almost always a single oversized write, and a model told only "you
+/// have not written the file yet" sends the same write again.
+pub(crate) fn cut_off_nudge(cut_off_at: usize) -> String {
+    format!(
+        "Your previous reply was cut off by the output limit after {cut_off_at} output tokens, \
+         so it was not used. Do not send it again as it was. Either make it shorter, or split \
+         the work into smaller pieces: for a file, write the first part, then add each further \
+         part with a separate call. The output limit has been raised to the model's maximum \
+         for your next reply."
+    )
 }
 
 /// Append a `[System]` nudge to the conversation region: the one injection path
