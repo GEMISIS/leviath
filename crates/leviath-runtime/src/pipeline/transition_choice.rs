@@ -134,7 +134,75 @@ type TransitionChoiceQuery = (
     &'static AwaitingTransitionChoice,
     Option<&'static InFlightWork>,
     Option<&'static DispatchStall>,
+    // What the stage's own request was built from, so the routing request
+    // can be built the same way and share its cached prefix.
+    (
+        Option<&'static crate::components::InferenceConfig>,
+        Option<&'static crate::pipeline::response::StageProgress>,
+        Option<&'static crate::pipeline::inference::SystemPrefixHash>,
+        Option<&'static crate::pipeline::inference::SystemBlockHashes>,
+        Option<&'static crate::pipeline::PromptCalibration>,
+    ),
 );
+
+/// The shape of `tool_choice: none` for a provider's wire format, or `None`
+/// for a provider whose format is not known here.
+///
+/// The routing request carries the stage's tool list so that its prefix is
+/// the stage request's prefix - every provider caches the tool definitions
+/// as part of it - and this is what stops the model from answering the
+/// "which stage next?" question with a tool call instead of a name. A
+/// provider this cannot vouch for gets the old request with no tools, which
+/// is a cold prefix but a safe one.
+fn routing_tool_choice(provider: &str) -> Option<serde_json::Value> {
+    match provider {
+        "anthropic" => Some(serde_json::json!({ "type": "none" })),
+        "openai" | "openrouter" | "gemini" => Some(serde_json::json!("none")),
+        _ => None,
+    }
+}
+
+/// The routing request: the stage's own request, built by the same code, with
+/// a short answer budget, a fixed temperature, and tool use switched off.
+///
+/// It used to be assembled separately - no hint blocks, no stage metadata,
+/// no tools - so its prompt differed from the stage's from the first byte
+/// and every routing call was a cold read of the whole context: on a
+/// 170,000-token window that was a full re-send to get one word back.
+pub(crate) fn routing_request(
+    window: &ContextWindow,
+    config: Option<&crate::components::InferenceConfig>,
+    si: &StageInference,
+    provider: &Arc<dyn Provider>,
+    stage_name: &str,
+    stage_iterations: usize,
+    prior: crate::pipeline::inference::PriorCalls,
+) -> InferenceRequest {
+    let (mut request, _, _) = crate::pipeline::inference::build_request(
+        window,
+        config,
+        si,
+        provider,
+        stage_name,
+        stage_iterations,
+        prior,
+    );
+    let remaining = window.max_tokens.saturating_sub(window.current_tokens);
+    request.max_tokens = remaining.min(256); // short routing response
+    request.temperature = 0.0; // deterministic routing
+    match routing_tool_choice(&si.provider_name) {
+        Some(choice) if !request.tools.is_empty() => {
+            let mut extra = match request.extra.take() {
+                serde_json::Value::Object(map) => map,
+                _ => serde_json::Map::new(),
+            };
+            extra.insert("tool_choice".to_string(), choice);
+            request.extra = serde_json::Value::Object(extra);
+        }
+        _ => request.tools.clear(),
+    }
+    request
+}
 
 /// Transition-choice dispatch: for each `AwaitingTransitionChoice` agent, inject
 /// the "which stage next?" prompt into its context, build a short deterministic
@@ -150,8 +218,10 @@ pub fn dispatch_transition_choice(
 ) {
     crate::tick_scope::clear();
     let now = chrono::Utc::now().timestamp();
-    for (entity, state, mut window, si, bp, cursor, choice, in_flight, stalled) in agents.iter_mut()
+    for (entity, state, mut window, si, bp, cursor, choice, in_flight, stalled, built_from) in
+        agents.iter_mut()
     {
+        let (config, progress, prefix, block_prefix, calibration) = built_from;
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled - don't start new work
@@ -182,22 +252,20 @@ pub fn dispatch_transition_choice(
             tokens,
         );
 
-        // Plain `assemble()` (default meta): this is the deterministic
-        // 256-token routing call, not stage inference - custom regions still
-        // render (they may hold the whole context), just with empty stage
-        // fields in their ctx.
-        let assembled = window.assemble();
-        let remaining = window.max_tokens.saturating_sub(window.current_tokens);
-        let request = InferenceRequest {
-            system: assembled.system_blocks,
-            messages: assembled.messages,
-            model: si.model.clone(),
-            max_tokens: remaining.min(256), // short routing response
-            temperature: 0.0,               // deterministic routing
-            tools: Vec::new(),
-            extra: serde_json::Value::Null,
-            request_timeout_secs: None,
-        };
+        let request = routing_request(
+            &window,
+            config,
+            si,
+            &provider,
+            &state.current_stage,
+            progress.map(|p| p.iterations).unwrap_or(0),
+            crate::pipeline::inference::PriorCalls {
+                system_hash: prefix.map(|p| p.0),
+                block_hashes: block_prefix.map(|b| b.0.clone()).unwrap_or_default(),
+                calibration: calibration.copied(),
+                raise_output_cap: false,
+            },
+        );
 
         let job = InferenceJob {
             entity,
