@@ -9,9 +9,13 @@ version: 2
 #   with `contents: write` on the release path, so a compromised action is a
 #   compromised release.
 #
-# Both run Thursday afternoon, a few hours after the Thursday 9am prod cut, so a
-# dependency bump lands with a whole weekend to be reviewed and integrated
-# before the next Monday beta goes out.
+# Both run Thursday at 1pm Pacific, a few hours after the Thursday morning prod
+# cut, so a dependency bump lands with a whole weekend to be reviewed and
+# integrated before the next Monday beta goes out. `time` is read in the
+# `timezone` below rather than UTC, so the hour here is the local one and it
+# holds at 1pm across the daylight-saving change. The prod cron cannot do that -
+# Actions schedules are UTC only - so the gap between the two is four hours in
+# summer and five in winter.
 updates:
   - package-ecosystem: cargo
     directory: /
