@@ -404,7 +404,7 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
                         FieldId::ModelEntry(i),
                         if i == 0 { "Model" } else { "then" },
                         FieldValue::Row(m.clone()),
-                        "The chain is tried in order. Enter swaps this one, x drops it, ←/→ move it.",
+                        "Tried in order, best first. Enter swaps this one, x drops it, ←/→ or a drag on ⠿ moves it.",
                     )
                 })
                 .collect();

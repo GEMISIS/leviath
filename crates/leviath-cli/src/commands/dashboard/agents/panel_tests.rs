@@ -5,7 +5,7 @@
 
 use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 
-use super::editor::{Focus, Overlay};
+use super::editor::{Focus, ModelDrag, Overlay};
 use super::inspector::{FieldId, FieldValue, Panel, StageTab};
 use super::prompts::{ExternalEdit, PromptFocus};
 use super::tests::{ctrl, dashboard, draw, key, mouse, open_editor_on, text, type_str};
@@ -1415,6 +1415,170 @@ fn a_click_on_the_inspector_picks_rows_and_tabs() {
     // No editor: not handled.
     dash.close_editor();
     assert!(!dash.editor_inspector_mouse(press(1, 1)));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The model chain is a priority order, so moving an entry is an edit like
+/// any other - and reaching for the mouse to do it is the obvious thing.
+///
+/// The grip is what makes that safe. Dragging the *row* would mean the only
+/// way to copy a model id out of the inspector was to not touch the row it is
+/// on, so the press has to land on the grip cells to pick anything up.
+#[test]
+fn a_model_is_dragged_along_the_chain_by_its_grip() {
+    let (mut dash, root) = dashboard("model_drag");
+    open_stage(&mut dash, "own", "work", StageTab::Model);
+    let chain = vec![
+        "alfa-model".to_string(),
+        "bravo-model".to_string(),
+        "charlie-model".to_string(),
+    ];
+    assert!(dash.editor_mutate(|d| d.set_models("work", &chain)));
+
+    let _ = draw(&mut dash, 160, 50);
+    let grips = dash.agents().editor.as_ref().unwrap().hit.grips.clone();
+    assert_eq!(
+        grips.iter().map(|(m, _)| *m).collect::<Vec<_>>(),
+        vec![0, 1, 2],
+        "one grip per chain entry, in chain order"
+    );
+    // Only the model rows get one: the tools row below them is not orderable.
+    assert_eq!(
+        grips.len(),
+        3,
+        "the button and the tools row carry no grip: {grips:?}"
+    );
+
+    let at = |kind, cell: ratatui::layout::Rect| mouse(kind, cell.x, cell.y);
+    let down = MouseEventKind::Down(MouseButton::Left);
+    let drag = MouseEventKind::Drag(MouseButton::Left);
+    let up = MouseEventKind::Up(MouseButton::Left);
+
+    // Pick the last entry up. Nothing is written yet - the document is only
+    // touched on the drop, so the whole gesture is one undo entry.
+    assert!(dash.handle_agents_mouse(at(down, grips[2].1)));
+    assert_eq!(
+        models_of(&mut dash, "work"),
+        chain,
+        "the press changed nothing"
+    );
+    assert!(dash.agents().editor.as_ref().unwrap().model_drag.is_some());
+
+    // Drag it over the first row: the chain *draws* in the order a release
+    // would commit, so what is under the pointer is the answer.
+    assert!(dash.handle_agents_mouse(at(drag, grips[0].1)));
+    let screen = text(&mut dash);
+    let seen = |name: &str| {
+        screen
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} is not drawn"))
+    };
+    assert!(
+        seen("charlie-model") < seen("alfa-model"),
+        "the held entry draws where it would land"
+    );
+    assert_eq!(
+        models_of(&mut dash, "work"),
+        chain,
+        "still nothing written mid-drag"
+    );
+
+    // Release: now it is written, and the cursor stayed on the entry.
+    assert!(dash.handle_agents_mouse(at(up, grips[0].1)));
+    assert_eq!(
+        models_of(&mut dash, "work"),
+        vec![
+            "charlie-model".to_string(),
+            "alfa-model".to_string(),
+            "bravo-model".to_string(),
+        ],
+        "lift-and-insert, not a swap: alfa and bravo both shift down one"
+    );
+    assert_eq!(dash.agents().editor.as_ref().unwrap().cursor, 0);
+    assert!(dash.agents().editor.as_ref().unwrap().model_drag.is_none());
+
+    // A drag that ends where it began costs nothing - not even an undo entry,
+    // so one undo still reaches the order from before the first drop.
+    let _ = draw(&mut dash, 160, 50);
+    let grips = dash.agents().editor.as_ref().unwrap().hit.grips.clone();
+    assert!(dash.handle_agents_mouse(at(down, grips[1].1)));
+    assert!(dash.handle_agents_mouse(at(up, grips[1].1)));
+    assert!(dash.agents().editor.as_mut().unwrap().undo());
+    assert_eq!(models_of(&mut dash, "work"), chain);
+
+    // Another button pressed part-way through a drag is not the drag's: it
+    // takes its ordinary meaning and the held entry stays held.
+    assert!(dash.handle_agents_mouse(at(down, grips[2].1)));
+    assert!(!dash.editor_inspector_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Right),
+        grips[0].1.x,
+        grips[0].1.y
+    )));
+    assert!(dash.agents().editor.as_ref().unwrap().model_drag.is_some());
+    assert!(dash.handle_agents_mouse(at(up, grips[2].1)));
+
+    // The rows are rebuilt from the document every frame, and the document can
+    // move under a held button (an undo, a reload). A drag whose indices no
+    // longer fit the chain draws it untouched rather than panicking.
+    dash.agents().editor.as_mut().unwrap().model_drag = Some(ModelDrag { from: 0, to: 9 });
+    let screen = text(&mut dash);
+    let seen = |name: &str| screen.find(name).expect("the chain is drawn");
+    assert!(seen("alfa-model") < seen("bravo-model"), "{screen}");
+    dash.agents().editor.as_mut().unwrap().model_drag = None;
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The grip is a target, not the row. A press anywhere else on a model row is
+/// the ordinary row click, and the drag machinery stays out of the way of
+/// selecting the model id as text.
+#[test]
+fn pressing_a_model_row_off_its_grip_starts_no_drag() {
+    let (mut dash, root) = dashboard("model_drag_off_grip");
+    open_stage(&mut dash, "own", "work", StageTab::Model);
+    let chain = vec!["alfa-model".to_string(), "bravo-model".to_string()];
+    assert!(dash.editor_mutate(|d| d.set_models("work", &chain)));
+    let _ = draw(&mut dash, 160, 50);
+    let editor = dash.agents().editor.as_ref().unwrap();
+    let grips = editor.hit.grips.clone();
+    let rows = editor.hit.rows.clone();
+    let press = |col: u16, row: u16| mouse(MouseEventKind::Down(MouseButton::Left), col, row);
+
+    // Two cells to the right of the grip is the label, and further right the
+    // value: both are ordinary row picks.
+    let cell = grips[1].1;
+    assert!(dash.handle_agents_mouse(press(cell.x + cell.width, cell.y)));
+    assert!(dash.agents().editor.as_ref().unwrap().model_drag.is_none());
+    assert_eq!(dash.agents().editor.as_ref().unwrap().cursor, 1);
+
+    // A drag with nothing held is not the inspector's: it falls through to
+    // the text selection behind it.
+    assert!(!dash.editor_inspector_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        cell.x,
+        cell.y
+    )));
+    assert!(!dash.editor_inspector_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        cell.x,
+        cell.y
+    )));
+
+    // A drag off the rows entirely keeps the entry where it was picked up,
+    // so letting go outside the list is a cancel rather than a random move.
+    assert!(dash.handle_agents_mouse(press(cell.x, cell.y)));
+    assert!(dash.handle_agents_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        cell.x,
+        rows[rows.len() - 1] + 1
+    )));
+    assert!(dash.handle_agents_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        cell.x,
+        rows[rows.len() - 1] + 1
+    )));
+    assert_eq!(models_of(&mut dash, "work"), chain);
+
     let _ = std::fs::remove_dir_all(&root);
 }
 
