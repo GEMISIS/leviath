@@ -445,21 +445,12 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-stok", AgentDisplayStatus::Active);
         agent.stages.push(crate::runstate::StageRecord {
-            active: Default::default(),
-            name: "main".to_string(),
-            index: 0,
             status: crate::runstate::StageRunStatus::Active,
             entered: true,
             prompt_tokens: 200,
             completion_tokens: 80,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            region_tokens: Default::default(),
-            first_call_prompt_tokens: None,
-            runaway_warned: false,
-            output_cap_raised: false,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
-            ended_at: None,
+            ..crate::runstate::StageRecord::new("main".to_string(), 0)
         });
         dash.selected_stage = 0;
         terminal

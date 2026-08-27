@@ -165,7 +165,7 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/agents/{id}/result` · `/context` | The run's answer and log tail · current context window |
 | `GET /api/agents/{id}/logs?stage=&stream=&tail=` | A run's logs. `stage`, `stream` and `tail` pick which stage, which stream, and how much |
 | `GET /api/agents/{id}/context/history` | How the context window changed over the run, paginated |
-| `GET /api/agents/{id}/stages` | The per-stage ledger: what each stage cost, which regions it carried, and whether it ran at all. See [below](#where-a-runs-cost-went) |
+| `GET /api/agents/{id}/stages` | The per-stage ledger: what each stage spent in tokens and dollars, per visit as well as in total, which regions it carried, and whether it ran at all. See [below](#where-a-runs-cost-went) |
 | `GET /api/agents/{id}/files` | List a run's files, or read one with `?path=`. `offset` pages a large one. See [below](#a-runs-files) |
 | `GET /api/agents/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + token roll-ups |
 | `POST /api/agents/{id}/pause` · `/resume` | Pause a run · resume it |
@@ -445,6 +445,17 @@ order:
     { "name": "plan",           "status": "complete", "entered": true,
       "prompt_tokens": 8420, "completion_tokens": 610,
       "cached_tokens": 6100, "cache_write_tokens": 240,
+      "cost_usd": 0.0412, "unpriced_calls": 0, "cost_is_exact": false,
+      "cost_priced_usd": 0.0412,
+      "visit_count": 1,
+      "visits": [
+        { "entered_at": 1786409280, "left_at": 1786409461,
+          "prompt_tokens": 8420, "completion_tokens": 610,
+          "cached_tokens": 6100, "cache_write_tokens": 240,
+          "cost_usd": 0.0412, "unpriced_calls": 0, "cost_is_exact": false,
+          "cost_priced_usd": 0.0412,
+          "active": { "banked_secs": 181, "since": null } }
+      ],
       "region_tokens": { "task": 24, "data_preview": 4004 },
       "runaway_warned": false },
     { "name": "error_recovery", "status": "skipped",  "entered": false },
@@ -453,7 +464,7 @@ order:
 }
 ```
 
-Three things here are not derivable from any other route.
+Four things here are not derivable from any other route.
 
 **`entered` says whether the run was ever in that stage.** The alternative is to
 fetch `context/history` and diff consecutive snapshots to see which stages
@@ -468,6 +479,48 @@ stage spent them, and the cache read/write split within a stage, are only here.
 A stage showing no cache reads cannot be told apart from one paying to write a
 prefix nothing reuses without `cache_write_tokens`.
 
+`cost_usd` is what that stage spent. It means exactly what it means on a run:
+
+- **`null` is unknown, never free.** Some call in that stage was served by a
+  model with no reported cost and no rates the daemon knows, so any total would
+  understate by an unknown amount. `unpriced_calls` says how many.
+- **`cost_is_exact` says which number you have.** `true` means every priced call
+  carried the provider's own figure - the invoice. `false` means at least one was
+  reconstructed from published rates, which is arithmetic on numbers that drift
+  for reasons outside the daemon: negotiated pricing, a gateway's margin, a
+  request rerouted to another backend.
+- **`cost_priced_usd` is the priced subtotal**, kept even while `cost_usd` is
+  `null` so a resumed run does not restart its accounting from zero. It is not a
+  substitute for `cost_usd`: showing it while calls went unpriced is exactly the
+  partial total that looks authoritative and is not.
+
+Do not multiply the tokens by a rate card of your own. Pricing is the daemon's
+job, deliberately: a rate card in a console produces a fourth answer that
+disagrees with the run's figure, the stage's, and the provider's, and none of the
+four says which is wrong.
+
+Every call a run bills is counted against the stage it was made in - the stage's
+own turns, the compaction calls that summarize its context when the window fills,
+and the routing call it makes at its own boundary to choose where to go next. The
+one exception is the run's title call, which happens once at spawn beside the run
+rather than inside any stage of it, so the stage costs can sum to slightly less
+than the run's own `cost_usd`.
+
+**`visits` splits a stage by each stay in it.** The record above accumulates
+across revisits, which is the right total for the stage and the wrong shape for a
+graph of the path a run took, where a stage entered twice is two nodes. Each
+entry covers one entry into the stage: `entered_at`, `left_at` (`null` on the
+visit in progress), the same four token counts, the same four cost fields, and an
+`active` working clock of its own, on the rule described under
+[how long a run has taken](#how-long-a-run-has-taken).
+
+A stage that loops back to itself starts a new visit; iterations within one stay
+do not. `visit_count` counts every entry, and the list stops at 128 - so
+`visit_count > visits.length` means the per-visit split is partial and the
+accumulated figures on the record are the complete ones. `visits` is empty on a
+stage the run never entered, and on records written by a daemon older than this
+field, which is the other reason to keep falling back to the stage record itself.
+
 **`region_tokens` is what decides whether a region is earning its place.** It is
 the largest each region reached while that stage was active. This is the number to
 look at before trimming a layout.
@@ -478,6 +531,9 @@ first call, which is the shape of a region accumulating without a cap.
 The list is bounded by the blueprint's stage count, so it is not paginated. A run
 that has not reached its first stage boundary returns an empty list rather than a
 404. The run exists and has nothing to report yet.
+
+`lev stages <run-id>` prints the same ledger as a table, `--visits` breaks each
+stage into its stays, and `--json` is this shape read straight off disk.
 
 > [!NOTE]
 > `entered` is `false` for every stage of a run recorded before Leviath tracked
@@ -729,6 +785,7 @@ than that feature, not broken.
 | `runs.files.listing` | `GET /api/agents/{id}/files`, the run's own record of what it changed |
 | `runs.files.workdir` | `source=workdir` on that route, reading the filesystem a directory at a time |
 | `runs.stages` | `GET /api/agents/{id}/stages`, the per-stage ledger |
+| `runs.stages.cost` | `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and the `visits` split beneath them. Without it a stage record carries tokens and no price, and the missing field is not a zero |
 | `runs.waiting_on` | `wait_reason` on a run, saying what a parked run is parked on |
 | `runs.delete` | `DELETE /api/runs/{id}`, which removes the record rather than cancelling the run |
 | `runs.delete.bulk` | `DELETE /api/runs` with `before` or `ids`, bounded by `max_ids` |

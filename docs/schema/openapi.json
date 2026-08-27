@@ -1240,7 +1240,7 @@
           "agents"
         ],
         "summary": "The run's per-stage ledger",
-        "description": "What each stage cost and which regions it carried. Not derivable from the other routes: a stage that ran and wrote nothing to any region leaves no trace in context/history, so `entered` is the only way to tell it from a stage that was never reached.",
+        "description": "What each stage spent, in tokens and in dollars, per visit as well as in total, and which regions it carried. Not derivable from the other routes: a stage that ran and wrote nothing to any region leaves no trace in context/history, so `entered` is the only way to tell it from a stage that was never reached, and pricing is the daemon's job - a console multiplying tokens by a rate card of its own produces a fourth answer that disagrees with the run's, the stage's and the provider's.",
         "responses": {
           "200": {
             "description": "Stage records in blueprint order. Empty for a run that has not reached its first stage boundary.",
@@ -1809,6 +1809,38 @@
             "minimum": 0,
             "description": "Without this a stage showing no cache reads cannot be told apart from one paying to write a prefix nothing reuses."
           },
+          "cost_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "What this stage spent, accumulated across revisits. Null means unknown, never free: some call was served by a model with no reported cost and no known rates, so any total would understate by an unknown amount. Counts every call made in the stage - its own turns, the compaction calls that summarize its context, and the routing call at its boundary. The run's title call belongs to no stage, so the stages can sum to slightly less than the run's own cost_usd. Absent on a daemon without the runs.stages.cost capability, which is not the same as null."
+          },
+          "unpriced_calls": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Calls in this stage that could not be priced at all. Non-zero forces cost_usd to null."
+          },
+          "cost_is_exact": {
+            "type": "boolean",
+            "description": "Whether every priced call carried the provider's own cost figure. False means the total is a reconstruction from published rates, not the invoice."
+          },
+          "cost_priced_usd": {
+            "type": "number",
+            "description": "The priced subtotal, kept even while cost_usd is null so a resumed run does not restart from zero. Not a substitute for cost_usd: showing it while calls went unpriced is the partial total that looks authoritative and is not."
+          },
+          "visit_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "How many times the run has entered this stage, counting past the point where `visits` stopped recording them. Greater than visits.length means the per-visit split is partial and the accumulated figures on this record are the complete ones."
+          },
+          "visits": {
+            "type": "array",
+            "description": "Each contiguous stay in this stage, oldest first, capped at 128. The record itself accumulates across revisits, which is the right total for the stage and the wrong shape for a graph of the path a run took, where a stage entered twice is two nodes. A stage that loops back to itself starts a new visit; iterations within one stay do not. Empty on a stage the run never entered, and on records written before Leviath split visits out.",
+            "items": {
+              "$ref": "#/components/schemas/StageVisitRecord"
+            }
+          },
           "region_tokens": {
             "type": "object",
             "additionalProperties": {
@@ -1860,6 +1892,92 @@
                   "null"
                 ],
                 "description": "Unix seconds when the span in progress began, or null while the clock is stopped. The working total is banked_secs plus now - since when since is set."
+              }
+            }
+          }
+        }
+      },
+      "StageVisitRecord": {
+        "type": "object",
+        "description": "One contiguous stay in a stage: what it cost, and how long it took. The nodes of the graph a run actually walked, where a stage entered twice is two of them.",
+        "required": [
+          "entered_at",
+          "left_at",
+          "prompt_tokens",
+          "completion_tokens",
+          "cached_tokens",
+          "cache_write_tokens",
+          "cost_usd",
+          "unpriced_calls",
+          "cost_is_exact",
+          "cost_priced_usd"
+        ],
+        "properties": {
+          "entered_at": {
+            "type": "integer",
+            "description": "Unix seconds when the run entered the stage on this visit."
+          },
+          "left_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Unix seconds when it left. Null on the visit in progress, which is the last entry of the stage the run is in right now."
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cached_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cache_write_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cost_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "What this visit spent. Null means unknown, never free, on the same rule as the stage and the run."
+          },
+          "unpriced_calls": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Calls in this visit that could not be priced at all. Non-zero forces cost_usd to null."
+          },
+          "cost_is_exact": {
+            "type": "boolean",
+            "description": "Whether every priced call in this visit carried the provider's own cost figure rather than one computed from published rates."
+          },
+          "cost_priced_usd": {
+            "type": "number",
+            "description": "The priced subtotal, kept even while cost_usd is null so a resumed run does not restart this visit's accounting from zero."
+          },
+          "active": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "How long this visit actually spent working, as against how long the run was parked in the stage. Same shape and same rule as the stage's own clock.",
+            "properties": {
+              "banked_secs": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Seconds from spans that have already ended."
+              },
+              "since": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Unix seconds when the span in progress began, or null while the clock is stopped."
               }
             }
           }

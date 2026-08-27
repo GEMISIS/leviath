@@ -240,8 +240,20 @@ pub(crate) fn reconcile_stage_ledger(
                 rec.started_at = Some(now);
             }
             rec.active.get_or_insert_default().observe(now, running);
+            // The visit in progress keeps the same clock as the stage it is
+            // part of. Opening one is `enter_stage`'s job, not this function's:
+            // a visit conjured here would have a boundary at a persist tick
+            // rather than at the transition, which is the misattribution the
+            // per-visit split exists to remove.
+            rec.observe_visit(now, running);
             if active == StageRunStatus::Complete && rec.ended_at.is_none() {
                 rec.ended_at = Some(now);
+            }
+            // The run stopped in this stage, so the visit it was on stopped too.
+            // Left open, the last visit of every finished run would read as
+            // still running and grow without bound for whoever renders it.
+            if run_is_over {
+                rec.close_visit(now);
             }
             rec.status = active.clone();
             continue;
@@ -268,6 +280,11 @@ pub(crate) fn reconcile_stage_ledger(
         if rec.ended_at.is_none() {
             rec.ended_at = Some(now);
         }
+        // Belt and braces for the visit `enter_stage` did not close: a run
+        // whose stage record shows tokens it never appeared as the cursor for
+        // (the case the `entered` line above exists for) would otherwise leave
+        // a visit open on a stage the run is demonstrably not in.
+        rec.close_visit(now);
     }
 }
 

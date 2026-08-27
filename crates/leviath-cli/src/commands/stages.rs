@@ -22,6 +22,10 @@ pub struct StagesArgs {
     /// Include each stage's per-region token high-water marks.
     #[arg(long)]
     pub regions: bool,
+    /// Break each stage down by visit, so a stage the run entered twice is two
+    /// rows rather than one sum.
+    #[arg(long)]
+    pub visits: bool,
 }
 
 /// Execute `lev stages`.
@@ -38,28 +42,74 @@ pub async fn execute(args: StagesArgs) -> anyhow::Result<()> {
             "{}",
             serde_json::to_string_pretty(&stages).expect("a stage ledger serializes")
         ),
-        false => print_ledger(&stages, args.regions),
+        false => print_ledger(&stages, args.regions, args.visits),
     }
     Ok(())
 }
 
+/// One cost cell.
+///
+/// `?` for unknown, never `$0.0000`: a stage whose calls could not be priced
+/// has not been shown to be free, and a zero in this column is a claim that it
+/// was. A leading `~` says the figure was reconstructed from published rates
+/// rather than read off the provider's own answer.
+///
+/// Four decimals throughout, so the column stays aligned and a cheap routing
+/// call still resolves to a hundredth of a cent.
+fn cost_cell(cost_usd: Option<f64>, is_exact: bool) -> String {
+    match cost_usd {
+        None => "?".to_string(),
+        Some(usd) if is_exact => format!("${usd:.4}"),
+        Some(usd) => format!("~${usd:.4}"),
+    }
+}
+
 /// The table `lev stages` prints. Split out so its shape is assertable without
 /// capturing stdout.
-fn print_ledger(stages: &[StageRecord], with_regions: bool) {
+fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
     println!(
-        "{:<20} {:<10} {:>10} {:>10} {:>10} {:>10}",
-        "STAGE", "STATUS", "PROMPT", "OUTPUT", "CACHE RD", "CACHE WR"
+        "{:<20} {:<10} {:>10} {:>10} {:>10} {:>10} {:>11}",
+        "STAGE", "STATUS", "PROMPT", "OUTPUT", "CACHE RD", "CACHE WR", "COST"
     );
     for stage in stages {
         println!(
-            "{:<20} {:<10} {:>10} {:>10} {:>10} {:>10}",
+            "{:<20} {:<10} {:>10} {:>10} {:>10} {:>10} {:>11}",
             truncate(&stage.name, 20),
             format!("{:?}", stage.status).to_lowercase(),
             stage.prompt_tokens,
             stage.completion_tokens,
             stage.cached_tokens,
             stage.cache_write_tokens,
+            cost_cell(stage.cost_usd, stage.cost_is_exact),
         );
+        if with_visits {
+            for (n, visit) in stage.visits.iter().enumerate() {
+                println!(
+                    "  {:<18} {:<10} {:>10} {:>10} {:>10} {:>10} {:>11}",
+                    format!("visit {}", n + 1),
+                    match visit.left_at {
+                        Some(_) => "left",
+                        None => "in it",
+                    },
+                    visit.prompt_tokens,
+                    visit.completion_tokens,
+                    visit.cached_tokens,
+                    visit.cache_write_tokens,
+                    cost_cell(visit.cost_usd, visit.cost_is_exact),
+                );
+            }
+            // Said rather than left to be inferred from a short list: the row
+            // above is the whole stage, and a reader comparing it against
+            // visits that stop early deserves to know why they do.
+            if stage.visit_count > stage.visits.len() {
+                println!(
+                    "  {:<18} {} of {} visits recorded; the stage row above covers them all",
+                    "",
+                    stage.visits.len(),
+                    stage.visit_count,
+                );
+            }
+        }
         if with_regions {
             // Largest first: the question this answers is which region is worth
             // its place, and that is decided at the top of the list.
@@ -75,10 +125,26 @@ fn print_ledger(stages: &[StageRecord], with_regions: bool) {
     let output: usize = stages.iter().map(|s| s.completion_tokens).sum();
     let read: usize = stages.iter().map(|s| s.cached_tokens).sum();
     let written: usize = stages.iter().map(|s| s.cache_write_tokens).sum();
+    // One unpriced stage makes the whole total unknown, the same way one
+    // unpriced call makes a stage's. Summing the rest would print a figure that
+    // looks like the bill and is not.
+    let total_cost = stages
+        .iter()
+        .try_fold(0.0, |acc, s| Some(acc + s.cost_usd?));
+    let total_exact = stages.iter().all(|s| s.cost_is_exact);
     println!(
-        "{:<20} {:<10} {:>10} {:>10} {:>10} {:>10}",
-        "TOTAL", "", prompt, output, read, written
+        "{:<20} {:<10} {:>10} {:>10} {:>10} {:>10} {:>11}",
+        "TOTAL",
+        "",
+        prompt,
+        output,
+        read,
+        written,
+        cost_cell(total_cost, total_exact),
     );
+    // The title call is billed to the run and to no stage of it, so this column
+    // can legitimately sum to less than `lev ps` reports for the same run.
+    println!("\nStage costs exclude the run's title call, which belongs to no stage.");
 }
 
 /// `s` cut to `width` **characters**.
@@ -110,7 +176,45 @@ mod tests {
 
     #[test]
     fn the_ledger_prints_without_regions() {
-        print_ledger(&[record("ingest", 100)], false);
+        print_ledger(&[record("ingest", 100)], false, false);
+    }
+
+    /// An unknown cost prints as `?`, and a reconstructed one wears the `~` that
+    /// says it is arithmetic rather than an invoice. A zero here would read as
+    /// "this stage was free", which is the one thing it has not been shown to be.
+    #[test]
+    fn a_cost_cell_says_unknown_and_says_reconstructed() {
+        assert_eq!(cost_cell(None, false), "?");
+        assert_eq!(cost_cell(None, true), "?");
+        assert_eq!(cost_cell(Some(0.0421), true), "$0.0421");
+        assert_eq!(cost_cell(Some(0.0421), false), "~$0.0421");
+    }
+
+    /// One unpriced stage takes the TOTAL with it: the priced remainder is not
+    /// the bill, and printing it as though it were is how a partial total gets
+    /// quoted onward.
+    #[test]
+    fn the_visit_breakdown_and_an_unknown_total_print() {
+        let mut priced = record("gather", 100);
+        priced.begin_visit(10);
+        priced.record_call(
+            &leviath_core::run_meta::StageCall {
+                prompt_tokens: 40,
+                completion_tokens: 5,
+                cost_usd: Some(0.002),
+                cost_reported: true,
+                ..Default::default()
+            },
+            11,
+        );
+        priced.close_visit(20);
+        priced.begin_visit(30);
+        let mut unpriced = record("answer", 50);
+        unpriced.record_call(&leviath_core::run_meta::StageCall::default(), 40);
+        // The cap is past, so the stage row is the only complete figure and the
+        // table has to say so rather than let a short list read as the whole run.
+        unpriced.visit_count = 300;
+        print_ledger(&[priced, unpriced], false, true);
     }
 
     #[test]
@@ -123,7 +227,7 @@ mod tests {
         // shuffle between runs of the same command.
         r.region_tokens.insert("alpha".to_string(), 42);
         r.region_tokens.insert("beta".to_string(), 42);
-        print_ledger(&[r], true);
+        print_ledger(&[r], true, false);
     }
 
     /// A long stage name is cut rather than breaking the columns, and cut on a
@@ -159,6 +263,7 @@ mod tests {
                 run_id,
                 json: false,
                 regions: true,
+                visits: true,
             })
             .await
             .expect("a ledger on disk is readable");
@@ -173,6 +278,7 @@ mod tests {
                 run_id,
                 json: true,
                 regions: false,
+                visits: false,
             })
             .await
             .expect("json is the same read, printed differently");
@@ -186,6 +292,7 @@ mod tests {
             run_id: "no-such-run".to_string(),
             json: false,
             regions: false,
+            visits: false,
         })
         .await
         .expect_err("a missing ledger is worth saying");

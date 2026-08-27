@@ -1333,21 +1333,9 @@ mod tests {
     /// compares against.
     fn make_stage_record(name: &str) -> crate::runstate::StageRecord {
         crate::runstate::StageRecord {
-            active: Default::default(),
-            name: name.to_string(),
-            index: 0,
             status: crate::runstate::StageRunStatus::Active,
             entered: true,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            region_tokens: Default::default(),
-            first_call_prompt_tokens: None,
-            runaway_warned: false,
-            output_cap_raised: false,
-            started_at: None,
-            ended_at: None,
+            ..crate::runstate::StageRecord::new(name.to_string(), 0)
         }
     }
 
@@ -1708,21 +1696,12 @@ hint = "after plan"
 "#,
         );
         agent.stages = vec![crate::runstate::StageRecord {
-            active: Default::default(),
-            name: "main".to_string(),
-            index: 0,
             status: crate::runstate::StageRunStatus::Active,
             entered: true,
             prompt_tokens: 100,
             completion_tokens: 50,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            region_tokens: Default::default(),
-            first_call_prompt_tokens: None,
-            runaway_warned: false,
-            output_cap_raised: false,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
-            ended_at: None,
+            ..crate::runstate::StageRecord::new("main".to_string(), 0)
         }];
         let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
@@ -1767,21 +1746,10 @@ name = "g"
             graph_from("[agent]\nname = \"g\"\n[stages.main]\n[stages.main.transitions]\n");
         // Two records named "main" -> visited count 2, exercising the plural "s".
         let rec = crate::runstate::StageRecord {
-            active: Default::default(),
-            name: "main".to_string(),
-            index: 0,
             status: crate::runstate::StageRunStatus::Active,
             entered: true,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            region_tokens: Default::default(),
-            first_call_prompt_tokens: None,
-            runaway_warned: false,
-            output_cap_raised: false,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
-            ended_at: None,
+            ..crate::runstate::StageRecord::new("main".to_string(), 0)
         };
         agent.stages = vec![rec.clone(), rec];
 
@@ -1809,21 +1777,10 @@ condition = "error"
 "#,
         );
         agent.stages = vec![crate::runstate::StageRecord {
-            active: Default::default(),
-            name: "main".to_string(),
-            index: 0,
             status: crate::runstate::StageRunStatus::Active,
             entered: true,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            region_tokens: Default::default(),
-            first_call_prompt_tokens: None,
-            runaway_warned: false,
-            output_cap_raised: false,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
-            ended_at: None,
+            ..crate::runstate::StageRecord::new("main".to_string(), 0)
         }];
 
         let (lines, _rows) = dash.build_context_lines(&agent, 80);
@@ -1922,21 +1879,12 @@ transform = "clear"
 "#,
         );
         agent.stages = vec![crate::runstate::StageRecord {
-            active: Default::default(),
-            name: "implement".to_string(),
-            index: 1,
             status: crate::runstate::StageRunStatus::Active,
             entered: true,
             prompt_tokens: 100,
             completion_tokens: 50,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            region_tokens: Default::default(),
-            first_call_prompt_tokens: None,
-            runaway_warned: false,
-            output_cap_raised: false,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
-            ended_at: None,
+            ..crate::runstate::StageRecord::new("implement".to_string(), 1)
         }];
         // selected_stage = 0, so we look up index 0 in stages which is "implement"
         let (lines, _rows) = dash.build_context_lines(&agent, 80);
@@ -1960,21 +1908,13 @@ transform = "clear"
         agent.graph =
             graph_from("[agent]\nname = \"g\"\n[stages.plan]\n[stages.plan.transitions]\n");
         agent.stages = vec![crate::runstate::StageRecord {
-            active: Default::default(),
-            name: "plan".to_string(),
-            index: 0,
             status: crate::runstate::StageRunStatus::Complete,
             entered: true,
             prompt_tokens: 100,
             completion_tokens: 50,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            region_tokens: Default::default(),
-            first_call_prompt_tokens: None,
-            runaway_warned: false,
-            output_cap_raised: false,
             started_at: Some(chrono::Utc::now().timestamp() - 60),
             ended_at: Some(chrono::Utc::now().timestamp() - 10),
+            ..crate::runstate::StageRecord::new("plan".to_string(), 0)
         }];
         let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
@@ -1993,21 +1933,12 @@ transform = "clear"
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         agent.graph = graph_from("[agent]\nname = \"g\"\n[stages.main]\n[stages.next]\n");
         agent.stages = vec![crate::runstate::StageRecord {
-            active: Default::default(),
-            name: "main".to_string(),
-            index: 0,
             status: crate::runstate::StageRunStatus::Active,
             entered: true,
             prompt_tokens: 100,
             completion_tokens: 50,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            region_tokens: Default::default(),
-            first_call_prompt_tokens: None,
-            runaway_warned: false,
-            output_cap_raised: false,
             started_at: Some(chrono::Utc::now().timestamp() - 30),
-            ended_at: None,
+            ..crate::runstate::StageRecord::new("main".to_string(), 0)
         }];
         let (lines, _rows) = dash.build_context_lines(&agent, 80);
         let text: String = lines
@@ -2330,21 +2261,9 @@ transform = "clear"
         dash.stage_content_mode = StageContentMode::Output;
         let mut agent = make_test_agent("run-sn", AgentDisplayStatus::Active);
         agent.stages = vec![crate::runstate::StageRecord {
-            active: Default::default(),
-            name: "analyze".to_string(),
-            index: 0,
             status: crate::runstate::StageRunStatus::Active,
             entered: true,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            region_tokens: Default::default(),
-            first_call_prompt_tokens: None,
-            runaway_warned: false,
-            output_cap_raised: false,
-            started_at: None,
-            ended_at: None,
+            ..crate::runstate::StageRecord::new("analyze".to_string(), 0)
         }];
         terminal
             .draw(|f| {

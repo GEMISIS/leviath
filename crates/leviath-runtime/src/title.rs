@@ -724,6 +724,11 @@ pub fn collect_title(
         if let Some(usage) = &outcome.usage {
             crate::inference_usage::record_call(
                 totals.as_deref_mut(),
+                // No ledger: with no stage to name, this call belongs to the run
+                // and to no stage of it. Handing one over would match nothing
+                // anyway, and asking for it would put a component in this
+                // query for the sake of a lookup that cannot hit.
+                None,
                 persist.as_deref(),
                 Some(&meta),
                 &crate::inference_usage::CallUsage {

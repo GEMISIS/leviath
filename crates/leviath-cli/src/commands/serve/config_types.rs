@@ -80,6 +80,16 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "runs.files.listing",
     "runs.files.workdir",
     "runs.stages",
+    // `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and
+    // the `visits` split beneath them. The tokens were always there and the
+    // price was not, so a console drawing a run's graph could annotate a node
+    // with how long it took and not with what it cost - and the obvious
+    // workaround, multiplying tokens by a rate card of its own, produces a
+    // fourth answer that disagrees with the run's, the provider's and this
+    // one's (#630). Announced because a missing field must not read as a zero:
+    // an older daemon serves stage records with no cost at all, and `null`
+    // there means unknown for a different reason than it does here.
+    "runs.stages.cost",
     "logs.stage",
     "logs.stream",
     "context.history.page",

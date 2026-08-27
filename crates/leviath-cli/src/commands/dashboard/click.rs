@@ -372,23 +372,7 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1");
         agent.stages = (0..3)
-            .map(|i| crate::runstate::StageRecord {
-                active: Default::default(),
-                name: format!("stage{i}"),
-                index: i,
-                status: crate::runstate::StageRunStatus::Pending,
-                entered: false,
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                cached_tokens: 0,
-                cache_write_tokens: 0,
-                region_tokens: Default::default(),
-                first_call_prompt_tokens: None,
-                runaway_warned: false,
-                output_cap_raised: false,
-                started_at: None,
-                ended_at: None,
-            })
+            .map(|i| crate::runstate::StageRecord::new(format!("stage{i}"), i))
             .collect();
         dash.agents.push(agent);
         dash.update_display_indices();
