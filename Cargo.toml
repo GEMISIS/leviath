@@ -185,7 +185,7 @@ jsonschema = { version = "0.50", default-features = false }
 # answer is well-formed in the format it claims. Well-formedness only: schema
 # conformance is JSON Schema (above) or an agent's own Rhai validator, so none
 # of these needs its format's schema language.
-quick-xml = "0.41"
+quick-xml = "0.42"
 yaml-rust2 = "0.12"
 csv = "1.4"
 async-trait = "0.1"
