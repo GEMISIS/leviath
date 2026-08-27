@@ -749,15 +749,7 @@ pub fn handle_empty_response(
             && progress.cut_off_nudges < MAX_CUT_OFF_NUDGES
         {
             progress.cut_off_nudges += 1;
-            if !infer.response.trim().is_empty() {
-                let response_tokens = leviath_core::estimate_tokens(&infer.response);
-                let _ = window.add_typed_entry(
-                    "conversation",
-                    leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
-                    infer.response.clone(),
-                    response_tokens,
-                );
-            }
+            store_text_reply(&mut window, &infer.response);
             inject_system_nudge(&mut window, &cut_off_nudge(cut_off_at));
             commands
                 .entity(entity)
@@ -767,19 +759,21 @@ pub fn handle_empty_response(
         }
         if progress.total_tool_calls > 0 || !nudge.enabled || progress.text_only_nudges >= nudge.max
         {
+            // The reply is accepted as the stage's last word, so it goes into
+            // the conversation like every other turn. It used to be dropped
+            // here, which meant a transition gate that bounced the stage back
+            // was answered by a model with no memory of what it had just
+            // said - and a stage told "you have not written the file yet"
+            // with its own unwritten draft in front of it can split it; one
+            // with nothing in front of it drafts the whole thing again.
+            store_text_reply(&mut window, &infer.response);
             commands
                 .entity(entity)
                 .remove::<ReadyForTransition>()
                 .insert(ResolveTransition);
         } else {
             progress.text_only_nudges += 1;
-            let response_tokens = leviath_core::estimate_tokens(&infer.response);
-            let _ = window.add_typed_entry(
-                "conversation",
-                leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
-                infer.response.clone(),
-                response_tokens,
-            );
+            store_text_reply(&mut window, &infer.response);
             let stage_name = stage.map(|s| s.name.as_str()).unwrap_or("");
             let regions = stage
                 .and_then(|s| s.context_layout.as_ref())
@@ -823,6 +817,23 @@ pub(crate) fn cut_off_nudge(cut_off_at: usize) -> String {
          part with a separate call. The output limit has been raised to the model's maximum \
          for your next reply."
     )
+}
+
+/// Record a text-only reply in the conversation as the model's turn. A reply
+/// with nothing in it (a cut-off tool call, an empty answer) leaves no entry:
+/// an empty assistant message is noise to the next request and some
+/// providers refuse it outright.
+fn store_text_reply(window: &mut ContextWindow, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let tokens = leviath_core::estimate_tokens(text);
+    let _ = window.add_typed_entry(
+        "conversation",
+        leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
+        text.to_string(),
+        tokens,
+    );
 }
 
 /// Append a `[System]` nudge to the conversation region: the one injection path
