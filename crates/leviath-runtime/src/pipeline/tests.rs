@@ -11950,6 +11950,12 @@ async fn dispatch_choice_moves_to_awaiting_response_and_injects_prompt() {
         vec![si("m0"), si("m1")],
         vec![plain_edge("b")],
     );
+    // What the last stage call left behind, read the same way the stage
+    // lane reads it so the routing prefix matches.
+    world.entity_mut(e).insert((
+        crate::pipeline::inference::SystemPrefixHash(7),
+        crate::pipeline::inference::SystemBlockHashes(vec![7, 8]),
+    ));
 
     let mut schedule = Schedule::default();
     schedule.add_systems(dispatch_transition_choice);
@@ -16815,4 +16821,72 @@ fn a_stage_hides_what_it_names_and_the_next_stage_starts_clean() {
             .iter()
             .any(|b| b.text.contains("a page"))
     );
+}
+
+/// The routing request is the stage request with three fields changed: the
+/// system blocks, messages and tools are byte for byte the stage's own, so
+/// the provider can serve the prefix from cache instead of re-reading the
+/// whole context to answer one word.
+#[test]
+fn routing_request_shares_the_stage_prefix_and_forbids_tool_use() {
+    use crate::pipeline::inference::{PriorCalls, build_request};
+    use crate::pipeline::transition_choice::routing_request;
+    let cfg = InferenceConfig {
+        temperature: Some(0.7),
+        max_output_tokens: None,
+        extra_params: serde_json::json!({ "top_p": 0.9 })
+            .as_object()
+            .cloned()
+            .unwrap(),
+        batch_tool_hint: true,
+        shell_hint: false,
+        request_timeout_secs: None,
+    };
+    let w = ctx(&[("conversation", 10_000), ("notes", 2_000)]);
+    let mut si = stage("m", vec![tool("read_file"), tool("write_file")], None);
+    si.provider_name = "openrouter".to_string();
+    let p = provider(true, 4_000);
+
+    let (stage_req, _, _) =
+        build_request(&w, Some(&cfg), &si, &p, "analyze", 3, PriorCalls::default());
+    let routing = routing_request(&w, Some(&cfg), &si, &p, "analyze", 3, PriorCalls::default());
+
+    assert_eq!(
+        serde_json::to_value(&routing.system).unwrap(),
+        serde_json::to_value(&stage_req.system).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&routing.messages).unwrap(),
+        serde_json::to_value(&stage_req.messages).unwrap()
+    );
+    assert_eq!(routing.tools.len(), 2);
+    assert_eq!(routing.max_tokens, 256);
+    assert_eq!(routing.temperature, 0.0);
+    assert_eq!(routing.extra["tool_choice"], serde_json::json!("none"));
+    assert_eq!(
+        routing.extra["top_p"],
+        serde_json::json!(0.9),
+        "the stage's own extras stay"
+    );
+
+    // Anthropic's wire shape for the same instruction, with no extras to keep.
+    si.provider_name = "anthropic".to_string();
+    let routing = routing_request(&w, None, &si, &p, "analyze", 3, PriorCalls::default());
+    assert_eq!(
+        routing.extra,
+        serde_json::json!({ "tool_choice": { "type": "none" } })
+    );
+
+    // A provider this cannot vouch for gets the old shape: no tools at all.
+    si.provider_name = "cfg".to_string();
+    let routing = routing_request(&w, None, &si, &p, "analyze", 3, PriorCalls::default());
+    assert!(routing.tools.is_empty());
+    assert_eq!(routing.extra, serde_json::Value::Null);
+
+    // A stage with no tools has nothing to forbid, so no `tool_choice` either.
+    si.provider_name = "openrouter".to_string();
+    si.tools.clear();
+    let routing = routing_request(&w, None, &si, &p, "analyze", 3, PriorCalls::default());
+    assert!(routing.tools.is_empty());
+    assert_eq!(routing.extra, serde_json::Value::Null);
 }
