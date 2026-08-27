@@ -99,6 +99,10 @@ impl Dashboard {
         let (mcp_cmd_tx, mcp_cmd_rx) = mpsc::unbounded_channel();
         let (mcp_outcome_tx, mcp_outcome_rx) = mpsc::unbounded_channel();
         let (daemon_outcome_tx, daemon_outcome_rx) = mpsc::unbounded_channel();
+        // The daemon-polling lane. Its whole point is that the draw loop never
+        // waits on the socket: it drains this, and a daemon taking its time
+        // costs a stale run list rather than a frozen terminal.
+        let (daemon_poll_tx, daemon_poll_rx) = mpsc::unbounded_channel();
         // The spawn lane, split the same way: resolving a blueprint and the
         // socket round trip both happen off the draw loop.
         let (spawn_cmd_tx, spawn_cmd_rx) = mpsc::unbounded_channel();
@@ -198,6 +202,8 @@ impl Dashboard {
             spawn_bg_ends: Some((spawn_cmd_rx, spawn_outcome_tx)),
             daemon_outcome_rx,
             daemon_outcome_tx: Some(daemon_outcome_tx),
+            daemon_poll_rx,
+            daemon_poll_tx: Some(daemon_poll_tx),
             daemon_run_ids: None,
             daemon_link: Default::default(),
             clock: system_now_secs,
@@ -233,6 +239,14 @@ impl Dashboard {
         &mut self,
     ) -> Option<mpsc::UnboundedSender<DaemonOutcome>> {
         self.daemon_outcome_tx.take()
+    }
+
+    /// Take the daemon-poll sender, so `init_dashboard` can hand it to
+    /// [`super::daemon_poll_loop`]. Returns `None` if already taken.
+    pub(super) fn take_daemon_poll_tx(
+        &mut self,
+    ) -> Option<mpsc::UnboundedSender<super::types::DaemonPoll>> {
+        self.daemon_poll_tx.take()
     }
     /// The MCP screen's context, for `init_dashboard` to hand to the loop.
     pub(super) fn mcp_context(&self) -> McpContext {
