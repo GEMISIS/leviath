@@ -11,6 +11,22 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## 0.5.4 - 2026-08-27
+
+- Fixed: a tool call streamed from the native Anthropic provider arrived as two
+  calls, and the second one had no id, so the turn after it was rejected before
+  the model saw it: `messages.N.content.M.tool_use.id: String should match
+  pattern '^[a-zA-Z0-9_-]+$'`. `content_block_start` numbered the call and then
+  advanced the counter, so every `input_json_delta` after it - that call's own
+  arguments - was filed one index further on, and the collector, which keys by
+  index, built one call carrying an id and no arguments and a second carrying
+  arguments and an empty id. Any streamed run that called a tool on that
+  provider died on its next turn, which is every run of a bundled agent whose
+  stage names a Claude model on a machine holding an Anthropic key. The same
+  models served through OpenRouter were never affected: that is an
+  OpenAI-shaped stream and a different parser, which is why this reached a
+  release.
+
 ## 0.5.3 - 2026-08-27
 
 - Fixed: `lev dash` no longer reads every run's context window on every tick.
