@@ -107,6 +107,14 @@ struct ApiWindow {
     max_completion_tokens: Option<usize>,
 }
 
+/// Whether OpenRouter forwards `cache_control` markers to this model's
+/// upstream. Anthropic and Google both read them; every other upstream
+/// OpenRouter routes to caches automatically by prefix, or not at all, and
+/// is sent plain text so an unknown field cannot be refused.
+fn explicit_cache_control(model: &str) -> bool {
+    model.contains("claude") || model.contains("gemini")
+}
+
 impl OpenRouterProvider {
     /// Create a new OpenRouter provider.
     pub fn new(client: reqwest::Client, api_key: String) -> Self {
@@ -203,10 +211,11 @@ impl OpenRouterProvider {
     /// writes an entry that can never be read back, and that logic already
     /// exists and is tested.
     fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
-        let is_anthropic = request.model.contains("claude");
+        let is_anthropic = explicit_cache_control(&request.model);
         // Anthropic allows four `cache_control` markers per request across
         // system and messages together. System takes its claim first and the
-        // conversation gets the rest, matching the direct provider.
+        // conversation gets the rest, matching the direct provider. Gemini
+        // reads the same markers through OpenRouter and has the same limit.
         let system_breakpoints: std::collections::HashSet<usize> = match is_anthropic {
             true => crate::anthropic::system_cache_breakpoints(
                 &request.system,
@@ -1669,6 +1678,36 @@ mod tests {
         let msgs = body["messages"].as_array().unwrap();
         // Non-anthropic model should not get cache_control blocks
         assert!(msgs[0]["content"].is_string());
+    }
+
+    /// Gemini reads the same markers through OpenRouter (measured: 0 cached
+    /// tokens on 200k-token prompts without them), so it gets them too.
+    #[test]
+    fn gemini_gets_explicit_cache_markers_and_grok_does_not() {
+        assert!(explicit_cache_control("google/gemini-3.1-pro-preview"));
+        assert!(explicit_cache_control("anthropic/claude-sonnet-5"));
+        assert!(!explicit_cache_control("x-ai/grok-4.6"));
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".into(),
+                cache_breakpoint: true,
+            }],
+            model: "google/gemini-3.1-pro-preview".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+        let body = provider.build_request_body(&request);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
     }
 
     #[test]
