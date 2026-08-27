@@ -11,7 +11,7 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
-## Unreleased
+## 0.5.3 - 2026-08-27
 
 - Fixed: `lev dash` no longer reads every run's context window on every tick.
   The context is the largest file in a run directory, and the only thing that
@@ -52,6 +52,17 @@ same list.
   still excluded: it happens once at spawn beside the run and belongs to no
   stage of it, so the stages can sum to slightly less than the run's own total.
 
+- Changed: `lev dash` asks the daemon for its open interactions and the runs
+  it holds from a background task rather than inline in the draw loop. The
+  socket can no longer stall a frame whatever the daemon is doing, and the
+  asking drops from twice per 100ms frame to once per 300ms, which is nearer
+  the rate a run's status actually changes at. A round is published whether
+  or not the daemon answered, so a silent daemon leaves the disk view at face
+  value instead of condemning every run as stale. This is not a fix for the
+  reported dashboard freeze: measured against a real daemon held with
+  SIGSTOP, a control request returns in 0.04s rather than parking for its
+  30s deadline, and both builds kept drawing and taking keys throughout.
+
 - Fixed: a deleted run no longer comes back. The persistence lane ran
   `create_dir_all` before every write, so the next message for a run - a
   heartbeat snapshot, a journal append, or just the closing write of a run
@@ -63,6 +74,130 @@ same list.
   starts the run; after that its existence belongs to whoever is looking after
   the machine, and the lane now drops writes for a run whose directory has been
   removed instead of putting it back.
+
+- Changed: a fan-out pass starts at most four workers before handing the tick
+  back. Starting a worker reads and checks its blueprint, compiles its script
+  tools and builds its sandbox on the driver thread with every other run
+  frozen, and `fan_out_collect` used to start the whole queue in one pass:
+  measured with a thirty-worker probe, 4 to 5 ms each and 140 ms for all
+  thirty. The rest of the queue now drains over the following passes of the
+  same wake, after the other systems have had their turn. Each start is
+  logged with its cost, so a blueprint whose workers are expensive to start
+  says so in the daemon log rather than in a frozen tick.
+
+- Fixed: a raised output cap survives a daemon restart. The per-stage runtime
+  counters are rebuilt from zero on restore and the raised-cap flag lived
+  only there, so a run resumed after a restart retried at the cap that had
+  already cut its reply off, and paid for that reply a second time before
+  raising. The cut-off is now written to the stage ledger as
+  `output_cap_raised`, which does survive, and read back into the current
+  stage on restore.
+
+- Fixed: two cache markers landed where nothing could read them back. The
+  batch-tool and shell hint blocks are the first bytes of every stage request
+  and the same bytes every time, but they carried the default `rewritten`
+  volatility, which the Anthropic breakpoint chooser reads as "the prefix
+  moves from block zero", so no request ever got its stable-prefix marker.
+  They are stable now.
+- Fixed: through OpenRouter, `cache_control` was sent only for models whose
+  name contains "claude". Gemini reads the same markers there and has the
+  same four-marker limit; measured on a research run it reported zero cached
+  tokens on 200,000-token prompts. It gets them now. Upstreams that cache by
+  prefix on their own, or not at all, are still sent plain text, so an
+  unknown field cannot be refused.
+
+- Changed: the routing call shares the stage call's cached prefix. The "which
+  stage next?" call re-sent the whole context to get one word back and could
+  not be served from the provider's cache: it was assembled separately from
+  the stage call, with no hint blocks, no stage metadata and no tools, so its
+  prompt differed from the first byte. On a 170,000-token window that was
+  three cold full re-sends per run in the root alone, and two in every
+  worker. It is now the stage's own request with three fields changed: a
+  256-token answer budget, a fixed temperature, and `tool_choice: none` in
+  the provider's own wire shape, so the tool list can stay in the prefix
+  without the model being able to answer with a tool call. A provider whose
+  wire shape is not known here keeps the old tool-less request, which is a
+  cold prefix but a safe one.
+
+- Changed: `deep-researcher` and `researcher` stop carrying raw sources into
+  the stages that never read them. Measured on a 77-minute run: `sources`,
+  125,000 tokens of fetched pages, rode in every call of challenge,
+  synthesize, polish and summary; polish's fixed 24,000-token cap was smaller
+  than the report it was rewriting, and the stage lost twenty minutes
+  re-sending replies the cap cut off; and the six workers each wrote a 20,000
+  to 30,000 token report the root never opened, because analyze was told the
+  findings "are not files". Polish's cap is now `"100%"`, whatever the model
+  in front of it can give; those four stages hide `sources`, and the worker's
+  summarize and summary hide `raw_findings`; summary is told its only tool is
+  `submit_output`; and analyze reads every worker report named in
+  `sub_findings`, which the worker's summary now names by its exact path.
+  Everything else is carried exactly as before. Both versions are bumped, so
+  `lev setup` reinstalls them.
+
+- Added: `[stages.<name>.context] hide`, the regions a stage leaves out of
+  its prompt. A stage could narrow its window only by re-declaring the whole
+  layout under `[stages.<name>.context.regions]`, which re-resolves every
+  budget against that stage's model and drops entries that no longer fit;
+  nobody used it, and the bundled deep-researcher carried 125,000 tokens of
+  raw sources into every call of five stages whose instructions never read
+  them. `hide = ["sources"]` changes nothing else: the content stays, every
+  other stage sees it, and the global budgets stand. A name no layout
+  declares fails the load, the always-visible regions cannot be hidden, and a
+  tool result routed to a hidden region is refused the way routing to an
+  undeclared one is.
+- Fixed: the hidden set describes only the stage being entered. A stage with
+  neither `regions` nor `hide` carries everything; it used to inherit the
+  previous stage's hidden set, so a stage after a narrowed one lost regions
+  it never asked to lose, which is what the docs already said did not happen.
+
+- Added: `max_output_tokens` takes a share of the model's window or of a
+  region. A bare number is the wrong shape for a stage whose reply is "the
+  whole report, rewritten": the bundled deep-researcher set 24000 on that
+  stage, the report was larger, and every reply was cut off, when what the
+  author meant was "as much as this model can give", which depends on the
+  model the stage lands on. The parameter now also takes `"40%"` of the
+  model's context window, and `"100% of claims"` (or the table
+  `{ percent = 100, of = "claims" }`), that share of a named region's budget,
+  so a stage that fills a region may fill all of it. Relative caps are
+  resolved when each request is built, against the model actually in use, and
+  never exceed that model's own maximum. A cap the loader cannot read fails
+  the load with the stage named, rather than reaching the provider as a
+  nonsense parameter or as no cap at all.
+
+- Fixed: a text-only reply the stage accepts is kept. `handle_empty_response`
+  took it as the stage's last word and then dropped it: nothing put it in the
+  conversation. A transition gate that bounced the stage back was therefore
+  talking to a model with no memory of what it had just said, and a stage
+  told "you have not written the file yet" with no draft in front of it
+  drafts the whole thing again rather than splitting the one it had. The
+  reply now goes into the conversation like every other turn; an empty reply
+  still leaves no empty turn behind.
+
+- Fixed: a reply cut off at the output cap is sent back, not repeated. A
+  deep-researcher run lost twenty minutes to five identical 23,000-token
+  replies: the stage's `max_output_tokens` was smaller than the report it was
+  asked to rewrite, the provider said so with `finish_reason = length`, and
+  nothing downstream listened. The finish reason was dropped on the way in, a
+  tool call with half-written arguments was run with `{}`, and a cut-off text
+  reply was accepted as the stage's answer and then discarded without a word,
+  so the exit gate's "you have not written the report yet" was all the model
+  ever heard, and it sent the same reply again. The verdict now travels:
+  what arrived is kept, the cause is explained, the work is asked for in
+  pieces, and the retry goes out with the cap raised to the model's own
+  maximum, which is the room the reply did not have. Unparseable argument
+  text is kept as text and refused with the same explanation instead of being
+  run as an empty object, and a finish reason this build does not recognise
+  no longer passes as complete.
+
+- Added: `lev timeline`, where a run's wall-clock time went. `lev stages`
+  says what each stage cost; nothing said what a run was doing for an hour.
+  The journal already timestamps every model call, tool batch, tool result
+  and status change, so the split between model time, tool time and time
+  parked on children is exact. The one heuristic is a warning for
+  back-to-back same-stage replies of the same large size, which is what a
+  reply cut off by the stage's output cap and retried looks like. `--tree`
+  walks the children and reports the peak number of calls per model in flight
+  at once, which is how an oversubscribed per-model slot cap shows up.
 
 - Added: a stage's model chain can be reordered with the mouse in the agent
   editor. Each model row carries a `⠿` grip; press it, drag up or down the
