@@ -1706,6 +1706,140 @@ async fn a_bulk_delete_by_id_reports_a_verdict_for_every_run_it_was_given() {
     .await;
 }
 
+// ─── delete: sub-agent trees ────────────────────────────────────────────────
+
+/// A finished run recorded as `parent`'s sub-agent, which is how a fan-out
+/// worker or a `sub_agent` spawn appears on disk.
+fn finished_child(id: &str, parent: &str, updated_at: i64) -> RunMeta {
+    let mut meta = finished(id, updated_at);
+    meta.parent_run_id = Some(parent.to_string());
+    meta
+}
+
+/// A sub-agent run exists only because its parent spawned it, so forgetting the
+/// parent forgets the children. Left behind they were not merely stale rows:
+/// the dashboard treats a run whose parent is absent as a root, so a delete
+/// promoted them to the top of the list instead of clearing them.
+#[tokio::test]
+async fn deleting_a_parent_takes_its_sub_agent_runs_with_it() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-tree", |_d| async move {
+        create_run(&finished("run-parent", 1)).unwrap();
+        create_run(&finished_child("run-kid", "run-parent", 2)).unwrap();
+        create_run(&finished_child("run-grandkid", "run-kid", 3)).unwrap();
+        // A run of its own, to show the delete is scoped to the tree.
+        create_run(&finished("run-other", 4)).unwrap();
+
+        let code = delete_run(AxumPath("run-parent".to_string()), force(false))
+            .await
+            .expect("the delete succeeds");
+
+        assert_eq!(code, StatusCode::NO_CONTENT);
+        assert!(!crate::runstate::run_dir("run-parent").exists());
+        assert!(!crate::runstate::run_dir("run-kid").exists());
+        assert!(!crate::runstate::run_dir("run-grandkid").exists());
+        assert!(crate::runstate::run_dir("run-other").exists());
+    })
+    .await;
+}
+
+/// The tree is walked downwards only. Deleting one worker out of a fan-out is
+/// an ordinary thing to do and must not take the run that started it, or the
+/// workers beside it.
+#[tokio::test]
+async fn deleting_a_sub_agent_run_leaves_its_parent_and_siblings() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-child-only", |_d| async move {
+        create_run(&finished("run-parent", 1)).unwrap();
+        create_run(&finished_child("run-kid-a", "run-parent", 2)).unwrap();
+        create_run(&finished_child("run-kid-b", "run-parent", 3)).unwrap();
+
+        let code = delete_run(AxumPath("run-kid-a".to_string()), force(false))
+            .await
+            .expect("the delete succeeds");
+
+        assert_eq!(code, StatusCode::NO_CONTENT);
+        assert!(!crate::runstate::run_dir("run-kid-a").exists());
+        assert!(crate::runstate::run_dir("run-parent").exists());
+        assert!(crate::runstate::run_dir("run-kid-b").exists());
+    })
+    .await;
+}
+
+/// Half a tree is not a state anything downstream knows how to read, so a live
+/// sub-agent refuses the whole delete - and the reason names it, because
+/// "cancel it before deleting it" about a run the caller never mentioned is
+/// unactionable on its own.
+#[tokio::test]
+async fn a_live_sub_agent_refuses_its_parents_delete_and_says_which_run_it_is() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-live-child", |_d| async move {
+        create_run(&finished("run-parent", 1)).unwrap();
+        let mut live = meta_at("run-kid", 2);
+        live.parent_run_id = Some("run-parent".to_string());
+        create_run(&live).unwrap();
+
+        let (code, body) = delete_run(AxumPath("run-parent".to_string()), force(false))
+            .await
+            .expect_err("a live sub-agent is refused");
+
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert!(body.0.error.contains("run-kid"), "{}", body.0.error);
+        assert!(body.0.error.contains("sub-agent run"), "{}", body.0.error);
+        // Nothing was taken on the way to the refusal.
+        assert!(crate::runstate::run_dir("run-parent").exists());
+        assert!(crate::runstate::run_dir("run-kid").exists());
+    })
+    .await;
+}
+
+/// The bulk route deletes trees too, and reports the sub-agents by id: they are
+/// runs that are now gone, and a caller reconciling its own list needs to know.
+#[tokio::test]
+async fn a_bulk_delete_reports_the_sub_agent_runs_it_removed() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-bulk-tree", |_d| async move {
+        create_run(&finished("run-parent", 1)).unwrap();
+        create_run(&finished_child("run-kid", "run-parent", 2)).unwrap();
+
+        let resp = delete_runs(Query(delete_query(&[("ids", "run-parent")])))
+            .await
+            .expect("the sweep runs");
+
+        // Deepest first, which is the order they were removed in.
+        assert_eq!(
+            resp.deleted,
+            vec!["run-kid".to_string(), "run-parent".to_string()]
+        );
+        assert!(resp.skipped.is_empty());
+        assert!(crate::runstate::list_runs().is_empty());
+    })
+    .await;
+}
+
+/// A sweep names a parent and its child independently all the time - `before`
+/// selects both, and a console sending marked rows sends both. The second
+/// mention is of a run this same request has already removed, which is a
+/// deletion, not the 404 a re-check would report.
+#[tokio::test]
+async fn a_bulk_delete_naming_a_parent_and_its_child_counts_each_once() {
+    crate::runstate::with_isolated_runs_dir_async("runs-delete-bulk-dup", |_d| async move {
+        create_run(&finished("run-parent", 1)).unwrap();
+        create_run(&finished_child("run-kid", "run-parent", 2)).unwrap();
+
+        let resp = delete_runs(Query(delete_query(&[("ids", "run-parent,run-kid")])))
+            .await
+            .expect("the sweep runs");
+
+        assert_eq!(
+            resp.deleted,
+            vec!["run-kid".to_string(), "run-parent".to_string()]
+        );
+        assert!(
+            resp.skipped.is_empty(),
+            "the child is deleted, not skipped: {:?}",
+            resp.skipped
+        );
+    })
+    .await;
+}
+
 /// Far likelier to be a client that failed to build its query than an operator
 /// asking to erase the machine's history.
 #[tokio::test]

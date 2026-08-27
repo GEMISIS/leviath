@@ -80,7 +80,7 @@ the detail view).
 | `/` | Filter runs by name or status |
 | `s` | Cycle the sort: start time (default), recent activity, or status groups |
 | `x` | Kill the selected run. Asks first |
-| `d` | Delete the run. Permanent, and asks first |
+| `d` | Delete the run, and the sub-agent runs nested under it. Permanent, and asks first |
 | `Space` | Mark or unmark the selected run, then move down a row |
 | `p` / `r` | Pause / resume the selected run |
 | `m` | Manage MCP servers |
@@ -96,6 +96,10 @@ row wearing a `▾` while its workers are showing and a `▸` once they are fold
 many the fold is hiding. `←` and `→` work the tree, and clicking the arrow does the same. A fold is
 remembered by run, so it survives sorting, filtering and new rows arriving above it, and folding
 the run you were inside moves the highlight onto the fold rather than back to the top.
+
+`d` on such a run deletes the whole tree, and the confirmation says how many sub-agent runs that
+is before you answer. Nothing goes the other way: deleting one worker leaves the run that started
+it, and the workers beside it, alone.
 
 Folds also outlive the dashboard. They are written to `ui-state.json` under the data directory as
 you make them, not on the way out, so a session that ends with the terminal window keeps them all
