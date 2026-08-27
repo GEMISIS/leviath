@@ -134,5 +134,11 @@ lifecycle.
 The metrics above answer "is the fleet healthy". For "what did this one run spend, and on which
 stage", read its stage ledger instead: [`lev stages <run-id>`](/docs/cli#lev-stages-run-id) at a terminal,
 or [`GET /api/agents/{id}/stages`](/docs/api#where-a-runs-cost-went) over HTTP. Both carry the
-per-stage token split, the cache read and write halves, and the largest each context region reached
-while that stage was active, which is the number to look at before trimming a layout.
+per-stage token split, the cache read and write halves, what each stage spent in dollars, the split
+of that by each stay in the stage, and the largest each context region reached while that stage was
+active, which is the number to look at before trimming a layout.
+
+Pricing is the daemon's job on purpose. A dashboard that multiplied the token counts by a rate card
+of its own would produce a fourth answer, disagreeing with the run's figure, the stage's, and the
+provider's invoice, with nothing to say which of the four was wrong. Where the daemon cannot price a
+call it reports the cost as unknown rather than as zero, and says how many calls it could not price.

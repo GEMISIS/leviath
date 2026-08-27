@@ -335,6 +335,7 @@ type CollectTransitionChoiceQuery = (
     Option<&'static mut crate::persistence::RunOutcomeFlags>,
     Option<&'static crate::persistence::RunMetadata>,
     Option<&'static mut crate::persistence::TokenTotals>,
+    Option<&'static mut StageLedger>,
 );
 
 /// Transition-choice collect: drain completed routing inferences, match each to a
@@ -363,6 +364,7 @@ pub fn collect_transition_choice(
             mut flags,
             metadata,
             mut totals,
+            mut ledger,
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -450,9 +452,14 @@ pub fn collect_transition_choice(
         // Indexed rather than looked up, like the `bp.0.stages[cursor.index]`
         // below it: `StageInferences` is built one entry per stage at spawn, so
         // a cursor that could miss here would already have panicked there.
+        //
+        // Billed to the stage being left, which is the stage that asked the
+        // question. `state.current_stage` is still that stage here: the cursor
+        // does not move until `enter_stage` below.
         let si = &stage_infs.0[cursor.index];
         crate::inference_usage::record_call(
             totals.as_deref_mut(),
+            ledger.as_deref_mut(),
             persist.as_deref(),
             metadata,
             &crate::inference_usage::CallUsage {
@@ -526,6 +533,7 @@ pub fn collect_transition_choice(
                         progress: &mut progress,
                         visits: &mut visits,
                         window: &mut window,
+                        ledger: ledger.as_deref_mut(),
                     },
                 ) {
                     Ok(visit) => {

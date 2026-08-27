@@ -1114,21 +1114,9 @@ mod tests {
     /// A `stages.json` entry, so a log test can say which stages exist.
     fn stage_rec(index: usize, name: &str) -> leviath_core::run_meta::StageRecord {
         leviath_core::run_meta::StageRecord {
-            active: Default::default(),
-            name: name.to_string(),
-            index,
             status: leviath_core::run_meta::StageRunStatus::Complete,
             entered: true,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            region_tokens: Default::default(),
-            first_call_prompt_tokens: None,
-            runaway_warned: false,
-            output_cap_raised: false,
-            started_at: None,
-            ended_at: None,
+            ..leviath_core::run_meta::StageRecord::new(name.to_string(), index)
         }
     }
 
@@ -3390,13 +3378,26 @@ system_prompt = "Plan the work"
         let mut plan = StageRecord::new("plan".to_string(), 0);
         plan.status = StageRunStatus::Complete;
         plan.entered = true;
-        plan.prompt_tokens = 900;
-        plan.completion_tokens = 120;
-        plan.cached_tokens = 400;
-        plan.cache_write_tokens = 60;
         plan.region_tokens.insert("task".to_string(), 24);
         plan.region_tokens.insert("data_preview".to_string(), 4004);
         plan.runaway_warned = true;
+        // Two stays, so the stage totals below are a sum of real calls rather
+        // than numbers assigned past the accounting. `plan` is the stage a graph
+        // draws as `plan` and `plan (2)`, so it is the one whose split has to
+        // survive the wire.
+        let call = |prompt, completion, cached, written, usd| leviath_core::run_meta::StageCall {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            cached_tokens: cached,
+            cache_write_tokens: written,
+            cost_usd: Some(usd),
+            cost_reported: false,
+        };
+        plan.begin_visit(1_000);
+        plan.record_call(&call(600, 80, 300, 40, 0.03), 1_001);
+        plan.close_visit(1_100);
+        plan.begin_visit(1_200);
+        plan.record_call(&call(300, 40, 100, 20, 0.01), 1_201);
 
         let mut recovery = StageRecord::new("error_recovery".to_string(), 1);
         recovery.status = StageRunStatus::Skipped;
@@ -3443,6 +3444,66 @@ system_prompt = "Plan the work"
             // a stage the run stepped over, versus one still ahead of it.
             assert_eq!(stages[1]["entered"], false);
             assert_eq!(stages[2]["entered"], false);
+        })
+        .await;
+    }
+
+    /// The price beside the tokens, and the split by visit beneath it (#630).
+    ///
+    /// A console drawing a run's graph annotates each node with what it cost.
+    /// Without these it could annotate time and nothing else, and the obvious
+    /// workaround - tokens times a rate card of the console's own - is a fourth
+    /// answer that disagrees with the run's, the stage's and the provider's.
+    #[tokio::test]
+    async fn agent_stages_serves_the_price_and_the_split_by_visit() {
+        crate::runstate::with_isolated_runs_dir_async("agent_stages_cost", |_d| async move {
+            let run_id = unique_run_id("stages-cost");
+            create_run(&make_run(&run_id)).unwrap();
+            runstate::write_stages_index(&run_id, &ledger_fixture()).unwrap();
+
+            let app = Router::new()
+                .route("/api/agents/{id}/stages", get(agent_stages))
+                .with_state(test_state());
+            let req = Request::builder()
+                .uri(format!("/api/agents/{}/stages", run_id))
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let plan = &body["stages"][0];
+
+            assert_eq!(plan["cost_usd"], serde_json::json!(0.04));
+            assert_eq!(plan["unpriced_calls"], 0);
+            assert_eq!(
+                plan["cost_is_exact"], false,
+                "reconstructed from rates, and the client is told so"
+            );
+            assert_eq!(plan["visit_count"], 2);
+
+            let visits = plan["visits"].as_array().expect("the split by visit");
+            assert_eq!(visits.len(), 2);
+            assert_eq!(visits[0]["cost_usd"], serde_json::json!(0.03));
+            assert_eq!(visits[0]["prompt_tokens"], 600);
+            assert_eq!(visits[0]["left_at"], 1_100);
+            assert_eq!(visits[1]["cost_usd"], serde_json::json!(0.01));
+            assert_eq!(
+                visits[1]["left_at"],
+                serde_json::Value::Null,
+                "the stay in progress"
+            );
+
+            // A stage the run never entered spent nothing, which is a real zero
+            // and not the `null` that means "could not be priced".
+            assert_eq!(body["stages"][2]["cost_usd"], serde_json::json!(0.0));
+            assert!(
+                body["stages"][2]["visits"]
+                    .as_array()
+                    .expect("present, and empty")
+                    .is_empty()
+            );
         })
         .await;
     }

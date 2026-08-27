@@ -539,6 +539,7 @@ type ResolveTransitionQuery = (
     Option<&'static mut crate::persistence::RunOutcomeFlags>,
     Option<&'static crate::persistence::RunMetadata>,
     Option<&'static crate::persistence::FinalOutput>,
+    Option<&'static mut StageLedger>,
 );
 
 /// Transition-resolution system: for each `ResolveTransition` agent, resolve the
@@ -567,6 +568,7 @@ pub fn resolve_transition(
         mut flags,
         metadata,
         submitted,
+        mut ledger,
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -741,6 +743,7 @@ pub fn resolve_transition(
                         progress: &mut progress,
                         visits: &mut visits,
                         window: &mut window,
+                        ledger: ledger.as_deref_mut(),
                     },
                 ) {
                     Ok(visit) => {
@@ -817,6 +820,16 @@ pub(crate) struct StageEntry<'a> {
     pub visits: &'a mut VisitCounts,
     /// The context window, re-laid-out for the new stage.
     pub window: &'a mut ContextWindow,
+    /// The durable per-stage ledger, whose visit list is cut here.
+    ///
+    /// This is the only moment the boundary between two visits is exact.
+    /// Reconciling it on the persist tick instead would merge a stage entered
+    /// and left between two ticks into whichever visit happened to be open, and
+    /// attribute that stay's calls to it - which is the misattribution the
+    /// per-visit split exists to remove.
+    ///
+    /// Optional because a bare agent driven by a test has no ledger.
+    pub ledger: Option<&'a mut StageLedger>,
 }
 
 pub(crate) fn enter_stage(
@@ -831,7 +844,20 @@ pub(crate) fn enter_stage(
         progress,
         visits,
         window,
+        ledger,
     } = entry;
+    // Before the cursor moves, while `cursor.index` still names the stage being
+    // left. A self-transition closes and reopens: it is an entry like any other,
+    // and the visit number the transition event carries counts it as one.
+    if let Some(ledger) = ledger {
+        let at = chrono::Utc::now().timestamp();
+        if let Some(rec) = ledger.0.get_mut(cursor.index) {
+            rec.close_visit(at);
+        }
+        if let Some(rec) = ledger.0.get_mut(idx) {
+            rec.begin_visit(at);
+        }
+    }
     cursor.index = idx;
     let name = blueprint.stages[idx].name.clone();
     state.current_stage = name.clone();
@@ -1068,6 +1094,7 @@ pub fn force_transition(world: &mut World, agent: crate::world::AgentId, target_
             &StageSetups,
             &mut VisitCounts,
             &mut ContextWindow,
+            Option<&mut StageLedger>,
         )>();
         let Ok((
             bp,
@@ -1078,6 +1105,7 @@ pub fn force_transition(world: &mut World, agent: crate::world::AgentId, target_
             setups,
             mut visits,
             mut window,
+            mut ledger,
         )) = q.get_mut(world, entity)
         else {
             return; // agent despawned
@@ -1096,6 +1124,7 @@ pub fn force_transition(world: &mut World, agent: crate::world::AgentId, target_
                 progress: &mut progress,
                 visits: &mut visits,
                 window: &mut window,
+                ledger: ledger.as_deref_mut(),
             },
         ) {
             Ok(_) => Some((stage_inf, setup, name)),

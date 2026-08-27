@@ -235,8 +235,13 @@ pub fn collect_inference(
         match outcome.result {
             Ok(response) => {
                 state.iteration += 1;
+                // This iteration's tokens and cost land on the run's totals, on
+                // the current stage's ledger record and on its open visit, all
+                // inside `record_call` - the one place that knows how a call is
+                // priced.
                 crate::inference_usage::record_call(
                     totals.as_deref_mut(),
+                    ledger.as_deref_mut(),
                     persist.as_deref(),
                     md,
                     &crate::inference_usage::CallUsage {
@@ -249,12 +254,18 @@ pub fn collect_inference(
                         pricing: outcome.pricing,
                     },
                 );
-                // Accrue this iteration's tokens against the current stage record.
-                if let Some(rec) = ledger.as_deref_mut().and_then(|l| l.0.get_mut(idx)) {
-                    rec.prompt_tokens += response.tokens_used.prompt_tokens;
-                    rec.completion_tokens += response.tokens_used.completion_tokens;
-                    rec.cached_tokens += response.tokens_used.cached_tokens;
-                    rec.cache_write_tokens += response.tokens_used.cache_write_tokens;
+                // What is left is per-stage bookkeeping that has nothing to do
+                // with the invoice, and needs the window this call was built
+                // from.
+                //
+                // Found by name, the same key `record_call` above just used and
+                // the same one `restore_stage_ledger` matches on. Two lookups
+                // for one call have to agree, and only one of them can be
+                // written by index: the compaction lane has no cursor to offer.
+                if let Some(rec) = ledger
+                    .as_deref_mut()
+                    .and_then(|l| l.0.iter_mut().find(|r| r.name == state.current_stage))
+                {
                     // The high-water mark rather than a sum: a region is
                     // re-sent whole on every call, so summing would report a
                     // number that is neither what it costs per call nor what it

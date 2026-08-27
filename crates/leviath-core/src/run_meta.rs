@@ -10,6 +10,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod stage_ledger;
+
+// Re-exported flat rather than left behind a path of their own: the stage ledger
+// moved out of this file because the file got long, and that is a fact about
+// where the source lives, not about what a caller should have to type.
+pub use stage_ledger::{
+    MAX_STAGE_VISITS, StageCall, StageRecord, StageRunStatus, StageVisitRecord,
+};
+
 /// Current status of a background run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -955,165 +964,6 @@ pub struct ContextSnapshot {
     pub regions: Vec<RegionSnapshot>,
 }
 
-/// Status of an individual stage within a run.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum StageRunStatus {
-    /// Declared but not yet entered.
-    Pending,
-    /// The stage the run is in right now. At most one stage is `Active`.
-    Active,
-    /// Entered, and blocked on a person answering.
-    WaitingInput,
-    /// Finished and left. A stage that loops back becomes `Active` again.
-    Complete,
-    /// Ended in a failure. The run's own `error` carries the message.
-    Error,
-    /// The run finished without ever entering this stage.
-    ///
-    /// Distinct from [`Pending`](Self::Pending), which means "not yet" while a
-    /// run is live, and from [`Complete`](Self::Complete), which these used to
-    /// be recorded as: the ledger marked every stage positioned before the
-    /// cursor complete, and a graph does not visit its stages in index order,
-    /// so an error-recovery branch nothing reached was filed as having run
-    /// (#372). Its `region_tokens` is empty because nothing ever wrote it,
-    /// which made the next real stage look like it had written every region
-    /// from zero.
-    Skipped,
-}
-
-impl std::fmt::Display for StageRunStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            StageRunStatus::Pending => write!(f, "Pending"),
-            StageRunStatus::Skipped => write!(f, "Skipped"),
-            StageRunStatus::Active => write!(f, "Active"),
-            StageRunStatus::WaitingInput => write!(f, "WaitingInput"),
-            StageRunStatus::Complete => write!(f, "Complete"),
-            StageRunStatus::Error => write!(f, "Error"),
-        }
-    }
-}
-
-/// Metadata record for a single stage within a run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StageRecord {
-    /// The stage's name, matching its key under `[stages]`.
-    pub name: String,
-    /// Zero-based position in the blueprint's stage list.
-    pub index: usize,
-    /// Where this stage stands.
-    pub status: StageRunStatus,
-    /// Whether the run has ever actually been in this stage.
-    ///
-    /// Position cannot answer this. A graph blueprint reaches its stages in
-    /// whatever order its edges describe, so "index below the cursor" includes
-    /// every branch the run went past without taking - and reading it as
-    /// "finished" is what filed never-entered stages as `Complete` (#372).
-    /// Sticky once set, so a stage the run has left and may re-enter stays
-    /// entered.
-    #[serde(default)]
-    pub entered: bool,
-    /// Input tokens billed while this stage was active. A revisited stage keeps
-    /// accumulating rather than resetting, so the run's total is the sum.
-    pub prompt_tokens: usize,
-    /// Output tokens billed while this stage was active, accumulating the same
-    /// way.
-    pub completion_tokens: usize,
-    /// Tokens read from provider cache in this stage.
-    #[serde(default)]
-    pub cached_tokens: usize,
-    /// Tokens *written* to provider cache in this stage.
-    ///
-    /// Without it only half of a cache decision was visible: a stage showing
-    /// no reads might be paying to write a prefix nothing reuses, or might not
-    /// be caching at all, and the ledger could not tell those apart.
-    #[serde(default)]
-    pub cache_write_tokens: usize,
-    /// Per-region token contribution to this stage's calls, by region name.
-    ///
-    /// The central question of a structured layout is "what am I paying to
-    /// carry, and where", and answering it meant replaying the context history
-    /// and grouping by stage - archaeology for something the runtime already
-    /// knows. Recorded as the largest each region reached while the stage was
-    /// active, which is the number that decides whether a region is earning its
-    /// place.
-    ///
-    /// Every region the window carries is measured, including the ones a stage
-    /// layout hides rather than declares, so a stage can list a region it never
-    /// assembled into a request.
-    #[serde(default)]
-    pub region_tokens: std::collections::BTreeMap<String, usize>,
-    /// Prompt tokens billed by this stage's first call, the baseline the
-    /// runaway-context check compares against. `None` until it runs once.
-    #[serde(default)]
-    pub first_call_prompt_tokens: Option<usize>,
-    /// Whether the runaway-context warning has already fired for this stage, so
-    /// it is said once on the crossing rather than on every call afterwards.
-    #[serde(default)]
-    pub runaway_warned: bool,
-    /// A reply in this stage was cut off at the output cap, so its requests go
-    /// out at the model's maximum. Kept here, and not only in the per-stage
-    /// runtime counters, because those do not survive a daemon restart and a
-    /// resumed run would otherwise retry at the cap that already failed.
-    #[serde(default)]
-    pub output_cap_raised: bool,
-    /// Unix timestamp (seconds); None until the stage starts.
-    pub started_at: Option<i64>,
-    /// Unix timestamp (seconds); None until the stage ends.
-    pub ended_at: Option<i64>,
-    /// How long this stage has actually been working, as against how long it has
-    /// been the cursor. Read it through [`StageRecord::active_runtime_secs`].
-    ///
-    /// A stage the run is parked in - paused, or holding a prompt open - is
-    /// still the cursor stage, so `started_at`..`ended_at` counts time nothing
-    /// spent working. A stage the run re-enters keeps accumulating, the same way
-    /// its token counts do.
-    ///
-    /// `None` on records written before the clock existed; see
-    /// [`RunMeta::active`] for why that is not a zero.
-    #[serde(default)]
-    pub active: Option<ActiveClock>,
-}
-
-impl StageRecord {
-    /// How long this stage has actually been working, at `now`.
-    ///
-    /// Falls back to the wall-clock span for records written before the clock
-    /// existed, for the reason given on [`RunMeta::active_runtime_secs`].
-    pub fn active_runtime_secs(&self, now: i64) -> u64 {
-        if let Some(clock) = self.active {
-            return clock.total_secs(now);
-        }
-        let Some(started) = self.started_at else {
-            return 0;
-        };
-        crate::duration::between(started, self.ended_at.unwrap_or(now))
-    }
-
-    /// A stage the run has not entered yet: [`StageRunStatus::Pending`], zero
-    /// tokens, and neither timestamp set.
-    pub fn new(name: String, index: usize) -> Self {
-        Self {
-            name,
-            index,
-            status: StageRunStatus::Pending,
-            entered: false,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            region_tokens: std::collections::BTreeMap::new(),
-            first_call_prompt_tokens: None,
-            runaway_warned: false,
-            output_cap_raised: false,
-            started_at: None,
-            ended_at: None,
-            active: None,
-        }
-    }
-}
-
 /// Current Unix time in seconds (saturating to 0 before the epoch).
 fn now_secs() -> i64 {
     SystemTime::now()
@@ -1829,23 +1679,5 @@ mod tests {
         assert!(!json.to_string().contains("flags"));
         let back: RunMeta = serde_json::from_value(json).unwrap();
         assert_eq!(back.flags, RunFlags::default());
-    }
-
-    #[test]
-    fn stage_record_new_and_serde_roundtrip() {
-        let rec = StageRecord::new("analyze".to_string(), 2);
-        assert_eq!(rec.name, "analyze");
-        assert_eq!(rec.index, 2);
-        assert_eq!(rec.status, StageRunStatus::Pending);
-        assert_eq!(rec.prompt_tokens, 0);
-        assert_eq!(rec.completion_tokens, 0);
-        assert_eq!(rec.cached_tokens, 0);
-        assert!(rec.started_at.is_none());
-        assert!(rec.ended_at.is_none());
-
-        let json = serde_json::to_string(&rec).unwrap();
-        let back: StageRecord = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.name, "analyze");
-        assert_eq!(back.status, StageRunStatus::Pending);
     }
 }

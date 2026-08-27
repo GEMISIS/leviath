@@ -329,7 +329,7 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
 
     // Seed the per-stage ledger (names + Pending) so the dashboard shows every
     // stage's real name from the first persist, not just the active one.
-    let ledger = StageLedger(
+    let mut ledger = StageLedger(
         blueprint
             .stages
             .iter()
@@ -337,6 +337,10 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
             .map(|(i, s)| leviath_core::run_meta::StageRecord::new(s.name.clone(), i))
             .collect(),
     );
+    // Stage 0 is the one stage no transition enters, so its first visit is
+    // opened here for the same reason its `VisitCounts` entry is pre-counted
+    // above: without it the two disagree from the first tick.
+    ledger.0[0].begin_visit(chrono::Utc::now().timestamp());
 
     // Repetition detection is opt-in per blueprint.
     let repetition = blueprint

@@ -22,6 +22,36 @@ same list.
   It now reads the window for the run the cursor is on: 0.10s to the list, and
   32 MB.
 
+- Added: the per-stage ledger carries a price. `cost_usd`, `unpriced_calls` and
+  `cost_is_exact` now sit on every stage record, meaning exactly what they mean
+  on a run: `null` is unknown rather than free, and `cost_is_exact` says whether
+  the figure is the provider's own or a reconstruction from published rates. The
+  tokens were always there and the conversion was not, so a console drawing a
+  run's graph could annotate a node with how long it took and not with what it
+  cost - and the obvious workaround, multiplying tokens by a rate card of its
+  own, produces a fourth answer that disagrees with the run's, the stage's and
+  the invoice. Served by `GET /api/agents/{id}/stages` behind the new
+  `runs.stages.cost` capability, and shown by `lev stages` in a `COST` column.
+- Added: each stage record splits itself by visit. `visits` carries one entry
+  per entry into the stage, with its own `entered_at`/`left_at`, token counts,
+  cost, and working clock. A stage record accumulates across revisits, which is
+  the right total for the stage and the wrong shape for a graph of the path a
+  run took, where a stage entered twice is two nodes; attributing the sum to
+  the first node overstates it and splitting it evenly invents a division, and
+  a reader can see neither mistake. The boundaries are cut where the run
+  actually enters and leaves a stage, so no call lands in the wrong stay.
+  `visit_count` counts every entry and the list stops at 128, so a
+  `visit_count` above `visits.length` says the split is partial and the stage's
+  own figures are the complete ones. `lev stages --visits` prints it.
+- Changed: a stage's token counts now include the compaction and routing calls
+  made while the run was in it. They were counted against the run and against
+  no stage, so a stage that compacted its window - which can be the most
+  expensive request the run makes - reported only the cheap half of its bill,
+  and the per-stage ledger answered "which stage cost me that" incorrectly for
+  exactly the runs where the question is worth asking. The run's title call is
+  still excluded: it happens once at spawn beside the run and belongs to no
+  stage of it, so the stages can sum to slightly less than the run's own total.
+
 - Fixed: a deleted run no longer comes back. The persistence lane ran
   `create_dir_all` before every write, so the next message for a run - a
   heartbeat snapshot, a journal append, or just the closing write of a run

@@ -111,26 +111,43 @@ sentence.
 
 ### `lev stages <RUN-ID>`
 
-The per-stage token ledger, which is where a staged agent's cost lives. A single loop has one
+The per-stage ledger, which is where a staged agent's cost lives. A single loop has one
 number you can eyeball; a staged agent has a different window per stage, regions that persist
 across stages, and per-stage models with different prices.
 
 | Flag | Purpose |
 |---|---|
 | `--regions` | Also show each stage's per-region token high-water mark, largest first |
+| `--visits` | Break each stage into its stays, so a stage entered twice is two rows |
 | `--json` | Print the ledger as JSON |
 
 ```
-STAGE                STATUS         PROMPT     OUTPUT   CACHE RD   CACHE WR
-ingest               complete        16832       2249          0          0
-report               complete        37644        493          0          0
-summary              complete       252848        648          0          0
-TOTAL                               307324       3390          0          0
+STAGE                STATUS         PROMPT     OUTPUT   CACHE RD   CACHE WR        COST
+ingest               complete        16832       2249          0          0    ~$0.0891
+report               complete        37644        493          0          0    ~$0.1932
+summary              complete       252848        648          0          0    ~$1.2812
+TOTAL                               307324       3390          0          0    ~$1.5635
 ```
 
 `CACHE WR` is the write half of a cache decision. Without it a stage showing no reads might be
 paying to write a prefix nothing reuses, or might not be caching at all, and the ledger could not
 tell those apart.
+
+`COST` is what that stage spent, and it is deliberately not a number you can always get. A leading
+`~` means the figure was reconstructed from published rates rather than read off the provider's own
+answer, and a bare `?` means at least one call in that stage could not be priced at all, by either
+route. A `?` is not a zero: a stage whose calls went unpriced has not been shown to be free, and one
+unpriced stage takes the `TOTAL` with it for the same reason.
+
+Every call a run bills counts against the stage it was made in, including the compaction calls that
+summarize a full window and the routing call a stage makes at its own boundary. The exception is the
+run's title call, which happens once at spawn beside the run rather than inside any stage, so this
+column can sum to slightly less than the run's own figure.
+
+`--visits` splits a stage by each stay in it. The row above is the sum across every visit, which is
+the right total for the stage and the wrong number to put on a graph of the path the run took, where
+a stage entered twice is two nodes. Leviath records up to 128 stays per stage; past that the split
+stops and the table says so, while the stage's own row keeps counting.
 
 `--regions` answers the question a structured layout is really asking: what am I paying to carry,
 and where. The number shown is the largest each region reached while the stage was active, since a

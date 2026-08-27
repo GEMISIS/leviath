@@ -47,20 +47,49 @@ pub struct CallUsage<'a> {
     pub pricing: Option<leviath_providers::ModelPricing>,
 }
 
-/// Fold one call into the run's cumulative totals and journal what it cost.
+/// Fold one call into the run's cumulative totals and the stage ledger, and
+/// journal what it cost.
 ///
-/// Both halves are optional and independent: a world with no `TokenTotals` (a
-/// bare test agent) still journals, and a world with no persistence lane or run
-/// metadata - tests, unpersisted agents - still counts. Neither absence is an
-/// error, which is why this takes options rather than making callers branch.
+/// All three halves are optional and independent: a world with no `TokenTotals`
+/// (a bare test agent) still journals, one with no ledger still counts, and one
+/// with no persistence lane or run metadata - tests, unpersisted agents - still
+/// does both. None of those absences is an error, which is why this takes
+/// options rather than making callers branch.
+///
+/// The ledger is found by stage *name*, not by a cursor index. Three of the four
+/// lanes that bill a run reach here from somewhere the cursor is awkward to
+/// hold, and a stage name is the key the ledger is built on anyway. The title
+/// lane has no stage, passes an empty one, and so matches no record - which is
+/// correct: it is billed to the run, not to any stage of it.
 pub fn record_call(
     totals: Option<&mut TokenTotals>,
+    ledger: Option<&mut crate::pipeline::StageLedger>,
     persist: Option<&PersistenceStage>,
     metadata: Option<&RunMetadata>,
     call: &CallUsage<'_>,
 ) {
+    // The provider's own figure when it gave one, else this model's rates
+    // applied to the counts, else nothing at all. Decided once here so the
+    // journal record, the run totals and the stage ledger cannot end up
+    // describing the same call three different ways.
+    let cost_usd = call.usage.priced_cost(call.pricing.as_ref());
+    let cost_reported = call.usage.reported_cost_usd.is_some();
+    let at = chrono::Utc::now().timestamp();
     if let Some(totals) = totals {
         totals.add_usage_priced(call.usage, call.pricing.as_ref());
+    }
+    if let Some(rec) = ledger.and_then(|l| l.0.iter_mut().find(|r| r.name == call.stage)) {
+        rec.record_call(
+            &leviath_core::run_meta::StageCall {
+                prompt_tokens: call.usage.prompt_tokens,
+                completion_tokens: call.usage.completion_tokens,
+                cached_tokens: call.usage.cached_tokens,
+                cache_write_tokens: call.usage.cache_write_tokens,
+                cost_usd,
+                cost_reported,
+            },
+            at,
+        );
     }
     let (Some(persist), Some(md)) = (persist, metadata) else {
         return;
@@ -75,19 +104,11 @@ pub fn record_call(
         completion_tokens: call.usage.completion_tokens,
         cached_tokens: call.usage.cached_tokens,
         cache_write_tokens: call.usage.cache_write_tokens,
-        // The provider's own figure when it gave one, else this model's rates
-        // applied to the counts above, else nothing at all.
-        cost_usd: call
-            .usage
-            .reported_cost_usd
-            .or_else(|| call.pricing.as_ref().map(|p| call.usage.cost_usd(p))),
-        cost_reported_by_provider: call
-            .usage
-            .reported_cost_usd
-            .is_some()
+        cost_usd,
+        cost_reported_by_provider: cost_reported
             .then_some(true)
             .or_else(|| call.pricing.as_ref().map(|_| false)),
-        at: chrono::Utc::now().timestamp(),
+        at,
     };
     // No ack: a usage record is telemetry, and nothing downstream waits on it
     // the way the tool lane waits on its batch record being durable before
@@ -177,6 +198,7 @@ mod tests {
         let mut totals = TokenTotals::default();
         record_call(
             Some(&mut totals),
+            None,
             Some(&PersistenceStage(tx)),
             Some(&metadata()),
             &CallUsage {
@@ -218,6 +240,7 @@ mod tests {
         let mut totals = TokenTotals::default();
         record_call(
             Some(&mut totals),
+            None,
             Some(&PersistenceStage(tx)),
             Some(&metadata()),
             &CallUsage {
@@ -250,6 +273,7 @@ mod tests {
         let mut totals = TokenTotals::default();
         record_call(
             Some(&mut totals),
+            None,
             Some(&PersistenceStage(tx)),
             Some(&metadata()),
             &call(InferenceKind::Stage, &u),
@@ -279,6 +303,7 @@ mod tests {
         let mut totals = TokenTotals::default();
         record_call(
             Some(&mut totals),
+            None,
             Some(&PersistenceStage(tx)),
             Some(&metadata()),
             &call(InferenceKind::Compaction, &u),
@@ -329,6 +354,7 @@ mod tests {
         record_call(
             Some(&mut totals),
             None,
+            None,
             Some(&metadata()),
             &call(InferenceKind::Stage, &u),
         );
@@ -340,6 +366,7 @@ mod tests {
         let mut totals = TokenTotals::default();
         record_call(
             Some(&mut totals),
+            None,
             Some(&PersistenceStage(tx)),
             None,
             &call(InferenceKind::Title, &u),
@@ -348,7 +375,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         // Neither: a no-op that must not panic.
-        record_call(None, None, None, &call(InferenceKind::Routing, &u));
+        record_call(None, None, None, None, &call(InferenceKind::Routing, &u));
     }
 
     /// Totals accumulate across calls rather than being overwritten - the bug
@@ -361,6 +388,7 @@ mod tests {
         for _ in 0..3 {
             record_call(
                 Some(&mut totals),
+                None,
                 None,
                 None,
                 &call(InferenceKind::Stage, &u),

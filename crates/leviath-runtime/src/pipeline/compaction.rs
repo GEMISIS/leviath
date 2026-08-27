@@ -176,6 +176,7 @@ type CollectCompactionQuery = (
     Option<&'static mut crate::persistence::TokenTotals>,
     Option<&'static crate::persistence::RunMetadata>,
     Option<&'static AgentState>,
+    Option<&'static mut crate::pipeline::StageLedger>,
 );
 
 /// Compaction-collect system: drain finished compaction jobs and apply each
@@ -191,7 +192,8 @@ pub fn collect_compaction(
 ) {
     crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((mut window, activity, mut totals, md, state)) = agents.get_mut(outcome.entity)
+        let Ok((mut window, activity, mut totals, md, state, mut ledger)) =
+            agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
@@ -210,9 +212,16 @@ pub fn collect_compaction(
         // Counted even when the batch failed partway: the calls that already
         // ran were billed, and the summaries being discarded is a decision
         // about the window, not about the invoice.
+        // Billed to the stage the run was in when the window filled up, the same
+        // way its own turns are. Compaction is not free and not incidental - a
+        // stage that compacts twice can spend more on summarizing its context
+        // than on the work - so leaving it out of the ledger left the one
+        // question the ledger exists to answer, which stage cost that,
+        // answerable only for the cheap half of the bill (#630).
         for usage in &outcome.usage {
             crate::inference_usage::record_call(
                 totals.as_deref_mut(),
+                ledger.as_deref_mut(),
                 persist.as_deref(),
                 md,
                 &crate::inference_usage::CallUsage {

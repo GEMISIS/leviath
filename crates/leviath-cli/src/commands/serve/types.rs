@@ -812,11 +812,18 @@ pub(super) enum FileOrListing {
 /// `context/history` snapshots, which is expensive and cannot see a stage that
 /// ran and wrote nothing (#388).
 ///
+/// Each record carries a price as well as a token count, and a split of both by
+/// each stay in the stage. Pricing stays on this side deliberately: `cost_usd`
+/// is `None` for unknown rather than zero and `cost_is_exact` says whether the
+/// figure is the invoice or a reconstruction of it, and a console multiplying
+/// tokens by a rate card of its own would produce a fourth answer that
+/// disagrees with all three (#630).
+///
 /// Not paginated. The list is bounded by the blueprint's stage count - a dozen
 /// at the top end - so a cursor would be ceremony over a short array. The
 /// records themselves are open-ended in width because `region_tokens` has one
-/// entry per region, which is the reason this is its own route rather than a
-/// field on the run listing.
+/// entry per region and `visits` one entry per stay, which is the reason this is
+/// its own route rather than a field on the run listing.
 #[derive(Debug, Serialize)]
 pub(super) struct RunStagesResp {
     /// The run these stages belong to, echoed so a response is self-describing

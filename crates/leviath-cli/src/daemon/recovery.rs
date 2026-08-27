@@ -400,6 +400,19 @@ fn reload_one(
         if let Some(clock) = rec.active.as_mut() {
             clock.settle(meta.updated_at);
         }
+        // The visit in progress has a clock of its own, and it was left running
+        // by a daemon that has since stopped. Settled at the same moment for the
+        // same reason: the span ended when the process holding it did, not now.
+        // The visit itself stays open - the run really is still in that stage,
+        // and re-entering is not what a resume does.
+        if let Some(clock) = rec
+            .visits
+            .last_mut()
+            .filter(|v| v.left_at.is_none())
+            .and_then(|v| v.active.as_mut())
+        {
+            clock.settle(meta.updated_at);
+        }
     }
     leviath_runtime::restore::restore_stage_ledger(world.world_mut(), entity, &stage_records);
 
@@ -2194,6 +2207,21 @@ mod tests {
             banked_secs: 8,
             since: None,
         });
+        // One closed stay, priced, so the money survives the reload rather than
+        // restarting from zero the way #415 restarted the tokens.
+        analyze.begin_visit(10);
+        analyze.record_call(
+            &leviath_core::run_meta::StageCall {
+                prompt_tokens: 1_234,
+                cost_usd: Some(0.5),
+                cost_reported: true,
+                ..Default::default()
+            },
+            12,
+        );
+        analyze.close_visit(20);
+        analyze.prompt_tokens = 1_234;
+
         let mut implement = StageRecord::new("implement".to_string(), 1);
         implement.status = StageRunStatus::Active;
         implement.entered = true;
@@ -2201,6 +2229,12 @@ mod tests {
         implement.started_at = Some(20);
         // The stage the run was in when the daemon died, its span still open.
         implement.active = Some(leviath_core::run_meta::ActiveClock {
+            banked_secs: 3,
+            since: Some(200),
+        });
+        // And so is the visit it was on, with a clock of its own left running.
+        implement.begin_visit(20);
+        implement.visits[0].active = Some(leviath_core::run_meta::ActiveClock {
             banked_secs: 3,
             since: Some(200),
         });
@@ -2246,6 +2280,18 @@ mod tests {
         // closed at the run's `updated_at` (222), not carried on to now (999).
         assert_eq!(ledger.0[0].active_runtime_secs(999), 8);
         assert_eq!(ledger.0[1].active_runtime_secs(999), 3 + 22);
+        // The money comes back with the tokens. Restarting a stage's cost at
+        // zero on a reload is the same bug #415 was about, one column over.
+        assert_eq!(ledger.0[0].cost_usd, Some(0.5));
+        assert!(ledger.0[0].cost_is_exact);
+        assert_eq!(ledger.0[0].visits.len(), 1);
+        assert_eq!(ledger.0[0].visits[0].cost_usd, Some(0.5));
+        // The stay the daemon died on stays open - a resume is not a re-entry -
+        // and its clock is settled at `updated_at` (222) for the same reason the
+        // stage's is: the span ended when the process holding it did.
+        let open = &ledger.0[1].visits[0];
+        assert_eq!(open.left_at, None, "still in that stage");
+        assert_eq!(open.active_runtime_secs(999), 3 + 22);
         assert_eq!(ledger.0[0].first_call_prompt_tokens, Some(400));
         assert!(ledger.0[0].runaway_warned);
         assert_eq!(ledger.0[0].region_tokens.get("conversation"), Some(&900));

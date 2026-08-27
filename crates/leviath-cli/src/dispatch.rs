@@ -683,6 +683,7 @@ mod tests {
                 run_id: "no-such-run".to_string(),
                 json: false,
                 regions: false,
+                visits: false,
             }),
             &MockRisky,
         )

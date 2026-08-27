@@ -1784,9 +1784,13 @@ fn reconcile_stage_ledger_completes_current_stage_on_run_complete() {
 #[test]
 fn collect_inference_buffers_output_token_line_and_stage_tokens() {
     let (mut world, tx) = world_with_results();
+    // The ledger is keyed by stage name, so the state has to name the stage the
+    // cursor points at. In a real run `enter_stage` sets both together.
+    let mut state = agent_state();
+    state.current_stage = "impl".to_string();
     let e = world
         .spawn((
-            agent_state(),
+            state,
             AwaitingInference,
             StageCursor { index: 1 },
             ledger2(),
@@ -7408,6 +7412,26 @@ fn spawn_setup_agent(world: &mut World, dest_setup: StageSetup, window: ContextW
         .id()
 }
 
+/// A ledger with no record for either stage is left alone rather than panicking
+/// or filing the visit against whatever record happens to be there.
+///
+/// A ledger is seeded one record per blueprint stage, so in a real run there is
+/// always one to find. It is not a fact `enter_stage` can rely on: a bare agent
+/// spawned outside the blueprint path carries no ledger at all, and a restored
+/// one carries whatever the blueprint had when it was written. Indexing here
+/// would turn a blueprint that lost a stage into a crash at the transition.
+#[test]
+fn entering_a_stage_the_ledger_has_no_record_for_is_not_a_panic() {
+    let mut world = World::new();
+    let e = spawn_setup_agent(&mut world, setup(), pinned_window());
+    world.entity_mut(e).insert(StageLedger(vec![]));
+
+    run_transition(&mut world);
+
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1, "still moved");
+    assert!(world.get::<StageLedger>(e).unwrap().0.is_empty());
+}
+
 #[test]
 fn enter_stage_injects_system_prompt_and_config() {
     let mut s = setup();
@@ -11283,6 +11307,56 @@ fn compaction_calls_are_counted_one_record_per_region() {
     assert_eq!(totals.completion_tokens, 20);
 }
 
+/// And it lands on the stage that paid for it, not only on the run.
+///
+/// A summarize call sees a whole region, so a stage that compacts twice can
+/// spend more on summarizing its context than on the work - and the stage
+/// ledger, which exists to answer "which stage cost me that", counted only the
+/// stage's own turns. It answered for the cheap half of the bill (#630).
+#[test]
+fn a_compaction_call_is_billed_to_the_stage_that_needed_it() {
+    let (mut world, tx) = world_with_compaction_results();
+    let e = world
+        .spawn((
+            compacting_window(),
+            AwaitingCompaction,
+            crate::persistence::TokenTotals::default(),
+            StageLedger(vec![
+                leviath_core::run_meta::StageRecord::new("gather".to_string(), 0),
+                leviath_core::run_meta::StageRecord::new("analyze".to_string(), 1),
+            ]),
+            AgentState {
+                current_stage: "analyze".to_string(),
+                iteration: 3,
+                ..agent_state()
+            },
+        ))
+        .id();
+    tx.send(CompactionOutcome {
+        entity: e,
+        usage: vec![leviath_providers::TokenUsage::new(7000, 0, 0, 10)],
+        provider_name: "p".to_string(),
+        model: "m".to_string(),
+        result: Ok(vec![("conv".to_string(), "the summary".to_string())]),
+        // Priced, so the money half is exercised and not only the tokens.
+        pricing: Some(leviath_providers::ModelPricing::flat(1_000_000.0, 0.0)),
+    })
+    .unwrap();
+
+    run_collect_compaction(&mut world);
+
+    let led = world.get::<StageLedger>(e).unwrap();
+    assert_eq!(led.0[1].prompt_tokens, 7000, "billed to `analyze`");
+    assert_eq!(led.0[1].cost_usd, Some(7000.0));
+    assert!(!led.0[1].cost_is_exact, "rates, not the provider's figure");
+    // A lazily opened visit, because nothing entered the stage in this world -
+    // the money is not dropped for want of a boundary.
+    assert_eq!(led.0[1].visits.len(), 1);
+    assert_eq!(led.0[1].visits[0].prompt_tokens, 7000);
+    assert_eq!(led.0[0].prompt_tokens, 0, "and not to the stage before it");
+    assert_eq!(led.0[0].cost_usd, Some(0.0), "which really did spend zero");
+}
+
 /// A batch that failed partway still billed for the calls that ran before it
 /// gave up. Discarding the summaries is a decision about the window; it does
 /// not un-bill the requests.
@@ -12113,6 +12187,96 @@ fn run_collect_transition(world: &mut World) {
     let mut s = Schedule::default();
     s.add_systems(collect_transition_choice);
     s.run(world);
+}
+
+/// The routing call at a stage boundary is billed to the stage that asked the
+/// question, and the move to the next stage cuts the visit rather than
+/// backdating the answer into it.
+///
+/// One routing call fires at every boundary of every branching run, and the
+/// stage ledger counted none of them. Attributing it to the stage being entered
+/// would be worse than leaving it out: the run had not started that stage's work
+/// when it paid for the question (#630).
+#[test]
+fn a_routing_call_is_billed_to_the_stage_it_leaves_and_cuts_the_visit() {
+    let (mut world, tx) = world_with_transition_results();
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        stage_named("b", None, false, None),
+    ]);
+    let e = spawn_responding_agent(
+        &mut world,
+        bp,
+        vec![si("m0"), si("m1")],
+        vec![plain_edge("b")],
+    );
+    world.get_mut::<AgentState>(e).unwrap().current_stage = "a".to_string();
+    let mut ledger = StageLedger(vec![
+        leviath_core::run_meta::StageRecord::new("a".to_string(), 0),
+        leviath_core::run_meta::StageRecord::new("b".to_string(), 1),
+    ]);
+    ledger.0[0].begin_visit(100);
+    world.entity_mut(e).insert(ledger);
+
+    let mut response = resp("b");
+    response.tokens_used = leviath_providers::TokenUsage::new(120, 0, 0, 4);
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Ok(response),
+        pricing: Some(leviath_providers::ModelPricing::flat(1_000_000.0, 0.0)),
+    })
+    .unwrap();
+
+    run_collect_transition(&mut world);
+
+    let led = world.get::<StageLedger>(e).unwrap();
+    assert_eq!(led.0[0].prompt_tokens, 120, "billed to the stage it left");
+    assert_eq!(led.0[0].cost_usd, Some(120.0));
+    assert_eq!(led.0[1].prompt_tokens, 0, "and not to the one it entered");
+
+    // `a`'s visit is closed and `b`'s is open, so a graph drawn from this shows
+    // the run in `b` with `a` finished, not both open at once.
+    assert_eq!(led.0[0].visits.len(), 1);
+    assert!(led.0[0].visits[0].left_at.is_some(), "a was left");
+    assert_eq!(led.0[0].visits[0].prompt_tokens, 120, "in a's own visit");
+    assert_eq!(led.0[1].visits.len(), 1);
+    assert_eq!(led.0[1].visits[0].left_at, None, "b is where it is now");
+    assert_eq!(led.0[1].visit_count, 1);
+}
+
+/// A stage that loops back to itself is entered again, and starts a visit of
+/// its own. That matches the visit number the `stage_transition` event carries,
+/// and it is the distinction a run that ping-pongs between two stages needs:
+/// one accumulated row cannot show which pass got expensive.
+#[test]
+fn a_self_transition_starts_a_second_visit_of_the_same_stage() {
+    let (mut world, tx) = world_with_transition_results();
+    let bp = blueprint(vec![stage_named("a", None, false, None)]);
+    let e = spawn_responding_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("a")]);
+    world.get_mut::<AgentState>(e).unwrap().current_stage = "a".to_string();
+    let mut ledger = StageLedger(vec![leviath_core::run_meta::StageRecord::new(
+        "a".to_string(),
+        0,
+    )]);
+    ledger.0[0].begin_visit(100);
+    world.entity_mut(e).insert(ledger);
+
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Ok(resp("a")),
+        pricing: None,
+    })
+    .unwrap();
+
+    run_collect_transition(&mut world);
+
+    let rec = &world.get::<StageLedger>(e).unwrap().0[0];
+    assert_eq!(rec.visit_count, 2);
+    assert_eq!(rec.visits.len(), 2);
+    assert!(rec.visits[0].left_at.is_some(), "the first pass ended");
+    assert_eq!(rec.visits[1].left_at, None, "the second is in progress");
 }
 
 /// A pause landing during a stage-boundary routing call gets the same
@@ -16909,9 +17073,14 @@ fn collect_records_a_cut_off_reply_in_the_stage_ledger() {
             0,
         )])
     };
+    // The ledger is keyed by stage name, so the state has to name its stage.
+    let state = || AgentState {
+        current_stage: "polish".to_string(),
+        ..agent_state()
+    };
     let e = world
         .spawn((
-            agent_state(),
+            state(),
             AwaitingInference,
             StageCursor { index: 0 },
             ledger(),
@@ -16932,7 +17101,7 @@ fn collect_records_a_cut_off_reply_in_the_stage_ledger() {
     // A reply that finished on its own leaves the flag alone.
     let plain = world
         .spawn((
-            agent_state(),
+            state(),
             AwaitingInference,
             StageCursor { index: 0 },
             ledger(),
