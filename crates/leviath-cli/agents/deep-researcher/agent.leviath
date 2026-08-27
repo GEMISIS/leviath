@@ -1,6 +1,6 @@
 [agent]
 name = "deep-researcher"
-version = "0.4.6"
+version = "0.4.7"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 max_child_depth = 2
 entry_stage = "gather"
@@ -306,11 +306,14 @@ Analyze the `sources` and `sub_findings` against `sources_index`. Be rigorous:
 3. Evaluate source quality and bias; note gaps and the specific citations worth
    chasing next.
 
-The workers' findings are already here: the fan-out wrote them into
-`sub_findings`, which is rendered into this prompt under its own `## sub_findings`
-heading. They are not files. A work item's name is not a filename, and
-`read_file` on one finds nothing - the whole point of the fan-out is that the
-answers came back to you.
+The workers' findings arrive two ways, and you need both. The fan-out wrote
+each worker's short answer into `sub_findings`, rendered into this prompt under
+its own `## sub_findings` heading. Each of those answers names the full report
+file that worker wrote into this run's working directory; that file holds the
+claims, the disagreements and the bibliography the short answer had to leave
+out. Before you extract claims, `read_file` every report file named in
+`sub_findings`. A work item's name is not a filename: read the paths the
+workers wrote, not the names of the items they were given.
 
 Prefer following a key citation (follow_citations) over re-searching when a claim
 hinges on a source you haven't read directly.
@@ -439,6 +442,12 @@ also holds a report from every worker, so a name it has to guess at is a name it
 gets wrong.
 """
 
+# `sources` is the raw material - fetched pages, ~125k tokens on a real run -
+# and this stage's instructions never read it: it works from the regions the
+# earlier stages distilled. Left in, it is re-sent on every call for nothing.
+[stages.synthesize.context]
+hide = ["sources"]
+
 [stages.synthesize.transitions.polish]
 hint = "The synthesis is written"
 # The transcript of the research is not wanted here: this stage rewrites the
@@ -493,9 +502,19 @@ Say what this investigation concluded, for whoever asked for it.
 Lead with the answer, then the evidence that carried the most weight and the
 open questions that remain. Name the file you wrote.
 
+The report is already on disk, written and polished by the stages before this
+one. Your only tool here is `submit_output`; do not try to write a file, and do
+not paste the whole report into the answer.
+
 Where the sources disagreed, say so - a summary that hides a live disagreement
 is worse than no summary.
 """
+
+# `sources` is the raw material - fetched pages, ~125k tokens on a real run -
+# and this stage's instructions never read it: it works from the regions the
+# earlier stages distilled. Left in, it is re-sent on every call for nothing.
+[stages.summary.context]
+hide = ["sources"]
 
 [stages.summary.transitions]
 
@@ -552,6 +571,12 @@ If the analysis is sound throughout, say so and stop. You are not required to
 find fault.
 """
 
+# `sources` is the raw material - fetched pages, ~125k tokens on a real run -
+# and this stage's instructions never read it: it works from the regions the
+# earlier stages distilled. Left in, it is re-sent on every call for nothing.
+[stages.challenge.context]
+hide = ["sources"]
+
 [stages.challenge.transitions.gather]
 hint = "A challenge needs evidence nobody has gathered yet - name what to fetch"
 transform = "compact"
@@ -576,7 +601,10 @@ transform = "direct"
 # is not something to leave to good intentions.
 [stages.polish]
 mode = "autonomous"
-model = { models = ["gemini-3.1-pro-preview", "claude-opus-5", "gpt-5.5", "claude-sonnet-5", { provider = "ollama", model = "qwen3.5:9b" }], parameters = { max_output_tokens = 24000 } }
+# The reply IS the whole report, so the cap is whatever the model can give:
+# a fixed number here (24000, once) was smaller than the report, every reply
+# was cut off at the cap, and the stage re-sent the same reply five times.
+model = { models = ["gemini-3.1-pro-preview", "claude-opus-5", "gpt-5.5", "claude-sonnet-5", { provider = "ollama", model = "qwen3.5:9b" }], parameters = { max_output_tokens = "100%" } }
 description = "Rewrite the report in plain language without changing what it says"
 
 available_tools = ["context_read", "context_write", "read_file", "write_file", "list_dir"]
@@ -631,6 +659,12 @@ it: this directory also holds a separate report from every worker, and rewriting
 one of those instead would leave the real report untouched while the stage
 reports success.
 """
+
+# `sources` is the raw material - fetched pages, ~125k tokens on a real run -
+# and this stage's instructions never read it: it works from the regions the
+# earlier stages distilled. Left in, it is re-sent on every call for nothing.
+[stages.polish.context]
+hide = ["sources"]
 
 [stages.polish.transitions.summary]
 gate = { require_modifications = true, message = "You have not written the report yet. Read the file named in `report_path`, rewrite it in plain language, and write it back to that same path with write_file. The stage is not done until that file has been replaced." }
