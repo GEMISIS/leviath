@@ -81,12 +81,10 @@ pub(crate) fn stage_setup_from(
         .filter(|(k, _)| k.as_str() != "temperature" && k.as_str() != "max_output_tokens")
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let max_output_tokens = stage
-        .model
-        .parameters
-        .get("max_output_tokens")
-        .and_then(|v| v.as_u64())
-        .map(|t| t as usize);
+    // The manifest loader already refused a cap that does not parse, so an
+    // error here can only come from a `ModelConfig` built in code; it is
+    // treated as "no cap" the way an absent one is.
+    let max_output_tokens = stage.model.output_cap().ok().flatten();
     let base_prompt = stage
         .config
         .get("system_prompt")

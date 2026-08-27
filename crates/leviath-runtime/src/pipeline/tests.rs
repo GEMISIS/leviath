@@ -133,7 +133,7 @@ fn build_request_threads_stage_meta_into_custom_region_render() {
 fn build_request_filters_tools_and_uses_config_overrides() {
     let cfg = InferenceConfig {
         temperature: Some(0.1),
-        max_output_tokens: Some(42),
+        max_output_tokens: Some(leviath_core::blueprint::OutputCap::Tokens(42)),
         extra_params: Default::default(),
         batch_tool_hint: false,
         shell_hint: false,
@@ -7406,7 +7406,7 @@ fn enter_stage_injects_system_prompt_and_config() {
     s.system_prompt = Some("be terse".to_string());
     s.inference_config = InferenceConfig {
         temperature: Some(0.3),
-        max_output_tokens: Some(99),
+        max_output_tokens: Some(leviath_core::blueprint::OutputCap::Tokens(99)),
         extra_params: Default::default(),
         batch_tool_hint: false,
         shell_hint: false,
@@ -7429,7 +7429,10 @@ fn enter_stage_injects_system_prompt_and_config() {
             > 0
     );
     let cfg = world.get::<InferenceConfig>(e).unwrap();
-    assert_eq!(cfg.max_output_tokens, Some(99));
+    assert_eq!(
+        cfg.max_output_tokens,
+        Some(leviath_core::blueprint::OutputCap::Tokens(99))
+    );
     assert!(!world.get::<AgentState>(e).unwrap().accepts_messages);
     assert!(world.get::<ReadyToInfer>(e).is_some());
 }
@@ -7734,7 +7737,10 @@ fn spawn_agent_builds_stage0_ready_with_config_and_routing() {
     assert_eq!(world.get::<StageCursor>(e).unwrap().index, 0);
     let cfg = world.get::<InferenceConfig>(e).unwrap();
     assert_eq!(cfg.temperature, Some(0.5));
-    assert_eq!(cfg.max_output_tokens, Some(128));
+    assert_eq!(
+        cfg.max_output_tokens,
+        Some(leviath_core::blueprint::OutputCap::Tokens(128))
+    );
     assert_eq!(
         world
             .get::<crate::components::ToolResultRoutingComponent>(e)
@@ -7892,7 +7898,10 @@ fn stage_setup_from_collects_extra_model_parameters() {
 
     let setup = stage_setup_from(&s, hints(true), Default::default(), None);
     assert_eq!(setup.inference_config.temperature, Some(0.3));
-    assert_eq!(setup.inference_config.max_output_tokens, Some(256));
+    assert_eq!(
+        setup.inference_config.max_output_tokens,
+        Some(leviath_core::blueprint::OutputCap::Tokens(256))
+    );
     let extra = &setup.inference_config.extra_params;
     assert_eq!(extra.len(), 2);
     assert_eq!(extra["top_p"], serde_json::json!(0.9));
@@ -16499,7 +16508,7 @@ fn process_response_arms_the_raised_cap_when_the_reply_was_cut_off() {
 fn build_request_raises_the_cap_to_the_model_maximum_after_a_cut_off() {
     let cfg = InferenceConfig {
         temperature: None,
-        max_output_tokens: Some(100),
+        max_output_tokens: Some(leviath_core::blueprint::OutputCap::Tokens(100)),
         extra_params: Default::default(),
         batch_tool_hint: false,
         shell_hint: false,
@@ -16716,4 +16725,54 @@ fn empty_response_keeps_the_reply_it_accepts() {
     run_empty(&mut world);
     assert!(world.get::<ResolveTransition>(e).is_some());
     assert_eq!(conversation_text(&world, e), "");
+}
+
+/// A relative cap resolves against the model and the window at request time:
+/// a window percentage against the model's context size, a region percentage
+/// against that region's budget, both clamped to the model's own maximum,
+/// and a region the stage does not carry falls back to that maximum.
+#[test]
+fn build_request_resolves_relative_output_caps() {
+    use leviath_core::blueprint::OutputCap;
+    let cfg = |cap: OutputCap| InferenceConfig {
+        temperature: None,
+        max_output_tokens: Some(cap),
+        extra_params: Default::default(),
+        batch_tool_hint: false,
+        shell_hint: false,
+        request_timeout_secs: None,
+    };
+    let si = stage("m", vec![], None);
+    let w = ctx(&[("conversation", 10_000), ("claims", 3_000)]);
+    let cap_of = |cap: OutputCap| {
+        build_request(
+            &w,
+            Some(&cfg(cap)),
+            &si,
+            &provider(true, 4_000),
+            "s",
+            0,
+            crate::pipeline::inference::PriorCalls::default(),
+        )
+        .0
+        .max_tokens
+    };
+    // Cfg's window is 8192: 25% is 2048.
+    assert_eq!(cap_of(OutputCap::WindowPercent(0.25)), 2_048);
+    // 100% of the window would be 8192, clamped to the model's 4000.
+    assert_eq!(cap_of(OutputCap::WindowPercent(1.0)), 4_000);
+    assert_eq!(
+        cap_of(OutputCap::RegionPercent {
+            percent: 0.5,
+            region: "claims".to_string()
+        }),
+        1_500
+    );
+    assert_eq!(
+        cap_of(OutputCap::RegionPercent {
+            percent: 1.0,
+            region: "no_such_region".to_string()
+        }),
+        4_000
+    );
 }

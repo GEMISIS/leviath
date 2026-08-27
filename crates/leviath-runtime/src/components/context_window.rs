@@ -30,8 +30,10 @@ pub struct EvictionResult {
 pub struct InferenceConfig {
     /// Temperature override. If None, uses 0.7 (or 0.0 if model doesn't support it).
     pub temperature: Option<f32>,
-    /// Max output tokens override. If None, caps at model's max_output_tokens capability.
-    pub max_output_tokens: Option<usize>,
+    /// The stage's output cap (`parameters.max_output_tokens`), resolved
+    /// against the model and the window when each request is built. `None`
+    /// caps at the model's `max_output_tokens` capability.
+    pub max_output_tokens: Option<leviath_core::blueprint::OutputCap>,
     /// Extra provider parameters from `[stages.<name>.model.parameters]` beyond
     /// `temperature`/`max_output_tokens` (e.g. `top_p`, `stop`, `seed`,
     /// `frequency_penalty`). Passed through to the provider request so models can

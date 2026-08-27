@@ -195,12 +195,14 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     Ok(blueprint)
 }
 
+mod model;
 mod regions;
 mod sections;
 mod stage;
 
 // Glob re-exports, so this split is invisible to every caller and to the
 // test module, exactly as `pipeline/mod.rs` does it.
+use model::*;
 use regions::*;
 use sections::*;
 use stage::*;
