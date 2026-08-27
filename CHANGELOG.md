@@ -11,7 +11,7 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
-## Unreleased
+## 0.5.5 - 2026-08-27
 
 - Fixed: a stage whose model can answer at nearly the width of its own context
   window could be rejected outright for asking. The reply budget was everything
