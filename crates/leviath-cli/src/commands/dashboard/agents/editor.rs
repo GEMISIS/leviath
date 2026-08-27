@@ -126,6 +126,9 @@ pub(in crate::commands::dashboard) struct Editor {
     /// each field, and the column span of each stage tab, so a click lands
     /// on the right one.
     pub(in crate::commands::dashboard) hit: InspectorHits,
+    /// A model entry the mouse has picked up by its grip, if one is in the
+    /// air. See [`ModelDrag`].
+    pub(in crate::commands::dashboard) model_drag: Option<ModelDrag>,
 }
 
 /// What the inspector drew last, for the mouse.
@@ -137,6 +140,29 @@ pub(in crate::commands::dashboard) struct InspectorHits {
     pub(in crate::commands::dashboard) rows: Vec<u16>,
     /// The screen row of the stage tab bar, and each tab's `[x0, x1)`.
     pub(in crate::commands::dashboard) tabs: Option<(u16, Vec<(u16, u16)>)>,
+    /// The drag grip drawn beside each model entry: its place in the chain,
+    /// and the cells that pick it up.
+    ///
+    /// A grip rather than the whole row, so pressing on a model's *name*
+    /// still starts a text selection the way pressing on any other value
+    /// does. Dragging the row itself would mean the only way to copy a model
+    /// id out of the inspector was to not touch the row it is on.
+    pub(in crate::commands::dashboard) grips: Vec<(usize, ratatui::layout::Rect)>,
+}
+
+/// A model entry held by the mouse: where it came from in the chain, and
+/// where it would land if the button came up now.
+///
+/// The document is not touched until the drop. Mid-drag the inspector simply
+/// *draws* the chain in `to` order, so what the pointer is over is the answer
+/// rather than a preview of it, and the whole gesture lands on the undo stack
+/// as one entry instead of one per row crossed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::commands::dashboard) struct ModelDrag {
+    /// The entry's index in the chain when it was picked up.
+    pub(in crate::commands::dashboard) from: usize,
+    /// The index it would take on release.
+    pub(in crate::commands::dashboard) to: usize,
 }
 
 /// Snapshots kept for undo.
@@ -407,6 +433,7 @@ impl Dashboard {
             models,
             tools,
             hit: InspectorHits::default(),
+            model_drag: None,
         };
         editor.apply_flags();
         self.agents().editor = Some(editor);

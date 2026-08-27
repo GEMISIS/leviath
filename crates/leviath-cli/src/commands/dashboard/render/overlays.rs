@@ -202,6 +202,10 @@ fn agent_editor_sections() -> Vec<HelpSection> {
                 ),
                 ("← → on a model", "move it earlier or later in the chain"),
                 (
+                    "drag ⠿",
+                    "pick a model up by its grip and drop it anywhere in the chain; the rest of the row still selects text",
+                ),
+                (
                     "esc",
                     "back: a region or a loop's path returns to where it was opened from, otherwise the canvas",
                 ),

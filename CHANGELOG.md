@@ -13,6 +13,19 @@ same list.
 
 ## Unreleased
 
+- Added: a stage's model chain can be reordered with the mouse in the agent
+  editor. Each model row carries a `⠿` grip; press it, drag up or down the
+  chain, and let go. The rows reorder as you drag, so the drop is what you
+  saw, and the document is only written on release - one undo entry for the
+  whole move, and none at all for a drop back where it started. The grip is a
+  small target on purpose: dragging anywhere else on the row still selects
+  text, so a model id stays something you can highlight and copy. `←` `→` on a
+  model row still move it a place at a time.
+- Changed: moving a model in the chain lifts and inserts rather than swapping
+  with its neighbour. The two agree for the single step the arrow keys make,
+  but a drag crosses several rows at once, and swapping the ends of such a
+  move would fling the entry the pointer had just passed back to where the
+  dragged one started.
 - Fixed: deleting a run now deletes the sub-agent runs beneath it. A fan-out
   worker or a `sub_agent` spawn is a run of its own, but it exists because
   something started it and it is drawn nested under that run, so deleting the
