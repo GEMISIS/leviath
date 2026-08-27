@@ -223,6 +223,23 @@ pub(crate) fn barrier_then(
     })
 }
 
+/// The refusal for a tool call whose arguments were not JSON.
+///
+/// Names the size and the tail of what arrived, because that is what tells
+/// the model (and a person reading the log) that the call was cut off rather
+/// than mistyped: an argument string that ends mid-word at a round number of
+/// tokens is the output cap, every time.
+pub(crate) fn cut_off_arguments_refusal(name: &str, raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    let tail: String = chars[chars.len().saturating_sub(40)..].iter().collect();
+    format!(
+        "[error] '{name}' was not run: its arguments were not valid JSON ({} characters \
+         arrived, ending `{tail}`). A reply that stops mid-argument has hit the output \
+         limit. Send a smaller call, or split the work across several calls.",
+        chars.len()
+    )
+}
+
 /// `Some(refusal)` when `name`'s arguments do not satisfy the schema the
 /// stage advertised for it.
 ///
@@ -426,6 +443,14 @@ pub fn dispatch_tools(
             // drift from advertising the way a second copy of the rule would.
             if let Some(refusal) = unoffered_tool_refusal(stage_inf, &c.name) {
                 context_results.push((c.tool_id.clone(), refusal));
+                continue;
+            }
+            // A call whose arguments arrived as text rather than JSON was cut
+            // off mid-argument by the output cap (the provider layer keeps
+            // the text for exactly this reading). Refused with the cause, so
+            // the model shrinks or splits the call instead of repeating it.
+            if let serde_json::Value::String(raw) = &c.arguments {
+                context_results.push((c.tool_id.clone(), cut_off_arguments_refusal(&c.name, raw)));
                 continue;
             }
             // Layer 2: the call must satisfy the schema the model was shown.

@@ -776,8 +776,7 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
                 .get("arguments")
                 .and_then(|v| v.as_str())
                 .unwrap_or("{}");
-            let arguments: serde_json::Value = serde_json::from_str(arguments_str)
-                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            let arguments = crate::provider::parse_tool_arguments(arguments_str);
             let thought_signature = thought_signature_of(tc);
             tool_calls.push(ToolCall {
                 id,
@@ -2213,8 +2212,10 @@ mod tests {
         assert_eq!(resp.tool_calls[1].arguments["file"], "a.txt");
     }
 
+    /// Arguments that are not JSON stay as the text the model sent: the usual
+    /// cause is a reply cut off at its output cap, and `{}` hid that.
     #[test]
-    fn parse_response_malformed_tool_arguments_defaults_to_empty_object() {
+    fn parse_response_malformed_tool_arguments_keep_the_raw_text() {
         let body = serde_json::json!({
             "choices": [{
                 "message": {
@@ -2230,7 +2231,10 @@ mod tests {
         });
         let resp = parse_openai_response(&body).unwrap();
         assert_eq!(resp.tool_calls.len(), 1);
-        assert!(resp.tool_calls[0].arguments.is_object());
+        assert_eq!(
+            resp.tool_calls[0].arguments,
+            serde_json::json!("not-valid-json")
+        );
     }
 
     #[test]

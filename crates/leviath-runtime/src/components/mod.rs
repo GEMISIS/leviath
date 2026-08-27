@@ -318,6 +318,12 @@ pub struct InferenceResult {
 
     /// Timestamp of this inference
     pub timestamp: i64,
+
+    /// Output tokens the reply had reached when the provider cut it off at
+    /// the output cap (`finish_reason = length`); `None` when the reply ended
+    /// on its own. A cut-off reply is not an answer, and treating it as one
+    /// is how a stage re-sent the same oversized reply five times.
+    pub cut_off_at: Option<usize>,
 }
 
 /// A tool call requested by the model.
@@ -940,6 +946,7 @@ mod tests {
             }],
             tokens_used: 100,
             timestamp: 99999,
+            cut_off_at: None,
         };
         assert_eq!(ir.response, "Hello");
         assert_eq!(ir.tool_calls.len(), 1);
