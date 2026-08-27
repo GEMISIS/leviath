@@ -445,6 +445,29 @@ pub(super) struct DaemonOutcome {
     pub(super) ok: bool,
 }
 
+/// What one round of daemon polling learned: the open interactions, and which
+/// runs the daemon is actually holding.
+///
+/// Carried on a channel rather than fetched by the draw loop. Both answers
+/// come from control-socket round trips, and the loop used to `await` them
+/// between the tick and the draw - so a daemon that was busy, wedged, or
+/// restarting stopped the dashboard dead. The deadline on a control request is
+/// 30 seconds and there are two of them per tick, which is a very long time to
+/// look like a frozen terminal that ignores keys.
+///
+/// Each field is `None` when that request did not come back, which the
+/// dashboard reads as "no answer this round" and leaves the corresponding
+/// state alone - the same best-effort reading the two polls always had.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct DaemonPoll {
+    /// The daemon's open interactions, keyed by run id.
+    pub(super) interactions: Option<Vec<(String, interaction::InteractionRequest)>>,
+    /// The runs the daemon reports holding, or `None` for "it did not say" -
+    /// which is not the same as "it holds none", and must not condemn every
+    /// run on disk as stale.
+    pub(super) run_ids: Option<std::collections::HashSet<String>>,
+}
+
 /// The dashboard's view of its link to the daemon, refreshed each tick from
 /// the control client's own bookkeeping.
 ///

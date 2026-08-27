@@ -1,6 +1,6 @@
 //! Dashboard state struct and core state-management methods.
 
-use leviath_runtime::control_socket::{ControlClient, ControlRequest, ControlResponse};
+use leviath_runtime::control_socket::ControlClient;
 use ratatui::widgets::TableState;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -263,6 +263,12 @@ pub(crate) struct Dashboard {
     /// The background loop's sender for [`DaemonOutcome`]s; taken by
     /// `init_dashboard`, retained by tests to inject outcomes.
     pub(super) daemon_outcome_tx: Option<mpsc::UnboundedSender<DaemonOutcome>>,
+    /// Receives each round of daemon polling, drained (never awaited) once a
+    /// tick. See [`Self::drain_daemon_polls`].
+    pub(super) daemon_poll_rx: mpsc::UnboundedReceiver<DaemonPoll>,
+    /// The poll loop's sender; taken by `init_dashboard`, retained by tests to
+    /// inject a round without a daemon.
+    pub(super) daemon_poll_tx: Option<mpsc::UnboundedSender<DaemonPoll>>,
     /// The run ids the daemon currently holds, refreshed each tick. `None` when
     /// the daemon did not answer - the disk view is then taken at face value
     /// rather than declaring every run stale.
@@ -866,31 +872,37 @@ impl Dashboard {
         self.initial_sync_done = true;
     }
 
-    /// Refresh the daemon's open interactions (keyed by agent/run id) so waiting
-    /// agents can show their prompt. Best-effort: on any transport error or an
-    /// unexpected reply the map is left untouched.
-    pub(super) async fn sync_interactions(&mut self, control: &ControlClient) {
-        if let Ok(ControlResponse::Interactions { interactions }) =
-            control.request(&ControlRequest::ListInteractions).await
-        {
+    /// Take whatever the daemon poller has learned since the last tick.
+    ///
+    /// Only the newest round is applied: each carries the whole answer, so an
+    /// older one describes a daemon state that has already been superseded.
+    ///
+    /// The polling itself happens on [`daemon_poll_loop`], not here. It used to
+    /// be two `await`ed control round trips wedged between the tick and the
+    /// draw, which meant a busy or restarting daemon stopped the dashboard
+    /// dead - no redraw, no keys - for as long as it took to answer. Draining
+    /// a channel cannot block, so the UI now keeps its own time whatever the
+    /// daemon is doing.
+    ///
+    /// [`daemon_poll_loop`]: super::daemon_poll_loop
+    pub(super) fn drain_daemon_polls(&mut self) {
+        let mut newest = None;
+        while let Ok(poll) = self.daemon_poll_rx.try_recv() {
+            newest = Some(poll);
+        }
+        let Some(poll) = newest else {
+            return;
+        };
+        // A request that did not come back leaves its state alone: the
+        // best-effort reading both polls always had.
+        if let Some(interactions) = poll.interactions {
             self.pending_interactions = interactions.into_iter().collect();
         }
-    }
-
-    /// Refresh which runs the daemon actually holds.
-    ///
-    /// The dashboard lists runs from disk and the daemon lists them from memory,
-    /// and nothing reconciled the two - so a run whose daemon had died sat at
-    /// ACTIVE with a ticking timer forever. On any transport error this is set
-    /// back to `None`, meaning "unknown", so an unreachable daemon does not make
-    /// every run look dead.
-    pub(super) async fn sync_daemon_runs(&mut self, control: &ControlClient) {
-        self.daemon_run_ids = match control.request(&ControlRequest::List).await {
-            Ok(ControlResponse::List { runs, .. }) => {
-                Some(runs.into_iter().map(|entry| entry.run_id).collect())
-            }
-            _ => None,
-        };
+        // Except this one, where `None` is itself the answer - "the daemon did
+        // not say" is not "the daemon holds nothing", and the difference is
+        // whether every run on disk gets condemned as stale. The poller sends
+        // the `None` deliberately, so it is applied as given.
+        self.daemon_run_ids = poll.run_ids;
     }
 
     /// Notice what this tick's polls learned about the daemon itself, and say
@@ -1138,6 +1150,9 @@ mod tests {
     use super::*;
 
     use crate::commands::dashboard::test_support::make_test_dashboard;
+    // Only the tests speak the control protocol now: the polling itself moved
+    // off the draw loop and onto `daemon_poll_loop`.
+    use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
 
     /// Root agent indices (no parent), in agent order - the input the production
     /// path feeds to `build_tree_order` (there it's the status-sorted roots).
@@ -2771,49 +2786,116 @@ mod tests {
         });
     }
 
-    /// A reachable daemon's run list is recorded; an unreachable one leaves
+    /// A reachable daemon's answers are recorded; an unreachable one leaves
     /// "unknown" rather than an empty set, which would read as "nothing is
     /// running" and flip every healthy run to STALE.
+    ///
+    /// Drives the real polling path: one round against a socket, handed to the
+    /// dashboard the way the background loop hands it over.
     #[tokio::test]
-    async fn sync_daemon_runs_records_the_list_or_unknown() {
+    async fn a_poll_round_records_the_daemons_answers_or_says_it_did_not_answer() {
         use leviath_runtime::control_socket::{bind_control_listener, control_id};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let dir = tempfile::tempdir().unwrap();
         let id = control_id(dir.path());
         let mut listener = bind_control_listener(&id).unwrap();
+        // Serialized from the real type: a hand-written interaction body is a
+        // test of my JSON, and the wire shape is the thing under test.
+        let interactions = serde_json::to_string(&ControlResponse::Interactions {
+            interactions: vec![(
+                "run-1".to_string(),
+                interaction::InteractionRequest::free_text("q1", "?", "main", true),
+            )],
+        })
+        .unwrap()
+            + "\n";
+        // Two connections: a round asks two questions, each on its own.
         let server = tokio::spawn(async move {
-            let stream = listener
-                .accept()
-                .await
-                .expect("accept succeeds")
-                .expect("our own connection is admitted");
-            let (read_half, mut write_half) = tokio::io::split(stream);
-            let mut lines = BufReader::new(read_half).lines();
-            let _ = lines.next_line().await;
-            let _ = write_half
-                .write_all(
-                    b"{\"result\":\"list\",\"runs\":[{\"run_id\":\"run-a\",\"status\":\"Active\",\
-                      \"stage\":\"plan\",\"iteration\":1,\"tool_calls\":0}]}\n",
-                )
-                .await;
+            for reply in [
+                interactions.into_bytes(),
+                b"{\"result\":\"list\",\"runs\":[{\"run_id\":\"run-a\",\"status\":\"Active\",\
+                   \"stage\":\"plan\",\"iteration\":1,\"tool_calls\":0}]}\n"
+                    .to_vec(),
+            ] {
+                let stream = listener
+                    .accept()
+                    .await
+                    .expect("accept succeeds")
+                    .expect("our own connection is admitted");
+                let (read_half, mut write_half) = tokio::io::split(stream);
+                let mut lines = BufReader::new(read_half).lines();
+                let _ = lines.next_line().await;
+                let _ = write_half.write_all(&reply).await;
+            }
         });
 
         let mut dash = make_test_dashboard();
-        dash.sync_daemon_runs(&ControlClient::new(id)).await;
+        let polls = dash
+            .take_daemon_poll_tx()
+            .expect("a fresh dashboard has its poll sender");
+        polls
+            .send(super::super::poll_daemon(&ControlClient::new(id)).await)
+            .unwrap();
+        let _ = server.await;
+        dash.drain_daemon_polls();
         assert_eq!(
             dash.daemon_run_ids,
             Some(["run-a".to_string()].into_iter().collect())
         );
-        let _ = server.await;
+        assert_eq!(
+            dash.pending_interactions.get("run-1").map(|r| r.id.clone()),
+            Some("q1".to_string())
+        );
 
-        // No daemon at all → unknown, not "none running".
+        // No daemon at all → unknown, not "none running", and the interactions
+        // already on screen are left where they are rather than blanked.
         let gone = tempfile::tempdir().unwrap();
-        dash.sync_daemon_runs(&ControlClient::new(control_id(
-            &gone.path().join("no-daemon"),
-        )))
-        .await;
+        polls
+            .send(
+                super::super::poll_daemon(&ControlClient::new(control_id(
+                    &gone.path().join("no-daemon"),
+                )))
+                .await,
+            )
+            .unwrap();
+        dash.drain_daemon_polls();
         assert_eq!(dash.daemon_run_ids, None);
+        assert!(
+            dash.pending_interactions.contains_key("run-1"),
+            "a round that did not answer must not blank the prompts on screen"
+        );
+    }
+
+    /// Only the newest round is applied. Each carries the whole answer, so an
+    /// older one describes a daemon state that has already been superseded -
+    /// and applying it would flicker the run list back a step.
+    #[test]
+    fn draining_the_polls_applies_only_the_newest_round() {
+        let mut dash = make_test_dashboard();
+        let polls = dash
+            .take_daemon_poll_tx()
+            .expect("a fresh dashboard has its poll sender");
+        for id in ["old-run", "new-run"] {
+            polls
+                .send(crate::commands::dashboard::types::DaemonPoll {
+                    interactions: None,
+                    run_ids: Some([id.to_string()].into_iter().collect()),
+                })
+                .unwrap();
+        }
+        dash.drain_daemon_polls();
+        assert_eq!(
+            dash.daemon_run_ids,
+            Some(["new-run".to_string()].into_iter().collect())
+        );
+
+        // Nothing queued: the last round stands rather than being cleared.
+        dash.drain_daemon_polls();
+        assert_eq!(
+            dash.daemon_run_ids,
+            Some(["new-run".to_string()].into_iter().collect())
+        );
     }
 
     /// The messages the log pane holds, newest last.
@@ -2841,9 +2923,9 @@ mod tests {
                 assert!(dash.daemon_link.chip().is_none(), "healthy at first");
 
                 // Two failed polls: one announcement.
-                dash.sync_daemon_runs(&poll).await;
+                let _ = poll.request(&ControlRequest::List).await;
                 dash.sync_daemon_link(&poll);
-                dash.sync_daemon_runs(&poll).await;
+                let _ = poll.request(&ControlRequest::List).await;
                 dash.sync_daemon_link(&poll);
                 assert_eq!(
                     log_messages(&dash),
@@ -2864,9 +2946,9 @@ mod tests {
                             health: Default::default(),
                         }
                     });
-                dash.sync_daemon_runs(&poll).await;
+                let _ = poll.request(&ControlRequest::List).await;
                 dash.sync_daemon_link(&poll);
-                dash.sync_daemon_runs(&poll).await;
+                let _ = poll.request(&ControlRequest::List).await;
                 dash.sync_daemon_link(&poll);
                 server.await.unwrap();
                 let messages = log_messages(&dash);
@@ -2910,14 +2992,14 @@ mod tests {
                 // The first daemon, met and lost.
                 let (_c, _e, server) =
                     identified_daemon_in(dir.path(), same_code_daemon(1), 1, empty);
-                dash.sync_daemon_runs(&poll).await;
+                let _ = poll.request(&ControlRequest::List).await;
                 dash.sync_daemon_link(&poll);
                 server.await.unwrap();
                 assert!(
                     log_messages(&dash).is_empty(),
                     "meeting the daemon is not news"
                 );
-                dash.sync_daemon_runs(&poll).await;
+                let _ = poll.request(&ControlRequest::List).await;
                 dash.sync_daemon_link(&poll);
                 assert_eq!(log_messages(&dash).len(), 1, "gone");
 
@@ -2925,7 +3007,7 @@ mod tests {
                 let mut newer = same_code_daemon(2);
                 newer.build = "newer-build".to_string();
                 let (_c, _e, server) = identified_daemon_in(dir.path(), newer, 2, empty);
-                dash.sync_daemon_runs(&poll).await;
+                let _ = poll.request(&ControlRequest::List).await;
                 dash.sync_daemon_link(&poll);
                 let messages = log_messages(&dash);
                 assert_eq!(messages.len(), 3, "{messages:?}");
@@ -2942,7 +3024,7 @@ mod tests {
                 assert_eq!(dash.toasts.len(), 3);
 
                 // Said once: another successful poll adds nothing.
-                dash.sync_daemon_runs(&poll).await;
+                let _ = poll.request(&ControlRequest::List).await;
                 dash.sync_daemon_link(&poll);
                 server.await.unwrap();
                 assert_eq!(log_messages(&dash).len(), 3);
@@ -2952,7 +3034,7 @@ mod tests {
                 // the chip comes down without a word.
                 let (_c, _e, server) =
                     identified_daemon_in(dir.path(), same_code_daemon(3), 1, empty);
-                dash.sync_daemon_runs(&poll).await;
+                let _ = poll.request(&ControlRequest::List).await;
                 dash.sync_daemon_link(&poll);
                 server.await.unwrap();
                 assert!(dash.daemon_link.chip().is_none(), "the chip is down");
@@ -3874,51 +3956,6 @@ mod tests {
                 cleanup_run(run_id);
             },
         );
-    }
-
-    #[tokio::test]
-    async fn sync_interactions_populates_map_from_daemon() {
-        use leviath_runtime::control_socket::{
-            ControlClient, ControlResponse, bind_control_listener, control_id,
-        };
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        let dir = tempfile::tempdir().unwrap();
-        let id = control_id(dir.path());
-        let mut listener = bind_control_listener(&id).unwrap();
-        let server = tokio::spawn(async move {
-            let stream = listener
-                .accept()
-                .await
-                .expect("accept succeeds")
-                .expect("our own connection is admitted");
-            let (r, mut w) = tokio::io::split(stream);
-            let mut lines = BufReader::new(r).lines();
-            let _ = lines.next_line().await.unwrap();
-            let req = interaction::InteractionRequest::free_text("q1", "?", "main", true);
-            let resp = ControlResponse::Interactions {
-                interactions: vec![("run-1".to_string(), req)],
-            };
-            let mut line = serde_json::to_string(&resp).unwrap();
-            line.push('\n');
-            w.write_all(line.as_bytes()).await.unwrap();
-        });
-        let mut dash = make_test_dashboard();
-        dash.sync_interactions(&ControlClient::new(id)).await;
-        server.await.unwrap();
-        assert_eq!(
-            dash.pending_interactions.get("run-1").map(|r| r.id.clone()),
-            Some("q1".to_string())
-        );
-    }
-
-    #[tokio::test]
-    async fn sync_interactions_no_daemon_leaves_map_untouched() {
-        use leviath_runtime::control_socket::{ControlClient, control_id};
-        let dir = tempfile::tempdir().unwrap();
-        let mut dash = make_test_dashboard();
-        dash.sync_interactions(&ControlClient::new(control_id(&dir.path().join("nope"))))
-            .await;
-        assert!(dash.pending_interactions.is_empty());
     }
 
     // ── Marks for group kill / delete ─────────────────────────────────────

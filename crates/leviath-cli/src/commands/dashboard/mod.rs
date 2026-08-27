@@ -46,6 +46,63 @@ use tokio::sync::mpsc;
 use state::Dashboard;
 use types::DaemonCommand;
 
+/// How often the poller asks the daemon what it is holding.
+///
+/// Slower than the 100ms draw tick on purpose. Two socket round trips per
+/// frame was never a rate anything needed - a run's status changes on the
+/// order of seconds - and the old loop only ran at that rate because it was
+/// doing the asking inline.
+const DAEMON_POLL_INTERVAL: Duration = Duration::from_millis(300);
+
+/// Background task that asks the daemon what it is holding, and publishes each
+/// round for the draw loop to pick up.
+///
+/// This exists so the dashboard never waits on the socket. The two questions -
+/// the open interactions and the live run ids - used to be `await`ed inside the
+/// tick, between advancing the frame and drawing it, so a daemon that was busy,
+/// wedged, or part-way through a restart stopped the whole UI: no redraw, no
+/// keys, nothing, until it answered. A control request's deadline is thirty
+/// seconds and there were two per tick.
+///
+/// Every round is sent whether or not the daemon answered, because "it did not
+/// say" is itself information the run list needs: a `None` run set means the
+/// disk view is taken at face value rather than every run being marked stale.
+///
+/// The link bookkeeping this drives - reachable, restarted, build mismatch -
+/// needs nothing sent: `ControlClient` shares it across clones, so the
+/// dashboard's own handle sees what this task's requests learned.
+async fn daemon_poll_loop(
+    control: ControlClient,
+    polls: mpsc::UnboundedSender<types::DaemonPoll>,
+    interval: Duration,
+) {
+    loop {
+        // A closed receiver means the dashboard has exited; nothing to poll for.
+        if polls.send(poll_daemon(&control).await).is_err() {
+            return;
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// One round of the two questions, each answering `None` when the daemon did
+/// not. Separate from the loop so a test can take a single round against a
+/// socket instead of racing a timer.
+async fn poll_daemon(control: &ControlClient) -> types::DaemonPoll {
+    types::DaemonPoll {
+        interactions: match control.request(&ControlRequest::ListInteractions).await {
+            Ok(ControlResponse::Interactions { interactions }) => Some(interactions),
+            _ => None,
+        },
+        run_ids: match control.request(&ControlRequest::List).await {
+            Ok(ControlResponse::List { runs, .. }) => {
+                Some(runs.into_iter().map(|entry| entry.run_id).collect())
+            }
+            _ => None,
+        },
+    }
+}
+
 /// Background task that forwards the dashboard's control commands (cancel /
 /// answer-interaction / message) to the shared-world daemon over the control
 /// socket. The dashboard is a pure client: it never drives agents itself.
@@ -180,13 +237,12 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
         dashboard.tick_count += 1;
         dashboard.tick_toasts();
 
-        // Pull the daemon's open interactions (best-effort; ignore if the daemon
-        // is unreachable) so waiting agents show their prompt.
-        dashboard.sync_interactions(control).await;
-
-        // …and which runs it actually holds, so a run on disk that nothing is
-        // driving can be shown as stale rather than ACTIVE.
-        dashboard.sync_daemon_runs(control).await;
+        // Take whatever the poller has learned: the daemon's open interactions,
+        // so waiting agents show their prompt, and which runs it actually
+        // holds, so a run on disk that nothing is driving shows as stale rather
+        // than ACTIVE. Drained, never awaited - the socket must not be able to
+        // stop the UI (see `daemon_poll_loop`).
+        dashboard.drain_daemon_polls();
 
         // …and whether those polls reached a daemon at all, and which one.
         dashboard.sync_daemon_link(control);
@@ -281,6 +337,17 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
         daemon_outcome_tx,
     ));
 
+    // Ask the daemon what it is holding, off the draw loop, for the same
+    // reason: the UI keeps its own time whatever the socket is doing.
+    let daemon_poll_tx = dashboard
+        .take_daemon_poll_tx()
+        .expect("a fresh dashboard has its daemon poll sender");
+    tokio::spawn(daemon_poll_loop(
+        control.clone(),
+        daemon_poll_tx,
+        DAEMON_POLL_INTERVAL,
+    ));
+
     // Run MCP logins/tests off the UI loop. A freshly-built dashboard always
     // has its background channel ends.
     let (mcp_cmd_rx, mcp_outcome_tx) = dashboard
@@ -356,6 +423,36 @@ mod tests {
     #[test]
     fn dashboard_args_can_be_constructed() {
         let _args = DashboardArgs {};
+    }
+
+    /// The poller publishes a round whether or not the daemon answered, and
+    /// stops once nobody is listening.
+    ///
+    /// A round that answered nothing is not a round to skip: `None` run ids
+    /// mean "the daemon did not say", which is what stops the run list
+    /// condemning every run on disk as stale.
+    #[tokio::test]
+    async fn the_poll_loop_publishes_rounds_until_the_dashboard_goes() {
+        use leviath_runtime::control_socket::control_id;
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let control = ControlClient::new(control_id(&dir.path().join("no-daemon")));
+        let task = tokio::spawn(daemon_poll_loop(
+            control,
+            tx,
+            std::time::Duration::from_millis(1),
+        ));
+
+        let round = rx.recv().await.expect("a round is published");
+        assert_eq!(
+            round,
+            types::DaemonPoll::default(),
+            "nothing answered, and the round says so rather than not arriving"
+        );
+
+        // Dropping the receiver is how the dashboard says it has exited.
+        drop(rx);
+        task.await.expect("the loop returns rather than hanging");
     }
 
     #[test]
