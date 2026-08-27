@@ -11,6 +11,21 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+- Fixed: a stage whose model can answer at nearly the width of its own context
+  window could be rejected outright for asking. The reply budget was everything
+  the window had left after the prompt, and "what the prompt costs" there is
+  `estimate_tokens`, bytes over four, while the provider counts with its own
+  tokenizer and counts the tool schemas besides. Measured on a wide-researcher
+  run against grok-4.6 (500k window, 450k output cap): the window put the prompt
+  at 106,172 tokens and asked for the other 393,828 back, the provider counted
+  the same prompt at 108,277, and the call died on `maximum context length is
+  500000 tokens. However, you requested about 502105 tokens`. The budget now
+  keeps a sixteenth of the prompt back as headroom, which costs nothing anywhere
+  the model's own cap is the smaller number and is the difference between a
+  shorter answer and a dead stage where it is not.
+
 ## 0.5.4 - 2026-08-27
 
 - Fixed: a tool call streamed from the native Anthropic provider arrived as two
