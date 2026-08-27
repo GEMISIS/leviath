@@ -4049,35 +4049,39 @@ mod tests {
 
     #[test]
     fn marked_delete_confirm_carries_all_ids_and_removes_them() {
-        let mut dash = make_test_dashboard();
-        dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Complete));
-        dash.agents
-            .push(make_test_agent("run-2", AgentDisplayStatus::Complete));
-        dash.agents
-            .push(make_test_agent("run-3", AgentDisplayStatus::Complete));
-        dash.update_display_indices();
-        dash.marked.insert("run-1".to_string());
-        dash.marked.insert("run-2".to_string());
-        dash.handle_key(key(KeyCode::Char('d')));
+        // Isolated because confirming reaches the filesystem: a delete now
+        // takes each run's sub-agent tree, which is read from the runs dir.
+        crate::runstate::with_isolated_runs_dir("marked-delete-carries-ids", |_d| {
+            let mut dash = make_test_dashboard();
+            dash.agents
+                .push(make_test_agent("run-1", AgentDisplayStatus::Complete));
+            dash.agents
+                .push(make_test_agent("run-2", AgentDisplayStatus::Complete));
+            dash.agents
+                .push(make_test_agent("run-3", AgentDisplayStatus::Complete));
+            dash.update_display_indices();
+            dash.marked.insert("run-1".to_string());
+            dash.marked.insert("run-2".to_string());
+            dash.handle_key(key(KeyCode::Char('d')));
 
-        let (action, dialog) = dash.pending_confirm.clone().expect("d opens the dialog");
-        assert_eq!(
-            action,
-            ConfirmAction::Delete {
-                run_ids: vec!["run-1".to_string(), "run-2".to_string()],
-            }
-        );
-        assert!(
-            format!("{:?}", dialog.body).contains("Delete 2 runs"),
-            "the body states the count: {:?}",
-            dialog.body
-        );
+            let (action, dialog) = dash.pending_confirm.clone().expect("d opens the dialog");
+            assert_eq!(
+                action,
+                ConfirmAction::Delete {
+                    run_ids: vec!["run-1".to_string(), "run-2".to_string()],
+                }
+            );
+            assert!(
+                format!("{:?}", dialog.body).contains("Delete 2 runs"),
+                "the body states the count: {:?}",
+                dialog.body
+            );
 
-        dash.handle_key(key(KeyCode::Char('y')));
-        assert_eq!(dash.agents.len(), 1, "both marked runs are gone");
-        assert_eq!(dash.agents[0].id, "run-3");
-        assert!(dash.marked.is_empty(), "acted-on ids leave the mark set");
+            dash.handle_key(key(KeyCode::Char('y')));
+            assert_eq!(dash.agents.len(), 1, "both marked runs are gone");
+            assert_eq!(dash.agents[0].id, "run-3");
+            assert!(dash.marked.is_empty(), "acted-on ids leave the mark set");
+        });
     }
 
     #[test]

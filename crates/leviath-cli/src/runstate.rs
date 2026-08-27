@@ -699,6 +699,88 @@ pub fn list_runs() -> Vec<RunMeta> {
     list_runs_in_dir(runs_dir())
 }
 
+/// Every run below `root_id` in the sub-agent tree - its children, their
+/// children, and so on - deepest first, `root_id` itself excluded.
+///
+/// This is the unit a delete has to act on. A sub-agent run is not a separate
+/// thing a user started: it exists because its parent spawned it, it is drawn
+/// nested under its parent, and once the parent's directory is gone nothing
+/// left on disk explains why it is there. The dashboard treats a run whose
+/// parent is absent as a root, so deleting a parent alone did not remove its
+/// sub-agents - it *promoted* them to the top of the list.
+///
+/// Deepest first so a caller removing the family takes a child's directory
+/// before its parent's. A partial failure then leaves a parent whose children
+/// are gone, which reads as an ordinary finished run, rather than the orphan
+/// this exists to prevent.
+///
+/// Two sources, unioned, because neither sees the whole tree on its own: the
+/// scan over every run's `parent_run_id` misses a child whose `meta.json` will
+/// not parse (`list_runs` skips it), and a parent's own `children` list misses
+/// one spawned by a build that did not persist that field. An id named only by
+/// `children` counts only if its directory is really there, so a pruned or
+/// never-created child is not reported as something to delete.
+///
+/// Cycle-safe: no run is queued twice, so metadata claiming an ancestor as a
+/// child ends the walk rather than looping forever.
+pub fn descendant_run_ids(root_id: &str) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+
+    let all = list_runs();
+    let mut by_parent: HashMap<&str, Vec<&str>> = HashMap::new();
+    for meta in &all {
+        if let Some(parent) = meta.parent_run_id.as_deref() {
+            by_parent.entry(parent).or_default().push(&meta.run_id);
+        }
+    }
+    for meta in &all {
+        let known = by_parent.entry(&meta.run_id).or_default();
+        for child in &meta.children {
+            if !known.contains(&child.as_str()) {
+                known.push(child);
+            }
+        }
+    }
+
+    let mut seen: HashSet<&str> = HashSet::from([root_id]);
+    let mut frontier: Vec<&str> = vec![root_id];
+    let mut levels: Vec<Vec<String>> = Vec::new();
+    while !frontier.is_empty() {
+        let mut level = Vec::new();
+        let mut next = Vec::new();
+        for id in frontier {
+            for child in by_parent.get(id).map(Vec::as_slice).unwrap_or_default() {
+                if !seen.insert(child) || !run_dir(child).is_dir() {
+                    continue;
+                }
+                level.push((*child).to_string());
+                next.push(*child);
+            }
+        }
+        levels.push(level);
+        frontier = next;
+    }
+    levels.into_iter().rev().flatten().collect()
+}
+
+/// `root_id` and everything spawned beneath it, deepest first: the set that
+/// "delete this run" acts on, wherever it is asked for.
+///
+/// A sub-agent run has no life of its own - it is drawn nested under its
+/// parent and exists only because that parent spawned it - so forgetting the
+/// parent has to forget the children too. The relationship is one-way: this
+/// never reaches upwards, so deleting a child leaves its parent and its
+/// siblings exactly where they were.
+///
+/// One definition for the API route and the dashboard, so the two cannot
+/// disagree about what a delete covers. See [`descendant_run_ids`] for the
+/// ordering and for how the tree is read off disk.
+pub fn family_of(root_id: &str) -> Vec<String> {
+    let mut ids = descendant_run_ids(root_id);
+    ids.push(root_id.to_string());
+    ids
+}
+
 /// [`list_runs`] through a [`StatCache`], for pollers: each `meta.json` is
 /// re-parsed only when its stat changes, and cache entries for deleted runs
 /// are dropped. Same ordering and skip-unreadable behavior as `list_runs`.
@@ -3295,6 +3377,118 @@ mod tests {
             append_dashboard_log(&unique);
             let content = std::fs::read_to_string(dashboard_log_path()).unwrap_or_default();
             assert!(content.contains(&unique));
+        });
+    }
+
+    // ─── descendant_run_ids / family_of ────────────────────────────────────
+
+    /// Plant a run directory whose meta names `parent` as its parent and
+    /// `children` as its children.
+    fn plant_run(id: &str, parent: Option<&str>, children: &[&str]) {
+        let mut meta = RunMeta::new(
+            id.to_string(),
+            "agent".into(),
+            "/p".into(),
+            "task".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        meta.parent_run_id = parent.map(str::to_string);
+        meta.children = children.iter().map(|c| (*c).to_string()).collect();
+        create_run(&meta).expect("run dir");
+    }
+
+    /// The whole tree below a run, and nothing beside it.
+    ///
+    /// Deepest first is the contract callers rely on to delete a child's
+    /// directory before its parent's, so the grandchild has to lead.
+    #[test]
+    fn descendants_are_the_whole_subtree_deepest_first() {
+        with_isolated_runs_dir("descendants-subtree", |_d| {
+            // The parent remembers its children *and* the children name their
+            // parent, which is what a healthy tree looks like on disk. The two
+            // sources agreeing must report each child once.
+            plant_run("root", None, &["kid-a", "kid-b"]);
+            plant_run("kid-a", Some("root"), &["grandkid"]);
+            plant_run("kid-b", Some("root"), &[]);
+            plant_run("grandkid", Some("kid-a"), &[]);
+            // A run of its own, and a run under it: neither is below `root`.
+            plant_run("stranger", None, &[]);
+            plant_run("stranger-kid", Some("stranger"), &[]);
+
+            let found = descendant_run_ids("root");
+            assert_eq!(found.len(), 3, "root has three runs below it: {found:?}");
+            assert_eq!(found[0], "grandkid", "deepest first: {found:?}");
+            assert!(found.contains(&"kid-a".to_string()));
+            assert!(found.contains(&"kid-b".to_string()));
+            assert!(!found.contains(&"stranger".to_string()));
+            assert!(!found.contains(&"stranger-kid".to_string()));
+
+            // The family is the same set plus the run itself, last.
+            let family = family_of("root");
+            assert_eq!(family.len(), 4);
+            assert_eq!(family.last().map(String::as_str), Some("root"));
+        });
+    }
+
+    /// Nothing walks upwards: deleting a child must leave its parent and its
+    /// siblings alone, which is only true if they were never named.
+    #[test]
+    fn descendants_of_a_child_never_reach_its_parent_or_siblings() {
+        with_isolated_runs_dir("descendants-no-upwards", |_d| {
+            plant_run("root", None, &[]);
+            plant_run("kid-a", Some("root"), &[]);
+            plant_run("kid-b", Some("root"), &[]);
+            plant_run("grandkid", Some("kid-a"), &[]);
+
+            assert_eq!(descendant_run_ids("kid-a"), vec!["grandkid".to_string()]);
+            assert!(descendant_run_ids("kid-b").is_empty());
+            assert_eq!(family_of("kid-b"), vec!["kid-b".to_string()]);
+        });
+    }
+
+    /// A child whose `meta.json` will not parse is skipped by `list_runs`, so
+    /// the parent-scan cannot see it. The parent's own `children` list can, and
+    /// that is the half that keeps a corrupt child from being left behind.
+    #[test]
+    fn a_child_only_the_parent_remembers_is_still_found() {
+        with_isolated_runs_dir("descendants-unparseable-child", |_d| {
+            plant_run("root", None, &["broken-kid", "never-existed"]);
+            plant_run("broken-kid", Some("root"), &[]);
+            std::fs::write(run_dir("broken-kid").join("meta.json"), "{not json")
+                .expect("garble the child's record");
+
+            let found = descendant_run_ids("root");
+            // Found through `children`, because the scan cannot read it...
+            assert_eq!(found, vec!["broken-kid".to_string()]);
+            // ...and an id with no directory behind it is not a deletion
+            // waiting to happen, so it is not reported at all.
+            assert!(!found.contains(&"never-existed".to_string()));
+        });
+    }
+
+    /// Metadata claiming an ancestor as a child ends the walk instead of
+    /// looping forever.
+    #[test]
+    fn a_cycle_in_the_tree_terminates() {
+        with_isolated_runs_dir("descendants-cycle", |_d| {
+            plant_run("a", Some("b"), &["b"]);
+            plant_run("b", Some("a"), &["a"]);
+
+            assert_eq!(descendant_run_ids("a"), vec!["b".to_string()]);
+            assert_eq!(descendant_run_ids("b"), vec!["a".to_string()]);
+        });
+    }
+
+    /// A run nobody spawned anything under, and a run that is not there at
+    /// all, both have nothing below them.
+    #[test]
+    fn a_lone_run_has_no_descendants() {
+        with_isolated_runs_dir("descendants-lone", |_d| {
+            plant_run("lonely", None, &[]);
+            assert!(descendant_run_ids("lonely").is_empty());
+            assert!(descendant_run_ids("no-such-run").is_empty());
         });
     }
 }
