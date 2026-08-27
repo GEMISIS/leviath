@@ -154,6 +154,7 @@ pub(crate) fn stage_setup_from(
         routing: stage.tool_result_routing.clone(),
         accepts_messages: stage.accepts_messages,
         context_layout: stage.context_layout.clone(),
+        context_hide: stage.context_hide.clone(),
         system_prompt,
         output,
     }
@@ -466,6 +467,7 @@ mod stage_instructions_fit_tests {
             routing: None,
             accepts_messages: true,
             context_layout: None,
+            context_hide: Vec::new(),
             system_prompt: Some(prompt),
             output: None,
         };
@@ -535,6 +537,7 @@ mod stage_instructions_fit_tests {
             routing: None,
             accepts_messages: true,
             context_layout: None,
+            context_hide: Vec::new(),
             system_prompt: Some(prompt),
             output: None,
         };
@@ -621,6 +624,7 @@ mod stage_instructions_fit_tests {
             routing: None,
             accepts_messages: true,
             context_layout: None,
+            context_hide: Vec::new(),
             system_prompt: Some(prompt),
             output: None,
         };
@@ -700,6 +704,7 @@ mod stage_instructions_fit_tests {
             routing: None,
             accepts_messages: true,
             context_layout: Some(scoped),
+            context_hide: Vec::new(),
             system_prompt: Some(prompt),
             output: None,
         };

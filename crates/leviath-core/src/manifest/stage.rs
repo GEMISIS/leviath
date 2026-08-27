@@ -51,11 +51,11 @@ const STAGE_KEYS: &[&str] = &[
 
 /// Every key read off `[stages.<name>.context]`.
 ///
-/// Just the one. A stage narrows its window by listing the regions it wants;
-/// what it leaves out is hidden rather than destroyed, so there is no separate
-/// `hidden`/`visible` key to write - and an author who guesses one now hears
+/// `regions` re-declares the whole layout for the stage; `hide` drops named
+/// regions from an otherwise inherited one. Either way what is left out is
+/// hidden rather than destroyed. An author who guesses any other key hears
 /// about it instead of quietly carrying the region they meant to drop.
-const CONTEXT_KEYS: &[&str] = &["regions"];
+const CONTEXT_KEYS: &[&str] = &["regions", "hide"];
 
 /// Every key read off `[stages.<name>.tool_routing]`.
 const TOOL_ROUTING_KEYS: &[&str] = &[
@@ -540,6 +540,26 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         if let Some(regions_table) = context_table.get("regions").and_then(|v| v.as_table()) {
             let (stage_regions, stage_total) = parse_region_layout(regions_table)?;
             stage.context_layout = Some(ContextLayout::new(stage_regions, stage_total));
+        }
+        // `hide = ["sources"]`: the regions this stage leaves out of its
+        // prompt. Names are checked against the blueprint once every layout is
+        // known (`Blueprint::validate`); here only the shape is.
+        if let Some(hide) = context_table.get("hide") {
+            let names = hide
+                .as_array()
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .map(|v| v.as_str().map(str::to_string))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or_else(|| {
+                    Error::Other(format!(
+                        "stage '{stage_name}': context.hide must be a list of region names, \
+                         e.g. hide = [\"sources\"]"
+                    ))
+                })?;
+            stage.context_hide = names;
         }
     }
 

@@ -42,6 +42,8 @@ pub struct StageSetup {
     pub accepts_messages: bool,
     /// Optional stage-specific context layout to swap to on entry.
     pub context_layout: Option<leviath_core::ContextLayout>,
+    /// Regions this stage leaves out of its prompt (`[stages.<name>.context] hide`).
+    pub context_hide: Vec<String>,
     /// Optional stage instructions injected as pinned context on entry.
     pub system_prompt: Option<String>,
     /// The output shape resolved for this stage (agent, stage, and the
@@ -953,8 +955,20 @@ pub(crate) fn apply_stage_context(
     setup: &StageSetup,
     window: &mut ContextWindow,
 ) -> Result<(), String> {
-    if let Some(layout) = &setup.context_layout {
-        crate::context_setup::apply_layout(window, layout);
+    // The hidden set describes the stage being entered and nothing else. A
+    // stage with a layout of its own gets exactly what that layout leaves
+    // out; a stage without one carries everything (it used to inherit the
+    // previous stage's hidden set, so a stage after a narrowed one lost
+    // regions it never asked to lose); and `hide` then removes what this
+    // stage's own instructions never read.
+    match &setup.context_layout {
+        Some(layout) => crate::context_setup::apply_layout(window, layout),
+        None => window.hidden.clear(),
+    }
+    for name in &setup.context_hide {
+        if !leviath_core::blueprint::ALWAYS_VISIBLE_REGIONS.contains(&name.as_str()) {
+            window.hidden.insert(name.clone());
+        }
     }
 
     let target = stage_instructions_target(window);

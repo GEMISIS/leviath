@@ -210,12 +210,7 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
     // would silently drop that stage's instructions - the region is the
     // runtime's to fill, not something an author has to remember to re-declare
     // in every stage.
-    let always_visible = [
-        "conversation",
-        "tool_results",
-        crate::output_tool::FINAL_OUTPUT_REGION,
-        leviath_core::layout::STAGE_INSTRUCTIONS_REGION,
-    ];
+    let always_visible = leviath_core::blueprint::ALWAYS_VISIBLE_REGIONS;
     let mut hidden = std::collections::HashSet::new();
     for existing in &window.regions {
         if kept.contains(existing.name.as_str()) {

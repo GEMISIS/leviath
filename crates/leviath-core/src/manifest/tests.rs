@@ -5371,3 +5371,68 @@ model = { models = ["claude-sonnet-5"], parameters = { max_output_tokens = "100%
         }))
     );
 }
+
+/// `[stages.<name>.context] hide = [...]` reads as a list of region names,
+/// is checked against the blueprint's layouts, and cannot name one of the
+/// regions every stage carries.
+#[test]
+fn a_stage_can_hide_a_region_it_does_not_read() {
+    let good = r#"
+[agent]
+name = "t"
+
+[context.regions]
+sources = { kind = "temporary", budget = "30%" }
+claims = { kind = "pinned", budget = "10%" }
+
+[stages.gather]
+mode = "autonomous"
+model = { models = ["claude-sonnet-5"] }
+
+[stages.polish]
+mode = "autonomous"
+model = { models = ["claude-sonnet-5"] }
+
+[stages.polish.context]
+hide = ["sources"]
+"#;
+    let manifest = parse_manifest(good).expect("loads");
+    assert_eq!(manifest.stages[1].context_hide, vec!["sources".to_string()]);
+    assert!(manifest.stages[0].context_hide.is_empty());
+    manifest
+        .validate()
+        .expect("a hidden region the layout declares is fine");
+
+    let bad_shape = good.replace(r#"hide = ["sources"]"#, r#"hide = "sources""#);
+    let err = parse_manifest(&bad_shape).expect_err("not a list");
+    assert!(
+        err.to_string().contains("context.hide must be a list"),
+        "{err}"
+    );
+
+    let unknown = good.replace(r#"hide = ["sources"]"#, r#"hide = ["sauces"]"#);
+    let err = parse_manifest(&unknown)
+        .expect("shape is fine")
+        .validate()
+        .expect_err("no such region");
+    assert!(err.to_string().contains("'sauces'"), "{err}");
+
+    let always = good.replace(r#"hide = ["sources"]"#, r#"hide = ["conversation"]"#);
+    let err = parse_manifest(&always)
+        .expect("shape is fine")
+        .validate()
+        .expect_err("cannot hide the conversation");
+    assert!(err.to_string().contains("cannot hide"), "{err}");
+
+    // A tool result routed to a region the stage hid is a result the stage
+    // cannot read, and is refused the way routing to an undeclared region is.
+    let routed = good.replace(
+        r#"hide = ["sources"]"#,
+        "hide = [\"sources\"]\n\n[stages.polish.tool_routing]\ndefault_region = \"sources\"",
+    );
+    let err = parse_manifest(&routed)
+        .expect("shape is fine")
+        .validate()
+        .expect_err("routed into a hidden region");
+    assert!(err.to_string().contains("sources"), "{err}");
+}
