@@ -5336,3 +5336,38 @@ task = { kind = "pinned", max_tokens = 100, volatility = "immutable" }
     assert!(message.contains("immutable"), "{message}");
     assert!(message.contains("stable"), "{message}");
 }
+
+/// A `max_output_tokens` the loader cannot read fails the load, naming the
+/// stage: passed through as written it would reach the provider as nonsense
+/// or as no cap at all, and a typo in a limit only shows up as a bill.
+#[test]
+fn a_bad_output_cap_fails_the_load_and_a_relative_one_is_kept() {
+    let bad = r#"
+[agent]
+name = "t"
+
+[stages.write]
+mode = "autonomous"
+model = { models = ["claude-sonnet-5"], parameters = { max_output_tokens = "lots" } }
+"#;
+    let err = parse_manifest(bad).expect_err("rejected");
+    assert!(err.to_string().contains("stage 'write'"), "{err}");
+    assert!(err.to_string().contains("max_output_tokens"), "{err}");
+
+    let good = r#"
+[agent]
+name = "t"
+
+[stages.write]
+mode = "autonomous"
+model = { models = ["claude-sonnet-5"], parameters = { max_output_tokens = "100% of report" } }
+"#;
+    let manifest = parse_manifest(good).expect("loads");
+    assert_eq!(
+        manifest.stages[0].model.output_cap(),
+        Ok(Some(crate::blueprint::OutputCap::RegionPercent {
+            percent: 1.0,
+            region: "report".to_string()
+        }))
+    );
+}

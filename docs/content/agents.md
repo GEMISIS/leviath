@@ -119,8 +119,27 @@ request_timeout_secs = 120         # per-stage inference wall-clock cap
 
 [stages.analyze.model.parameters]  # free-form, passed through to the provider
 temperature = 0.2
-max_tokens  = 8000
+max_output_tokens = "40%"          # see below; everything else goes to the provider as written
 ```
+
+`max_output_tokens` is the one parameter Leviath reads itself: it is the most one reply may
+contain. Three forms:
+
+| Form | Meaning |
+|---|---|
+| `max_output_tokens = 8000` | a fixed number of tokens, sent as written |
+| `max_output_tokens = "40%"` | that share of the model's context window |
+| `max_output_tokens = "100% of claims"` | that share of the `claims` region's budget, for a stage whose reply fills a region |
+
+The table form `{ percent = 100, of = "claims" }` is the same as the last one. A relative cap is
+resolved when each request is built, against whichever model the stage landed on, and is never
+more than that model's own maximum. A cap the loader cannot read fails the load, because a limit
+that silently becomes "no limit" is the kind of typo that only shows up as a bill.
+
+Prefer a relative cap for a stage that writes something whose size follows the material (a report,
+a rewrite of a file). A fixed number is easy to set smaller than the thing being written, and a
+reply cut off by its cap is not an answer: the runtime sends it back with the reason and retries
+once at the model's maximum, but the first attempt is still paid for.
 
 Model selection is per stage, and only per stage. Two mistakes here are quiet ones. A top-level
 `[model]` block parses and is read by nothing, and a stage naming no model takes the host default

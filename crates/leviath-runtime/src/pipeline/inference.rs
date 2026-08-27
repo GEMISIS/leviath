@@ -166,9 +166,12 @@ pub(crate) fn build_request(
     let spent = crate::pipeline::calibrated_tokens(window.current_tokens, calibration.as_ref());
     let remaining = window.max_tokens.saturating_sub(spent);
     let caps = provider.capabilities(&stage.model);
-    let output_cap = config
-        .and_then(|c| c.max_output_tokens)
-        .unwrap_or(caps.max_output_tokens);
+    let output_cap = match config.and_then(|c| c.max_output_tokens.as_ref()) {
+        None => caps.max_output_tokens,
+        Some(cap) => cap.resolve(caps.max_context_tokens, caps.max_output_tokens, |region| {
+            window.get_region(region).map(|r| r.max_tokens)
+        }),
+    };
     // The stage's cap is what the last reply did not fit under. The model's
     // own maximum is the most room a retry can be given; a reply that does
     // not fit that either gets asked for in pieces (`cut_off_nudge`).
