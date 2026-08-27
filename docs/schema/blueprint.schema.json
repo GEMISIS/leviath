@@ -425,6 +425,11 @@
               "additionalProperties": {
                 "$ref": "#/$defs/region"
               }
+            },
+            "hide": {
+              "type": "array",
+              "description": "Regions this stage leaves out of its prompt. Hidden, not destroyed: the content is kept and every other stage sees it. Names must be declared by a layout in this blueprint, and the always-visible regions (conversation, tool_results, final_output, stage_instructions) cannot be hidden.",
+              "items": { "type": "string" }
             }
           }
         },
@@ -522,7 +527,7 @@
         },
         "parameters": {
           "type": "object",
-          "description": "Passed to the provider verbatim, so the accepted keys are the provider's.",
+          "description": "Passed to the provider verbatim, so the accepted keys are the provider's. The one key Leviath reads itself is max_output_tokens: a token count, a percentage of the model's context window (\"40%\"), or a percentage of a region's budget (\"100% of claims\").",
           "additionalProperties": true
         }
       }
