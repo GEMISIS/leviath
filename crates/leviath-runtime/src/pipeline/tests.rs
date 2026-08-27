@@ -87,6 +87,89 @@ fn provider(supports_temperature: bool, max_output: usize) -> Arc<dyn Provider> 
 
 // ── build_request branch coverage ──
 
+/// The answer is asked for with room to spare, not for every token the window
+/// estimate says is left.
+///
+/// Regression: `max_tokens` was `window - estimated_prompt`, which is only
+/// right if the estimate is never light. It is bytes-over-four, and the
+/// provider counts with its own tokenizer, so a prompt costing more than
+/// estimated put `real_prompt + max_tokens` over the window and the provider
+/// rejected the request outright. Measured on a wide-researcher run against
+/// grok-4.6 (500k window, 450k output cap): the window believed the prompt was
+/// 106,172 tokens and asked for the other 393,828 back, the provider counted
+/// the same prompt at 108,277, and the call died with "maximum context length
+/// is 500000 tokens. However, you requested about 502105 tokens".
+///
+/// Only models whose output cap approaches their context window can reach it:
+/// anywhere the cap is the smaller number, the `min` below already leaves the
+/// difference as slack.
+#[test]
+fn build_request_leaves_the_window_room_for_an_underestimated_prompt() {
+    const WINDOW: usize = 500_000;
+    const ESTIMATE: usize = 106_172;
+    // What the provider's own tokenizer made of the same prompt.
+    const REAL: usize = 108_277;
+
+    let mut w = ContextWindow::new(WINDOW);
+    w.add_region(Region::new("sys".to_string(), RegionKind::Pinned, WINDOW));
+    w.add_to_region("sys", "the prompt".to_string(), ESTIMATE)
+        .unwrap();
+
+    let si = stage("grok-4.6", vec![], None);
+    let req = build_request(
+        &w,
+        None,
+        &si,
+        // A model that will answer with almost its whole window, which is what
+        // stops the output cap from providing the slack by itself.
+        &provider(true, 450_000),
+        "challenge",
+        0,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+
+    assert!(
+        REAL + req.max_tokens <= WINDOW,
+        "asked for {} output tokens on top of a {REAL}-token prompt, which is \
+         {} over the {WINDOW}-token window",
+        req.max_tokens,
+        (REAL + req.max_tokens).saturating_sub(WINDOW),
+    );
+    // The room given up is headroom, not the whole answer: a stage that has
+    // most of its window free still gets most of it back.
+    assert!(
+        req.max_tokens > (WINDOW - ESTIMATE) * 3 / 4,
+        "gave up too much of the window: {}",
+        req.max_tokens
+    );
+}
+
+/// The headroom comes off the window, not off a cap the model already fits
+/// inside. A stage whose model answers in 4k on a 500k window still gets its
+/// full 4k.
+#[test]
+fn build_request_does_not_shave_an_output_cap_the_window_already_fits() {
+    let mut w = ContextWindow::new(500_000);
+    w.add_region(Region::new("sys".to_string(), RegionKind::Pinned, 500_000));
+    w.add_to_region("sys", "the prompt".to_string(), 100_000)
+        .unwrap();
+
+    let si = stage("m", vec![], None);
+    let req = build_request(
+        &w,
+        None,
+        &si,
+        &provider(true, 4_096),
+        "test-stage",
+        0,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+
+    assert_eq!(req.max_tokens, 4_096);
+}
+
 #[test]
 fn build_request_threads_stage_meta_into_custom_region_render() {
     // The custom region's script echoes the stage metadata build_request
@@ -1870,7 +1953,9 @@ fn the_completion_budget_never_falls_below_the_provider_minimum() {
 }
 
 /// And the clamp must not overshoot: a provider rejects `prompt + completion`
-/// past the window just as readily, so the budget stays inside what is left.
+/// past the window just as readily, so the budget stays inside what is left -
+/// and inside the headroom held back from it, because what is "left" is an
+/// estimate of the prompt rather than a measurement of it.
 #[test]
 fn the_completion_budget_stays_inside_what_the_window_has_left() {
     let mut w = window();
@@ -1888,7 +1973,32 @@ fn the_completion_budget_stays_inside_what_the_window_has_left() {
     )
     .0;
 
-    assert_eq!(req.max_tokens, 10, "10 left means 10 asked for");
+    assert!(
+        req.max_tokens <= 10,
+        "10 left is the most that can be asked for, got {}",
+        req.max_tokens
+    );
+
+    // Half the window free, and the ask is the rest of it less the headroom -
+    // near enough all of it that a stage with room to answer still has it.
+    let mut roomy = window();
+    roomy.current_tokens = roomy.max_tokens / 2;
+    let req = build_request(
+        &roomy,
+        None,
+        &si,
+        &provider(true, 100_000),
+        "implement",
+        1,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+    let left = roomy.max_tokens - roomy.current_tokens;
+    assert!(
+        req.max_tokens < left && req.max_tokens > left * 3 / 4,
+        "expected most of the {left} left, got {}",
+        req.max_tokens
+    );
 }
 
 // ─── estimator calibration (issue #485) ───

@@ -110,6 +110,26 @@ pub(crate) fn hint_blocks(
 /// and the warning beside it says so.
 const MIN_OUTPUT_TOKENS: usize = 1;
 
+/// The share of the prompt held back from the answer when the window, and not
+/// the model's own cap, is what limits the reply. One sixteenth.
+///
+/// The window is shared between the prompt and the answer, and only one of the
+/// two is a measurement: the prompt is [`leviath_core::estimate_tokens`], bytes
+/// over four, while the provider counts with its own tokenizer and counts the
+/// tool schemas and its own message framing besides.
+/// [`PromptCalibration`](crate::pipeline::PromptCalibration) corrects that from
+/// what earlier calls were charged, but it can only correct by what it has
+/// already seen, and a stage's first call carries schemas nothing has measured
+/// yet. Asking for every token the estimate says is left means any remaining
+/// light spot is not a shorter answer but a rejected request.
+///
+/// This is not the guessed margin the calibration module argues against. That
+/// one would hold context back from every workload; this one only ever shortens
+/// a reply, only when the window is the binding constraint - where the model's
+/// cap is the smaller number the `min` below already leaves the difference as
+/// slack - and it is proportional because the error it covers is.
+const PROMPT_ESTIMATE_HEADROOM: usize = 16;
+
 /// What earlier calls in this run taught us, carried into the next request.
 ///
 /// Three pieces of evidence with one thing in common: none of them can be
@@ -184,7 +204,10 @@ pub(crate) fn build_request(
         true => output_cap.max(caps.max_output_tokens),
         false => output_cap,
     };
-    let max_tokens = remaining.min(output_cap).max(MIN_OUTPUT_TOKENS);
+    // What is left of the window for the answer, less the headroom the estimate
+    // behind `remaining` needs. See [`PROMPT_ESTIMATE_HEADROOM`].
+    let room_for_answer = remaining.saturating_sub(spent / PROMPT_ESTIMATE_HEADROOM);
+    let max_tokens = room_for_answer.min(output_cap).max(MIN_OUTPUT_TOKENS);
     if remaining < MIN_OUTPUT_TOKENS {
         // The prompt has filled the window and left nothing to answer with.
         // Said out loud because the request still goes out, and a reply capped
