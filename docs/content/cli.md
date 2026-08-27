@@ -140,6 +140,35 @@ Leviath also warns once when a stage's per-call prompt grows past four times its
 is the shape of a region accumulating without a cap, which is the failure that costs money and
 the hardest one to spot by eye.
 
+### `lev timeline <RUN-ID>`
+
+Where a run's wall-clock time went. `lev stages` says what each stage cost; this says what the
+run was doing for an hour. Every number comes from the journal (`run.lvr`), which timestamps each
+model call, tool batch, tool result and status change, so the split is exact.
+
+| Flag | Purpose |
+|---|---|
+| `--calls` | List every model call: when it started, how long it took, prompt, cached and output tokens |
+| `--tree` | Include the run's children (and theirs), one line per run, plus the peak number of calls per model in flight at once |
+| `--json` | Print the same data as JSON |
+
+```
+deep-researcher-1787779292 (deep-researcher, complete) wall 1:17:02 = model calls 46:55 + tools 0:35 + waiting on children 29:59 + other 0:00
+
+STAGE                MODEL TIME  CALLS     OUTPUT    LARGEST
+(title)                    0:03      1         30         30
+gather                     6:14     12      19330       7879
+polish                    19:59      6     116670      23996
+```
+
+A model call's time is measured from the moment the run had nothing else in flight, so it
+includes any wait for an inference slot. That is deliberate: the run experienced the queue as
+latency, and `--tree` shows which model was oversubscribed.
+
+The command warns about one shape it recognises: several back-to-back replies in the same stage,
+each thousands of tokens and all the same size. That is what a reply cut off by the stage's output
+cap and retried looks like, and it is easy to miss in a column of token counts.
+
 ### `lev create <NAME>`
 
 Scaffold a new [blueprint](/docs/agents) directory.

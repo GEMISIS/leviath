@@ -56,6 +56,7 @@ pub mod serve;
 pub mod setup;
 pub mod stages;
 pub mod test;
+pub mod timeline;
 pub mod tools;
 pub mod update;
 pub mod validate;
