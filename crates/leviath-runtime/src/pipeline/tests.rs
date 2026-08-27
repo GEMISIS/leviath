@@ -366,6 +366,13 @@ fn both_hints_lead_the_prefix_with_the_batch_hint_first() {
     // it has to be the same head on every request the host makes.
     let cfg = hint_config(true, true);
     let blocks = hint_blocks(Some(&cfg), &[tool("shell")], "windows");
+    // The hints are the first bytes of every request and never change, and
+    // the breakpoint chooser only trusts a prefix of `Stable` blocks.
+    assert!(
+        blocks
+            .iter()
+            .all(|b| b.volatility == leviath_core::Volatility::Stable)
+    );
     let texts: Vec<&str> = blocks.iter().map(|b| b.text.as_str()).collect();
     assert_eq!(texts, vec![BATCH_TOOL_HINT, WINDOWS_SHELL_HINT]);
     assert!(

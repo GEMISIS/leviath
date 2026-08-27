@@ -67,10 +67,15 @@ pub(crate) fn hint_blocks(
     tools: &[Tool],
     os: &str,
 ) -> Vec<leviath_providers::SystemBlock> {
+    // `Stable`, and it matters: these blocks are the first bytes of every
+    // request and never change, but the default volatility is `Rewritten`,
+    // and the Anthropic breakpoint chooser reads that as "the prefix moves
+    // from block zero". Measured on a research run, no request ever got its
+    // stable-prefix marker for that reason alone.
     let always = |text: &str| leviath_providers::SystemBlock {
         text: text.to_string(),
         cache_hint: leviath_core::CacheHint::Always,
-        volatility: leviath_core::Volatility::default(),
+        volatility: leviath_core::Volatility::Stable,
         region: String::new(),
     };
     let mut blocks = Vec::new();
