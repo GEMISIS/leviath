@@ -16897,3 +16897,54 @@ fn routing_request_shares_the_stage_prefix_and_forbids_tool_use() {
     assert!(routing.tools.is_empty());
     assert_eq!(routing.extra, serde_json::Value::Null);
 }
+
+/// The cut-off is written to the stage ledger as it lands, which is what a
+/// run resumed after a daemon restart reads its raised cap back from.
+#[test]
+fn collect_records_a_cut_off_reply_in_the_stage_ledger() {
+    let (mut world, tx) = world_with_results();
+    let ledger = || {
+        StageLedger(vec![leviath_core::run_meta::StageRecord::new(
+            "polish".to_string(),
+            0,
+        )])
+    };
+    let e = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            StageCursor { index: 0 },
+            ledger(),
+        ))
+        .id();
+    let mut response = resp("half a report");
+    response.finish_reason = leviath_providers::FinishReason::TokenLimit;
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Ok(response),
+        pricing: None,
+    })
+    .unwrap();
+    run_collect(&mut world);
+    assert!(world.get::<StageLedger>(e).unwrap().0[0].output_cap_raised);
+
+    // A reply that finished on its own leaves the flag alone.
+    let plain = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            StageCursor { index: 0 },
+            ledger(),
+        ))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: plain,
+        result: Ok(resp("done")),
+        pricing: None,
+    })
+    .unwrap();
+    run_collect(&mut world);
+    assert!(!world.get::<StageLedger>(plain).unwrap().0[0].output_cap_raised);
+}

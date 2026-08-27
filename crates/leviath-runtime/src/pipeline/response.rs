@@ -270,6 +270,11 @@ pub fn collect_inference(
                         *seen = (*seen).max(region.current_tokens);
                     }
                     warn_if_context_is_running_away(rec, response.tokens_used.prompt_tokens);
+                    // Persisted beside the runtime flag `process_response` sets,
+                    // so a run resumed after a restart keeps the raised cap.
+                    if response.finish_reason == leviath_providers::FinishReason::TokenLimit {
+                        rec.output_cap_raised = true;
+                    }
                 }
                 // The provider just said what this request really cost. Against
                 // what the window believed it would cost, that is the only
