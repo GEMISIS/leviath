@@ -2331,9 +2331,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.50.1"
+version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29b6bb4e22283b09119c671e57ac6a185e9a0c70c31585e56b729b626d877753"
+checksum = "152999731bfbe0bb82d561550be73b0c31a9827d6ebe3fe96ad47563703b5328"
 dependencies = [
  "ahash",
  "bytecount",
@@ -2360,18 +2360,18 @@ dependencies = [
 
 [[package]]
 name = "jsonschema-regex"
-version = "0.50.1"
+version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "497fbf3b1ca53b1e23a253f636e88e7a2031387388b8140199a0f240fcadf647"
+checksum = "8cb2e614e1c610e31e947d53156e877340c718e053cfce0dfe9b9ce7beff4d31"
 dependencies = [
  "regex-syntax",
 ]
 
 [[package]]
 name = "jsonschema-value"
-version = "0.50.1"
+version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b84ca3f39446973a810fc90fc2645ada8c24284f6deb009c78b776813973887d"
+checksum = "24373bc85409cb935a46af0ffb41294c5372c08cf9b0709913d908154cd10582"
 dependencies = [
  "ahash",
  "bytecount",
@@ -2427,7 +2427,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "leviath"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "leviath-agent-client",
  "leviath-core",
@@ -2443,7 +2443,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-agent-client"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "leviath-core",
  "serde",
@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-alloc"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "libmimalloc-sys",
  "temp-env",
@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-cli"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2523,7 +2523,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-core"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "chrono",
  "dirs",
@@ -2543,7 +2543,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-mcp"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2570,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-net"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "reqwest",
  "tokio",
@@ -2580,7 +2580,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-package"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2600,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-providers"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2625,7 +2625,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-runtime"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "bevy_ecs",
@@ -2650,7 +2650,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-scripting"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base64 0.23.1",
  "leviath-core",
@@ -2665,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-sys"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "fs4",
  "keyring",
@@ -2681,7 +2681,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-telemetry"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "leviath-core",
  "leviath-testkit",
@@ -2697,7 +2697,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-testkit"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "tokio",
  "tracing",
@@ -2705,7 +2705,7 @@ dependencies = [
 
 [[package]]
 name = "leviath-tools"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3498,9 +3498,9 @@ checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "quick-xml"
-version = "0.41.0"
+version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
 dependencies = [
  "memchr",
 ]
@@ -3825,9 +3825,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.50.1"
+version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a0a32a2a2c2d7dd0ee54705b5fd641be73037271928f68e9b0e7205b71c9d30"
+checksum = "0aff997fc7eecb671a947b0f73f5ce4bcb4ad3534fd5bff2dd752718a8107525"
 dependencies = [
  "ahash",
  "fluent-uri",

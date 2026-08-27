@@ -2425,6 +2425,164 @@ mod tests {
         });
     }
 
+    // ─── delete: sub-agent trees ─────────────────────────────────────────
+
+    /// Plant a run directory recorded as `parent`'s sub-agent, and return the
+    /// matching list row. Both halves are needed: the rows are what the user
+    /// sees, and the directories are what the delete has to remove.
+    fn plant_agent(dash: &mut Dashboard, id: &str, parent: Option<&str>) {
+        let mut meta = crate::runstate::RunMeta::new(
+            id.to_string(),
+            "agent".into(),
+            "/p".into(),
+            "task".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        meta.parent_run_id = parent.map(str::to_string);
+        crate::runstate::create_run(&meta).expect("run dir");
+        let mut agent = make_test_agent(id, AgentDisplayStatus::Complete);
+        agent.parent_id = parent.map(str::to_string);
+        dash.agents.push(agent);
+    }
+
+    /// A sub-agent run is drawn nested under the run that spawned it, and
+    /// nothing else on disk accounts for it. Deleting the parent alone left the
+    /// children behind - and because the list treats a run whose parent is
+    /// absent as a root, they did not even stay put: they jumped to the top
+    /// level, so a delete read as a promotion.
+    #[test]
+    fn deleting_a_run_takes_its_sub_agent_rows_with_it() {
+        crate::runstate::with_isolated_runs_dir("dash-delete-tree", |_d| {
+            let mut dash = make_test_dashboard();
+            plant_agent(&mut dash, "parent", None);
+            plant_agent(&mut dash, "kid", Some("parent"));
+            plant_agent(&mut dash, "grandkid", Some("kid"));
+            plant_agent(&mut dash, "other", None);
+            // One worker still going: it is cancelled through the daemon on the
+            // way out, where a finished one is only taken off disk.
+            dash.agents
+                .iter_mut()
+                .find(|a| a.id == "kid")
+                .expect("the worker is listed")
+                .status = AgentDisplayStatus::Active;
+            dash.update_display_indices();
+
+            dash.perform_delete("parent");
+
+            let left: Vec<&str> = dash.agents.iter().map(|a| a.id.as_str()).collect();
+            assert_eq!(left, vec!["other"], "the whole tree left the list");
+            assert!(!crate::runstate::run_dir("parent").exists());
+            assert!(!crate::runstate::run_dir("kid").exists());
+            assert!(!crate::runstate::run_dir("grandkid").exists());
+            assert!(crate::runstate::run_dir("other").exists());
+        });
+    }
+
+    /// The tree is walked downwards only: deleting one fan-out worker is an
+    /// ordinary thing to do, and must not take the run that started it or the
+    /// workers beside it.
+    #[test]
+    fn deleting_a_sub_agent_row_leaves_its_parent_and_siblings() {
+        crate::runstate::with_isolated_runs_dir("dash-delete-child-only", |_d| {
+            let mut dash = make_test_dashboard();
+            plant_agent(&mut dash, "parent", None);
+            plant_agent(&mut dash, "kid-a", Some("parent"));
+            plant_agent(&mut dash, "kid-b", Some("parent"));
+            dash.update_display_indices();
+
+            dash.perform_delete("kid-a");
+
+            let left: Vec<&str> = dash.agents.iter().map(|a| a.id.as_str()).collect();
+            assert_eq!(left, vec!["parent", "kid-b"]);
+            assert!(crate::runstate::run_dir("parent").exists());
+            assert!(crate::runstate::run_dir("kid-b").exists());
+            assert!(!crate::runstate::run_dir("kid-a").exists());
+        });
+    }
+
+    /// The sub-agents are rows the user did not select, so the confirmation
+    /// says how many of them are about to go. A dialog that says "1 run" and
+    /// removes four is the prompt lying about what the key does.
+    #[test]
+    fn the_delete_dialog_counts_the_sub_agent_rows_that_go_too() {
+        let mut dash = make_test_dashboard();
+        // No run directories: the count is read off the list on screen, which
+        // is what the dialog is describing.
+        let mut push = |id: &str, parent: Option<&str>| {
+            let mut agent = make_test_agent(id, AgentDisplayStatus::Complete);
+            agent.parent_id = parent.map(str::to_string);
+            dash.agents.push(agent);
+        };
+        push("parent", None);
+        push("kid", Some("parent"));
+        push("grandkid", Some("kid"));
+        push("lonely", None);
+        dash.update_display_indices();
+
+        // A run with a tree under it says so, counting the whole tree.
+        dash.selected = dash.row_of_run("parent").expect("the parent is on screen");
+        dash.request_delete();
+        let (_, dialog) = dash.pending_confirm.take().expect("d opens the dialog");
+        assert!(
+            format!("{:?}", dialog.body).contains("Also deletes 2 sub-agent runs below it."),
+            "{:?}",
+            dialog.body
+        );
+
+        // One child reads as one, and a run with nothing under it says nothing
+        // at all rather than "0 sub-agent runs".
+        dash.selected = dash.row_of_run("kid").expect("the child is on screen");
+        dash.request_delete();
+        let (_, dialog) = dash.pending_confirm.take().expect("d opens the dialog");
+        assert!(
+            format!("{:?}", dialog.body).contains("Also deletes 1 sub-agent run below it."),
+            "{:?}",
+            dialog.body
+        );
+
+        dash.selected = dash
+            .row_of_run("lonely")
+            .expect("the lone run is on screen");
+        dash.request_delete();
+        let (_, dialog) = dash.pending_confirm.take().expect("d opens the dialog");
+        assert_eq!(
+            dialog.body.len(),
+            1,
+            "nothing extra to say: {:?}",
+            dialog.body
+        );
+    }
+
+    /// Marking a parent and one of its own children is ordinary, and the child
+    /// must not be counted twice - it is one row either way.
+    #[test]
+    fn a_marked_parent_and_child_count_their_shared_tree_once() {
+        let mut dash = make_test_dashboard();
+        for (id, parent) in [
+            ("parent", None),
+            ("kid", Some("parent")),
+            ("grandkid", Some("kid")),
+        ] {
+            let mut agent = make_test_agent(id, AgentDisplayStatus::Complete);
+            agent.parent_id = parent.map(str::to_string);
+            dash.agents.push(agent);
+        }
+        dash.update_display_indices();
+        dash.marked.insert("parent".to_string());
+        dash.marked.insert("kid".to_string());
+
+        dash.request_delete();
+
+        let (_, dialog) = dash.pending_confirm.take().expect("d opens the dialog");
+        assert!(
+            format!("{:?}", dialog.body).contains("Also deletes 1 sub-agent run below them."),
+            "the grandchild is the only row not already named: {:?}",
+            dialog.body
+        );
+    }
+
     // ─── selected_stage_can_respond: empty stage_name falls back ──────────
 
     #[test]

@@ -80,7 +80,7 @@ the detail view).
 | `/` | Filter runs by name or status |
 | `s` | Cycle the sort: start time (default), recent activity, or status groups |
 | `x` | Kill the selected run. Asks first |
-| `d` | Delete the run. Permanent, and asks first |
+| `d` | Delete the run, and the sub-agent runs nested under it. Permanent, and asks first |
 | `Space` | Mark or unmark the selected run, then move down a row |
 | `p` / `r` | Pause / resume the selected run |
 | `m` | Manage MCP servers |
@@ -96,6 +96,10 @@ row wearing a `▾` while its workers are showing and a `▸` once they are fold
 many the fold is hiding. `←` and `→` work the tree, and clicking the arrow does the same. A fold is
 remembered by run, so it survives sorting, filtering and new rows arriving above it, and folding
 the run you were inside moves the highlight onto the fold rather than back to the top.
+
+`d` on such a run deletes the whole tree, and the confirmation says how many sub-agent runs that
+is before you answer. Nothing goes the other way: deleting one worker leaves the run that started
+it, and the workers beside it, alone.
 
 Folds also outlive the dashboard. They are written to `ui-state.json` under the data directory as
 you make them, not on the way out, so a session that ends with the terminal window keeps them all
@@ -315,8 +319,9 @@ hidden, so the panel never reflows under the cursor:
 - **A stage**, on three tabs (`1` `2` `3`). *Behaviour*: how it works, description, tries, revisits,
   whether it may finish the run, the fan-out settings when it fans out, its loop back to itself when it
   has one, the prompts, its place in the file, delete. *Model & tools*: the model chain (the first is
-  tried first; `Enter` swaps an entry, `x` drops it, `←` `→` move it, the last row adds a fallback)
-  and the tools it may use, picked from every tool this install has (`Space` toggles, `Enter` keeps).
+  tried first; `Enter` swaps an entry, `x` drops it, `←` `→` or a drag on its `⠿` grip move it, the
+  last row adds a fallback) and the tools it may use, picked from every tool this install has
+  (`Space` toggles, `Enter` keeps).
   *Context*: whether the stage sees the agent's shared regions or has a layout of its own, the regions
   it sees (`Enter` opens one), a button to give it its own layout or go back to the shared one, where
   tool results land by default, and per-tool routing (`Enter` on a row changes the region, `x` stops
@@ -379,7 +384,16 @@ On the inspector:
 | `x` / `Backspace` | Remove the row: a model from the chain, a tool's routing |
 | `1` `2` `3` | A stage's tabs: behaviour, model & tools, context |
 | `Esc` | Back: a region or a loop's path returns to where it was opened from; otherwise to the graph |
-| mouse | Click a row to pick it (again to open it); click a tab to switch to it |
+| mouse | Click a row to pick it (again to open it); click a tab to switch to it; drag a model's `⠿` grip to move it in the chain |
+
+A stage's model chain is a priority order, and the `⠿` grip at the start of each model row is how
+the mouse changes it: press the grip, drag it up or down the chain, and let go. The rows reorder as
+you drag, so where you drop it is what you saw, and nothing is written until the button comes up --
+one undo entry for the whole move, and a drop back where it started costs not even that.
+
+The grip is deliberately a small target rather than the whole row. Dragging anywhere else on a row
+still selects text the way it does everywhere else in the dashboard, so a model id stays something
+you can highlight and copy.
 
 In the prompts:
 

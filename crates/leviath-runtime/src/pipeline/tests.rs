@@ -133,7 +133,7 @@ fn build_request_threads_stage_meta_into_custom_region_render() {
 fn build_request_filters_tools_and_uses_config_overrides() {
     let cfg = InferenceConfig {
         temperature: Some(0.1),
-        max_output_tokens: Some(42),
+        max_output_tokens: Some(leviath_core::blueprint::OutputCap::Tokens(42)),
         extra_params: Default::default(),
         batch_tool_hint: false,
         shell_hint: false,
@@ -366,6 +366,13 @@ fn both_hints_lead_the_prefix_with_the_batch_hint_first() {
     // it has to be the same head on every request the host makes.
     let cfg = hint_config(true, true);
     let blocks = hint_blocks(Some(&cfg), &[tool("shell")], "windows");
+    // The hints are the first bytes of every request and never change, and
+    // the breakpoint chooser only trusts a prefix of `Stable` blocks.
+    assert!(
+        blocks
+            .iter()
+            .all(|b| b.volatility == leviath_core::Volatility::Stable)
+    );
     let texts: Vec<&str> = blocks.iter().map(|b| b.text.as_str()).collect();
     assert_eq!(texts, vec![BATCH_TOOL_HINT, WINDOWS_SHELL_HINT]);
     assert!(
@@ -3395,6 +3402,7 @@ fn infer_result_only(with_tools: bool) -> crate::components::InferenceResult {
         },
         tokens_used: 0,
         timestamp: 0,
+        cut_off_at: None,
     }
 }
 
@@ -3471,6 +3479,7 @@ fn process_response_counts_edits_by_path() {
                 ],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             StageProgress::default(),
             ProcessResponse,
@@ -3615,16 +3624,12 @@ fn empty_response_never_nudges_a_stage_whose_output_is_reviewed() {
         0,
         "and not counted as a nudge"
     );
-    // Nothing was injected - the model is not told to go do work it has no
-    // tool for, which is what sent it asking the user for one.
-    assert!(
-        world
-            .get::<ContextWindow>(e)
-            .unwrap()
-            .get_region("conversation")
-            .unwrap()
-            .content
-            .is_empty(),
+    // Nothing was injected beyond the reply itself - the model is not told
+    // to go do work it has no tool for, which is what sent it asking the
+    // user for one.
+    assert_eq!(
+        conversation_text(&world, e),
+        "r",
         "nothing is injected: no nudge telling the model to go do work it \
          has no tool for, which is what sent it asking the user for one"
     );
@@ -3678,7 +3683,8 @@ fn empty_response_respects_a_stage_that_disables_its_nudge() {
     run_empty(&mut world);
     assert!(world.get::<ResolveTransition>(e).is_some());
     assert_eq!(world.get::<StageProgress>(e).unwrap().text_only_nudges, 0);
-    assert!(conversation_text(&world, e).is_empty());
+    // The reply is kept; no nudge follows it.
+    assert_eq!(conversation_text(&world, e), "r");
 }
 
 #[test]
@@ -3787,7 +3793,8 @@ fn empty_response_reads_the_global_nudge_component() {
         .id();
     run_empty(&mut world);
     assert!(world.get::<ResolveTransition>(e).is_some());
-    assert!(conversation_text(&world, e).is_empty());
+    // The reply is kept; no nudge follows it.
+    assert_eq!(conversation_text(&world, e), "r");
 }
 
 #[test]
@@ -4529,6 +4536,7 @@ fn infer_with(
             tool_calls: calls,
             tokens_used: 0,
             timestamp: 0,
+            cut_off_at: None,
         },
     )
 }
@@ -5248,6 +5256,7 @@ async fn a_refused_submission_leaves_an_earlier_answer_alone() {
                 ],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             output_window(),
             ReadyForTools,
@@ -5561,6 +5570,7 @@ async fn dispatch_tools_refuses_arguments_that_fail_the_advertised_schema() {
         ],
         tokens_used: 0,
         timestamp: 0,
+        cut_off_at: None,
     };
     let e = world
         .spawn((
@@ -5605,6 +5615,7 @@ async fn dispatch_tools_skips_validation_when_the_schema_does_not_compile() {
         tool_calls: vec![fcall("c1", "typod", serde_json::json!({"whatever": true}))],
         tokens_used: 0,
         timestamp: 0,
+        cut_off_at: None,
     };
     let e = world
         .spawn((
@@ -5650,6 +5661,7 @@ async fn dispatch_tools_validates_through_a_tool_alias() {
         tool_calls: vec![fcall("c1", canonical, serde_json::json!({}))],
         tokens_used: 0,
         timestamp: 0,
+        cut_off_at: None,
     };
     let e = world
         .spawn((
@@ -5702,6 +5714,7 @@ async fn dispatch_tools_validates_an_mcp_style_schema() {
         ],
         tokens_used: 0,
         timestamp: 0,
+        cut_off_at: None,
     };
     let e = world
         .spawn((
@@ -6561,6 +6574,7 @@ fn collect_tools_applies_and_loops_back_to_infer() {
                 tool_calls: vec![tc("c1", "read")],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             AwaitingTools,
         ))
@@ -6823,6 +6837,7 @@ fn setup() -> StageSetup {
         routing: None,
         accepts_messages: true,
         context_layout: None,
+        context_hide: Vec::new(),
         system_prompt: None,
         output: None,
     }
@@ -7399,7 +7414,7 @@ fn enter_stage_injects_system_prompt_and_config() {
     s.system_prompt = Some("be terse".to_string());
     s.inference_config = InferenceConfig {
         temperature: Some(0.3),
-        max_output_tokens: Some(99),
+        max_output_tokens: Some(leviath_core::blueprint::OutputCap::Tokens(99)),
         extra_params: Default::default(),
         batch_tool_hint: false,
         shell_hint: false,
@@ -7422,7 +7437,10 @@ fn enter_stage_injects_system_prompt_and_config() {
             > 0
     );
     let cfg = world.get::<InferenceConfig>(e).unwrap();
-    assert_eq!(cfg.max_output_tokens, Some(99));
+    assert_eq!(
+        cfg.max_output_tokens,
+        Some(leviath_core::blueprint::OutputCap::Tokens(99))
+    );
     assert!(!world.get::<AgentState>(e).unwrap().accepts_messages);
     assert!(world.get::<ReadyToInfer>(e).is_some());
 }
@@ -7727,7 +7745,10 @@ fn spawn_agent_builds_stage0_ready_with_config_and_routing() {
     assert_eq!(world.get::<StageCursor>(e).unwrap().index, 0);
     let cfg = world.get::<InferenceConfig>(e).unwrap();
     assert_eq!(cfg.temperature, Some(0.5));
-    assert_eq!(cfg.max_output_tokens, Some(128));
+    assert_eq!(
+        cfg.max_output_tokens,
+        Some(leviath_core::blueprint::OutputCap::Tokens(128))
+    );
     assert_eq!(
         world
             .get::<crate::components::ToolResultRoutingComponent>(e)
@@ -7885,7 +7906,10 @@ fn stage_setup_from_collects_extra_model_parameters() {
 
     let setup = stage_setup_from(&s, hints(true), Default::default(), None);
     assert_eq!(setup.inference_config.temperature, Some(0.3));
-    assert_eq!(setup.inference_config.max_output_tokens, Some(256));
+    assert_eq!(
+        setup.inference_config.max_output_tokens,
+        Some(leviath_core::blueprint::OutputCap::Tokens(256))
+    );
     let extra = &setup.inference_config.extra_params;
     assert_eq!(extra.len(), 2);
     assert_eq!(extra["top_p"], serde_json::json!(0.9));
@@ -11933,6 +11957,12 @@ async fn dispatch_choice_moves_to_awaiting_response_and_injects_prompt() {
         vec![si("m0"), si("m1")],
         vec![plain_edge("b")],
     );
+    // What the last stage call left behind, read the same way the stage
+    // lane reads it so the routing prefix matches.
+    world.entity_mut(e).insert((
+        crate::pipeline::inference::SystemPrefixHash(7),
+        crate::pipeline::inference::SystemBlockHashes(vec![7, 8]),
+    ));
 
     let mut schedule = Schedule::default();
     schedule.add_systems(dispatch_transition_choice);
@@ -12644,6 +12674,7 @@ fn collect_tools_records_one_activity_per_call_with_error_detection() {
                 tool_calls: vec![tc("c1", "read_file"), tc("c2", "write_file")],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             AwaitingTools,
             crate::telemetry::StageActivity::default(),
@@ -14046,6 +14077,7 @@ fn spawn_after(world: &mut World, src: &str) -> Entity {
                 tool_calls: vec![],
                 tokens_used: 7,
                 timestamp: 0,
+                cut_off_at: None,
             },
             hook_scripts(src, &["after_inference"]),
         ))
@@ -14323,6 +14355,7 @@ fn after_inference_sees_tool_call_names_but_cannot_change_them() {
                 }],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             hook_scripts(
                 r#"fn after_inference(ctx) { #{ action: "modify", value: ctx.tool_calls[0] } }"#,
@@ -14358,6 +14391,7 @@ fn after_inference_skips_an_out_of_range_stage() {
                 tool_calls: vec![],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             hook_scripts(
                 r#"fn after_inference(ctx) { #{ action: "cancel" } }"#,
@@ -14387,6 +14421,7 @@ fn after_inference_skips_a_stage_that_declared_none() {
                 tool_calls: vec![],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             hook_scripts(
                 r#"fn after_inference(ctx) { #{ action: "cancel" } }"#,
@@ -14445,6 +14480,7 @@ fn spawn_tool_hooked(
                 tool_calls: calls,
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             hook_scripts(src, &["on_tool_call"]),
         ))
@@ -14530,6 +14566,7 @@ fn on_tool_call_cannot_mark_its_own_calls_approved() {
                 tool_calls: vec![call("shell", serde_json::json!({"command": "ls"}))],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             crate::taint::TaintGate::new(leviath_core::taint::SecurityConfig::default()),
             hook_scripts(
@@ -14730,6 +14767,7 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
                 tool_calls: vec![call("shell", serde_json::json!({}))],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             hook_scripts(
                 r#"fn on_tool_call(ctx) { #{ action: "cancel" } }"#,
@@ -14752,6 +14790,7 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
                 tool_calls: vec![call("shell", serde_json::json!({}))],
                 tokens_used: 0,
                 timestamp: 0,
+                cut_off_at: None,
             },
             hook_scripts(
                 r#"fn on_tool_call(ctx) { #{ action: "cancel" } }"#,
@@ -16432,4 +16471,480 @@ fn collect_tools_counts_no_searches_when_none_were_made() {
     );
     assert_eq!(flags.searches_run, 0);
     assert_eq!(flags.searches_empty, 0);
+}
+
+// ── a reply cut off at the output cap ──
+//
+// A deep-researcher run lost twenty minutes to five identical 23,000-token
+// replies: the stage's `max_output_tokens` was below the report it was asked
+// to rewrite, the provider said so (`finish_reason = length`), and nothing
+// downstream listened. These pin every link of the chain that now does.
+
+/// The provider's "cut off" verdict reaches the stored result, with the size
+/// the reply had reached, and a reply that finished on its own carries none.
+#[test]
+fn to_inference_result_records_where_a_cut_off_reply_stopped() {
+    let mut response = resp("half a report");
+    response.tokens_used.completion_tokens = 23_050;
+    response.finish_reason = leviath_providers::FinishReason::TokenLimit;
+    assert_eq!(to_inference_result(&response).cut_off_at, Some(23_050));
+    assert_eq!(to_inference_result(&resp("done")).cut_off_at, None);
+}
+
+/// A cut-off reply arms the raised cap whether or not it carried tool calls:
+/// the retry either way needs the room the model actually has.
+#[test]
+fn process_response_arms_the_raised_cap_when_the_reply_was_cut_off() {
+    let mut world = World::new();
+    let mut result = infer_result_only(false);
+    result.cut_off_at = Some(8_192);
+    let e = world
+        .spawn((result, StageProgress::default(), ProcessResponse))
+        .id();
+    run_process(&mut world);
+    assert!(world.get::<StageProgress>(e).unwrap().raise_output_cap);
+    assert!(world.get::<ReadyForTransition>(e).is_some());
+
+    let plain = world
+        .spawn((
+            infer_result_only(true),
+            StageProgress::default(),
+            ProcessResponse,
+        ))
+        .id();
+    run_process(&mut world);
+    assert!(!world.get::<StageProgress>(plain).unwrap().raise_output_cap);
+}
+
+/// Once armed, the request goes out at the model's maximum rather than the
+/// stage's setting; before that the stage's setting stands.
+#[test]
+fn build_request_raises_the_cap_to_the_model_maximum_after_a_cut_off() {
+    let cfg = InferenceConfig {
+        temperature: None,
+        max_output_tokens: Some(leviath_core::blueprint::OutputCap::Tokens(100)),
+        extra_params: Default::default(),
+        batch_tool_hint: false,
+        shell_hint: false,
+        request_timeout_secs: None,
+    };
+    let si = stage("m", vec![], None);
+    let raised = build_request(
+        &window(),
+        Some(&cfg),
+        &si,
+        &provider(true, 9_000),
+        "polish",
+        0,
+        crate::pipeline::inference::PriorCalls {
+            raise_output_cap: true,
+            ..Default::default()
+        },
+    )
+    .0;
+    assert_eq!(raised.max_tokens, 9_000);
+    let plain = build_request(
+        &window(),
+        Some(&cfg),
+        &si,
+        &provider(true, 9_000),
+        "polish",
+        0,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+    assert_eq!(plain.max_tokens, 100);
+}
+
+/// The polish case: tool calls were made earlier in the stage, so the old
+/// rule accepted the cut-off text as the answer and dropped it. Now the text
+/// is kept, the cause is stated, and the model goes again.
+#[test]
+fn empty_response_sends_a_cut_off_reply_back_with_the_reason() {
+    let mut world = World::new();
+    let mut result = infer_result_only(false);
+    result.response = "# Report (first half)".to_string();
+    result.cut_off_at = Some(23_050);
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            result,
+            StageProgress {
+                total_tool_calls: 2,
+                ..Default::default()
+            },
+            nudge_bp(true),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert!(world.get::<ResolveTransition>(e).is_none());
+    assert_eq!(world.get::<StageProgress>(e).unwrap().cut_off_nudges, 1);
+    let text = conversation_text(&world, e);
+    assert!(text.contains("# Report (first half)"), "{text}");
+    assert!(
+        text.contains("[System] Your previous reply was cut off by the output limit after 23050"),
+        "{text}"
+    );
+}
+
+/// A cut-off reply with no text (the whole reply was a tool call) stores
+/// nothing but still says why the call did not run; and once the budget is
+/// spent the stage takes what it has rather than paying for a fourth try.
+#[test]
+fn empty_response_stops_resending_a_cut_off_reply_after_the_budget() {
+    let mut world = World::new();
+    let mut result = infer_result_only(false);
+    result.response = String::new();
+    result.cut_off_at = Some(8_192);
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            result.clone(),
+            StageProgress::default(),
+            nudge_bp(false),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    let text = conversation_text(&world, e);
+    assert!(
+        text.starts_with("[System] Your previous reply was cut off"),
+        "{text}"
+    );
+
+    let spent = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            result,
+            StageProgress {
+                total_tool_calls: 1,
+                cut_off_nudges: MAX_CUT_OFF_NUDGES,
+                ..Default::default()
+            },
+            nudge_bp(false),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ResolveTransition>(spent).is_some());
+    assert!(world.get::<ReadyToInfer>(spent).is_none());
+}
+
+/// Arguments that arrived as text (a call cut off mid-JSON) are refused with
+/// the cause instead of being run with nothing, and the refusal reads as
+/// "never happened" so a cut-off write cannot satisfy a modification gate.
+#[tokio::test]
+async fn dispatch_tools_refuses_a_call_whose_arguments_were_cut_off() {
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let result = crate::components::InferenceResult {
+        response: String::new(),
+        tool_calls: vec![fcall(
+            "c1",
+            "write_file",
+            serde_json::json!("{\"path\": \"report.md\", \"content\": \"# Local LLM hardw"),
+        )],
+        tokens_used: 0,
+        timestamp: 0,
+        cut_off_at: Some(24_000),
+    };
+    let e = world
+        .spawn((
+            agent_state(),
+            offering(&["write_file"]),
+            result,
+            conv_window(),
+            ReadyForTools,
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    let text = conversation_text(&world, e);
+    assert!(text.contains("[error] 'write_file' was not run"), "{text}");
+    assert!(text.contains("51 characters arrived, ending `"), "{text}");
+    assert!(text.contains("# Local LLM hardw`"), "{text}");
+    assert!(jrx.try_recv().is_err(), "nothing reached the tool lane");
+    assert!(call_had_no_effect(&cut_off_arguments_refusal(
+        "write_file",
+        "{"
+    )));
+}
+
+/// The tail quoted back is the last forty characters, or all of a shorter
+/// argument, and is cut on a character boundary.
+#[test]
+fn cut_off_arguments_refusal_quotes_the_tail() {
+    let short = cut_off_arguments_refusal("t", "{\"a\": 1");
+    assert!(
+        short.contains("(7 characters arrived, ending `{\"a\": 1`)"),
+        "{short}"
+    );
+    let long = cut_off_arguments_refusal("t", &format!("{}é", "x".repeat(60)));
+    assert!(
+        long.contains(&format!("ending `{}é`", "x".repeat(39))),
+        "{long}"
+    );
+}
+
+/// An accepted text-only reply stays in the conversation. It used to vanish,
+/// so a gate that bounced the stage back was talking to a model with no
+/// memory of its own draft.
+#[test]
+fn empty_response_keeps_the_reply_it_accepts() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_result(false),
+            StageProgress {
+                total_tool_calls: 2,
+                ..Default::default()
+            },
+            nudge_bp(false),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    assert_eq!(conversation_text(&world, e), "r");
+
+    // An empty reply leaves no empty turn behind.
+    let mut blank = infer_result_only(false);
+    blank.response = "  ".to_string();
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            blank,
+            StageProgress {
+                total_tool_calls: 2,
+                ..Default::default()
+            },
+            nudge_bp(false),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    assert_eq!(conversation_text(&world, e), "");
+}
+
+/// A relative cap resolves against the model and the window at request time:
+/// a window percentage against the model's context size, a region percentage
+/// against that region's budget, both clamped to the model's own maximum,
+/// and a region the stage does not carry falls back to that maximum.
+#[test]
+fn build_request_resolves_relative_output_caps() {
+    use leviath_core::blueprint::OutputCap;
+    let cfg = |cap: OutputCap| InferenceConfig {
+        temperature: None,
+        max_output_tokens: Some(cap),
+        extra_params: Default::default(),
+        batch_tool_hint: false,
+        shell_hint: false,
+        request_timeout_secs: None,
+    };
+    let si = stage("m", vec![], None);
+    let w = ctx(&[("conversation", 10_000), ("claims", 3_000)]);
+    let cap_of = |cap: OutputCap| {
+        build_request(
+            &w,
+            Some(&cfg(cap)),
+            &si,
+            &provider(true, 4_000),
+            "s",
+            0,
+            crate::pipeline::inference::PriorCalls::default(),
+        )
+        .0
+        .max_tokens
+    };
+    // Cfg's window is 8192: 25% is 2048.
+    assert_eq!(cap_of(OutputCap::WindowPercent(0.25)), 2_048);
+    // 100% of the window would be 8192, clamped to the model's 4000.
+    assert_eq!(cap_of(OutputCap::WindowPercent(1.0)), 4_000);
+    assert_eq!(
+        cap_of(OutputCap::RegionPercent {
+            percent: 0.5,
+            region: "claims".to_string()
+        }),
+        1_500
+    );
+    assert_eq!(
+        cap_of(OutputCap::RegionPercent {
+            percent: 1.0,
+            region: "no_such_region".to_string()
+        }),
+        4_000
+    );
+}
+
+/// `hide` leaves the named regions out of this stage's prompt and nothing
+/// else: the content stays, the always-visible regions cannot be hidden, and
+/// the next stage (with neither a layout nor a hide list) sees everything
+/// again rather than inheriting the narrowing.
+#[test]
+fn a_stage_hides_what_it_names_and_the_next_stage_starts_clean() {
+    let mut window = instructions_window(&["task", "sources", "notes"]);
+    let _ = window.add_to_region("sources", "a page".to_string(), 2);
+    let hiding = StageSetup {
+        context_hide: vec!["sources".to_string(), "conversation".to_string()],
+        ..setup_carrying_prompt("polish")
+    };
+    apply_stage_context(&hiding, &mut window).expect("fits");
+    assert!(window.hidden.contains("sources"));
+    assert!(!window.hidden.contains("conversation"));
+    assert_eq!(window.get_region("sources").unwrap().content.len(), 1);
+    let assembled = window.assemble();
+    assert!(
+        !assembled
+            .system_blocks
+            .iter()
+            .any(|b| b.text.contains("a page")),
+        "hidden region assembled"
+    );
+
+    apply_stage_context(&setup_carrying_prompt("summary"), &mut window).expect("fits");
+    assert!(
+        window.hidden.is_empty(),
+        "a stage with no narrowing carries everything"
+    );
+    let assembled = window.assemble();
+    assert!(
+        assembled
+            .system_blocks
+            .iter()
+            .any(|b| b.text.contains("a page"))
+    );
+}
+
+/// The routing request is the stage request with three fields changed: the
+/// system blocks, messages and tools are byte for byte the stage's own, so
+/// the provider can serve the prefix from cache instead of re-reading the
+/// whole context to answer one word.
+#[test]
+fn routing_request_shares_the_stage_prefix_and_forbids_tool_use() {
+    use crate::pipeline::inference::{PriorCalls, build_request};
+    use crate::pipeline::transition_choice::routing_request;
+    let cfg = InferenceConfig {
+        temperature: Some(0.7),
+        max_output_tokens: None,
+        extra_params: serde_json::json!({ "top_p": 0.9 })
+            .as_object()
+            .cloned()
+            .unwrap(),
+        batch_tool_hint: true,
+        shell_hint: false,
+        request_timeout_secs: None,
+    };
+    let w = ctx(&[("conversation", 10_000), ("notes", 2_000)]);
+    let mut si = stage("m", vec![tool("read_file"), tool("write_file")], None);
+    si.provider_name = "openrouter".to_string();
+    let p = provider(true, 4_000);
+
+    let (stage_req, _, _) =
+        build_request(&w, Some(&cfg), &si, &p, "analyze", 3, PriorCalls::default());
+    let routing = routing_request(&w, Some(&cfg), &si, &p, "analyze", 3, PriorCalls::default());
+
+    assert_eq!(
+        serde_json::to_value(&routing.system).unwrap(),
+        serde_json::to_value(&stage_req.system).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&routing.messages).unwrap(),
+        serde_json::to_value(&stage_req.messages).unwrap()
+    );
+    assert_eq!(routing.tools.len(), 2);
+    assert_eq!(routing.max_tokens, 256);
+    assert_eq!(routing.temperature, 0.0);
+    assert_eq!(routing.extra["tool_choice"], serde_json::json!("none"));
+    assert_eq!(
+        routing.extra["top_p"],
+        serde_json::json!(0.9),
+        "the stage's own extras stay"
+    );
+
+    // Anthropic's wire shape for the same instruction, with no extras to keep.
+    si.provider_name = "anthropic".to_string();
+    let routing = routing_request(&w, None, &si, &p, "analyze", 3, PriorCalls::default());
+    assert_eq!(
+        routing.extra,
+        serde_json::json!({ "tool_choice": { "type": "none" } })
+    );
+
+    // A provider this cannot vouch for gets the old shape: no tools at all.
+    si.provider_name = "cfg".to_string();
+    let routing = routing_request(&w, None, &si, &p, "analyze", 3, PriorCalls::default());
+    assert!(routing.tools.is_empty());
+    assert_eq!(routing.extra, serde_json::Value::Null);
+
+    // A stage with no tools has nothing to forbid, so no `tool_choice` either.
+    si.provider_name = "openrouter".to_string();
+    si.tools.clear();
+    let routing = routing_request(&w, None, &si, &p, "analyze", 3, PriorCalls::default());
+    assert!(routing.tools.is_empty());
+    assert_eq!(routing.extra, serde_json::Value::Null);
+}
+
+/// The cut-off is written to the stage ledger as it lands, which is what a
+/// run resumed after a daemon restart reads its raised cap back from.
+#[test]
+fn collect_records_a_cut_off_reply_in_the_stage_ledger() {
+    let (mut world, tx) = world_with_results();
+    let ledger = || {
+        StageLedger(vec![leviath_core::run_meta::StageRecord::new(
+            "polish".to_string(),
+            0,
+        )])
+    };
+    let e = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            StageCursor { index: 0 },
+            ledger(),
+        ))
+        .id();
+    let mut response = resp("half a report");
+    response.finish_reason = leviath_providers::FinishReason::TokenLimit;
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Ok(response),
+        pricing: None,
+    })
+    .unwrap();
+    run_collect(&mut world);
+    assert!(world.get::<StageLedger>(e).unwrap().0[0].output_cap_raised);
+
+    // A reply that finished on its own leaves the flag alone.
+    let plain = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            StageCursor { index: 0 },
+            ledger(),
+        ))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: plain,
+        result: Ok(resp("done")),
+        pricing: None,
+    })
+    .unwrap();
+    run_collect(&mut world);
+    assert!(!world.get::<StageLedger>(plain).unwrap().0[0].output_cap_raised);
 }

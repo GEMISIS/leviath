@@ -20,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 license = "MIT"
 authors = ["Gerald McAlister <gemisis@users.noreply.github.com>"]
@@ -96,18 +96,18 @@ allow_attributes_without_reason = "deny"
 # `leviath-testkit` stays path-only ON PURPOSE: cargo strips path-only
 # dev-dependencies when publishing, which is what keeps the testkit private
 # to the repo while every crate that dev-depends on it still publishes.
-leviath = { path = "crates/leviath", version = "0.5.1" }
-leviath-core = { path = "crates/leviath-core", version = "0.5.1" }
-leviath-net = { path = "crates/leviath-net", version = "0.5.1" }
-leviath-agent-client = { path = "crates/leviath-agent-client", version = "0.5.1" }
-leviath-runtime = { path = "crates/leviath-runtime", version = "0.5.1" }
-leviath-providers = { path = "crates/leviath-providers", version = "0.5.1" }
-leviath-mcp = { path = "crates/leviath-mcp", version = "0.5.1" }
-leviath-scripting = { path = "crates/leviath-scripting", version = "0.5.1" }
-leviath-package = { path = "crates/leviath-package", version = "0.5.1" }
-leviath-tools = { path = "crates/leviath-tools", version = "0.5.1" }
-leviath-sys = { path = "crates/leviath-sys", version = "0.5.1" }
-leviath-telemetry = { path = "crates/leviath-telemetry", version = "0.5.1" }
+leviath = { path = "crates/leviath", version = "0.5.2" }
+leviath-core = { path = "crates/leviath-core", version = "0.5.2" }
+leviath-net = { path = "crates/leviath-net", version = "0.5.2" }
+leviath-agent-client = { path = "crates/leviath-agent-client", version = "0.5.2" }
+leviath-runtime = { path = "crates/leviath-runtime", version = "0.5.2" }
+leviath-providers = { path = "crates/leviath-providers", version = "0.5.2" }
+leviath-mcp = { path = "crates/leviath-mcp", version = "0.5.2" }
+leviath-scripting = { path = "crates/leviath-scripting", version = "0.5.2" }
+leviath-package = { path = "crates/leviath-package", version = "0.5.2" }
+leviath-tools = { path = "crates/leviath-tools", version = "0.5.2" }
+leviath-sys = { path = "crates/leviath-sys", version = "0.5.2" }
+leviath-telemetry = { path = "crates/leviath-telemetry", version = "0.5.2" }
 leviath-testkit = { path = "crates/leviath-testkit" }
 
 # External dependencies
@@ -180,12 +180,12 @@ tiktoken-rs = "0.12"
 # schema pull external `$ref`s over the network or filesystem at validation
 # time. Without them an external `$ref` simply fails to compile, and a schema
 # that fails to compile skips validation instead of refusing calls.
-jsonschema = { version = "0.50", default-features = false }
+jsonschema = { version = "0.51", default-features = false }
 # Parsers behind the built-in output validators, which check that a submitted
 # answer is well-formed in the format it claims. Well-formedness only: schema
 # conformance is JSON Schema (above) or an agent's own Rhai validator, so none
 # of these needs its format's schema language.
-quick-xml = "0.41"
+quick-xml = "0.42"
 yaml-rust2 = "0.12"
 csv = "1.4"
 async-trait = "0.1"

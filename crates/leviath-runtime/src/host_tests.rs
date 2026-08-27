@@ -196,6 +196,7 @@ fn setup() -> StageSetup {
         routing: None,
         accepts_messages: true,
         context_layout: None,
+        context_hide: Vec::new(),
         system_prompt: None,
         output: None,
     }

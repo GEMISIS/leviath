@@ -228,6 +228,21 @@ pub fn restore_stage_ledger(
             rec.index = index;
         }
     }
+    // The per-stage runtime counters are rebuilt from zero on restore. The one
+    // that must not be is the raised output cap: without it a resumed run
+    // retries at the cap that already cut a reply off, and pays for that
+    // reply again before raising.
+    let cursor = world
+        .get::<crate::pipeline::StageCursor>(entity)
+        .map(|c| c.index);
+    let raised = world
+        .get::<crate::pipeline::StageLedger>(entity)
+        .zip(cursor)
+        .and_then(|(ledger, index)| ledger.0.iter().find(|rec| rec.index == index))
+        .is_some_and(|rec| rec.output_cap_raised);
+    if raised && let Some(mut progress) = world.get_mut::<crate::pipeline::StageProgress>(entity) {
+        progress.raise_output_cap = true;
+    }
 }
 
 /// The synthesized result for a call whose completion never reached the journal.
@@ -342,6 +357,7 @@ mod tests {
             routing: None,
             accepts_messages: true,
             context_layout: None,
+            context_hide: Vec::new(),
             system_prompt: None,
             output: None,
         }
@@ -492,6 +508,48 @@ mod tests {
     /// rebuilt, so a reloaded run came back with every stage at zero - and
     /// because the persist tick rewrites `stages.json` whole, the next one
     /// wrote those zeros over the run's real history (issue #415).
+    /// The raised output cap survives a restart through the ledger: the
+    /// per-stage counters are rebuilt from zero, and this is the one that must
+    /// not be.
+    #[test]
+    fn a_raised_output_cap_is_read_back_from_the_ledger_on_restore() {
+        use crate::pipeline::{StageCursor, StageLedger, StageProgress};
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                StageCursor { index: 1 },
+                StageProgress::default(),
+                StageLedger(vec![
+                    leviath_core::run_meta::StageRecord::new("gather".into(), 0),
+                    leviath_core::run_meta::StageRecord::new("polish".into(), 1),
+                ]),
+            ))
+            .id();
+        let mut saved = leviath_core::run_meta::StageRecord::new("polish".into(), 1);
+        saved.output_cap_raised = true;
+        restore_stage_ledger(&mut world, entity, &[saved.clone()]);
+        assert!(world.get::<StageProgress>(entity).unwrap().raise_output_cap);
+
+        // Raised in a stage the run is no longer in: nothing to carry.
+        let elsewhere = world
+            .spawn((
+                StageCursor { index: 0 },
+                StageProgress::default(),
+                StageLedger(vec![
+                    leviath_core::run_meta::StageRecord::new("gather".into(), 0),
+                    leviath_core::run_meta::StageRecord::new("polish".into(), 1),
+                ]),
+            ))
+            .id();
+        restore_stage_ledger(&mut world, elsewhere, &[saved]);
+        assert!(
+            !world
+                .get::<StageProgress>(elsewhere)
+                .unwrap()
+                .raise_output_cap
+        );
+    }
+
     #[test]
     fn restore_stage_ledger_overlays_the_persisted_records_by_name() {
         use crate::pipeline::StageLedger;

@@ -159,7 +159,7 @@ Base path `/api`; all JSON unless noted.
 | Method · Path | Purpose |
 |---|---|
 | `GET /api/runs` · `DELETE /api/runs` | List runs: paginated, sortable, searchable · prune many at once. See [below](#listing-and-searching-runs) |
-| `DELETE /api/runs/{id}` | Delete one finished run's record. Not the same as cancelling it. See [below](#deleting-runs) |
+| `DELETE /api/runs/{id}` | Delete one finished run's record, and its sub-agent runs. Not the same as cancelling it. See [below](#deleting-runs) |
 | `GET /api/agents` · `POST /api/agents` | List runs *(deprecated, use `/api/runs`)* · spawn an agent. Reads the persisted records, so finished runs stay listed |
 | `GET /api/agents/{id}` · `DELETE …` | Get one · cancel. Cancelling stops the work and **keeps** the record; see [deleting runs](#deleting-runs) for removing it |
 | `GET /api/agents/{id}/result` · `/context` | The run's answer and log tail · current context window |
@@ -374,6 +374,21 @@ DELETE /api/runs/deep-researcher-1786839472-d908ad2d9455
 - **404** if it is already gone, so a client that lost the response to its own delete can just send
   it again instead of treating a missing run as a failure.
 
+### Sub-agent runs go with their parent
+
+A fan-out worker and a `sub_agent` spawn are runs of their own, but they exist because something
+started them, and they are drawn nested under it. Deleting the parent deletes them too.
+
+Leaving them behind was not a matter of a few stale rows. A client that nests runs under their
+parent has nowhere to draw a run whose parent is missing except the top level, so deleting a
+research run with nine workers under it emptied one row and promoted nine.
+
+The walk only goes downwards. Deleting one worker out of a fan-out is an ordinary thing to do and
+leaves the run that started it, and the workers beside it, exactly where they were.
+
+A live sub-agent is a **409** on the parent's delete, and the reason names the run to cancel --
+half a tree is not a state anything downstream knows how to read.
+
 A run whose `meta.json` will not parse is a **409** too, overridden with `?force=true`:
 
 ```
@@ -412,6 +427,11 @@ correctly deleted the rest, so the response is a 200 with a verdict per run:
 Read `skipped` when the list does not empty. A run that is still going and a run that was already
 gone are both non-deletions, and only the reason tells them apart. Use the single-run route when you
 want a status code per outcome instead.
+
+`deleted` can hold ids you never named: every run named takes its sub-agent tree with it here too,
+and those are runs that are now gone. Naming a parent and one of its own children in the same
+request is fine -- each is deleted once, and the child is reported as deleted rather than skipped as
+missing.
 
 ## Where a run's cost went
 

@@ -527,6 +527,14 @@ pub struct Stage {
     /// If None, uses the blueprint's global layout
     pub context_layout: Option<ContextLayout>,
 
+    /// Regions this stage does not carry in its prompt
+    /// (`[stages.<name>.context] hide = [...]`). Hidden, not destroyed: the
+    /// content is kept and every other stage sees it as before. The cheap way
+    /// to drop one large region from a stage that its own instructions never
+    /// read, without re-declaring the whole layout for that stage.
+    #[serde(default)]
+    pub context_hide: Vec<String>,
+
     /// Custom configuration for this stage
     pub config: HashMap<String, serde_json::Value>,
 
@@ -673,6 +681,7 @@ impl Stage {
             max_iterations: None,
             mode: StageMode::Autonomous,
             context_layout: None,
+            context_hide: Vec::new(),
             config: HashMap::new(),
             tool_permissions: HashMap::new(),
             requires_children: false,

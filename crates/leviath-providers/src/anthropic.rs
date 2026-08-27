@@ -704,7 +704,10 @@ impl AnthropicProvider {
             "tool_use" => FinishReason::ToolCall,
             "max_tokens" => FinishReason::TokenLimit,
             "stop_sequence" => FinishReason::Stop,
-            _ => FinishReason::Complete,
+            other => {
+                tracing::debug!(reason = other, "unrecognised stop_reason from Anthropic");
+                FinishReason::Unknown
+            }
         }
     }
 
@@ -2546,7 +2549,7 @@ mod tests {
         );
         assert_eq!(
             AnthropicProvider::parse_stop_reason("unknown_reason"),
-            FinishReason::Complete
+            FinishReason::Unknown
         );
     }
 

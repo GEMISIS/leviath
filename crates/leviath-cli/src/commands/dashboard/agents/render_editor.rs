@@ -13,8 +13,8 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use super::super::state::Dashboard;
 use super::super::theme::*;
 use super::super::types::PaneId;
-use super::editor::{Focus, InspectorHits, Overlay};
-use super::inspector::{Field, FieldValue, Panel, StageTab, panel_title};
+use super::editor::{Focus, InspectorHits, ModelDrag, Overlay};
+use super::inspector::{Field, FieldId, FieldValue, Panel, StageTab, panel_title};
 use crate::blueprint_edit::check::Severity;
 use crate::tui::widgets::footer::{draw_hint_bar, hint};
 use crate::tui::widgets::markdown_edit::{MODE_CHORD, MdAction, chord_label};
@@ -26,6 +26,14 @@ const SIDE_BY_SIDE_MIN_WIDTH: u16 = 110;
 const INSPECTOR_WIDTH: u16 = 58;
 /// Rows the expanded problems list takes.
 const PROBLEMS_ROWS: u16 = 6;
+/// The grip drawn beside a row the mouse can pick up and drag, with the space
+/// that separates it from the label. Braille dots: the widest-supported glyph
+/// that reads as "handle" rather than as content.
+const GRIP: &str = "⠿ ";
+/// Cells [`GRIP`] occupies, and so the width of the column reserved for it on
+/// every row - a grip that shifted its own row two columns right would be a
+/// worse cue than one that lines up with the blanks above it.
+const GRIP_W: u16 = 2;
 
 impl Dashboard {
     /// The editor screen.
@@ -211,11 +219,25 @@ impl Dashboard {
                 Style::default().fg(C_MUTED),
             )));
         }
-        let fields = editor.fields();
+        let fields = drag_order(editor.fields(), editor.model_drag);
         let label_w = 23usize;
-        let value_w = (inner.width as usize).saturating_sub(label_w + 3);
+        // Two columns wider than the label and its gutter: the grip sits in
+        // the gap, blank on rows nothing can be done with.
+        let value_w = (inner.width as usize).saturating_sub(label_w + GRIP_W as usize + 3);
         for (i, field) in fields.iter().enumerate() {
-            hits.rows.push(inner.y + lines.len() as u16);
+            let row_y = inner.y + lines.len() as u16;
+            hits.rows.push(row_y);
+            if let FieldId::ModelEntry(m) = field.id {
+                hits.grips.push((
+                    m,
+                    Rect {
+                        x: inner.x + 2,
+                        y: row_y,
+                        width: GRIP_W,
+                        height: 1,
+                    },
+                ));
+            }
             let on = focused && i == editor.cursor;
             let editing = editor.line.as_ref().filter(|(id, _)| *id == field.id);
             let label_style = if !field.enabled {
@@ -225,10 +247,14 @@ impl Dashboard {
             } else {
                 Style::default().fg(C_MUTED)
             };
-            let mut spans = vec![Span::styled(
-                if on { "› " } else { "  " },
-                Style::default().fg(C_ACCENT),
-            )];
+            let grabbable = matches!(field.id, FieldId::ModelEntry(_));
+            let mut spans = vec![
+                Span::styled(if on { "› " } else { "  " }, Style::default().fg(C_ACCENT)),
+                Span::styled(
+                    if grabbable { GRIP } else { "  " },
+                    Style::default().fg(if on { C_ACCENT } else { C_DIM }),
+                ),
+            ];
             // A button is its label: the whole row is the action, so it has
             // no value column.
             let is_button = matches!(field.value, FieldValue::Button);
@@ -268,6 +294,7 @@ impl Dashboard {
         let body_h = inner.height.saturating_sub(3);
         // Rows under the help area are not drawn, so they are not clickable.
         hits.rows.retain(|y| *y < inner.y + body_h);
+        hits.grips.retain(|(_, r)| r.y < inner.y + body_h);
         editor.hit = hits;
         frame.render_widget(
             Paragraph::new(lines).wrap(Wrap { trim: false }),
@@ -377,6 +404,7 @@ impl Dashboard {
                     hint("tab", "canvas"),
                     hint("^z", "undo"),
                     hint("click", "pick a row"),
+                    hint("drag ⠿", "reorder"),
                 ],
             }
         };
@@ -418,6 +446,40 @@ impl Dashboard {
             frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), inner);
         }
     }
+}
+
+/// The fields as they should be drawn while a model is in the air: the chain's
+/// values permuted into the order a release would commit.
+///
+/// The *values* move and the rows stay, so the labels still read "Model" then
+/// "then" down the list - the first row is whatever the chain would start
+/// with, which is the question the labels are answering. It also keeps the
+/// row under the pointer the row that will hold the entry, so the drop is
+/// what it looked like rather than an inference from a caret.
+///
+/// A drag whose indices no longer fit the chain draws untouched rather than
+/// panicking: the fields are rebuilt from the document every frame, and the
+/// document can change under a held button (an undo, a reload).
+fn drag_order(mut fields: Vec<Field>, drag: Option<ModelDrag>) -> Vec<Field> {
+    let Some(drag) = drag else {
+        return fields;
+    };
+    let rows: Vec<usize> = fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| matches!(f.id, FieldId::ModelEntry(_)))
+        .map(|(i, _)| i)
+        .collect();
+    if drag.from >= rows.len() || drag.to >= rows.len() {
+        return fields;
+    }
+    let mut values: Vec<FieldValue> = rows.iter().map(|&i| fields[i].value.clone()).collect();
+    let held = values.remove(drag.from);
+    values.insert(drag.to, held);
+    for (row, value) in rows.into_iter().zip(values) {
+        fields[row].value = value;
+    }
+    fields
 }
 
 /// How a field's value reads on its row (a button reads as its label).

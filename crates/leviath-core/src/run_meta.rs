@@ -1052,6 +1052,12 @@ pub struct StageRecord {
     /// it is said once on the crossing rather than on every call afterwards.
     #[serde(default)]
     pub runaway_warned: bool,
+    /// A reply in this stage was cut off at the output cap, so its requests go
+    /// out at the model's maximum. Kept here, and not only in the per-stage
+    /// runtime counters, because those do not survive a daemon restart and a
+    /// resumed run would otherwise retry at the cap that already failed.
+    #[serde(default)]
+    pub output_cap_raised: bool,
     /// Unix timestamp (seconds); None until the stage starts.
     pub started_at: Option<i64>,
     /// Unix timestamp (seconds); None until the stage ends.
@@ -1100,6 +1106,7 @@ impl StageRecord {
             region_tokens: std::collections::BTreeMap::new(),
             first_call_prompt_tokens: None,
             runaway_warned: false,
+            output_cap_raised: false,
             started_at: None,
             ended_at: None,
             active: None,
