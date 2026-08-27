@@ -366,6 +366,7 @@ mod tests {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
                 ollama_base_url: Some("http://127.0.0.1:1".to_string()),
                 providers: crate::config::ProviderConfig {
@@ -386,6 +387,7 @@ mod tests {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
@@ -398,6 +400,7 @@ mod tests {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
                 providers: crate::config::ProviderConfig {
                     anthropic_api_key: Some("sk-ant-test".to_string()),
@@ -536,6 +539,7 @@ mod tests {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         let state = AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
                 agent_paths: vec![
                     std::path::PathBuf::from("/my/agents"),
@@ -572,6 +576,7 @@ mod tests {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
                 providers: crate::config::ProviderConfig {
                     anthropic_base_url: None,
@@ -744,6 +749,7 @@ mod tests {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
@@ -763,6 +769,7 @@ mod tests {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: Arc::new(crate::daemon::config_reload::ConfigReloader::new(
                 path.clone(),
                 Config::default(),
@@ -1237,6 +1244,7 @@ mod tests {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         let state = AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
                 providers: crate::config::ProviderConfig {
                     anthropic_api_key: Some("test-key".to_string()),

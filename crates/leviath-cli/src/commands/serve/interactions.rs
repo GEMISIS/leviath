@@ -136,6 +136,7 @@ mod tests {
         let (tx, _) = broadcast::channel(16);
         let state = AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control,

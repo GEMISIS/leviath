@@ -47,6 +47,7 @@ a test, so a client generator or an agent can consume the contract directly.
   | `PUT /api/config` | 405, because `GET /api/config` is mounted |
   | `POST /api/mcp/servers` | 405, because `GET /api/mcp/servers` is mounted |
   | `DELETE /api/mcp/servers/{name}` | 404, because nothing else is mounted on that path |
+  | `POST /api/update` | 405, because `GET /api/update` is mounted |
 - **`--workdir-root`** confines agent workdirs; **`--no-remote-yolo`** forbids `"yolo": true` and
   `"allow": [...]` on spawn, which are one lever rather than two.
 
@@ -179,6 +180,7 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/mcp/servers` · `GET /{name}/status` · `POST /{name}/login` · `POST /{name}/test` | MCP servers (add/remove need admin) |
 | `GET /api/doctor` | The checks `lev doctor` runs, as data. A failing check is `ok: false` inside a 200, never an HTTP error |
 | `GET /api/update` | Whether anything newer exists, how this copy was installed, and the command that upgrades it. See [below](#asking-how-to-upgrade) |
+| `POST /api/update` *(admin)* · `GET /api/update/jobs/{id}` | Carry that plan out, and read where it got to. See [below](#pressing-the-button) |
 | `GET /api/fs/dirs?path=&hidden=` | One directory level of subdirectory names, for a folder picker. Absolute paths only, fenced by `--workdir-root`; `hidden=true` includes dot-prefixed names |
 | `POST /api/fs/dirs` | Make one directory: `{"path": "<absolute parent>", "name": "<one segment>"}` → `201 {"path", "parent"}`. The same fence as the `GET`; `409` if it already exists. Announced as `fs.mkdir` |
 | `GET /ws` · `GET /ws/agents/{id}` | Live event stream (all agents / one run) |
@@ -678,6 +680,98 @@ The route is read-only and available without `--allow-admin`. It works out what 
 do and does none of it, makes no network call on the request path, and cannot run a command even
 if asked.
 
+## Pressing the button
+
+`POST /api/update` carries out the plan the `GET` prints: it runs `binary.commands` in order,
+installs the blueprints the plan marks `preselected`, and applies the migrations. It needs
+`lev serve --allow-admin`, which is the line it crosses and the read half does not - it runs a
+package manager, replaces the blueprints in your agents directory and rewrites your config.
+
+The body names which parts to do. Every field defaults to `true`, so an empty body is the whole
+plan and a body naming one part leaves the others on. A field this route does not know is a `400`
+rather than a silent default:
+
+```json
+{ "binary": true, "agents": true, "migrations": false }
+```
+
+It answers `202` straight away, with the id to watch:
+
+```json
+{
+  "job_id": "update-1787438706-1",
+  "status": "running",
+  "applying": { "binary": true, "agents": true, "migrations": false }
+}
+```
+
+An upgrade is a download and an install - a minute on a good day, and it can fail halfway - so the
+request does not stay open for it. Watch `/ws`, where each step change arrives as it happens:
+
+```json
+{ "type": "update_progress", "job_id": "update-1787438706-1", "step": "binary",
+  "status": "running", "detail": "running `scoop update && scoop update leviath`" }
+```
+
+`step` is `binary`, `agents` or `migrations`, always in that order, and `status` is one of
+`running`, `done`, `skipped`, `advised` or `failed`. The last frame is `update_finished`, carrying
+the whole record so a client that connected mid-run needs no follow-up request. Both frames are
+about the machine rather than a run, so `/ws` receives them and a per-run subscription does not.
+
+`GET /api/update/jobs/{id}` answers that same record, for a client that would rather poll than
+hold a socket open:
+
+```json
+{
+  "id": "update-1787438706-1",
+  "status": "complete",
+  "steps": [
+    { "step": "binary", "status": "done", "detail": "ran `scoop update && scoop update leviath`" },
+    { "step": "agents", "status": "done", "detail": "installed researcher, coder" },
+    { "step": "migrations", "status": "skipped", "detail": "not asked for" }
+  ],
+  "restart_required": true,
+  "restart_hint": "the new binary is on disk, but this server and the daemon it talks to are still running the old one...",
+  "started_at": 1787438706,
+  "finished_at": 1787438771
+}
+```
+
+The last few runs are kept, so reading back after the fact finds the job rather than a `404`.
+One update runs at a time: a second `POST` while one is going is a `409` naming the job already
+running, not a second package manager over the same binary.
+
+### What it will not do
+
+`binary.action == "advise"` stays advice. A `cargo install` copy is a full rebuild of the
+workspace, and a binary somewhere no installer writes is not something to guess at - both are
+yours to do, so the step is recorded as `advised` with the plan's own sentence and no compile is
+started. That is neither a success nor a failure: the job carries on to the other two steps and
+still finishes `complete`.
+
+A blueprint you edited locally is never installed. Installing removes the destination directory
+first, so it would take your edits and any file you added with them; `lev update` asks about each
+one on its own and no flag covers it, and there is nobody to ask over HTTP. The `agents` step says
+how many it left alone and why.
+
+A binary step that *fails* stops the two after it, the same way `lev update` stops there: the
+blueprints and the config worth having are the ones the new binary ships. A failed blueprint
+install does not - it is named in the step's detail and the run carries on, because most of the
+blueprints plus a named failure is a better place to be left than a step that gave up in the
+middle.
+
+### The restart
+
+Upgrading replaces the binary on disk. The daemon answering the request is the old one and stays
+the old one, and so does `lev serve`, until each restarts - so a console that updates and then
+reports the version it can see has told the truth in the least useful way possible.
+
+`restart_required` is `true` when the binary step actually ran and succeeded, and `restart_hint`
+carries the sentence to show. Say it; do not report the running version as the result of the
+update. Restarting `lev serve` picks up the new binary, and `lev daemon restart` does the same for
+the daemon - which any `lev` command also does on its own, since the daemon's build marker is
+checked before a run is spawned.
+
 ## Tools and scripts
 
 `GET /api/tools` answers what an agent on **this** machine can call, which is not a question a
@@ -807,6 +901,7 @@ than that feature, not broken.
 | `blueprints.fan_outs` | `fan_outs` on the detail route. See [fan-out limits](#fan-out-limits) |
 | `tools.list` | `GET /api/tools?agent=`, what an agent here can actually call |
 | `update.plan` | `GET /api/update`, how this copy was installed and the command that upgrades it. See [asking how to upgrade](#asking-how-to-upgrade) |
+| `update.apply` | `POST /api/update` and `GET /api/update/jobs/{id}`, carrying that plan out. Says this build serves them; whether *this* daemon mounts them is `--allow-admin`, which you find out by calling one. See [pressing the button](#pressing-the-button) |
 | `scripts.read` | The `GET` half of the scripts routes |
 | `scripts.write` | That this build serves the write half. Whether *this* daemon mounts it is `--allow-admin`, which you find out by calling one and reading the status |
 | `scripts.providers` | `provider` as a fifth script `kind`, the machine's drop-in model providers |

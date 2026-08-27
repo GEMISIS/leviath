@@ -855,6 +855,7 @@ mod tests {
         let (tx, _) = broadcast::channel(64);
         AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: no_daemon(),
@@ -882,6 +883,7 @@ mod tests {
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
                 agent_paths: vec![agents.path().to_path_buf()],
                 ..Default::default()
@@ -1143,6 +1145,7 @@ mod tests {
         let (tx, _) = broadcast::channel(64);
         AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config {
                 agent_paths: paths,
                 ..Default::default()
@@ -2968,6 +2971,7 @@ system_prompt = "Plan the work"
         let (tx, _) = broadcast::channel(16);
         let state = AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control,
@@ -3025,6 +3029,7 @@ system_prompt = "Plan the work"
         let (tx, _) = broadcast::channel(16);
         let state = AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control,

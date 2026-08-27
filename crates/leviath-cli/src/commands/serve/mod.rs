@@ -26,6 +26,7 @@ mod tree;
 mod types;
 mod update;
 mod update_cache;
+mod update_job;
 mod websocket;
 
 #[cfg(test)]
@@ -61,11 +62,25 @@ impl<T> Drop for AbortOnDrop<T> {
 }
 
 /// Run `lev serve`: expose the HTTP + WebSocket API over the daemon.
+///
+/// `upgrade` is how `POST /api/update` runs a package manager. Injected rather
+/// than built here for the same reason `lev update`'s is: spawning a process is
+/// the one part of an update with nothing to unit-test it against, so it lives
+/// in the binary's composition root and everything that decides *whether* and
+/// *what* to spawn is testable without one.
 pub async fn execute(
     args: ServeArgs,
     control: leviath_runtime::control_socket::ControlClient,
+    upgrade: crate::commands::update::CommandRunner,
 ) -> anyhow::Result<()> {
-    execute_with_shutdown(args, control, Box::pin(std::future::pending()), None).await
+    execute_with_shutdown(
+        args,
+        control,
+        upgrade,
+        Box::pin(std::future::pending()),
+        None,
+    )
+    .await
 }
 
 /// Every API route with its production handlers - the single route table,
@@ -247,6 +262,7 @@ fn routes_in(source: &str) -> Vec<(String, String)> {
 async fn execute_with_shutdown(
     args: ServeArgs,
     control: leviath_runtime::control_socket::ControlClient,
+    upgrade: crate::commands::update::CommandRunner,
     shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
     ready: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
 ) -> anyhow::Result<()> {
@@ -274,6 +290,7 @@ async fn execute_with_shutdown(
 
     let state = AppState {
         update_check: Default::default(),
+        update_jobs: update_job::UpdateJobs::with_runner(upgrade),
         config: Arc::new(crate::daemon::config_reload::ConfigReloader::new(
             Config::config_path(),
             cfg,
@@ -359,6 +376,13 @@ async fn execute_with_shutdown(
             // Config-write persists provider secrets to disk, so it is gated the
             // same way as MCP admin: unmounted (404) unless --allow-admin.
             .route("/api/config", put(config::put_config))
+            // Carrying out the update the GET half only describes: it runs a
+            // package manager, replaces the blueprints in the agents directory
+            // and rewrites the config. Same category of act as the three above,
+            // and gated the same way - the read half stays open, so a console
+            // without admin still shows what to type.
+            .route("/api/update", post(update::post_update))
+            .route("/api/update/jobs/{id}", get(update::get_update_job))
             // A `.rhai` file is executable code every agent then runs, so
             // writing one is the same category of act as adding an MCP server
             // rather than the same category as saving a blueprint. Unmounted
@@ -526,6 +550,37 @@ async fn status_page() -> axum::response::Html<&'static str> {
          <h1>Leviath is running.</h1>\
          <p>The API needs a token; this page does not serve it.</p>",
     )
+}
+
+/// The upgrade runner a server test carries.
+///
+/// A refusal rather than a no-op: a server test that reached the upgrade path
+/// by accident should fail loudly, not quietly report having run a package
+/// manager it never ran. A named function rather than a closure per call site
+/// so there is one body to cover rather than one per test.
+#[cfg(test)]
+fn no_upgrade_in_tests(_argv: &[String]) -> anyhow::Result<()> {
+    anyhow::bail!("no upgrade command runs in a server test")
+}
+
+/// [`execute_with_shutdown`] for a test that is not exercising the update
+/// route, with a runner that refuses to spawn anything.
+///
+#[cfg(test)]
+async fn serve_for_test(
+    args: ServeArgs,
+    control: leviath_runtime::control_socket::ControlClient,
+    shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    ready: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
+) -> anyhow::Result<()> {
+    execute_with_shutdown(
+        args,
+        control,
+        Arc::new(no_upgrade_in_tests),
+        shutdown,
+        ready,
+    )
+    .await
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -791,6 +846,7 @@ mod tests {
         let (tx, _) = broadcast::channel(64);
         AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: no_daemon_control(),
@@ -1384,7 +1440,7 @@ system_prompt = "Run"
                     tls_key: None,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-                let handle = tokio::spawn(execute_with_shutdown(
+                let handle = tokio::spawn(serve_for_test(
                     args,
                     no_daemon_control(),
                     Box::pin(std::future::pending()),
@@ -1459,7 +1515,7 @@ system_prompt = "Run"
                 tls_key: Some(key),
             };
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-            let handle = tokio::spawn(execute_with_shutdown(
+            let handle = tokio::spawn(serve_for_test(
                 args,
                 no_daemon_control(),
                 Box::pin(std::future::pending()),
@@ -1541,7 +1597,7 @@ system_prompt = "Run"
                     tls_cert: Some(cert.clone()),
                     ..base.clone()
                 };
-                let err = execute_with_shutdown(
+                let err = serve_for_test(
                     lone,
                     no_daemon_control(),
                     Box::pin(std::future::pending()),
@@ -1560,7 +1616,7 @@ system_prompt = "Run"
                     tls_key: Some(key),
                     ..base
                 };
-                let err = execute_with_shutdown(
+                let err = serve_for_test(
                     unreadable,
                     no_daemon_control(),
                     Box::pin(std::future::pending()),
@@ -1606,7 +1662,7 @@ system_prompt = "Run"
                 };
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-                let server = tokio::spawn(execute_with_shutdown(
+                let server = tokio::spawn(serve_for_test(
                     args,
                     no_daemon_control(),
                     Box::pin(async move {
@@ -1654,7 +1710,7 @@ system_prompt = "Run"
                     tls_key: None,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-                let handle = tokio::spawn(execute_with_shutdown(
+                let handle = tokio::spawn(serve_for_test(
                     args,
                     no_daemon_control(),
                     Box::pin(std::future::pending()),
@@ -1708,7 +1764,7 @@ system_prompt = "Run"
                     tls_key: None,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-                let handle = tokio::spawn(execute_with_shutdown(
+                let handle = tokio::spawn(serve_for_test(
                     args,
                     no_daemon_control(),
                     Box::pin(std::future::pending()),
@@ -1743,7 +1799,7 @@ system_prompt = "Run"
                 tls_cert: None,
                 tls_key: None,
             };
-            let result = execute(args, no_daemon_control()).await;
+            let result = execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
             assert!(result.is_err());
         })
         .await;
@@ -1781,7 +1837,8 @@ system_prompt = "Run"
                     tls_cert: None,
                     tls_key: None,
                 };
-                let result = execute(args, no_daemon_control()).await;
+                let result =
+                    execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
                 assert_execute_failed_on_malformed_config(&result);
             },
         )
@@ -1820,7 +1877,7 @@ system_prompt = "Run"
         };
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
-        let handle = tokio::spawn(execute_with_shutdown(
+        let handle = tokio::spawn(serve_for_test(
             args,
             no_daemon_control(),
             Box::pin(shutdown_fut),
@@ -1867,7 +1924,8 @@ system_prompt = "Run"
                     tls_cert: None,
                     tls_key: None,
                 };
-                let result = execute(args, no_daemon_control()).await;
+                let result =
+                    execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
                 assert_execute_failed_on_port_in_use(&result);
                 // Names the address it could not have, rather than leaving the
                 // reader with a bare errno.
@@ -1904,7 +1962,8 @@ system_prompt = "Run"
                     tls_cert: None,
                     tls_key: None,
                 };
-                let result = execute(args, no_daemon_control()).await;
+                let result =
+                    execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
                 assert_execute_failed_on_port_in_use(&result);
                 assert_error_says(
                     &result,
@@ -1932,7 +1991,7 @@ system_prompt = "Run"
                 tls_cert: None,
                 tls_key: None,
             };
-            let result = execute(args, no_daemon_control()).await;
+            let result = execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
             assert!(result.is_err(), "must refuse to start unauthenticated");
         })
         .await;
@@ -1963,7 +2022,7 @@ system_prompt = "Run"
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
-                let handle = tokio::spawn(execute_with_shutdown(
+                let handle = tokio::spawn(serve_for_test(
                     args,
                     no_daemon_control(),
                     Box::pin(shutdown_fut),
@@ -2012,7 +2071,7 @@ system_prompt = "Run"
                     let _ = shutdown_rx.await;
                 };
 
-                let handle = tokio::spawn(execute_with_shutdown(
+                let handle = tokio::spawn(serve_for_test(
                     args,
                     no_daemon_control(),
                     Box::pin(shutdown_fut),
@@ -2060,7 +2119,7 @@ system_prompt = "Run"
             async fn starts(cors: Option<&str>) {
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-                let server = tokio::spawn(execute_with_shutdown(
+                let server = tokio::spawn(serve_for_test(
                     args_with(cors),
                     no_daemon_control(),
                     Box::pin(async move {
@@ -2084,7 +2143,7 @@ system_prompt = "Run"
 
             // A malformed origin fails before binding, so this can be awaited
             // directly rather than raced against a `ready` signal.
-            let err = execute_with_shutdown(
+            let err = serve_for_test(
                 args_with(Some("not a valid\nheader")),
                 no_daemon_control(),
                 Box::pin(std::future::pending()),
@@ -2122,7 +2181,7 @@ system_prompt = "Run"
                     tls_cert: None,
                     tls_key: None,
                 };
-                let server = tokio::spawn(execute_with_shutdown(
+                let server = tokio::spawn(serve_for_test(
                     args,
                     no_daemon_control(),
                     Box::pin(async move {
@@ -2154,6 +2213,108 @@ system_prompt = "Run"
                 let _ = server.await;
             }
         })
+        .await;
+    }
+
+    /// The runner every server test here carries refuses, so a test that
+    /// reached the upgrade path by accident fails loudly rather than reporting
+    /// a package manager it never ran.
+    #[test]
+    fn a_server_test_cannot_run_an_upgrade_command() {
+        let e = no_upgrade_in_tests(&["brew".to_string()]).expect_err("it refuses");
+        assert!(e.to_string().contains("no upgrade command runs"), "{e}");
+    }
+
+    /// The update routes that *do* something are mounted only with
+    /// `--allow-admin`. The `GET` half stays mounted either way, so a console
+    /// without admin still shows what to type - which is the whole point of it
+    /// being a separate route.
+    ///
+    /// The request deliberately asks for the binary step alone. The runner
+    /// `serve_for_test` supplies refuses to spawn anything, so nothing runs;
+    /// asking for the blueprint step would point a real install at whatever
+    /// `~/.leviath/agents` this test happens to run beside.
+    #[tokio::test]
+    async fn the_update_admin_routes_are_mounted_only_with_allow_admin() {
+        crate::config::with_isolated_config_path_async(
+            "serve-mod-update",
+            |_fake_dir| async move {
+                for allow_admin in [false, true] {
+                    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+                    let args = ServeArgs {
+                        port: 0,
+                        host: "127.0.0.1".to_string(),
+                        cors: None,
+                        token: Some("t".to_string()),
+                        allow_admin,
+                        workdir_root: None,
+                        no_remote_yolo: false,
+                        tls_cert: None,
+                        tls_key: None,
+                    };
+                    let server = tokio::spawn(serve_for_test(
+                        args,
+                        no_daemon_control(),
+                        Box::pin(async move {
+                            let _ = stop_rx.await;
+                        }),
+                        Some(ready_tx),
+                    ));
+                    let addr = ready_rx.await.expect("bound");
+                    let client = reqwest::Client::new();
+
+                    let apply = client
+                        .post(format!("http://{addr}/api/update"))
+                        .bearer_auth("t")
+                        .json(&serde_json::json!({
+                            "binary": true, "agents": false, "migrations": false
+                        }))
+                        .send()
+                        .await
+                        .expect("request")
+                        .status()
+                        .as_u16();
+                    let job = client
+                        .get(format!("http://{addr}/api/update/jobs/never"))
+                        .bearer_auth("t")
+                        .send()
+                        .await
+                        .expect("request")
+                        .status()
+                        .as_u16();
+                    // 405 is the signature of "this path exists for GET but POST is
+                    // not mounted"; the jobs path has nothing else on it, so it is
+                    // a 404 when unmounted and a 404-for-a-real-reason when mounted
+                    // - which is why that one is checked as "not 405" from the
+                    // other side: an unknown id.
+                    match allow_admin {
+                        false => {
+                            assert_eq!(apply, 405, "POST must not be mounted");
+                            assert_eq!(job, 404, "the jobs route must not be mounted");
+                        }
+                        true => {
+                            assert_eq!(apply, 202, "POST must be mounted and answer at once");
+                            assert_eq!(job, 404, "mounted, and that id really is unknown");
+                        }
+                    }
+
+                    // The read half answers either way.
+                    let plan = client
+                        .get(format!("http://{addr}/api/update"))
+                        .bearer_auth("t")
+                        .send()
+                        .await
+                        .expect("request")
+                        .status()
+                        .as_u16();
+                    assert_eq!(plan, 200, "the read half is never gated");
+
+                    let _ = stop_tx.send(());
+                    let _ = server.await;
+                }
+            },
+        )
         .await;
     }
 
@@ -2189,7 +2350,7 @@ system_prompt = "Run"
                     tls_cert: None,
                     tls_key: None,
                 };
-                let server = tokio::spawn(execute_with_shutdown(
+                let server = tokio::spawn(serve_for_test(
                     args,
                     no_daemon_control(),
                     Box::pin(async move {

@@ -145,7 +145,12 @@ impl RiskyExecutors for RealExecutors {
         // The HTTP API is a gateway to the shared-world daemon: ensure it's
         // running, then serve, routing agent actions through its control socket.
         ensure_daemon_running().await?;
-        commands::serve::execute(args, long_lived_control_client()?).await
+        commands::serve::execute(
+            args,
+            long_lived_control_client()?,
+            std::sync::Arc::new(run_upgrade_captured),
+        )
+        .await
     }
 
     async fn agent_client(
@@ -261,6 +266,25 @@ fn run_upgrade(argv: &[String]) -> anyhow::Result<()> {
         true => Ok(()),
         false => anyhow::bail!("`{}` exited with {status}", argv.join(" ")),
     }
+}
+
+/// Run an upgrade command for `POST /api/update`.
+///
+/// The opposite of [`run_upgrade`] in all three ways that matter: there is no
+/// terminal for a package manager to draw on, no stdin for it to block the
+/// server on waiting for an answer nobody will type, and the console that
+/// pressed the button only ever sees what this function puts in the error - so
+/// the output is captured and [`commands::update::captured_outcome`], which is
+/// where the judgement lives, folds it in.
+fn run_upgrade_captured(argv: &[String]) -> anyhow::Result<()> {
+    let Some((program, rest)) = argv.split_first() else {
+        anyhow::bail!("no upgrade command to run");
+    };
+    let output = leviath_sys::child_command(program)
+        .args(rest)
+        .stdin(std::process::Stdio::null())
+        .output();
+    commands::update::captured_outcome(argv, output)
 }
 
 /// Ask a yes/no question on the real terminal.

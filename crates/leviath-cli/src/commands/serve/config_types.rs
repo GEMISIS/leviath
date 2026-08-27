@@ -170,6 +170,14 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // without it should send people to the install docs rather than pick a
     // package manager on their behalf.
     "update.plan",
+    // `POST /api/update` and `GET /api/update/jobs/{id}`: carrying the plan out
+    // rather than only printing it, with the step-by-step on the websocket.
+    // Announced whether or not `--allow-admin` was passed, the same narrower
+    // claim `scripts.write` makes below - it says this build serves the route,
+    // and whether this daemon mounts it is something a client finds out by
+    // calling it and reading the status. Worth announcing anyway: without it a
+    // console has to offer a button that might 404, or offer none at all.
+    "update.apply",
     "scripts.read",
     // Announced whether or not `--allow-admin` was passed, which is a narrower
     // claim than the others on this list: it says this build serves the write

@@ -1683,3 +1683,125 @@ fn the_stale_serves_migration_does_not_apply_to_a_clean_config() {
         &config, &raw
     ));
 }
+
+// ─── Running a command with its output captured ───────────────────────────────
+
+/// An `ExitStatus` that did or did not succeed.
+///
+/// Borrowed from a real spawn of the test binary for the same reason
+/// [`output_with`] does it: `ExitStatus` cannot be constructed portably, and a
+/// `#[cfg(unix)]` construction would leave the Windows build with an untested
+/// arm. Listing no tests succeeds; a flag libtest does not know does not.
+fn spawned_status(succeeds: bool) -> std::process::ExitStatus {
+    let mut command = std::process::Command::new(std::env::current_exe().expect("the test binary"));
+    match succeeds {
+        true => command.arg("--list").arg("a_filter_that_matches_nothing"),
+        false => command.arg("--a-flag-libtest-does-not-know"),
+    };
+    command
+        .output()
+        .expect("spawning the test binary to borrow an ExitStatus")
+        .status
+}
+
+/// An `Output` with the given streams and a status that did or did not succeed.
+fn captured(succeeds: bool, stdout: &str, stderr: &str) -> std::io::Result<std::process::Output> {
+    Ok(std::process::Output {
+        status: spawned_status(succeeds),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: stderr.as_bytes().to_vec(),
+    })
+}
+
+/// A command that worked is a plain `Ok`, whatever it printed.
+#[test]
+fn a_captured_command_that_succeeded_is_a_success() {
+    let argv = vec!["scoop".to_string(), "update".to_string()];
+    assert!(captured_outcome(&argv, captured(true, "noise", "warnings")).is_ok());
+}
+
+/// The failure a console shows is the command's own last word, because "exited
+/// with 1" is what sent people to run it by hand to find out.
+#[test]
+fn a_captured_failure_carries_the_last_thing_the_command_said() {
+    let argv = vec![
+        "scoop".to_string(),
+        "update".to_string(),
+        "leviath".to_string(),
+    ];
+
+    let stderr = captured_outcome(&argv, captured(false, "", "warming up\nno such bucket\n"))
+        .expect_err("it failed");
+    assert_eq!(
+        stderr.to_string(),
+        "`scoop update leviath` failed: no such bucket"
+    );
+
+    // stdout is read when stderr said nothing: a `sh -c "curl ... | sh"` is a
+    // pipeline whose useful last word can land on either.
+    let stdout = captured_outcome(&argv, captured(false, "step 1\ncould not fetch\n", "  \n"))
+        .expect_err("it failed");
+    assert!(
+        stdout.to_string().ends_with("failed: could not fetch"),
+        "{stdout}"
+    );
+
+    // Nothing on either stream still names the command, since the exit status
+    // alone is not something to hand a reader on its own.
+    let silent = captured_outcome(&argv, captured(false, "", "")).expect_err("it failed");
+    assert!(
+        silent.to_string().contains("scoop update leviath"),
+        "{silent}"
+    );
+    assert!(silent.to_string().contains("said nothing"), "{silent}");
+}
+
+/// A command that could not be spawned at all names itself, so "scoop is not
+/// installed" does not read as "scoop failed".
+#[test]
+fn a_command_that_could_not_be_spawned_says_which_one() {
+    let argv = vec!["scoop".to_string(), "update".to_string()];
+    let e = captured_outcome(
+        &argv,
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "not found",
+        )),
+    )
+    .expect_err("it did not run");
+    assert!(
+        e.to_string().starts_with("could not run `scoop update`"),
+        "{e}"
+    );
+}
+
+/// The environment the API applies an update through: a real machine, the
+/// caller's runner, and nothing that asks a question or reaches the network.
+///
+/// The refusals matter. `POST /api/update` never prompts - the request body was
+/// the consent - so a `confirm` that answered yes would make an executing path
+/// that stopped to ask look like permission, and the update check belongs to
+/// the route's own cache rather than to a step that runs a package manager.
+#[test]
+fn the_applying_environment_asks_nothing_and_checks_nothing() {
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let env = UpdateEnv::for_applying({
+        let ran = Arc::clone(&ran);
+        Arc::new(move |argv: &[String]| {
+            ran.lock().expect("not poisoned").push(argv.to_vec());
+            Ok(())
+        })
+    });
+
+    (env.runner)(&["scoop".to_string()]).expect("the caller's runner is the one that runs");
+    assert_eq!(
+        *ran.lock().expect("not poisoned"),
+        vec![vec!["scoop".to_string()]]
+    );
+    assert!(!(env.confirm)("anything?"), "nothing is agreed to");
+    assert!(
+        (env.latest)("https://example.invalid").is_err(),
+        "nothing is looked up"
+    );
+    assert_eq!(env.migrations.len(), MIGRATIONS.len());
+}

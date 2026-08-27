@@ -215,6 +215,45 @@ pub enum ServerEvent {
         /// The result, flattened to one line and truncated.
         summary: String,
     },
+    /// A step of an update started by `POST /api/update` changed.
+    ///
+    /// About the machine rather than about a run, like
+    /// [`DaemonLink`](Self::DaemonLink) - so a per-run subscription does not
+    /// receive one, and `/ws` does.
+    ///
+    /// Sent as it happens, because that is the whole reason the route answers
+    /// with a job id instead of holding the request open: a `brew upgrade` is a
+    /// download and an install, and a console that can only say "updating" for
+    /// a minute is a console that cannot say whether anything is happening.
+    UpdateProgress {
+        /// The job this is about, as `POST /api/update` answered with.
+        job_id: String,
+        /// `binary`, `agents` or `migrations`.
+        step: String,
+        /// `running`, `done`, `skipped`, `advised` or `failed`.
+        status: String,
+        /// One line about what just happened, ready to print.
+        detail: String,
+    },
+    /// An update started by `POST /api/update` reached a terminal status.
+    ///
+    /// Carries the whole job record rather than a summary, so a client that
+    /// connected mid-run or dropped a frame renders the result without a
+    /// follow-up request.
+    UpdateFinished {
+        /// The job that finished.
+        job_id: String,
+        /// `complete` if every step that ran succeeded, `failed` otherwise.
+        status: String,
+        /// Whether the binary on disk is now newer than the processes serving
+        /// this. Both this server and the daemon keep running the old build
+        /// until they are restarted, so a console that reported the version it
+        /// can see would be telling the truth in the least useful way possible.
+        restart_required: bool,
+        /// The same record `GET /api/update/jobs/{id}` returns.
+        job: serde_json::Value,
+    },
+
     /// This server's own link to the daemon changed.
     ///
     /// Sent when the daemon's event stream drops and when it is back, and once
@@ -243,8 +282,8 @@ pub enum ServerEvent {
 
 impl ServerEvent {
     /// The run id this event belongs to, for per-run subscription filtering.
-    /// Every event names one except [`DaemonLink`](Self::DaemonLink), which is
-    /// about the server's own connection rather than any run.
+    /// Every event names one except the three about the machine rather than a
+    /// run - [`DaemonLink`](Self::DaemonLink), and the two an update sends.
     pub fn run_id(&self) -> &str {
         match self {
             ServerEvent::AgentStatus { run_id, .. }
@@ -259,12 +298,20 @@ impl ServerEvent {
             | ServerEvent::ToolCallStarted { run_id, .. }
             | ServerEvent::ToolCallFinished { run_id, .. }
             | ServerEvent::AgentSpend { run_id, .. } => run_id,
-            ServerEvent::DaemonLink { .. } => "",
+            ServerEvent::DaemonLink { .. }
+            | ServerEvent::UpdateProgress { .. }
+            | ServerEvent::UpdateFinished { .. } => "",
         }
     }
 
     /// Whether a subscription filtered to `run_id` should receive this event:
     /// its own run's events, and the ones about no run at all.
+    ///
+    /// The update frames are deliberately not in that second group. A link
+    /// event explains why a run's events stopped arriving, which is something
+    /// a per-run subscriber has to know; an update happening on the machine is
+    /// not about the run it is watching, and `/ws` is where a console watches
+    /// for it.
     pub fn is_for_run(&self, run_id: &str) -> bool {
         matches!(self, ServerEvent::DaemonLink { .. }) || self.run_id() == run_id
     }

@@ -219,6 +219,7 @@ mod tests {
         let (tx, _) = broadcast::channel(64);
         AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
@@ -665,6 +666,7 @@ mod tests {
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: daemon.client.clone(),
@@ -826,6 +828,7 @@ mod tests {
         let (tx, _) = broadcast::channel::<ServerEvent>(2);
         let state = AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx.clone(),
             control: crate::commands::serve::testutil::no_daemon_client(),
@@ -954,6 +957,7 @@ mod tests {
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
         let state = AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx.clone(),
             control: crate::commands::serve::testutil::no_daemon_client(),
