@@ -1,15 +1,18 @@
 //! Anthropic Claude provider implementation.
 
+mod stream;
+
 use crate::provider::{
     FinishReason, InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities,
     ModelCapabilityOverride, ModelInfo, Provider, ProviderConfig, ProviderError, Result,
-    StreamChunk, TokenUsage, ToolCall, ToolCallDelta,
+    StreamChunk, TokenUsage, ToolCall,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
 use futures_core::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
+use stream::AnthropicSseStream;
 
 /// Read the dump directory from the environment and delegate to
 /// [`dump_request`]. See that function for the rationale.
@@ -956,225 +959,11 @@ impl Provider for AnthropicProvider {
     }
 }
 
-// SSE stream parser for Anthropic's streaming API.
-//
-// The inner byte stream is boxed as a trait object rather than kept generic.
-// In production this is always `reqwest`'s `bytes_stream()`; tests inject
-// dozens of distinct mock stream types via `new`'s generic parameter, and a
-// generic `impl<S> Stream` causes `cargo llvm-cov` to instrument each
-// monomorphized `poll_next` separately, leaving some artificially "uncovered"
-// even though the shared logic is fully exercised. Boxing collapses all of
-// that into a single concrete `poll_next` implementation.
-struct AnthropicSseStream {
-    inner: Pin<Box<dyn Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send>>,
-    buffer: String,
-    current_tool_index: usize,
-}
-
-impl AnthropicSseStream {
-    fn new<S>(inner: S) -> Self
-    where
-        S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
-    {
-        Self {
-            inner: Box::pin(inner),
-            buffer: String::new(),
-            current_tool_index: 0,
-        }
-    }
-}
-
-impl Stream for AnthropicSseStream {
-    type Item = Result<StreamChunk>;
-
-    fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
-        loop {
-            // Check if we have complete SSE events in the buffer
-            if let Some(chunk) = parse_sse_event(&mut this.buffer, &mut this.current_tool_index) {
-                return std::task::Poll::Ready(Some(Ok(chunk)));
-            }
-
-            // Try to get more data
-            match this.inner.as_mut().poll_next(cx) {
-                std::task::Poll::Ready(Some(Ok(bytes))) => {
-                    if let Ok(text) = std::str::from_utf8(&bytes) {
-                        this.buffer.push_str(text);
-                    }
-                }
-                std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Some(Err(ProviderError::transport(
-                        "reading the response stream",
-                        &e,
-                    ))));
-                }
-                std::task::Poll::Ready(None) => {
-                    // Stream ended - try to parse any remaining data
-                    if let Some(chunk) =
-                        parse_sse_event(&mut this.buffer, &mut this.current_tool_index)
-                    {
-                        return std::task::Poll::Ready(Some(Ok(chunk)));
-                    }
-                    return std::task::Poll::Ready(None);
-                }
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-            }
-        }
-    }
-}
-
-/// Parse a single SSE event from the buffer, consuming it if found.
-fn parse_sse_event(buffer: &mut String, tool_index: &mut usize) -> Option<StreamChunk> {
-    // `None` until the double newline that terminates an event has arrived;
-    // the caller polls again with more bytes.
-    let (event_text, rest) = buffer.split_once("\n\n")?;
-    let event_text = event_text.to_string();
-    *buffer = rest.to_string();
-
-    // Parse event type and data
-    let mut event_type = String::new();
-    let mut data = String::new();
-
-    for line in event_text.lines() {
-        if let Some(et) = line.strip_prefix("event: ") {
-            event_type = et.to_string();
-        } else if let Some(d) = line.strip_prefix("data: ") {
-            data = d.to_string();
-        }
-    }
-
-    if data.is_empty() {
-        return None;
-    }
-
-    let json: serde_json::Value = serde_json::from_str(&data).ok()?;
-
-    match event_type.as_str() {
-        "content_block_delta" => {
-            let delta = json.get("delta")?;
-            match delta.get("type").and_then(|t| t.as_str()) {
-                Some("text_delta") => {
-                    let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                    Some(StreamChunk {
-                        delta: text.to_string(),
-                        tool_calls: Vec::new(),
-                        tokens: None,
-                        finish_reason: None,
-                    })
-                }
-                Some("input_json_delta") => {
-                    let partial = delta
-                        .get("partial_json")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("");
-                    Some(StreamChunk {
-                        delta: String::new(),
-                        tool_calls: vec![ToolCallDelta {
-                            index: *tool_index,
-                            id: None,
-                            name: None,
-                            arguments_delta: partial.to_string(),
-                            // Anthropic signs nothing: the signature is a
-                            // Gemini 3.x requirement carried on the
-                            // OpenAI-shaped wire.
-                            thought_signature: None,
-                        }],
-                        tokens: None,
-                        finish_reason: None,
-                    })
-                }
-                _ => None,
-            }
-        }
-        "content_block_start" => {
-            let content_block = json.get("content_block")?;
-            if content_block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                let id = content_block
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let name = content_block
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let idx = *tool_index;
-                *tool_index += 1;
-                Some(StreamChunk {
-                    delta: String::new(),
-                    tool_calls: vec![ToolCallDelta {
-                        index: idx,
-                        id: Some(id),
-                        name: Some(name),
-                        arguments_delta: String::new(),
-                        thought_signature: None,
-                    }],
-                    tokens: None,
-                    finish_reason: None,
-                })
-            } else {
-                None
-            }
-        }
-        "message_delta" => {
-            let stop_reason = json
-                .get("delta")
-                .and_then(|d| d.get("stop_reason"))
-                .and_then(|s| s.as_str())
-                .unwrap_or("end_turn");
-
-            let usage = json.get("usage");
-            let output_tokens = usage
-                .and_then(|u| u.get("output_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-
-            Some(StreamChunk {
-                delta: String::new(),
-                tool_calls: Vec::new(),
-                tokens: Some(TokenUsage::new(0, 0, 0, output_tokens)),
-                finish_reason: Some(AnthropicProvider::parse_stop_reason(stop_reason)),
-            })
-        }
-        "message_start" => {
-            // Extract input token count from message_start
-            let usage = json.get("message").and_then(|m| m.get("usage"));
-            let input_tokens = usage
-                .and_then(|u| u.get("input_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let cached = usage
-                .and_then(|u| u.get("cache_read_input_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let cache_write = usage
-                .and_then(|u| u.get("cache_creation_input_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-
-            if input_tokens > 0 || cached > 0 || cache_write > 0 {
-                Some(StreamChunk {
-                    delta: String::new(),
-                    tool_calls: Vec::new(),
-                    tokens: Some(TokenUsage::new(input_tokens, cached, cache_write, 0)),
-                    finish_reason: None,
-                })
-            } else {
-                None
-            }
-        }
-        "message_stop" | "ping" => None,
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    // The SSE parser lives in `stream`, and its tests stayed here beside the
+    // request-building ones they share fixtures with.
+    use super::stream::{AnthropicSseStream, parse_sse_event};
 
     /// Config beats the shipped table, and an unconfigured model still gets the
     /// published rate rather than falling to unpriced.
@@ -2874,7 +2663,7 @@ mod tests {
     #[test]
     fn test_parse_sse_event_text_delta() {
         let mut buffer = "event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n".to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
         assert_eq!(chunk.delta, "Hello");
         assert!(chunk.tool_calls.is_empty());
@@ -2884,7 +2673,7 @@ mod tests {
     #[test]
     fn test_parse_sse_event_input_json_delta() {
         let mut buffer = "event: content_block_delta\ndata: {\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"key\\\"\"}}\n\n".to_string();
-        let mut tool_index = 1usize;
+        let mut tool_index = Some(1usize);
         let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
         assert_eq!(chunk.delta, "");
         assert_eq!(chunk.tool_calls.len(), 1);
@@ -2895,19 +2684,21 @@ mod tests {
     #[test]
     fn test_parse_sse_event_content_block_start_tool_use() {
         let mut buffer = "event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"search\"}}\n\n".to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
         assert_eq!(chunk.tool_calls.len(), 1);
         assert_eq!(chunk.tool_calls[0].id, Some("toolu_1".to_string()));
         assert_eq!(chunk.tool_calls[0].name, Some("search".to_string()));
         assert_eq!(chunk.tool_calls[0].index, 0);
-        assert_eq!(tool_index, 1);
+        // The block stays open: the argument deltas that follow are this
+        // call's, and they are filed under this index.
+        assert_eq!(tool_index, Some(0));
     }
 
     #[test]
     fn test_parse_sse_event_content_block_start_text_returns_none() {
         let mut buffer = "event: content_block_start\ndata: {\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n".to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let result = parse_sse_event(&mut buffer, &mut tool_index);
         assert!(result.is_none());
     }
@@ -2915,7 +2706,7 @@ mod tests {
     #[test]
     fn test_parse_sse_event_message_delta() {
         let mut buffer = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":42}}\n\n".to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
         assert_eq!(chunk.finish_reason, Some(FinishReason::ToolCall));
         let tokens = chunk.tokens.unwrap();
@@ -2925,7 +2716,7 @@ mod tests {
     #[test]
     fn test_parse_sse_event_message_start_with_usage() {
         let mut buffer = "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":50,\"cache_creation_input_tokens\":10}}}\n\n".to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
         let tokens = chunk.tokens.unwrap();
         assert_eq!(tokens.prompt_tokens, 100);
@@ -2938,7 +2729,7 @@ mod tests {
         let mut buffer =
             "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":0}}}\n\n"
                 .to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let result = parse_sse_event(&mut buffer, &mut tool_index);
         assert!(result.is_none());
     }
@@ -2946,7 +2737,7 @@ mod tests {
     #[test]
     fn test_parse_sse_event_message_stop_returns_none() {
         let mut buffer = "event: message_stop\ndata: {}\n\n".to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let result = parse_sse_event(&mut buffer, &mut tool_index);
         assert!(result.is_none());
     }
@@ -2954,7 +2745,7 @@ mod tests {
     #[test]
     fn test_parse_sse_event_ping_returns_none() {
         let mut buffer = "event: ping\ndata: {}\n\n".to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let result = parse_sse_event(&mut buffer, &mut tool_index);
         assert!(result.is_none());
     }
@@ -2962,7 +2753,7 @@ mod tests {
     #[test]
     fn test_parse_sse_event_unknown_event_returns_none() {
         let mut buffer = "event: some_future_event\ndata: {\"foo\":\"bar\"}\n\n".to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let result = parse_sse_event(&mut buffer, &mut tool_index);
         assert!(result.is_none());
     }
@@ -2970,7 +2761,7 @@ mod tests {
     #[test]
     fn test_parse_sse_event_incomplete_buffer() {
         let mut buffer = "event: content_block_delta\ndata: {\"delta\":".to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let result = parse_sse_event(&mut buffer, &mut tool_index);
         assert!(result.is_none());
         // Buffer should be unchanged
@@ -2980,7 +2771,7 @@ mod tests {
     #[test]
     fn test_parse_sse_event_empty_data_returns_none() {
         let mut buffer = "event: content_block_delta\n\n\n".to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let result = parse_sse_event(&mut buffer, &mut tool_index);
         assert!(result.is_none());
     }
@@ -2992,7 +2783,7 @@ mod tests {
         let mut buffer =
             ": this is a comment\nevent: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"
                 .to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
         assert_eq!(chunk.delta, "hi");
     }
@@ -3002,7 +2793,7 @@ mod tests {
         // content_block_delta event where the JSON has no "delta" key → the ?
         // at json.get("delta")? returns None.
         let mut buffer = "event: content_block_delta\ndata: {\"no_delta\": true}\n\n".to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let result = parse_sse_event(&mut buffer, &mut tool_index);
         assert!(result.is_none());
     }
@@ -3117,7 +2908,7 @@ mod tests {
         let mut buffer =
             "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"
                 .to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
         assert_eq!(chunk.finish_reason, Some(FinishReason::Complete));
         // No usage → tokens default to 0
@@ -3136,7 +2927,7 @@ mod tests {
             "data: {\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\n"
         )
         .to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
 
         // First event
         let chunk1 = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
@@ -3156,7 +2947,7 @@ mod tests {
     fn test_parse_sse_event_content_block_start_no_content_block() {
         // content_block_start with no "content_block" key
         let mut buffer = "event: content_block_start\ndata: {\"index\":0}\n\n".to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let result = parse_sse_event(&mut buffer, &mut tool_index);
         assert!(result.is_none());
     }
@@ -3166,7 +2957,7 @@ mod tests {
     #[test]
     fn test_parse_sse_event_invalid_json_data_returns_none() {
         let mut buffer = "event: content_block_delta\ndata: not-valid-json\n\n".to_string();
-        let mut tool_index = 0usize;
+        let mut tool_index: Option<usize> = None;
         let result = parse_sse_event(&mut buffer, &mut tool_index);
         assert!(result.is_none());
     }
@@ -3824,6 +3615,112 @@ mod tests {
         assert!(
             provider.serves_model("not-a-real-model-xyz").is_none(),
             "a model nobody has"
+        );
+    }
+
+    /// A streamed tool call arrives as one call, with its id and its arguments
+    /// on the same call.
+    ///
+    /// Regression: `content_block_start` numbered the call and then advanced
+    /// the counter, so the `input_json_delta` events that followed - the
+    /// call's own arguments - were filed under the *next* index. One tool_use
+    /// block came back as two calls: the id and the name with no arguments,
+    /// and the arguments with no id. The empty id went into the conversation
+    /// and Anthropic rejected the following turn with
+    /// `messages.0.content.1.tool_use.id: String should match pattern
+    /// ^[a-zA-Z0-9_-]+$`, which killed every streamed run that used a tool.
+    #[tokio::test]
+    async fn a_streamed_tool_call_keeps_its_id_and_its_arguments_together() {
+        let sse = concat!(
+            "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Checking.\"}}\n\n",
+            "event: content_block_start\ndata: {\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01ABC\",\"name\":\"current_time\"}}\n\n",
+            "event: content_block_delta\ndata: {\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"tz\\\":\"}}\n\n",
+            "event: content_block_delta\ndata: {\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"utc\\\"}\"}}\n\n",
+            "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n\n",
+        );
+        let stream = AnthropicSseStream::new(StaticByteStream {
+            data: vec![sse.as_bytes().to_vec()],
+            idx: 0,
+        });
+        let response = crate::collect_stream(Box::pin(stream)).await.unwrap();
+
+        assert_eq!(response.content, "Checking.");
+        assert_eq!(
+            response.tool_calls.len(),
+            1,
+            "one tool_use block is one tool call, got {:?}",
+            response.tool_calls
+        );
+        assert_eq!(response.tool_calls[0].id, "toolu_01ABC");
+        assert_eq!(response.tool_calls[0].name, "current_time");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            serde_json::json!({ "tz": "utc" })
+        );
+    }
+
+    /// Two tool calls in one reply keep their own ids and their own arguments.
+    ///
+    /// The single-call case would also pass with the counter simply never
+    /// advancing, which would merge a parallel pair into one call.
+    #[tokio::test]
+    async fn two_streamed_tool_calls_stay_apart() {
+        let sse = concat!(
+            "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_first\",\"name\":\"web_search\"}}\n\n",
+            "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\\\"a\\\"}\"}}\n\n",
+            "event: content_block_start\ndata: {\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_second\",\"name\":\"web_fetch\"}}\n\n",
+            "event: content_block_delta\ndata: {\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"url\\\":\\\"b\\\"}\"}}\n\n",
+            "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n\n",
+        );
+        let stream = AnthropicSseStream::new(StaticByteStream {
+            data: vec![sse.as_bytes().to_vec()],
+            idx: 0,
+        });
+        let response = crate::collect_stream(Box::pin(stream)).await.unwrap();
+
+        assert_eq!(response.tool_calls.len(), 2);
+        assert_eq!(response.tool_calls[0].id, "toolu_first");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            serde_json::json!({ "q": "a" })
+        );
+        assert_eq!(response.tool_calls[1].id, "toolu_second");
+        assert_eq!(
+            response.tool_calls[1].arguments,
+            serde_json::json!({ "url": "b" })
+        );
+    }
+
+    /// An event stream that numbers nothing still keeps two calls apart.
+    ///
+    /// Anthropic numbers every content block, so this is the defensive arm:
+    /// the fix may not lean on the `index` field being there.
+    #[tokio::test]
+    async fn unnumbered_events_still_keep_two_calls_apart() {
+        let sse = concat!(
+            "event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_first\",\"name\":\"web_search\"}}\n\n",
+            "event: content_block_delta\ndata: {\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\\\"a\\\"}\"}}\n\n",
+            "event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_second\",\"name\":\"web_fetch\"}}\n\n",
+            "event: content_block_delta\ndata: {\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"url\\\":\\\"b\\\"}\"}}\n\n",
+            "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n\n",
+        );
+        let stream = AnthropicSseStream::new(StaticByteStream {
+            data: vec![sse.as_bytes().to_vec()],
+            idx: 0,
+        });
+        let response = crate::collect_stream(Box::pin(stream)).await.unwrap();
+
+        assert_eq!(response.tool_calls.len(), 2);
+        assert_eq!(response.tool_calls[0].id, "toolu_first");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            serde_json::json!({ "q": "a" })
+        );
+        assert_eq!(response.tool_calls[1].id, "toolu_second");
+        assert_eq!(
+            response.tool_calls[1].arguments,
+            serde_json::json!({ "url": "b" })
         );
     }
 }
