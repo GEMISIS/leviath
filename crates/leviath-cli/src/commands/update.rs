@@ -724,6 +724,50 @@ pub struct UpdateArgs {
 /// `SeedCommandRunner` seams.
 pub type CommandRunner = Arc<dyn Fn(&[String]) -> anyhow::Result<()> + Send + Sync>;
 
+/// What to make of an upgrade command a caller ran with its output captured
+/// rather than letting it draw on a terminal.
+///
+/// `lev update` hands the package manager the terminal it inherited, because a
+/// progress bar is most of what makes the wait bearable. `POST /api/update` has
+/// no terminal to hand over and a console on the other end of a socket, so the
+/// command is run captured and whatever it printed is the only evidence of
+/// *why* that ever reaches the person who pressed the button.
+///
+/// Split from the spawn so the decision is testable: the spawn itself lives in
+/// the binary's composition root, beside the terminal-inheriting one.
+pub fn captured_outcome(
+    argv: &[String],
+    output: std::io::Result<std::process::Output>,
+) -> anyhow::Result<()> {
+    let shown = argv.join(" ");
+    let output = output.map_err(|e| anyhow::anyhow!("could not run `{shown}`: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    // stderr first, then stdout: a package manager that failed usually says so
+    // on stderr, but `sh -c "curl ... | sh"` is a pipeline whose useful last
+    // word can land on either. The exit status alone is the last resort - it
+    // names no cause, and "exited with 1" is what sent people to run the
+    // command by hand to find out.
+    match last_line(&output.stderr).or_else(|| last_line(&output.stdout)) {
+        Some(line) => anyhow::bail!("`{shown}` failed: {line}"),
+        None => anyhow::bail!("`{shown}` exited with {} and said nothing", output.status),
+    }
+}
+
+/// The last line of captured output with anything on it.
+///
+/// The last rather than the first: a build log's opening lines are the tool
+/// announcing itself, and the sentence that explains the failure is at the
+/// bottom.
+fn last_line(bytes: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_string())
+}
+
 /// Asks the user a yes/no question. Injected for the same reason: a unit test
 /// has no terminal, and which questions a flag answers on the user's behalf -
 /// and, for a blueprint they edited, which ones no flag answers - is something
@@ -791,6 +835,27 @@ impl UpdateEnv {
         Self {
             latest: std::sync::Arc::new(decline_update_check),
             ..Self::for_planning()
+        }
+    }
+
+    /// The real machine, wired for a caller that will carry the plan out but
+    /// will never stop to ask a question.
+    ///
+    /// `POST /api/update` is the caller: the request body is the consent, so
+    /// there is nobody to prompt and no terminal to prompt on. `confirm` is a
+    /// refusal rather than a yes for the same reason [`Self::for_planning`]
+    /// carries refusals - the executing paths that ask are the ones this caller
+    /// must not reach, and a `true` here would make reaching one look like
+    /// permission.
+    ///
+    /// The update check is off: the route answers "is there anything newer"
+    /// from its own cache, and an apply that blocked on a release feed would
+    /// turn a step that runs a package manager into one that first waits on
+    /// GitHub.
+    pub fn for_applying(runner: CommandRunner) -> Self {
+        Self {
+            latest: std::sync::Arc::new(decline_update_check),
+            ..Self::real(runner, std::sync::Arc::new(say_no))
         }
     }
 

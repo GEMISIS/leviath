@@ -1051,6 +1051,74 @@
             "$ref": "#/components/responses/Ok"
           }
         }
+      },
+      "post": {
+        "tags": [
+          "diagnostics"
+        ],
+        "summary": "Carry out the update the GET half describes",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because it runs a package manager, rewrites the agents directory and rewrites the config. Answers 202 with a `job_id` and runs the work behind it: an upgrade is a download and an install, so every step change is sent on `/ws` as `update_progress`, the last as `update_finished`, and `GET /api/update/jobs/{id}` answers the same record for a client that would rather poll. The body names which parts to do - `binary`, `agents`, `migrations`, each defaulting to true, so an empty body is the whole plan. A `binary.action` of `advise` stays advice: the step is recorded as `advised` with the reason and no compile is started. A blueprint you edited locally is never installed. 409 while another update is running.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "binary": {
+                    "type": "boolean"
+                  },
+                  "agents": {
+                    "type": "boolean"
+                  },
+                  "migrations": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/update/jobs/{id}": {
+      "get": {
+        "tags": [
+          "diagnostics"
+        ],
+        "summary": "Where one update run got to",
+        "description": "Admin only, mounted alongside `POST /api/update`. The same record the `update_finished` frame carries: `status` of `running`, `complete` or `failed`; a `steps` list with one entry per step (`binary`, `agents`, `migrations`), each `pending`, `running`, `done`, `skipped`, `advised` or `failed` with a line of detail; and `restart_required`, set when the binary was replaced - this server and the daemon keep running the old build until they are restarted. The last few runs are kept, so a client that reads back after the fact finds the job.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "An update job id, as returned by POST /api/update."
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/api/fs/dirs": {

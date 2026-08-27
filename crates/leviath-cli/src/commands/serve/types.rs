@@ -127,6 +127,9 @@ pub struct AppState {
     /// On the state rather than in a `static` so two servers in one process -
     /// or two tests - cannot write into each other's answer.
     pub(super) update_check: super::update_cache::UpdateCheckCache,
+    /// The update runs `POST /api/update` has started, and the machine to start
+    /// another on. On the state for the same reason the cache above is.
+    pub(super) update_jobs: super::update_job::UpdateJobs,
 }
 
 impl AppState {

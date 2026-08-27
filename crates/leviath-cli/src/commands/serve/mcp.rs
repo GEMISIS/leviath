@@ -363,6 +363,7 @@ mod tests {
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
         AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
@@ -758,6 +759,7 @@ for line in sys.stdin:
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
         AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
@@ -813,6 +815,7 @@ for line in sys.stdin:
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
         let state = AppState {
             update_check: Default::default(),
+            update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
