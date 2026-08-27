@@ -13,6 +13,18 @@ same list.
 
 ## Unreleased
 
+- Fixed: a deleted run no longer comes back. The persistence lane ran
+  `create_dir_all` before every write, so the next message for a run - a
+  heartbeat snapshot, a journal append, or just the closing write of a run
+  being cancelled - rebuilt the whole directory: `meta.json`, `context.json`,
+  the stage logs and the transcript, seconds after the console said it was
+  gone. Deleting a run the daemon was still holding therefore looked like it
+  did nothing at all, and deleting it again did nothing again, until the daemon
+  happened to be finished with it. A run directory is created once, by whoever
+  starts the run; after that its existence belongs to whoever is looking after
+  the machine, and the lane now drops writes for a run whose directory has been
+  removed instead of putting it back.
+
 - Added: a stage's model chain can be reordered with the mouse in the agent
   editor. Each model row carries a `⠿` grip; press it, drag up or down the
   chain, and let go. The rows reorder as you drag, so the drop is what you

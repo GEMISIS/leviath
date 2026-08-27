@@ -9,6 +9,7 @@
 //! sees a half-written file. All errors are logged and swallowed - persistence is
 //! best-effort and must never stall or fail the world.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use leviath_core::run_archive;
@@ -145,6 +146,10 @@ pub async fn persistence_worker(
     // go terminal might have no `Progress` after it at all.
     let mut last_status: std::collections::HashMap<String, leviath_core::run_meta::RunStatus> =
         std::collections::HashMap::new();
+    // The runs this lane has already written for, so a later write can tell a
+    // directory it is about to establish from one somebody has deleted. See
+    // [`may_write`].
+    let mut staked: HashSet<String> = HashSet::new();
     while let Some(first) = jobs.recv().await {
         // Drain whatever else is already queued and process it as one batch,
         // keeping only the NEWEST snapshot per run: each snapshot carries the
@@ -168,6 +173,14 @@ pub async fn persistence_worker(
                 PersistMsg::Snapshot(job) => {
                     if newest_snapshot.get(job.run_id.as_str()) != Some(&i) {
                         continue; // superseded by a newer snapshot in this batch
+                    }
+                    if !may_write(&runs_dir, &job.run_id, &mut staked) {
+                        // Deleted. Forget what was cached about it too, so the
+                        // maps stay bounded by the runs still being written.
+                        last_context.remove(&job.run_id);
+                        last_output.remove(&job.run_id);
+                        last_status.remove(&job.run_id);
+                        continue;
                     }
                     let prev = last_context.get(&job.run_id);
                     let written = last_output.get(&job.run_id).copied();
@@ -216,9 +229,12 @@ pub async fn persistence_worker(
                     record,
                     ack,
                 } => {
-                    append_record(&runs_dir, &run_id, &record).await;
+                    if may_write(&runs_dir, &run_id, &mut staked) {
+                        append_record(&runs_dir, &run_id, &record).await;
+                    }
                     // Ack unconditionally - persistence is best-effort and the
-                    // dispatch-side barrier must never stall on a failed append.
+                    // dispatch-side barrier must never stall on a failed append,
+                    // or on a run that has been deleted out from under it.
                     if let Some(ack) = ack {
                         let _ = ack.send(());
                     }
@@ -228,6 +244,9 @@ pub async fn persistence_worker(
                     output_appends,
                     log_appends,
                 } => {
+                    if !may_write(&runs_dir, &run_id, &mut staked) {
+                        continue;
+                    }
                     let dir = runs_dir.join(&run_id);
                     for (idx, line) in &output_appends {
                         append_stage_line(&dir, *idx, "output.log", line, &run_id).await;
@@ -239,6 +258,43 @@ pub async fn persistence_worker(
             }
         }
     }
+}
+
+/// Whether the lane should still write for `run_id`, remembering the run the
+/// first time it is asked about it.
+///
+/// A run directory is created **once**, by whoever starts the run: the CLI
+/// spawner before the world is built, or - for an embedded world with no CLI
+/// in front of it - this lane's own first write. After that, its existence
+/// belongs to whoever is looking after the machine. `d` in the dashboard,
+/// `DELETE /api/runs/{id}` and an operator with `rm -rf` all say the same
+/// thing by removing it.
+///
+/// So a write that finds the directory gone is not a gap to repair. It used to
+/// be repaired: every snapshot ran `create_dir_all` first, so a run came back
+/// from the dead - meta, context, stage logs, transcript and all - moments
+/// after the console said it was deleted. A cancelled run's closing write was
+/// enough on its own, which is why deleting a stuck run looked like it did
+/// nothing. The delete had worked; the daemon put it straight back, and the
+/// next list showed it again.
+///
+/// One `stat` per message, taken inline rather than through the blocking pool:
+/// the hop would cost more than the syscall it is avoiding, and the lane is
+/// already doing far heavier work per message than this.
+fn may_write(runs_dir: &Path, run_id: &str, staked: &mut HashSet<String>) -> bool {
+    // First message for this run. The directory is normally already there, and
+    // creating it is a no-op; the embedded case is the one that needs it made.
+    if staked.insert(run_id.to_string()) {
+        return true;
+    }
+    if runs_dir.join(run_id).is_dir() {
+        return true;
+    }
+    tracing::info!(
+        run_id = %run_id,
+        "persistence: the run directory is gone, so it was deleted; dropping its writes"
+    );
+    false
 }
 
 /// Create a run directory and any missing parents, owner-only, off the async
@@ -1359,6 +1415,87 @@ mod tests {
         write_snapshot(dir.path(), &job("run-1"), "m", "w", None, None, None).await;
         // meta.json still written despite the archive failure.
         assert!(run_dir.join("meta.json").exists());
+    }
+
+    /// A run somebody deleted has to stay deleted.
+    ///
+    /// The lane ran `create_dir_all` before every write, so the next message
+    /// for that run rebuilt the whole directory - meta, context, transcript -
+    /// seconds after the console said it was gone. The closing write of a run
+    /// being cancelled was enough on its own, which is what made deleting a
+    /// stuck run from the dashboard look like it did nothing at all.
+    #[tokio::test]
+    async fn a_deleted_run_is_not_written_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().to_path_buf();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let worker = tokio::spawn(persistence_worker(Some(runs.clone()), rx));
+
+        // The run establishes its directory the ordinary way.
+        tx.send(PersistMsg::Snapshot(Box::new(job("run-1"))))
+            .unwrap();
+        let run_dir = runs.join("run-1");
+        for _ in 0..500 {
+            if run_dir.join("meta.json").exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            run_dir.join("meta.json").exists(),
+            "the first write establishes the directory"
+        );
+
+        // Deleted out from under the lane, which is all `d` in the dashboard
+        // and `DELETE /api/runs/{id}` do.
+        std::fs::remove_dir_all(&run_dir).unwrap();
+
+        // Every later message for it is dropped - a snapshot, a journal append,
+        // and a batch of stage lines, since all three used to make directories.
+        tx.send(PersistMsg::Snapshot(Box::new(job("run-1"))))
+            .unwrap();
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(PersistMsg::Append {
+            run_id: "run-1".to_string(),
+            record: Box::new(batch_record(0, "c1")),
+            ack: Some(ack_tx),
+        })
+        .unwrap();
+        tx.send(PersistMsg::StageLines {
+            run_id: "run-1".to_string(),
+            output_appends: vec![(0, "a line".to_string())],
+            log_appends: vec![(0, "a log line".to_string())],
+        })
+        .unwrap();
+        // The ack still fires. A dropped append that never answered would park
+        // the tool lane's dispatch barrier for the rest of the run.
+        ack_rx
+            .await
+            .expect("a dropped append is still acknowledged");
+
+        // A different run is unaffected: this is one run being forgotten, not
+        // the lane giving up.
+        tx.send(PersistMsg::Snapshot(Box::new(job("run-2"))))
+            .unwrap();
+        drop(tx);
+        worker.await.unwrap();
+
+        // Listed before the assert rather than inside its message: a message
+        // on an assert that passes never runs, and never-run code does not
+        // meet the coverage gate.
+        let left: Vec<String> = std::fs::read_dir(&runs)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !left.iter().any(|n| n == "run-1"),
+            "the deleted run came back: {left:?}"
+        );
+        assert!(
+            runs.join("run-2").join("meta.json").exists(),
+            "another run still writes"
+        );
     }
 
     fn batch_record(iteration: usize, call_id: &str) -> leviath_core::run_archive::RunRecord {
