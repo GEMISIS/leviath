@@ -249,6 +249,21 @@ preview through every one of its calls, and a summary stage further on can still
 The first two hold the typed tool-call turns the next stage's own turns attach to, and an answer
 submitted early has to survive to the end.
 
+Re-declaring a layout is the heavy form. When a stage only needs to leave one or two regions out,
+name them instead:
+
+```toml
+[stages.polish.context]
+hide = ["sources"]        # everything else is carried exactly as the global layout says
+```
+
+`hide` is the right tool for the common case: a region of raw material (fetched pages, tool
+output) that an early stage fills and a late stage never reads. Left in, it is re-sent on every
+call of every later stage; a report-polishing stage in the bundled deep-researcher was carrying
+125,000 tokens of sources it had no instruction to look at. A name that matches no region fails
+the load, and the always-visible regions above cannot be hidden. The hidden set is decided afresh
+by each stage: a stage that declares neither `regions` nor `hide` carries everything.
+
 ## Seed commands
 
 A region can be seeded before the run starts:

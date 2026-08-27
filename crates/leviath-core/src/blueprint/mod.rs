@@ -18,7 +18,7 @@ use std::collections::HashMap;
 /// tool_use/tool_result turns, an answer submitted early has to survive to the
 /// end, and the last holds the instructions of the stage being entered. Mirrors
 /// `context_setup::apply_layout`, which is where the rule is enforced.
-const ALWAYS_VISIBLE_REGIONS: [&str; 4] = [
+pub const ALWAYS_VISIBLE_REGIONS: [&str; 4] = [
     "conversation",
     "tool_results",
     "final_output",
@@ -349,6 +349,11 @@ impl Blueprint {
         let mut names: std::collections::HashSet<&str> =
             layout.regions.iter().map(|r| r.name.as_str()).collect();
         names.extend(ALWAYS_VISIBLE_REGIONS);
+        // `validate_region_references` has already refused a hide list that
+        // names an always-visible region, so nothing here can remove one.
+        for hidden in &stage.context_hide {
+            names.remove(hidden.as_str());
+        }
         names
     }
 
@@ -380,6 +385,25 @@ impl Blueprint {
                 stage: stage.name.clone(),
                 message,
             };
+
+            // A hidden region has to be one the stage would otherwise carry:
+            // a name that matches nothing is a typo, and a typo here is the
+            // silent kind (the large region stays in every prompt and the
+            // bill says so a month later). The always-visible four cannot be
+            // hidden at all - the model's own turns live there.
+            for hidden in &stage.context_hide {
+                if ALWAYS_VISIBLE_REGIONS.contains(&hidden.as_str()) {
+                    return Err(bad(format!(
+                        "context.hide names '{hidden}', which every stage carries and cannot hide"
+                    )));
+                }
+                if !known.contains(hidden.as_str()) {
+                    return Err(bad(format!(
+                        "context.hide names region '{hidden}', which no layout in this \
+                         blueprint declares"
+                    )));
+                }
+            }
 
             if let Some(routing) = &stage.tool_result_routing {
                 // Routing is checked against what *this* stage can see, not

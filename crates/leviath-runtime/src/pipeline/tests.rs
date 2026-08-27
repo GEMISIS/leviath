@@ -6830,6 +6830,7 @@ fn setup() -> StageSetup {
         routing: None,
         accepts_messages: true,
         context_layout: None,
+        context_hide: Vec::new(),
         system_prompt: None,
         output: None,
     }
@@ -16774,5 +16775,44 @@ fn build_request_resolves_relative_output_caps() {
             region: "no_such_region".to_string()
         }),
         4_000
+    );
+}
+
+/// `hide` leaves the named regions out of this stage's prompt and nothing
+/// else: the content stays, the always-visible regions cannot be hidden, and
+/// the next stage (with neither a layout nor a hide list) sees everything
+/// again rather than inheriting the narrowing.
+#[test]
+fn a_stage_hides_what_it_names_and_the_next_stage_starts_clean() {
+    let mut window = instructions_window(&["task", "sources", "notes"]);
+    let _ = window.add_to_region("sources", "a page".to_string(), 2);
+    let hiding = StageSetup {
+        context_hide: vec!["sources".to_string(), "conversation".to_string()],
+        ..setup_carrying_prompt("polish")
+    };
+    apply_stage_context(&hiding, &mut window).expect("fits");
+    assert!(window.hidden.contains("sources"));
+    assert!(!window.hidden.contains("conversation"));
+    assert_eq!(window.get_region("sources").unwrap().content.len(), 1);
+    let assembled = window.assemble();
+    assert!(
+        !assembled
+            .system_blocks
+            .iter()
+            .any(|b| b.text.contains("a page")),
+        "hidden region assembled"
+    );
+
+    apply_stage_context(&setup_carrying_prompt("summary"), &mut window).expect("fits");
+    assert!(
+        window.hidden.is_empty(),
+        "a stage with no narrowing carries everything"
+    );
+    let assembled = window.assemble();
+    assert!(
+        assembled
+            .system_blocks
+            .iter()
+            .any(|b| b.text.contains("a page"))
     );
 }
