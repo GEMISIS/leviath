@@ -13,6 +13,15 @@ same list.
 
 ## Unreleased
 
+- Fixed: `lev dash` no longer reads every run's context window on every tick.
+  The context is the largest file in a run directory, and the only thing that
+  draws it is the detail view's context card - which shows one run. Reading all
+  of them made opening the dashboard cost the whole history: measured on 750
+  runs holding 194 MB of `context.json` between them, the run list took 1.4s to
+  appear (3.9s from a cold page cache) and the process sat at 267 MB resident.
+  It now reads the window for the run the cursor is on: 0.10s to the list, and
+  32 MB.
+
 - Fixed: a deleted run no longer comes back. The persistence lane ran
   `create_dir_all` before every write, so the next message for a run - a
   heartbeat snapshot, a journal append, or just the closing write of a run

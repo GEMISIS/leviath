@@ -652,6 +652,18 @@ impl Dashboard {
             .collect();
         self.stages_cache.retain_under(&live_dirs);
         self.context_cache.retain_under(&live_dirs);
+        // The run whose context is worth reading this tick: the one the cursor
+        // is on, which is the one the detail view draws. Taken before the loop
+        // because the loop borrows `self.agents` mutably.
+        //
+        // Last frame's selection, which is this frame's: a keypress that moves
+        // the cursor is handled before the tick that follows it, so opening a
+        // run always finds its context already read.
+        let showing = self
+            .display_indices
+            .get(self.selected)
+            .and_then(|&i| self.agents.get(i))
+            .map(|agent| agent.id.clone());
         for run in runs {
             // A live open prompt from the daemon's hub (populated each tick by
             // `sync_interactions`) is the authoritative signal that this agent is
@@ -708,8 +720,20 @@ impl Dashboard {
             // hoisted out of the per-agent branches below so the cache borrow
             // does not overlap the `self.agents` borrow.
             let stages = runstate::read_stages_index_cached(&run.run_id, &mut self.stages_cache);
-            let context_snapshot =
-                runstate::read_context_snapshot_cached(&run.run_id, &mut self.context_cache);
+            // The context window, only for the run on screen. It is the largest
+            // file in a run directory by a wide margin, and the only thing that
+            // reads it is the detail view's context card, which draws one run.
+            //
+            // Reading every run's cost what the history cost: a machine with
+            // 750 runs behind it held 194 MB of context.json, and the dashboard
+            // parsed all of it before its first frame and then kept every
+            // snapshot alive in the cache. 1.3s to draw a list of runs, and
+            // 267 MB resident to show one of them.
+            let context_snapshot = if showing.as_deref() == Some(run.run_id.as_str()) {
+                runstate::read_context_snapshot_cached(&run.run_id, &mut self.context_cache)
+            } else {
+                None
+            };
 
             if let Some(agent) = self.agents.iter_mut().find(|a| a.id == run.run_id) {
                 let prev_status_was_active = matches!(
@@ -2675,6 +2699,58 @@ mod tests {
             assert!(dash.toasts.is_empty());
 
             cleanup_run(run_id);
+        });
+    }
+
+    /// The context window is read only for the run the cursor is on.
+    ///
+    /// It is the largest file in a run directory by a wide margin, and the only
+    /// thing that draws it is the detail view's context card - which draws one
+    /// run. Reading every run's made launching the dashboard cost the whole
+    /// history: measured on 750 runs holding 194 MB of `context.json` between
+    /// them, the list took 1.4s to appear and the process sat at 267 MB, all to
+    /// show one run's window.
+    #[test]
+    fn only_the_run_on_screen_has_its_context_read() {
+        crate::runstate::with_isolated_runs_dir("sync-context-one-run", |_d| {
+            let snapshot = runstate::ContextSnapshot {
+                stage_name: "main".to_string(),
+                total_tokens: 10,
+                max_tokens: 100,
+                regions: vec![],
+            };
+            for run_id in ["run-shown", "run-offscreen"] {
+                runstate::create_run(&make_run_meta(run_id, RunStatus::Complete)).unwrap();
+                runstate::write_context_snapshot(run_id, &snapshot).unwrap();
+            }
+
+            let mut dash = make_test_dashboard();
+            // The first pass has no cursor to read from yet; the second is the
+            // steady state every tick after it.
+            dash.sync_from_run_state();
+            dash.sync_from_run_state();
+
+            let shown = dash
+                .display_indices
+                .get(dash.selected)
+                .and_then(|&i| dash.agents.get(i))
+                .map(|agent| agent.id.clone())
+                .expect("a row is selected");
+            assert_eq!(dash.agents.len(), 2, "both runs are listed");
+            for agent in &dash.agents {
+                if agent.id == shown {
+                    assert!(
+                        agent.context_snapshot.is_some(),
+                        "the run on screen has its window read"
+                    );
+                } else {
+                    assert!(
+                        agent.context_snapshot.is_none(),
+                        "{} is off screen; its window is not read",
+                        agent.id
+                    );
+                }
+            }
         });
     }
 
