@@ -6,6 +6,92 @@
 
 use serde::{Deserialize, Serialize};
 
+/// How one row of a built-in capability table recognises a model name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Match {
+    /// The name starts with this.
+    Prefix(&'static str),
+    /// The name contains this anywhere.
+    Contains(&'static str),
+    /// The name starts with the first and contains the second.
+    PrefixAnd(&'static str, &'static str),
+}
+
+impl Match {
+    /// Whether `model` is what this pattern describes.
+    fn hits(self, model: &str) -> bool {
+        match self {
+            Self::Prefix(p) => model.starts_with(p),
+            Self::Contains(c) => model.contains(c),
+            Self::PrefixAnd(p, c) => model.starts_with(p) && model.contains(c),
+        }
+    }
+
+    /// A model name this pattern recognises, for the table tests.
+    #[cfg(test)]
+    fn example(self) -> String {
+        match self {
+            Self::Prefix(p) | Self::Contains(p) => p.to_string(),
+            Self::PrefixAnd(p, c) => format!("{p}{c}"),
+        }
+    }
+}
+
+/// One row of a provider's built-in capability table.
+///
+/// Every model any table knows streams and takes a system prompt, so a row
+/// records only what varies: whether it takes a temperature, whether it
+/// calls tools, and its two token limits. A row matches when any of its
+/// patterns does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Row {
+    /// Any of these recognises the model.
+    pub(crate) matches: &'static [Match],
+    /// See [`ModelCapabilities::supports_temperature`].
+    pub(crate) temperature: bool,
+    /// See [`ModelCapabilities::supports_tools`].
+    pub(crate) tools: bool,
+    /// See [`ModelCapabilities::max_context_tokens`].
+    pub(crate) context: usize,
+    /// See [`ModelCapabilities::max_output_tokens`].
+    pub(crate) output: usize,
+}
+
+impl Row {
+    /// Whether any of this row's patterns recognises `model`.
+    fn hits(&self, model: &str) -> bool {
+        self.matches.iter().any(|m| m.hits(model))
+    }
+
+    /// The capabilities this row describes.
+    const fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_temperature: self.temperature,
+            supports_streaming: true,
+            supports_tools: self.tools,
+            supports_system_prompt: true,
+            max_context_tokens: self.context,
+            max_output_tokens: self.output,
+            limits_source: LimitsSource::Builtin,
+        }
+    }
+}
+
+/// The first row of `table` that recognises `model`, or `fallback`.
+///
+/// First hit wins, which is what lets a table put `gpt-5.5` above `gpt-5`
+/// and `claude-opus-4-8` above `claude-opus-4`: the specific row comes
+/// first and the family row catches the rest. The four providers that used
+/// to spell this as a ladder of `if model.starts_with(..) { return .. }`
+/// blocks each carried a note about that ordering; now the table is the
+/// note.
+pub(crate) fn lookup(table: &[Row], model: &str, fallback: ModelCapabilities) -> ModelCapabilities {
+    table
+        .iter()
+        .find(|row| row.hits(model))
+        .map_or(fallback, Row::capabilities)
+}
+
 /// Capabilities supported by a model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCapabilities {
@@ -176,5 +262,99 @@ impl From<ModelCapabilities> for ModelCapabilityOverride {
             cache_write_per_mtok: None,
             output_per_mtok: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+
+    /// Every provider table, with the fallback its provider uses.
+    fn tables() -> Vec<(&'static str, &'static [Row], ModelCapabilities)> {
+        vec![
+            (
+                "openai",
+                crate::openai::MODELS,
+                ModelCapabilities::default(),
+            ),
+            (
+                "anthropic",
+                crate::anthropic::MODELS,
+                ModelCapabilities::default(),
+            ),
+            (
+                "ollama",
+                crate::ollama::MODELS,
+                crate::ollama::FALLBACK_CAPABILITIES,
+            ),
+            (
+                "openrouter",
+                crate::openrouter::MODELS,
+                crate::openrouter::FALLBACK_CAPABILITIES,
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_pattern_in_every_table_resolves_to_the_first_row_that_matches_it() {
+        for (name, table, fallback) in tables() {
+            for (i, row) in table.iter().enumerate() {
+                for m in row.matches {
+                    let model = m.example();
+                    // A pattern always matches its own example, so the
+                    // position is never absent.
+                    let first = table
+                        .iter()
+                        .position(|r| r.hits(&model))
+                        .expect("a pattern matches its own example");
+                    assert!(
+                        first <= i,
+                        "{name}: row {i} ({model}) is shadowed by row {first}"
+                    );
+                    assert_eq!(
+                        lookup(table, &model, fallback.clone()),
+                        table[first].capabilities(),
+                        "{name}: {model}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_name_no_row_recognises_gets_the_fallback() {
+        for (name, table, fallback) in tables() {
+            assert_eq!(
+                lookup(table, "nothing-anyone-has-heard-of", fallback.clone()),
+                fallback,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_three_pattern_kinds_match_what_they_say() {
+        assert!(Match::Prefix("gpt-5").hits("gpt-5-mini"));
+        assert!(!Match::Prefix("gpt-5").hits("openai/gpt-5"));
+        assert!(Match::Contains("gpt-5").hits("openai/gpt-5"));
+        assert!(Match::PrefixAnd("anthropic/", "fable").hits("anthropic/claude-fable-5"));
+        assert!(!Match::PrefixAnd("anthropic/", "fable").hits("openai/claude-fable-5"));
+        assert!(!Match::PrefixAnd("anthropic/", "fable").hits("anthropic/claude-opus-5"));
+    }
+
+    #[test]
+    fn a_row_streams_and_takes_a_system_prompt_whatever_else_it_says() {
+        let row = Row {
+            matches: &[Match::Contains("x")],
+            temperature: false,
+            tools: false,
+            context: 1,
+            output: 2,
+        };
+        let caps = row.capabilities();
+        assert!(caps.supports_streaming && caps.supports_system_prompt);
+        assert!(!caps.supports_temperature && !caps.supports_tools);
+        assert_eq!((caps.max_context_tokens, caps.max_output_tokens), (1, 2));
+        assert_eq!(caps.limits_source, LimitsSource::Builtin);
     }
 }

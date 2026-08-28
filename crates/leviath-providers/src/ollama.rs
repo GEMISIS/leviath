@@ -2,6 +2,7 @@
 //!
 //! Ollama provides local LLM execution via NDJSON streaming.
 
+use crate::capabilities::{Match, Row};
 use crate::provider::{
     FinishReason, InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities,
     ModelCapabilityOverride, ModelInfo, Provider, ProviderError, Result, StreamChunk, TokenUsage,
@@ -148,6 +149,89 @@ fn effective_window(show: &serde_json::Value) -> Option<usize> {
             .flatten()
     })
 }
+
+/// What this build knows about the models Ollama commonly serves.
+///
+/// `deepseek-r1` sits above the general DeepSeek row because it is the one
+/// that cannot call tools.
+pub(crate) const MODELS: &[Row] = &[
+    // Llama 3.x and Qwen 2.x/3: tool-capable, 128K context.
+    Row {
+        matches: &[
+            Match::Contains("llama3"),
+            Match::Contains("llama-3"),
+            Match::Contains("qwen2.5"),
+            Match::Contains("qwen3"),
+            Match::Contains("qwen2"),
+        ],
+        temperature: true,
+        tools: true,
+        context: 131_072,
+        output: 8192,
+    },
+    // Mistral / Mixtral: tool-capable.
+    Row {
+        matches: &[Match::Contains("mistral"), Match::Contains("mixtral")],
+        temperature: true,
+        tools: true,
+        context: 32_768,
+        output: 4096,
+    },
+    // Phi-4: tool-capable, 128K context.
+    Row {
+        matches: &[Match::Contains("phi-4"), Match::Contains("phi4")],
+        temperature: true,
+        tools: true,
+        context: 131_072,
+        output: 8192,
+    },
+    // DeepSeek R1: reasoning, no tool calls.
+    Row {
+        matches: &[Match::Contains("deepseek-r1")],
+        temperature: true,
+        tools: false,
+        context: 131_072,
+        output: 8192,
+    },
+    // DeepSeek general: tool-capable.
+    Row {
+        matches: &[Match::Contains("deepseek")],
+        temperature: true,
+        tools: true,
+        context: 131_072,
+        output: 8192,
+    },
+    // Gemma: no tool support.
+    Row {
+        matches: &[Match::Contains("gemma")],
+        temperature: true,
+        tools: false,
+        context: 131_072,
+        output: 8192,
+    },
+    // CodeLlama: no tool support.
+    Row {
+        matches: &[Match::Contains("codellama")],
+        temperature: true,
+        tools: false,
+        context: 16_384,
+        output: 4096,
+    },
+];
+
+/// What a local model this build has never heard of is assumed to be.
+///
+/// Conservative on purpose: a small window and no tools, since most models
+/// people pull into Ollama are small and tool calling is the exception.
+pub(crate) const FALLBACK_CAPABILITIES: ModelCapabilities = ModelCapabilities {
+    supports_temperature: true,
+    supports_streaming: true,
+    supports_tools: false,
+    supports_system_prompt: true,
+    max_context_tokens: 8192,
+    max_output_tokens: 4096,
+    limits_source: LimitsSource::Builtin,
+};
 
 impl OllamaProvider {
     /// Create a new Ollama provider.
@@ -426,100 +510,7 @@ impl OllamaProvider {
 
     /// Return built-in capability defaults for a model based on its name pattern.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        // Llama 3.x and Qwen 2.x/3 - tool-capable, 128K context
-        if model.contains("llama3")
-            || model.contains("llama-3")
-            || model.contains("qwen2.5")
-            || model.contains("qwen3")
-            || model.contains("qwen2")
-        {
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 131_072,
-                max_output_tokens: 8192,
-                limits_source: LimitsSource::Builtin,
-            }
-        // Mistral / Mixtral - tool-capable
-        } else if model.contains("mistral") || model.contains("mixtral") {
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 32_768,
-                max_output_tokens: 4096,
-                limits_source: LimitsSource::Builtin,
-            }
-        // Phi-4 - tool-capable, 128K context
-        } else if model.contains("phi-4") || model.contains("phi4") {
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 131_072,
-                max_output_tokens: 8192,
-                limits_source: LimitsSource::Builtin,
-            }
-        // DeepSeek R1 - reasoning, no tool calls
-        } else if model.contains("deepseek-r1") {
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: false,
-                supports_system_prompt: true,
-                max_context_tokens: 131_072,
-                max_output_tokens: 8192,
-                limits_source: LimitsSource::Builtin,
-            }
-        // DeepSeek general - tool-capable
-        } else if model.contains("deepseek") {
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 131_072,
-                max_output_tokens: 8192,
-                limits_source: LimitsSource::Builtin,
-            }
-        // Gemma - no tool support
-        } else if model.contains("gemma") {
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: false,
-                supports_system_prompt: true,
-                max_context_tokens: 131_072,
-                max_output_tokens: 8192,
-                limits_source: LimitsSource::Builtin,
-            }
-        // CodeLlama - no tool support
-        } else if model.contains("codellama") {
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: false,
-                supports_system_prompt: true,
-                max_context_tokens: 16_384,
-                max_output_tokens: 4096,
-                limits_source: LimitsSource::Builtin,
-            }
-        } else {
-            // Conservative fallback for unknown local models
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: false,
-                supports_system_prompt: true,
-                max_context_tokens: 8192,
-                max_output_tokens: 4096,
-                limits_source: LimitsSource::Builtin,
-            }
-        }
+        crate::capabilities::lookup(MODELS, model, FALLBACK_CAPABILITIES)
     }
 
     /// Build request body for the Ollama API.

@@ -1,12 +1,13 @@
 //! OpenAI provider implementation.
 
+use crate::capabilities::{Match, Row};
 use crate::openai_compat::{
     TokenLimitField, build_openai_request_body_with, openai_sse_stream, parse_openai_response,
     send_chat_request, temperature_refused, tools_refused_over_reasoning_effort,
 };
 use crate::provider::{
-    InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
-    ModelInfo, Provider, ProviderError, Result, StreamChunk,
+    InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride, ModelInfo,
+    Provider, ProviderError, Result, StreamChunk,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -43,6 +44,45 @@ pub struct OpenAIProvider {
     /// omits it instead of spending a round trip learning the same thing again.
     temperature_unsupported: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
+
+/// What this build knows about OpenAI's models, most specific first.
+///
+/// `gpt-5.5` sits above the `gpt-5` family row because it is the one member
+/// that refuses a temperature (verified against the API: it takes only its
+/// default and rejects any other value outright), and `gpt-4.1` above the
+/// implicit `gpt-4` default because its window is eight times larger.
+pub(crate) const MODELS: &[Row] = &[
+    Row {
+        matches: &[Match::Prefix("gpt-5.5")],
+        temperature: false,
+        tools: true,
+        context: 1_050_000,
+        output: 128_000,
+    },
+    // GPT-5.x family (5.4, 5.4-mini, 5.4-nano, 5-mini).
+    Row {
+        matches: &[Match::Prefix("gpt-5")],
+        temperature: true,
+        tools: true,
+        context: 400_000,
+        output: 128_000,
+    },
+    Row {
+        matches: &[Match::Prefix("gpt-4.1")],
+        temperature: true,
+        tools: true,
+        context: 1_047_576,
+        output: 32_768,
+    },
+    // o-series reasoning models: no temperature.
+    Row {
+        matches: &[Match::Prefix("o3"), Match::Prefix("o4")],
+        temperature: false,
+        tools: true,
+        context: 200_000,
+        output: 100_000,
+    },
+];
 
 impl OpenAIProvider {
     /// Create a new OpenAI provider.
@@ -101,57 +141,7 @@ impl OpenAIProvider {
 
     /// Return built-in capability defaults for a model.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        // GPT-5.5 - flagship, 1M+ context, 128K output (check before generic gpt-5)
-        if model.starts_with("gpt-5.5") {
-            ModelCapabilities {
-                // Verified against the API: it takes only its default and
-                // rejects any other value outright. The rest of the gpt-5
-                // family accepts one, which is how the generic branch below
-                // came to cover this model wrongly.
-                supports_temperature: false,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_050_000,
-                max_output_tokens: 128_000,
-                limits_source: LimitsSource::Builtin,
-            }
-        // GPT-5.x family (5.4, 5.4-mini, 5.4-nano, 5-mini) - 400K context, 128K output
-        } else if model.starts_with("gpt-5") {
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 400_000,
-                max_output_tokens: 128_000,
-                limits_source: LimitsSource::Builtin,
-            }
-        // GPT-4.1 family - 1M context (must check before generic gpt-4)
-        } else if model.starts_with("gpt-4.1") {
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_047_576,
-                max_output_tokens: 32_768,
-                limits_source: LimitsSource::Builtin,
-            }
-        // o-series reasoning models (o3, o4) - no temperature, 200K context
-        } else if model.starts_with("o3") || model.starts_with("o4") {
-            ModelCapabilities {
-                supports_temperature: false,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 200_000,
-                max_output_tokens: 100_000,
-                limits_source: LimitsSource::Builtin,
-            }
-        } else {
-            ModelCapabilities::default()
-        }
+        crate::capabilities::lookup(MODELS, model, ModelCapabilities::default())
     }
 
     /// POST a chat-completions body, teaching the retry described on
@@ -467,6 +457,7 @@ mod tests {
         assert_eq!(provider.pricing("no-such-model-9"), None);
     }
     use super::*;
+    use crate::provider::LimitsSource;
     use crate::test_support::always_on_tracing_guard;
     use leviath_testkit::{spawn_mock_server, spawn_mock_server_truncated_body};
 
