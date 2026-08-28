@@ -45,14 +45,14 @@ pub struct ExecConfig {
     pub jobs: mpsc::UnboundedSender<BrokerJob>,
     /// Effective per-request timeout (the stage's `request_timeout_secs`).
     pub timeout_secs: Option<u64>,
-    /// When streaming, the sink `__emit_chunk` feeds parsed chunks into.
+    /// When streaming, the sink `leviath_emit_chunk` feeds parsed chunks into.
     pub chunk_tx: Option<mpsc::UnboundedSender<crate::Result<StreamChunk>>>,
     /// `[security] allow_env_vars` - see [`build_init_engine`].
     pub env_allowlist: Arc<Vec<String>>,
 }
 
 /// Build the per-call execution engine: the hardened base plus `http_get`,
-/// `http_post`, `stream_request`, and (when streaming) `__emit_chunk`.
+/// `http_post`, `stream_request`, and (when streaming) `leviath_emit_chunk`.
 pub fn build_exec_engine(cfg: ExecConfig) -> Engine {
     let mut engine = build_init_engine(cfg.env_allowlist.clone());
     register_http_fns(&mut engine, cfg.jobs.clone(), cfg.timeout_secs);
@@ -301,7 +301,7 @@ fn register_emit_chunk(
     engine: &mut Engine,
     chunk_tx: mpsc::UnboundedSender<crate::Result<StreamChunk>>,
 ) {
-    engine.register_fn("__emit_chunk", move |result: Dynamic| {
+    engine.register_fn("leviath_emit_chunk", move |result: Dynamic| {
         let _ = chunk_tx.send(chunk_from_dynamic(result));
     });
 }
