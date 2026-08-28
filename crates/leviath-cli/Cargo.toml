@@ -87,7 +87,7 @@ rand = { workspace = true }
 
 # Randomly named, owner-only temp files for the interactive task editor: a
 # predictable `/tmp` name is a symlink-attack target on a shared host.
-tempfile = "3"
+tempfile = { workspace = true }
 
 [dev-dependencies]
 leviath-testkit = { workspace = true }

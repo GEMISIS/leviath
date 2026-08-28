@@ -34,7 +34,7 @@ leviath-testkit = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
 # Real directories and real symlinks: the path-containment tests are about what
 # the filesystem actually does, so a mock would test the mock.
-tempfile = "3"
+tempfile = { workspace = true }
 temp-env = { workspace = true }
 
 [lints]

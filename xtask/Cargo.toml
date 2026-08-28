@@ -15,7 +15,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 # Auto-installs the pre-commit hook (from .cargo-husky/hooks/) into
 # .git/hooks/ the first time this crate is built or tested -- since xtask is
 # a workspace member, that happens for free the first time anyone runs

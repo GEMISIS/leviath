@@ -40,4 +40,4 @@ axum = { workspace = true }
 # `async_closure` for the auth probe tests, which have to hold a variable set
 # across an await. `leviath-cli` already takes the same feature.
 temp-env = { workspace = true, features = ["async_closure"] }
-tempfile = "3"
+tempfile = { workspace = true }
