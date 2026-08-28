@@ -648,13 +648,13 @@ impl Dashboard {
 
     /// Sync agent list from on-disk run-state dir (background workers).
     pub(super) fn sync_from_run_state(&mut self) {
-        // Cached listing: metas re-parse only when their files change. Cloned
-        // out of the Arcs because the big match below reads fields by value;
-        // a meta is ~1KB, so the clone is noise next to the parses it avoids.
-        let runs: Vec<runstate::RunMeta> = runstate::list_runs_cached(&mut self.meta_cache)
-            .iter()
-            .map(|meta| (**meta).clone())
-            .collect();
+        // Cached listing: metas re-parse only when their files change, and a
+        // finished run's is not even stat'ed every tick. Kept as the cache's
+        // own `Arc`s: the loop below reads fields and clones the few strings
+        // it keeps, and cloning 750 records ten times a second was a measurable
+        // share of an idle dashboard's work.
+        let runs: Vec<std::sync::Arc<runstate::RunMeta>> =
+            runstate::list_runs_cached(&mut self.meta_cache);
         // Prune the per-run caches down to runs that still exist.
         let live_dirs: std::collections::HashSet<std::path::PathBuf> = runs
             .iter()
@@ -674,6 +674,14 @@ impl Dashboard {
             .get(self.selected)
             .and_then(|&i| self.agents.get(i))
             .map(|agent| agent.id.clone());
+        // Where each known run sits, so the loop is not a search per run: 750
+        // runs was 280,000 string compares a tick.
+        let positions: std::collections::HashMap<String, usize> = self
+            .agents
+            .iter()
+            .enumerate()
+            .map(|(i, agent)| (agent.id.clone(), i))
+            .collect();
         for run in runs {
             // A live open prompt from the daemon's hub (populated each tick by
             // `sync_interactions`) is the authoritative signal that this agent is
@@ -729,7 +737,11 @@ impl Dashboard {
             // Read stages index + context snapshot through the poll caches,
             // hoisted out of the per-agent branches below so the cache borrow
             // does not overlap the `self.agents` borrow.
-            let stages = runstate::read_stages_index_cached(&run.run_id, &mut self.stages_cache);
+            let stages = runstate::read_stages_index_settled(
+                &run.run_id,
+                &mut self.stages_cache,
+                runstate::settle_window(&run),
+            );
             // The context window, only for the run on screen. It is the largest
             // file in a run directory by a wide margin, and the only thing that
             // reads it is the detail view's context card, which draws one run.
@@ -745,7 +757,7 @@ impl Dashboard {
                 None
             };
 
-            if let Some(agent) = self.agents.iter_mut().find(|a| a.id == run.run_id) {
+            if let Some(agent) = positions.get(&run.run_id).map(|&i| &mut self.agents[i]) {
                 let prev_status_was_active = matches!(
                     agent.status,
                     AgentDisplayStatus::Active | AgentDisplayStatus::Waiting
@@ -3655,6 +3667,10 @@ mod tests {
 
                 let meta2 = make_run_meta(run_id, RunStatus::Error);
                 runstate::write_meta(&meta2).unwrap();
+                // A finished run's record is re-read once a second, not every
+                // tick; this test is about the toast path, not the window, so
+                // the cache forgets the run before the next sync.
+                dash.meta_cache = Default::default();
                 dash.sync_from_run_state(); // second sync: transitions Complete -> Error
 
                 let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
