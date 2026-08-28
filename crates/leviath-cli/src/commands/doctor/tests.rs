@@ -1132,6 +1132,60 @@ async fn run_checks_skips_the_daemon_when_asked_to() {
     assert!(checks.iter().all(|c| c.status != CheckStatus::Fail));
 }
 
+/// `--offline` proves the config and the resolution and then stops: no
+/// inference, no daemon, whatever daemon target the caller had in hand.
+#[tokio::test]
+async fn run_checks_stops_after_resolve_when_offline() {
+    let checks = with_env(|root| async move {
+        write_config(&root, "stub", Some("m"), "");
+        // A provider that would fail the inference if it were called.
+        let build = always(registry_with(
+            "stub",
+            StubProvider::failing("must not be called"),
+        ));
+        let args = DoctorArgs {
+            offline: true,
+            ..DoctorArgs::default()
+        };
+        let target = DaemonTarget::Unavailable("must not be consulted".to_string());
+        run_checks(&args, &build, target).await
+    })
+    .await;
+    assert_eq!(checks.len(), 3, "{checks:?}");
+    assert_eq!(checks[2].name, "resolve");
+    assert!(checks.iter().all(|c| c.status != CheckStatus::Fail));
+}
+
+/// A machine with no writable scratch space fails the daemon check instead
+/// of panicking the command.
+#[tokio::test]
+async fn run_checks_reports_a_scratch_dir_it_cannot_create() {
+    fn no_scratch() -> std::io::Result<tempfile::TempDir> {
+        Err(std::io::Error::other("scratch is read-only"))
+    }
+    let checks = with_env(|root| async move {
+        write_config(&root, "stub", Some("m"), "");
+        let build = always(registry_with("stub", StubProvider::replying("PONG")));
+        let (id, _server) = scripted_daemon(&root, vec![LISTING.to_string()]);
+        let client = ControlClient::new(id);
+        run_checks_with(
+            &DoctorArgs::default(),
+            &build,
+            DaemonTarget::Client(&client),
+            no_scratch,
+        )
+        .await
+    })
+    .await;
+    assert_eq!(checks.len(), 5, "{checks:?}");
+    assert_eq!(checks[4].name, "daemon");
+    assert_eq!(checks[4].status, CheckStatus::Fail);
+    assert!(
+        checks[4].detail.contains("scratch is read-only"),
+        "{checks:?}"
+    );
+}
+
 #[tokio::test]
 async fn run_checks_reports_a_daemon_that_would_not_start() {
     // The credentials are fine and the report says so; the daemon is the

@@ -1004,7 +1004,7 @@
             "$ref": "#/components/responses/Ok"
           }
         },
-        "description": "Returns `{\"status\": \"authenticated\"}` when the browser flow completed and credentials were stored, or `{\"status\": \"not_required\"}` when the server answered a probe carrying its configured headers, which means there is no OAuth flow to run."
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because it opens the operator's browser on the host running the server and completes an OAuth flow there. Returns `{\"status\": \"authenticated\"}` when the browser flow completed and credentials were stored, or `{\"status\": \"not_required\"}` when the server answered a probe carrying its configured headers, which means there is no OAuth flow to run."
       }
     },
     "/api/mcp/servers/{name}/test": {
@@ -1022,7 +1022,8 @@
           "200": {
             "$ref": "#/components/responses/Ok"
           }
-        }
+        },
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because it connects to the server and, for a stdio server, spawns its configured command."
       }
     },
     "/api/doctor": {
@@ -1030,11 +1031,28 @@
         "tags": [
           "diagnostics"
         ],
-        "summary": "The `lev doctor` checks, as data",
-        "description": "A failing check is reported inside a 200 with `ok: false`, not as an HTTP error: the request succeeded, the install is what did not.",
+        "summary": "The offline `lev doctor` checks, as data",
+        "description": "The same checks as `lev doctor --offline`: config, search and resolve, then stop. Nothing here contacts a provider or the daemon, so pressing the button costs nothing. A failing check is reported inside a 200 with `ok: false`, not as an HTTP error: the request succeeded, the install is what did not.",
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          }
+        }
+      }
+    },
+    "/api/doctor/live": {
+      "post": {
+        "tags": [
+          "diagnostics"
+        ],
+        "summary": "The whole `lev doctor` chain, billed calls included",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed: past the offline checks it makes one billed provider call, then spawns a throwaway one-stage run through the daemon (a second billed call) and waits for it. One at a time; a second caller while one is going gets 409. A failing check is reported inside a 200 with `ok: false`, not as an HTTP error.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "409": {
+            "description": "Another live doctor run is already in progress"
           }
         }
       }

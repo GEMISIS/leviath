@@ -387,12 +387,13 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
 /// propagated: the whole point of the command is to say whether the credentials
 /// or the daemon is at fault, and aborting here would answer neither.
 /// `--no-daemon` skips both the auto-start and the check, so a caller who only
-/// wants to test credentials never causes a daemon to exist. The checks
+/// wants to test credentials never causes a daemon to exist; `--offline`
+/// stops earlier still and skips it for the same reason. The checks
 /// themselves are the tested `commands::doctor::run_checks`; the auto-start and
 /// socket connect are the un-unit-testable slivers kept here.
 async fn real_doctor(args: commands::doctor::DoctorArgs) -> anyhow::Result<()> {
     use commands::doctor::DaemonTarget;
-    if args.no_daemon {
+    if args.no_daemon || args.offline {
         return commands::doctor::execute(args, DaemonTarget::Skip).await;
     }
     let started = ensure_daemon_running()

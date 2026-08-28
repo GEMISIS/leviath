@@ -139,13 +139,13 @@ fn api_router() -> Router<AppState> {
             "/api/agents/{id}/interaction",
             get(interactions::get_interaction).post(interactions::submit_interaction),
         )
-        // MCP servers - read-only surface. The mutating half is mounted by
-        // `execute_with_shutdown`, behind `--allow-admin`.
+        // MCP servers - read-only surface. Everything that connects to one or
+        // opens a browser is mounted by `execute_with_shutdown`, behind
+        // `--allow-admin`.
         .route("/api/mcp/servers", get(mcp::list_servers))
         .route("/api/mcp/servers/{name}/status", get(mcp::status))
-        .route("/api/mcp/servers/{name}/login", post(mcp::login))
-        .route("/api/mcp/servers/{name}/test", post(mcp::test_server))
-        // Doctor - the same checks `lev doctor` runs, returned as data.
+        // Doctor - the offline half of the checks `lev doctor` runs, returned
+        // as data. The billed half is behind `--allow-admin` too.
         .route("/api/doctor", get(doctor::run_doctor))
         // Update - how this copy was installed, and what upgrades it. The
         // console has no other way to know, and printed a macOS-only command
@@ -373,6 +373,15 @@ async fn execute_with_shutdown(
         true => app
             .route("/api/mcp/servers", post(mcp::add_server))
             .route("/api/mcp/servers/{name}", delete(mcp::remove_server))
+            // Login opens the operator's browser and completes an OAuth flow
+            // on this host; test connects to the server and, for a stdio one,
+            // spawns its command. Neither is a read, and both were reachable by
+            // anyone holding the bearer token.
+            .route("/api/mcp/servers/{name}/login", post(mcp::login))
+            .route("/api/mcp/servers/{name}/test", post(mcp::test_server))
+            // The live doctor makes two billed provider calls and spawns a run
+            // through the daemon. The read half above stops before either.
+            .route("/api/doctor/live", post(doctor::run_doctor_live))
             // Config-write persists provider secrets to disk, so it is gated the
             // same way as MCP admin: unmounted (404) unless --allow-admin.
             .route("/api/config", put(config::put_config))
