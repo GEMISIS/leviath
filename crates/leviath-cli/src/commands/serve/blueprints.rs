@@ -29,7 +29,7 @@ pub(super) fn agents_dir() -> PathBuf {
 /// filesystem: `POST /api/blueprints` with `name = "../../../../tmp/x"` created
 /// a directory and wrote attacker-controlled TOML into it, and
 /// `DELETE /api/blueprints/{name}` recursively deleted whatever it landed on.
-fn blueprint_dir(name: &str) -> Result<PathBuf, (StatusCode, Json<ErrorResponse>)> {
+fn blueprint_dir(name: &str) -> Result<PathBuf, ApiError> {
     if !leviath_core::is_safe_path_component(name) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -161,7 +161,7 @@ const MAX_LIMIT: usize = 200;
 pub(super) async fn list_blueprints(
     State(state): State<AppState>,
     Query(query): Query<BlueprintsQuery>,
-) -> Result<Json<Page<BlueprintInfo>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Page<BlueprintInfo>>, ApiError> {
     let descending = match query.order.as_deref() {
         None | Some("asc") => false,
         Some("desc") => true,
@@ -354,7 +354,7 @@ fn fan_out_infos(bp: &leviath_core::blueprint::Blueprint) -> Vec<FanOutInfo> {
 
 pub(super) async fn create_blueprint(
     Json(body): Json<CreateBlueprintReq>,
-) -> Result<Json<BlueprintInfo>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<BlueprintInfo>, ApiError> {
     // Validate manifest first, keeping the parsed Blueprint so the response
     // can be built from it directly below instead of re-reading the file we
     // just wrote (re-reading would make the re-read's error arm a TOCTOU-only,
@@ -403,7 +403,7 @@ pub(super) async fn create_blueprint(
 pub(super) async fn update_blueprint(
     AxumPath(name): AxumPath<String>,
     Json(body): Json<UpdateBlueprintReq>,
-) -> Result<Json<BlueprintInfo>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<BlueprintInfo>, ApiError> {
     let bp = parse_manifest(&body.manifest).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -447,7 +447,7 @@ pub(super) async fn update_blueprint(
 
 pub(super) async fn delete_blueprint(
     AxumPath(name): AxumPath<String>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<StatusCode, ApiError> {
     let dir = blueprint_dir(&name)?;
     if !dir.exists() {
         return Err((

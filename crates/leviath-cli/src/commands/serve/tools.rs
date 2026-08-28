@@ -16,11 +16,8 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
-use super::types::{ErrorResponse, err};
+use super::types::{ApiError, err};
 use crate::tool_inventory::ToolInventory;
-
-/// The `(status, body)` pair every fallible handler in this module returns.
-pub(super) type ApiError = (StatusCode, Json<ErrorResponse>);
 
 /// Resolve `<agents_dir>/<name>`, refusing a name that is not a single safe
 /// path component.

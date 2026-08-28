@@ -241,12 +241,46 @@ pub(super) struct ErrorResponse {
     pub(super) error: String,
 }
 
+/// The `(status, body)` pair every fallible handler returns.
+pub(super) type ApiError = (axum::http::StatusCode, axum::response::Json<ErrorResponse>);
+
 /// Build a `(status, JSON error)` response tuple.
-pub(super) fn err(
-    code: axum::http::StatusCode,
-    message: String,
-) -> (axum::http::StatusCode, axum::response::Json<ErrorResponse>) {
+pub(super) fn err(code: axum::http::StatusCode, message: String) -> ApiError {
     (code, axum::response::Json(ErrorResponse { error: message }))
+}
+
+/// A daemon reply this handler has no arm for.
+///
+/// 500 rather than 502: the reply decoded, so the two still speak the same
+/// protocol; the handler simply did not expect this answer to this request.
+pub(super) fn unexpected_response(
+    other: leviath_runtime::control_socket::ControlResponse,
+) -> ApiError {
+    err(
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Unexpected daemon response: {other:?}"),
+    )
+}
+
+/// The status for a control request the daemon answers with `Ok { ok }`.
+///
+/// `success` when it did the thing; 404 carrying `not_found` when it could
+/// not, since every such request names a run or an interaction and "could
+/// not" means the daemon had nothing by that name in the right state. Five
+/// handlers used to carry this four-arm match each.
+pub(super) fn daemon_ok(
+    reply: std::io::Result<leviath_runtime::control_socket::ControlResponse>,
+    success: axum::http::StatusCode,
+    not_found: String,
+) -> Result<axum::http::StatusCode, ApiError> {
+    match reply {
+        Ok(leviath_runtime::control_socket::ControlResponse::Ok { ok: true }) => Ok(success),
+        Ok(leviath_runtime::control_socket::ControlResponse::Ok { ok: false }) => {
+            Err(err(axum::http::StatusCode::NOT_FOUND, not_found))
+        }
+        Ok(other) => Err(unexpected_response(other)),
+        Err(e) => Err(daemon_error(e)),
+    }
 }
 
 /// The response for a control request the daemon did not answer.
@@ -261,9 +295,7 @@ pub(super) fn err(
 ///   understand it - the daemon was updated under a running `lev serve`, and
 ///   the two no longer speak the same protocol. Retrying cannot help; the
 ///   message says what does, which is restarting `lev serve`.
-pub(super) fn daemon_error(
-    e: std::io::Error,
-) -> (axum::http::StatusCode, axum::response::Json<ErrorResponse>) {
+pub(super) fn daemon_error(e: std::io::Error) -> ApiError {
     match e.kind() {
         std::io::ErrorKind::Unsupported => err(
             axum::http::StatusCode::BAD_GATEWAY,

@@ -105,7 +105,7 @@ pub(super) async fn agents_tree() -> Json<Vec<AgentTreeNode>> {
 
 pub(super) async fn agent_tree_status(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<TreeStatusNode>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<TreeStatusNode>, ApiError> {
     let runs = runstate::list_runs();
     let root = runs.iter().find(|r| r.run_id == id).ok_or((
         StatusCode::NOT_FOUND,

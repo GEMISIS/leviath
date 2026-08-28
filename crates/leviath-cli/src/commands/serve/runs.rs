@@ -239,8 +239,6 @@ impl Resolved {
     }
 }
 
-type ApiError = (StatusCode, Json<ErrorResponse>);
-
 fn bad_request(message: String) -> ApiError {
     err(StatusCode::BAD_REQUEST, message)
 }
@@ -1043,7 +1041,7 @@ fn remove_family(ids: &[String]) -> Result<(), (StatusCode, String)> {
 pub(super) async fn delete_run(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<DeleteRunQuery>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<StatusCode, ApiError> {
     // `run_dir` maps an unsafe id to a path that cannot exist, so a traversal
     // attempt arrives here as an ordinary miss rather than a removed directory.
     let ids = runstate::family_of(&id);
@@ -1072,7 +1070,7 @@ pub(super) async fn delete_run(
 /// than an operator asking to erase the machine's entire history.
 pub(super) async fn delete_runs(
     Query(query): Query<DeleteRunsQuery>,
-) -> Result<Json<DeleteRunsResp>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<DeleteRunsResp>, ApiError> {
     let targets: Vec<String> = match (&query.ids, query.before) {
         (Some(ids), _) => {
             let ids = comma_list(ids);

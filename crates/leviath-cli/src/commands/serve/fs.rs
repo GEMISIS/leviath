@@ -38,7 +38,7 @@ use super::types::*;
 pub(super) async fn list_dirs(
     State(state): State<AppState>,
     Query(query): Query<DirsQuery>,
-) -> Result<Json<DirsResp>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<DirsResp>, ApiError> {
     let root = state.limits.workdir_root.as_deref();
     let cwd = known_dir_or_fs_root(std::env::current_dir().ok());
 
@@ -155,7 +155,7 @@ pub(super) async fn list_dirs(
 pub(super) async fn create_dir(
     State(state): State<AppState>,
     Json(req): Json<MkdirReq>,
-) -> Result<(StatusCode, Json<MkdirResp>), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<(StatusCode, Json<MkdirResp>), ApiError> {
     let parent = PathBuf::from(&req.path);
     if !parent.is_absolute() {
         return Err(err(
