@@ -482,8 +482,13 @@ impl Dashboard {
             return;
         }
         let name = self.editor().name.clone();
-        let written = std::fs::create_dir_all(&dir)
-            .and_then(|()| std::fs::write(dir.join(leviath_core::files::MANIFEST_FILENAME), &text));
+        let written = std::fs::create_dir_all(&dir).and_then(|()| {
+            leviath_sys::write_atomic(
+                &dir.join(leviath_core::files::MANIFEST_FILENAME),
+                text.as_bytes(),
+                None,
+            )
+        });
         if let Err(e) = written {
             self.editor().message = Some(format!("Could not write {}: {e}", dir.display()));
             return;

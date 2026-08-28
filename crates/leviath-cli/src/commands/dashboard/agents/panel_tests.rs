@@ -1289,6 +1289,10 @@ fn f2_hands_a_prompt_to_the_editor_and_takes_it_back() {
     dash.finish_external_edit(edit, Ok(()));
     // A scratch directory that cannot be made: a message, nothing pending.
     std::fs::write(root.join("blocked"), "not a dir").unwrap();
+    // The scratch directory is made once, under whatever the parent was at
+    // the time; a dashboard never changes its parent, so a test that does
+    // has to forget the directory it already made.
+    dash.external_edit_scratch = None;
     dash.external_edit_dir = root.join("blocked");
     open_stage(&mut dash, "own", "work", StageTab::Behaviour);
     goto(&mut dash, FieldId::EditPrompts);
@@ -1873,6 +1877,49 @@ fn a_stage_that_inherits_lists_the_shared_regions_and_a_table_seed_reads_as_such
             .region(None, "conventions")
             .is_none()
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The file a prompt is handed over in is private and its name is not
+/// knowable in advance: it used to be `<temp>/leviath-dash-prompts/<stage>-
+/// system.md`, a path another local user could create first and point
+/// wherever they liked, on a directory this process did not own.
+#[test]
+fn handoff_files_are_private_and_unpredictable() {
+    let (mut dash, root) = dashboard("prompts_private_handoff");
+    dash.external_edit_dir = root.join("scratch");
+    open_stage(&mut dash, "own", "work", StageTab::Behaviour);
+    goto(&mut dash, FieldId::EditPrompts);
+    dash.handle_key(key(KeyCode::Enter));
+    dash.handle_key(key(KeyCode::F(2)));
+    let first = dash.take_external_edit().unwrap().path;
+    dash.handle_key(key(KeyCode::F(2)));
+    let second = dash.take_external_edit().unwrap().path;
+    let predictable = root.join("scratch").join("work-system.md");
+    assert_ne!(first, predictable, "the old fixed path");
+    assert_ne!(first, second, "two handoffs, one name");
+    assert!(
+        first.starts_with(root.join("scratch")),
+        "{}",
+        first.display()
+    );
+    let name = first.file_name().unwrap().to_string_lossy();
+    assert!(
+        !name.contains("work"),
+        "the stage name is not part of the path: {name}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&first).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:o}");
+        let dir_mode = std::fs::metadata(first.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "{dir_mode:o}");
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
 

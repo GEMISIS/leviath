@@ -38,7 +38,76 @@ pub fn ensure_file_private(path: &Path) -> io::Result<Option<u32>> {
 /// a plain write - the mode argument has no meaning there, and Windows ACL
 /// handling is a separate piece of work rather than something to fake here.
 pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
-    crate::platform::write_with_mode(path, contents, 0o600)
+    write_atomic(path, contents, Some(0o600))
+}
+
+/// Replace `path` with `contents` in one step: the bytes are written to a
+/// fresh file beside it and renamed over it, so a reader never sees a
+/// half-written file and a crash mid-write leaves the old one whole.
+///
+/// `mode` is the permission the new file is created with (`Some(0o600)` for
+/// a secret). `None` keeps what the target had, or the platform default for
+/// a new file, so an agent manifest saved by the editor is not quietly made
+/// owner-only. A symlink at `path` is followed: the file it points at is what
+/// is replaced, not the link.
+///
+/// `fs::write` truncated the target first and then wrote into it, which is
+/// the shape that left `config.toml`, a blueprint or the dashboard's memory
+/// empty when the process died between the two. The inode changes on every
+/// save now, which is what atomic replacement means; anything holding the
+/// old file open keeps the old bytes.
+pub fn write_atomic(path: &Path, contents: &[u8], mode: Option<u32>) -> io::Result<()> {
+    write_atomic_with(path, contents, mode, persist)
+}
+
+/// The rename step of [`write_atomic`], as `tempfile` does it.
+fn persist(staged: tempfile::TempPath, target: &Path) -> io::Result<()> {
+    staged.persist(target).map_err(|e| e.error)
+}
+
+/// [`write_atomic`] with the rename injected, so the arm where the old file
+/// has to survive a failed replacement is provable without a filesystem
+/// that refuses renames.
+pub fn write_atomic_with(
+    path: &Path,
+    contents: &[u8],
+    mode: Option<u32>,
+    persist: fn(tempfile::TempPath, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    // A file the owner marked read-only stays that way. Replacing it by
+    // rename would succeed where a write into it fails, and "cannot be
+    // written" is the answer a read-only secrets file is there to give.
+    if let Ok(existing) = std::fs::metadata(&target)
+        && existing.permissions().readonly()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("'{}' is read-only", target.display()),
+        ));
+    }
+    let dir = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| io::Error::other(format!("'{}' has no parent directory", path.display())))?;
+    let staged = tempfile::Builder::new()
+        .prefix(".lev-write-")
+        .tempfile_in(dir)?
+        .into_temp_path();
+    // Written through the platform's mode-setting write, so a secret is
+    // owner-only from the moment it has bytes; a plain write otherwise, and
+    // the existing file's permissions are carried over when it has any.
+    let written = match mode {
+        Some(mode) => crate::platform::write_with_mode(&staged, contents, mode),
+        None => std::fs::write(&staged, contents).and_then(|()| match std::fs::metadata(&target) {
+            Ok(existing) => std::fs::set_permissions(&staged, existing.permissions()),
+            Err(_) => Ok(()),
+        }),
+    };
+    // Chained rather than `?`: a write into a file just created for writing
+    // has no reachable failure, and the chain keeps the short-circuit
+    // without a branch nothing can exercise.
+    written.and_then(|()| persist(staged, &target))
 }
 
 /// Open `path` for appending, owner-only (`0o600` on Unix, an owner-only ACL on
@@ -215,6 +284,94 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("no-such-dir").join("log");
         assert!(open_private_append(&path).is_err());
+    }
+
+    #[test]
+    fn write_atomic_replaces_the_file_and_keeps_a_secret_private() {
+        #[cfg(windows)]
+        let _env = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, b"old").unwrap();
+        write_atomic(&path, b"new", Some(0o600)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        #[cfg(unix)]
+        assert_eq!(mode_of(&path), 0o600);
+        // Nothing staged is left behind.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        // A fresh file, no mode asked for: created and readable.
+        let plain = dir.path().join("agent.leviath");
+        write_atomic(&plain, b"[agent]", None).unwrap();
+        assert_eq!(std::fs::read(&plain).unwrap(), b"[agent]");
+    }
+
+    /// `None` keeps the permissions the target already had, so replacing a
+    /// file never quietly changes who can read it.
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_without_a_mode_keeps_the_existing_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.md");
+        std::fs::write(&path, b"old").unwrap();
+        set_mode(&path, 0o640);
+        write_atomic(&path, b"new", None).unwrap();
+        assert_eq!(mode_of(&path), 0o640);
+    }
+
+    /// A symlink is followed: the file it points at is replaced and the link
+    /// still points there.
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_follows_a_symlink_to_the_real_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.toml");
+        std::fs::write(&real, b"old").unwrap();
+        let link = dir.path().join("link.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_atomic(&link, b"new", None).unwrap();
+        assert_eq!(std::fs::read(&real).unwrap(), b"new");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    /// The failures are reported, and a failed replacement leaves the old
+    /// file exactly as it was with nothing staged beside it.
+    #[test]
+    fn write_atomic_reports_a_bad_target_and_leaves_the_old_file_on_failure() {
+        #[cfg(windows)]
+        let _env = env_lock();
+        // No parent directory to stage in.
+        assert!(write_atomic(Path::new(""), b"x", None).is_err());
+        // A parent that does not exist.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(write_atomic(&dir.path().join("missing").join("f"), b"x", None).is_err());
+        // A read-only target is refused, not replaced around.
+        let locked = dir.path().join("locked.toml");
+        std::fs::write(&locked, b"keep").unwrap();
+        let original = std::fs::metadata(&locked).unwrap().permissions();
+        let mut perms = original.clone();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&locked, perms).unwrap();
+        let err = write_atomic(&locked, b"new", Some(0o600)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read(&locked).unwrap(), b"keep");
+        std::fs::set_permissions(&locked, original).unwrap();
+        // A rename the disk refuses: the old bytes survive, the staging
+        // file is gone.
+        fn refuse(_staged: tempfile::TempPath, _target: &Path) -> io::Result<()> {
+            Err(io::Error::other("rename refused"))
+        }
+        let alone = tempfile::tempdir().unwrap();
+        let path = alone.path().join("kept.toml");
+        std::fs::write(&path, b"old").unwrap();
+        let err = write_atomic_with(&path, b"new", None, refuse).unwrap_err();
+        assert!(err.to_string().contains("rename refused"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(std::fs::read_dir(alone.path()).unwrap().count(), 1);
     }
 
     #[test]

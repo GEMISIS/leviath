@@ -244,8 +244,18 @@ pub(crate) struct Dashboard {
     /// A prompt handed to `$EDITOR`, waiting for the loop to leave the
     /// terminal and run it.
     pub(super) pending_external_edit: Option<super::agents::ExternalEdit>,
-    /// Where a prompt handed to `$EDITOR` is written while the editor runs.
+    /// Under which directory a prompt handed to `$EDITOR` is written while
+    /// the editor runs. The file itself goes in a private scratch directory
+    /// made under here on the first handoff (`external_edit_scratch`).
     pub(super) external_edit_dir: std::path::PathBuf,
+    /// The owner-only, randomly named directory the handoff files live in,
+    /// made on the first handoff and removed with the dashboard.
+    ///
+    /// A fixed `<temp>/leviath-dash-prompts/<stage>-system.md` was a path
+    /// another local user could create first, as a directory of their own or
+    /// a link to one, and read or replace the prompt through. A directory
+    /// this process made, with a name nobody can guess, closes both.
+    pub(super) external_edit_scratch: Option<tempfile::TempDir>,
     /// Sends resolve-and-spawn work to the background lane.
     pub(super) spawn_cmd_tx: mpsc::UnboundedSender<SpawnCommand>,
     /// Receives spawn results, drained into toasts each tick.

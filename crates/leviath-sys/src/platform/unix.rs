@@ -189,6 +189,15 @@ pub(crate) fn hostname() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// `write_atomic` only ever hands this a file it just created, so the
+    /// open failure is reachable here alone.
+    #[test]
+    fn write_with_mode_reports_a_path_it_cannot_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing").join("f");
+        assert!(super::write_with_mode(&missing, b"x", 0o600).is_err());
+    }
+
     use super::*;
 
     #[test]

@@ -401,6 +401,15 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"rotated");
     }
 
+    /// `write_atomic` only ever hands this a file it just created, so the
+    /// write failure is reachable here alone.
+    #[test]
+    fn write_with_mode_reports_a_path_it_cannot_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing").join("f");
+        assert!(write_with_mode(&missing, b"x", 0o600).is_err());
+    }
+
     #[test]
     fn ensure_private_restricts_an_existing_file_and_skips_a_missing_one() {
         let _env = ENV_LOCK.lock().expect("env lock");
