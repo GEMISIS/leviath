@@ -122,17 +122,22 @@ clap = { version = "4.6", features = ["derive"] }
 # rustls instead of default native-tls: keeps Linux binaries free of a
 # runtime libssl dependency (single static binary) and lets the
 # aarch64-linux release target cross-compile without an OpenSSL sysroot.
-# native-roots so system/corporate CA stores are still honored.
 # TLS is rustls, never native-tls: one audited implementation on every platform
-# rather than whatever the OS ships. 0.13 renamed the features -
-# `rustls-tls-native-roots` became `rustls` + `rustls-native-certs`, and
-# `macos-system-configuration` became `system-proxy`. `form` and `query`, which
-# used to be always-on, are now opt-in.
+# rather than whatever the OS ships.
+#
+# System and corporate CA stores are honoured through `rustls-platform-verifier`,
+# which the `rustls` feature enables unconditionally in 0.13: Keychain on macOS,
+# CryptoAPI on Windows, and the OpenSSL directories on Linux (where the verifier
+# pulls `rustls-native-certs` itself). reqwest's own `rustls-native-certs`
+# feature is not listed because 0.13 has no code behind it - the crate is an
+# optional dependency nothing in `src/` references - so naming it only added a
+# crate to the graph. `form` is opt-in in 0.13 and is used by the MCP OAuth token
+# exchange; `query` (the same two dependencies) has no caller.
 # `gzip`/`brotli`/`zstd` are not optional niceties: without them reqwest sends no
 # `Accept-Encoding`, but a server can still answer compressed, and `Response::text`
 # then decodes the compressed bytes lossily into a page of replacement characters
 # that `web_fetch` hands to the model as if it were the article.
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "rustls-native-certs", "charset", "http2", "system-proxy", "blocking", "form", "query", "gzip", "brotli", "zstd"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "charset", "http2", "system-proxy", "blocking", "form", "gzip", "brotli", "zstd"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # OpenTelemetry export ([observability] config, issue #73). OTLP goes over
