@@ -8,16 +8,16 @@ use super::*;
 pub(super) fn parse_compaction_config(table: &toml::value::Table) -> CompactionConfig {
     let mut cc = CompactionConfig::default();
 
-    if let Some(provider) = table.get("provider").and_then(|v| v.as_str()) {
+    if let Some(provider) = str_of(table, "provider") {
         cc.provider = provider.to_string();
     }
-    if let Some(model) = table.get("model").and_then(|v| v.as_str()) {
+    if let Some(model) = str_of(table, "model") {
         cc.model = model.to_string();
     }
-    if let Some(sp) = table.get("system_prompt").and_then(|v| v.as_str()) {
+    if let Some(sp) = str_of(table, "system_prompt") {
         cc.system_prompt = Some(sp.to_string());
     }
-    if let Some(mst) = table.get("max_summary_tokens").and_then(|v| v.as_integer()) {
+    if let Some(mst) = int_of(table, "max_summary_tokens") {
         cc.max_summary_tokens = mst as usize;
     }
     if let Some(temp) = table.get("temperature").and_then(|v| v.as_float()) {
@@ -34,7 +34,7 @@ pub(super) fn parse_read_paths(
     table: &toml::value::Table,
 ) -> Result<crate::blueprint::ReadPathsConfig> {
     let mut allow = Vec::new();
-    if let Some(entries) = table.get("allow").and_then(|v| v.as_array()) {
+    if let Some(entries) = array_of(table, "allow") {
         for entry in entries {
             let Some(raw) = entry.as_str() else {
                 return Err(Error::Other(format!(
@@ -108,23 +108,10 @@ pub(super) fn tool_permission_metadata(
 /// region is the default because that is what the shipped layouts assume.
 pub(super) fn parse_file_tracking(table: &toml::value::Table) -> crate::FileTrackingConfig {
     crate::FileTrackingConfig {
-        region: table
-            .get("region")
-            .and_then(|v| v.as_str())
-            .unwrap_or("files")
-            .to_string(),
-        track_reads: table
-            .get("track_reads")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        track_writes: table
-            .get("track_writes")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        max_file_tokens: table
-            .get("max_file_tokens")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize),
+        region: str_of(table, "region").unwrap_or("files").to_string(),
+        track_reads: bool_of(table, "track_reads").unwrap_or(true),
+        track_writes: bool_of(table, "track_writes").unwrap_or(true),
+        max_file_tokens: int_of(table, "max_file_tokens").map(|v| v as usize),
     }
 }
 
@@ -134,15 +121,9 @@ pub(super) fn parse_repetition_detection(
     table: &toml::value::Table,
 ) -> crate::RepetitionDetectionConfig {
     crate::RepetitionDetectionConfig {
-        max_repeat_calls: table
-            .get("max_repeat_calls")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize),
-        max_readonly_streak: table
-            .get("max_readonly_streak")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize),
-        enabled: table.get("enabled").and_then(|v| v.as_bool()),
+        max_repeat_calls: int_of(table, "max_repeat_calls").map(|v| v as usize),
+        max_readonly_streak: int_of(table, "max_readonly_streak").map(|v| v as usize),
+        enabled: bool_of(table, "enabled"),
     }
 }
 
@@ -179,10 +160,7 @@ pub(super) fn parse_output_spec(table: &toml::value::Table) -> crate::output::Ou
 
 pub(super) fn parse_security_config(security_table: &toml::value::Table) -> crate::SecurityConfig {
     let mut sc = crate::SecurityConfig::default();
-    if let Some(tt) = security_table
-        .get("taint_tracking")
-        .and_then(|v| v.as_bool())
-    {
+    if let Some(tt) = bool_of(security_table, "taint_tracking") {
         sc.taint_tracking = tt;
     }
     sc
@@ -200,7 +178,7 @@ pub(super) fn parse_sandbox_config(
 
     let mut sc = ToolSandboxConfig::default();
 
-    if let Some(kind) = table.get("kind").and_then(|v| v.as_str()) {
+    if let Some(kind) = str_of(table, "kind") {
         sc.kind = match kind {
             "none" => SandboxKind::None,
             "namespace" => SandboxKind::Namespace,
@@ -213,25 +191,25 @@ pub(super) fn parse_sandbox_config(
             }
         };
     }
-    if let Some(image) = table.get("image").and_then(|v| v.as_str()) {
+    if let Some(image) = str_of(table, "image") {
         sc.image = Some(image.to_string());
     }
-    if let Some(engine) = table.get("engine").and_then(|v| v.as_str()) {
+    if let Some(engine) = str_of(table, "engine") {
         sc.engine = Some(engine.to_string());
     }
-    if let Some(network) = table.get("network").and_then(|v| v.as_bool()) {
+    if let Some(network) = bool_of(table, "network") {
         sc.network = network;
     }
-    if let Some(persist) = table.get("persist").and_then(|v| v.as_bool()) {
+    if let Some(persist) = bool_of(table, "persist") {
         sc.persist = persist;
     }
-    if let Some(mounts) = table.get("mount").and_then(|v| v.as_array()) {
+    if let Some(mounts) = array_of(table, "mount") {
         sc.mounts = mounts
             .iter()
             .filter_map(|m| m.as_str().map(str::to_string))
             .collect();
     }
-    if let Some(ou) = table.get("on_unavailable").and_then(|v| v.as_str()) {
+    if let Some(ou) = str_of(table, "on_unavailable") {
         sc.on_unavailable = match ou {
             "error" => OnUnavailable::Error,
             "warn" => OnUnavailable::Warn,
