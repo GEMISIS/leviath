@@ -26,7 +26,7 @@
 //! nothing lands on the screen while somebody is looking at it.
 
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use tracing_subscriber::layer::SubscriberExt;
@@ -45,6 +45,35 @@ static TUI_HOLDS_TERMINAL: AtomicBool = AtomicBool::new(false);
 /// Lines written while the terminal was held, waiting to be flushed.
 static PARKED: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
+/// The most [`PARKED`] may hold. A long `lev dash` session with `--verbose`
+/// used to accumulate every debug line for the life of the session; past this
+/// the oldest bytes go and the release says how many.
+const PARKED_CAP: usize = 1024 * 1024;
+
+/// Bytes dropped from [`PARKED`] since the last release, reported on release.
+static PARKED_DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+/// Append `buf` to `parked`, keeping at most `cap` bytes by discarding the
+/// oldest, and return how many bytes were discarded.
+///
+/// Pure over its arguments so the arithmetic is tested with a small cap
+/// rather than by writing a megabyte through the global.
+fn park(parked: &mut Vec<u8>, buf: &[u8], cap: usize) -> usize {
+    let total = parked.len().saturating_add(buf.len());
+    let overflow = total.saturating_sub(cap);
+    if overflow == 0 {
+        parked.extend_from_slice(buf);
+        return 0;
+    }
+    // Drop from the front of what is already parked first; only a single
+    // write larger than the whole cap reaches into `buf` itself.
+    let from_parked = overflow.min(parked.len());
+    parked.drain(..from_parked);
+    let from_buf = overflow - from_parked;
+    parked.extend_from_slice(&buf[from_buf..]);
+    overflow
+}
+
 /// Where a log line goes: straight to stderr, or into [`PARKED`] until the
 /// terminal is free.
 ///
@@ -60,10 +89,12 @@ impl Write for TerminalAwareWriter {
             // buffer is still a valid buffer, so it is taken back rather than
             // handled: a logging call is the worst place to raise a second
             // panic, and there is nothing here that a poisoned flag protects.
-            PARKED
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .extend_from_slice(buf);
+            let dropped = park(
+                &mut PARKED.lock().unwrap_or_else(PoisonError::into_inner),
+                buf,
+                PARKED_CAP,
+            );
+            PARKED_DROPPED.fetch_add(dropped, Ordering::Relaxed);
             return Ok(buf.len());
         }
         std::io::stderr().write(buf)
@@ -101,8 +132,15 @@ pub fn hold_for_tui() {
 pub fn release_from_tui() {
     TUI_HOLDS_TERMINAL.store(false, Ordering::Relaxed);
     let parked = std::mem::take(&mut *PARKED.lock().unwrap_or_else(PoisonError::into_inner));
+    let dropped = PARKED_DROPPED.swap(0, Ordering::Relaxed);
     if parked.is_empty() {
         return;
+    }
+    if dropped > 0 {
+        let _ = writeln!(
+            std::io::stderr(),
+            "[log] {dropped} bytes of output were dropped while the terminal was held"
+        );
     }
     let _ = std::io::stderr().write_all(&parked);
     let _ = std::io::stderr().flush();
@@ -240,9 +278,35 @@ mod tests {
             PARKED.lock().expect("uncontended").is_empty(),
             "release hands the buffer to stderr and empties it"
         );
+
+        // Past the cap the oldest bytes go, the count is kept for the release
+        // to report, and the release clears it. Same test, same reason: the
+        // flag and the counter are process-wide.
+        hold_for_tui();
+        let big = vec![b'x'; PARKED_CAP + 16];
+        writer().write_all(&big).expect("a held write is buffered");
+        assert_eq!(PARKED.lock().expect("uncontended").len(), PARKED_CAP);
+        assert_eq!(PARKED_DROPPED.load(Ordering::Relaxed), 16);
+        release_from_tui();
+        assert_eq!(PARKED_DROPPED.load(Ordering::Relaxed), 0);
         // Releasing twice is what the panic hook plus `Drop` actually does, and
         // with nothing parked it must stay quiet rather than write an empty
         // line.
         release_from_tui();
+    }
+
+    /// The cap is a ring: dropping comes off the front of what is parked
+    /// first, and only a single write bigger than the cap loses its own head.
+    #[test]
+    fn park_keeps_the_newest_bytes_and_counts_the_rest() {
+        let mut parked = Vec::new();
+        assert_eq!(park(&mut parked, b"abc", 8), 0);
+        assert_eq!(parked, b"abc");
+        // Two over: the two oldest go.
+        assert_eq!(park(&mut parked, b"defghij", 8), 2);
+        assert_eq!(parked, b"cdefghij");
+        // One write larger than the whole cap keeps its own tail.
+        assert_eq!(park(&mut parked, b"0123456789", 8), 10);
+        assert_eq!(parked, b"23456789");
     }
 }
