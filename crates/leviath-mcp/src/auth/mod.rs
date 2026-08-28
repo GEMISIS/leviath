@@ -626,6 +626,9 @@ pub struct StoredTokenRefresher {
     store_path: std::path::PathBuf,
     /// Current Unix time; a fn so a long-lived transport stays current.
     clock: fn() -> u64,
+    /// Built once: every 401 used to construct a fresh `reqwest::Client`,
+    /// with its own connection pool, to make one token request.
+    oauth: OAuthClient,
 }
 
 impl StoredTokenRefresher {
@@ -635,6 +638,7 @@ impl StoredTokenRefresher {
             server_name: server_name.into(),
             store_path,
             clock: system_now_secs,
+            oauth: OAuthClient::new(),
         }
     }
 }
@@ -657,7 +661,7 @@ impl crate::transport::BearerRefresher for StoredTokenRefresher {
                 self.server_name
             )
         })?;
-        let refreshed = OAuthClient::new().refresh(auth, (self.clock)()).await?;
+        let refreshed = self.oauth.refresh(auth, (self.clock)()).await?;
         let value = format!("Bearer {}", refreshed.access_token);
         store.set(&self.server_name, refreshed);
         store.save(&self.store_path)?;
@@ -1586,6 +1590,7 @@ mod tests {
             server_name: "srv".to_string(),
             store_path: dir.join("mcp-auth.json"),
             clock: || 2_000,
+            oauth: OAuthClient::new(),
         }
     }
 
