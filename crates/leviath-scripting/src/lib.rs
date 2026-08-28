@@ -10,7 +10,6 @@ pub mod engine;
 pub mod functions;
 pub mod output_validator;
 pub mod region_hook;
-pub mod sandbox;
 pub mod stage_hook;
 pub mod tool;
 pub mod types;
@@ -52,7 +51,6 @@ pub fn harden(engine: &mut rhai::Engine, max_operations: u64) {
 }
 
 pub use engine::ScriptEngine;
-pub use sandbox::SandboxConfig;
 pub use tool::{
     ParamSpec, ScriptHost, ScriptToolMeta, ScriptToolSet, SkippedTool,
     execute as execute_script_tool,
@@ -77,12 +75,4 @@ pub enum Error {
     /// Script validation failed
     #[error("Script validation failed: {0}")]
     ValidationFailed(String),
-
-    /// Rhai engine error
-    #[error("Rhai error: {0}")]
-    RhaiError(#[from] Box<rhai::EvalAltResult>),
-
-    /// Core error
-    #[error("Core error: {0}")]
-    CoreError(#[from] leviath_core::Error),
 }

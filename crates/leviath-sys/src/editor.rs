@@ -47,7 +47,7 @@ pub enum EditorRunOutcome {
 /// System32 search path whatever `$PATH` says, and unlike `start notepad` it
 /// blocks until the window closes). `vim` last picks up Git-for-Windows and
 /// scoop installs for users who never set `$EDITOR`.
-pub fn default_editors_for(os: &str) -> Vec<&'static str> {
+pub(crate) fn default_editors_for(os: &str) -> Vec<&'static str> {
     match os {
         "windows" => vec!["edit", "notepad", "vim"],
         _ => vec!["vim", "nano", "vi"],
@@ -62,7 +62,11 @@ pub fn default_editors_for(os: &str) -> Vec<&'static str> {
 /// environment. An unset *or* empty value contributes nothing: an exported but
 /// empty `EDITOR=` is a common shell-profile accident, and treating it as a
 /// program name would spawn nothing and mask the real fallbacks.
-pub fn editor_candidates(visual: Option<&str>, editor: Option<&str>, os: &str) -> Vec<String> {
+pub(crate) fn editor_candidates(
+    visual: Option<&str>,
+    editor: Option<&str>,
+    os: &str,
+) -> Vec<String> {
     let mut candidates: Vec<String> = Vec::new();
     for preferred in [visual, editor] {
         if let Some(value) = preferred
@@ -84,7 +88,7 @@ pub fn editor_candidates(visual: Option<&str>, editor: Option<&str>, os: &str) -
 ///
 /// `None` when the candidate has no program token at all, which is what a
 /// whitespace-only value amounts to.
-pub fn editor_argv(candidate: &str, path: &str) -> Option<(String, Vec<String>)> {
+pub(crate) fn editor_argv(candidate: &str, path: &str) -> Option<(String, Vec<String>)> {
     let mut parts = candidate.split_whitespace();
     let program = parts.next()?;
     let mut args: Vec<String> = parts.map(str::to_string).collect();
@@ -96,7 +100,7 @@ pub fn editor_argv(candidate: &str, path: &str) -> Option<(String, Vec<String>)>
 /// an exit code (a signal kill). A pure function so both arms are unit-testable
 /// on every platform, independent of whether a real process can produce a
 /// code-less status there.
-pub fn classify_exit(success: bool, code: Option<i32>) -> EditorRunOutcome {
+pub(crate) fn classify_exit(success: bool, code: Option<i32>) -> EditorRunOutcome {
     if success || code.is_some() {
         EditorRunOutcome::Completed
     } else {
