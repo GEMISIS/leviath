@@ -105,7 +105,16 @@ pub fn read_context_snapshot(run_id: &str) -> Option<ContextSnapshot> {
 /// the length check catches most of those, and a same-length same-instant
 /// rewrite is indistinguishable anyway one tick later.
 pub struct StatCache<T> {
-    entries: std::collections::HashMap<PathBuf, (std::time::SystemTime, u64, Option<Arc<T>>)>,
+    entries: std::collections::HashMap<PathBuf, CacheEntry<T>>,
+}
+
+/// One cached file: the stat it was last read at, when that stat was taken,
+/// and what it parsed to.
+struct CacheEntry<T> {
+    mtime: std::time::SystemTime,
+    len: u64,
+    checked: std::time::Instant,
+    value: Option<Arc<T>>,
 }
 
 impl<T> Default for StatCache<T> {
@@ -126,6 +135,29 @@ impl<T> StatCache<T> {
         path: &Path,
         parse: impl FnOnce(&str) -> Option<T>,
     ) -> Option<Arc<T>> {
+        self.get_with_recheck(path, parse, std::time::Duration::ZERO)
+    }
+
+    /// [`get_with`](Self::get_with), skipping the stat when the entry was
+    /// checked less than `recheck_after` ago.
+    ///
+    /// The stat is the cost. A dashboard over 750 runs stat'ed 1,500 files
+    /// ten times a second to learn that 1,490 of them, belonging to runs that
+    /// finished days ago, had not changed; two thirds of its idle CPU was that
+    /// question. A caller that knows a file has settled (a finished run's
+    /// record) asks it once a second instead, and a file it knows is live
+    /// passes `Duration::ZERO` and is stat'ed every time, as before.
+    pub fn get_with_recheck(
+        &mut self,
+        path: &Path,
+        parse: impl FnOnce(&str) -> Option<T>,
+        recheck_after: std::time::Duration,
+    ) -> Option<Arc<T>> {
+        if let Some(entry) = self.entries.get(path)
+            && entry.checked.elapsed() < recheck_after
+        {
+            return entry.value.clone();
+        }
         let Ok(meta) = std::fs::metadata(path) else {
             self.entries.remove(path);
             return None;
@@ -133,18 +165,32 @@ impl<T> StatCache<T> {
         // A filesystem with no mtimes degrades to epoch (so length changes
         // still refresh) rather than growing an unreachable error arm.
         let stamp = (meta.modified().unwrap_or(std::time::UNIX_EPOCH), meta.len());
-        if let Some((mtime, len, value)) = self.entries.get(path)
-            && (*mtime, *len) == stamp
+        let checked = std::time::Instant::now();
+        if let Some(entry) = self.entries.get_mut(path)
+            && (entry.mtime, entry.len) == stamp
         {
-            return value.clone();
+            entry.checked = checked;
+            return entry.value.clone();
         }
         let value = std::fs::read_to_string(path)
             .ok()
             .and_then(|text| parse(&text))
             .map(Arc::new);
-        self.entries
-            .insert(path.to_path_buf(), (stamp.0, stamp.1, value.clone()));
+        self.entries.insert(
+            path.to_path_buf(),
+            CacheEntry {
+                mtime: stamp.0,
+                len: stamp.1,
+                checked,
+                value: value.clone(),
+            },
+        );
         value
+    }
+
+    /// The cached value for `path`, without asking the filesystem anything.
+    pub fn peek(&self, path: &Path) -> Option<Arc<T>> {
+        self.entries.get(path).and_then(|entry| entry.value.clone())
     }
 
     /// Drop entries for files under runs that no longer exist, so a
@@ -800,9 +846,16 @@ pub fn list_runs_cached(cache: &mut StatCache<RunMeta>) -> Vec<Arc<RunMeta>> {
         for entry in entries.filter_map(|e| e.ok()) {
             live_dirs.insert(entry.path());
             let meta_path = entry.path().join(leviath_core::files::META_FILE);
-            if let Some(meta) = cache.get_with(&meta_path, |json| {
-                serde_json::from_str::<RunMeta>(json).ok()
-            }) {
+            // A run this poller already knows to be finished is asked about
+            // once a second; a live one (or one never seen) every time.
+            let recheck = cache
+                .peek(&meta_path)
+                .map_or(std::time::Duration::ZERO, |meta| settle_window(&meta));
+            if let Some(meta) = cache.get_with_recheck(
+                &meta_path,
+                |json| serde_json::from_str::<RunMeta>(json).ok(),
+                recheck,
+            ) {
                 runs.push(meta);
             }
         }
@@ -812,14 +865,44 @@ pub fn list_runs_cached(cache: &mut StatCache<RunMeta>) -> Vec<Arc<RunMeta>> {
     runs
 }
 
+/// How long a poller may go without re-stat'ing a run's files once the run
+/// has finished: `ZERO` (every tick) while it is live, a second once it is
+/// not. A finished run's record changes only when someone renames or deletes
+/// it, and a second's lag on that is what buys a 750-run dashboard back two
+/// thirds of its idle CPU.
+pub fn settle_window(meta: &RunMeta) -> std::time::Duration {
+    match meta.status {
+        RunStatus::Complete
+        | RunStatus::CompleteInteractive
+        | RunStatus::Error
+        | RunStatus::Cancelled => SETTLED_RECHECK,
+        RunStatus::Starting | RunStatus::Running | RunStatus::WaitingInput | RunStatus::Paused => {
+            std::time::Duration::ZERO
+        }
+    }
+}
+
+/// See [`settle_window`].
+const SETTLED_RECHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// [`read_stages_index`] through a [`StatCache`], for pollers.
 pub fn read_stages_index_cached(
     run_id: &str,
     cache: &mut StatCache<Vec<StageRecord>>,
 ) -> Vec<StageRecord> {
+    read_stages_index_settled(run_id, cache, std::time::Duration::ZERO)
+}
+
+/// [`read_stages_index_cached`] with the poller's [`settle_window`] for the
+/// run, so a finished run's stage ledger is not stat'ed every tick either.
+pub fn read_stages_index_settled(
+    run_id: &str,
+    cache: &mut StatCache<Vec<StageRecord>>,
+    recheck_after: std::time::Duration,
+) -> Vec<StageRecord> {
     let path = run_dir(run_id).join(leviath_core::files::STAGES_FILE);
     cache
-        .get_with(&path, |json| serde_json::from_str(json).ok())
+        .get_with_recheck(&path, |json| serde_json::from_str(json).ok(), recheck_after)
         .map(|records| records.as_ref().clone())
         .unwrap_or_default()
 }
@@ -2075,6 +2158,150 @@ mod tests {
             // read_dir-failed arm).
             std::fs::remove_dir_all(runs_dir()).unwrap();
             assert!(list_runs_cached(&mut metas).is_empty());
+        });
+    }
+
+    /// A settled entry is answered from memory inside its window and from the
+    /// filesystem outside it; `peek` never asks the filesystem at all.
+    #[test]
+    fn a_stat_cache_honours_the_recheck_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.json");
+        std::fs::write(&path, "1").unwrap();
+        let mut cache: StatCache<String> = StatCache::default();
+        let parse = |s: &str| Some(s.to_string());
+        assert!(cache.peek(&path).is_none(), "nothing cached yet");
+        assert_eq!(*cache.get_with(&path, parse).unwrap(), "1");
+        assert_eq!(*cache.peek(&path).unwrap(), "1");
+
+        // The file changes. Inside the window the old value stands, because
+        // the point is not to stat; outside it the change is seen. The new
+        // content is a different LENGTH: the stamp is (mtime, len), and a
+        // same-length rewrite inside one mtime tick (Windows CI has coarse
+        // ticks) is invisible to it by design.
+        std::fs::write(&path, "22").unwrap();
+        let hour = std::time::Duration::from_secs(3600);
+        assert_eq!(*cache.get_with_recheck(&path, parse, hour).unwrap(), "1");
+        assert_eq!(*cache.get_with(&path, parse).unwrap(), "22");
+        // A stat that finds the same stamp refreshes the check time without a
+        // parse, so the next windowed read is answered from memory too.
+        assert_eq!(*cache.get_with(&path, parse).unwrap(), "22");
+        assert_eq!(*cache.get_with_recheck(&path, parse, hour).unwrap(), "22");
+
+        // A missing file is forgotten, and a window does not resurrect it.
+        std::fs::remove_file(&path).unwrap();
+        assert!(cache.get_with(&path, parse).is_none());
+        assert!(cache.peek(&path).is_none());
+        assert!(cache.get_with_recheck(&path, parse, hour).is_none());
+    }
+
+    /// A finished run settles; a live, waiting or paused one does not.
+    #[test]
+    fn only_a_finished_run_settles() {
+        let mut meta = RunMeta::new(
+            "settle".to_string(),
+            "agent".to_string(),
+            "/p".to_string(),
+            "t".to_string(),
+            None,
+            "/w".to_string(),
+            1,
+        );
+        for status in [
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::WaitingInput,
+            RunStatus::Paused,
+        ] {
+            meta.status = status;
+            assert_eq!(settle_window(&meta), std::time::Duration::ZERO);
+        }
+        for status in [
+            RunStatus::Complete,
+            RunStatus::CompleteInteractive,
+            RunStatus::Error,
+            RunStatus::Cancelled,
+        ] {
+            meta.status = status;
+            assert_eq!(settle_window(&meta), SETTLED_RECHECK);
+        }
+    }
+
+    /// The listing asks a finished run once a second and a live one every
+    /// time: a rename of a finished run shows up within the window, a live
+    /// run's progress immediately.
+    #[test]
+    fn a_cached_listing_settles_finished_runs() {
+        with_isolated_runs_dir("cached-listing-settles", |_d| {
+            let mut done = RunMeta::new(
+                "done".to_string(),
+                "agent".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                "/w".to_string(),
+                1,
+            );
+            done.status = RunStatus::Complete;
+            create_run(&done).unwrap();
+            let mut live = RunMeta::new(
+                "live".to_string(),
+                "agent".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                "/w".to_string(),
+                1,
+            );
+            live.status = RunStatus::Running;
+            create_run(&live).unwrap();
+            let mut metas = StatCache::default();
+            let mut stages = StatCache::default();
+            assert_eq!(list_runs_cached(&mut metas).len(), 2);
+
+            // Both records change on disk.
+            done.title = Some("renamed".to_string());
+            write_meta(&done).unwrap();
+            live.iteration = 7;
+            write_meta(&live).unwrap();
+            let listed = list_runs_cached(&mut metas);
+            let by_id = |id: &str| listed.iter().find(|m| m.run_id == id).unwrap().clone();
+            assert_eq!(by_id("live").iteration, 7, "a live run is read every tick");
+            assert_eq!(
+                by_id("done").title,
+                None,
+                "a finished run waits for its window"
+            );
+            // The same for the stage ledger: the first read populates, a
+            // windowed read after a change answers from memory, an unwindowed
+            // one sees the change.
+            write_stages_index("done", &[StageRecord::new("a".to_string(), 0)]).unwrap();
+            let window = settle_window(&done);
+            assert_eq!(
+                read_stages_index_settled("done", &mut stages, window).len(),
+                1
+            );
+            write_stages_index(
+                "done",
+                &[
+                    StageRecord::new("a".to_string(), 0),
+                    StageRecord::new("b".to_string(), 1),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                read_stages_index_settled("done", &mut stages, window).len(),
+                1
+            );
+            assert_eq!(read_stages_index_cached("done", &mut stages).len(), 2);
+            // Outside the window (forced here by asking with no window) the
+            // rename is seen.
+            let fresh = metas
+                .get_with(&run_dir("done").join("meta.json"), |json| {
+                    serde_json::from_str::<RunMeta>(json).ok()
+                })
+                .unwrap();
+            assert_eq!(fresh.title.as_deref(), Some("renamed"));
         });
     }
 
