@@ -148,6 +148,20 @@ cargo llvm-cov --package <crate> --lib --html --open   # browsable per-crate rep
 
 > Branch coverage isn't collected: `cargo llvm-cov --branch` reliably SIGSEGVs inside LLVM's own coverage-mapping code ([open upstream bug](https://github.com/llvm/llvm-project/issues/119558)). See the doc comment atop `xtask/src/coverage.rs` for the full investigation.
 
+## Running CodeQL locally
+
+GitHub's default CodeQL setup scans every push with the `rust-code-scanning` suite and the `remote` threat model, and the repo keeps that count at zero with nothing dismissed. Waiting twenty minutes per push to learn whether a fix took is the slow way; the same queries run locally in a few minutes:
+
+```bash
+brew install codeql                                                    # the CLI (Linux: the GitHub release tarball)
+codeql database create target/codeql-db --language=rust --overwrite    # builds the workspace through cargo
+codeql database analyze target/codeql-db codeql/rust-queries:codeql-suites/rust-code-scanning.qls \
+  --format=sarif-latest --output=target/codeql.sarif --download
+python3 perf-tools/codeql_summary.py target/codeql.sarif                # rule, sink, and every flow's source
+```
+
+The summary's exit status is the number of findings, so a shell can gate on it. Two things worth knowing before reading a result: the Rust model treats every parameter of an axum handler as request data, `State` included (see `SECURITY.md`, "What the scanners say"), and the sensitive-data queries go by variable *name*, so a loop variable called `secret` that holds env-var names reads as a leak.
+
 ## Live-testing against a real daemon
 
 A green test suite and a 100% coverage number are not the same thing as

@@ -151,6 +151,17 @@ assume; none is a case of the code doing something other than what it says.
 If you find something this document claims but the code does not do, that is a
 vulnerability and we want to hear about it - see the top of this file.
 
+**What the scanners say.** CodeQL runs on every push and the count is kept at
+zero, with nothing dismissed. One class needs explaining so it is not
+re-triaged: CodeQL's Rust model treats every parameter of an axum handler as
+request data, the shared `State` included, so a file location read off the
+server state counts as a path-injection finding even when the operator set it
+at startup. `lev serve` therefore keeps the config and token-store locations
+behind a resolver installed at startup (`McpAdmin::paths()`, and
+`UpdateJobs::with_env` for the update route). A new admin route reads paths
+through that resolver, never through a field on the state. `CONTRIBUTING.md`
+has the recipe for running the same queries locally.
+
 ## Where secrets live
 
 | What | Where | Mode |

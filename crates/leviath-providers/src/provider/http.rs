@@ -123,7 +123,7 @@ pub fn malformed_url_error() -> HttpError {
     reqwest::Client::builder()
         .build()
         .expect("a builder with no options set always yields a client")
-        .get("http://[")
+        .get("https://[")
         .build()
         .expect_err("reqwest rejects a string that is not a URL")
 }

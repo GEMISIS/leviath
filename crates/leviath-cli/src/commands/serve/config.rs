@@ -63,10 +63,10 @@ pub(super) async fn get_config(State(state): State<AppState>) -> Json<RedactedCo
 /// present field, and writes it back with the file's `0600` permissions — the
 /// same file `lev setup` and MCP admin edits. Returns the new redacted config.
 pub(super) async fn put_config(
-    State(state): State<AppState>,
     Json(req): Json<WriteConfigReq>,
 ) -> Result<Json<RedactedConfig>, ApiError> {
-    let path = &state.mcp.config_path;
+    let paths = super::mcp::admin_paths();
+    let path = &paths.config;
     let mut config = Config::load_from_path_public(path).map_err(|e| {
         err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -335,6 +335,7 @@ mod limits_source_label_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::serve::mcp::{AdminPaths, scoped};
     use axum::Router;
     use axum::body::Body;
     use axum::http::Request;
@@ -745,29 +746,33 @@ mod tests {
 
     // ─── put_config endpoint ──────────────────────────────────────────────────
 
-    fn state_with_config_path(path: std::path::PathBuf) -> AppState {
+    /// The state and the file locations a `put_config` test runs against.
+    fn state_with_config_path(path: std::path::PathBuf) -> (AppState, AdminPaths) {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
-        AppState {
+        let state = AppState {
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
-            mcp: crate::commands::serve::mcp::McpAdmin {
-                config_path: path,
-                ..Default::default()
-            },
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
             limits: Default::default(),
-        }
+        };
+        (state, paths_for(path))
+    }
+
+    fn paths_for(config: std::path::PathBuf) -> AdminPaths {
+        let store = config.with_file_name("mcp-auth.json");
+        AdminPaths { config, store }
     }
 
     /// [`state_with_config_path`], but its config source *watches* that file
     /// rather than holding a copy - the way `lev serve` builds one. What the
     /// handlers see is then whatever is on disk, which is the whole point of
     /// issue #532.
-    fn state_watching_config_path(path: std::path::PathBuf) -> AppState {
+    fn state_watching_config_path(path: std::path::PathBuf) -> (AppState, AdminPaths) {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
-        AppState {
+        let state = AppState {
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: Arc::new(crate::daemon::config_reload::ConfigReloader::new(
@@ -776,12 +781,10 @@ mod tests {
             )),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
-            mcp: crate::commands::serve::mcp::McpAdmin {
-                config_path: path,
-                ..Default::default()
-            },
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
             limits: Default::default(),
-        }
+        };
+        (state, paths_for(path))
     }
 
     /// Force a file's mtime strictly newer, so the reload is observable even
@@ -796,10 +799,13 @@ mod tests {
     /// The endpoint's answer as JSON rather than as `RedactedConfig`: a
     /// gateway serializes with `skip_serializing_if` fields that its own
     /// `Deserialize` requires, so the wire form is the only faithful reading.
-    async fn get_config_request(state: AppState) -> serde_json::Value {
-        let app = Router::new()
-            .route("/api/config", get(get_config))
-            .with_state(state);
+    async fn get_config_request((state, paths): (AppState, AdminPaths)) -> serde_json::Value {
+        let app = scoped(
+            Router::new()
+                .route("/api/config", get(get_config))
+                .with_state(state),
+            paths,
+        );
         let req = Request::builder()
             .uri("/api/config")
             .body(Body::empty())
@@ -868,10 +874,16 @@ mod tests {
         assert_eq!(gateways[0]["base_url"], "https://api.cerebras.ai/v1");
     }
 
-    async fn put_config_request(state: AppState, body: &str) -> axum::http::Response<Body> {
-        let app = Router::new()
-            .route("/api/config", axum::routing::put(put_config))
-            .with_state(state);
+    async fn put_config_request(
+        (state, paths): (AppState, AdminPaths),
+        body: &str,
+    ) -> axum::http::Response<Body> {
+        let app = scoped(
+            Router::new()
+                .route("/api/config", axum::routing::put(put_config))
+                .with_state(state),
+            paths,
+        );
         let req = Request::builder()
             .method("PUT")
             .uri("/api/config")
