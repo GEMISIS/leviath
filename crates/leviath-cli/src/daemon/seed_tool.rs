@@ -148,6 +148,9 @@ pub struct SeedToolContext {
     pub script_host: Arc<dyn leviath_scripting::ScriptHost>,
     /// The shared MCP executor.
     pub mcp: Arc<tokio::sync::Mutex<leviath_mcp::ToolExecutor>>,
+    /// The run's write budget, shared with the tool lane so what a seed
+    /// writes at spawn counts against the same ceiling as turn one.
+    pub writes: Arc<crate::daemon::tool_service::WriteBudget>,
 }
 
 /// Decides one seeded call's policy: `(tool name, is_builtin) -> policy`.
@@ -162,8 +165,25 @@ pub type SeedPolicyResolver = Arc<dyn Fn(&str, bool) -> ToolPolicy + Send + Sync
 pub fn production_runner(ctx: SeedToolContext, resolve: SeedPolicyResolver) -> SeedToolRunner {
     Arc::new(move |name: &str, args: &serde_json::Value| {
         let is_builtin = ctx.builtin_names.contains(name);
-        if let Some(refusal) = seed_policy_refusal(name, resolve(name, is_builtin)) {
+        // The same three fences the tool lane applies to a mid-run call, in
+        // the same order: a seed used to skip all of them, and a seed is the
+        // one call that runs before anyone could have been asked.
+        let policy = resolve(name, is_builtin);
+        let policy =
+            crate::tools::clamp_by_effect(name, args, policy, &|| resolve("write_file", true));
+        if let Some(refusal) = seed_policy_refusal(name, policy) {
             return Err(refusal);
+        }
+        let workdir = ctx.builtins.workdir();
+        if let Some(refusal) = crate::tools::escaping_write_refusal(name, args, workdir) {
+            return Err(refusal);
+        }
+        if let Some(refusal) = crate::tools::write_budget_refusal(name, args, workdir, &ctx.writes)
+        {
+            return Err(refusal);
+        }
+        if let Some(declared) = crate::tools::declared_write_bytes(name, args) {
+            ctx.writes.record(declared);
         }
         // A script tool is checked first, exactly as the tool lane checks it
         // first, so a discovered `.rhai` dispatches to the engine. The Rhai
@@ -176,7 +196,13 @@ pub fn production_runner(ctx: SeedToolContext, resolve: SeedPolicyResolver) -> S
             ));
         }
         match is_builtin {
-            true => block_on_daemon(ctx.builtins.execute(name, args.clone())),
+            true => {
+                let out = block_on_daemon(ctx.builtins.execute(name, args.clone()));
+                // A redirect is only measurable after the fact, as in the lane.
+                ctx.writes
+                    .record(crate::tools::measured_write_bytes(name, args, workdir));
+                out
+            }
             false => {
                 let mcp = ctx.mcp.clone();
                 let name = name.to_string();
@@ -352,11 +378,28 @@ mod tests {
         dir: &std::path::Path,
         scripts: leviath_scripting::ScriptToolSet,
     ) -> SeedToolContext {
+        ctx_with_budget(dir, scripts, Arc::new(unlimited_writes()))
+    }
+
+    /// A budget that stops nothing, over a filesystem reporting plenty of room.
+    fn unlimited_writes() -> crate::daemon::tool_service::WriteBudget {
+        crate::daemon::tool_service::WriteBudget::with_probe(Default::default(), |_| {
+            Some(leviath_core::write_limits::MIN_FREE_BYTES * 100)
+        })
+    }
+
+    /// [`ctx_over`] with the run's write budget chosen.
+    fn ctx_with_budget(
+        dir: &std::path::Path,
+        scripts: leviath_scripting::ScriptToolSet,
+        writes: Arc<crate::daemon::tool_service::WriteBudget>,
+    ) -> SeedToolContext {
         let builtins = Arc::new(leviath_tools::BuiltinTools::new(
             leviath_tools::ToolContext::new(dir.to_path_buf()),
         ));
         let builtin_names = builtins.names().into_iter().collect();
         SeedToolContext {
+            writes,
             builtins,
             builtin_names,
             script_tools: scripts,
@@ -423,6 +466,84 @@ mod tests {
         let runner = production_runner(ctx_over(dir.path(), Default::default()), ask);
         let err = runner("current_time", &serde_json::json!({})).expect_err("refused");
         assert!(err.contains("nobody to prompt"), "{err}");
+    }
+
+    /// A seed runs before the first inference, so it used to run before every
+    /// fence the tool lane applies: a `shell` seed could redirect outside the
+    /// workdir, which the same line as a tool call is refused for.
+    #[test]
+    fn a_seed_cannot_redirect_outside_the_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("pwned.txt");
+        let command = format!("echo pwn > {}", target.display());
+        let runner = production_runner(ctx_over(dir.path(), Default::default()), allow_all());
+        let err = runner("shell", &serde_json::json!({ "command": command })).expect_err("refused");
+        assert!(err.contains("outside the working directory"), "{err}");
+        assert!(!target.exists(), "the seed wrote outside the workdir");
+    }
+
+    /// And the write clamp: a `shell` seed that redirects is a write, so a
+    /// `write_file = "deny"` refuses it even though `shell` itself is allowed.
+    #[test]
+    fn a_seed_redirect_answers_to_the_write_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let deny_writes: SeedPolicyResolver = Arc::new(|name, _| match name {
+            "write_file" => ToolPolicy::Deny,
+            _ => ToolPolicy::Allow,
+        });
+        let runner = production_runner(ctx_over(dir.path(), Default::default()), deny_writes);
+        let err = runner(
+            "shell",
+            &serde_json::json!({ "command": "echo x > inside.txt" }),
+        )
+        .expect_err("refused");
+        assert!(err.contains("denied"), "{err}");
+        assert!(
+            !dir.path().join("inside.txt").exists(),
+            "the seed wrote anyway"
+        );
+    }
+
+    /// A seed's write spends the run's budget, the same budget turn one then
+    /// checks against, and a seed over the ceiling is refused before it lands.
+    #[test]
+    fn a_seed_write_spends_the_run_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let writes = Arc::new(crate::daemon::tool_service::WriteBudget::with_probe(
+            leviath_core::write_limits::WriteLimits {
+                per_call: Some(8),
+                per_run: Some(10),
+            },
+            |_| Some(leviath_core::write_limits::MIN_FREE_BYTES * 100),
+        ));
+        let runner = production_runner(
+            ctx_with_budget(dir.path(), Default::default(), writes.clone()),
+            allow_all(),
+        );
+        runner(
+            "write_file",
+            &serde_json::json!({ "path": "seeded.txt", "content": "12345678" }),
+        )
+        .expect("fits");
+        assert_eq!(writes.written(), 8);
+        let err = runner(
+            "write_file",
+            &serde_json::json!({ "path": "more.txt", "content": "123" }),
+        )
+        .expect_err("over the run ceiling");
+        assert!(err.contains("budget"), "{err}");
+        assert!(!dir.path().join("more.txt").exists());
+        // A shell redirect is measured after the fact and charged too.
+        let runner = production_runner(
+            ctx_with_budget(dir.path(), Default::default(), Arc::new(unlimited_writes())),
+            allow_all(),
+        );
+        runner(
+            "shell",
+            &serde_json::json!({ "command": "echo hi > out.txt" }),
+        )
+        .expect("ran");
     }
 
     /// Whether a name is a built-in is what the resolver is told, and it is the
