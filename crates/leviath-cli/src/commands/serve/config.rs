@@ -65,7 +65,7 @@ pub(super) async fn get_config(State(state): State<AppState>) -> Json<RedactedCo
 pub(super) async fn put_config(
     State(state): State<AppState>,
     Json(req): Json<WriteConfigReq>,
-) -> Result<Json<RedactedConfig>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<RedactedConfig>, ApiError> {
     let path = &state.mcp.config_path;
     let mut config = Config::load_from_path_public(path).map_err(|e| {
         err(

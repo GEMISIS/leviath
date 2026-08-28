@@ -47,7 +47,7 @@ fn output_request(body: &SpawnAgentReq) -> Option<leviath_core::output::OutputSp
 pub(super) async fn spawn_agent(
     State(state): State<AppState>,
     Json(body): Json<SpawnAgentReq>,
-) -> Result<Json<SpawnAgentResp>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<SpawnAgentResp>, ApiError> {
     let blueprints = discover_blueprints(&state.current_config());
     let bp_info = blueprints
         .iter()
@@ -125,10 +125,7 @@ pub(super) async fn spawn_agent(
             StatusCode::BAD_REQUEST,
             format!("Failed to spawn agent: {message}"),
         )),
-        Ok(other) => Err(err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Unexpected daemon response: {other:?}"),
-        )),
+        Ok(other) => Err(unexpected_response(other)),
         Err(e) => Err(daemon_error(e)),
     }
 }
@@ -153,7 +150,7 @@ pub(super) async fn list_agents(
 
 pub(super) async fn get_agent(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     runstate::read_meta(&id)
         .map(|m| Json(run_json(&m, leviath_core::duration::now_secs())))
         .map_err(|_| {
@@ -178,7 +175,7 @@ pub(super) async fn agent_children(AxumPath(id): AxumPath<String>) -> Json<Vec<s
 
 pub(super) async fn agent_context(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<ContextSnapshot>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<ContextSnapshot>, ApiError> {
     runstate::read_context_snapshot(&id)
         .map(Json)
         .ok_or_else(|| {
@@ -217,7 +214,7 @@ pub(super) const HISTORY_MAX_LIMIT: usize = 100;
 pub(super) async fn agent_context_history(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<HistoryQuery>,
-) -> Result<Json<Page<leviath_core::run_archive::RunPoint>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Page<leviath_core::run_archive::RunPoint>>, ApiError> {
     use std::ops::ControlFlow;
 
     let ascending = match query.order.as_deref() {
@@ -356,7 +353,7 @@ pub(super) async fn agent_context_history(
 pub(super) async fn agent_logs(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<LogsQuery>,
-) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<String, ApiError> {
     let run_dir = runstate::run_dir(&id);
     if !run_dir.exists() {
         return Err((
@@ -403,7 +400,7 @@ pub(super) const MAX_FILE_READ_BYTES: u64 = 1024 * 1024;
 pub(super) async fn agent_file(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<FileQuery>,
-) -> Result<Json<FileOrListing>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<FileOrListing>, ApiError> {
     let meta = runstate::read_meta(&id)
         .map_err(|_| err(StatusCode::NOT_FOUND, format!("Agent run '{id}' not found")))?;
 
@@ -550,7 +547,7 @@ fn list_run_files(
     source: FileSource,
     dir: Option<&std::path::Path>,
     hidden: bool,
-) -> Result<FileOrListing, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<FileOrListing, ApiError> {
     let workdir = PathBuf::from(&meta.workdir);
     let listing = match source {
         FileSource::Modified => modified_listing(meta, &workdir),
@@ -612,7 +609,7 @@ fn workdir_listing(
     workdir: &std::path::Path,
     dir: Option<&std::path::Path>,
     hidden: bool,
-) -> Result<RunFileListing, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<RunFileListing, ApiError> {
     let target = dir
         .map(PathBuf::from)
         .unwrap_or_else(|| workdir.to_path_buf());
@@ -682,7 +679,7 @@ fn workdir_listing(
 
 pub(super) async fn agent_result(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<AgentResultResp>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<AgentResultResp>, ApiError> {
     let meta = runstate::read_meta(&id).map_err(|_| {
         (
             StatusCode::NOT_FOUND,
@@ -736,7 +733,7 @@ pub(super) async fn agent_result(
 /// already been answered.
 pub(super) async fn agent_stages(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<RunStagesResp>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<RunStagesResp>, ApiError> {
     let meta = runstate::read_meta(&id).map_err(|_| {
         (
             StatusCode::NOT_FOUND,
@@ -758,23 +755,16 @@ pub(super) async fn agent_stages(
 pub(super) async fn kill_agent(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    match state
+) -> Result<StatusCode, ApiError> {
+    let reply = state
         .control
         .request(&ControlRequest::Cancel { run_id: id.clone() })
-        .await
-    {
-        Ok(ControlResponse::Ok { ok: true }) => Ok(StatusCode::NO_CONTENT),
-        Ok(ControlResponse::Ok { ok: false }) => Err(err(
-            StatusCode::NOT_FOUND,
-            format!("Agent run '{id}' not found"),
-        )),
-        Ok(other) => Err(err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Unexpected daemon response: {other:?}"),
-        )),
-        Err(e) => Err(daemon_error(e)),
-    }
+        .await;
+    daemon_ok(
+        reply,
+        StatusCode::NO_CONTENT,
+        format!("Agent run '{id}' not found"),
+    )
 }
 
 /// `POST /api/agents/{id}/pause`: park a run. The daemon refuses when the run
@@ -783,46 +773,32 @@ pub(super) async fn kill_agent(
 pub(super) async fn pause_agent(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    match state
+) -> Result<StatusCode, ApiError> {
+    let reply = state
         .control
         .request(&ControlRequest::Pause { run_id: id.clone() })
-        .await
-    {
-        Ok(ControlResponse::Ok { ok: true }) => Ok(StatusCode::NO_CONTENT),
-        Ok(ControlResponse::Ok { ok: false }) => Err(err(
-            StatusCode::NOT_FOUND,
-            format!("Agent run '{id}' not found or not pausable"),
-        )),
-        Ok(other) => Err(err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Unexpected daemon response: {other:?}"),
-        )),
-        Err(e) => Err(daemon_error(e)),
-    }
+        .await;
+    daemon_ok(
+        reply,
+        StatusCode::NO_CONTENT,
+        format!("Agent run '{id}' not found or not pausable"),
+    )
 }
 
 /// `POST /api/agents/{id}/resume`: un-pause a run.
 pub(super) async fn resume_agent(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    match state
+) -> Result<StatusCode, ApiError> {
+    let reply = state
         .control
         .request(&ControlRequest::Resume { run_id: id.clone() })
-        .await
-    {
-        Ok(ControlResponse::Ok { ok: true }) => Ok(StatusCode::NO_CONTENT),
-        Ok(ControlResponse::Ok { ok: false }) => Err(err(
-            StatusCode::NOT_FOUND,
-            format!("Agent run '{id}' not found or not paused"),
-        )),
-        Ok(other) => Err(err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Unexpected daemon response: {other:?}"),
-        )),
-        Err(e) => Err(daemon_error(e)),
-    }
+        .await;
+    daemon_ok(
+        reply,
+        StatusCode::NO_CONTENT,
+        format!("Agent run '{id}' not found or not paused"),
+    )
 }
 
 #[cfg(test)]
