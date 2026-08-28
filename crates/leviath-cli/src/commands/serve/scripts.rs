@@ -34,14 +34,13 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
 
-use axum::extract::{Path as AxumPath, Query};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
 use super::tools::agent_dir;
-use super::types::ApiError;
-use super::types::err;
+use super::types::{ApiError, AppState, err};
 
 /// Which extension point a script plugs into, and so which compiler decides
 /// whether it is valid.
@@ -133,7 +132,12 @@ struct Target {
 /// request can ask for a `.toml`, a manifest, or anything else in the agent's
 /// directory. A `name` that already carries the extension is accepted and means
 /// the same file, since that is how the listing spells a path back.
-fn resolve(kind: &str, name: &str, agent: Option<&str>) -> Result<Target, ApiError> {
+fn resolve(
+    config: &crate::config::Config,
+    kind: &str,
+    name: &str,
+    agent: Option<&str>,
+) -> Result<Target, ApiError> {
     let Some(kind) = ScriptKind::parse(kind) else {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -163,7 +167,7 @@ fn resolve(kind: &str, name: &str, agent: Option<&str>) -> Result<Target, ApiErr
             ));
         }
         (Some(agent), _) => {
-            let base = agent_dir(agent)?;
+            let base = agent_dir(config, agent)?;
             // Tools are scanned out of `tools/`; a hook or validator is named by
             // a manifest path that resolves against the agent's own directory.
             let dir = match kind {
@@ -674,11 +678,12 @@ fn collect_declared(dir: &Path, agent: &str, out: &mut Vec<ScriptItem>) {
 /// them out of the agent view would only mean a console had to make a second
 /// request to draw the same page.
 pub(super) async fn list_scripts(
+    State(state): State<AppState>,
     Query(q): Query<ScriptQuery>,
 ) -> Result<Json<ScriptsResp>, ApiError> {
     let mut scripts = Vec::new();
     if let Some(name) = q.agent.as_deref() {
-        let dir = agent_dir(name)?;
+        let dir = agent_dir(&state.current_config(), name)?;
         collect_tools(&dir.join("tools"), "agent", Some(name), &mut scripts);
         collect_declared(&dir, name, &mut scripts);
     }
@@ -689,10 +694,11 @@ pub(super) async fn list_scripts(
 
 /// `GET /api/scripts/{kind}/{name}[?agent=<name>]`: the source text.
 pub(super) async fn get_script(
+    State(state): State<AppState>,
     AxumPath((kind, name)): AxumPath<(String, String)>,
     Query(q): Query<ScriptQuery>,
 ) -> Result<Json<ScriptSource>, ApiError> {
-    let target = resolve(&kind, &name, q.agent.as_deref())?;
+    let target = resolve(&state.current_config(), &kind, &name, q.agent.as_deref())?;
     guard(&target, Presence::Required)?;
     read_script(&target)
 }
@@ -745,11 +751,12 @@ fn stem_of(path: &Path) -> String {
 /// Mounted only under `--allow-admin`, because what this writes is code every
 /// agent on the machine may then execute.
 pub(super) async fn put_script(
+    State(state): State<AppState>,
     AxumPath((kind, name)): AxumPath<(String, String)>,
     Query(q): Query<ScriptQuery>,
     Json(body): Json<WriteScriptReq>,
 ) -> Result<Json<ScriptWritten>, ApiError> {
-    let target = resolve(&kind, &name, q.agent.as_deref())?;
+    let target = resolve(&state.current_config(), &kind, &name, q.agent.as_deref())?;
     if let Err(e) = std::fs::create_dir_all(&target.dir) {
         return Err(err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -781,10 +788,11 @@ fn write_script(target: &Target, content: &str) -> Result<Json<ScriptWritten>, A
 
 /// `DELETE /api/scripts/{kind}/{name}[?agent=<name>]` (admin only): remove it.
 pub(super) async fn delete_script(
+    State(state): State<AppState>,
     AxumPath((kind, name)): AxumPath<(String, String)>,
     Query(q): Query<ScriptQuery>,
 ) -> Result<StatusCode, ApiError> {
-    let target = resolve(&kind, &name, q.agent.as_deref())?;
+    let target = resolve(&state.current_config(), &kind, &name, q.agent.as_deref())?;
     guard(&target, Presence::Required)?;
     remove_script(&target)
 }

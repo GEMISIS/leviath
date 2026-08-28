@@ -1,7 +1,8 @@
 //! Tests for the script read/write routes.
 
 use super::*;
-use crate::commands::serve::testutil::with_home;
+use crate::commands::serve::testutil::{state_with_agent_paths, with_home};
+use crate::config::Config;
 use axum::Router;
 use axum::body::Body;
 use axum::http::Request;
@@ -31,7 +32,7 @@ fn providers_root(home: &Path) -> PathBuf {
 
 /// Every script route, mounted the way production mounts them under
 /// `--allow-admin`, so a test drives the real handlers.
-fn admin_router() -> Router {
+fn admin_router(agent_paths: Vec<PathBuf>) -> Router {
     Router::new()
         .route("/api/scripts", get(list_scripts))
         .route("/api/scripts/validate", post(validate_script))
@@ -39,10 +40,22 @@ fn admin_router() -> Router {
             "/api/scripts/{kind}/{name}",
             get(get_script).put(put_script).delete(delete_script),
         )
+        .with_state(state_with_agent_paths(agent_paths))
 }
 
 async fn call(req: Request<Body>) -> (StatusCode, serde_json::Value) {
-    let resp = admin_router().oneshot(req).await.expect("a response");
+    call_with_paths(Vec::new(), req).await
+}
+
+/// `call`, against a server whose config lists `agent_paths`.
+async fn call_with_paths(
+    agent_paths: Vec<PathBuf>,
+    req: Request<Body>,
+) -> (StatusCode, serde_json::Value) {
+    let resp = admin_router(agent_paths)
+        .oneshot(req)
+        .await
+        .expect("a response");
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
@@ -200,7 +213,8 @@ fn status_pairs_flatten_both_outcomes() {
 #[tokio::test]
 async fn a_tool_resolves_into_the_agents_tools_directory() {
     with_home(|home| async move {
-        let target = resolve("tool", "summarize", Some("researcher")).expect("resolves");
+        let target =
+            resolve(&Config::default(), "tool", "summarize", Some("researcher")).expect("resolves");
         assert_eq!(target.dir, agent_root(&home, "researcher").join("tools"));
         assert_eq!(target.scope, "agent");
         assert_eq!(target.agent.as_deref(), Some("researcher"));
@@ -214,7 +228,13 @@ async fn a_tool_resolves_into_the_agents_tools_directory() {
 #[tokio::test]
 async fn a_hook_resolves_beside_the_manifest_not_under_tools() {
     with_home(|home| async move {
-        let target = resolve("stage_hook", "hooks", Some("researcher")).expect("resolves");
+        let target = resolve(
+            &Config::default(),
+            "stage_hook",
+            "hooks",
+            Some("researcher"),
+        )
+        .expect("resolves");
         assert_eq!(target.dir, agent_root(&home, "researcher"));
         assert_eq!(
             target.path,
@@ -227,7 +247,7 @@ async fn a_hook_resolves_beside_the_manifest_not_under_tools() {
 #[tokio::test]
 async fn a_global_tool_resolves_into_the_shared_directory() {
     with_home(|home| async move {
-        let target = resolve("tool", "summarize", None).expect("resolves");
+        let target = resolve(&Config::default(), "tool", "summarize", None).expect("resolves");
         assert_eq!(target.dir, global_root(&home));
         assert_eq!(target.scope, "global");
         assert!(target.agent.is_none());
@@ -240,8 +260,8 @@ async fn a_global_tool_resolves_into_the_shared_directory() {
 #[tokio::test]
 async fn a_name_that_already_carries_the_extension_is_the_same_file() {
     with_home(|home| async move {
-        let bare = resolve("tool", "summarize", None).expect("resolves");
-        let dotted = resolve("tool", "summarize.rhai", None).expect("resolves");
+        let bare = resolve(&Config::default(), "tool", "summarize", None).expect("resolves");
+        let dotted = resolve(&Config::default(), "tool", "summarize.rhai", None).expect("resolves");
         assert_eq!(bare.path, dotted.path);
         assert!(bare.path.starts_with(global_root(&home)));
     })
@@ -251,7 +271,8 @@ async fn a_name_that_already_carries_the_extension_is_the_same_file() {
 #[tokio::test]
 async fn an_unknown_kind_is_refused() {
     with_home(|_home| async move {
-        let (status, _) = resolve("model_provider", "x", None).expect_err("no such kind");
+        let (status, _) =
+            resolve(&Config::default(), "model_provider", "x", None).expect_err("no such kind");
         assert_eq!(status, StatusCode::BAD_REQUEST);
     })
     .await;
@@ -260,7 +281,8 @@ async fn an_unknown_kind_is_refused() {
 #[tokio::test]
 async fn a_traversing_script_name_is_refused() {
     with_home(|_home| async move {
-        let (status, _) = resolve("tool", "../../evil", None).expect_err("a traversal");
+        let (status, _) =
+            resolve(&Config::default(), "tool", "../../evil", None).expect_err("a traversal");
         assert_eq!(status, StatusCode::BAD_REQUEST);
     })
     .await;
@@ -269,8 +291,36 @@ async fn a_traversing_script_name_is_refused() {
 #[tokio::test]
 async fn a_traversing_agent_name_is_refused() {
     with_home(|_home| async move {
-        let (status, _) = resolve("tool", "x", Some("../../etc")).expect_err("a traversal");
+        let (status, _) =
+            resolve(&Config::default(), "tool", "x", Some("../../etc")).expect_err("a traversal");
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    })
+    .await;
+}
+
+/// An agent the catalog found through `config.agent_paths` resolves to its
+/// own directory, the one `GET /api/blueprints` reports as `path`. It used to
+/// resolve to `~/.leviath/agents/<name>`, which for such an agent does not
+/// exist, so a `PUT` wrote a tool nothing would ever load (issue #643).
+#[tokio::test]
+async fn an_agent_from_a_configured_path_resolves_to_its_own_directory() {
+    with_home(|home| async move {
+        let workspace = home.join("workspace");
+        let agent = workspace.join("researcher");
+        write(&agent.join("agent.leviath"), manifest_with_hooks());
+        let config = Config {
+            agent_paths: vec![workspace],
+            ..Default::default()
+        };
+
+        let tool = resolve(&config, "tool", "summarize", Some("researcher")).expect("resolves");
+        assert_eq!(tool.dir, agent.join("tools"));
+        let hook = resolve(&config, "stage_hook", "hooks", Some("researcher")).expect("resolves");
+        assert_eq!(hook.dir, agent);
+        // A name the catalog does not know still lands in the installed
+        // directory, so a new agent can be created there.
+        let fresh = resolve(&config, "tool", "summarize", Some("newcomer")).expect("resolves");
+        assert_eq!(fresh.dir, agent_root(&home, "newcomer").join("tools"));
     })
     .await;
 }
@@ -280,7 +330,8 @@ async fn a_traversing_agent_name_is_refused() {
 #[tokio::test]
 async fn a_hook_without_an_agent_is_refused() {
     with_home(|_home| async move {
-        let (status, body) = resolve("region_hook", "x", None).expect_err("no scope");
+        let (status, body) =
+            resolve(&Config::default(), "region_hook", "x", None).expect_err("no scope");
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.0.error.contains("?agent="), "{}", body.0.error);
     })
@@ -878,7 +929,8 @@ async fn validating_an_unknown_kind_is_a_400() {
 #[tokio::test]
 async fn a_provider_resolves_into_the_providers_directory() {
     with_home(|home| async move {
-        let target = resolve("provider", "groq", None).expect("a provider is global");
+        let target =
+            resolve(&Config::default(), "provider", "groq", None).expect("a provider is global");
         assert_eq!(target.path, providers_root(&home).join("groq.rhai"));
         assert_eq!(target.scope, "global");
         assert!(target.agent.is_none());
@@ -891,7 +943,8 @@ async fn a_provider_resolves_into_the_providers_directory() {
 #[tokio::test]
 async fn a_provider_with_an_agent_is_refused() {
     with_home(|_home| async move {
-        let (status, body) = resolve("provider", "groq", Some("researcher")).expect_err("global");
+        let (status, body) = resolve(&Config::default(), "provider", "groq", Some("researcher"))
+            .expect_err("global");
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.0.error.contains("?agent="), "{}", body.0.error);
     })
@@ -1123,6 +1176,88 @@ async fn validating_a_provider_does_not_run_initialize() {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["valid"], true);
+    })
+    .await;
+}
+
+// ─── agents discovered through config.agent_paths ───────────────────────────
+
+/// The whole round trip for an agent that lives in a configured path rather
+/// than the installed directory: its tools are listed, its hook opens, and a
+/// write lands beside its manifest. Every one of these went to an empty
+/// `~/.leviath/agents/<name>/` before (issue #643).
+#[tokio::test]
+async fn the_routes_see_an_agent_discovered_through_agent_paths() {
+    with_home(|home| async move {
+        let workspace = home.join("workspace");
+        let agent = workspace.join("researcher");
+        write(&agent.join("agent.leviath"), manifest_with_hooks());
+        write(&agent.join("tools").join("web_search.rhai"), GOOD_TOOL);
+        write(&agent.join("hooks.rhai"), "fn on_stage_enter(ctx) { () }");
+        let paths = vec![workspace];
+
+        let (status, body) = call_with_paths(
+            paths.clone(),
+            Request::builder()
+                .uri("/api/scripts?agent=researcher")
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let scripts = body["scripts"].as_array().expect("a scripts array");
+        let own = scripts
+            .iter()
+            .find(|s| s["name"] == "web_search")
+            .expect("the agent's own tool");
+        assert_eq!(own["source"], "agent");
+        assert!(
+            own["path"]
+                .as_str()
+                .expect("a path")
+                .starts_with(&agent.display().to_string()),
+            "{}",
+            own["path"]
+        );
+
+        let (status, body) = call_with_paths(
+            paths.clone(),
+            Request::builder()
+                .uri("/api/scripts/stage_hook/hooks?agent=researcher")
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["content"], "fn on_stage_enter(ctx) { () }");
+
+        let (status, body) = call_with_paths(
+            paths.clone(),
+            Request::builder()
+                .method("PUT")
+                .uri("/api/scripts/tool/summarize?agent=researcher")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({ "content": GOOD_TOOL })).expect("json"),
+                ))
+                .expect("a request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(agent.join("tools").join("summarize.rhai").is_file());
+        assert!(!agent_root(&home, "researcher").exists());
+
+        let (status, _) = call_with_paths(
+            paths,
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/scripts/tool/summarize?agent=researcher")
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(!agent.join("tools").join("summarize.rhai").exists());
     })
     .await;
 }
