@@ -39,10 +39,10 @@ pub struct OpenAIProvider {
     /// not one per inference: a run makes many calls and they would each pay it.
     /// A `HashSet` behind a lock rather than a field on the request, because the
     /// provider is shared across every agent talking to it.
-    reasoning_effort_none: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    reasoning_effort_none: crate::provider::ModelMemo,
     /// Models the API has refused a temperature for, so the next request to one
     /// omits it instead of spending a round trip learning the same thing again.
-    temperature_unsupported: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    temperature_unsupported: crate::provider::ModelMemo,
 }
 
 /// What this build knows about OpenAI's models, most specific first.
@@ -240,22 +240,22 @@ impl OpenAIProvider {
 
     /// Whether this model has already refused a temperature.
     fn temperature_is_unsupported(&self, model: &str) -> bool {
-        leviath_core::sync::lock(&self.temperature_unsupported).contains(model)
+        self.temperature_unsupported.contains(model)
     }
 
     /// Record that it did, for the rest of this process.
     fn remember_temperature_unsupported(&self, model: &str) {
-        leviath_core::sync::lock(&self.temperature_unsupported).insert(model.to_string());
+        self.temperature_unsupported.insert(model);
     }
 
     /// Whether this model has already refused tools over a reasoning effort.
     fn needs_reasoning_effort_none(&self, model: &str) -> bool {
-        leviath_core::sync::lock(&self.reasoning_effort_none).contains(model)
+        self.reasoning_effort_none.contains(model)
     }
 
     /// Record that it did, for the rest of this process.
     fn remember_reasoning_effort_none(&self, model: &str) {
-        leviath_core::sync::lock(&self.reasoning_effort_none).insert(model.to_string());
+        self.reasoning_effort_none.insert(model);
     }
 }
 

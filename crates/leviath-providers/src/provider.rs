@@ -918,6 +918,40 @@ pub fn parse_tool_arguments(raw: &str) -> serde_json::Value {
     serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
 }
 
+/// Model names remembered for the life of the process.
+///
+/// What a provider learns about a model by being refused (no temperature,
+/// no tools over a reasoning effort) or by warning about it once is worth
+/// keeping across requests, and clones of the provider share the same set.
+/// Five fields across three providers used to spell this out as
+/// `Arc<Mutex<HashSet<String>>>` with a pair of lock-and-look helpers each.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ModelMemo(std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>);
+
+impl ModelMemo {
+    /// Whether `model` has been recorded.
+    pub(crate) fn contains(&self, model: &str) -> bool {
+        leviath_core::sync::lock(&self.0).contains(model)
+    }
+
+    /// Record `model`; `true` the first time, `false` if it was already there.
+    pub(crate) fn insert(&self, model: &str) -> bool {
+        leviath_core::sync::lock(&self.0).insert(model.to_string())
+    }
+
+    /// How many models are recorded.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        leviath_core::sync::lock(&self.0).len()
+    }
+
+    /// Whether nothing has been recorded.
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// How long a response's `Retry-After` header asks the caller to wait.
 ///
 /// Only the delta-seconds form is read. The header's other form is an HTTP
@@ -925,7 +959,7 @@ pub fn parse_tool_arguments(raw: &str) -> serde_json::Value {
 /// reading it would mean trusting the server's clock against ours; an
 /// unparseable value is treated as no hint at all, which falls back to the
 /// caller's own backoff.
-fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+pub(crate) fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
         .get("retry-after")
         .and_then(|v| v.to_str().ok())

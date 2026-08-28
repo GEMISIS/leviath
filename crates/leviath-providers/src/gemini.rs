@@ -408,12 +408,19 @@ impl Provider for GeminiProvider {
 }
 
 impl GeminiProvider {
-    /// Native `/v1beta/models` listing with authoritative per-model token limits.
-    async fn list_models_native(&self, native_base: &str) -> Result<Vec<ModelInfo>> {
+    /// GET a models listing and return the array under `field`.
+    ///
+    /// The native and OpenAI-compatible listings differ in the auth header
+    /// they take and the key the array sits under, and in nothing else about
+    /// the request, so this is the one place the request is made.
+    async fn fetch_model_listing(
+        &self,
+        url: String,
+        auth: (&str, String),
+        field: &str,
+    ) -> Result<Vec<serde_json::Value>> {
         let response = crate::provider::apply_request_timeout(
-            self.client
-                .get(format!("{}/models", native_base))
-                .header("x-goog-api-key", &self.api_key),
+            self.client.get(url).header(auth.0, auth.1),
             Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
         )
         .send()
@@ -421,13 +428,23 @@ impl GeminiProvider {
         .map_err(|e| ProviderError::transport("listing models", &e))?;
         let response = crate::provider::check_http_response(response, None).await?;
         let body: serde_json::Value = crate::provider::decode_json(response).await?;
-
-        let models = body
-            .get("models")
+        body.get(field)
             .and_then(|d| d.as_array())
+            .cloned()
             .ok_or_else(|| {
-                ProviderError::InvalidResponse("No models field in models response".to_string())
-            })?
+                ProviderError::InvalidResponse(format!("No {field} field in models response"))
+            })
+    }
+
+    /// Native `/v1beta/models` listing with authoritative per-model token limits.
+    async fn list_models_native(&self, native_base: &str) -> Result<Vec<ModelInfo>> {
+        let models = self
+            .fetch_model_listing(
+                format!("{}/models", native_base),
+                ("x-goog-api-key", self.api_key.clone()),
+                "models",
+            )
+            .await?
             .iter()
             .filter_map(|item| {
                 // `name` is like "models/gemini-3.5-flash"; the id drops the prefix.
@@ -468,24 +485,13 @@ impl GeminiProvider {
     /// OpenAI-compat `/models` listing (no per-model token limits) used only when
     /// the configured base URL isn't the standard native-derivable form.
     async fn list_models_compat(&self) -> Result<Vec<ModelInfo>> {
-        let response = crate::provider::apply_request_timeout(
-            self.client
-                .get(format!("{}/models", self.base_url))
-                .header("Authorization", format!("Bearer {}", self.api_key)),
-            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
-        )
-        .send()
-        .await
-        .map_err(|e| ProviderError::transport("listing models", &e))?;
-        let response = crate::provider::check_http_response(response, None).await?;
-        let body: serde_json::Value = crate::provider::decode_json(response).await?;
-
-        let models = body
-            .get("data")
-            .and_then(|d| d.as_array())
-            .ok_or_else(|| {
-                ProviderError::InvalidResponse("No data field in models response".to_string())
-            })?
+        let models = self
+            .fetch_model_listing(
+                format!("{}/models", self.base_url),
+                ("Authorization", format!("Bearer {}", self.api_key)),
+                "data",
+            )
+            .await?
             .iter()
             .filter_map(|item| {
                 let id = item.get("id")?.as_str()?.to_string();
