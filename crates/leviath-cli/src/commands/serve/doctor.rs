@@ -1,37 +1,80 @@
-//! `GET /api/doctor` - the browser's "check my setup" button.
+//! `GET /api/doctor` and `POST /api/doctor/live` - the browser's "check my
+//! setup" button, in two halves.
 //!
-//! Runs exactly the checks `lev doctor` runs
-//! ([`crate::commands::doctor::run_checks`]), semantics preserved, and returns
-//! them as data instead of a table. See that module for what each layer proves.
+//! Both run the checks `lev doctor` runs ([`crate::commands::doctor::run_checks`]),
+//! semantics preserved, and return them as data instead of a table. See that
+//! module for what each layer proves. The split is about what a request can
+//! cost: the read half stops before the first billed call, and the half that
+//! bills and spawns is mounted only behind `--allow-admin`.
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::Json;
 
 use super::types::*;
 use crate::commands::doctor::{CheckStatus, DaemonTarget, DoctorArgs, run_checks};
 use crate::commands::run::session::build_provider_registry_from_config;
 
-/// `GET /api/doctor`: prove the provider wiring works, one layer at a time.
+/// `GET /api/doctor`: the checks that cost nothing.
+///
+/// Config, search and resolve, then stop: exactly `lev doctor --offline`. It
+/// used to run the whole chain, which made an unauthenticated-looking read
+/// into two billed provider calls and a spawned run for anyone holding the
+/// bearer token, on every press of a button.
 ///
 /// A failing check is an `ok: false` entry in a 200, never an HTTP error - the
 /// endpoint answering at all is not the thing being diagnosed. The config is
 /// re-read per request (not taken from [`AppState`]) so the button reflects an
 /// edit the user just made.
+pub(super) async fn run_doctor(State(_state): State<AppState>) -> Json<DoctorResp> {
+    let args = DoctorArgs {
+        offline: true,
+        ..DoctorArgs::default()
+    };
+    let checks = run_checks(
+        &args,
+        &build_provider_registry_from_config,
+        DaemonTarget::Skip,
+    )
+    .await;
+    Json(report(checks))
+}
+
+/// One live doctor at a time. Two of them would race two throwaway runs and
+/// four billed calls against the same config, and a double-clicked button
+/// means one check.
+static LIVE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// `POST /api/doctor/live`: the whole chain, billed calls included. Admin only.
 ///
 /// Live-call behavior is `lev doctor`'s own, bounded by its own deadlines:
 /// `inference` makes one real, billed provider call under the probe's 60s
 /// request timeout, and `daemon` spawns a throwaway one-stage run (a second
 /// billed call) through this server's control socket, waited on for at most
 /// the doctor's 90s. A daemon that is not running reports as a failing
-/// `daemon` check rather than skipping it.
-pub(super) async fn run_doctor(State(state): State<AppState>) -> Json<DoctorResp> {
+/// `daemon` check rather than skipping it. `409` while another live doctor is
+/// still going.
+pub(super) async fn run_doctor_live(
+    State(state): State<AppState>,
+) -> Result<Json<DoctorResp>, (StatusCode, Json<ErrorResponse>)> {
+    let Ok(_running) = LIVE.try_lock() else {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "a live doctor run is already in progress".to_string(),
+        ));
+    };
     let checks = run_checks(
         &DoctorArgs::default(),
         &build_provider_registry_from_config,
         DaemonTarget::Client(&state.control),
     )
     .await;
-    Json(DoctorResp {
+    Ok(Json(report(checks)))
+}
+
+/// The checks as the wire shape both halves answer with.
+fn report(checks: Vec<crate::commands::doctor::Check>) -> DoctorResp {
+    DoctorResp {
         checks: checks
             .into_iter()
             .map(|c| DoctorCheck {
@@ -44,7 +87,7 @@ pub(super) async fn run_doctor(State(state): State<AppState>) -> Json<DoctorResp
                 elapsed_ms: c.elapsed_ms,
             })
             .collect(),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -142,6 +185,58 @@ mod tests {
             );
             // The offline checks carry no timing.
             assert!(report.checks.iter().all(|c| c.elapsed_ms.is_none()));
+        })
+        .await;
+    }
+
+    /// The live route is not in the shared table: it is mounted behind
+    /// `--allow-admin` by `execute_with_shutdown`, so over the plain table it
+    /// is a 404 like the other admin routes.
+    #[tokio::test]
+    async fn the_live_doctor_is_not_reachable_without_admin() {
+        with_env(|_root| async move {
+            let app = super::super::api_router().with_state(test_state());
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/doctor/live")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        })
+        .await;
+    }
+
+    /// Mounted, the live route runs the same chain and, against the same
+    /// empty config, stops at the same place with the same shape. A second
+    /// caller while one is going is told so rather than doubled up.
+    #[tokio::test]
+    async fn the_live_doctor_runs_once_at_a_time() {
+        with_env(|_root| async move {
+            let app = axum::Router::new()
+                .route("/api/doctor/live", axum::routing::post(run_doctor_live))
+                .with_state(test_state());
+            let request = || {
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/doctor/live")
+                    .body(Body::empty())
+                    .unwrap()
+            };
+
+            let held = LIVE.lock().await;
+            let resp = app.clone().oneshot(request()).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+            drop(held);
+
+            let resp = app.oneshot(request()).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let report: DoctorResp = serde_json::from_slice(&body).unwrap();
+            assert_eq!(report.checks.len(), 3);
+            assert_eq!(report.checks[2].name, "resolve");
         })
         .await;
     }

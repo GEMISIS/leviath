@@ -98,6 +98,12 @@ pub struct DoctorArgs {
     #[arg(long)]
     pub no_daemon: bool,
 
+    /// Stop after the resolve check: no provider call, no daemon, nothing
+    /// billed. Proves the config parses and names a model something answers
+    /// to, which is most of what goes wrong.
+    #[arg(long)]
+    pub offline: bool,
+
     /// Print the checks as JSON instead of a table.
     #[arg(long)]
     pub json: bool,
@@ -848,6 +854,23 @@ pub async fn run_checks(
      ),
     daemon: DaemonTarget<'_>,
 ) -> Vec<Check> {
+    run_checks_with(args, build_registry, daemon, tempfile::tempdir).await
+}
+
+/// [`run_checks`] with the scratch-directory factory injected.
+///
+/// The daemon check stages its canary blueprint in a fresh temp directory. A
+/// machine with no writable scratch space is a finding, not a panic, and the
+/// only way to prove that on every platform is to hand in a factory that
+/// refuses.
+pub async fn run_checks_with(
+    args: &DoctorArgs,
+    build_registry: &(
+         dyn Fn(&Config) -> Result<ProviderRegistry, leviath_providers::ProviderError> + Sync
+     ),
+    daemon: DaemonTarget<'_>,
+    scratch: fn() -> std::io::Result<tempfile::TempDir>,
+) -> Vec<Check> {
     let mut checks = Vec::new();
 
     // A config that will not parse is itself a finding, and the most common
@@ -897,6 +920,10 @@ pub async fn run_checks(
     let Some(resolved) = resolved else {
         return checks;
     };
+    // Everything past this point bills or spawns.
+    if args.offline {
+        return checks;
+    }
 
     let check = inference_check(resolved.provider.as_ref(), &resolved.model).await;
     let inference_failed = check.status == CheckStatus::Fail;
@@ -909,11 +936,16 @@ pub async fn run_checks(
         DaemonTarget::Skip => {}
         DaemonTarget::Unavailable(reason) => checks.push(Check::fail("daemon", reason)),
         DaemonTarget::Client(client) => {
-            // `.expect`: a temp directory that cannot be created means the
-            // machine has no writable scratch space at all, which every other
-            // part of a run would hit first. Nothing here could report it more
-            // usefully.
-            let stage = tempfile::tempdir().expect("the system temp directory is writable");
+            let stage = match scratch() {
+                Ok(stage) => stage,
+                Err(e) => {
+                    checks.push(Check::fail(
+                        "daemon",
+                        format!("no writable scratch space to stage the probe run in: {e}"),
+                    ));
+                    return checks;
+                }
+            };
             checks.push(
                 daemon_check(
                     client,
