@@ -696,7 +696,7 @@ pub use http::{
 };
 
 // Folding a streamed answer back into one response.
-mod stream;
+pub(crate) mod stream;
 pub use stream::collect_stream;
 
 /// Trait for LLM providers.
