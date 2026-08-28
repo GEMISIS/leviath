@@ -10,7 +10,6 @@ use crate::provider::{
 };
 use crate::rate_limit::RateLimiter;
 use futures_core::Stream;
-use std::pin::Pin;
 
 /// Send an OpenAI-compatible chat request and return the checked response.
 ///
@@ -862,71 +861,16 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
     })
 }
 
-// SSE stream parser for OpenAI-compatible streaming APIs.
-//
-// The inner byte stream is boxed as a trait object rather than kept generic.
-// In production this is always `reqwest`'s `bytes_stream()`; tests inject
-// dozens of distinct mock stream types via `new`'s generic parameter, and a
-// generic `impl<S> Stream` causes `cargo llvm-cov` to instrument each
-// monomorphized `poll_next` separately, leaving some artificially "uncovered"
-// even though the shared logic is fully exercised. Boxing collapses all of
-// that into a single concrete `poll_next` implementation.
-/// SSE stream wrapper that parses OpenAI-compatible server-sent events.
-pub struct OpenAiSseStream {
-    inner: Pin<Box<dyn Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send>>,
-    buffer: String,
-}
-
-impl OpenAiSseStream {
-    /// Create a new SSE stream wrapper around a byte stream.
-    pub fn new<S>(inner: S) -> Self
-    where
-        S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
-    {
-        Self {
-            inner: Box::pin(inner),
-            buffer: String::new(),
-        }
-    }
-}
-
-impl Stream for OpenAiSseStream {
-    type Item = Result<StreamChunk>;
-
-    fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
-        loop {
-            // Check for complete SSE events
-            if let Some(chunk) = parse_openai_sse_event(&mut this.buffer) {
-                return std::task::Poll::Ready(chunk);
-            }
-
-            match this.inner.as_mut().poll_next(cx) {
-                std::task::Poll::Ready(Some(Ok(bytes))) => {
-                    if let Ok(text) = std::str::from_utf8(&bytes) {
-                        this.buffer.push_str(text);
-                    }
-                }
-                std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Some(Err(ProviderError::transport(
-                        "reading the response stream",
-                        &e,
-                    ))));
-                }
-                std::task::Poll::Ready(None) => {
-                    if let Some(chunk) = parse_openai_sse_event(&mut this.buffer) {
-                        return std::task::Poll::Ready(chunk);
-                    }
-                    return std::task::Poll::Ready(None);
-                }
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-            }
-        }
-    }
+/// Wrap a byte stream in the OpenAI-compatible server-sent-events framer.
+///
+/// The one framer shared by OpenAI, Gemini's OpenAI-compatible endpoint and
+/// OpenRouter, which is what makes a gateway's mid-stream error envelope
+/// (see [`parse_openai_sse_event`]) handled the same way on all three.
+pub(crate) fn openai_sse_stream<S>(inner: S) -> crate::provider::stream::FramedStream
+where
+    S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+{
+    crate::provider::stream::FramedStream::new(inner, Box::new(parse_openai_sse_event), None)
 }
 
 /// Parse a single SSE event from the buffer.
@@ -1294,6 +1238,7 @@ mod tests {
 
     use super::*;
     use crate::provider::{InferenceRequest, Message, SystemBlock, Tool};
+    use std::pin::Pin;
 
     fn sample_request() -> InferenceRequest {
         InferenceRequest {
@@ -2331,7 +2276,7 @@ mod tests {
         assert!(result.is_none());
     }
 
-    // ─── OpenAiSseStream (Stream-level, not just parse_openai_sse_event) ───
+    // ─── openai_sse_stream (Stream-level, not just parse_openai_sse_event) ───
 
     struct StaticByteStream {
         data: Vec<Vec<u8>>,
@@ -2362,7 +2307,7 @@ mod tests {
             data: vec![data],
             idx: 0,
         };
-        let mut sse = OpenAiSseStream::new(stream);
+        let mut sse = openai_sse_stream(stream);
         let chunk = sse.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "hi");
     }
@@ -2375,7 +2320,7 @@ mod tests {
             data: vec![data],
             idx: 0,
         };
-        let mut sse = OpenAiSseStream::new(stream);
+        let mut sse = openai_sse_stream(stream);
         assert!(sse.next().await.is_none());
     }
 
@@ -2388,7 +2333,7 @@ mod tests {
             data: vec![data],
             idx: 0,
         };
-        let mut sse = OpenAiSseStream::new(stream);
+        let mut sse = openai_sse_stream(stream);
         assert!(sse.next().await.is_none());
     }
 
@@ -2403,7 +2348,7 @@ mod tests {
             ],
             idx: 0,
         };
-        let mut sse = OpenAiSseStream::new(stream);
+        let mut sse = openai_sse_stream(stream);
         let chunk = sse.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "ok");
     }
@@ -2424,7 +2369,7 @@ mod tests {
             data: vec![data],
             idx: 0,
         };
-        let mut sse = OpenAiSseStream::new(stream);
+        let mut sse = openai_sse_stream(stream);
         let chunk = sse.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "hi");
         assert!(sse.next().await.is_none());
@@ -2441,7 +2386,7 @@ mod tests {
             ],
             idx: 0,
         };
-        let mut sse = OpenAiSseStream::new(stream);
+        let mut sse = openai_sse_stream(stream);
         let chunk = sse.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "ok");
     }
@@ -3327,7 +3272,7 @@ mod tests {
         let client = reqwest::Client::new();
         let resp = client.get(&url).send().await.unwrap();
         let byte_stream = resp.bytes_stream();
-        let mut sse = OpenAiSseStream::new(byte_stream);
+        let mut sse = openai_sse_stream(byte_stream);
 
         let item = sse.next().await.expect("stream should yield an item");
         let err = item.unwrap_err();

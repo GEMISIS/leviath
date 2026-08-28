@@ -1,7 +1,7 @@
 //! Google Gemini provider implementation (via OpenAI-compatible endpoint).
 
 use crate::openai_compat::{
-    OpenAiSseStream, build_openai_request_body, parse_openai_response, send_chat_request,
+    build_openai_request_body, openai_sse_stream, parse_openai_response, send_chat_request,
 };
 use crate::provider::{
     InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
@@ -304,7 +304,7 @@ impl Provider for GeminiProvider {
         .await?;
 
         let byte_stream = response.bytes_stream();
-        let stream = OpenAiSseStream::new(byte_stream);
+        let stream = openai_sse_stream(byte_stream);
 
         Ok(Box::pin(stream))
     }
