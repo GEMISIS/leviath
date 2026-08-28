@@ -16,6 +16,7 @@ pub mod config;
 pub mod credentials;
 pub mod duration;
 pub mod error;
+pub mod files;
 pub mod interaction;
 pub mod layout;
 pub mod lifecycle;

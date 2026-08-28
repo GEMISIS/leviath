@@ -239,7 +239,7 @@ fn manifest_path_for(path: &std::path::Path) -> std::path::PathBuf {
     if path.is_file() {
         path.to_path_buf()
     } else {
-        path.join("agent.leviath")
+        path.join(leviath_core::files::MANIFEST_FILENAME)
     }
 }
 

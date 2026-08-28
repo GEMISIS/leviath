@@ -658,7 +658,7 @@ fn stage_canary(
 ) -> std::io::Result<std::path::PathBuf> {
     let agent_dir = root.join("doctor");
     std::fs::create_dir_all(&agent_dir)?;
-    let manifest = agent_dir.join("agent.leviath");
+    let manifest = agent_dir.join(leviath_core::files::MANIFEST_FILENAME);
     std::fs::write(&manifest, canary_manifest(provider, model))?;
     Ok(manifest)
 }

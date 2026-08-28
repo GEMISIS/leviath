@@ -348,7 +348,9 @@ async fn append_record(
     run_id: &str,
     record: &leviath_core::run_archive::RunRecord,
 ) {
-    let path = runs_dir.join(run_id).join("run.lvr");
+    let path = runs_dir
+        .join(run_id)
+        .join(leviath_core::files::ARCHIVE_FILE);
     if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
         tracing::warn!(run_id = %run_id, "persistence: record append skipped, no archive yet");
         return;
@@ -447,13 +449,18 @@ async fn write_snapshot(
     let archived =
         append_run_archive(&dir, job, machine_id, world_id, prev_context, status_before).await;
     let meta_json = serde_json::to_string_pretty(&job.meta).expect("RunMeta always serializes");
-    write_bytes_atomic(&dir.join("meta.json"), meta_json.into_bytes(), &job.run_id).await;
+    write_bytes_atomic(
+        &dir.join(leviath_core::files::META_FILE),
+        meta_json.into_bytes(),
+        &job.run_id,
+    )
+    .await;
     // Compact, not pretty: the context is the largest file the lane writes and
     // every consumer parses it; pretty-printing only inflated the write (and
     // its transient allocation) by half.
     let ctx_json = serde_json::to_string(&job.context).expect("ContextSnapshot always serializes");
     write_bytes_atomic(
-        &dir.join("context.json"),
+        &dir.join(leviath_core::files::CONTEXT_FILE),
         ctx_json.into_bytes(),
         &job.run_id,
     )
@@ -493,7 +500,7 @@ async fn write_snapshot(
         let stages_json =
             serde_json::to_string_pretty(&job.stages).expect("StageRecord slice always serializes");
         write_bytes_atomic(
-            &dir.join("stages.json"),
+            &dir.join(leviath_core::files::STAGES_FILE),
             stages_json.into_bytes(),
             &job.run_id,
         )
@@ -519,7 +526,7 @@ async fn write_snapshot(
     }
     // Fan-out waiting state (whole-file), or remove any stale file once the
     // parent is no longer parked on a fan-out.
-    let fanout_path = dir.join("fanout.json");
+    let fanout_path = dir.join(leviath_core::files::FANOUT_FILE);
     match &job.fanout {
         Some(json) => {
             write_bytes_atomic(&fanout_path, json.clone().into_bytes(), &job.run_id).await
@@ -530,7 +537,7 @@ async fn write_snapshot(
     }
     // Interaction-point waiting state (whole-file), or remove any stale file once the
     // agent is no longer parked at a stage-boundary interaction point.
-    let interactions_path = dir.join("interactions.json");
+    let interactions_path = dir.join(leviath_core::files::INTERACTIONS_FILE);
     match &job.interactions {
         Some(json) => {
             write_bytes_atomic(&interactions_path, json.clone().into_bytes(), &job.run_id).await
@@ -568,7 +575,7 @@ async fn append_run_archive(
 ) -> bool {
     use leviath_core::run_archive::{RunIdentity, RunRecord};
 
-    let path = dir.join("run.lvr");
+    let path = dir.join(leviath_core::files::ARCHIVE_FILE);
     let file_exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
     let at = job.meta.updated_at;
 

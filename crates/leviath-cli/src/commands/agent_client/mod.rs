@@ -819,7 +819,7 @@ fn read_run_status(runs_dir: &std::path::Path, run_id: &str) -> Option<RunStatus
     struct StatusOnly {
         status: RunStatus,
     }
-    let path = runs_dir.join(run_id).join("meta.json");
+    let path = runs_dir.join(run_id).join(leviath_core::files::META_FILE);
     let json = std::fs::read_to_string(path).ok()?;
     serde_json::from_str::<StatusOnly>(&json)
         .ok()

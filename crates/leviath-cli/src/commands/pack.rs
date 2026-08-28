@@ -107,19 +107,20 @@ fn find_manifest(project_path: &Path) -> anyhow::Result<PathBuf> {
 
 fn find_manifest_with_cwd(project_path: &Path, cwd: &Path) -> anyhow::Result<PathBuf> {
     if project_path.is_file()
-        && project_path.file_name() == Some(std::ffi::OsStr::new("agent.leviath"))
+        && project_path.file_name()
+            == Some(std::ffi::OsStr::new(leviath_core::files::MANIFEST_FILENAME))
     {
         return Ok(project_path.to_path_buf());
     }
 
     if project_path.is_dir() {
-        let manifest = project_path.join("agent.leviath");
+        let manifest = project_path.join(leviath_core::files::MANIFEST_FILENAME);
         if manifest.exists() {
             return Ok(manifest);
         }
     }
 
-    let current_manifest = cwd.join("agent.leviath");
+    let current_manifest = cwd.join(leviath_core::files::MANIFEST_FILENAME);
     if current_manifest.exists() {
         return Ok(current_manifest);
     }
