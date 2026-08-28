@@ -460,8 +460,19 @@ pub fn read_meta(run_id: &str) -> anyhow::Result<RunMeta> {
 /// build that stored the answer inline, or one whose directory was pruned).
 pub fn read_final_output(run_id: &str) -> Option<leviath_core::FinalOutput> {
     let meta = read_meta(run_id).ok()?;
-    let descriptor = meta.final_output?;
-    let content = std::fs::read_to_string(final_output_path(&run_dir(run_id))).ok()?;
+    read_final_output_in(&run_dir(run_id), &meta)
+}
+
+/// [`read_final_output`] for a run directory the caller already resolved,
+/// with the metadata it already read. The daemon's recovery works from its
+/// configured runs directory rather than the home one, and used to carry a
+/// copy of this for that reason.
+pub(crate) fn read_final_output_in(
+    dir: &std::path::Path,
+    meta: &RunMeta,
+) -> Option<leviath_core::FinalOutput> {
+    let descriptor = meta.final_output.clone()?;
+    let content = std::fs::read_to_string(final_output_path(dir)).ok()?;
     Some(leviath_core::FinalOutput {
         content,
         format: descriptor.format,

@@ -18,6 +18,7 @@ mod defs;
 mod env;
 mod exec;
 pub use exec::is_null_device;
+pub use exec::resolve_within;
 mod platform;
 pub mod validate;
 pub use context::*;
@@ -505,7 +506,7 @@ mod tests {
             false
         }
         let dir = tempfile::tempdir().unwrap();
-        let err = BuiltinTools::resolve_within("notes.txt", dir.path(), escapes)
+        let err = resolve_within("notes.txt", dir.path(), escapes)
             .expect_err("a path that resolves outside must be refused");
         assert!(err.to_string().contains("symlink"), "{err}");
     }
@@ -515,9 +516,8 @@ mod tests {
     #[test]
     fn resolve_admits_an_ordinary_path_within_the_workdir() {
         let dir = tempfile::tempdir().unwrap();
-        let resolved =
-            BuiltinTools::resolve_within("notes.txt", dir.path(), leviath_core::resolves_within)
-                .expect("an ordinary path resolves");
+        let resolved = resolve_within("notes.txt", dir.path(), leviath_core::resolves_within)
+            .expect("an ordinary path resolves");
         assert!(resolved.ends_with("notes.txt"));
     }
 
