@@ -27,7 +27,9 @@ a test, so a client generator or an agent can consume the contract directly.
   environment variable: a `--token` value is visible to other local users in the process table
   (`ps`).
 - **CORS is closed by default.** Pass `--cors <origin>` (e.g. `https://leviath.dev`) or `--cors "*"`
-  to allow a browser to call it cross-origin.
+  to allow a browser to call it cross-origin. The server does not check the `Host` header, so the
+  bearer token is what stands between a DNS-rebinding page and your local API: never embed the
+  token in a page served from somewhere else, and avoid `--cors "*"` on a machine that browses.
 - **Binds to `127.0.0.1`** by default. `--host 0.0.0.0` exposes it on your network. Without
   `--tls-cert`, that puts the bearer token on the wire in cleartext for anyone on that network to read.
   If the address is publicly routable, that is the open internet. See

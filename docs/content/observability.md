@@ -119,6 +119,10 @@ excluded, so a fleet of routers and researchers will not drown the signal. See
 Log records carry the run's trace ID. A collector that joins all three signals can therefore jump
 from a log line straight to the span that produced it.
 
+They carry the line as it was written. Every output and runtime log line of every run is exported,
+and nothing redacts a credential a tool happened to print on its way out, so point the exporter only
+at a collector you would trust with the run's transcript.
+
 ## Trying it locally
 
 Any OTLP-over-HTTP collector works. With a local Jaeger all-in-one listening on 4318, enable the
