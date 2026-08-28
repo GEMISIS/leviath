@@ -2570,6 +2570,7 @@ dependencies = [
 name = "leviath-net"
 version = "0.5.5"
 dependencies = [
+ "leviath-testkit",
  "reqwest",
  "tokio",
  "tracing",

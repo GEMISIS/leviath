@@ -491,8 +491,11 @@ mod tests {
     /// endpoint gets credentials for the whole instance.
     #[test]
     fn rejects_cloud_metadata_endpoint() {
-        let err = check_url(&u("http://169.254.169.254/latest/meta-data/"), false).unwrap_err();
-        assert_eq!(err.kind(), "private_address");
+        // Under a subscriber, so the refusal's `debug!` body runs too.
+        leviath_testkit::with_tracing(|| {
+            let err = check_url(&u("http://169.254.169.254/latest/meta-data/"), false).unwrap_err();
+            assert_eq!(err.kind(), "private_address");
+        });
     }
 
     /// Asserting on `PrivateAddress` specifically, not just `is_err()`: an IPv6
