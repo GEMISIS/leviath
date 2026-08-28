@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use bevy_ecs::prelude::Resource;
@@ -112,17 +112,14 @@ impl InteractionHub {
     async fn submit(&self, agent_id: &str, request: InteractionRequest) -> InteractionResponse {
         let id = request.id.clone();
         let (responder, rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(
-                id.clone(),
-                PendingEntry {
-                    agent_id: agent_id.to_string(),
-                    request,
-                    responder,
-                },
-            );
+        leviath_core::sync::lock(&self.pending).insert(
+            id.clone(),
+            PendingEntry {
+                agent_id: agent_id.to_string(),
+                request,
+                responder,
+            },
+        );
         // Wake the driver so it ticks and reflects this open request into the
         // agent's status (Active → Waiting) for the dashboard to surface.
         self.nudge();
@@ -161,10 +158,7 @@ impl InteractionHub {
         id: &str,
         rx: &mut oneshot::Receiver<InteractionResponse>,
     ) -> InteractionResponse {
-        self.pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(id);
+        leviath_core::sync::lock(&self.pending).remove(id);
         if let Ok(answered) = rx.try_recv() {
             return answered;
         }
@@ -182,9 +176,7 @@ impl InteractionHub {
     /// Every open request, as `(agent_id, request)` pairs, for surfacing to
     /// clients.
     pub fn pending(&self) -> Vec<(String, InteractionRequest)> {
-        self.pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        leviath_core::sync::lock(&self.pending)
             .values()
             .map(|e| (e.agent_id.clone(), e.request.clone()))
             .collect()
@@ -193,11 +185,7 @@ impl InteractionHub {
     /// Answer an open request. Returns `false` if no request with that id is
     /// open (already answered, cancelled, or never existed).
     pub fn answer(&self, response: InteractionResponse) -> bool {
-        let entry = self
-            .pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&response.request_id);
+        let entry = leviath_core::sync::lock(&self.pending).remove(&response.request_id);
         match entry {
             Some(entry) => {
                 // The awaiting `submit` may have gone away (agent despawned); a
@@ -216,10 +204,7 @@ impl InteractionHub {
     /// Returns `false` if no such request is open.
     pub fn cancel(&self, request_id: &str) -> bool {
         // Dropping the entry drops its responder, waking `submit` with an error.
-        let removed = self
-            .pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        let removed = leviath_core::sync::lock(&self.pending)
             .remove(request_id)
             .is_some();
         if removed {
@@ -238,7 +223,7 @@ impl InteractionHub {
     /// that no longer exists.
     pub fn cancel_for_agent(&self, agent_id: &str) -> usize {
         // Dropping each entry drops its responder, waking `submit` with an error.
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut pending = leviath_core::sync::lock(&self.pending);
         let before = pending.len();
         pending.retain(|_, entry| entry.agent_id != agent_id);
         let removed = before - pending.len();

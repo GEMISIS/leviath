@@ -205,6 +205,25 @@ mod listing;
 mod subagents;
 
 impl WorldHost {
+    /// Forget the emitted-interaction ids that are no longer pending.
+    ///
+    /// The hub is keyed by agent id but the emitted set is keyed by request
+    /// id, so it is pruned by what is still open. Called after a cancel and
+    /// after a reap, the two moments an interaction can stop being pending
+    /// without being answered.
+    fn prune_emitted_interactions(&mut self) {
+        let still_open: std::collections::HashSet<String> = self
+            .interactions
+            .pending()
+            .into_iter()
+            .map(|(_, req)| req.id)
+            .collect();
+        self.emitted_interactions
+            .retain(|id| still_open.contains(id));
+    }
+}
+
+impl WorldHost {
     /// Register any agent that exists in the world but is missing from the run-id
     /// map, so the host's view is the world's view.
     ///
@@ -299,10 +318,7 @@ impl WorldHost {
             None => true,
             Some(parent_ref) => match world.get::<AgentState>(parent_ref.parent_entity) {
                 None => true,
-                Some(state) => matches!(
-                    state.status,
-                    AgentStatus::Complete | AgentStatus::Error { .. } | AgentStatus::Cancelled
-                ),
+                Some(state) => crate::pipeline::is_terminal_status(&state.status),
             },
         }
     }

@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedSender;
@@ -378,10 +378,7 @@ impl AgentWorld {
         let blueprint_path = match resolved {
             Resolved::Path(path) => path.to_string_lossy().into_owned(),
             Resolved::Inline(blueprint) => {
-                self.staged
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(run_id.clone(), *blueprint);
+                leviath_core::sync::lock(&self.staged).insert(run_id.clone(), *blueprint);
                 format!("inline:{run_id}")
             }
         };
@@ -528,9 +525,7 @@ mod tests {
     #[async_trait::async_trait]
     impl Provider for Mock {
         async fn infer(&self, _r: &InferenceRequest) -> Result<InferenceResponse, ProviderError> {
-            self.responses
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+            leviath_core::sync::lock(&self.responses)
                 .pop_front()
                 .ok_or_else(|| ProviderError::Other("script exhausted".to_string()))
         }
@@ -584,9 +579,7 @@ mod tests {
     #[async_trait::async_trait]
     impl Provider for Recorder {
         async fn infer(&self, r: &InferenceRequest) -> Result<InferenceResponse, ProviderError> {
-            self.seen
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+            leviath_core::sync::lock(&self.seen)
                 .push(r.system.iter().map(|b| b.text.clone()).collect());
             Ok(text("done"))
         }
@@ -1186,7 +1179,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         .await
         .expect("completes");
         world.shutdown().await;
-        let seen = seen.lock().unwrap_or_else(PoisonError::into_inner);
+        let seen = leviath_core::sync::lock(&seen);
         seen.first().cloned().expect("one inference happened")
     }
 
