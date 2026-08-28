@@ -2491,7 +2491,6 @@ dependencies = [
  "leviath-telemetry",
  "leviath-testkit",
  "leviath-tools",
- "libc",
  "mimalloc",
  "opentelemetry_sdk",
  "pulldown-cmark",
@@ -2538,7 +2537,6 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "url",
 ]
 
 [[package]]
@@ -2583,19 +2581,13 @@ name = "leviath-package"
 version = "0.5.5"
 dependencies = [
  "anyhow",
- "dirs",
  "flate2",
  "leviath-core",
  "leviath-testkit",
- "reqwest",
- "serde",
- "serde_json",
  "tar",
  "tempfile",
- "tokio",
  "toml",
  "tracing",
- "url",
 ]
 
 [[package]]

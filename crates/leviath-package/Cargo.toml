@@ -14,23 +14,15 @@ readme = "README.md"
 
 [dependencies]
 leviath-core = { workspace = true }
-# Real URL parsing for the registry scheme/host check: hand-splitting on `://`
-# and `:` mistakes userinfo for a host.
-url = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
-reqwest = { workspace = true }
-dirs = { workspace = true }
 
 [dev-dependencies]
 leviath-testkit = { workspace = true }
 tempfile = "3"
-tokio = { workspace = true }
 
 [lints]
 workspace = true

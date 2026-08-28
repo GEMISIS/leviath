@@ -247,7 +247,11 @@ fn is_restricted_v6(a: Ipv6Addr) -> bool {
 /// *every* address it resolves to must pass, so a name with both a public and a
 /// private A record is refused rather than raced.
 pub fn check_url(url: &url::Url, allow_local: bool) -> Result<(), UrlRejection> {
-    check_url_with(url, allow_local, resolve_host)
+    check_url_with(url, allow_local, resolve_host).inspect_err(|rejection| {
+        // The host only: a URL can carry userinfo or a signed query, and a
+        // refusal is not a reason to write either into the log.
+        tracing::debug!(host = url.host_str().unwrap_or(""), %rejection, "outbound URL refused");
+    })
 }
 
 /// The real resolver: every address `host:port` maps to.
