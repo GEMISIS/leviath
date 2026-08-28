@@ -607,8 +607,10 @@ persist        = false
 on_unavailable = "error"       # error | warn
 ```
 
-Unset entirely, agents run tools on the host. Details in
-[Security and sandboxing](/docs/security#sandboxes).
+Unset entirely, agents run tools on the host. The boundary covers shell commands only: the
+`shell` tool, seed commands and a Rhai tool's `shell()`. File tools, and a Rhai tool's HTTP and
+file calls, run on the host whatever this says, held to the workdir by path confinement rather than
+by the sandbox. Details in [Security and sandboxing](/docs/security#sandboxes).
 
 ## `[rate_limits.<provider>]`
 
