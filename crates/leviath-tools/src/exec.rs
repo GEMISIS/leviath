@@ -42,6 +42,84 @@ fn directory_listing(path: &std::path::Path) -> String {
     out
 }
 
+/// Fold `..` components of `raw` lexically, without touching the filesystem.
+///
+/// `None` when a `..` would climb past the root: that request is unresolvable
+/// whatever any allowlist says. `Path::components` already drops interior
+/// `.`, and every caller passes an absolute path, so no `CurDir` survives.
+/// Shared by [`resolve_within`] and [`BuiltinTools::resolve_outside`], which
+/// used to carry the same loop each.
+fn fold_parents(raw: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in raw.components() {
+        match component {
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            c => normalized.push(c),
+        }
+    }
+    Some(normalized)
+}
+
+/// Resolve `requested` against `workdir`, refusing anything that leaves it.
+///
+/// The shared definition of "inside the workspace" for every path a tool or
+/// a script hands the daemon: the built-in file tools and the Rhai script
+/// host both go through here, so `write_file` and a script's `write_file`
+/// cannot disagree about what a path is allowed to be.
+///
+/// The `within` predicate is a `fn` pointer (not `impl Fn`) so there is one
+/// monomorphization, matching the seam idiom used elsewhere in the workspace.
+/// The seam exists because the refusal cannot be reached otherwise on every
+/// platform: producing the escape needs a real symlink, and creating one on
+/// Windows requires a privilege CI runners do not have. Injecting the
+/// predicate lets the refusal itself be tested everywhere, while the
+/// `#[cfg(unix)]` tests still prove the real filesystem behaviour end to end.
+pub fn resolve_within(
+    requested: &str,
+    workdir: &Path,
+    within: fn(&Path, &Path) -> bool,
+) -> anyhow::Result<PathBuf> {
+    if is_null_device(requested) {
+        return Ok(PathBuf::from(requested));
+    }
+    let raw = if Path::new(requested).is_absolute() {
+        PathBuf::from(requested)
+    } else {
+        workdir.join(requested)
+    };
+
+    // Normalize by resolving .. and . without requiring the path to exist.
+    let Some(normalized) = fold_parents(&raw) else {
+        anyhow::bail!("path '{}' escapes the working directory", requested);
+    };
+
+    if !normalized.starts_with(workdir) {
+        // Names the workspace and what to do instead. "Denied" on its own
+        // sends an agent looking for a different way out, and it spends
+        // iterations - which the stage's budget is charged for - finding
+        // that there isn't one (#373).
+        anyhow::bail!(
+            "path '{}' would escape the working directory ({}). Use a path \
+             inside the workspace instead - a relative path resolves \
+             against it.",
+            requested,
+            workdir.display()
+        );
+    }
+
+    if !within(&normalized, workdir) {
+        anyhow::bail!(
+            "path '{requested}' resolves outside the working directory through a symlink"
+        );
+    }
+
+    Ok(normalized)
+}
+
 impl BuiltinTools {
     /// Execute a built-in tool by name (resolving aliases), returning the result
     /// as a string.
@@ -131,7 +209,7 @@ impl BuiltinTools {
     /// throughout, which is a larger change; this stops the planted-symlink case,
     /// which is the one an agent can actually arrange.
     pub(crate) fn resolve(&self, requested: &str) -> anyhow::Result<PathBuf> {
-        Self::resolve_within(requested, &self.ctx.workdir, resolves_within)
+        resolve_within(requested, &self.ctx.workdir, resolves_within)
     }
 
     /// Resolve a requested path for a *read-only* tool.
@@ -148,7 +226,7 @@ impl BuiltinTools {
     /// [`resolve`](Self::resolve) so an allowlisted directory can be read but
     /// never written.
     pub(crate) fn resolve_read(&self, requested: &str) -> anyhow::Result<PathBuf> {
-        match Self::resolve_within(requested, &self.ctx.workdir, resolves_within) {
+        match resolve_within(requested, &self.ctx.workdir, resolves_within) {
             Ok(path) => Ok(path),
             Err(workdir_err) => {
                 if !self.ctx.read_paths.is_active() {
@@ -166,7 +244,7 @@ impl BuiltinTools {
 
     /// The out-of-workdir arm of [`resolve_read`](Self::resolve_read), with
     /// the canonicalizer injected (`fn` pointer, same seam idiom as
-    /// [`resolve_within`](Self::resolve_within)) so the fail-closed refusal is
+    /// [`resolve_within`]) so the fail-closed refusal is
     /// testable on every platform.
     ///
     /// The returned path is the *canonicalized* one - the path that was
@@ -189,22 +267,10 @@ impl BuiltinTools {
         };
 
         // Fold `..` lexically; popping past the filesystem root is
-        // unresolvable no matter what any allowlist says. `Path::components`
-        // already drops interior `.`, and `raw` is absolute here (an absolute
-        // request, or a relative one joined onto the canonicalized workdir),
-        // so no `CurDir` survives to this loop - the catch-all mirrors
-        // `resolve_within`.
-        let mut normalized = PathBuf::new();
-        for component in raw.components() {
-            match component {
-                Component::ParentDir => {
-                    if !normalized.pop() {
-                        anyhow::bail!("path '{requested}' cannot be resolved");
-                    }
-                }
-                other => normalized.push(other),
-            }
-        }
+        // unresolvable no matter what any allowlist says.
+        let Some(normalized) = fold_parents(&raw) else {
+            anyhow::bail!("path '{requested}' cannot be resolved");
+        };
 
         // The policy only ever sees the real, symlink-resolved path. A path
         // that cannot be verified is refused, never matched.
@@ -225,65 +291,6 @@ impl BuiltinTools {
                 agent = policy.agent
             ),
         }
-    }
-
-    /// Core of [`resolve`](Self::resolve) with the containment check injected.
-    ///
-    /// A `fn` pointer (not `impl Fn`) so there is one monomorphization, matching
-    /// the seam idiom used elsewhere in the workspace. The seam exists because
-    /// the refusal cannot be reached otherwise on every platform: producing the
-    /// escape needs a real symlink, and creating one on Windows requires a
-    /// privilege CI runners do not have. Injecting the predicate lets the
-    /// refusal itself be tested everywhere, while the `#[cfg(unix)]` tests below
-    /// still prove the real filesystem behaviour end to end.
-    pub(crate) fn resolve_within(
-        requested: &str,
-        workdir: &Path,
-        within: fn(&Path, &Path) -> bool,
-    ) -> anyhow::Result<PathBuf> {
-        if is_null_device(requested) {
-            return Ok(PathBuf::from(requested));
-        }
-        let raw = if Path::new(requested).is_absolute() {
-            PathBuf::from(requested)
-        } else {
-            workdir.join(requested)
-        };
-
-        // Normalize by resolving .. and . without requiring the path to exist.
-        let mut normalized = PathBuf::new();
-        for component in raw.components() {
-            match component {
-                Component::ParentDir => {
-                    if !normalized.pop() {
-                        anyhow::bail!("path '{}' escapes the working directory", requested);
-                    }
-                }
-                c => normalized.push(c),
-            }
-        }
-
-        if !normalized.starts_with(workdir) {
-            // Names the workspace and what to do instead. "Denied" on its own
-            // sends an agent looking for a different way out, and it spends
-            // iterations - which the stage's budget is charged for - finding
-            // that there isn't one (#373).
-            anyhow::bail!(
-                "path '{}' would escape the working directory ({}). Use a path \
-                 inside the workspace instead - a relative path resolves \
-                 against it.",
-                requested,
-                workdir.display()
-            );
-        }
-
-        if !within(&normalized, workdir) {
-            anyhow::bail!(
-                "path '{requested}' resolves outside the working directory through a symlink"
-            );
-        }
-
-        Ok(normalized)
     }
 
     pub(crate) async fn read_file(&self, args: &Value) -> String {
