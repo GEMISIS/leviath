@@ -355,6 +355,22 @@ fn script_tool_join_failed(e: tokio::task::JoinError) -> String {
     format!("[error] script tool panicked: {e}")
 }
 
+/// Charge the run for a write the call declares, the moment it is queued.
+///
+/// Charged here, not after it runs: every call in a batch is authorized
+/// before any of them execute, so a budget charged only on completion would
+/// let all of them check against a total none had spent, and two 8-byte
+/// writes would both pass a 10-byte run budget. And charged only here, on
+/// the two paths that queue the call: a write refused by containment, by the
+/// budget itself, by policy, or by the user at the prompt never reaches the
+/// disk and used to be charged all the same, so a denied 8-byte write made
+/// the next allowed one fail on a limit it had never spent.
+fn charge_declared(state: &AgentToolState, tc: &ToolCall) {
+    if let Some(declared) = crate::tools::declared_write_bytes(&tc.name, &tc.arguments) {
+        state.writes.record(declared);
+    }
+}
+
 /// Resolve policy, handle approvals / dynamic interactions, and execute a batch
 /// of tool calls, returning `(tool_call_id, result)` pairs in call order.
 ///
@@ -441,15 +457,6 @@ pub async fn dispatch_tools(
             slots.push((tc.id.clone(), Some(refusal)));
             continue;
         }
-        // Charged here, not after it runs. Every call in a batch is authorized
-        // before any of them execute, so a budget charged only on completion
-        // would let all of them check against a total none had spent - two
-        // 8-byte writes would both pass a 10-byte run budget. A refused call
-        // reaches `continue` above and is charged nothing.
-        if let Some(declared) = crate::tools::declared_write_bytes(&tc.name, &tc.arguments) {
-            state.writes.record(declared);
-        }
-
         let is_builtin = state.builtin_names.contains(&tc.name);
         // What a scoped approval for *this specific call* would be remembered
         // under. For a shell call that is one key per command in the line, not
@@ -518,6 +525,7 @@ pub async fn dispatch_tools(
                     // scoped approval degrades to "this once" - which is what
                     // the option label they chose already told them.
                     state.remember(response.scope, &approval_keys).await;
+                    charge_declared(&state, &tc);
                     slots.push((tc.id.clone(), None));
                     queued.push((slot, is_builtin, tc));
                 } else {
@@ -527,6 +535,7 @@ pub async fn dispatch_tools(
                 }
             }
             ToolPolicy::Allow => {
+                charge_declared(&state, &tc);
                 slots.push((tc.id.clone(), None));
                 queued.push((slot, is_builtin, tc));
             }
@@ -789,14 +798,25 @@ mod tests {
     /// A state over `workdir` with every write tool allowed and `budget` in
     /// effect, so a test about the ceilings is not also a test about policy.
     fn state_with_writes(workdir: &std::path::Path, budget: WriteBudget) -> Arc<AgentToolState> {
-        let builtins = Arc::new(leviath_tools::BuiltinTools::new(
-            leviath_tools::ToolContext::new(workdir.to_path_buf()),
-        ));
-        let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let mut global = HashMap::new();
         for tool in ["write_file", "edit_file", "shell"] {
             global.insert(tool.to_string(), ToolPolicy::Allow);
         }
+        budgeted_state(&InteractionHub::new(), workdir, budget, global)
+    }
+
+    /// [`state_with_writes`] with the policies and the interaction hub chosen,
+    /// for the tests where the budget and the policy layer meet.
+    fn budgeted_state(
+        hub: &InteractionHub,
+        workdir: &std::path::Path,
+        budget: WriteBudget,
+        global: HashMap<String, ToolPolicy>,
+    ) -> Arc<AgentToolState> {
+        let builtins = Arc::new(leviath_tools::BuiltinTools::new(
+            leviath_tools::ToolContext::new(workdir.to_path_buf()),
+        ));
+        let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         Arc::new(AgentToolState {
             writes: Arc::new(budget),
@@ -815,7 +835,7 @@ mod tests {
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(global),
             blueprint_may_loosen: false,
-            interaction: InteractionHub::new().backend_for("agent-a"),
+            interaction: hub.backend_for("agent-a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
@@ -1771,6 +1791,100 @@ mod tests {
         assert!(result.contains("nearly out of disk"), "{result}");
         assert!(!result.contains("max_"), "sent them to a config key");
         assert!(!dir.path().join("x.txt").exists());
+    }
+
+    /// A write the policy denies never touches the disk, so it must not spend
+    /// the run's budget either: it used to be charged its declared size before
+    /// the policy was consulted, and a denied 8-byte write then made the next
+    /// allowed one fail on a "per-run limit" it had never used.
+    #[tokio::test]
+    async fn a_denied_write_spends_nothing_of_the_run_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "old text").unwrap();
+        let mut global = HashMap::new();
+        global.insert("write_file".to_string(), ToolPolicy::Deny);
+        global.insert("edit_file".to_string(), ToolPolicy::Allow);
+        let state = budgeted_state(
+            &InteractionHub::new(),
+            dir.path(),
+            WriteBudget::with_probe(
+                leviath_core::write_limits::WriteLimits {
+                    per_call: Some(100),
+                    per_run: Some(10),
+                },
+                |_| Some(leviath_core::write_limits::MIN_FREE_BYTES * 100),
+            ),
+            global,
+        );
+
+        let out = dispatch_tools(
+            Arc::clone(&state),
+            vec![
+                call(
+                    "c1",
+                    "write_file",
+                    serde_json::json!({"path": "a.txt", "content": "12345678"}),
+                ),
+                call(
+                    "c2",
+                    "edit_file",
+                    serde_json::json!({"path": "notes.txt", "old_str": "old text", "new_str": "new text"}),
+                ),
+            ],
+            noop_progress(),
+        )
+        .await;
+
+        let denied = &out[0].1;
+        let edited = &out[1].1;
+        assert!(denied.contains("[denied]"), "{denied}");
+        assert!(!dir.path().join("a.txt").exists());
+        assert!(
+            !edited.contains("[denied]"),
+            "the denied write was charged: {edited}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+            "new text"
+        );
+        assert_eq!(state.writes.written(), 8, "only the edit was charged");
+    }
+
+    /// The same for a write the user declined at the prompt.
+    #[tokio::test]
+    async fn a_declined_write_spends_nothing_of_the_run_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = InteractionHub::new();
+        let mut global = HashMap::new();
+        global.insert("write_file".to_string(), ToolPolicy::Ask);
+        let state = budgeted_state(
+            &hub,
+            dir.path(),
+            WriteBudget::with_probe(
+                leviath_core::write_limits::WriteLimits {
+                    per_call: Some(100),
+                    per_run: Some(10),
+                },
+                |_| Some(leviath_core::write_limits::MIN_FREE_BYTES * 100),
+            ),
+            global,
+        );
+
+        let out = dispatch_answering(
+            Arc::clone(&state),
+            vec![call(
+                "c1",
+                "write_file",
+                serde_json::json!({"path": "a.txt", "content": "12345678"}),
+            )],
+            |req| InteractionResponse::approval(&req.id, false, ApprovalScope::Once),
+            hub,
+        )
+        .await;
+
+        let declined = &out[0].1;
+        assert!(declined.contains("User declined"), "{declined}");
+        assert_eq!(state.writes.written(), 0, "a declined write was charged");
     }
 
     /// The per-run ceiling spans calls, which is the case a per-call ceiling
