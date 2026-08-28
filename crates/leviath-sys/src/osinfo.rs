@@ -9,7 +9,7 @@
 //! Windows has no equivalent file. Its version lives in the registry or behind
 //! `cmd /c ver`, and neither is reachable without either a new dependency or
 //! spawning a process - which this crate will not do to answer a question this
-//! minor. [`version_for`] reports `None` there, and the caller says so plainly
+//! minor. `version_for` reports `None` there, and the caller says so plainly
 //! rather than guessing.
 //!
 //! Every function is pure over an injected reader except [`current_version`], so
@@ -20,7 +20,7 @@
 ///
 /// Pure over `os` rather than `#[cfg]`-switched, following
 /// [`crate::editor::default_editors_for`], so every arm is testable anywhere.
-pub fn version_path_for(os: &str) -> Option<&'static str> {
+pub(crate) fn version_path_for(os: &str) -> Option<&'static str> {
     match os {
         "linux" | "android" => Some("/etc/os-release"),
         "macos" | "ios" => Some("/System/Library/CoreServices/SystemVersion.plist"),
@@ -53,7 +53,7 @@ pub fn display_name_for(os: &str) -> &str {
 /// answer (`Ubuntu 24.04.1 LTS`); `VERSION_ID` alone (`24.04`) is the useful
 /// remainder on a distribution that omits it. Values may be quoted with either
 /// quote character, or not at all - all three spellings occur in the wild.
-pub fn parse_os_release(contents: &str) -> Option<String> {
+pub(crate) fn parse_os_release(contents: &str) -> Option<String> {
     let value_of = |key: &str| {
         contents.lines().find_map(|line| {
             let rest = line.trim().strip_prefix(key)?.strip_prefix('=')?;
@@ -73,7 +73,7 @@ pub fn parse_os_release(contents: &str) -> Option<String> {
 /// Scanned rather than parsed as XML: the file is a fixed, Apple-generated
 /// `<key>`/`<string>` sequence, and a plist parser would be a dependency bought
 /// to read one value out of one known file.
-pub fn parse_system_version_plist(contents: &str) -> Option<String> {
+pub(crate) fn parse_system_version_plist(contents: &str) -> Option<String> {
     let after_key = contents.split("<key>ProductVersion</key>").nth(1)?;
     // `split_once` rather than `find` plus a range: byte offsets into a `str`
     // panic when they land inside a multi-byte character, and the workspace
@@ -88,7 +88,7 @@ pub fn parse_system_version_plist(contents: &str) -> Option<String> {
 ///
 /// `&dyn Fn` rather than `impl Fn`: one monomorphization, so coverage is
 /// attributed to a single instantiation rather than split across several.
-pub fn version_for(os: &str, read: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+pub(crate) fn version_for(os: &str, read: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     let contents = read(version_path_for(os)?)?;
     match os {
         "macos" | "ios" => parse_system_version_plist(&contents),

@@ -60,7 +60,7 @@ impl Default for ClientTimeouts {
 /// The redirect cap matters independently of timeouts: reqwest follows up to ten
 /// hops by default, and every hop is a fresh destination that the caller's
 /// original URL check never saw.
-pub fn client_builder(timeouts: ClientTimeouts) -> reqwest::ClientBuilder {
+pub(crate) fn client_builder(timeouts: ClientTimeouts) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .connect_timeout(timeouts.connect)
         .timeout(timeouts.total)

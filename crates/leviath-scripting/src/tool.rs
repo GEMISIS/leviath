@@ -106,7 +106,7 @@ impl ScriptToolMeta {
 ///
 /// Non-comment / unrecognized lines are ignored, so a script can mix ordinary
 /// comments with directives. A missing `@tool` name is an error.
-pub fn parse_annotations(src: &str) -> Result<ScriptToolMeta> {
+pub(crate) fn parse_annotations(src: &str) -> Result<ScriptToolMeta> {
     let mut name: Option<String> = None;
     let mut description = String::new();
     let mut params: Vec<ParamSpec> = Vec::new();
@@ -237,7 +237,7 @@ struct ToolTomlParam {
 
 /// Parse a `tool.toml` manifest into [`ScriptToolMeta`]. When a `tool.toml` sits
 /// beside a script it takes precedence over the script's comment annotations.
-pub fn parse_tool_toml(src: &str) -> Result<ScriptToolMeta> {
+pub(crate) fn parse_tool_toml(src: &str) -> Result<ScriptToolMeta> {
     let doc: ToolTomlDoc = toml::from_str(src)
         .map_err(|e| Error::ValidationFailed(format!("invalid tool.toml: {e}")))?;
     if doc.tool.name.trim().is_empty() {
@@ -458,7 +458,7 @@ fn compile_tool(engine: &Engine, path: &Path) -> Result<ScriptTool> {
 /// Maximum wall-clock a single script tool call may run. Enforced via the Rhai
 /// operation limit already set on the engine; this constant documents intent for
 /// the (blocking) host wrapper.
-pub const SCRIPT_TOOL_MAX_OPERATIONS: u64 = 500_000;
+pub(crate) const SCRIPT_TOOL_MAX_OPERATIONS: u64 = 500_000;
 
 /// Execute a compiled script tool with the model-supplied `args`, returning the
 /// result as a string for the agent. `args` is exposed to the script as the

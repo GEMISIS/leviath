@@ -16,7 +16,7 @@ use std::process::Command;
 /// On Windows the empty `""` title argument to `start` matters: `start` treats
 /// a single quoted argument as a window title, so a URL would be swallowed
 /// without a placeholder title ahead of it.
-pub fn open_command_for(os: &str, url: &str) -> (String, Vec<String>) {
+pub(crate) fn open_command_for(os: &str, url: &str) -> (String, Vec<String>) {
     match os {
         "macos" => ("open".to_string(), vec![url.to_string()]),
         "windows" => (
@@ -38,7 +38,7 @@ pub fn open_command_for(os: &str, url: &str) -> (String, Vec<String>) {
 /// production passes [`spawn_detached`], tests pass a recording stub. Returns
 /// whether the launcher was spawned successfully - not whether the user
 /// actually saw the page, which is unknowable.
-pub fn open_url_via(spawn: fn(&mut Command) -> std::io::Result<()>, url: &str) -> bool {
+pub(crate) fn open_url_via(spawn: fn(&mut Command) -> std::io::Result<()>, url: &str) -> bool {
     let (program, args) = open_command_for(std::env::consts::OS, url);
     let mut cmd = Command::new(program);
     cmd.args(args);
@@ -60,7 +60,7 @@ pub fn open_url_via(spawn: fn(&mut Command) -> std::io::Result<()>, url: &str) -
 /// console on its way to opening the browser. `start` hands the URL to the
 /// shell association and needs no console of its own, so suppressing the window
 /// costs nothing - the browser still opens.
-pub fn spawn_detached(cmd: &mut Command) -> std::io::Result<()> {
+pub(crate) fn spawn_detached(cmd: &mut Command) -> std::io::Result<()> {
     crate::process::hide_console_window(cmd);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

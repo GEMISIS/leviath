@@ -29,7 +29,7 @@ pub fn detect_container_engine() -> Option<String> {
 
 /// Testable core of [`detect_container_engine`]: `exists` reports whether a
 /// binary name is available. First match in [`KNOWN_ENGINES`] wins.
-pub fn detect_container_engine_with(exists: &dyn Fn(&str) -> bool) -> Option<String> {
+pub(crate) fn detect_container_engine_with(exists: &dyn Fn(&str) -> bool) -> Option<String> {
     KNOWN_ENGINES
         .iter()
         .find(|bin| exists(bin))
@@ -37,7 +37,7 @@ pub fn detect_container_engine_with(exists: &dyn Fn(&str) -> bool) -> Option<Str
 }
 
 /// Whether `bin` resolves to a regular file on any `PATH` entry.
-pub fn binary_on_path(bin: &str) -> bool {
+pub(crate) fn binary_on_path(bin: &str) -> bool {
     binary_on_path_in(std::env::var_os("PATH"), bin)
 }
 
@@ -105,7 +105,7 @@ const FORBIDDEN_MOUNTS: &[&str] = &[
 /// container engines' own sockets), plus any
 /// relative path (which the engine would resolve against its own cwd, not ours)
 /// and anything containing `..`.
-pub fn mount_allowed(path: &str) -> bool {
+pub(crate) fn mount_allowed(path: &str) -> bool {
     // POSIX semantics spelled out rather than `std::path::Path`, because these
     // are paths *inside a Linux container* - the host's rules do not apply to
     // them. On Windows `Path::new("/data").is_absolute()` is false (an absolute
@@ -142,7 +142,7 @@ pub fn mount_allowed(path: &str) -> bool {
 /// else, and anything written to the bind-mounted workdir came back root-owned
 /// on the host.
 ///
-/// `mounts` entries are filtered through [`mount_allowed`]; a refused entry is
+/// `mounts` entries are filtered through `mount_allowed`; a refused entry is
 /// dropped rather than silently honored.
 pub fn container_run_argv(spec: &ContainerRunSpec) -> Vec<String> {
     let mut v = vec![
