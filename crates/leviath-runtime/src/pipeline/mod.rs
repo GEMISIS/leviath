@@ -32,7 +32,9 @@ use crate::providers::ProviderRegistry;
 use crate::tool_bridge::{BoxedToolExec, ToolJob, ToolOutcome};
 
 // Sections of the former single-file pipeline, one per concern.
+mod gate_check;
 mod transition;
+pub(crate) use gate_check::*;
 pub use transition::*;
 mod hooks;
 pub use hooks::*;
