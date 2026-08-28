@@ -220,11 +220,7 @@ impl ReqwestExecutor {
 async fn classify(resp: reqwest::Response) -> Result<reqwest::Response, HostHttpError> {
     let status = resp.status();
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        let retry_after = resp
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok());
+        let retry_after = crate::provider::retry_after_secs(resp.headers());
         return Err(HostHttpError::RateLimited { retry_after });
     }
     if !status.is_success() {

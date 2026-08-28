@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 /// Tracks requests per minute (RPM) and tokens per minute (TPM),
 /// sleeping when limits are approached and applying exponential
 /// backoff on 429 responses.
+#[derive(Clone)]
 pub struct RateLimiter {
     /// Requests per minute limit
     rpm_limit: u32,
@@ -162,16 +163,6 @@ impl RateLimiter {
     pub async fn reset_backoff(&self) {
         let mut state = self.state.lock().await;
         state.consecutive_429s = 0;
-    }
-}
-
-impl Clone for RateLimiter {
-    fn clone(&self) -> Self {
-        Self {
-            rpm_limit: self.rpm_limit,
-            tpm_limit: self.tpm_limit,
-            state: Arc::clone(&self.state),
-        }
     }
 }
 

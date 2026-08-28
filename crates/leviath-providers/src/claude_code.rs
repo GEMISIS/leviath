@@ -35,7 +35,10 @@
 //! - Anthropic models only, and the CLI ignores the request's `max_tokens` and
 //!   `temperature` in favour of its own.
 
-use crate::provider::*;
+use crate::provider::{
+    FinishReason, InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities,
+    ModelCapabilityOverride, ModelInfo, Provider, ProviderError, Result, TokenUsage, ToolCall,
+};
 use crate::text_tools;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -513,6 +516,7 @@ impl Default for ClaudeCodeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{Message, SystemBlock, Tool};
 
     // ─── construction / configuration ───────────────────────────────────────
 
