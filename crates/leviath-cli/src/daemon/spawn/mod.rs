@@ -693,11 +693,18 @@ fn build_agent_inner(
             )
         },
     );
+    // One write budget per run, created here so the seeds and the scripts
+    // that run at spawn spend the same ceiling the tool lane checks from
+    // turn one; it used to be born with the tool state, after both.
+    let writes = Arc::new(crate::daemon::tool_service::WriteBudget::new(
+        deps.config.limits.write_limits(),
+    ));
     let script_host: Arc<dyn leviath_scripting::ScriptHost> = Arc::new(
         crate::daemon::script_host::DaemonScriptHost::new(
             script_allow,
             std::path::PathBuf::from(&args.workdir),
         )
+        .with_write_budget(writes.clone())
         // Route a script `shell()` through the agent's per-stage sandbox (so a
         // script can't escape the isolation the stage declared) and cap it at the
         // configured wall-clock timeout.
@@ -755,6 +762,7 @@ fn build_agent_inner(
                     script_tools: script_tools.clone(),
                     script_host: script_host.clone(),
                     mcp: deps.shared_mcp.clone(),
+                    writes: writes.clone(),
                 },
                 Arc::new(move |name: &str, is_builtin: bool| {
                     crate::daemon::seed_tool::SeedToolPermissions {
@@ -894,6 +902,7 @@ fn build_agent_inner(
         })
     });
     let state = build_tool_state(ToolStateParts {
+        writes,
         builtins,
         builtin_names,
         mcp: deps.shared_mcp,
@@ -3654,6 +3663,31 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         assert_eq!(seeds.get("lit").map(String::as_str), Some("hello"));
         let docs = seeds.get("docs").unwrap();
         assert!(docs.contains("alpha") && docs.contains("beta"));
+    }
+
+    /// A seed file is read into the prompt, so it is held to the same size a
+    /// script's I/O is: a multi-megabyte file used to arrive whole.
+    #[test]
+    fn resolve_seeds_caps_an_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("big.txt"), vec![b'x'; 900_001]).unwrap();
+        let bp =
+            bp(r#"docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["big.txt"] } }"#);
+        let wd = dir.path().to_string_lossy().to_string();
+        let args = args_with("t", HashMap::new(), &wd);
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            &wd,
+            &seed_policy(),
+            &no_seed_tools(),
+            &no_read_paths(),
+        )
+        .unwrap();
+        let docs = seeds.get("docs").unwrap();
+        let len = docs.len();
+        assert!(len < 900_200, "{len} bytes reached the prompt");
+        assert!(docs.contains("truncated by leviath"));
     }
 
     #[test]

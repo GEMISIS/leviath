@@ -187,6 +187,7 @@ pub(super) fn resolve_seeds(
                 let out = leviath_scripting::ScriptEngine::new()
                     .transform(&src, input)
                     .map_err(|e| format!("region '{}': rhai seed failed: {e}", region.name))?;
+                let out = crate::daemon::script_host::cap_script_io(out);
                 if !out.trim().is_empty() {
                     seeds.insert(region.name.clone(), out);
                 } else if region.required {
@@ -315,7 +316,13 @@ pub(super) fn read_and_concat(
     let mut parts: Vec<String> = Vec::new();
     for path in paths {
         match std::fs::read_to_string(&path) {
-            Ok(text) => parts.push(format!("--- {} ---\n{}", path.display(), text)),
+            // Held to the same size a script's I/O is: a seed lands in the
+            // prompt whole, and a multi-megabyte file is not a seed.
+            Ok(text) => parts.push(format!(
+                "--- {} ---\n{}",
+                path.display(),
+                crate::daemon::script_host::cap_script_io(text)
+            )),
             Err(e) => {
                 if required {
                     return Err(format!(
