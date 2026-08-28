@@ -216,24 +216,40 @@ fn permission_title(request: &InteractionRequest) -> String {
 /// Unrecognised names - including every MCP tool, whose names are arbitrary -
 /// fall back to [`ToolKind::Other`].
 fn tool_kind_for(tool_name: Option<&str>) -> ToolKind {
-    match tool_name {
-        Some("read_file" | "read_files" | "list_files" | "grep") => ToolKind::Read,
-        // The environment tools read the host and the run rather than a file,
-        // but `Read` is the closest kind the protocol has and is what a host
-        // should show: a lookup that returns information and changes nothing.
-        Some(
-            "current_time" | "system_info" | "locale_info" | "environment_info" | "which_command"
-            | "runtime_info",
-        ) => ToolKind::Read,
-        Some("write_file" | "edit_file" | "apply_patch") => ToolKind::Edit,
-        Some("delete_file") => ToolKind::Delete,
-        Some("move_file") => ToolKind::Move,
-        Some("search" | "web_search") => ToolKind::Search,
-        Some("bash" | "run_command" | "shell") => ToolKind::Execute,
-        Some("fetch" | "web_fetch" | "http_get") => ToolKind::Fetch,
-        _ => ToolKind::Other,
-    }
+    tool_name
+        .and_then(|name| TOOL_KINDS.iter().find(|(known, _)| *known == name))
+        .map_or(ToolKind::Other, |(_, kind)| *kind)
 }
+
+/// Every built-in and bundled tool a host can be asked to approve, with the
+/// kind it should show. Nothing else belongs here: a name that no tool
+/// answers to would only ever match a third-party MCP tool by accident,
+/// and the test below holds the list to what `leviath-tools` actually ships
+/// plus the two bundled script tools.
+const TOOL_KINDS: &[(&str, ToolKind)] = &[
+    ("read_file", ToolKind::Read),
+    ("read_files", ToolKind::Read),
+    ("list_dir", ToolKind::Read),
+    // The environment tools read the host and the run rather than a file,
+    // but `Read` is the closest kind the protocol has and is what a host
+    // should show: a lookup that returns information and changes nothing.
+    ("current_time", ToolKind::Read),
+    ("system_info", ToolKind::Read),
+    ("locale_info", ToolKind::Read),
+    ("environment_info", ToolKind::Read),
+    ("which_command", ToolKind::Read),
+    ("runtime_info", ToolKind::Read),
+    ("write_file", ToolKind::Edit),
+    ("edit_file", ToolKind::Edit),
+    ("web_search", ToolKind::Search),
+    ("shell", ToolKind::Execute),
+    ("bash", ToolKind::Execute),
+    ("web_fetch", ToolKind::Fetch),
+];
+
+/// The bundled Rhai script tools, which `leviath-tools` does not list.
+#[cfg(test)]
+const SCRIPT_TOOLS: &[&str] = &["web_search", "web_fetch"];
 
 /// Whether an interaction can be answered over the protocol at all.
 ///
@@ -489,8 +505,7 @@ this trailing text is ignored";
         for (name, expected) in [
             ("read_file", ToolKind::Read),
             ("read_files", ToolKind::Read),
-            ("list_files", ToolKind::Read),
-            ("grep", ToolKind::Read),
+            ("list_dir", ToolKind::Read),
             // The environment tools read the host and the run rather than a
             // file, but a lookup that returns information and changes nothing
             // is what `Read` means to a host picking an icon.
@@ -502,22 +517,35 @@ this trailing text is ignored";
             ("runtime_info", ToolKind::Read),
             ("write_file", ToolKind::Edit),
             ("edit_file", ToolKind::Edit),
-            ("apply_patch", ToolKind::Edit),
-            ("delete_file", ToolKind::Delete),
-            ("move_file", ToolKind::Move),
-            ("search", ToolKind::Search),
             ("web_search", ToolKind::Search),
             ("bash", ToolKind::Execute),
-            ("run_command", ToolKind::Execute),
             ("shell", ToolKind::Execute),
-            ("fetch", ToolKind::Fetch),
             ("web_fetch", ToolKind::Fetch),
-            ("http_get", ToolKind::Fetch),
             ("mcp__whatever__thing", ToolKind::Other),
+            // Names that no tool answers to are not guessed at.
+            ("grep", ToolKind::Other),
+            ("delete_file", ToolKind::Other),
         ] {
             assert_eq!(tool_kind_for(Some(name)), expected, "tool {name}");
         }
         assert_eq!(tool_kind_for(None), ToolKind::Other);
+    }
+
+    /// The table names only tools that exist: everything `leviath-tools`
+    /// ships (aliases included) plus the bundled script tools. A name that
+    /// drifts from the tool crate fails here rather than silently showing
+    /// the wrong icon, or none.
+    #[test]
+    fn every_classified_tool_name_is_a_real_tool() {
+        let dir = std::env::temp_dir();
+        let shipped =
+            leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(dir)).names();
+        for (name, _) in TOOL_KINDS {
+            assert!(
+                shipped.iter().any(|s| s == name) || SCRIPT_TOOLS.contains(name),
+                "{name} is classified but no tool answers to it"
+            );
+        }
     }
 
     // ─── is_permission_request ───────────────────────────────────────────────
