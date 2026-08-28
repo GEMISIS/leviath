@@ -336,14 +336,22 @@ fn install_from_dir(
         );
     }
 
-    // Read the manifest to extract the agent name
     let content = std::fs::read_to_string(&manifest_path)?;
-    let name = parse_agent_name(&content).unwrap_or_else(|| {
+    let name = manifest_agent_name(&content)?.unwrap_or_else(|| {
         src.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string()
     });
+    // The name becomes a directory under the agents dir, so it has to be a
+    // single path component. Joining it unchecked let `name = "../x"` remove
+    // and overwrite whatever sat beside the agents directory.
+    if !leviath_core::is_safe_path_component(&name) {
+        anyhow::bail!(
+            "invalid agent name '{name}': names may contain only letters, digits, \
+             '.', '_' and '-'"
+        );
+    }
 
     let install_dir = agents_dir.join(&name);
 
@@ -385,35 +393,79 @@ fn unwrap_dir_entry(
     Ok(entry?)
 }
 
-/// Recursively copy a directory tree.
+/// Recursively copy a directory tree, refusing links.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    copy_dir_recursive_with(src, dst, classify_entry)
+}
+
+/// What a directory entry is, judged by its own metadata rather than what it
+/// might point at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    /// A real directory: descend into it.
+    Dir,
+    /// A real file: copy it.
+    File,
+    /// A symlink, or something whose metadata could not be read: refuse it.
+    Refused,
+}
+
+/// Classify an entry without following it. `symlink_metadata` is the point:
+/// `is_dir()` follows a link, and copying through one would either pull in a
+/// tree from outside the agent directory or copy a file the link resolves to.
+fn classify_entry(path: &Path) -> Entry {
+    match std::fs::symlink_metadata(path).map(|m| m.file_type()).ok() {
+        Some(t) if t.is_dir() => Entry::Dir,
+        Some(t) if !t.is_symlink() => Entry::File,
+        _ => Entry::Refused,
+    }
+}
+
+/// [`copy_dir_recursive`] with the entry classifier injected.
+///
+/// A `fn` pointer so there is one monomorphization. The seam exists because
+/// the refusal has to be provable on every platform and a real symlink cannot
+/// be created on the Windows CI runner; the installer in `leviath-package`
+/// makes the same trade for the same reason.
+fn copy_dir_recursive_with(
+    src: &Path,
+    dst: &Path,
+    classify: fn(&Path) -> Entry,
+) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = unwrap_dir_entry(entry)?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)?;
+        match classify(&src_path) {
+            Entry::Dir => copy_dir_recursive_with(&src_path, &dst_path, classify)?,
+            Entry::File => {
+                std::fs::copy(&src_path, &dst_path)?;
+            }
+            Entry::Refused => anyhow::bail!(
+                "'{}' is a symlink or unreadable entry; an agent directory may not \
+                 contain links",
+                src_path.display()
+            ),
         }
     }
     Ok(())
 }
 
-/// Parse the agent name from an `agent.leviath` manifest (first `name = "..."` line).
-fn parse_agent_name(content: &str) -> Option<String> {
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("name") {
-            let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '=');
-            let name = rest.trim().trim_matches('"');
-            if !name.is_empty() {
-                return Some(name.to_string());
-            }
-        }
-    }
-    None
+/// The `[agent] name` an `agent.leviath` declares, if it declares one.
+///
+/// A real TOML read: the line scanner this replaces took the first line that
+/// started with `name`, which a `names = [..]` key anywhere in the manifest
+/// satisfied, and it never validated what it found.
+fn manifest_agent_name(content: &str) -> anyhow::Result<Option<String>> {
+    let parsed: toml::Value = toml::from_str(content)
+        .map_err(|e| anyhow::anyhow!("agent.leviath is not valid TOML: {e}"))?;
+    Ok(parsed
+        .get("agent")
+        .and_then(|a| a.get("name"))
+        .and_then(|v| v.as_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string))
 }
 
 #[cfg(test)]
@@ -717,42 +769,34 @@ mod tests {
         );
     }
 
-    // ─── parse_agent_name ──────────────────────────────────────────────────
+    // ─── manifest_agent_name ──────────────────────────────────────────────
 
     #[test]
-    fn parse_agent_name_standard() {
-        let content = r#"
-name = "my-agent"
-version = "1.0"
-"#;
-        assert_eq!(parse_agent_name(content), Some("my-agent".to_string()));
+    fn manifest_agent_name_reads_the_agent_table() {
+        let content = "[agent]\nname = \"my-agent\"\nversion = \"1.0\"\n";
+        assert_eq!(
+            manifest_agent_name(content).unwrap(),
+            Some("my-agent".to_string())
+        );
     }
 
     #[test]
-    fn parse_agent_name_no_quotes() {
-        let content = r#"name = my-agent"#;
-        assert_eq!(parse_agent_name(content), Some("my-agent".to_string()));
+    fn manifest_agent_name_is_none_when_absent_or_empty() {
+        assert_eq!(manifest_agent_name("version = \"1.0\"\n").unwrap(), None);
+        assert_eq!(manifest_agent_name("[agent]\nname = \"\"\n").unwrap(), None);
+        // A `name` under another table is not the agent's name.
+        assert_eq!(
+            manifest_agent_name("[stages.main]\nname = \"x\"\n").unwrap(),
+            None
+        );
     }
 
     #[test]
-    fn parse_agent_name_extra_whitespace() {
-        let content = r#"  name   =   "spacy-agent"  "#;
-        assert_eq!(parse_agent_name(content), Some("spacy-agent".to_string()));
-    }
-
-    #[test]
-    fn parse_agent_name_missing() {
-        let content = r#"
-version = "1.0"
-description = "test"
-"#;
-        assert_eq!(parse_agent_name(content), None);
-    }
-
-    #[test]
-    fn parse_agent_name_empty_value() {
-        let content = r#"name = """#;
-        assert_eq!(parse_agent_name(content), None);
+    fn manifest_agent_name_rejects_bad_toml() {
+        let err = manifest_agent_name("[agent\nname = 1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not valid TOML"), "{err}");
     }
 
     // ─── copy_dir_recursive ────────────────────────────────────────────────
@@ -884,6 +928,146 @@ description = "test"
     }
 
     // ─── install_from_dir ──────────────────────────────────────────────────
+
+    /// The classifier judges an entry by its own metadata: a directory, a
+    /// plain file, and a path that has no metadata at all.
+    #[test]
+    fn classify_entry_tells_dirs_files_and_missing_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("tools");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("web_fetch.rhai"), "fn main() {}").unwrap();
+        assert_eq!(classify_entry(&nested), Entry::Dir);
+        assert_eq!(classify_entry(&nested.join("web_fetch.rhai")), Entry::File);
+        assert_eq!(
+            classify_entry(&dir.path().join("no-such-entry")),
+            Entry::Refused
+        );
+    }
+
+    /// A real symlink, where the platform can make one: judged by the link's
+    /// own metadata, so even a link to an ordinary file inside the directory
+    /// is refused rather than copied through.
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_recursive_refuses_a_real_symlink() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("real.txt"), "fine").unwrap();
+        std::os::unix::fs::symlink(src.path().join("real.txt"), src.path().join("link.txt"))
+            .unwrap();
+        assert_eq!(classify_entry(&src.path().join("link.txt")), Entry::Refused);
+
+        let dst = tempfile::tempdir().unwrap();
+        let err = copy_dir_recursive(src.path(), &dst.path().join("copy"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("link.txt"), "{err}");
+    }
+
+    /// An agent directory may not contain a link: the classifier is injected
+    /// because a real symlink cannot be created on every CI platform, and the
+    /// refusal has to be provable everywhere.
+    #[test]
+    fn copy_dir_recursive_refuses_a_link_or_unreadable_entry() {
+        fn refuse_links(path: &Path) -> Entry {
+            if path.file_name().is_some_and(|n| n == "link.txt") {
+                Entry::Refused
+            } else {
+                classify_entry(path)
+            }
+        }
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("ok.txt"), "fine").unwrap();
+        std::fs::write(src.path().join("link.txt"), "pretend I am a symlink").unwrap();
+        // The injected classifier defers to the real one for everything else;
+        // asked directly, because `read_dir` order decides whether the copy
+        // reaches `ok.txt` before it bails on the link.
+        assert_eq!(refuse_links(&src.path().join("ok.txt")), Entry::File);
+        let dst = tempfile::tempdir().unwrap();
+
+        let err = copy_dir_recursive_with(src.path(), &dst.path().join("copy"), refuse_links)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("link.txt"), "{err}");
+        assert!(err.contains("symlink"), "{err}");
+    }
+
+    /// A manifest whose name walks out of the agents directory must not be
+    /// installed, and must not touch what it pointed at: the old code joined
+    /// the name onto the agents directory and, finding the target existed,
+    /// removed it before copying.
+    #[test]
+    fn install_from_dir_refuses_a_name_that_escapes_the_agents_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let agents_dir = root.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        let victim = root.path().join("escaped");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keepme.txt"), "precious").unwrap();
+
+        let src = root.path().join("evil");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("agent.leviath"),
+            "[agent]\nname = \"../escaped\"\n",
+        )
+        .unwrap();
+
+        let err = install_from_dir(&src, &agents_dir).unwrap_err().to_string();
+        assert!(err.contains("invalid agent name"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(victim.join("keepme.txt")).unwrap(),
+            "precious",
+            "the escape target must be left alone"
+        );
+        assert!(!agents_dir.join("agent.leviath").exists());
+    }
+
+    /// The name comes from the `[agent]` table, not from the first line that
+    /// happens to start with `name`: a `names = [..]` key elsewhere in the
+    /// manifest used to be read as the agent's name.
+    #[test]
+    fn install_from_dir_reads_the_agent_table_not_the_first_name_line() {
+        let root = tempfile::tempdir().unwrap();
+        let src = root.path().join("tabled");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("agent.leviath"),
+            "[agent]\nversion = \"1.0\"\n\n[stages.main]\nnames = [\"x\"]\n",
+        )
+        .unwrap();
+        let agents_dir = tempfile::tempdir().unwrap();
+
+        install_from_dir(&src, agents_dir.path()).unwrap();
+
+        let installed: Vec<String> = std::fs::read_dir(agents_dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(installed, vec!["tabled".to_string()], "{installed:?}");
+    }
+
+    /// A manifest that is not TOML is refused rather than installed under a
+    /// guessed name.
+    #[test]
+    fn install_from_dir_refuses_a_manifest_that_is_not_toml() {
+        let root = tempfile::tempdir().unwrap();
+        let src = root.path().join("broken");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("agent.leviath"), "[agent\nname = \"x\"\n").unwrap();
+        let agents_dir = tempfile::tempdir().unwrap();
+
+        let err = install_from_dir(&src, agents_dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not valid TOML"), "{err}");
+        assert!(
+            std::fs::read_dir(agents_dir.path())
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
 
     #[test]
     fn install_from_dir_no_manifest_errors() {
@@ -1180,37 +1364,6 @@ description = "test"
         let package_path = Path::new(package);
         assert!(!package_path.is_dir());
         assert!(!package.ends_with(".leviath-bundle"));
-    }
-
-    // ─── parse_agent_name additional ──────────────────────────────────────
-
-    #[test]
-    fn parse_agent_name_in_section() {
-        let content = r#"
-[agent]
-name = "my-agent"
-version = "1.0"
-"#;
-        assert_eq!(parse_agent_name(content), Some("my-agent".to_string()));
-    }
-
-    #[test]
-    fn parse_agent_name_with_single_quotes() {
-        // toml uses double quotes, but our parser uses trim_matches('"')
-        let content = r#"name = my-agent-no-quotes"#;
-        assert_eq!(
-            parse_agent_name(content),
-            Some("my-agent-no-quotes".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_agent_name_multiple_name_fields_returns_first() {
-        let content = r#"
-name = "first"
-name = "second"
-"#;
-        assert_eq!(parse_agent_name(content), Some("first".to_string()));
     }
 
     // ─── copy_dir_recursive with nested dirs ──────────────────────────────
