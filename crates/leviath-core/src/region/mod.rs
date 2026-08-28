@@ -936,7 +936,7 @@ impl Region {
         } = &self.kind
         {
             let max = *max_items;
-            match eviction_strategy.clone() {
+            match *eviction_strategy {
                 EvictionStrategy::PerItem => {
                     // `remove_oldest` only returns None when empty, which the
                     // `len > max >= 0` guard already precludes; folding it into
