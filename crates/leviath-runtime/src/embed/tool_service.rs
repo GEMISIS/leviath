@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use bevy_ecs::entity::Entity;
 use leviath_tools::{BuiltinTools, ToolContext};
@@ -72,19 +72,13 @@ impl BasicToolService {
             backend: self.hub.backend_for(agent_id),
             stage_name: Mutex::new(String::new()),
         };
-        self.agents
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(entity, Arc::new(state));
+        leviath_core::sync::lock(&self.agents).insert(entity, Arc::new(state));
     }
 
     /// Drop `entity`'s tool state. Called by the reaper when a terminal agent
     /// is unloaded, so the map stays bounded by the set of live agents.
     pub fn unregister(&self, entity: Entity) {
-        self.agents
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&entity);
+        leviath_core::sync::lock(&self.agents).remove(&entity);
     }
 }
 
@@ -95,12 +89,7 @@ impl ToolService for BasicToolService {
         calls: Vec<leviath_providers::ToolCall>,
         progress: ToolProgress,
     ) -> BoxedToolExec {
-        let state = self
-            .agents
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&entity)
-            .cloned();
+        let state = leviath_core::sync::lock(&self.agents).get(&entity).cloned();
         Box::new(move || {
             Box::pin(async move {
                 let mut results = Vec::with_capacity(calls.len());
@@ -115,11 +104,7 @@ impl ToolService for BasicToolService {
                     }
                     return results;
                 };
-                let stage_name = state
-                    .stage_name
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone();
+                let stage_name = leviath_core::sync::lock(&state.stage_name).clone();
                 for call in calls {
                     // Interaction tools block on the hub (the host answers);
                     // everything else runs on the built-ins.
@@ -144,16 +129,8 @@ impl ToolService for BasicToolService {
     }
 
     fn sync_stage(&self, entity: Entity, _stage_index: usize, stage_name: &str) {
-        if let Some(state) = self
-            .agents
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&entity)
-        {
-            *state
-                .stage_name
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = stage_name.to_string();
+        if let Some(state) = leviath_core::sync::lock(&self.agents).get(&entity) {
+            *leviath_core::sync::lock(&state.stage_name) = stage_name.to_string();
         }
     }
 }

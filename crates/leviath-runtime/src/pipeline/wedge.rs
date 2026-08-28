@@ -188,7 +188,7 @@ pub fn fail_wedged_runs(
         // A terminal agent is the goal, not a problem, and the host reaps it. A
         // paused one is stopped because somebody stopped it, and must come back
         // with no clock already running against it.
-        if is_terminal(&state.status) || state.status == AgentStatus::Paused {
+        if super::is_terminal_status(&state.status) || state.status == AgentStatus::Paused {
             if wedged.is_some() {
                 commands.entity(entity).remove::<Wedged>();
             }
@@ -223,15 +223,6 @@ pub fn fail_wedged_runs(
         // driven into that stage instead of ending here.
         crate::pipeline::fail_stage(&mut commands, entity, &mut state, message);
     }
-}
-
-/// Whether an agent has stopped for good. Terminal agents are left to the host,
-/// which reaps them once their state has been persisted and reported.
-fn is_terminal(status: &AgentStatus) -> bool {
-    matches!(
-        status,
-        AgentStatus::Complete | AgentStatus::Error { .. } | AgentStatus::Cancelled
-    )
 }
 
 #[cfg(test)]

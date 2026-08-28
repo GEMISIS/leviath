@@ -29,37 +29,32 @@ const SOURCES_REGION: &str = "sources_index";
 /// Best-effort throughout, like the stuck and error notes: a parent with no
 /// such region, a worker that recorded nothing, or a region too full to take
 /// the lines all leave the parent exactly as it was.
+/// The sources region of `entity`'s context window as one text, one entry
+/// per line, if the entity has such a region.
+fn sources_text(world: &World, entity: Entity) -> Option<String> {
+    world
+        .get::<ContextWindow>(entity)
+        .and_then(|w| w.get_region(SOURCES_REGION))
+        .map(|r| {
+            r.content
+                .iter()
+                .map(|e| e.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+}
+
 pub(super) fn merge_worker_sources(
     world: &mut World,
     parent: Entity,
     worker: Entity,
     item_id: &str,
 ) {
-    let Some(worker_text) = world
-        .get::<ContextWindow>(worker)
-        .and_then(|w| w.get_region(SOURCES_REGION))
-        .map(|r| {
-            r.content
-                .iter()
-                .map(|e| e.content.clone())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-    else {
+    let Some(worker_text) = sources_text(world, worker) else {
         return;
     };
 
-    let Some(existing) = world
-        .get::<ContextWindow>(parent)
-        .and_then(|w| w.get_region(SOURCES_REGION))
-        .map(|r| {
-            r.content
-                .iter()
-                .map(|e| e.content.clone())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-    else {
+    let Some(existing) = sources_text(world, parent) else {
         // The parent does not keep a bibliography, so there is nothing this
         // could usefully merge into.
         return;

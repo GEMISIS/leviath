@@ -25,7 +25,7 @@
 //! model* across every agent in the world.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::{AcquireError, Notify, OwnedSemaphorePermit, Semaphore};
 
@@ -248,10 +248,7 @@ impl InferencePools {
     /// This is what makes "the pool is full and has been for hours" observable
     /// rather than inferred.
     pub fn occupancy(&self) -> Vec<PoolOccupancy> {
-        let map = self
-            .semaphores
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let map = leviath_core::sync::lock(&self.semaphores);
         let mut out: Vec<PoolOccupancy> = map
             .iter()
             .map(|(model, semaphore)| {
@@ -279,10 +276,7 @@ impl InferencePools {
     /// and "waiting on nothing" is the one shape this reporting exists to
     /// prevent.
     pub fn provider_occupancy(&self) -> Vec<ProviderPoolOccupancy> {
-        let map = self
-            .provider_semaphores
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let map = leviath_core::sync::lock(&self.provider_semaphores);
         let mut out: Vec<ProviderPoolOccupancy> = map
             .iter()
             .map(|(provider, (cap, semaphore))| ProviderPoolOccupancy {
@@ -299,10 +293,7 @@ impl InferencePools {
     /// or `None` when that provider has no configured cap.
     fn provider_semaphore_for(&self, provider: &str) -> Option<Arc<Semaphore>> {
         let permits = self.config.provider_limit_for(provider)?;
-        let mut map = self
-            .provider_semaphores
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut map = leviath_core::sync::lock(&self.provider_semaphores);
         if let Some((_, existing)) = map.get(provider) {
             return Some(existing.clone());
         }
@@ -313,10 +304,7 @@ impl InferencePools {
 
     /// Fetch (or lazily create) the semaphore for `model`.
     fn semaphore_for(&self, model: &str) -> Arc<Semaphore> {
-        let mut map = self
-            .semaphores
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut map = leviath_core::sync::lock(&self.semaphores);
         if let Some(existing) = map.get(model) {
             return existing.clone();
         }

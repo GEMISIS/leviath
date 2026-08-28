@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use bevy_ecs::entity::Entity;
 
@@ -57,10 +57,7 @@ impl EmbedSpawner {
         // The blueprint: staged inline by `AgentWorld::spawn`, or a manifest
         // path to load.
         let blueprint = match args.blueprint_path.strip_prefix("inline:") {
-            Some(key) => self
-                .staged
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+            Some(key) => leviath_core::sync::lock(&self.staged)
                 .remove(key)
                 .ok_or_else(|| format!("no staged blueprint under '{key}'"))?,
             None => {
