@@ -80,18 +80,13 @@ fn build_http_client() -> reqwest::Client {
         .expect("failed to build reqwest client")
 }
 
-/// Substitute `${NAME}` references with environment variables.
+/// Substitute `${NAME}` references with environment variables, honouring the
+/// caller's `[security] allow_env_vars` list.
 ///
 /// Lets a config say `Authorization = "Bearer ${MY_TOKEN}"` so the secret lives
 /// in the environment rather than in a file on disk. An undefined variable
 /// expands to nothing (and warns) rather than leaving the literal `${NAME}` to
 /// be sent as if it were the credential.
-#[cfg(test)]
-pub(crate) fn expand_env(value: &str) -> String {
-    expand_env_allowing(value, &[])
-}
-
-/// [`expand_env`] with the caller's `[security] allow_env_vars` list.
 ///
 /// A credential-shaped variable is refused unless the user named it, exactly as
 /// a Rhai script tool's `env_var` is. Without this the two transports disagreed:
@@ -744,6 +739,11 @@ impl Transport for HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`expand_env_allowing`] with no allowlist, the shape most tests want.
+    fn expand_env(value: &str) -> String {
+        expand_env_allowing(value, &[])
+    }
     use crate::test_support::always_on_tracing_guard;
     use crate::transport::DEFAULT_REQUEST_TIMEOUT;
     use axum::Router;

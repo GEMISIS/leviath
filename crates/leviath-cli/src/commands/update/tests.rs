@@ -6,8 +6,16 @@
 
 use std::sync::{Arc, Mutex};
 
+use std::path::Path;
+
+use super::detect::{
+    SCRIPT_DESTINATIONS, brew_prefix_from, component_after, has_component, is_ambiguous_prefix,
+    script_destinations,
+};
+use super::migrate::{load_config, migrate_config};
 use super::*;
 use crate::bundled::BUNDLED_AGENTS;
+use crate::config::Config;
 use crate::test_support::with_tracing;
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────

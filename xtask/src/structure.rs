@@ -10,9 +10,17 @@
 //! This workspace gates a hard 100% and keeps most tests inline, so test code is
 //! roughly two thirds of the tree. A total-lines rule would fire on the files
 //! with the *best* test coverage, which is precisely backwards. The count
-//! therefore stops at the first column-zero `#[cfg(test)]`, and sibling test
-//! files (`tests.rs`, `*_tests.rs`, anything under a `tests/` directory) are
-//! skipped outright.
+//! therefore skips every column-zero `#[cfg(test)]` item - the attribute stack,
+//! then either a `;`-terminated one-liner or a braced item closing at column
+//! zero - and keeps counting after it. Sibling test files (`tests.rs`,
+//! `*_tests.rs`, anything under a `tests/` directory) are skipped outright.
+//!
+//! An *indented* `#[cfg(test)]` still counts as production: it sits on a field
+//! or a method, and brace-matching arbitrary nesting is a parser this rule has
+//! no business being. That over-reports a handful of files, which is the safe
+//! direction for a ratchet. The rule used to stop at the *first* column-zero
+//! attribute instead, and a `#[cfg(test)] use` near the top of a file hid
+//! everything after it - `runstate.rs` measured 46 lines for a real 1,015.
 //!
 //! # One number, no exemptions
 //!
@@ -30,7 +38,7 @@ use std::path::Path;
 
 /// The most production lines a file may hold.
 ///
-/// 1,200 is what the tree meets today, with the longest file at 1,152 and a
+/// 1,200 is what the tree meets today, with the longest file at 1,184 and a
 /// median of 218. Lower it as files get split; it must never go up. Raising it
 /// to admit one long file is how a limit stops being one.
 pub const MAX_PRODUCTION_LINES: usize = 1_200;
@@ -69,14 +77,65 @@ pub fn is_test_path(path: &str) -> bool {
 
 /// How many production lines `source` holds.
 ///
-/// Everything from a column-zero `#[cfg(test)]` onward is test scaffolding. The
-/// attribute has to be at column zero: an indented one sits on a field or a
-/// method and does not begin the file's test section.
+/// Every column-zero `#[cfg(test)]` item is skipped and the count resumes
+/// after it. The attribute has to be at column zero: an indented one sits on a
+/// field or a method and is counted as production.
 pub fn production_lines(source: &str) -> usize {
-    source
-        .lines()
-        .position(|l| l.starts_with("#[cfg(test)]"))
-        .unwrap_or_else(|| source.lines().count())
+    let lines: Vec<&str> = source.lines().collect();
+    let mut count = 0;
+    let mut i = 0;
+    while i < lines.len() {
+        if starts_test_item(lines[i]) {
+            i = past_test_item(&lines, i);
+            continue;
+        }
+        count += 1;
+        i += 1;
+    }
+    count
+}
+
+/// Whether this column-zero line is the first attribute of a test-only item.
+///
+/// `#[cfg(all(test, ...))]` counts too: `leviath-alloc` gates a test module
+/// that way, and it is test scaffolding exactly like the plain form.
+fn starts_test_item(line: &str) -> bool {
+    line.starts_with("#[cfg(test)]") || line.starts_with("#[cfg(all(test")
+}
+
+/// The index just past the test-only item whose first attribute is at `at`.
+///
+/// Stacked attributes (`#[cfg(test)]` then `#[rustfmt::skip]`) are skipped
+/// first. A `;`-terminated line is a one-liner (`mod tests;`, `use x::Y;`); any
+/// other item is bracketed and, being at column zero, closes at column zero
+/// with `}` (or the exact `];` / `);` a `static` slice or tuple ends in).
+fn past_test_item(lines: &[&str], at: usize) -> usize {
+    let mut i = at + 1;
+    while i < lines.len() && lines[i].starts_with("#[") {
+        i += 1;
+    }
+    let Some(item) = lines.get(i) else {
+        return lines.len();
+    };
+    if item.trim_end().ends_with(';') {
+        return i + 1;
+    }
+    let mut j = i;
+    while j < lines.len() && !closes_item(lines[j]) {
+        j += 1;
+    }
+    j + 1
+}
+
+/// Whether a column-zero line ends a bracketed item.
+///
+/// `}` closes a block, `];` a `static` slice and `);` a tuple struct. Only the
+/// exact two-character forms are accepted for the latter: a raw string inside a
+/// test module can put a bare `)` or `]` at column zero, and matching on the
+/// first character alone counted the rest of `validate.rs`'s tests as
+/// production.
+fn closes_item(line: &str) -> bool {
+    line.starts_with('}') || line == "];" || line == ");"
 }
 
 /// One file and how many production lines it holds.
@@ -217,7 +276,10 @@ pub fn run(mode: StructureMode) -> Result<()> {
     Ok(())
 }
 
-/// `(crate name, manifest text)` for every member under `crates/`.
+/// `(crate name, manifest text)` for every member under `crates/`, plus `xtask`.
+///
+/// `xtask` is a workspace member like any other and carries the same lint
+/// table; leaving it out here would let it drop the table without a word.
 fn crate_manifests() -> Result<Vec<(String, String)>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir("crates")?.flatten() {
@@ -229,6 +291,10 @@ fn crate_manifests() -> Result<Vec<(String, String)>> {
             ));
         }
     }
+    out.push((
+        "xtask".to_string(),
+        std::fs::read_to_string("xtask/Cargo.toml")?,
+    ));
     out.sort();
     Ok(out)
 }

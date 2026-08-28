@@ -38,13 +38,12 @@
 //! single process being spawned - the same shape `lev mcp` uses for the browser
 //! and the daemon uses for seed commands.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Args;
 
 use crate::bundled::{AgentAction, BundledAgent, install_bundled, plan_agent_actions};
-use crate::config::Config;
 
 /// Where the hosted installer lives. One constant, because the invocation below
 /// is easy to get subtly wrong and there must be exactly one copy of it.
@@ -86,311 +85,6 @@ then asked about.
 whole flow, prompts and all, and prints what each step would do instead of
 doing it.";
 
-// ─── Channels ─────────────────────────────────────────────────────────────────
-
-/// A release channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-#[value(rename_all = "lowercase")]
-pub enum Channel {
-    /// The weekly stable release. What crates.io and `brew install leviath` track.
-    Stable,
-    /// The promoted build a week ahead of stable.
-    Beta,
-    /// The nightly build.
-    Alpha,
-}
-
-impl Channel {
-    /// The name the install script and the docs use.
-    pub fn id(self) -> &'static str {
-        match self {
-            Self::Stable => "stable",
-            Self::Beta => "beta",
-            Self::Alpha => "alpha",
-        }
-    }
-
-    /// The Homebrew formula and Scoop package for this channel. They share a
-    /// naming scheme on purpose, so one function answers for both.
-    pub fn package(self) -> &'static str {
-        match self {
-            Self::Stable => "leviath",
-            Self::Beta => "leviath-beta",
-            Self::Alpha => "leviath-alpha",
-        }
-    }
-
-    /// The channel a package name carries, or `None` for a name this build does
-    /// not ship (someone's own formula, or one from a future channel).
-    pub fn from_package(name: &str) -> Option<Self> {
-        [Self::Stable, Self::Beta, Self::Alpha]
-            .into_iter()
-            .find(|c| c.package() == name)
-    }
-}
-
-// ─── Install-method detection ─────────────────────────────────────────────────
-
-/// How this copy of `lev` got onto the machine.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InstallMethod {
-    /// Homebrew, under the named formula.
-    Homebrew {
-        /// The formula, which is also what carries the channel.
-        formula: String,
-    },
-    /// Scoop, under the named package.
-    Scoop {
-        /// The package, which carries the channel the same way a formula does.
-        package: String,
-    },
-    /// `cargo install`, so the binary was compiled locally.
-    Cargo,
-    /// The hosted install script, or something else that dropped a plain binary
-    /// where the install script puts one.
-    Script {
-        /// The channel to re-install. Never detected: see the module docs.
-        channel: Channel,
-    },
-    /// Somewhere no supported installer writes.
-    Unknown {
-        /// Where the binary actually is, so the report can say it.
-        path: PathBuf,
-    },
-}
-
-impl InstallMethod {
-    /// The short name used in `--json`.
-    pub fn id(&self) -> &'static str {
-        match self {
-            Self::Homebrew { .. } => "homebrew",
-            Self::Scoop { .. } => "scoop",
-            Self::Cargo => "cargo",
-            Self::Script { .. } => "script",
-            Self::Unknown { .. } => "unknown",
-        }
-    }
-
-    /// The channel this install tracks, where that is knowable.
-    ///
-    /// `cargo install leviath-cli` resolves crates.io, and each stable deploy
-    /// publishes there from the same commit the binaries were built at, so a
-    /// cargo install is a stable install by construction.
-    pub fn channel(&self) -> Option<Channel> {
-        match self {
-            Self::Homebrew { formula } => Channel::from_package(formula),
-            Self::Scoop { package } => Channel::from_package(package),
-            Self::Cargo => Some(Channel::Stable),
-            Self::Script { channel } => Some(*channel),
-            Self::Unknown { .. } => None,
-        }
-    }
-
-    /// The one-line description the report opens with.
-    pub fn describe(&self) -> String {
-        let channel = match self.channel() {
-            Some(c) => format!(", {} channel", c.id()),
-            // A formula this build does not ship, or a path nothing claims.
-            None => String::new(),
-        };
-        match self {
-            Self::Homebrew { formula } => format!("Homebrew (formula {formula}{channel})"),
-            Self::Scoop { package } => format!("Scoop (package {package}{channel})"),
-            Self::Cargo => format!("cargo install (crates.io{channel})"),
-            Self::Script { .. } => format!("the install script ({INSTALL_URL}{channel})"),
-            Self::Unknown { path } => {
-                format!("something else - the binary is at {}", path.display())
-            }
-        }
-    }
-}
-
-/// The component of `path` immediately after the first one equal to `marker`.
-///
-/// This is how both package managers record what they installed: Homebrew lays
-/// a binary out as `<prefix>/Cellar/<formula>/<version>/bin/lev`, and Scoop as
-/// `<root>/apps/<package>/current/lev.exe`. The name in that slot is the real
-/// answer to "which channel is this", and it is on disk rather than inferred.
-fn component_after(path: &Path, marker: &str) -> Option<String> {
-    let mut components = path
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned());
-    components.by_ref().find(|c| c == marker)?;
-    components.next()
-}
-
-/// Whether `path` has a component equal to `marker`, ignoring case.
-///
-/// Scoop's root is a user-chosen directory that is conventionally but not
-/// reliably lowercase, and Windows paths are case-insensitive anyway.
-fn has_component(path: &Path, marker: &str) -> bool {
-    path.components()
-        .any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case(marker))
-}
-
-/// Homebrew prefixes that mean Homebrew and nothing else, for the case where
-/// the binary is the `bin/lev` symlink rather than the Cellar path behind it.
-///
-/// `/usr/local` is deliberately absent even though it is Homebrew's own prefix
-/// on Intel macOS: it is also where the install script and a hand-unpacked
-/// tarball put a binary, so treating everything under it as Homebrew would send
-/// a script install to `brew upgrade`. Under that prefix the Cellar component is
-/// the only evidence that counts.
-const UNAMBIGUOUS_BREW_PREFIXES: &[&str] = &["/opt/homebrew", "/home/linuxbrew/.linuxbrew"];
-
-/// Absolute directories the installers write to. The Linux installer hard-codes
-/// `/usr/local/bin`; `/usr/bin` is where the manual tarball instructions end up
-/// for anyone who moved it there instead.
-const SCRIPT_DESTINATIONS: &[&str] = &["/usr/local/bin", "/usr/bin"];
-
-/// Every directory a plain-binary install lands in, including the two that are
-/// home-relative: `~/.local/bin`, and the `%LOCALAPPDATA%\Leviath\bin` that
-/// `install.ps1` writes on Windows.
-///
-/// A loose binary in one of these is a script install. A loose binary anywhere
-/// else is not something to guess about, because re-running an installer aims
-/// at a fixed destination and would leave the copy actually on `PATH` untouched.
-fn script_destinations(home: Option<&Path>) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = SCRIPT_DESTINATIONS.iter().map(PathBuf::from).collect();
-    if let Some(home) = home {
-        dirs.push(home.join(".local").join("bin"));
-        dirs.push(
-            home.join("AppData")
-                .join("Local")
-                .join("Leviath")
-                .join("bin"),
-        );
-    }
-    dirs
-}
-
-/// Work out how `exe` was installed.
-///
-/// Pure over its inputs - the resolved executable path, the home directory, the
-/// answer `brew --prefix` gave (if it was asked and answered), and the channel
-/// the user named - so every arm is testable without a Homebrew, a Scoop or a
-/// second machine.
-pub fn detect(
-    exe: &Path,
-    home: Option<&Path>,
-    brew_prefix: Option<&Path>,
-    requested: Option<Channel>,
-) -> InstallMethod {
-    // The channel to fall back on where the path does not name one.
-    let channel = requested.unwrap_or(Channel::Stable);
-
-    // Homebrew, from the strongest evidence down. A Cellar path names the
-    // formula outright; a prefix only says "Homebrew put this here".
-    if let Some(formula) = component_after(exe, "Cellar") {
-        return InstallMethod::Homebrew { formula };
-    }
-    let under_brew = UNAMBIGUOUS_BREW_PREFIXES.iter().any(|p| exe.starts_with(p))
-        || brew_prefix.is_some_and(|p| exe.starts_with(p) && !is_ambiguous_prefix(p));
-    if under_brew {
-        return InstallMethod::Homebrew {
-            formula: channel.package().to_string(),
-        };
-    }
-
-    // Scoop, the same two ways round.
-    if has_component(exe, "scoop") {
-        let package = component_after(exe, "apps").unwrap_or_else(|| channel.package().to_string());
-        return InstallMethod::Scoop { package };
-    }
-
-    // A cargo install, which is the one method that cannot be updated in place.
-    let cargo_bin = home.map(|h| h.join(".cargo").join("bin"));
-    if cargo_bin.is_some_and(|dir| exe.starts_with(dir)) {
-        return InstallMethod::Cargo;
-    }
-
-    let parent = exe.parent();
-    let script_dir = script_destinations(home)
-        .iter()
-        .any(|d| parent == Some(d.as_path()));
-    match script_dir {
-        true => InstallMethod::Script { channel },
-        false => InstallMethod::Unknown {
-            path: exe.to_path_buf(),
-        },
-    }
-}
-
-/// Whether a prefix is too general to be evidence of anything on its own. See
-/// [`UNAMBIGUOUS_BREW_PREFIXES`] for why `/usr/local` is the case that matters.
-fn is_ambiguous_prefix(prefix: &Path) -> bool {
-    matches!(
-        prefix.to_string_lossy().trim_end_matches('/'),
-        "/usr/local" | "/usr" | "" | "/"
-    )
-}
-
-// ─── Config migrations ────────────────────────────────────────────────────────
-
-/// One config change `lev update` knows how to make on the user's behalf.
-///
-/// The mechanism exists so that a future incompatibility - a key that moved, a
-/// value whose meaning changed - is either fixed automatically or at least
-/// explained at the moment the user updates into it, rather than surfacing as a
-/// broken run days later. [`MIGRATIONS`] is empty today because no shipped
-/// version has changed a key's name or meaning; the tests drive the machinery
-/// with a sample so the wiring is proven rather than assumed.
-pub struct Migration {
-    /// A short stable name, shown in the report and in `--json`.
-    pub name: &'static str,
-    /// What it changes and why, in one line.
-    pub description: &'static str,
-    /// Whether this config needs it.
-    ///
-    /// Gets the parsed [`Config`] *and* the raw document, because the two see
-    /// different things: a key serde no longer reads vanishes from the parsed
-    /// value entirely, and a key that is still read but now means something
-    /// else is only visible there.
-    pub applies: fn(&Config, &toml::Table) -> bool,
-    /// Make the change, returning one line per thing it did.
-    pub apply: fn(&mut Config) -> Vec<String>,
-}
-
-/// Why `serves = []` is worth a migration at all.
-///
-/// It never meant anything. `serves` is the model list a script provider with no
-/// `list_models` falls back to, and an empty one is the same as no entry - so the
-/// line has always been inert. It got written because the field serialized even
-/// when empty, and a save-back writes every field, so `lev setup` and every
-/// config migration stamped it into each `[model_providers.*]` block.
-///
-/// Inert is not harmless once somebody is debugging. It reads as a declaration
-/// that the provider serves nothing, which is exactly what a provider whose
-/// `list_models` was never asked looks like from outside - so it got the blame
-/// for a routing failure it had no part in. The real fault was priming, fixed
-/// separately; this removes the thing that pointed at the wrong culprit.
-///
-/// The migrations this build knows about, oldest first.
-///
-/// Adding one is adding an entry here.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    name: "stale-empty-serves",
-    description: "remove `serves = []` from [model_providers.*] - it never meant anything",
-    applies: |config, _raw| {
-        config
-            .model_providers
-            .values()
-            .any(|p| p.serves.as_ref().is_some_and(Vec::is_empty))
-    },
-    apply: |config| {
-        let mut done = Vec::new();
-        for (name, provider) in &mut config.model_providers {
-            if provider.serves.as_ref().is_some_and(Vec::is_empty) {
-                provider.serves = None;
-                done.push(format!(
-                    "removed empty `serves` from [model_providers.{name}]"
-                ));
-            }
-        }
-        done
-    },
-}];
-
 // ─── The plan ─────────────────────────────────────────────────────────────────
 
 /// What to do about the binary.
@@ -422,24 +116,6 @@ pub struct UpdatePlan {
     pub migrations: Vec<&'static Migration>,
     /// What reading the config found.
     pub config: ConfigState,
-}
-
-/// What the plan found when it read the config file.
-///
-/// One value rather than a `Config` and an error beside it, because those two
-/// only ever come in two of the four combinations and the other two would be
-/// arms nothing could reach.
-///
-/// The config is carried rather than re-read at write time so there is exactly
-/// one read: re-opening the file would add an error arm only a race could take,
-/// and applying a migration to a document nobody has looked at since the report
-/// was printed is exactly the surprise this command exists to avoid.
-pub enum ConfigState {
-    /// The config as it stands, for the migrations to be applied to. Boxed
-    /// because a `Config` is far larger than the message beside it.
-    Loaded(Box<Config>),
-    /// It could not be read, and this is why.
-    Unreadable(String),
 }
 
 /// One line naming every command a [`BinaryStep::Run`] will run, in order.
@@ -504,26 +180,6 @@ pub fn binary_step(method: &InstallMethod) -> BinaryStep {
             path.display()
         )),
     }
-}
-
-/// The config as `lev update` needs to see it: parsed, and the document behind
-/// it.
-struct LoadedConfig {
-    config: Config,
-    raw: toml::Table,
-}
-
-/// Read the config file both ways.
-fn load_config(path: &Path) -> anyhow::Result<LoadedConfig> {
-    let config = Config::load_from_path_public(path)?;
-    let raw = match std::fs::read_to_string(path) {
-        // `expect`: `load_from_path_public` above parsed this same text as
-        // TOML, so a document that reaches here is a document that parses.
-        Ok(text) => toml::from_str::<toml::Table>(&text).expect("the config parsed a moment ago"),
-        // No file at all, which loads as the defaults and an empty document.
-        Err(_) => toml::Table::new(),
-    };
-    Ok(LoadedConfig { config, raw })
 }
 
 /// Work out everything the command would do, without doing any of it.
@@ -921,48 +577,6 @@ fn say_no(_question: &str) -> bool {
     false
 }
 
-/// What `brew --prefix` says, when there is a `brew` to ask.
-///
-/// Cached: this used to run once per `lev update`, and now also answers an HTTP
-/// route, where spawning a process per request to learn a thing that cannot
-/// change under a running server would be a waste worth noticing.
-pub fn brew_prefix() -> Option<PathBuf> {
-    static CACHED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    CACHED
-        .get_or_init(|| {
-            brew_prefix_from(
-                leviath_sys::child_command("brew")
-                    .arg("--prefix")
-                    .output()
-                    .ok(),
-            )
-        })
-        .clone()
-}
-
-/// The part of [`brew_prefix`] that is worth testing: what to make of whatever
-/// `brew --prefix` did or did not say.
-///
-/// Any failure is a `None` - it only ever adds evidence, and a machine without
-/// Homebrew is the ordinary case rather than an error. Empty output is a `None`
-/// for the same reason: an empty prefix would match every path under
-/// [`detect`]'s `starts_with`, which is the opposite of no evidence.
-///
-/// Takes the answer rather than a closure that produces one. A generic seam
-/// would be tidier to read and is measured per instantiation, so the arms this
-/// machine's own `brew` does not take would go uncovered however many closures
-/// the tests passed. The command is spawned once, inside the cache above, so
-/// taking it eagerly costs nothing.
-fn brew_prefix_from(output: Option<std::process::Output>) -> Option<PathBuf> {
-    let output = output?;
-    let prefix = String::from_utf8(output.stdout).ok()?;
-    let prefix = prefix.trim();
-    match prefix.is_empty() {
-        true => None,
-        false => Some(PathBuf::from(prefix)),
-    }
-}
-
 // ─── Execution ────────────────────────────────────────────────────────────────
 
 /// Ask, unless `--yes` has already answered.
@@ -1081,47 +695,6 @@ fn update_agents(args: &UpdateArgs, env: &UpdateEnv, plan: &UpdatePlan) {
     }
 }
 
-/// Step three: the config.
-///
-/// Nothing is written before the user has seen, line by line, what changed.
-fn migrate_config(args: &UpdateArgs, env: &UpdateEnv, plan: &UpdatePlan) -> anyhow::Result<()> {
-    let config = match &plan.config {
-        ConfigState::Unreadable(e) => {
-            println!("  the config could not be read, so it was left alone: {e}");
-            return Ok(());
-        }
-        ConfigState::Loaded(config) => config,
-    };
-    if plan.migrations.is_empty() {
-        println!("  the config needs no changes");
-        return Ok(());
-    }
-
-    let mut config = config.as_ref().clone();
-    let mut changed = Vec::new();
-    for migration in &plan.migrations {
-        for line in (migration.apply)(&mut config) {
-            changed.push(format!("{}: {line}", migration.name));
-        }
-    }
-    for line in &changed {
-        println!("    - {line}");
-    }
-
-    let path = env.config_path.display();
-    if !agreed(args, env, &format!("Write these changes to {path}?")) {
-        println!("  config left as it is");
-        return Ok(());
-    }
-    if args.dry_run {
-        println!("  would write {path}");
-        return Ok(());
-    }
-    config.save_to_path_public(&env.config_path)?;
-    println!("  wrote {path}");
-    Ok(())
-}
-
 /// A fetcher that does not look anything up.
 ///
 /// Used both by the path that must not touch the network and by an install that
@@ -1192,7 +765,13 @@ pub fn execute_with(args: &UpdateArgs, env: &UpdateEnv, version: &str) -> anyhow
     Ok(())
 }
 
+mod detect;
 pub mod latest;
+mod migrate;
+
+pub use detect::{Channel, InstallMethod, brew_prefix, detect};
+pub use migrate::{ConfigState, MIGRATIONS, Migration};
+use migrate::{load_config, migrate_config};
 
 #[cfg(test)]
 mod tests;
