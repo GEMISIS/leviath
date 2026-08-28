@@ -5,7 +5,7 @@ use crate::openai_compat::{
 };
 use crate::provider::{
     InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
-    ModelInfo, Provider, ProviderConfig, ProviderError, Result, StreamChunk,
+    ModelInfo, Provider, ProviderError, Result, StreamChunk,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -108,21 +108,6 @@ impl GeminiProvider {
         }
     }
 
-    /// Create a new Gemini provider with full configuration.
-    pub fn with_config(client: reqwest::Client, config: ProviderConfig) -> Self {
-        let rate_limiter = config.rate_limit.as_ref().map(RateLimiter::new);
-        Self {
-            client,
-            api_key: config.api_key,
-            base_url: config.base_url.unwrap_or_else(|| {
-                "https://generativelanguage.googleapis.com/v1beta/openai".to_string()
-            }),
-            rate_limiter,
-            api_limits: Default::default(),
-            capability_overrides: HashMap::new(),
-        }
-    }
-
     /// Create a new Gemini provider with per-model capability overrides.
     pub fn with_overrides(
         client: reqwest::Client,
@@ -144,9 +129,9 @@ impl GeminiProvider {
     ///
     /// An enterprise gateway or self-hosted proxy speaks the same API on a
     /// different origin, and every part of that was already here - the struct
-    /// holds a `base_url`, and `with_config` honours one - except a way for
+    /// holds a `base_url`, and the constructors honour one - except a way for
     /// configuration to reach the constructor the registry actually calls.
-    /// `with_config` sets the URL and drops the capability overrides;
+    /// a `base_url` constructor would drop the capability overrides;
     /// `with_overrides` does the reverse, and the registry needs the overrides,
     /// so the URL was the half that got lost.
     ///
@@ -854,58 +839,6 @@ mod tests {
 
     // ── Additional coverage tests ──────────────────────────────────────────
 
-    #[test]
-    fn test_with_config_default_url() {
-        let config = ProviderConfig {
-            api_key: "key".to_string(),
-            base_url: None,
-            rate_limit: None,
-            request_timeout_secs: None,
-        };
-        let provider = GeminiProvider::with_config(
-            crate::provider::build_http_client(None).expect("a test client builds"),
-            config,
-        );
-        assert!(
-            provider
-                .base_url
-                .contains("generativelanguage.googleapis.com")
-        );
-    }
-
-    #[test]
-    fn test_with_config_custom_url() {
-        let config = ProviderConfig {
-            api_key: "key".to_string(),
-            base_url: Some("https://custom.google.com".to_string()),
-            rate_limit: None,
-            request_timeout_secs: None,
-        };
-        let provider = GeminiProvider::with_config(
-            crate::provider::build_http_client(None).expect("a test client builds"),
-            config,
-        );
-        assert_eq!(provider.base_url, "https://custom.google.com");
-    }
-
-    #[test]
-    fn test_with_config_with_rate_limit() {
-        let config = ProviderConfig {
-            api_key: "key".to_string(),
-            base_url: None,
-            rate_limit: Some(crate::provider::RateLimitConfig {
-                requests_per_minute: 30,
-                tokens_per_minute: 50000,
-            }),
-            request_timeout_secs: None,
-        };
-        let provider = GeminiProvider::with_config(
-            crate::provider::build_http_client(None).expect("a test client builds"),
-            config,
-        );
-        assert!(provider.rate_limiter.is_some());
-    }
-
     /// Provider whose native base is a non-standard URL (no `/openai` suffix),
     /// so `count_tokens` skips the endpoint and uses the local heuristic.
     fn heuristic_only_provider() -> GeminiProvider {
@@ -1082,15 +1015,48 @@ mod tests {
     // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
 
     fn provider_with_url(url: String) -> GeminiProvider {
-        GeminiProvider::with_config(
+        GeminiProvider::new(
             crate::provider::build_http_client(None).expect("a test client builds"),
-            ProviderConfig {
-                api_key: "test-key".to_string(),
-                base_url: Some(url),
-                rate_limit: None,
-                request_timeout_secs: None,
-            },
+            "test-key".to_string(),
         )
+        .with_base_url(Some(url))
+    }
+
+    #[test]
+    fn with_base_url_keeps_the_default_when_none_is_given() {
+        let provider = GeminiProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        )
+        .with_base_url(None);
+        assert_eq!(
+            provider.base_url,
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        );
+    }
+
+    #[test]
+    fn with_base_url_replaces_the_default() {
+        let provider = GeminiProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        )
+        .with_base_url(Some("https://custom.example.com".to_string()));
+        assert_eq!(provider.base_url, "https://custom.example.com");
+    }
+
+    #[test]
+    fn with_overrides_installs_a_rate_limiter_when_given_one() {
+        let provider = GeminiProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+            HashMap::new(),
+            Some(&crate::provider::RateLimitConfig {
+                requests_per_minute: 10,
+                tokens_per_minute: 50_000,
+            }),
+        );
+        assert!(provider.rate_limiter.is_some());
     }
 
     fn simple_request() -> InferenceRequest {
