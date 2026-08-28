@@ -19,3 +19,8 @@ serde_json = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The tool-name classification test checks its table against what the tool
+# crate actually ships.
+leviath-tools = { workspace = true }

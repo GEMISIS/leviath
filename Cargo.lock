@@ -2446,6 +2446,7 @@ name = "leviath-agent-client"
 version = "0.5.5"
 dependencies = [
  "leviath-core",
+ "leviath-tools",
  "serde",
  "serde_json",
 ]
