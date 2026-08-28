@@ -39,7 +39,8 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
-use super::tools::{ApiError, agent_dir};
+use super::tools::agent_dir;
+use super::types::ApiError;
 use super::types::err;
 
 /// Which extension point a script plugs into, and so which compiler decides
