@@ -299,11 +299,7 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
         result
     } else {
         let mut mcp = state.mcp.lock().await;
-        match mcp.execute(&tc.name, tc.arguments.clone()).await {
-            Ok(r) if r.success => r.text,
-            Ok(r) => format!("[error] {}", r.text),
-            Err(e) => format!("[error] tool error: {e}"),
-        }
+        super::seed_tool::mcp_text(mcp.execute(&tc.name, tc.arguments.clone()).await)
     }
 }
 

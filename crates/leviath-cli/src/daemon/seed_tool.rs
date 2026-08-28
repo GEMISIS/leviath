@@ -197,7 +197,7 @@ pub fn production_runner(ctx: SeedToolContext, resolve: SeedPolicyResolver) -> S
 /// outcomes are ordinary values. A tool that ran and said it failed is an
 /// `[error]` just as much as one that could not be reached - the seed treats
 /// both as "no block", and the model never sees a failure dressed as data.
-fn mcp_text(result: anyhow::Result<leviath_mcp::execution::ExecutionResult>) -> String {
+pub(super) fn mcp_text(result: anyhow::Result<leviath_mcp::execution::ExecutionResult>) -> String {
     match result {
         Ok(r) if r.success => r.text,
         Ok(r) => format!("[error] {}", r.text),
