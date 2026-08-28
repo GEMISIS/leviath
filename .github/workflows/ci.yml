@@ -184,7 +184,7 @@ jobs:
         run: cargo doc -p leviath-runtime --no-deps
 
   # Supply chain. Leviath ships a binary that executes model-chosen tool calls on
-  # a user's machine, so its ~370 transitive crates are part of the attack
+  # a user's machine, so its ~380 transitive crates (per target) are part of the attack
   # surface. This job is what makes that graph reviewable:
   #
   #   - `cargo deny check advisories` fails on any RUSTSEC advisory or yanked

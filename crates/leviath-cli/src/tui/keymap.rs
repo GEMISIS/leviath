@@ -1,17 +1,19 @@
-//! The crate's single key → semantic-action table.
+//! The setup wizard's key → semantic-action table.
 //!
-//! Every Leviath TUI resolves navigation and app-level keys through
-//! [`resolve`], so "what does Esc do" has exactly one answer across surfaces:
+//! The wizard resolves navigation and app-level keys through [`resolve`], so
+//! "what does Esc do" has exactly one answer across its screens:
 //! arrows move (with `k`/`j`/`h`/`l` as vim aliases), Space toggles, Enter
 //! acts on the focused thing, Esc goes back, Tab/Shift-Tab step between
 //! screens or panes, `?` opens help, `q` quits, and Ctrl-C force-quits.
 //!
-//! Surfaces match their surface-specific keys (`o` signup, `x` kill, …)
+//! Screens match their screen-specific keys (`o` signup, `v` verify, …)
 //! *before* calling [`resolve`], and only fall through to it for the shared
-//! set. That keeps this table frozen while surfaces evolve, and it means a
-//! surface can shadow an alias that clashes with a local binding (the
-//! dashboard's `l` = Logs wins over "l = Right") without touching this
-//! module.
+//! set. That keeps this table frozen while screens evolve.
+//!
+//! The dashboard does **not** use this table: it binds `l` to Logs and leaves
+//! `h` unbound, which the vim aliases here would silently override. Its keys
+//! live in `commands/dashboard/input.rs` and are documented in its help
+//! overlay, which a test holds to the handlers.
 //!
 //! [`resolve`] must never be called while a text field is being edited -
 //! letters are letters there; text inputs own the raw key stream.

@@ -82,7 +82,8 @@ The workspace is gated at a hard **100%** on lines, regions, and functions, with
 
 ### Suppressing a lint
 
-You cannot. `cargo xtask`'s ast-grep rules fail the build on `#[allow(...)]` or
+You cannot. The pre-commit hook and CI's `check-exclusions` job run `ast-grep
+scan`, whose rules fail the build on `#[allow(...)]` or
 `#[expect(...)]` for `too_many_arguments`, `type_complexity`, `dead_code`,
 `deprecated`, `async_fn_in_trait`, `match_same_arms`, `new_without_default`,
 `permissions_set_readonly_false` and `enum_variant_names`.

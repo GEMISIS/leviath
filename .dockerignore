@@ -6,4 +6,9 @@ coverage/
 .git/
 .github/
 .claude/
+# Safe only because every `include_str!("../../docs/...")` in the tree sits
+# under `#[cfg(test)]` (the bundled-blueprint schema test, the config example
+# test, the openapi drift test). A production `include_str!` of a docs file
+# would fail the image build with a bare "No such file"; put the file in
+# `crates/` or drop this line.
 docs/

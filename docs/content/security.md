@@ -44,6 +44,11 @@ configured those tools yourself.
 
 ## Sandboxes
 
+A survey of the stronger isolation options (microVMs, gVisor, V8 isolates) and
+why shared-kernel containers are not a boundary for untrusted code lives in the
+repository at `docs/design/sandboxing-approaches.md`; the section below is what
+Leviath ships today.
+
 ```toml
 [sandbox]
 kind    = "container"     # "container" | "namespace" | "none"

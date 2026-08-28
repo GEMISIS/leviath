@@ -241,7 +241,9 @@ fn run_seed_command(mut cmd: TokioCommand, timeout: Duration) -> Result<String, 
         })
     })
     .join()
-    // The closure above has no fallible unwraps, so it cannot unwind.
+    // The only panic the closure can raise is the runtime builder's `expect`
+    // above, which needs the OS to refuse a thread; joining that as a panic
+    // here rather than a `[error]` string is the honest answer.
     .expect("seed command thread does not panic")
 }
 

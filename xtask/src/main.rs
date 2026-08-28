@@ -66,8 +66,9 @@ pub fn dispatch_with(
             println!("  coverage                  Gate every workspace package at 100%%");
             println!("  coverage --package <pkg>  Gate one package (CI per-package fan-out)");
             println!("  version <X.Y.Z>           Move the workspace version, roll the changelog");
-            println!("  structure                 Hold every file to the production-line limit");
             println!("  version --check           Verify the version declarations agree");
+            println!("  structure                 Hold every file to the production-line limit");
+            println!("  structure --list          Print every file's production-line count");
             println!("  docs                      Check docs/content for dead links + frontmatter");
             Ok(())
         }

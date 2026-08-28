@@ -78,6 +78,17 @@ pub fn stop_fallback(recorded_pid: Option<u32>) -> StopFallback {
 
 /// The line `lev daemon stop` prints, or the error it fails with.
 ///
+/// What `lev daemon stop` prints when the daemon ignores it for the whole of
+/// [`super::readiness::READY_TIMEOUT`].
+///
+/// Spelled per platform because the timeout is, and a `&'static str` cannot be
+/// formatted at runtime; `the_shutdown_message_names_the_real_timeout` holds
+/// the two in step.
+const SHUTDOWN_TIMEOUT_MSG: &str = match cfg!(windows) {
+    true => "the leviath daemon did not shut down within 15s",
+    false => "the leviath daemon did not shut down within 5s",
+};
+
 /// `was_running` and `stopped` are separate observations because they answer
 /// different questions and the pair "nothing was running" and "it did not stop"
 /// must not read the same: the first is a success.
@@ -85,7 +96,7 @@ pub fn stop_outcome(was_running: bool, stopped: bool) -> Result<&'static str, &'
     match (was_running, stopped) {
         (false, _) => Ok("daemon not running"),
         (true, true) => Ok("daemon stopped"),
-        (true, false) => Err("the leviath daemon did not shut down within 5s"),
+        (true, false) => Err(SHUTDOWN_TIMEOUT_MSG),
     }
 }
 
