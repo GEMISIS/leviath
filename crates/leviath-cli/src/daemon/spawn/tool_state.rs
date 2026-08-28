@@ -19,6 +19,8 @@ use super::*;
 /// silently and produces a run whose approvals are keyed to the wrong name.
 /// Nothing else in this file was ever going to catch that.
 pub(super) struct ToolStateParts<'a> {
+    /// The run's write budget, already spent on by the seeds.
+    pub(super) writes: Arc<crate::daemon::tool_service::WriteBudget>,
     /// The built-in tools, over this agent's workdir.
     pub(super) builtins: Arc<leviath_tools::BuiltinTools>,
     /// Their names, for deciding what is a builtin at dispatch.
@@ -76,10 +78,8 @@ pub(super) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
         .unwrap_or_default();
     Arc::new(AgentToolState {
         // One budget per run, so the per-run ceiling spans every batch rather
-        // than resetting with each one.
-        writes: Arc::new(crate::daemon::tool_service::WriteBudget::new(
-            parts.config.limits.write_limits(),
-        )),
+        // than resetting with each one - and spans the seeds before them.
+        writes: parts.writes,
         builtins: parts.builtins,
         mcp: parts.mcp,
         builtin_names: parts.builtin_names,
