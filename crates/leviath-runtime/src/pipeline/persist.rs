@@ -229,10 +229,7 @@ pub(crate) fn reconcile_stage_ledger(
 ) {
     use leviath_core::run_meta::StageRunStatus;
     let active = crate::persistence::stage_status_from(status);
-    let run_is_over = matches!(
-        status,
-        AgentStatus::Complete | AgentStatus::Error { .. } | AgentStatus::Cancelled
-    );
+    let run_is_over = super::is_terminal_status(status);
     for rec in ledger.0.iter_mut() {
         if rec.index == cursor_index {
             rec.entered = true;

@@ -47,10 +47,7 @@ impl WorldHost {
             };
             let agent_id = state.agent_id.clone();
             let status = status_str(&state.status);
-            let terminal = matches!(
-                state.status,
-                AgentStatus::Complete | AgentStatus::Error { .. } | AgentStatus::Cancelled
-            );
+            let terminal = crate::pipeline::is_terminal_status(&state.status);
             let cur = {
                 let totals = self
                     .world
@@ -291,14 +288,7 @@ impl WorldHost {
         // life (the set is keyed by request id, so prune by what is still
         // pending - the same shape `cancel_tree` uses).
         if reaped_any {
-            let still_open: std::collections::HashSet<String> = self
-                .interactions
-                .pending()
-                .into_iter()
-                .map(|(_, req)| req.id)
-                .collect();
-            self.emitted_interactions
-                .retain(|id| still_open.contains(id));
+            self.prune_emitted_interactions();
         }
 
         for (agent_id, request) in self.interactions.pending() {
