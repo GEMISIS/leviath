@@ -44,7 +44,7 @@ pub use browser::open_url;
 pub use editor::launch as launch_editor;
 pub use perms::{
     create_private_dir_all, ensure_file_private, open_private_append, secure_dir_perms,
-    secure_file_perms, write_private,
+    secure_file_perms, write_atomic, write_private,
 };
 #[cfg(unix)]
 pub use process::peer_uid;
