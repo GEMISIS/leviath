@@ -25,7 +25,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use leviath_providers::rhai_provider::host::HttpExecutor;
@@ -342,17 +342,14 @@ impl ScriptProviderLayer {
         ) {
             Ok(p) => {
                 let provider: Arc<dyn Provider> = Arc::new(p);
-                self.cache
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(
-                        name.to_string(),
-                        Cached {
-                            mtime,
-                            config: config.clone(),
-                            provider: provider.clone(),
-                        },
-                    );
+                leviath_core::sync::lock(&self.cache).insert(
+                    name.to_string(),
+                    Cached {
+                        mtime,
+                        config: config.clone(),
+                        provider: provider.clone(),
+                    },
+                );
                 Some(provider)
             }
             Err(e) => {
@@ -372,7 +369,7 @@ impl ScriptProviderLayer {
         mtime: SystemTime,
         config: &Arc<ScriptProviderConfig>,
     ) -> Option<Arc<dyn Provider>> {
-        let cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+        let cache = leviath_core::sync::lock(&self.cache);
         let cached = cache.get(name)?;
         if cached.mtime == mtime && Arc::ptr_eq(&cached.config, config) {
             Some(cached.provider.clone())
@@ -383,10 +380,7 @@ impl ScriptProviderLayer {
 
     /// Drop any cached entry for `name`.
     fn evict(&self, name: &str) {
-        self.cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(name);
+        leviath_core::sync::lock(&self.cache).remove(name);
     }
 }
 

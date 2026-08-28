@@ -267,16 +267,7 @@ impl WorldHost {
             cancelled |= self.world.cancel(self.world.own_agent(e));
             if let Some(agent_id) = agent_id {
                 self.interactions.cancel_for_agent(&agent_id);
-                // The hub is keyed by agent id but the emitted-interaction set is
-                // keyed by request id, so drop the ids that are no longer pending.
-                let still_open: HashSet<String> = self
-                    .interactions
-                    .pending()
-                    .into_iter()
-                    .map(|(_, req)| req.id)
-                    .collect();
-                self.emitted_interactions
-                    .retain(|id| still_open.contains(id));
+                self.prune_emitted_interactions();
             }
         }
         cancelled

@@ -20,6 +20,23 @@ pub fn is_context_tool(name: &str) -> bool {
     name.starts_with("context_") || name.starts_with("todo_")
 }
 
+/// The string argument under `key`, if the model passed one.
+fn str_arg<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    args.get(key).and_then(|v| v.as_str())
+}
+
+/// The reply for a tool call that left out `key`.
+fn missing(key: &str) -> String {
+    format!("[error] missing '{key}' argument")
+}
+
+/// Whether the region is keyed; `None` when there is no such region.
+fn is_hashmap_region(window: &ContextWindow, name: &str) -> Option<bool> {
+    window
+        .get_region(name)
+        .map(|r| matches!(r.kind, RegionKind::HashMap { .. }))
+}
+
 /// Build the "section not found" error listing the writable regions.
 fn region_not_found(name: &str, window: &ContextWindow) -> String {
     let available: Vec<&str> = window
@@ -71,11 +88,11 @@ pub fn handle_context_tool(
         // unfinished items and one holding three finished ones are the same
         // string to every other region kind, which is why no gate could ask.
         "todo_add" => {
-            let Some(region_name) = args.get("region").and_then(|v| v.as_str()) else {
-                return "[error] missing 'region' argument".to_string();
+            let Some(region_name) = str_arg(args, "region") else {
+                return missing("region");
             };
-            let Some(item) = args.get("item").and_then(|v| v.as_str()) else {
-                return "[error] missing 'item' argument".to_string();
+            let Some(item) = str_arg(args, "item") else {
+                return missing("item");
             };
             let tokens = leviath_core::estimate_tokens(item);
             match checklist_region(window, region_name) {
@@ -87,8 +104,8 @@ pub fn handle_context_tool(
             }
         }
         "todo_done" | "todo_note" => {
-            let Some(region_name) = args.get("region").and_then(|v| v.as_str()) else {
-                return "[error] missing 'region' argument".to_string();
+            let Some(region_name) = str_arg(args, "region") else {
+                return missing("region");
             };
             let Some(id) = args.get("id").and_then(|v| v.as_u64()) else {
                 return "[error] missing 'id' argument".to_string();
@@ -118,18 +135,17 @@ pub fn handle_context_tool(
             }
         }
         "context_write" => {
-            let Some(region_name) = args.get("region").and_then(|v| v.as_str()) else {
-                return "[error] missing 'region' argument".to_string();
+            let Some(region_name) = str_arg(args, "region") else {
+                return missing("region");
             };
-            let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
-                return "[error] missing 'content' argument".to_string();
+            let Some(content) = str_arg(args, "content") else {
+                return missing("content");
             };
             let key = args.get("key").and_then(|v| v.as_str());
             let tokens = leviath_core::estimate_tokens(content);
 
-            let is_hashmap = match window.get_region(region_name) {
-                Some(r) => matches!(r.kind, RegionKind::HashMap { .. }),
-                None => return region_not_found(region_name, window),
+            let Some(is_hashmap) = is_hashmap_region(window, region_name) else {
+                return region_not_found(region_name, window);
             };
             let region = window.get_region_mut(region_name).expect("region present");
             if is_hashmap {
@@ -155,18 +171,17 @@ pub fn handle_context_tool(
             }
         }
         "context_append" => {
-            let Some(region_name) = args.get("region").and_then(|v| v.as_str()) else {
-                return "[error] missing 'region' argument".to_string();
+            let Some(region_name) = str_arg(args, "region") else {
+                return missing("region");
             };
-            let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
-                return "[error] missing 'content' argument".to_string();
+            let Some(content) = str_arg(args, "content") else {
+                return missing("content");
             };
             let key = args.get("key").and_then(|v| v.as_str());
             let tokens = leviath_core::estimate_tokens(content);
 
-            let is_hashmap = match window.get_region(region_name) {
-                Some(r) => matches!(r.kind, RegionKind::HashMap { .. }),
-                None => return region_not_found(region_name, window),
+            let Some(is_hashmap) = is_hashmap_region(window, region_name) else {
+                return region_not_found(region_name, window);
             };
             let region = window.get_region_mut(region_name).expect("region present");
             if is_hashmap {
@@ -208,8 +223,8 @@ pub fn handle_context_tool(
             }
         }
         "context_read" => {
-            let Some(region_name) = args.get("region").and_then(|v| v.as_str()) else {
-                return "[error] missing 'region' argument".to_string();
+            let Some(region_name) = str_arg(args, "region") else {
+                return missing("region");
             };
             let key = args.get("key").and_then(|v| v.as_str());
             let region = match window.get_region(region_name) {
@@ -252,8 +267,8 @@ pub fn handle_context_tool(
             }
         }
         "context_delete" => {
-            let Some(region_name) = args.get("region").and_then(|v| v.as_str()) else {
-                return "[error] missing 'region' argument".to_string();
+            let Some(region_name) = str_arg(args, "region") else {
+                return missing("region");
             };
             if window.get_region(region_name).is_none() {
                 return region_not_found(region_name, window);
