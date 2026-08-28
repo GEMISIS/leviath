@@ -582,21 +582,7 @@ pub fn build_openai_request_body_with(
     body[token_limit.key()] = serde_json::json!(request.max_tokens);
 
     if !request.tools.is_empty() {
-        let tools: Vec<serde_json::Value> = request
-            .tools
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    }
-                })
-            })
-            .collect();
-        body["tools"] = serde_json::Value::Array(tools);
+        body["tools"] = tools_array(&request.tools);
     }
 
     merge_extra_params(
@@ -647,6 +633,28 @@ pub(crate) fn tools_refused_over_reasoning_effort(detail: &str) -> bool {
 pub(crate) fn temperature_refused(detail: &str) -> bool {
     let detail = detail.to_ascii_lowercase();
     detail.contains("temperature") && detail.contains("does not support")
+}
+
+/// The request's tools in the OpenAI `tools` wire shape.
+///
+/// One function for the three OpenAI-shaped providers (OpenAI-compatible
+/// gateways, OpenRouter and Ollama) so the shape cannot drift between them.
+pub(crate) fn tools_array(tools: &[crate::provider::Tool]) -> serde_json::Value {
+    serde_json::Value::Array(
+        tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Merge a request's pass-through `extra` params (the manifest's

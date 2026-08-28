@@ -29,7 +29,7 @@ pub struct OllamaProvider {
     api_windows: std::sync::Arc<std::sync::Mutex<HashMap<String, usize>>>,
     /// Models already warned about, so a guessed window is announced once per
     /// model rather than once per inference.
-    warned_guessed: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    warned_guessed: crate::provider::ModelMemo,
 }
 
 /// A tool-call id unique for the life of a conversation.
@@ -310,8 +310,7 @@ impl OllamaProvider {
         if leviath_core::sync::lock(&self.api_windows).contains_key(model) {
             return;
         }
-        let mut warned = leviath_core::sync::lock(&self.warned_guessed);
-        if !warned.insert(model.to_string()) {
+        if !self.warned_guessed.insert(model) {
             return;
         }
         tracing::warn!(
@@ -545,21 +544,7 @@ impl OllamaProvider {
 
         // Add tools if present (Ollama supports tool calling for some models)
         if !request.tools.is_empty() {
-            let tools: Vec<serde_json::Value> = request
-                .tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.parameters,
-                        }
-                    })
-                })
-                .collect();
-            body["tools"] = serde_json::Value::Array(tools);
+            body["tools"] = crate::openai_compat::tools_array(&request.tools);
         }
 
         // `think` is Ollama's own switch for a reasoning model, and it sits at
@@ -3128,7 +3113,7 @@ mod tests {
         let _ = provider.capabilities("qwen3.8-32k:latest");
         let _ = provider.capabilities("qwen3.8-32k:latest");
         assert_eq!(
-            leviath_core::sync::lock(&provider.warned_guessed).len(),
+            provider.warned_guessed.len(),
             1,
             "warned once per model, not once per call"
         );
@@ -3137,7 +3122,7 @@ mod tests {
 
         // Primed, a second model is still a guess and gets its own warning.
         let _ = provider.capabilities("mystery:latest");
-        let warned = leviath_core::sync::lock(&provider.warned_guessed);
+        let warned = &provider.warned_guessed;
         assert!(warned.contains("mystery:latest"));
         assert_eq!(warned.len(), 2);
     }
@@ -3158,7 +3143,7 @@ mod tests {
         provider.prime_capabilities().await.expect("primes");
 
         let _ = provider.capabilities("qwen3.8-32k:latest");
-        assert!(leviath_core::sync::lock(&provider.warned_guessed).is_empty());
+        assert!(provider.warned_guessed.is_empty());
     }
 
     /// An explicit override is an answer, so it silences the warning too.
@@ -3178,7 +3163,7 @@ mod tests {
             overrides,
         );
         let _ = provider.capabilities("mystery:latest");
-        assert!(leviath_core::sync::lock(&provider.warned_guessed).is_empty());
+        assert!(provider.warned_guessed.is_empty());
     }
 
     // ─── effective window ───────────────────────────────────────────────────

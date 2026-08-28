@@ -15,7 +15,7 @@ use super::RegionKind;
 /// The choice of strategy affects prompt caching effectiveness: PerItem eviction
 /// shifts the message prefix every iteration (breaking cache), while Bulk and
 /// Compact keep the prefix stable between eviction events.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "strategy", rename_all = "snake_case")]
 pub enum EvictionStrategy {
     /// Evict one turn group at a time (current behavior). Default.

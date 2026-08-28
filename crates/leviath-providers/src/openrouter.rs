@@ -36,14 +36,14 @@ pub struct OpenRouterProvider {
 
     /// Models already reported as falling back, so the warning is once per
     /// model per process rather than once per inference.
-    warned_unknown: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    warned_unknown: crate::provider::ModelMemo,
 
     /// Models the gateway has refused a temperature for.
     ///
     /// Per instance rather than a table: OpenRouter fronts every vendor, so no
     /// static list can stay right about which of their models take one, and
     /// this build's table already names only a few dozen of hundreds.
-    temperature_unsupported: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    temperature_unsupported: crate::provider::ModelMemo,
 
     /// What OpenRouter's own `/models` endpoint says each model's window is,
     /// filled once by [`Provider::prime_capabilities`].
@@ -282,21 +282,7 @@ impl OpenRouterProvider {
         body["usage"] = serde_json::json!({ "include": true });
 
         if !request.tools.is_empty() {
-            let tools: Vec<serde_json::Value> = request
-                .tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.parameters,
-                        }
-                    })
-                })
-                .collect();
-            body["tools"] = serde_json::Value::Array(tools);
+            body["tools"] = crate::openai_compat::tools_array(&request.tools);
         }
 
         // Pass through extra model parameters (top_p, stop, seed, …).
@@ -462,14 +448,28 @@ pub(crate) const FALLBACK_CAPABILITIES: ModelCapabilities = ModelCapabilities {
 };
 
 impl OpenRouterProvider {
+    /// The headers every chat request carries.
+    ///
+    /// OpenRouter attributes a request to an app by the referer and title
+    /// pair, and sending only the referer left every Leviath call unnamed on
+    /// the account's activity page.
+    fn chat_headers(&self) -> [(&'static str, String); 4] {
+        [
+            ("Authorization", format!("Bearer {}", self.api_key)),
+            ("HTTP-Referer", "https://leviath.dev".to_string()),
+            ("X-Title", "Leviath".to_string()),
+            ("Content-Type", "application/json".to_string()),
+        ]
+    }
+
     /// Whether this model has already refused a temperature.
     fn temperature_is_unsupported(&self, model: &str) -> bool {
-        leviath_core::sync::lock(&self.temperature_unsupported).contains(model)
+        self.temperature_unsupported.contains(model)
     }
 
     /// Record that it did, for the rest of this process.
     fn remember_temperature_unsupported(&self, model: &str) {
-        leviath_core::sync::lock(&self.temperature_unsupported).insert(model.to_string());
+        self.temperature_unsupported.insert(model);
     }
 
     /// Say so when a model fell through to [`FALLBACK_CAPABILITIES`].
@@ -544,8 +544,7 @@ impl OpenRouterProvider {
         if leviath_core::sync::lock(&self.api_windows).contains_key(model) {
             return;
         }
-        let mut warned = leviath_core::sync::lock(&self.warned_unknown);
-        if !warned.insert(model.to_string()) {
+        if !self.warned_unknown.insert(model) {
             return;
         }
         tracing::warn!(
@@ -577,15 +576,7 @@ impl Provider for OpenRouterProvider {
         {
             fields.remove("temperature");
         }
-        let headers = [
-            ("Authorization", format!("Bearer {}", self.api_key)),
-            // OpenRouter attributes a request to an app by this pair, and
-            // sending only the referer left every Leviath call unnamed on
-            // the account's activity page.
-            ("HTTP-Referer", "https://leviath.dev".to_string()),
-            ("X-Title", "Leviath".to_string()),
-            ("Content-Type", "application/json".to_string()),
-        ];
+        let headers = self.chat_headers();
 
         let mut sent = send_chat_request(
             &self.client,
@@ -653,15 +644,7 @@ impl Provider for OpenRouterProvider {
             &self.client,
             "openrouter",
             &url,
-            &[
-                ("Authorization", format!("Bearer {}", self.api_key)),
-                // OpenRouter attributes a request to an app by this pair, and
-                // sending only the referer left every Leviath call unnamed on
-                // the account's activity page.
-                ("HTTP-Referer", "https://leviath.dev".to_string()),
-                ("X-Title", "Leviath".to_string()),
-                ("Content-Type", "application/json".to_string()),
-            ],
+            &self.chat_headers(),
             &body,
             self.rate_limiter.as_ref(),
             request.request_timeout_secs,
@@ -1162,7 +1145,7 @@ mod tests {
             provider.capabilities("moonshotai/kimi-k3");
             provider.capabilities("meta/muse-spark-1.2");
         }
-        let warned = leviath_core::sync::lock(&provider.warned_unknown);
+        let warned = &provider.warned_unknown;
         assert_eq!(warned.len(), 2, "one entry per model: {warned:?}");
     }
 
@@ -1186,7 +1169,7 @@ mod tests {
         let caps = provider.capabilities("moonshotai/kimi-k3");
         assert_eq!(caps.max_context_tokens, 1_048_576);
         assert!(
-            leviath_core::sync::lock(&provider.warned_unknown).is_empty(),
+            provider.warned_unknown.is_empty(),
             "nothing to warn about once the window is known"
         );
     }
@@ -2043,13 +2026,13 @@ mod tests {
             128_000
         );
         assert!(
-            !leviath_core::sync::lock(&provider.warned_unknown).contains("some/128k-model"),
+            !provider.warned_unknown.contains("some/128k-model"),
             "the API answered for this model, so nothing was assumed"
         );
         // The control: a model it said nothing about is still reported.
         let _ = provider.capabilities("nobody/knows");
         assert!(
-            leviath_core::sync::lock(&provider.warned_unknown).contains("nobody/knows"),
+            provider.warned_unknown.contains("nobody/knows"),
             "a model with no answer anywhere is still called out"
         );
     }
