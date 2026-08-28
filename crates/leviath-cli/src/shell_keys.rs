@@ -345,31 +345,61 @@ pub fn writes_a_file(command: &str) -> bool {
     })
 }
 
-/// Every literal path `command` redirects a write to.
+/// Where a line's redirects go, as far as this can read them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteTargets {
+    /// Every literal path the line redirects a write to.
+    Known(Vec<String>),
+    /// The line has a `>` in it and cannot be read as commands: a heredoc, a
+    /// backtick, an unterminated quote or an unbalanced `$(` sits somewhere
+    /// on it, so where the redirect lands is not knowable from here.
+    Unreadable,
+}
+
+/// Where `command` redirects writes to.
 ///
 /// [`writes_a_file`] answers whether to clamp by the write policy; this answers
 /// *where*, so a caller can hold a redirect to the same workspace confinement
 /// `write_file` enforces.
 ///
 /// Discarded targets (`/dev/null` and friends) are absent because they write
-/// nothing anyone can read back. **Unreadable** targets are absent too, and that
-/// is the one asymmetry worth stating: `> $OUT` names a path only the shell will
-/// know, so there is nothing to check it against. Those are already ungrantable
-/// by [`writes_a_file`] and prompt every time, which is the containment they
-/// get. A line that will not tokenize yields nothing here for the same reason -
-/// it is already treated as writing.
-pub fn write_target_paths(command: &str) -> Vec<String> {
+/// nothing anyone can read back. A target through a variable (`> $OUT`) is
+/// absent too: it names a path only the shell will know, and such a line is
+/// already ungrantable by [`writes_a_file`] and prompts every time, which is
+/// the containment it gets.
+///
+/// A line that will not tokenize is different, and used to be folded into the
+/// same silence. It was "already treated as writing" by [`writes_a_file`], so
+/// it prompted - but under `--yolo` a prompt is a yes, and `cat <<EOF >
+/// /tmp/pwned` then wrote outside the tree where `write_file` on the same path
+/// is refused. Such a line is now [`WriteTargets::Unreadable`] when it holds a
+/// `>` at all, and the caller refuses it rather than guessing.
+pub fn write_targets(command: &str) -> WriteTargets {
     let Some(segments) = tokenize(command) else {
-        return Vec::new();
+        return match command.contains('>') {
+            true => WriteTargets::Unreadable,
+            false => WriteTargets::Known(Vec::new()),
+        };
     };
-    segments
-        .iter()
-        .flat_map(|segment| segment.writes.iter())
-        .filter_map(|t| match classify_write(t) {
-            WriteTarget::Path(p) => Some(p),
-            WriteTarget::Discarded | WriteTarget::Unreadable => None,
-        })
-        .collect()
+    WriteTargets::Known(
+        segments
+            .iter()
+            .flat_map(|segment| segment.writes.iter())
+            .filter_map(|t| match classify_write(t) {
+                WriteTarget::Path(p) => Some(p),
+                WriteTarget::Discarded | WriteTarget::Unreadable => None,
+            })
+            .collect(),
+    )
+}
+
+/// The literal paths of [`write_targets`], with an unreadable line yielding
+/// none. For callers that report rather than refuse.
+pub fn write_target_paths(command: &str) -> Vec<String> {
+    match write_targets(command) {
+        WriteTargets::Known(paths) => paths,
+        WriteTargets::Unreadable => Vec::new(),
+    }
 }
 
 /// The program half of a key, dropping any folded subcommand or argument.

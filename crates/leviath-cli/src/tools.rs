@@ -366,7 +366,22 @@ pub fn escaping_write_refusal(
         return None;
     }
     let command = arguments.get("command").and_then(|v| v.as_str())?;
-    let escaping = crate::shell_keys::write_target_paths(command)
+    let targets = match crate::shell_keys::write_targets(command) {
+        crate::shell_keys::WriteTargets::Known(targets) => targets,
+        // Refused even when the redirect would land inside the tree: "inside"
+        // is a judgement about a path this could not read, and the fence is
+        // only as good as what it can read.
+        crate::shell_keys::WriteTargets::Unreadable => {
+            return Some(
+                "[denied] This shell line redirects with `>` inside a construct that cannot be \
+                 read ahead of time (a heredoc, a backtick, an unterminated quote or an \
+                 unbalanced `$(`), so where it writes cannot be checked against the working \
+                 directory. Use the `write_file` tool, or rewrite the line without that construct."
+                    .to_string(),
+            );
+        }
+    };
+    let escaping = targets
         .into_iter()
         .find(|target| !leviath_core::resolves_within(&target_path(target, workdir), workdir))?;
     Some(format!(
@@ -981,6 +996,72 @@ mod policy_tests {
                 "{command:?} stays inside and must not be refused"
             );
         }
+    }
+
+    /// A redirect the tokenizer cannot read past is refused outright.
+    ///
+    /// A heredoc, a backtick, an unterminated quote and an unbalanced `$(`
+    /// each stop the line being read as commands, and the old answer was
+    /// "no targets found", which let `cat <<EOF > /tmp/pwned` through under
+    /// `--yolo` while the same path in `write_file` was refused. Every
+    /// redirect operator, under every construct, against a path outside.
+    #[test]
+    fn no_unreadable_redirect_escapes_the_workdir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let constructs: [(&str, &str); 6] = [
+            ("cat <<EOF", "\nx\nEOF"),
+            ("cat <<'EOF'", "\nx\nEOF"),
+            ("echo `id`", ""),
+            ("echo 'unterminated", ""),
+            ("echo \"unterminated", ""),
+            ("echo $(id", ""),
+        ];
+        let mut checked = 0;
+        for (head, tail) in constructs {
+            for op in [">", ">>", "2>", "&>", ">|", "<>"] {
+                let command = format!("{head} {op} /tmp/escaped.txt{tail}");
+                let refusal = escaping_write_refusal("shell", &shell_call(&command), dir.path());
+                let refusal = refusal.unwrap_or_default();
+                assert!(refusal.contains("cannot be read"), "{command:?}: {refusal}");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 36);
+    }
+
+    /// The controls. A line the tokenizer cannot read but that redirects
+    /// nothing is not this check's business (it still prompts, as it always
+    /// did), and an ordinary redirect inside the tree is still fine.
+    #[test]
+    fn an_unreadable_line_with_no_redirect_is_not_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for command in ["cat <<EOF\nx\nEOF", "echo `id`", "echo 'open", "echo $(id"] {
+            assert_eq!(
+                escaping_write_refusal("shell", &shell_call(command), dir.path()),
+                None,
+                "{command:?} redirects nothing"
+            );
+        }
+        assert_eq!(
+            escaping_write_refusal("shell", &shell_call("echo ok > inside.txt"), dir.path()),
+            None
+        );
+    }
+
+    /// Stated rather than hidden: an unreadable line is refused even when its
+    /// redirect would have landed inside the tree, because "inside" is a
+    /// judgement about a path this could not actually read.
+    #[test]
+    fn an_unreadable_redirect_inside_the_workdir_is_refused_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let refusal = escaping_write_refusal(
+            "shell",
+            &shell_call("cat <<EOF > inside.txt\nx\nEOF"),
+            dir.path(),
+        )
+        .unwrap_or_default();
+        assert!(refusal.contains("cannot be read"), "{refusal}");
+        assert!(refusal.contains("write_file"), "{refusal}");
     }
 
     /// An absolute path *into* the workdir is inside it, so the check cannot be
