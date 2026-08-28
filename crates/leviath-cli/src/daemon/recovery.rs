@@ -72,7 +72,7 @@ pub fn reload_persisted_agents(
         .filter_map(|dir_entry| {
             let run_dir = dir_entry.path();
             let meta = read_meta(&run_dir)?; // no meta.json, or unreadable/unparseable
-            let parked_on_fanout = run_dir.join("fanout.json").exists();
+            let parked_on_fanout = run_dir.join(leviath_core::files::FANOUT_FILE).exists();
             Some((meta, parked_on_fanout))
         })
         .collect();
@@ -134,7 +134,9 @@ fn restore_fan_outs(world: &mut PipelineWorld, reloaded: &[(RunMeta, Entity)], r
         .map(|(m, e)| (m.run_id.as_str(), *e))
         .collect();
     for (meta, entity) in reloaded {
-        let path = runs_dir.join(&meta.run_id).join("fanout.json");
+        let path = runs_dir
+            .join(&meta.run_id)
+            .join(leviath_core::files::FANOUT_FILE);
         let Some(state) = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str::<leviath_runtime::fanout::FanOutState>(&s).ok())
@@ -343,7 +345,7 @@ fn reload_one(
     // `{meta, context}`. Fall back to the separate JSON files only for runs written
     // before the archive existed, or an archive that couldn't be read at all - that
     // pair may be one tick out of sync, but it's the pre-existing behavior.
-    let folded = std::fs::read(run_dir.join("run.lvr"))
+    let folded = std::fs::read(run_dir.join(leviath_core::files::ARCHIVE_FILE))
         .ok()
         .and_then(|bytes| run_archive::read_archive_lenient(&mut bytes.as_slice()).ok())
         .and_then(|(_version, records)| run_archive::fold(&records));
@@ -359,7 +361,7 @@ fn reload_one(
             )
         }
         None => {
-            let snapshot = std::fs::read_to_string(run_dir.join("context.json"))
+            let snapshot = std::fs::read_to_string(run_dir.join(leviath_core::files::CONTEXT_FILE))
                 .ok()
                 .and_then(|s| serde_json::from_str::<ContextSnapshot>(&s).ok())
                 .unwrap_or_else(|| ContextSnapshot {
@@ -511,9 +513,10 @@ fn reload_one(
     // `Active` + `ReadyToInfer` restore - so the open prompt survives the restart
     // instead of being dropped and re-inferred (issue #38). A missing/malformed
     // sidecar, or a blueprint that no longer matches, leaves the default restore.
-    if let Some(state) = std::fs::read_to_string(run_dir.join("interactions.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str::<InteractionPointState>(&s).ok())
+    if let Some(state) =
+        std::fs::read_to_string(run_dir.join(leviath_core::files::INTERACTIONS_FILE))
+            .ok()
+            .and_then(|s| serde_json::from_str::<InteractionPointState>(&s).ok())
     {
         // Built against this world's ECS a few lines above, so it is ours.
         let agent = world.own_agent(entity);

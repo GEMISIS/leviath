@@ -82,7 +82,10 @@ pub fn discover(agents_dir: &Path, cwd: &Path, config: &Config) -> Vec<CatalogEn
         .map(|a| {
             let path = PathBuf::from(&a.path);
             let (dir, manifest_path) = if path.is_dir() {
-                (path.clone(), path.join("agent.leviath"))
+                (
+                    path.clone(),
+                    path.join(leviath_core::files::MANIFEST_FILENAME),
+                )
             } else {
                 (
                     path.parent().map(Path::to_path_buf).unwrap_or_default(),
@@ -149,7 +152,7 @@ pub fn bundled_manifest(agent: &BundledAgent) -> &'static str {
     agent
         .files
         .iter()
-        .find(|(rel, _)| *rel == "agent.leviath")
+        .find(|(rel, _)| *rel == leviath_core::files::MANIFEST_FILENAME)
         .map(|(_, text)| *text)
         .expect("every bundled agent has a manifest")
 }
@@ -159,7 +162,7 @@ pub fn bundled_manifest(agent: &BundledAgent) -> &'static str {
 pub fn write_agent(agents_dir: &Path, name: &str, manifest: &str) -> std::io::Result<PathBuf> {
     let dir = agents_dir.join(name);
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("agent.leviath"), manifest)?;
+    std::fs::write(dir.join(leviath_core::files::MANIFEST_FILENAME), manifest)?;
     Ok(dir)
 }
 
@@ -171,7 +174,11 @@ pub fn copy_bundled_extras(
     from: &BundledAgent,
 ) -> std::io::Result<()> {
     let dir = agents_dir.join(name);
-    for (rel, contents) in from.files.iter().filter(|(rel, _)| *rel != "agent.leviath") {
+    for (rel, contents) in from
+        .files
+        .iter()
+        .filter(|(rel, _)| *rel != leviath_core::files::MANIFEST_FILENAME)
+    {
         let path = dir.join(rel);
         // A joined path always has a parent.
         std::fs::create_dir_all(path.parent().unwrap_or(&dir))?;
@@ -206,7 +213,7 @@ pub fn rename_agent_with(
     if new.exists() {
         return Err(format!("An agent named {to} already exists."));
     }
-    let manifest_path = old.join("agent.leviath");
+    let manifest_path = old.join(leviath_core::files::MANIFEST_FILENAME);
     let text = std::fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Could not read {}: {e}", manifest_path.display()))?;
     let mut doc = super::ManifestDoc::parse(&text).map_err(|e| e.to_string())?;

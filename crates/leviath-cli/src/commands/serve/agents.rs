@@ -58,7 +58,7 @@ pub(super) async fn spawn_agent(
                 format!("Blueprint '{}' not found", body.blueprint),
             )
         })?;
-    let manifest_path = PathBuf::from(&bp_info.path).join("agent.leviath");
+    let manifest_path = PathBuf::from(&bp_info.path).join(leviath_core::files::MANIFEST_FILENAME);
 
     let workdir = body.workdir.clone().unwrap_or_else(|| {
         std::env::current_dir()

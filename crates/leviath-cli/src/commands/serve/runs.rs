@@ -570,8 +570,14 @@ fn matches_query(meta: &RunMeta, q: &str, sources: &[Source]) -> bool {
             .modified_files
             .iter()
             .any(|path| search::find_ignore_ascii_case(path, q).is_some()),
-        Source::Context => scan_file(&runstate::run_dir(&meta.run_id).join("context.json"), q),
-        Source::Journal => scan_file(&runstate::run_dir(&meta.run_id).join("run.lvr"), q),
+        Source::Context => scan_file(
+            &runstate::run_dir(&meta.run_id).join(leviath_core::files::CONTEXT_FILE),
+            q,
+        ),
+        Source::Journal => scan_file(
+            &runstate::run_dir(&meta.run_id).join(leviath_core::files::ARCHIVE_FILE),
+            q,
+        ),
         Source::Logs => stage_indices(&meta.run_id).iter().any(|idx| {
             let output = runstate::tail_stage_output(&meta.run_id, *idx, SEARCH_LOG_TAIL_BYTES);
             let operational = runstate::tail_stage_log(&meta.run_id, *idx, SEARCH_LOG_TAIL_BYTES);

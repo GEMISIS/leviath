@@ -231,7 +231,7 @@ fn discover_worker(agents_dir: Option<&Path>, query: &str) -> Result<PathBuf, St
         std::fs::read_dir(dir).map_err(|e| format!("read agents dir '{}': {e}", dir.display()))?;
     for entry in entries.flatten() {
         let path = entry.path();
-        let manifest = path.join("agent.leviath");
+        let manifest = path.join(leviath_core::files::MANIFEST_FILENAME);
         if !manifest.is_file() {
             continue;
         }

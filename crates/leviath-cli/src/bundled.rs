@@ -68,7 +68,12 @@ impl AgentAction {
 /// instead of refusing to plan. An unreadable manifest is exactly the state a
 /// half-finished copy leaves behind.
 pub fn installed_version(agents_dir: &Path, name: &str) -> Option<String> {
-    let manifest = std::fs::read_to_string(agents_dir.join(name).join("agent.leviath")).ok()?;
+    let manifest = std::fs::read_to_string(
+        agents_dir
+            .join(name)
+            .join(leviath_core::files::MANIFEST_FILENAME),
+    )
+    .ok()?;
     leviath_core::manifest::parse_manifest(&manifest)
         .ok()
         .map(|bp| bp.version)
