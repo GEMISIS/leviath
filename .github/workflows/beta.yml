@@ -11,6 +11,12 @@ on:
         type: boolean
         default: false
 
+# One promotion at a time. A manual `force` run started during the scheduled
+# one must queue behind it, not race it to the same tag.
+concurrency:
+  group: beta-promote
+  cancel-in-progress: false
+
 # Read-only by default; only the job that publishes a release elevates, matching
 # alpha.yml and prod.yml. A workflow-level `contents: write` grants it to every
 # step, including ones that merely read.
@@ -21,6 +27,7 @@ jobs:
   promote:
     name: Promote Alpha → Beta
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     # Handed to the docs job so beta docs render the promoted alpha commit,
@@ -216,15 +223,11 @@ jobs:
     needs: promote
     if: needs.promote.outputs.skip != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Dispatch to leviath-dist
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          VERSION: ${{ needs.promote.outputs.version }}
-        run: |
-          set -euo pipefail
-          jq -nc --arg version "$VERSION-beta" \
-            '{event_type:"release-published",
-              client_payload:{channel:"beta", version:$version}}' \
-            | gh api repos/GEMISIS/leviath-dist/dispatches --input -
-          echo "Asked leviath-dist to bump the beta manifests to $VERSION-beta."
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/dispatch-dist
+        with:
+          channel: beta
+          version: ${{ needs.promote.outputs.version }}-beta
+          token: ${{ secrets.RELEASE_TOKEN }}

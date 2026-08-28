@@ -1,0 +1,47 @@
+name: Rust setup
+description: >-
+  Install the toolchain rust-toolchain.toml pins and, by default, restore the
+  cargo cache. One definition instead of the same three steps in every job.
+
+# `rustup toolchain install` with no arguments reads rust-toolchain.toml - the
+# channel and the components - which is the single source of truth for the
+# compiler this repo builds with. The jobs used to call a toolchain action with
+# `toolchain: stable`, which installed stable and then let rustup install the
+# pinned 1.97.1 on the first cargo call: two toolchains per job, the second
+# being the only one that mattered. alpha.yml's build job already did it this
+# way, for the same reason.
+
+inputs:
+  cache:
+    description: Restore and save the cargo cache (Swatinem/rust-cache).
+    required: false
+    default: "true"
+  shared-key:
+    description: >-
+      rust-cache `shared-key`, so jobs that compile the same targets on the
+      same OS share one cache entry instead of each keeping their own.
+    required: false
+    default: ""
+  target:
+    description: An extra target triple to add to the pinned toolchain (cross builds).
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned toolchain
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        set -euo pipefail
+        rustup toolchain install
+        if [ -n "$TARGET" ]; then
+          rustup target add "$TARGET"
+        fi
+        rustup show active-toolchain
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      if: inputs.cache == 'true'
+      with:
+        shared-key: ${{ inputs.shared-key }}

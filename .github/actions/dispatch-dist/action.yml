@@ -1,0 +1,40 @@
+name: Dispatch to leviath-dist
+description: >-
+  Tell the tap repository which version a channel just published, so its
+  Homebrew and Scoop manifests move and `brew upgrade` has something to see.
+
+# Homebrew and Scoop compare the installed version against the version
+# *declared* in the manifest; neither looks at what is behind the rolling
+# channel tag the manifests point at. So the tap has to be told what shipped.
+# Three workflows used to carry this block verbatim; a tap URL change was
+# three edits.
+
+inputs:
+  channel:
+    description: alpha | beta | stable
+    required: true
+  version:
+    description: The version string the tap should declare, suffix included (e.g. 0.5.6-alpha).
+    required: true
+  token:
+    description: >-
+      A PAT with Contents read/write on GEMISIS/leviath-dist. GITHUB_TOKEN is
+      scoped to this repo and cannot reach the tap.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Dispatch release-published
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        CHANNEL: ${{ inputs.channel }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        jq -nc --arg channel "$CHANNEL" --arg version "$VERSION" \
+          '{event_type:"release-published",
+            client_payload:{channel:$channel, version:$version}}' \
+          | gh api repos/GEMISIS/leviath-dist/dispatches --input -
+        echo "Asked leviath-dist to bump the $CHANNEL manifests to $VERSION."

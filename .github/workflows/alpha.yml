@@ -57,6 +57,7 @@ jobs:
   check-version:
     name: Check for a version bump
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       skip: ${{ steps.check.outputs.skip }}
       version: ${{ steps.check.outputs.version }}
@@ -155,6 +156,7 @@ jobs:
     name: Build (${{ matrix.target }})
     needs: gate
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -288,6 +290,7 @@ jobs:
     name: Publish Alpha
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Handed to bump-tap so the tap declares what this nightly actually ships.
     outputs:
       version: ${{ steps.info.outputs.version }}
@@ -450,15 +453,11 @@ jobs:
     name: Bump tap manifests (alpha)
     needs: release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Dispatch to leviath-dist
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          VERSION: ${{ needs.release.outputs.version }}
-        run: |
-          set -euo pipefail
-          jq -nc --arg version "$VERSION-alpha" \
-            '{event_type:"release-published",
-              client_payload:{channel:"alpha", version:$version}}' \
-            | gh api repos/GEMISIS/leviath-dist/dispatches --input -
-          echo "Asked leviath-dist to bump the alpha manifests to $VERSION-alpha."
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/dispatch-dist
+        with:
+          channel: alpha
+          version: ${{ needs.release.outputs.version }}-alpha
+          token: ${{ secrets.RELEASE_TOKEN }}
