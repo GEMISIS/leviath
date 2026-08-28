@@ -47,7 +47,10 @@ fn execute_with(
     fs::create_dir_all(blueprint_dir)?;
 
     let manifest = create_manifest(&args.name, &args.template);
-    write_file(&blueprint_dir.join("agent.leviath"), manifest.as_bytes())?;
+    write_file(
+        &blueprint_dir.join(leviath_core::files::MANIFEST_FILENAME),
+        manifest.as_bytes(),
+    )?;
 
     let gitignore_content = ".env\n*.leviath-bundle\n.leviath/\n";
     write_file(

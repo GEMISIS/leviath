@@ -411,7 +411,9 @@ impl McpPool {
         };
         let mut paths: Vec<String> = Vec::new();
         for entry in entries.flatten() {
-            let Ok(text) = std::fs::read_to_string(entry.path().join("meta.json")) else {
+            let Ok(text) =
+                std::fs::read_to_string(entry.path().join(leviath_core::files::META_FILE))
+            else {
                 continue;
             };
             let Ok(meta) = serde_json::from_str::<leviath_core::run_meta::RunMeta>(&text) else {

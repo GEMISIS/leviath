@@ -608,7 +608,8 @@ impl Dashboard {
                 ),
                 StageContentMode::Context => {
                     let json = std::fs::read_to_string(
-                        runstate::stage_dir(&agent.id, self.selected_stage).join("context.json"),
+                        runstate::stage_dir(&agent.id, self.selected_stage)
+                            .join(leviath_core::files::CONTEXT_FILE),
                     )
                     .unwrap_or_default();
                     (json, "Context JSON")

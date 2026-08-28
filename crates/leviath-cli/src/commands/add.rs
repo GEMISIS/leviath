@@ -268,7 +268,9 @@ fn collect_seed_commands(value: &toml::Value) -> Vec<String> {
 
 /// Print the capability inventory for a freshly installed agent, if it has one.
 fn print_capabilities(name: &str, install_dir: &Path, config: Option<&crate::config::Config>) {
-    let manifest = std::fs::read_to_string(install_dir.join("agent.leviath")).unwrap_or_default();
+    let manifest =
+        std::fs::read_to_string(install_dir.join(leviath_core::files::MANIFEST_FILENAME))
+            .unwrap_or_default();
     let scripts = script_tool_names(install_dir);
     let report = read_path_report(&manifest, config);
     let findings = describe_capabilities(&manifest, &scripts, report.as_ref());
@@ -326,7 +328,7 @@ fn install_from_dir(
     agents_dir: &Path,
     config: Option<&crate::config::Config>,
 ) -> anyhow::Result<()> {
-    let manifest_path = src.join("agent.leviath");
+    let manifest_path = src.join(leviath_core::files::MANIFEST_FILENAME);
     if !manifest_path.exists() {
         anyhow::bail!(
             "No agent.leviath found in '{}'. Is this an agent directory?",
@@ -653,7 +655,7 @@ mod capability_tests {
         crate::test_support::with_tracing(|| {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(
-                dir.path().join("agent.leviath"),
+                dir.path().join(leviath_core::files::MANIFEST_FILENAME),
                 "[agent]\nname = \"q\"\n\n[tool_permissions]\nshell = \"allow\"\n",
             )
             .unwrap();
@@ -665,7 +667,7 @@ mod capability_tests {
             // And the quiet path: a plain agent prints nothing.
             let plain = tempfile::tempdir().unwrap();
             std::fs::write(
-                plain.path().join("agent.leviath"),
+                plain.path().join(leviath_core::files::MANIFEST_FILENAME),
                 "[agent]\nname = \"p\"\n\n[stages.main]\nsystem_prompt = \"p\"\n",
             )
             .unwrap();

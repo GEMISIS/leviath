@@ -79,12 +79,12 @@ fn write_private_atomic(path: &std::path::Path, body: &str) -> anyhow::Result<()
 fn write_context_snapshot_to(dir: &std::path::Path, snap: &ContextSnapshot) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(snap)
         .expect("infallible: ContextSnapshot always serializes to JSON");
-    write_private_atomic(&dir.join("context.json"), &json)
+    write_private_atomic(&dir.join(leviath_core::files::CONTEXT_FILE), &json)
 }
 
 /// Read the context snapshot for a run, if present.
 pub fn read_context_snapshot(run_id: &str) -> Option<ContextSnapshot> {
-    let path = run_dir(run_id).join("context.json");
+    let path = run_dir(run_id).join(leviath_core::files::CONTEXT_FILE);
     let json = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&json).ok()
 }
@@ -165,7 +165,7 @@ impl<T> StatCache<T> {
 /// a mature run's journal is tens of MB, and parsing it whole per request was
 /// the API's single largest transient allocation.
 pub fn read_run_archive(run_id: &str) -> Option<Vec<leviath_core::run_archive::RunRecord>> {
-    let path = run_dir(run_id).join("run.lvr");
+    let path = run_dir(run_id).join(leviath_core::files::ARCHIVE_FILE);
     let bytes = std::fs::read(&path).ok()?;
     // Lenient, not strict: this reads an archive some other build may have
     // written, so a record kind added later must be stepped over rather than
@@ -183,7 +183,7 @@ pub fn visit_run_records(
     run_id: &str,
     visit: &mut dyn FnMut(&leviath_core::run_archive::RunRecord) -> std::ops::ControlFlow<()>,
 ) -> Option<()> {
-    let path = run_dir(run_id).join("run.lvr");
+    let path = run_dir(run_id).join(leviath_core::files::ARCHIVE_FILE);
     let file = std::fs::File::open(&path).ok()?;
     let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
     leviath_core::run_archive::read_archive_start(&mut reader).ok()?;
@@ -211,7 +211,7 @@ pub fn visit_run_archive(
     run_id: &str,
     visit: &mut dyn FnMut(leviath_core::run_archive::PointRef<'_>) -> std::ops::ControlFlow<()>,
 ) -> Option<()> {
-    let path = run_dir(run_id).join("run.lvr");
+    let path = run_dir(run_id).join(leviath_core::files::ARCHIVE_FILE);
     let file = std::fs::File::open(&path).ok()?;
     let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
     leviath_core::run_archive::visit_archive_points(&mut reader, visit).ok()
@@ -444,7 +444,7 @@ pub fn write_meta(meta: &RunMeta) -> anyhow::Result<()> {
 pub(crate) fn write_meta_to(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
     let json =
         serde_json::to_string_pretty(meta).expect("infallible: RunMeta always serializes to JSON");
-    write_private_atomic(&dir.join("meta.json"), &json)
+    write_private_atomic(&dir.join(leviath_core::files::META_FILE), &json)
 }
 
 /// Read run metadata for a given run ID.
@@ -672,7 +672,7 @@ fn force_terminal_in(
 /// Read run metadata out of an explicit run directory (the daemon works from its
 /// own configured `runs_dir` rather than the home-resolved one).
 pub(crate) fn read_meta_from(dir: &std::path::Path) -> anyhow::Result<RunMeta> {
-    let path = dir.join("meta.json");
+    let path = dir.join(leviath_core::files::META_FILE);
     let json = std::fs::read_to_string(&path)?;
     Ok(serde_json::from_str(&json)?)
 }
@@ -688,7 +688,7 @@ fn list_runs_in_dir(dir: PathBuf) -> Vec<RunMeta> {
 
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.filter_map(|e| e.ok()) {
-            let meta_path = entry.path().join("meta.json");
+            let meta_path = entry.path().join(leviath_core::files::META_FILE);
             if let Ok(json) = std::fs::read_to_string(&meta_path)
                 && let Ok(meta) = serde_json::from_str::<RunMeta>(&json)
             {
@@ -799,7 +799,7 @@ pub fn list_runs_cached(cache: &mut StatCache<RunMeta>) -> Vec<Arc<RunMeta>> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             live_dirs.insert(entry.path());
-            let meta_path = entry.path().join("meta.json");
+            let meta_path = entry.path().join(leviath_core::files::META_FILE);
             if let Some(meta) = cache.get_with(&meta_path, |json| {
                 serde_json::from_str::<RunMeta>(json).ok()
             }) {
@@ -817,7 +817,7 @@ pub fn read_stages_index_cached(
     run_id: &str,
     cache: &mut StatCache<Vec<StageRecord>>,
 ) -> Vec<StageRecord> {
-    let path = run_dir(run_id).join("stages.json");
+    let path = run_dir(run_id).join(leviath_core::files::STAGES_FILE);
     cache
         .get_with(&path, |json| serde_json::from_str(json).ok())
         .map(|records| records.as_ref().clone())
@@ -831,7 +831,7 @@ pub fn read_context_snapshot_cached(
     run_id: &str,
     cache: &mut StatCache<ContextSnapshot>,
 ) -> Option<Arc<ContextSnapshot>> {
-    let path = run_dir(run_id).join("context.json");
+    let path = run_dir(run_id).join(leviath_core::files::CONTEXT_FILE);
     cache.get_with(&path, |json| serde_json::from_str(json).ok())
 }
 
@@ -891,7 +891,7 @@ pub fn write_stages_index(run_id: &str, stages: &[StageRecord]) -> anyhow::Resul
 fn write_stages_index_to(dir: &std::path::Path, stages: &[StageRecord]) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(&stages)
         .expect("infallible: StageRecord slice always serializes to JSON");
-    write_private_atomic(&dir.join("stages.json"), &json)
+    write_private_atomic(&dir.join(leviath_core::files::STAGES_FILE), &json)
 }
 
 /// Read the stages index for a run, or return an empty vec on any error.
@@ -904,7 +904,7 @@ pub fn read_stages_index(run_id: &str) -> Vec<StageRecord> {
 /// Restart recovery works from its configured runs directory rather than the
 /// home one, so it cannot resolve the path itself.
 pub fn read_stages_index_from(dir: &std::path::Path) -> Vec<StageRecord> {
-    let json = match std::fs::read_to_string(dir.join("stages.json")) {
+    let json = match std::fs::read_to_string(dir.join(leviath_core::files::STAGES_FILE)) {
         Ok(j) => j,
         Err(_) => return Vec::new(),
     };
@@ -959,7 +959,7 @@ pub fn write_stage_context(
 
 /// Read the context snapshot for a specific stage, if present.
 pub fn read_stage_context(run_id: &str, stage_idx: usize) -> Option<ContextSnapshot> {
-    let path = stage_dir(run_id, stage_idx).join("context.json");
+    let path = stage_dir(run_id, stage_idx).join(leviath_core::files::CONTEXT_FILE);
     let json = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&json).ok()
 }

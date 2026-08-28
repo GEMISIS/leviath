@@ -297,7 +297,8 @@ impl AgentInstaller {
             return Err(e);
         }
 
-        let (version, description) = manifest_meta(&agent_dir.join("agent.leviath"));
+        let (version, description) =
+            manifest_meta(&agent_dir.join(leviath_core::files::MANIFEST_FILENAME));
 
         tracing::info!(
             name = %name,
@@ -344,7 +345,7 @@ impl AgentInstaller {
             let path = entry.path();
 
             if path.is_dir() {
-                let manifest_path = path.join("agent.leviath");
+                let manifest_path = path.join(leviath_core::files::MANIFEST_FILENAME);
                 if manifest_path.exists() {
                     let name = path
                         .file_name()
@@ -388,7 +389,7 @@ impl AgentInstaller {
             return None;
         }
 
-        let manifest_path = agent_dir.join("agent.leviath");
+        let manifest_path = agent_dir.join(leviath_core::files::MANIFEST_FILENAME);
         if !manifest_path.exists() {
             return None;
         }

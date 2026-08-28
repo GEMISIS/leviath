@@ -104,7 +104,7 @@ impl AgentBundler {
         }
 
         // Verify agent.leviath exists
-        let manifest_path = project_path.join("agent.leviath");
+        let manifest_path = project_path.join(leviath_core::files::MANIFEST_FILENAME);
         if !manifest_path.exists() {
             anyhow::bail!("No agent.leviath found in '{}'", project_path.display());
         }

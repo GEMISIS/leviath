@@ -126,7 +126,7 @@ fn scan_directory_for_agents(dir: &Path, config: &Config, cwd: &Path) -> Vec<(Pa
     }
 
     // Check if this directory itself has an agent.leviath
-    let direct_manifest = dir.join("agent.leviath");
+    let direct_manifest = dir.join(leviath_core::files::MANIFEST_FILENAME);
     if direct_manifest.exists()
         && let Some(info) = read_agent_info(&direct_manifest, config, cwd)
     {
@@ -138,7 +138,7 @@ fn scan_directory_for_agents(dir: &Path, config: &Config, cwd: &Path) -> Vec<(Pa
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                let manifest_path = path.join("agent.leviath");
+                let manifest_path = path.join(leviath_core::files::MANIFEST_FILENAME);
                 if manifest_path.exists()
                     && let Some(info) = read_agent_info(&manifest_path, config, cwd)
                 {
@@ -222,7 +222,11 @@ pub(crate) fn build_list_report(
         };
     }
     let installed = scan_directory_for_agents(agents_dir, config, cwd);
-    let local = read_agent_info(&cwd.join("agent.leviath"), config, cwd);
+    let local = read_agent_info(
+        &cwd.join(leviath_core::files::MANIFEST_FILENAME),
+        config,
+        cwd,
+    );
     let configured: Vec<(PathBuf, AgentInfo)> = config
         .agent_paths
         .iter()
@@ -243,7 +247,10 @@ pub(crate) fn build_list_report(
         agents.push(ListedAgent {
             info,
             source: "local",
-            path: cwd.join("agent.leviath").display().to_string(),
+            path: cwd
+                .join(leviath_core::files::MANIFEST_FILENAME)
+                .display()
+                .to_string(),
         });
     }
 
@@ -299,7 +306,7 @@ fn print_agent_listing(
     }
 
     // 2. Local (current directory)
-    let local_manifest = cwd.join("agent.leviath");
+    let local_manifest = cwd.join(leviath_core::files::MANIFEST_FILENAME);
     if filter.shows_agents()
         && local_manifest.exists()
         && let Some(info) = read_agent_info(&local_manifest, config, cwd)
