@@ -466,8 +466,10 @@ impl Provider for RhaiProvider {
                 chunk_tx: Some(chunk_tx),
                 env_allowlist,
             });
-            // "__emit_chunk" is a fixed valid identifier registered above.
-            let on_chunk = FnPtr::new("__emit_chunk").expect("__emit_chunk is a valid identifier");
+            // A fixed identifier registered above. It starts with a letter on
+            // purpose: rhai 1.26 stopped accepting a leading underscore here.
+            let on_chunk =
+                FnPtr::new("leviath_emit_chunk").expect("leviath_emit_chunk is a valid identifier");
             let mut scope = Scope::new();
             engine
                 .call_fn::<Dynamic>(
