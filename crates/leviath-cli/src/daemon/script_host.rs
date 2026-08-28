@@ -210,6 +210,10 @@ pub struct DaemonScriptHost {
     /// `shell()` hands to the child. The same policy the built-in shell tool
     /// applies, so `shell()` is not a way around the `env_var` gate.
     shell_env: leviath_tools::ShellEnvPolicy,
+    /// The run's write budget, when this host serves a run. A script's
+    /// `write_file` and a redirect in its `shell` are writes the run pays
+    /// for like any other; without this they were the two that did not.
+    writes: Option<Arc<crate::daemon::tool_service::WriteBudget>>,
 }
 
 impl DaemonScriptHost {
@@ -226,7 +230,18 @@ impl DaemonScriptHost {
             allow_local_network: false,
             allow_env_vars: Vec::new(),
             shell_env: leviath_tools::ShellEnvPolicy::default(),
+            writes: None,
         }
+    }
+
+    /// Charge this run's write budget for what scripts write. Consuming
+    /// builder used at spawn.
+    pub fn with_write_budget(
+        mut self,
+        writes: Arc<crate::daemon::tool_service::WriteBudget>,
+    ) -> Self {
+        self.writes = Some(writes);
+        self
     }
 
     /// Permit fetches to loopback / private / link-local addresses, from
@@ -351,7 +366,16 @@ impl ScriptHost for DaemonScriptHost {
         // Same withholding the built-in shell tool applies. A script that has
         // `shell` would otherwise be the way around the `env_var` gate above.
         self.shell_env.apply(&mut cmd);
-        self.io.run_shell(cmd, self.shell_timeout)
+        let out = self.io.run_shell(cmd, self.shell_timeout);
+        if let Some(writes) = &self.writes {
+            // A redirect is only measurable after the fact, as in the tool lane.
+            writes.record(crate::tools::measured_write_bytes(
+                "shell",
+                &serde_json::json!({ "command": command }),
+                &self.workdir,
+            ));
+        }
+        out
     }
 
     fn read_file(&self, path: &str) -> Result<String, String> {
@@ -375,7 +399,19 @@ impl ScriptHost for DaemonScriptHost {
             ));
         }
         let resolved = self.resolve_in_workdir(path)?;
-        self.io.write_file(&resolved, content)
+        let bytes = content.len() as u64;
+        if let Some(writes) = &self.writes
+            && let Some(refusal) = writes.check(&self.workdir, bytes).refusal()
+        {
+            return Err(refusal);
+        }
+        let out = self.io.write_file(&resolved, content);
+        if out.is_ok()
+            && let Some(writes) = &self.writes
+        {
+            writes.record(bytes);
+        }
+        out
     }
 
     fn env_var(&self, name: &str) -> Result<String, String> {
@@ -2290,6 +2326,46 @@ mod tests {
         temp_env::with_var_unset("LEVIATH_DEFINITELY_UNSET_XYZ", || {
             assert!(host.env_var("LEVIATH_DEFINITELY_UNSET_XYZ").is_err());
         });
+    }
+
+    /// A script's writes spend the run's budget: `write_file` is refused over
+    /// the ceiling before it lands, and a redirect in `shell` is charged after.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_scripts_writes_spend_the_run_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let writes = Arc::new(crate::daemon::tool_service::WriteBudget::with_probe(
+            leviath_core::write_limits::WriteLimits {
+                per_call: Some(4),
+                per_run: None,
+            },
+            |_| Some(leviath_core::write_limits::MIN_FREE_BYTES * 100),
+        ));
+        let allow = ScriptAllow {
+            http_get: false,
+            http_post: false,
+            shell: true,
+            read_file: false,
+            write_file: true,
+            env_var: false,
+        };
+        let host = DaemonScriptHost::new(allow, dir.path().to_path_buf())
+            .with_write_budget(writes.clone());
+        host.write_file("small.txt", "abc").expect("fits");
+        assert_eq!(writes.written(), 3);
+        let err = host
+            .write_file("big.txt", "too big")
+            .expect_err("over the per-call ceiling");
+        assert!(err.contains("per-call"), "{err}");
+        assert!(!dir.path().join("big.txt").exists());
+        // The redirect's bytes are counted once the shell has run.
+        // The real shell blocks on the runtime, so it runs off the async
+        // thread, the way the tool lane's `block_in_place` places it.
+        tokio::task::spawn_blocking(move || host.shell("echo hi > out.txt"))
+            .await
+            .expect("joined")
+            .expect("ran");
+        let written = writes.written();
+        assert!(written > 3, "{written}");
     }
 
     #[test]
