@@ -147,6 +147,36 @@ cargo llvm-cov --package <crate> --lib --html --open   # browsable per-crate rep
 
 > Branch coverage isn't collected: `cargo llvm-cov --branch` reliably SIGSEGVs inside LLVM's own coverage-mapping code ([open upstream bug](https://github.com/llvm/llvm-project/issues/119558)). See the doc comment atop `xtask/src/coverage.rs` for the full investigation.
 
+## Live-testing against a real daemon
+
+A green test suite and a 100% coverage number are not the same thing as
+"tested": this repository has shipped fixes that a unit test certified and a
+running daemon ignored. Anything that changes what the daemon does on a tool
+call, a spawn or an HTTP request gets driven through a real daemon as well.
+
+`perf-tools/` holds the harness. `perf-tools/harness.sh CMD...` runs `CMD`
+in an isolated environment (`LEVIATH_HOME=/tmp/lv`, the repo `.env` skipped,
+the native OpenAI provider pointed at `perf-tools/mock.py`) and installs a
+one-stage `probe` blueprint. `mock.py` is a stateless OpenAI-compatible server
+that asks for a tool call of your choosing on the first turn; `daemon_drive.py`
+starts everything, spawns runs over `lev serve`, and waits for them to finish:
+
+```sh
+cargo build --release -p leviath-cli
+perf-tools/harness.sh python3 perf-tools/daemon_drive.py \
+    --runs 2 --tool shell --args '{"command":"echo hi > note.txt"}' --yolo --keep
+perf-tools/harness.sh target/release/lev timeline <run-id>
+```
+
+Every "the bad thing did not happen" probe needs a control in the same script
+that makes the good thing happen. A probe whose control is also silent proves
+that the harness is broken, not that the fix works. `mock.py`'s `GET /count`
+exists so "no provider call was made" can be asserted rather than assumed.
+
+The same directory holds the measuring sticks a performance change is gated
+on (`dash_pty.py`, `serve_latency.py`, `binsize.sh`) and the baseline numbers
+under `perf-tools/baselines/`; see `perf-tools/README.md`.
+
 ## Dependencies
 
 Declare a dependency in `[workspace.dependencies]` and reference it from a crate as `{ workspace = true }`. A version written inline in a crate manifest is invisible to anyone reading the root, which is how one crate ends up on a different minor from the rest without anybody deciding that.
