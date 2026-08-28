@@ -133,6 +133,7 @@ impl JsonRpcMessage {
 
     /// Whether this message is a notification: a method call with no id, which
     /// must never be answered.
+    #[cfg(test)]
     pub fn is_notification(&self) -> bool {
         self.id.is_none() && self.method.is_some()
     }
