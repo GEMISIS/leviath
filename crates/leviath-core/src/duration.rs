@@ -61,6 +61,18 @@ pub fn between(from: i64, to: i64) -> u64 {
     to.saturating_sub(from).max(0) as u64
 }
 
+/// The current Unix time in whole seconds, as the run records store it.
+///
+/// Zero if the clock is before 1970, which `SystemTime` can report on a
+/// machine whose clock is unset; every consumer treats zero as "unknown"
+/// rather than as a date. Five crates had their own copy of these four lines.
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// The JSON key carrying a run's age in seconds, on every API that serves runs.
 pub const AGE_SECS_KEY: &str = "age_secs";
 
@@ -141,5 +153,13 @@ mod tests {
     fn between_survives_a_timestamp_at_the_edge_of_the_range() {
         assert_eq!(between(i64::MIN, 0), i64::MAX as u64);
         assert_eq!(between(0, i64::MIN), 0);
+    }
+
+    #[test]
+    fn now_secs_is_a_plausible_unix_time() {
+        // After 2024-01-01 and before 2100-01-01: catches a millisecond or a
+        // zero slipping in, without pinning the test to today.
+        let now = now_secs();
+        assert!((1_704_067_200..4_102_444_800).contains(&now), "{now}");
     }
 }

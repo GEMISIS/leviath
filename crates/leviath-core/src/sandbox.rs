@@ -57,7 +57,7 @@ pub struct ToolSandboxConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<String>,
     /// Whether the sandbox has network access. `false` isolates the network.
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::default_true")]
     pub network: bool,
     /// Extra host paths to bind-mount into the sandbox. The agent's workdir is
     /// always mounted regardless of this list.
@@ -70,10 +70,6 @@ pub struct ToolSandboxConfig {
     /// What to do when the runtime is unavailable.
     #[serde(default)]
     pub on_unavailable: OnUnavailable,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// How much a kind actually isolates, for comparison.

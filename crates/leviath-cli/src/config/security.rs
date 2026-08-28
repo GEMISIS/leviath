@@ -7,8 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::default_true;
-
 /// One agent's entry in `[agent_read_paths.<name>]`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReadPathGrants {
@@ -49,7 +47,7 @@ pub struct SecurityConfig {
     /// `[limits] script_shell_timeout_secs`. Set this to `false` to refuse them
     /// machine-wide, or pass `--no-seed-commands` for a single run. Inspect an
     /// agent's command seeds before installing it with `lev validate <path>`.
-    #[serde(default = "default_true")]
+    #[serde(default = "leviath_core::default_true")]
     pub allow_seed_commands: bool,
 
     /// Whether agent-driven fetches may reach loopback, private, and link-local

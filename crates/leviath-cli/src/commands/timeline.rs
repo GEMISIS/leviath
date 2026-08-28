@@ -339,7 +339,7 @@ fn print_run(run: &RunTimeline, with_calls: bool) {
     for s in &run.stages {
         println!(
             "{:<20} {:>9} {:>6} {:>10} {:>10}",
-            truncate(&s.name, 20),
+            leviath_core::truncate_chars(&s.name, 20),
             hms(s.secs),
             s.calls,
             s.output_tokens,
@@ -359,9 +359,9 @@ fn print_run(run: &RunTimeline, with_calls: bool) {
                 format!("+{}", hms(c.started_at - t0)),
                 hms(c.secs()),
                 c.kind,
-                truncate(&c.stage, 16),
+                leviath_core::truncate_chars(&c.stage, 16),
                 c.iteration,
-                truncate(&c.model, 30),
+                leviath_core::truncate_chars(&c.model, 30),
                 c.prompt_tokens,
                 c.cached_tokens,
                 c.completion_tokens
@@ -385,7 +385,7 @@ fn print_tree(runs: &[RunTimeline]) {
     for r in runs {
         println!(
             "{:<44} {:>5} {:>9} {:>9} {:>9} {:>9}",
-            truncate(&r.run_id, 44),
+            leviath_core::truncate_chars(&r.run_id, 44),
             r.depth,
             hms(r.totals.wall),
             hms(r.totals.inference),
@@ -396,7 +396,11 @@ fn print_tree(runs: &[RunTimeline]) {
     println!();
     println!("{:<40} {:>10}", "MODEL", "PEAK CALLS");
     for (model, peak) in peak_in_flight(runs) {
-        println!("{:<40} {:>10}", truncate(&model, 40), peak);
+        println!(
+            "{:<40} {:>10}",
+            leviath_core::truncate_chars(&model, 40),
+            peak
+        );
     }
 }
 
@@ -438,15 +442,6 @@ fn hms(secs: i64) -> String {
     match h {
         0 => format!("{m}:{sec:02}"),
         _ => format!("{h}:{m:02}:{sec:02}"),
-    }
-}
-
-/// `s` cut to `width` **characters**, so a long id or model name cannot break
-/// the columns or land mid-codepoint.
-fn truncate(s: &str, width: usize) -> String {
-    match s.chars().count() > width {
-        true => s.chars().take(width).collect(),
-        false => s.to_string(),
     }
 }
 

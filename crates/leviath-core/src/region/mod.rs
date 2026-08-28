@@ -430,7 +430,7 @@ pub struct Region {
     /// Carried from the region's declaration so the transform can consult it
     /// without the layout: `transform = "compact"` summarizes by region *kind*,
     /// and kind cannot tell a transcript from a table of results (#369).
-    #[serde(default = "crate::region::default_true")]
+    #[serde(default = "crate::default_true")]
     pub summarizable: bool,
 
     /// What this region does when a write does not fit. See [`Admission`].
@@ -468,11 +468,6 @@ pub struct Region {
 mod schema;
 
 pub use schema::{ContentFormat, RegionSchema, Validator};
-
-/// Serde default for a flag that is on unless a blueprint turns it off.
-pub(crate) fn default_true() -> bool {
-    true
-}
 
 impl Region {
     /// Create a new region with the specified configuration.

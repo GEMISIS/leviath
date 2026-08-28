@@ -74,4 +74,14 @@ pub use taint::{
     GateDecision, GateDecisionSource, GateEvent, RegionTaint, SecurityConfig, TaintLevel,
     ToolClassification, ToolDirection,
 };
-pub use text::{estimate_tokens, floor_char_boundary, truncate_at_boundary};
+pub use text::{estimate_tokens, floor_char_boundary, truncate_at_boundary, truncate_chars};
+
+/// Serde default for a flag that is on unless a file turns it off.
+///
+/// `#[serde(default)]` on a `bool` is `false`, so every "on by default" field
+/// needs a named function, and eight modules across two crates had written
+/// this one. Name it as `default = "crate::default_true"` inside this crate and
+/// `"leviath_core::default_true"` outside it; serde pastes the path as written.
+pub fn default_true() -> bool {
+    true
+}

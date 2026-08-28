@@ -8,7 +8,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 mod stage_ledger;
 
@@ -787,7 +786,7 @@ impl RunMeta {
         workdir: String,
         num_stages: usize,
     ) -> Self {
-        let now = now_secs();
+        let now = crate::duration::now_secs();
         Self {
             run_id,
             agent_name,
@@ -880,7 +879,7 @@ impl RunMeta {
     /// persistence heartbeat calls this, and a run that is wedged must not look
     /// like one that just moved. See [`RunMeta::last_progress_at`].
     pub fn touch(&mut self) {
-        self.updated_at = now_secs();
+        self.updated_at = crate::duration::now_secs();
     }
 }
 
@@ -965,12 +964,6 @@ pub struct ContextSnapshot {
 }
 
 /// Current Unix time in seconds (saturating to 0 before the epoch).
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 #[cfg(test)]
 mod tests {
     use super::*;
