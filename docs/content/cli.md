@@ -691,6 +691,7 @@ the run. Nothing is left in `lev ps` or on disk.
 |---|---|
 | `-m`, `--model <MODEL>` | Test a specific model. Takes the same forms as `lev run --model` |
 | `--no-daemon` | Stop after the third check. Contacts no daemon, starts none, and creates no run |
+| `--offline` | Stop after the second check. Proves the config parses and the model resolves, and bills nothing |
 | `--json` | Print the checks as `{"checks": [...], "passed": bool}` |
 
 `--model` takes `provider/model` to pick both, and a bare model id pairs with your
@@ -700,7 +701,7 @@ string before wiring it into a blueprint: it goes further than `lev models list 
 compiles the provider and reads its catalog but never sends an inference.
 
 `lev doctor` exits non-zero when a check fails, so it works as a CI gate. It bills two inferences
-per run, each capped at 64 output tokens; `--no-daemon` bills one.
+per run, each capped at 64 output tokens; `--no-daemon` bills one, and `--offline` none.
 
 ### `lev setup`
 
