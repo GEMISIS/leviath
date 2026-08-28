@@ -4,6 +4,7 @@
 Usage:
     mock.py PORT                         # every turn answers "done"
     mock.py PORT TOOL '{"json":"args"}'  # first turn asks for TOOL, then "done"
+    mock.py PORT TOOL '[{"a":1},{"a":2}]'  # a JSON list asks for TOOL once per element, in one batch
 
 The decision is made from the request body, never from a turn counter: the
 daemon spends a turn during startup, so a counter-based script never reaches
@@ -23,6 +24,24 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 PORT = int(sys.argv[1])
 TOOL = sys.argv[2] if len(sys.argv) > 2 else None
 ARGS = sys.argv[3] if len(sys.argv) > 3 else "{}"
+
+
+def tool_calls(streaming):
+    """The tool calls the first turn asks for: one per element when ARGS is a
+    JSON list, so a probe can put several calls in one batch."""
+    try:
+        parsed = json.loads(ARGS)
+    except ValueError:
+        parsed = None
+    args_list = parsed if isinstance(parsed, list) else [ARGS]
+    calls = []
+    for i, args in enumerate(args_list):
+        arguments = args if isinstance(args, str) else json.dumps(args)
+        call = {"id": f"call_{i + 1}", "type": "function", "function": {"name": TOOL, "arguments": arguments}}
+        if streaming:
+            call = {"index": i, **call}
+        calls.append(call)
+    return calls
 CALLS = [0]
 USAGE = {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}
 
@@ -59,8 +78,7 @@ class Handler(BaseHTTPRequestHandler):
             message = {
                 "role": "assistant",
                 "content": None,
-                "tool_calls": [{"id": "call_1", "type": "function",
-                                "function": {"name": TOOL, "arguments": ARGS}}],
+                "tool_calls": tool_calls(streaming=False),
             }
             finish = "tool_calls"
         else:
@@ -71,8 +89,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _sse(self, want_tool):
         if want_tool:
-            delta = {"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1", "type": "function",
-                                                          "function": {"name": TOOL, "arguments": ARGS}}]}
+            delta = {"role": "assistant", "tool_calls": tool_calls(streaming=True)}
             finish = "tool_calls"
         else:
             delta = {"role": "assistant", "content": "done"}
