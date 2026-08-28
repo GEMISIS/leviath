@@ -2,10 +2,10 @@
 
 mod stream;
 
+use crate::capabilities::{Match, Row};
 use crate::provider::{
-    FinishReason, InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities,
-    ModelCapabilityOverride, ModelInfo, Provider, ProviderError, Result, StreamChunk, TokenUsage,
-    ToolCall,
+    FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride,
+    ModelInfo, Provider, ProviderError, Result, StreamChunk, TokenUsage, ToolCall,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -296,6 +296,87 @@ pub struct AnthropicProvider {
     cache_ttl: CacheTtl,
 }
 
+/// What this build knows about Anthropic's models, most specific first.
+///
+/// The generic Claude 4.x row at the bottom catches older 4.5 snapshots; it
+/// must stay below `claude-opus-4-8` and friends, which it would otherwise
+/// swallow with the wrong output limit.
+pub(crate) const MODELS: &[Row] = &[
+    // Opus 5: top-tier, 1M context, 128K output, no temperature.
+    Row {
+        matches: &[Match::Contains("claude-opus-5")],
+        temperature: false,
+        tools: true,
+        context: 1_000_000,
+        output: 128_000,
+    },
+    // Sonnet 5: 1M context, 128K output, no temperature.
+    Row {
+        matches: &[Match::Contains("claude-sonnet-5")],
+        temperature: false,
+        tools: true,
+        context: 1_000_000,
+        output: 128_000,
+    },
+    // Fable 5 / Mythos 5: top-tier, 1M context, 128K output, no temperature.
+    Row {
+        matches: &[
+            Match::Contains("claude-fable-5"),
+            Match::Contains("claude-mythos-5"),
+        ],
+        temperature: false,
+        tools: true,
+        context: 1_000_000,
+        output: 128_000,
+    },
+    // Opus 4.8 / 4.7: 1M context, 128K output, no temperature.
+    Row {
+        matches: &[
+            Match::Contains("claude-opus-4-8"),
+            Match::Contains("claude-opus-4-7"),
+        ],
+        temperature: false,
+        tools: true,
+        context: 1_000_000,
+        output: 128_000,
+    },
+    // Opus 4.6 and Sonnet 4.6: 1M context, 128K output, temperature supported.
+    Row {
+        matches: &[Match::Contains("claude-opus-4-6")],
+        temperature: true,
+        tools: true,
+        context: 1_000_000,
+        output: 128_000,
+    },
+    Row {
+        matches: &[Match::Contains("claude-sonnet-4-6")],
+        temperature: true,
+        tools: true,
+        context: 1_000_000,
+        output: 128_000,
+    },
+    // Haiku 4.5: 200K context, 64K output, temperature supported.
+    Row {
+        matches: &[Match::Contains("claude-haiku-4-5")],
+        temperature: true,
+        tools: true,
+        context: 200_000,
+        output: 64_000,
+    },
+    // Generic Claude 4.x fallback (e.g. older 4.5 snapshots).
+    Row {
+        matches: &[
+            Match::Contains("claude-opus-4"),
+            Match::Contains("claude-sonnet-4"),
+            Match::Contains("claude-haiku-4"),
+        ],
+        temperature: false,
+        tools: true,
+        context: 1_000_000,
+        output: 32_768,
+    },
+];
+
 impl AnthropicProvider {
     /// Create a new Anthropic provider.
     pub fn new(client: reqwest::Client, api_key: String) -> Self {
@@ -328,106 +409,7 @@ impl AnthropicProvider {
 
     /// Return built-in capabilities for a model based on its name pattern.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        // Opus 5 - top-tier, 1M context, 128K output, no temperature
-        if model.contains("claude-opus-5") {
-            return ModelCapabilities {
-                supports_temperature: false,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_000_000,
-                max_output_tokens: 128_000,
-                limits_source: LimitsSource::Builtin,
-            };
-        }
-        // Sonnet 5 - 1M context, 128K output, no temperature
-        if model.contains("claude-sonnet-5") {
-            return ModelCapabilities {
-                supports_temperature: false,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_000_000,
-                max_output_tokens: 128_000,
-                limits_source: LimitsSource::Builtin,
-            };
-        }
-        // Fable 5 / Mythos 5 - top-tier, 1M context, 128K output, no temperature
-        if model.contains("claude-fable-5") || model.contains("claude-mythos-5") {
-            return ModelCapabilities {
-                supports_temperature: false,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_000_000,
-                max_output_tokens: 128_000,
-                limits_source: LimitsSource::Builtin,
-            };
-        }
-        // Opus 4.8 / 4.7 - 1M context, 128K output, no temperature
-        if model.contains("claude-opus-4-8") || model.contains("claude-opus-4-7") {
-            return ModelCapabilities {
-                supports_temperature: false,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_000_000,
-                max_output_tokens: 128_000,
-                limits_source: LimitsSource::Builtin,
-            };
-        }
-        // Opus 4.6 - 1M context, 128K output, temperature supported
-        if model.contains("claude-opus-4-6") {
-            return ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_000_000,
-                max_output_tokens: 128_000,
-                limits_source: LimitsSource::Builtin,
-            };
-        }
-        // Sonnet 4.6 - 1M context, 128K output, temperature supported
-        if model.contains("claude-sonnet-4-6") {
-            return ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_000_000,
-                max_output_tokens: 128_000,
-                limits_source: LimitsSource::Builtin,
-            };
-        }
-        // Haiku 4.5 - 200K context, 64K output, temperature supported
-        if model.contains("claude-haiku-4-5") {
-            return ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 200_000,
-                max_output_tokens: 64_000,
-                limits_source: LimitsSource::Builtin,
-            };
-        }
-        // Generic Claude 4.x fallback (e.g. older 4.5 snapshots)
-        if model.contains("claude-opus-4")
-            || model.contains("claude-sonnet-4")
-            || model.contains("claude-haiku-4")
-        {
-            return ModelCapabilities {
-                supports_temperature: false,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 1_000_000,
-                max_output_tokens: 32_768,
-                limits_source: LimitsSource::Builtin,
-            };
-        }
-        ModelCapabilities::default()
+        crate::capabilities::lookup(MODELS, model, ModelCapabilities::default())
     }
 
     /// Point this provider at a different host.
@@ -993,6 +975,7 @@ mod tests {
         assert_eq!(provider.pricing("no-such-model-9"), None);
     }
     use super::*;
+    use crate::provider::LimitsSource;
 
     // ─── A breakpoint on a tool turn is not thrown away ─────────────────────
 

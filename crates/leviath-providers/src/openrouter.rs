@@ -3,6 +3,7 @@
 //! OpenRouter provides access to multiple models through a unified API.
 //! Uses OpenAI-compatible format with additional headers.
 
+use crate::capabilities::{Match, Row};
 use crate::openai_compat::{
     openai_sse_stream, parse_openai_response, send_chat_request, temperature_refused,
 };
@@ -315,169 +316,133 @@ impl OpenRouterProvider {
 /// and lifting it out is what lets `capabilities` merge an override onto it
 /// instead of replacing it wholesale.
 fn builtin_capabilities(model: &str) -> ModelCapabilities {
-    // ── Google Gemini ─────────────────────────────────────────────────────
-    if model.starts_with("google/gemini") {
-        return ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 1_048_576,
-            max_output_tokens: 65_536,
-            limits_source: LimitsSource::Builtin,
-        };
-    }
-    // ── Meta Llama 4 Scout - 10M context ─────────────────────────────────
-    if model.contains("llama-4-scout") {
-        return ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 10_000_000,
-            max_output_tokens: 32_768,
-            limits_source: LimitsSource::Builtin,
-        };
-    }
-    // ── Meta Llama 4 (Maverick + others) - 1M context ────────────────────
-    if model.starts_with("meta-llama/llama-4") {
-        return ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 1_048_576,
-            max_output_tokens: 32_768,
-            limits_source: LimitsSource::Builtin,
-        };
-    }
-    // ── DeepSeek R1 - reasoning-only, no tools, no temperature ───────────
-    if model.contains("deepseek-r1") {
-        return ModelCapabilities {
-            supports_temperature: false,
-            supports_streaming: true,
-            supports_tools: false,
-            supports_system_prompt: true,
-            max_context_tokens: 163_840,
-            max_output_tokens: 32_768,
-            limits_source: LimitsSource::Builtin,
-        };
-    }
-    // ── DeepSeek V4 Pro - 1M context, 384K output ────────────────────────
-    if model.contains("deepseek-v4-pro") {
-        return ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 1_048_576,
-            max_output_tokens: 393_216,
-            limits_source: LimitsSource::Builtin,
-        };
-    }
-    // ── DeepSeek V4 Flash / V3.x ─────────────────────────────────────────
-    if model.starts_with("deepseek/deepseek-v") {
-        return ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 1_048_576,
-            max_output_tokens: 65_536,
-            limits_source: LimitsSource::Builtin,
-        };
-    }
-    // ── Mistral Large ─────────────────────────────────────────────────────
-    if model.contains("mistral-large") {
-        return ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 262_144,
-            max_output_tokens: 32_768,
-            limits_source: LimitsSource::Builtin,
-        };
-    }
-    // ── Mistral Medium / Small ────────────────────────────────────────────
-    if model.starts_with("mistralai/") {
-        return ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 131_072,
-            max_output_tokens: 32_768,
-            limits_source: LimitsSource::Builtin,
-        };
-    }
-    // ── Qwen 3.6+ / Qwen3 Coder - 1M context ────────────────────────────
-    if model.contains("qwen3.6") || model.contains("qwen3-coder") {
-        return ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 1_048_576,
-            max_output_tokens: 65_536,
-            limits_source: LimitsSource::Builtin,
-        };
-    }
-    // ── Qwen3 general ─────────────────────────────────────────────────────
-    if model.starts_with("qwen/") {
-        return ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 131_072,
-            max_output_tokens: 32_768,
-            limits_source: LimitsSource::Builtin,
-        };
-    }
-    // ── Anthropic models via OpenRouter - inherit direct-provider flags ───
-    let anthropic_no_temp = model.contains("claude-opus-4-8")
-        || model.contains("claude-opus-4-7")
-        || model.contains("claude-fable-5")
-        || model.contains("claude-mythos-5");
-    if model.starts_with("anthropic/") {
-        return ModelCapabilities {
-            supports_temperature: !anthropic_no_temp,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 1_000_000,
-            max_output_tokens: 128_000,
-            limits_source: LimitsSource::Builtin,
-        };
-    }
-    // ── OpenAI o-series via OpenRouter - no temperature ───────────────────
-    if model.starts_with("openai/o") {
-        return ModelCapabilities {
-            supports_temperature: false,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 200_000,
-            max_output_tokens: 100_000,
-            limits_source: LimitsSource::Builtin,
-        };
-    }
-    // ── OpenAI GPT-5.x via OpenRouter ────────────────────────────────────
-    if model.starts_with("openai/gpt-5") {
-        return ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 1_050_000,
-            max_output_tokens: 128_000,
-            limits_source: LimitsSource::Builtin,
-        };
-    }
-    // ── Conservative fallback for unknown OpenRouter models ───────────────
-    FALLBACK_CAPABILITIES
+    crate::capabilities::lookup(MODELS, model, FALLBACK_CAPABILITIES)
 }
+
+/// What this build knows about the models OpenRouter routes to, most
+/// specific first.
+///
+/// Rows for a single model (`llama-4-scout`, `deepseek-v4-pro`, the
+/// Anthropic models that refuse a temperature) sit above their family rows.
+pub(crate) const MODELS: &[Row] = &[
+    // Google Gemini.
+    Row {
+        matches: &[Match::Prefix("google/gemini")],
+        temperature: true,
+        tools: true,
+        context: 1_048_576,
+        output: 65_536,
+    },
+    // Meta Llama 4 Scout: 10M context.
+    Row {
+        matches: &[Match::Contains("llama-4-scout")],
+        temperature: true,
+        tools: true,
+        context: 10_000_000,
+        output: 32_768,
+    },
+    // Meta Llama 4 (Maverick and others): 1M context.
+    Row {
+        matches: &[Match::Prefix("meta-llama/llama-4")],
+        temperature: true,
+        tools: true,
+        context: 1_048_576,
+        output: 32_768,
+    },
+    // DeepSeek R1: reasoning-only, no tools, no temperature.
+    Row {
+        matches: &[Match::Contains("deepseek-r1")],
+        temperature: false,
+        tools: false,
+        context: 163_840,
+        output: 32_768,
+    },
+    // DeepSeek V4 Pro: 1M context, 384K output.
+    Row {
+        matches: &[Match::Contains("deepseek-v4-pro")],
+        temperature: true,
+        tools: true,
+        context: 1_048_576,
+        output: 393_216,
+    },
+    // DeepSeek V4 Flash / V3.x.
+    Row {
+        matches: &[Match::Prefix("deepseek/deepseek-v")],
+        temperature: true,
+        tools: true,
+        context: 1_048_576,
+        output: 65_536,
+    },
+    // Mistral Large.
+    Row {
+        matches: &[Match::Contains("mistral-large")],
+        temperature: true,
+        tools: true,
+        context: 262_144,
+        output: 32_768,
+    },
+    // Mistral Medium / Small.
+    Row {
+        matches: &[Match::Prefix("mistralai/")],
+        temperature: true,
+        tools: true,
+        context: 131_072,
+        output: 32_768,
+    },
+    // Qwen 3.6+ / Qwen3 Coder: 1M context.
+    Row {
+        matches: &[Match::Contains("qwen3.6"), Match::Contains("qwen3-coder")],
+        temperature: true,
+        tools: true,
+        context: 1_048_576,
+        output: 65_536,
+    },
+    // Qwen3 general.
+    Row {
+        matches: &[Match::Prefix("qwen/")],
+        temperature: true,
+        tools: true,
+        context: 131_072,
+        output: 32_768,
+    },
+    // Anthropic models via OpenRouter inherit the direct provider's flags:
+    // these four refuse a temperature, the rest of the family takes one.
+    Row {
+        matches: &[
+            Match::PrefixAnd("anthropic/", "claude-opus-4-8"),
+            Match::PrefixAnd("anthropic/", "claude-opus-4-7"),
+            Match::PrefixAnd("anthropic/", "claude-fable-5"),
+            Match::PrefixAnd("anthropic/", "claude-mythos-5"),
+        ],
+        temperature: false,
+        tools: true,
+        context: 1_000_000,
+        output: 128_000,
+    },
+    Row {
+        matches: &[Match::Prefix("anthropic/")],
+        temperature: true,
+        tools: true,
+        context: 1_000_000,
+        output: 128_000,
+    },
+    // OpenAI o-series via OpenRouter: no temperature.
+    Row {
+        matches: &[Match::Prefix("openai/o")],
+        temperature: false,
+        tools: true,
+        context: 200_000,
+        output: 100_000,
+    },
+    // OpenAI GPT-5.x via OpenRouter.
+    Row {
+        matches: &[Match::Prefix("openai/gpt-5")],
+        temperature: true,
+        tools: true,
+        context: 1_050_000,
+        output: 128_000,
+    },
+];
 
 /// What an OpenRouter model this build has never heard of is assumed to be.
 ///
@@ -486,7 +451,7 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
 /// guessing low is that percentage budgets resolve against a window eight times
 /// smaller than a 1M-token model really has, which is why reaching this is
 /// worth saying out loud - see [`OpenRouterProvider::warn_if_unknown`].
-const FALLBACK_CAPABILITIES: ModelCapabilities = ModelCapabilities {
+pub(crate) const FALLBACK_CAPABILITIES: ModelCapabilities = ModelCapabilities {
     supports_temperature: true,
     supports_streaming: true,
     supports_tools: true,
