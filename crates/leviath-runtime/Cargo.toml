@@ -49,7 +49,7 @@ leviath-testkit = { workspace = true }
 # virtual clock rather than by sleeping through a real hour.
 tokio = { workspace = true, features = ["test-util"] }
 temp-env = { workspace = true, features = ["async_closure"] }
-tempfile = "3"
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

@@ -22,7 +22,7 @@ tar = { workspace = true }
 
 [dev-dependencies]
 leviath-testkit = { workspace = true }
-tempfile = "3"
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

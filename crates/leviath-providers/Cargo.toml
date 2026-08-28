@@ -41,7 +41,7 @@ rand = { workspace = true }
 rhai = { workspace = true }
 # The Claude Code transport hands its system prompt to the CLI as a file: an
 # assembled context routinely exceeds Linux's 128 KB cap on a single argv entry.
-tempfile = "3"
+tempfile = { workspace = true }
 
 [dev-dependencies]
 leviath-testkit = { workspace = true }
