@@ -53,7 +53,7 @@ const STAGE_HOOK_MAX_OPERATIONS: u64 = 100_000;
 /// The blueprint field and the Rhai function share a name on purpose: a
 /// blueprint saying `on_stage_enter = "hooks.rhai"` means "call
 /// `fn on_stage_enter(ctx)` in that file", with nothing in between to look up.
-pub const HOOK_NAMES: &[&str] = &[
+pub(crate) const HOOK_NAMES: &[&str] = &[
     "on_stage_enter",
     "on_stage_exit",
     "before_inference",
@@ -102,7 +102,7 @@ impl HookScript {
         self.defined.iter().any(|d| d == hook)
     }
 
-    /// Every hook this script defines, in [`HOOK_NAMES`] order.
+    /// Every hook this script defines, in `HOOK_NAMES` order.
     pub fn defined(&self) -> &[String] {
         &self.defined
     }

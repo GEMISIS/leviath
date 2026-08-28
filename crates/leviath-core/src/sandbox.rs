@@ -9,8 +9,8 @@
 //!
 //! The type follows the same "optional block at agent + stage level, cascade
 //! through a global default" shape as [`crate::SecurityConfig`]; see
-//! [`resolve_sandbox`]. It is named `ToolSandboxConfig` to avoid colliding with
-//! the unrelated Rhai `SandboxConfig` in `leviath-scripting`.
+//! [`resolve_sandbox`]. It is named `ToolSandboxConfig` because it configures
+//! where tools run, not the Rhai engine's own operation limits.
 
 use serde::{Deserialize, Serialize};
 

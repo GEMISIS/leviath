@@ -8,27 +8,22 @@ pub struct ScriptEngine {
     engine: Engine,
 }
 
+/// Operation budget for a seed or transform script: enough for any
+/// text-shaping a region seed does, and a ceiling on a script that loops.
+/// Tool scripts get their own, larger budget (`SCRIPT_TOOL_MAX_OPERATIONS`).
+const TRANSFORM_MAX_OPERATIONS: u64 = 100_000;
+
 impl ScriptEngine {
     /// Create a new sandboxed script engine.
     pub fn new() -> Self {
         let mut engine = Engine::new();
-        crate::harden(&mut engine, 100_000);
+        crate::harden(&mut engine, TRANSFORM_MAX_OPERATIONS);
 
         // Register Leviath functions and types
         crate::functions::register_functions(&mut engine);
         crate::types::register_types(&mut engine);
 
         Self { engine }
-    }
-
-    /// Validate content using a Rhai script.
-    pub fn validate(&self, script: &str, content: &str) -> Result<bool> {
-        let mut scope = Scope::new();
-        scope.push("content", content.to_string());
-
-        self.engine
-            .eval_with_scope::<bool>(&mut scope, script)
-            .map_err(|e| Error::ExecutionFailed(e.to_string()))
     }
 
     /// Transform content using a Rhai script.
@@ -91,102 +86,20 @@ impl Default for ScriptEngine {
 mod tests {
     use super::*;
 
+    /// `Default` is what clippy asks of a zero-argument `new`, and it has to
+    /// build the same engine.
+    #[test]
+    fn default_builds_an_engine() {
+        let engine = ScriptEngine::default();
+        assert_eq!(engine.transform(r#""ok""#, rhai::Map::new()).unwrap(), "ok");
+    }
+
     #[test]
     fn test_engine_creation() {
         let engine = ScriptEngine::new();
         // Just verify the engine was created successfully
         assert!(engine.engine.max_operations() > 0);
     }
-
-    #[test]
-    fn test_simple_validation() {
-        let engine = ScriptEngine::new();
-        let script = r#"
-            content.contains("test")
-        "#;
-        let result = engine.validate(script, "this is a test");
-        assert!(result.is_ok());
-        assert!(result.unwrap());
-    }
-
-    #[test]
-    fn test_string_operations() {
-        let engine = ScriptEngine::new();
-
-        // Test starts_with
-        let script = r#"content.starts_with("Hello")"#;
-        assert!(engine.validate(script, "Hello, world!").unwrap());
-
-        // Test ends_with
-        let script = r#"content.ends_with("!")"#;
-        assert!(engine.validate(script, "Hello, world!").unwrap());
-
-        // Test trim
-        let script = r#"content.trim() == "hello""#;
-        assert!(engine.validate(script, "  hello  ").unwrap());
-    }
-
-    #[test]
-    fn test_json_validation() {
-        let engine = ScriptEngine::new();
-        let script = r#"is_json(content)"#;
-
-        assert!(engine.validate(script, r#"{"key": "value"}"#).unwrap());
-        assert!(!engine.validate(script, "not json").unwrap());
-    }
-
-    #[test]
-    fn test_mermaid_validation() {
-        let engine = ScriptEngine::new();
-        let script = r#"is_mermaid(content)"#;
-
-        assert!(engine.validate(script, "graph TD\n  A --> B").unwrap());
-        assert!(
-            engine
-                .validate(script, "sequenceDiagram\n  Alice->>Bob: Hello")
-                .unwrap()
-        );
-        assert!(!engine.validate(script, "just text").unwrap());
-    }
-
-    #[test]
-    fn test_token_counting() {
-        let engine = ScriptEngine::new();
-        let script = r#"count_tokens(content) > 10"#;
-
-        let long_text = "a".repeat(50);
-        assert!(engine.validate(script, &long_text).unwrap());
-        assert!(!engine.validate(script, "short").unwrap());
-    }
-
-    #[test]
-    fn test_split_join() {
-        let engine = ScriptEngine::new();
-        let script = r#"
-            let parts = content.split(",");
-            parts.len() == 3 && join(parts, "|") != ""
-        "#;
-        assert!(engine.validate(script, "a,b,c").unwrap());
-    }
-
-    #[test]
-    fn test_sandbox_limits() {
-        let engine = ScriptEngine::new();
-        // Test operation limit by creating an infinite loop
-        let script = r#"
-            let x = 0;
-            loop {
-                x = x + 1;
-                if x > 200000 { break; }
-            }
-            true
-        "#;
-        // Should fail due to operation limit
-        let result = engine.validate(script, "test");
-        assert!(result.is_err());
-    }
-
-    // ─── transform() ────────────────────────────────────────────────────────
 
     #[test]
     fn test_transform_success() {
@@ -269,15 +182,6 @@ mod tests {
     }
 
     // ─── Default ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_default_creates_working_engine() {
-        let engine = ScriptEngine::default();
-        let result = engine.validate("content.len() > 0", "hi");
-        assert!(result.unwrap());
-    }
-
-    // ─── check_gate_rule ────────────────────────────────────────────────────
 
     #[test]
     fn test_gate_rule_allows_matching_tool() {
