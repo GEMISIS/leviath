@@ -200,22 +200,55 @@ impl Dashboard {
             PromptFocus::System => &prompts.system,
             PromptFocus::Transition => &prompts.transition,
         });
-        let stage = prompts.stage.clone();
-        let dir = self.external_edit_dir.clone();
-        let path = dir.join(format!(
-            "{stage}-{}.md",
-            match target {
-                PromptFocus::System => "system",
-                PromptFocus::Transition => "transition",
-            }
-        ));
-        let written = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, &text));
-        match written {
-            Ok(()) => self.pending_external_edit = Some(ExternalEdit { path, target }),
+        match self.write_handoff_file(&text) {
+            Ok(path) => self.pending_external_edit = Some(ExternalEdit { path, target }),
             Err(e) => {
                 self.editor().message = Some(format!("Could not hand the prompt to an editor: {e}"))
             }
         }
+    }
+
+    /// Write `text` to a fresh, owner-only file in this dashboard's private
+    /// scratch directory and return its path.
+    ///
+    /// The directory is made on the first handoff (`tempdir_in` under
+    /// `external_edit_dir`, which is the system temp directory in
+    /// production) and the file's name is random, so neither is a path anyone
+    /// else could have prepared. The stage's name is not part of it.
+    fn write_handoff_file(&mut self, text: &str) -> std::io::Result<std::path::PathBuf> {
+        use std::io::Write as _;
+        if self.external_edit_scratch.is_none() {
+            // Chained rather than two `?`s: the parent is the system temp
+            // directory in production, and the one failure a test can
+            // arrange (a file where the directory should be) fails the
+            // first step and short-circuits the second.
+            let dir = &self.external_edit_dir;
+            let scratch = std::fs::create_dir_all(dir)
+                .and_then(|()| {
+                    tempfile::Builder::new()
+                        .prefix("leviath-dash-")
+                        .tempdir_in(dir)
+                })
+                // `tempdir_in` makes the directory at the umask; the files in
+                // it are owner-only, and so is the directory that lists them.
+                .and_then(|scratch| {
+                    leviath_sys::secure_dir_perms(scratch.path()).map(|()| scratch)
+                })?;
+            self.external_edit_scratch = Some(scratch);
+        }
+        let dir = self
+            .external_edit_scratch
+            .as_ref()
+            .expect("made above")
+            .path();
+        // A fresh file created for writing has no reachable failure past its
+        // creation, so the steps are chained the same way.
+        tempfile::Builder::new()
+            .prefix("prompt-")
+            .suffix(".md")
+            .tempfile_in(dir)
+            .and_then(|mut file| file.write_all(text.as_bytes()).map(|()| file))
+            .and_then(|file| file.keep().map(|(_, path)| path).map_err(|e| e.error))
     }
 
     /// Whether a prompt is waiting for `$EDITOR`: the loop hands the terminal

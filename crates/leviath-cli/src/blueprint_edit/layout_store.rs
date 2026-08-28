@@ -85,6 +85,6 @@ impl LayoutStore {
         std::fs::create_dir_all(path.parent().unwrap_or(Path::new("")))?;
         let text =
             serde_json::to_string_pretty(&self.layouts).expect("a map of numbers serializes");
-        std::fs::write(path, text)
+        leviath_sys::write_atomic(path, text.as_bytes(), None)
     }
 }
