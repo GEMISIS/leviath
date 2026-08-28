@@ -26,6 +26,15 @@ on:
   # the only way that stays fixed.
   workflow_call:
 
+# A second push to a PR used to run a second full ~55-job suite next to the
+# first. Cancel the older one for pull requests only: a push to main and a
+# release calling this file must run to completion, and `github.workflow` is
+# the caller's name when this file is called, so a release run never shares a
+# group with the CI run for the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -36,6 +45,11 @@ permissions:
   contents: read
 
 jobs:
+  # Every job carries a `timeout-minutes`. The default is 360, and a hung
+  # `cargo test` (this suite spawns daemons, opens sockets, drives websockets)
+  # used to hold a runner for six hours - up to 39 of them in the coverage
+  # matrix. The numbers are roughly double the longest run seen.
+  #
   # Four legs, not three. `ubuntu-24.04-arm` is here because the release builds
   # ship `aarch64-unknown-linux-{gnu,musl}` and nothing had ever run them on an
   # ARM machine: `macos-latest` is Apple Silicon, so macOS was covered by
@@ -52,17 +66,17 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: ./.github/actions/rust-setup
         with:
-          toolchain: stable
-          components: rustfmt,clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+          # Same key as Clippy: both compile every target on this OS.
+          shared-key: build-${{ matrix.os }}
       - name: Build
         run: cargo build --all-targets
       - name: Test
@@ -103,6 +117,7 @@ jobs:
     needs: [test]
     if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.workflow == 'CI'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Publish combined test status badge
         uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
@@ -128,29 +143,28 @@ jobs:
   clippy:
     name: Clippy (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: ./.github/actions/rust-setup
         with:
-          toolchain: stable
-          components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+          shared-key: build-${{ matrix.os }}
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: ./.github/actions/rust-setup
         with:
-          toolchain: stable
-          components: rustfmt
+          cache: "false"
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -167,11 +181,10 @@ jobs:
   default-features:
     name: Build with default features
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          toolchain: stable
+      - uses: ./.github/actions/rust-setup
       - name: Check the runtime without its optional features
         run: cargo check -p leviath-runtime --all-targets
       - name: Check the facade without its optional features
@@ -200,11 +213,10 @@ jobs:
   supply-chain:
     name: Supply chain
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          toolchain: stable
+      - uses: ./.github/actions/rust-setup
       - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2
         with:
           tool: cargo-deny
@@ -240,6 +252,7 @@ jobs:
   docs:
     name: Docs
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Lifted to `env` because the `secrets` context is not available in a step's
     # `if` - naming it there is a workflow validation error, which fails the run
     # before a single job starts. `env` is available, and holds the same value.
@@ -247,10 +260,7 @@ jobs:
       DOCS_SSG_TOKEN: ${{ secrets.DOCS_SSG_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: ./.github/actions/rust-setup
       - name: Check docs
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
       - name: Check docs/content links and frontmatter
@@ -303,6 +313,7 @@ jobs:
   coverage:
     name: Coverage (${{ matrix.os }} / ${{ matrix.package }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       # One package's failure must not cancel the others' runs.
       fail-fast: false
@@ -329,11 +340,7 @@ jobs:
           - leviath-telemetry
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          toolchain: stable
-          components: llvm-tools
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: ./.github/actions/rust-setup
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2
         with:
@@ -361,6 +368,7 @@ jobs:
     name: Coverage gate (${{ matrix.os }})
     needs: [coverage]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -408,6 +416,7 @@ jobs:
   check-exclusions:
     name: Check coverage suppression markers
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install ast-grep
@@ -442,6 +451,7 @@ jobs:
   guard-main-rs:
     name: Guard bin entrypoint (main.rs)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.event_name == 'pull_request'
     # Reading the labels needs more than the workflow-wide `contents: read`.
     permissions:
@@ -509,6 +519,7 @@ jobs:
   guard-version-bump:
     name: Guard release version bump
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.event_name == 'pull_request'
     # See `guard-main-rs`: the live label read needs its own scope.
     permissions:
@@ -567,6 +578,7 @@ jobs:
   guard-facade:
     name: Guard re-export-only facade (crates/leviath)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Require crates/leviath to stay re-export-only

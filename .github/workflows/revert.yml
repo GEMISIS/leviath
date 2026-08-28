@@ -12,13 +12,24 @@ on:
         required: true
         type: string
 
+# Read-only by default, matching the other release workflows; the one job
+# that rewrites the `latest` release elevates itself.
 permissions:
-  contents: write
+  contents: read
+
+# A revert started while another is running must wait for it: both rewrite
+# the same release and tag.
+concurrency:
+  group: prod-revert
+  cancel-in-progress: false
 
 jobs:
   revert:
     name: Revert Prod
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
     environment: production  # Requires same approval as prod deploy
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

@@ -140,6 +140,7 @@ workspace = true
 # instead of panic. The GitHub release binaries and the crates.io install
 # must behave the same, so the warning is the price.
 [profile.release]
+opt-level = 3
 overflow-checks = true
 lto = "fat"
 codegen-units = 1

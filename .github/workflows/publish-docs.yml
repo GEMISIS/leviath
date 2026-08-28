@@ -34,9 +34,16 @@ permissions:
   id-token: write
   contents: read
 
+# Two publishes of the same channel must not interleave their S3 syncs: the
+# sync uses `--delete`, so the loser would remove the winner's pages.
+concurrency:
+  group: publish-docs-${{ inputs.channel }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout Leviath (docs content)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

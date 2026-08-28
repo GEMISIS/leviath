@@ -256,7 +256,21 @@ tower-http = { version = "0.7", features = ["cors"] }
 # A copy of this section lives in crates/leviath-cli/Cargo.toml so that
 # `cargo install leviath-cli` (where that manifest is the root and this one
 # does not exist) builds with the same settings. Keep the two in sync.
+# Line tables only, not full DWARF. The debug `lev` was 181 MB, 103 MB of it
+# symbol and debug-info sections, and CI rebuilds it roughly fifty times per
+# pull request across the test, clippy and per-package coverage jobs. Line
+# tables keep file:line in backtraces and are all `cargo-llvm-cov` needs;
+# nothing here debugs the daemon under a debugger. Release is unaffected.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
+# The default, stated so that changing it is a decision rather than an
+# omission. `"s"` or `"z"` would take 1-3 MB off the binary and slow the paths
+# that matter here - token-window arithmetic, JSON, BPE encoding - and has not
+# been measured; do not flip it without a before/after on the daemon drive.
+opt-level = 3
+
 # Overflow panics instead of wrapping. This workspace already treats
 # index/arithmetic mistakes as a real class of bug rather than a theoretical one
 # (see the `clippy::string_slice` deny above, which exists because a byte index
