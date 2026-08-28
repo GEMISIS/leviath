@@ -108,10 +108,48 @@ about them:
   both implemented; anything else gets whatever the platform does by default,
   and `leviath-sys`'s fallback module says so rather than pretending otherwise.
 
-**Known gaps.** None currently tracked. Everything the threat model claims is
-implemented and tested on every supported platform. If you find something this
-document claims but the code does not do, that is a vulnerability and we want to
-hear about it - see the top of this file.
+**Known gaps.** The ones we know about, so nobody has to find them twice.
+Each is a place where the code is weaker than a reader of this document might
+assume; none is a case of the code doing something other than what it says.
+
+- **The Windows control pipe checks no peer.** On Unix the daemon refuses a
+  control connection from another user, having read the peer's uid from the
+  kernel. The Windows pipe has no such check and sets no security descriptor,
+  so what stands between another local user and the daemon there is the
+  control token alone (owner-only file, fresh per daemon). The code says the
+  same where it accepts the connection.
+- **`[sandbox]` isolates shell commands, not file tools.** The boundary
+  covers the `shell` tool, seed commands and a Rhai tool's `shell()`. File
+  tools stay on the host and rely on workdir confinement; a Rhai tool's
+  `http_get`/`http_post` and `read_file`/`write_file` run on the host too.
+  Pick `container` when the filesystem is what you need isolated, and know
+  that a script tool reaches the network from the host either way.
+- **A run's webhook secret is on disk in plaintext.** `callback_secret` is
+  persisted in the run's `meta.json` so the daemon can still sign a webhook
+  for a run it reloaded after a restart. It is stripped from every API
+  response, and the file is `0600` in a `0700` directory, which is the same
+  protection the provider keys in `config.toml` get. It is not encrypted at
+  rest, and it stays on disk until the run is deleted.
+- **`lev serve` does not check the `Host` header.** A DNS-rebinding page can
+  therefore make a browser send requests to a local server under an origin
+  the server would accept. The bearer token is what stops that from being
+  useful: every API route requires it and a rebinding page does not have it.
+  Do not embed the token in a page served from anywhere else, and do not use
+  `--cors "*"` on a machine that browses the web.
+- **OTLP log records carry the run's output unredacted.** With
+  `[telemetry]` on, every output and runtime log line is exported as it was
+  written. Nothing redacts a credential a tool happened to print on its way
+  out, so point the exporter only at a collector you would trust with the
+  run's transcript.
+- **`POST /api/update` runs the installer it fetches.** On a script install
+  the update step is `curl -fsSL https://leviath.dev/install.sh | sh`, over
+  TLS and unpinned; the script then verifies the release checksums, but the
+  script itself is trusted on the strength of the TLS connection. It is
+  behind `--allow-admin` for that reason. A pinned install goes through your
+  package manager instead.
+
+If you find something this document claims but the code does not do, that is a
+vulnerability and we want to hear about it - see the top of this file.
 
 ## Where secrets live
 
@@ -120,6 +158,7 @@ hear about it - see the top of this file.
 | Provider API keys | `~/.leviath/config.toml`, or the OS keychain | `0600` |
 | MCP OAuth access + refresh tokens | `~/.leviath/mcp-auth.json`, or the OS keychain | `0600` |
 | Run artifacts (prompts, conversations) | `~/.leviath/runs/<id>/` | `0600` in a `0700` dir |
+| A run's webhook signing secret (`callback_secret`) | `~/.leviath/runs/<id>/meta.json` | same as the run; never served, see known gaps |
 | Control socket | `~/.leviath/control.sock` (Unix) | `0600`, same-uid peers only, token required |
 | Control pipe | `\\.\pipe\leviath-control-…` (Windows) | token required |
 | Control token | `~/.leviath/control.token` | owner-only; fresh per daemon |
