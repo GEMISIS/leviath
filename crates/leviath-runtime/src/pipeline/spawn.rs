@@ -247,6 +247,21 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
         region_scripts,
     } = spawn;
     let seeds = &seeds;
+    // Everything below indexes `blueprint.stages`, `stages` and the per-stage
+    // vectors built from them by position. `parse_manifest` guarantees at
+    // least one stage, but this is `pub` and an embedder can hand-build a
+    // `Blueprint`; refusing here turns two index panics into the `Err` the
+    // signature already promises.
+    if blueprint.stages.is_empty() {
+        return Err("blueprint declares no stages".to_string());
+    }
+    if stages.len() != blueprint.stages.len() {
+        return Err(format!(
+            "{} resolved stages for a blueprint with {}",
+            stages.len(),
+            blueprint.stages.len()
+        ));
+    }
     // Resolve any percentage region budgets against each stage's model context
     // window (the only place the model - and hence the window - is known). The
     // global layout resolves against the entry stage (stage 0); each per-stage

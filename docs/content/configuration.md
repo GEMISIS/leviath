@@ -621,6 +621,11 @@ requests_per_minute = 50
 tokens_per_minute   = 40000
 ```
 
+Only `requests_per_minute` is enforced today. `tokens_per_minute` is parsed and
+recorded but no code path throttles on it; it is accepted so a config that sets
+it keeps loading, and it will start to apply without a config change once the
+token bucket is wired in.
+
 This shapes request *rate*. `[limits] max_concurrent_inferences` and
 `[limits.max_concurrent_inferences_by_provider]` bound *concurrency*. Both apply. Script providers
 configure their rate limit under `[model_providers.<name>.rate_limit]` instead; their concurrency

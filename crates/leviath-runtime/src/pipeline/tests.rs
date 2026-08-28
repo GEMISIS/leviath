@@ -17227,3 +17227,32 @@ fn collect_records_a_cut_off_reply_in_the_stage_ledger() {
     run_collect(&mut world);
     assert!(!world.get::<StageLedger>(plain).unwrap().0[0].output_cap_raised);
 }
+
+/// `spawn_agent_seeded` is `pub`, so a hand-built `Blueprint` can reach it
+/// without `parse_manifest`'s "at least one stage" guarantee. Both invariants
+/// it indexes by are refused up front rather than panicking on `stages[0]`.
+#[test]
+fn spawning_refuses_a_blueprint_with_no_stages_or_a_stage_count_mismatch() {
+    let mut world = World::new();
+    let err = spawn_agent(
+        &mut world,
+        "r".to_string(),
+        blueprint(vec![]),
+        "task",
+        vec![],
+        hints(true),
+    )
+    .unwrap_err();
+    assert!(err.contains("no stages"), "{err}");
+
+    let err = spawn_agent(
+        &mut world,
+        "r".to_string(),
+        blueprint(vec![stage_named("a", None, false, None)]),
+        "task",
+        vec![],
+        hints(true),
+    )
+    .unwrap_err();
+    assert!(err.contains("0 resolved stages"), "{err}");
+}

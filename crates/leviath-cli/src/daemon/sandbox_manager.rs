@@ -16,7 +16,6 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::process::Command as StdCommand;
 use std::sync::{Mutex as StdMutex, PoisonError};
 
 use leviath_core::sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig};
@@ -262,10 +261,14 @@ fn unavailable(
 /// Real lifecycle-command runner: spawn synchronously, map a non-zero exit to
 /// its stderr.
 fn real_run(argv: &[String]) -> Result<(), String> {
-    let mut cmd = StdCommand::new(&argv[0]);
-    cmd.args(&argv[1..]);
+    let Some((program, args)) = argv.split_first() else {
+        return Err("empty sandbox command".to_string());
+    };
     // `docker run`/`docker rm` are bookkeeping the operator never watches, so
-    // they get no console window on Windows.
+    // they get no console window on Windows - which is what `child_command`
+    // arranges and a bare `Command::new` did not.
+    let mut cmd = leviath_sys::child_command(program);
+    cmd.args(args);
     let output = cmd.output().map_err(|e| e.to_string())?;
     if output.status.success() {
         Ok(())
@@ -743,4 +746,12 @@ mod tests {
     // The agent's shell runs INSIDE the container (reports `Alpine Linux`, which a
     // non-Alpine host lacks), the bind-mounted workdir is visible, and the
     // container is removed at reap (`docker ps -a` shows no leftover `leviath-*`).
+
+    /// The argv comes from `leviath_sys::container_*_argv`, which is never
+    /// empty, but indexing `argv[0]` on trust is how a refactor becomes a panic.
+    #[test]
+    fn real_run_refuses_an_empty_argv_instead_of_indexing_it() {
+        let err = real_run(&[]).unwrap_err();
+        assert_eq!(err, "empty sandbox command");
+    }
 }

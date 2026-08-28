@@ -231,16 +231,26 @@ fn dump_request(body: &serde_json::Value, dir: Option<&str>) {
     // contents and `env_var` output included. It was written at the process
     // umask into a directory created the same way, so pointing this at `/tmp` on
     // a shared host handed every local account the conversation.
-    let _ = std::fs::create_dir_all(dir);
-    let _ = leviath_sys::secure_dir_perms(std::path::Path::new(dir));
+    let dir_path = std::path::Path::new(dir);
     // `body` is an already-built `serde_json::Value`, which is infallibly
     // serializable (no NaN/Inf numbers, keys always strings) - `to_string_pretty`
     // only fails on a custom `Serialize` impl that errors, which a `Value` never
     // has. So there is no reachable error arm; `.expect` documents that.
     let pretty = serde_json::to_string_pretty(body)
         .expect("infallible: a serde_json::Value always serializes");
-    if leviath_sys::write_private(&path, pretty.as_bytes()).is_ok() {
-        tracing::info!(request_bytes = bytes, path = %path.display(), "dumped anthropic request body");
+    // Not a fallback to the umask: a dump that cannot be made private is a
+    // dump that must not be written, so the directory, its mode and the
+    // file itself are one chain with one refusal.
+    let written = leviath_sys::create_private_dir_all(dir_path)
+        .and_then(|()| leviath_sys::secure_dir_perms(dir_path))
+        .and_then(|()| leviath_sys::write_private(&path, pretty.as_bytes()));
+    match written {
+        Ok(()) => {
+            tracing::info!(request_bytes = bytes, path = %path.display(), "dumped anthropic request body");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, dir, "not dumping the request: it could not be written privately");
+        }
     }
 }
 
@@ -1218,6 +1228,23 @@ mod tests {
         assert!(contents.contains("claude-sonnet-5"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A path that cannot become a private directory (here, an existing
+    /// file) means no dump at all, not a dump at the umask.
+    #[test]
+    fn dump_request_refuses_a_directory_it_cannot_make_private() {
+        let dir =
+            std::env::temp_dir().join(format!("leviath-dumptest-file-{}", std::process::id()));
+        std::fs::write(&dir, b"not a directory").unwrap();
+        let _guard = crate::test_support::always_on_tracing_guard();
+        dump_request(
+            &serde_json::json!({"model": "x"}),
+            Some(dir.to_str().unwrap()),
+        );
+        assert!(dir.is_file(), "the file must be left alone");
+        assert_eq!(std::fs::read(&dir).unwrap(), b"not a directory");
+        std::fs::remove_file(&dir).unwrap();
     }
 
     #[test]
