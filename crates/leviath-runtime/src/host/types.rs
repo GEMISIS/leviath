@@ -22,7 +22,11 @@ use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 /// The parameters for spawning an agent into the world. The runtime doesn't know
 /// how to load blueprints or resolve tools - that policy lives in the
 /// [`Spawner`] the daemon installs - so this just carries the raw request.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+///
+/// `Debug` is hand-written (below) so `callback_secret` cannot reach a log
+/// line; `Serialize` keeps it, because the secret has to cross the control
+/// socket to the daemon that signs the webhook.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SpawnArgs {
     /// The run id to give the new agent (its directory / control key).
     pub run_id: String,
@@ -90,6 +94,39 @@ pub struct SpawnArgs {
     /// (see [`leviath_core::resolve_output_spec`]).
     #[serde(default)]
     pub output: Option<leviath_core::output::OutputSpec>,
+}
+
+/// Every field, with the webhook secret shown as present-or-absent only.
+///
+/// A `#[derive(Debug)]` here meant one `tracing::debug!(?args)` on the spawn
+/// path - there is none today - would print the HMAC key a caller shares
+/// with the daemon. `provider_creds.rs` does the same for API keys.
+impl std::fmt::Debug for SpawnArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnArgs")
+            .field("run_id", &self.run_id)
+            .field("blueprint_path", &self.blueprint_path)
+            .field("task", &self.task)
+            .field("regions", &self.regions)
+            .field("model", &self.model)
+            .field("workdir", &self.workdir)
+            .field("metadata", &self.metadata)
+            .field("callback_url", &self.callback_url)
+            .field(
+                "callback_secret",
+                match self.callback_secret {
+                    Some(_) => &"<set>",
+                    None => &"<unset>",
+                },
+            )
+            .field("yolo", &self.yolo)
+            .field("no_seed_commands", &self.no_seed_commands)
+            .field("allow", &self.allow)
+            .field("max_depth", &self.max_depth)
+            .field("parent_run_id", &self.parent_run_id)
+            .field("output", &self.output)
+            .finish()
+    }
 }
 
 /// One row of a run listing (`ControlRequest::List`): a live run, its status,
@@ -471,4 +508,25 @@ pub enum ControlOp {
         /// Reply channel.
         reply: oneshot::Sender<bool>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The field is visibly present (so a redacted log still says a secret was
+    /// supplied) and its value is not.
+    #[test]
+    fn spawn_args_debug_never_prints_the_callback_secret() {
+        let args = SpawnArgs {
+            run_id: "r1".to_string(),
+            callback_secret: Some("s3cr3t-callback-hmac-key".to_string()),
+            ..SpawnArgs::default()
+        };
+        let out = format!("{args:?}");
+        assert!(!out.contains("s3cr3t-callback-hmac-key"), "{out}");
+        assert!(out.contains("callback_secret: \"<set>\""), "{out}");
+        let none = format!("{:?}", SpawnArgs::default());
+        assert!(none.contains("callback_secret: \"<unset>\""), "{none}");
+    }
 }

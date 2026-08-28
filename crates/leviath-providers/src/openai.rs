@@ -6,7 +6,7 @@ use crate::openai_compat::{
 };
 use crate::provider::{
     InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
-    ModelInfo, Provider, ProviderConfig, ProviderError, Result, StreamChunk,
+    ModelInfo, Provider, ProviderError, Result, StreamChunk,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -58,22 +58,6 @@ impl OpenAIProvider {
         }
     }
 
-    /// Create a new OpenAI provider with full configuration.
-    pub fn with_config(client: reqwest::Client, config: ProviderConfig) -> Self {
-        let rate_limiter = config.rate_limit.as_ref().map(RateLimiter::new);
-        Self {
-            client,
-            api_key: config.api_key,
-            base_url: config
-                .base_url
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
-            rate_limiter,
-            capability_overrides: HashMap::new(),
-            reasoning_effort_none: Default::default(),
-            temperature_unsupported: Default::default(),
-        }
-    }
-
     /// Create a new OpenAI provider with per-model capability overrides.
     pub fn with_overrides(
         client: reqwest::Client,
@@ -96,9 +80,9 @@ impl OpenAIProvider {
     ///
     /// An enterprise gateway or self-hosted proxy speaks the same API on a
     /// different origin, and every part of that was already here - the struct
-    /// holds a `base_url`, and `with_config` honours one - except a way for
+    /// holds a `base_url`, and the constructors honour one - except a way for
     /// configuration to reach the constructor the registry actually calls.
-    /// `with_config` sets the URL and drops the capability overrides;
+    /// a `base_url` constructor would drop the capability overrides;
     /// `with_overrides` does the reverse, and the registry needs the overrides,
     /// so the URL was the half that got lost.
     ///
@@ -845,36 +829,6 @@ mod tests {
         assert_eq!(provider.name(), "openai");
     }
 
-    #[test]
-    fn test_with_config_default_url() {
-        let config = ProviderConfig {
-            api_key: "key".to_string(),
-            base_url: None,
-            rate_limit: None,
-            request_timeout_secs: None,
-        };
-        let provider = OpenAIProvider::with_config(
-            crate::provider::build_http_client(None).expect("a test client builds"),
-            config,
-        );
-        assert_eq!(provider.base_url, "https://api.openai.com/v1");
-    }
-
-    #[test]
-    fn test_with_config_custom_url() {
-        let config = ProviderConfig {
-            api_key: "key".to_string(),
-            base_url: Some("https://custom.openai.com".to_string()),
-            rate_limit: None,
-            request_timeout_secs: None,
-        };
-        let provider = OpenAIProvider::with_config(
-            crate::provider::build_http_client(None).expect("a test client builds"),
-            config,
-        );
-        assert_eq!(provider.base_url, "https://custom.openai.com");
-    }
-
     #[tokio::test]
     async fn test_count_tokens_uses_tiktoken() {
         let provider = OpenAIProvider::new(
@@ -1004,15 +958,31 @@ mod tests {
     // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
 
     fn provider_with_url(url: String) -> OpenAIProvider {
-        OpenAIProvider::with_config(
+        OpenAIProvider::new(
             crate::provider::build_http_client(None).expect("a test client builds"),
-            ProviderConfig {
-                api_key: "test-key".to_string(),
-                base_url: Some(url),
-                rate_limit: None,
-                request_timeout_secs: None,
-            },
+            "test-key".to_string(),
         )
+        .with_base_url(Some(url))
+    }
+
+    #[test]
+    fn with_base_url_keeps_the_default_when_none_is_given() {
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        )
+        .with_base_url(None);
+        assert_eq!(provider.base_url, "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn with_base_url_replaces_the_default() {
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        )
+        .with_base_url(Some("https://custom.example.com".to_string()));
+        assert_eq!(provider.base_url, "https://custom.example.com");
     }
 
     fn simple_request() -> InferenceRequest {

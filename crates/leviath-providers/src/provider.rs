@@ -674,25 +674,6 @@ pub struct ToolCallDelta {
     pub thought_signature: Option<String>,
 }
 
-/// Configuration for a provider instance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderConfig {
-    /// API key for authentication
-    pub api_key: String,
-
-    /// Optional custom base URL
-    pub base_url: Option<String>,
-
-    /// Optional rate limit configuration
-    pub rate_limit: Option<RateLimitConfig>,
-
-    /// Optional request timeout in seconds.
-    /// When set, the reqwest client will abort requests that exceed this duration.
-    /// Default is None (no timeout).
-    #[serde(default)]
-    pub request_timeout_secs: Option<u64>,
-}
-
 /// Rate limit configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitConfig {
@@ -1930,33 +1911,6 @@ mod tests {
         let back: RateLimitConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.requests_per_minute, 60);
         assert_eq!(back.tokens_per_minute, 100_000);
-    }
-
-    #[test]
-    fn provider_config_serde_roundtrip() {
-        let cfg = ProviderConfig {
-            api_key: "sk-test".into(),
-            base_url: Some("https://api.example.com".into()),
-            rate_limit: Some(RateLimitConfig {
-                requests_per_minute: 30,
-                tokens_per_minute: 50_000,
-            }),
-            request_timeout_secs: None,
-        };
-        let json = serde_json::to_string(&cfg).unwrap();
-        let back: ProviderConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.api_key, "sk-test");
-        assert_eq!(back.base_url.as_deref(), Some("https://api.example.com"));
-        assert!(back.rate_limit.is_some());
-    }
-
-    #[test]
-    fn provider_config_optional_fields_default_to_none() {
-        let json = r#"{"api_key":"sk-test"}"#;
-        let cfg: ProviderConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.api_key, "sk-test");
-        assert!(cfg.base_url.is_none());
-        assert!(cfg.rate_limit.is_none());
     }
 
     // ─── stream_once ────────────────────────────────────────────────────────

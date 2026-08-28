@@ -92,7 +92,7 @@ pub fn apply_request_timeout(
 /// Inference calls are bounded per-request instead (see [`apply_request_timeout`]
 /// and `DEFAULT_INFERENCE_TIMEOUT_SECS`) so each stage can pick its own deadline,
 /// with the dispatch `job_timeout` as the final backstop. `timeout_secs`
-/// (`ProviderConfig::request_timeout_secs`) still applies an optional
+/// (`InferenceRequest::request_timeout_secs`) still applies an optional
 /// client-level hard cap on total request duration for callers that set it; a
 /// per-request timeout, when present, overrides it.
 /// Whether a redirect keeps the request on the origin it started from.

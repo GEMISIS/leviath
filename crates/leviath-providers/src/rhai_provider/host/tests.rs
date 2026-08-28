@@ -684,3 +684,32 @@ fn the_executor_survives_losing_only_its_fallback() {
     // moment a script provider is resolved.
     assert!(executor_from_clients(Err(crate::provider::malformed_url_error()), Ok(ok()),).is_err());
 }
+
+/// The one place a script provider's credential could reach a log line.
+#[test]
+fn host_request_debug_never_prints_a_credential_header() {
+    let mut headers = BTreeMap::new();
+    headers.insert(
+        "authorization".to_string(),
+        "Bearer sk-live-abcdefghijklmnop".to_string(),
+    );
+    headers.insert(
+        "x-goog-api-key".to_string(),
+        "AIza-secret-value-1234567890".to_string(),
+    );
+    headers.insert("content-type".to_string(), "application/json".to_string());
+    let request = HostRequest {
+        method: HttpMethod::Post,
+        url: "https://example.com/v1/chat".to_string(),
+        body: Some("{}".to_string()),
+        headers,
+        timeout_secs: Some(30),
+    };
+    let out = format!("{request:?}");
+    assert!(!out.contains("sk-live-abcdefghijklmnop"), "{out}");
+    assert!(!out.contains("AIza-secret-value-1234567890"), "{out}");
+    // Present but redacted, not silently dropped.
+    assert!(out.contains("authorization"), "{out}");
+    assert!(out.contains("x-goog-api-key"), "{out}");
+    assert!(out.contains("application/json"), "{out}");
+}

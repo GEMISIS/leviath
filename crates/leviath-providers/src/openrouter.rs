@@ -8,7 +8,7 @@ use crate::openai_compat::{
 };
 use crate::provider::{
     InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
-    ModelInfo, Provider, ProviderConfig, ProviderError, Result, StreamChunk,
+    ModelInfo, Provider, ProviderError, Result, StreamChunk,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -131,24 +131,6 @@ impl OpenRouterProvider {
         }
     }
 
-    /// Create a new OpenRouter provider with full configuration.
-    pub fn with_config(client: reqwest::Client, config: ProviderConfig) -> Self {
-        let rate_limiter = config.rate_limit.as_ref().map(RateLimiter::new);
-        Self {
-            client,
-            api_key: config.api_key,
-            base_url: config
-                .base_url
-                .unwrap_or_else(|| "https://openrouter.ai/api/v1".to_string()),
-            rate_limiter,
-            capability_overrides: HashMap::new(),
-            warned_unknown: Default::default(),
-            temperature_unsupported: Default::default(),
-            api_windows: Default::default(),
-            api_pricing: Default::default(),
-        }
-    }
-
     /// Create a new OpenRouter provider with per-model capability overrides.
     pub fn with_overrides(
         client: reqwest::Client,
@@ -173,9 +155,9 @@ impl OpenRouterProvider {
     ///
     /// An enterprise gateway or self-hosted proxy speaks the same API on a
     /// different origin, and every part of that was already here - the struct
-    /// holds a `base_url`, and `with_config` honours one - except a way for
+    /// holds a `base_url`, and the constructors honour one - except a way for
     /// configuration to reach the constructor the registry actually calls.
-    /// `with_config` sets the URL and drops the capability overrides;
+    /// a `base_url` constructor would drop the capability overrides;
     /// `with_overrides` does the reverse, and the registry needs the overrides,
     /// so the URL was the half that got lost.
     ///
@@ -1175,36 +1157,6 @@ mod tests {
         assert!(provider.max_context_tokens("meta-llama/llama-4-scout") > 128_000);
     }
 
-    #[test]
-    fn test_with_config_default_url() {
-        let config = ProviderConfig {
-            api_key: "key".to_string(),
-            base_url: None,
-            rate_limit: None,
-            request_timeout_secs: None,
-        };
-        let provider = OpenRouterProvider::with_config(
-            crate::provider::build_http_client(None).expect("a test client builds"),
-            config,
-        );
-        assert_eq!(provider.base_url, "https://openrouter.ai/api/v1");
-    }
-
-    #[test]
-    fn test_with_config_custom_url() {
-        let config = ProviderConfig {
-            api_key: "key".to_string(),
-            base_url: Some("https://custom.openrouter.ai".to_string()),
-            rate_limit: None,
-            request_timeout_secs: None,
-        };
-        let provider = OpenRouterProvider::with_config(
-            crate::provider::build_http_client(None).expect("a test client builds"),
-            config,
-        );
-        assert_eq!(provider.base_url, "https://custom.openrouter.ai");
-    }
-
     // ─── The conservative fallback is no longer silent ──────────────────────
 
     #[test]
@@ -1801,15 +1753,31 @@ mod tests {
     // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
 
     fn provider_with_url(url: String) -> OpenRouterProvider {
-        OpenRouterProvider::with_config(
+        OpenRouterProvider::new(
             crate::provider::build_http_client(None).expect("a test client builds"),
-            ProviderConfig {
-                api_key: "test-key".to_string(),
-                base_url: Some(url),
-                rate_limit: None,
-                request_timeout_secs: None,
-            },
+            "test-key".to_string(),
         )
+        .with_base_url(Some(url))
+    }
+
+    #[test]
+    fn with_base_url_keeps_the_default_when_none_is_given() {
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        )
+        .with_base_url(None);
+        assert_eq!(provider.base_url, "https://openrouter.ai/api/v1");
+    }
+
+    #[test]
+    fn with_base_url_replaces_the_default() {
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        )
+        .with_base_url(Some("https://custom.example.com".to_string()));
+        assert_eq!(provider.base_url, "https://custom.example.com");
     }
 
     fn simple_request() -> InferenceRequest {

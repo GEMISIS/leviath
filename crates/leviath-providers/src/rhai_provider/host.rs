@@ -22,7 +22,11 @@ pub enum HttpMethod {
 }
 
 /// A single HTTP request a script asked the host to perform.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written (below): `headers` carries the script provider's
+/// `Authorization` or `x-api-key`, and a derived `Debug` would print it in
+/// full the first time anything logged `?request`.
+#[derive(Clone)]
 pub struct HostRequest {
     /// GET or POST.
     pub method: HttpMethod,
@@ -34,6 +38,32 @@ pub struct HostRequest {
     pub headers: BTreeMap<String, String>,
     /// Per-request wall-clock deadline in seconds (the stage timeout).
     pub timeout_secs: Option<u64>,
+}
+
+impl std::fmt::Debug for HostRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Values are redacted by header *shape*, not by an exact-name list,
+        // so a provider's own credential header (`x-goog-api-key`) is covered
+        // without anyone remembering to add it.
+        let headers: Vec<(&str, String)> = self
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                let shown = match leviath_core::is_secret_header(name) {
+                    true => leviath_core::redact(value),
+                    false => value.clone(),
+                };
+                (name.as_str(), shown)
+            })
+            .collect();
+        f.debug_struct("HostRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("body", &self.body)
+            .field("headers", &headers)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 /// A transport-level error from performing a [`HostRequest`], carrying enough
