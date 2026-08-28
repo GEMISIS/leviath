@@ -621,7 +621,7 @@ impl MarkdownEdit {
         let width = area.width.saturating_sub(4).clamp(12, 56);
         let height = 6u16.min(area.height);
         let popup = Rect {
-            x: area.x + (area.width - width) / 2,
+            x: area.x + area.width.saturating_sub(width) / 2,
             y: area.y + area.height.saturating_sub(height) / 2,
             width,
             height,
@@ -1836,5 +1836,15 @@ mod tests {
         );
         // A zero-width pane must not divide by zero on the way to nowhere.
         assert_eq!(wrapped_rows(&lines, 0), 21);
+    }
+
+    /// The prompt popup clamps its width to at least 12 columns, so in a
+    /// narrower terminal `area.width - width` went below zero - a panic with
+    /// `overflow-checks` on, which is how release builds ship.
+    #[test]
+    fn the_link_prompt_draws_in_a_ten_column_terminal() {
+        let mut md = edit("hi");
+        md.prompt = Some(Prompt::Link(LinkPrompt::new("hi")));
+        let _ = draw(&mut md, 10, 8);
     }
 }

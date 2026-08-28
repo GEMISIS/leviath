@@ -54,8 +54,11 @@ pub fn precise(secs: u64) -> String {
 /// The clamp is not paranoia about arithmetic: these are wall-clock stamps from
 /// a machine whose clock can be corrected, and a run whose `started_at` lands
 /// after `now` should read as brand new rather than as `u64::MAX` seconds old.
+/// The saturating subtraction *is* about arithmetic: `from` is read from a
+/// `meta.json` on disk, and a corrupted or hand-edited `i64::MIN` there would
+/// otherwise overflow before the clamp could apply.
 pub fn between(from: i64, to: i64) -> u64 {
-    (to - from).max(0) as u64
+    to.saturating_sub(from).max(0) as u64
 }
 
 /// The JSON key carrying a run's age in seconds, on every API that serves runs.
@@ -130,5 +133,13 @@ mod tests {
         assert_eq!(between(100, 145), 45);
         assert_eq!(between(100, 100), 0);
         assert_eq!(between(200, 100), 0);
+    }
+
+    /// A hand-edited or corrupted `started_at` of `i64::MIN` overflowed the
+    /// subtraction before the clamp could apply.
+    #[test]
+    fn between_survives_a_timestamp_at_the_edge_of_the_range() {
+        assert_eq!(between(i64::MIN, 0), i64::MAX as u64);
+        assert_eq!(between(0, i64::MIN), 0);
     }
 }

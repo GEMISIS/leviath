@@ -128,7 +128,7 @@ pub(super) fn parse_region_layout(
                     // for percentage regions (resolved later), else the legacy
                     // absolute `max_tokens * 8 / 10`.
                     (None, None, true) => usize::MAX,
-                    (None, None, false) => provisional_max_tokens * 8 / 10,
+                    (None, None, false) => provisional_max_tokens.saturating_mul(8) / 10,
                 };
                 RegionKind::Compacting {
                     threshold_tokens: threshold,
@@ -265,7 +265,7 @@ pub(super) fn parse_region_layout(
         // Percentage regions contribute their (unknown) size at resolution, so
         // only absolute budgets add to the summed total here.
         if percent.is_none() {
-            total_tokens += provisional_max_tokens;
+            total_tokens = total_tokens.saturating_add(provisional_max_tokens);
         }
 
         let mut def = RegionDefinition::new(region_name.clone(), kind, provisional_max_tokens)

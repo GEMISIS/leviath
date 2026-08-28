@@ -123,10 +123,12 @@ impl PartialToolCall {
 /// once.
 fn merge_usage(into: TokenUsage, chunk: TokenUsage) -> TokenUsage {
     TokenUsage::new(
-        into.prompt_tokens + chunk.prompt_tokens,
-        into.cached_tokens + chunk.cached_tokens,
-        into.cache_write_tokens + chunk.cache_write_tokens,
-        into.completion_tokens + chunk.completion_tokens,
+        into.prompt_tokens.saturating_add(chunk.prompt_tokens),
+        into.cached_tokens.saturating_add(chunk.cached_tokens),
+        into.cache_write_tokens
+            .saturating_add(chunk.cache_write_tokens),
+        into.completion_tokens
+            .saturating_add(chunk.completion_tokens),
     )
     .with_reported_cost(chunk.reported_cost_usd.or(into.reported_cost_usd))
 }
@@ -318,5 +320,16 @@ mod tests {
         let err = collect_stream(stream).await.expect_err("the stream failed");
 
         assert_eq!(err.failure_kind(), Some(FailureKind::Timeout));
+    }
+
+    /// Chunk counts accumulate across a stream; two large reports must clamp
+    /// rather than overflow the running total.
+    #[test]
+    fn merged_usage_saturates_instead_of_aborting() {
+        let a = TokenUsage::new(usize::MAX, 0, 0, 0);
+        let b = TokenUsage::new(1, 0, 0, 1);
+        let merged = merge_usage(a, b);
+        assert_eq!(merged.prompt_tokens, usize::MAX);
+        assert_eq!(merged.total_tokens, usize::MAX);
     }
 }
