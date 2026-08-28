@@ -41,6 +41,60 @@ fn a_file_with_no_tests_counts_every_line() {
     assert_eq!(production_lines("a\nb\nc\n"), 3);
 }
 
+/// A second test module further down must not hide the production code between
+/// the two: the count resumes after each test item.
+#[test]
+fn production_resumes_after_a_test_item() {
+    let src =
+        "one\n#[cfg(test)]\nmod a {\n    fn x() {}\n}\ntwo\nthree\n#[cfg(test)]\nmod b {\n}\n";
+    assert_eq!(production_lines(src), 3);
+}
+
+/// `#[cfg(test)] mod tests;` declares a sibling file; the one line after the
+/// attribute is the whole item.
+#[test]
+fn a_sibling_test_module_declaration_is_one_item() {
+    let src = "one\n#[cfg(test)]\nmod tests;\ntwo\n";
+    assert_eq!(production_lines(src), 2);
+}
+
+/// A `#[cfg(test)] use` at the top of a file used to end the count there and
+/// report a 1,000-line file as a handful of lines.
+#[test]
+fn a_test_only_import_does_not_end_the_count() {
+    let src = "use a::B;\n#[cfg(test)]\nuse c::D;\nfn one() {}\nfn two() {}\n";
+    assert_eq!(production_lines(src), 3);
+}
+
+#[test]
+fn stacked_attributes_belong_to_the_test_item() {
+    let src = "one\n#[cfg(test)]\n#[rustfmt::skip]\nmod tests {\n    fn a() {}\n}\ntwo\n";
+    assert_eq!(production_lines(src), 2);
+}
+
+/// `leviath-alloc` gates its tests with `cfg(all(test, ...))`.
+#[test]
+fn cfg_all_test_is_a_test_item_too() {
+    let src = "one\n#[cfg(all(test, feature = \"x\"))]\nmod tests {\n    fn a() {}\n}\n";
+    assert_eq!(production_lines(src), 1);
+}
+
+/// A trailing attribute with nothing after it is not a real file, but the walk
+/// must still terminate rather than index past the end.
+#[test]
+fn an_attribute_at_the_end_of_the_file_is_skipped() {
+    assert_eq!(production_lines("one\n#[cfg(test)]\n"), 1);
+    assert_eq!(production_lines("one\n#[cfg(test)]\n#[allow(x)]\n"), 1);
+}
+
+/// A column-zero `};` closes a `static`/`const` block; it must terminate the
+/// item like a bare `}` does.
+#[test]
+fn a_brace_semicolon_closes_a_test_item() {
+    let src = "one\n#[cfg(test)]\nstatic X: &[u8] = &[\n    1,\n];\ntwo\n";
+    assert_eq!(production_lines(src), 2);
+}
+
 #[test]
 fn test_paths_are_recognised_by_every_convention_the_repo_uses() {
     for p in [

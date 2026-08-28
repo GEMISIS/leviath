@@ -3,8 +3,6 @@
 use crate::openai_compat::{
     OpenAiSseStream, build_openai_request_body, parse_openai_response, send_chat_request,
 };
-#[cfg(test)]
-use crate::provider::FinishReason;
 use crate::provider::{
     InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
     ModelInfo, Provider, ProviderConfig, ProviderError, Result, StreamChunk,
@@ -522,6 +520,7 @@ impl GeminiProvider {
 
 #[cfg(test)]
 mod tests {
+    use crate::provider::FinishReason;
 
     /// Config beats the shipped table, and an unconfigured model still gets the
     /// published rate rather than falling to unpriced.

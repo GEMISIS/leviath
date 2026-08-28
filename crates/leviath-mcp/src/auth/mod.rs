@@ -76,19 +76,6 @@ enum Probe {
     Unreachable,
 }
 
-#[cfg(test)]
-impl Probe {
-    /// A one-word name for the variant, so a test can assert on it with
-    /// `assert_eq!` rather than a `matches!` whose other arm never runs.
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Challenge(_) => "challenge",
-            Self::Satisfied => "satisfied",
-            Self::Unreachable => "unreachable",
-        }
-    }
-}
-
 /// The result of [`OAuthClient::login`].
 #[derive(Debug)]
 pub enum LoginOutcome {
@@ -863,6 +850,18 @@ async fn write_response(stream: &mut tokio::net::TcpStream, status: &str, messag
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl Probe {
+        /// A one-word name for the variant, so a test can assert on it with
+        /// `assert_eq!` rather than a `matches!` whose other arm never runs.
+        fn label(&self) -> &'static str {
+            match self {
+                Self::Challenge(_) => "challenge",
+                Self::Satisfied => "satisfied",
+                Self::Unreachable => "unreachable",
+            }
+        }
+    }
 
     // ─── build_authorize_url ──────────────────────────────────────────────
 
