@@ -21,6 +21,46 @@ metrics on both sides or the comparison is meaningless.
   tab), printing the server's RSS between batches. A per-connection leak shows
   up as a staircase.
 
+## The measuring sticks the cleanup work is gated on
+
+Every performance PR has to move one of the numbers below, measured the same
+way before and after, or it does not merge. The scripts are Python and shell
+on purpose: nothing here is a workspace member, so the 100% coverage gate
+does not apply and no benchmark target pollutes a crate's profile.
+
+- `harness.sh` - the isolated environment every live probe runs in. Wraps a
+  command in `env -i` with a short `LEVIATH_HOME` (`/tmp/lv`), the
+  repo-root `.env` skipped, and the native OpenAI provider pointed at
+  `mock.py`. Use it as a prefix: `perf-tools/harness.sh lev ps`. It also
+  installs `agents/probe/`, a one-stage blueprint that calls whatever tool
+  the mock asks for.
+- `mock.py PORT [TOOL ARGS-JSON]` - a stateless OpenAI-compatible provider.
+  It decides from the request body, never a turn counter (the daemon spends
+  a turn at startup): the tool call is returned until `messages` carries a
+  `role: "tool"` entry, then the reply is `done`. `GET /count` says how many
+  completions it served, which is what makes a "no provider call happened"
+  probe provable rather than silent.
+- `daemon_drive.py --runs K [--tool NAME --args JSON --yolo]` - starts the
+  mock, a daemon and `lev serve`, spawns K runs, waits for them to finish,
+  and prints wall clock plus rusage as JSON. Run it through `harness.sh`.
+- `fake_runs.py --from RUN_DIR --count 750 --out DIR` - copies one real run
+  directory N times with fresh ids. Copies, not stubs: a 200-byte
+  `context.json` would hide exactly the per-frame parsing cost the dashboard
+  numbers exist to catch.
+- `dash_pty.py --bin lev --seconds 30 --keys 'jjj'` - drives `lev dash`
+  over a real pty, accumulating the whole escape stream (a full pty buffer
+  blocks the child and corrupts the measurement), and reports the child's
+  CPU seconds, max RSS, bytes written, repaint count and a normalised hash of
+  the first frame. The hash must match before and after a change; the CPU
+  and the syscall count (`measure.sh`, Linux) must fall.
+- `measure.sh CMD...` - `perf stat` + `strace -c` on Linux, `/usr/bin/time
+  -l` on macOS. Linux is the gate; macOS is corroboration.
+- `binsize.sh [BIN]` - release binary size, package count, `__const` /
+  `.rodata` size, and whether the unreachable tiktoken vocabularies are still
+  linked in.
+- `baselines/` - one JSON per commit the numbers were taken at. Compare
+  against the newest one.
+
 ## Memory metrics: what they mean, and the trap
 
 The single most common benchmarking mistake for long-lived processes is
