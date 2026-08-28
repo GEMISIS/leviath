@@ -153,7 +153,7 @@ pub fn save(path: &Path, state: &UiState) {
     // as already there.
     let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new("")));
     let text = serde_json::to_string_pretty(state).expect("plain strings and sets serialize");
-    let _ = std::fs::write(path, text);
+    let _ = leviath_sys::write_atomic(path, text.as_bytes(), None);
 }
 
 /// Read, modify, write - so one surface's save cannot drop another's memory.

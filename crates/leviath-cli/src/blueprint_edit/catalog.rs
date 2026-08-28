@@ -162,7 +162,11 @@ pub fn bundled_manifest(agent: &BundledAgent) -> &'static str {
 pub fn write_agent(agents_dir: &Path, name: &str, manifest: &str) -> std::io::Result<PathBuf> {
     let dir = agents_dir.join(name);
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join(leviath_core::files::MANIFEST_FILENAME), manifest)?;
+    leviath_sys::write_atomic(
+        &dir.join(leviath_core::files::MANIFEST_FILENAME),
+        manifest.as_bytes(),
+        None,
+    )?;
     Ok(dir)
 }
 
@@ -182,7 +186,7 @@ pub fn copy_bundled_extras(
         let path = dir.join(rel);
         // A joined path always has a parent.
         std::fs::create_dir_all(path.parent().unwrap_or(&dir))?;
-        std::fs::write(path, contents)?;
+        leviath_sys::write_atomic(&path, contents.as_bytes(), None)?;
     }
     Ok(())
 }
@@ -222,7 +226,7 @@ pub fn rename_agent_with(
     // The manifest first, in place: if the directory cannot move the agent
     // is still whole, only under its old name with the new one inside,
     // which the next open shows and the next save writes.
-    std::fs::write(&manifest_path, doc.to_toml())
+    leviath_sys::write_atomic(&manifest_path, doc.to_toml().as_bytes(), None)
         .map_err(|e| format!("Could not write {}: {e}", manifest_path.display()))?;
     move_dir(&old, &new)
         .map_err(|e| format!("Could not move {} to {}: {e}", old.display(), new.display()))?;
