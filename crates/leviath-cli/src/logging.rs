@@ -111,6 +111,12 @@ pub fn release_from_tui() {
 /// Install the process-wide subscriber: fmt → stderr at `info` (`debug` when
 /// verbose), plus the empty reloadable OTLP slot.
 ///
+/// The filter is the literal `info`/`debug` directive for `--verbose`, not
+/// `RUST_LOG`: `EnvFilter::new` parses its argument and never reads the
+/// environment. That is deliberate - a daemon started by a supervisor inherits
+/// whatever `RUST_LOG` the service file happens to carry, and the flag is the
+/// one switch the user actually set.
+///
 /// Callable any number of times without panicking; the first global
 /// subscriber and the first parked handle win. `main` calls it exactly once,
 /// so in the real process the two are the same subscriber - the losing-race

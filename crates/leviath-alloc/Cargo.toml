@@ -13,6 +13,9 @@
 [package]
 name = "leviath-alloc"
 description = "Allocator tuning for the leviath binary: one audited mimalloc option call"
+# Only `leviath-cli` consumes this, by path. Not publishing it keeps the one
+# `unsafe` call in the workspace out of crates.io and off the release ritual.
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true

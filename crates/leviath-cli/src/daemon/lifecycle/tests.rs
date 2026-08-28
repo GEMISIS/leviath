@@ -73,3 +73,11 @@ fn not_running_is_a_success_and_not_stopping_is_not() {
     assert_eq!(stop_outcome(true, true), Ok("daemon stopped"));
     assert!(stop_outcome(true, false).is_err());
 }
+
+/// The message used to say "5s" on every platform while Windows waits 15s.
+#[test]
+fn the_shutdown_message_names_the_real_timeout() {
+    let secs = super::super::readiness::READY_TIMEOUT.as_secs();
+    let msg = stop_outcome(true, false).unwrap_err();
+    assert!(msg.ends_with(&format!("within {secs}s")), "{msg}");
+}

@@ -50,4 +50,11 @@ cargo xtask structure \
   || fail "A file is over its production-line limit. Split it by concern."
 pass "Structure OK"
 
+# 6. Docs - dead links, frontmatter, em dashes, published schemas. CI runs
+# this too; catching it here saves a round trip.
+info "Checking docs..."
+cargo xtask docs \
+  || fail "docs/content has a problem. See the lines above."
+pass "Docs content OK"
+
 pass "All pre-commit checks passed."

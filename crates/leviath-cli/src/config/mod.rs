@@ -1006,7 +1006,7 @@ fn set_dir_permissions(path: &std::path::Path) {
 }
 
 /// Core of [`set_dir_permissions`] with the hardening operation injected; see
-/// [`set_file_permissions_with`] for why.
+/// [`check_permissions_at_with`] for why.
 fn set_dir_permissions_with(
     path: &std::path::Path,
     secure: fn(&std::path::Path) -> std::io::Result<()>,
@@ -1026,15 +1026,6 @@ pub(crate) fn default_true() -> bool {
     true
 }
 
-/// The provider a config that names none is assumed to mean.
-///
-/// Exists so `default_provider` can carry `#[serde(default)]`: without one,
-/// every field on [`Config`] that lacked a default made a hand-written
-/// `config.toml` a parse error. Writing three lines to point Leviath at
-/// OpenRouter used to fail with `missing field `providers``, which names a
-/// table the user has no reason to know about and says nothing about what to
-/// add. Kept in sync with [`Config::default`] by
-/// `an_empty_config_file_parses_to_the_defaults`.
 /// The update check is on when the key is absent.
 ///
 /// A named default rather than `#[serde(default)]`, which for a `bool` is
@@ -1044,6 +1035,15 @@ fn default_update_check() -> bool {
     true
 }
 
+/// The provider a config that names none is assumed to mean.
+///
+/// Exists so `default_provider` can carry `#[serde(default)]`: without one,
+/// every field on [`Config`] that lacked a default made a hand-written
+/// `config.toml` a parse error. Writing three lines to point Leviath at
+/// OpenRouter used to fail with `missing field `providers``, which names a
+/// table the user has no reason to know about and says nothing about what to
+/// add. Kept in sync with [`Config::default`] by
+/// `an_empty_config_file_parses_to_the_defaults`.
 pub(crate) fn default_provider_name() -> String {
     "anthropic".to_string()
 }

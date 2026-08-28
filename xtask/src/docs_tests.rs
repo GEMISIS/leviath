@@ -330,7 +330,7 @@ fn the_real_schemas_are_present_and_parse() {
         .parent()
         .expect("xtask/ has a parent");
     assert_eq!(
-        check_schemas(&root.join("docs/schema")).unwrap(),
+        check_schemas(&root.join("docs/schema")),
         Vec::<String>::new()
     );
 }
@@ -338,11 +338,26 @@ fn the_real_schemas_are_present_and_parse() {
 #[test]
 fn a_missing_schema_is_reported() {
     let dir = tempfile::tempdir().unwrap();
-    let problems = check_schemas(dir.path()).unwrap();
-    assert_eq!(problems.len(), SCHEMAS.len());
+    let problems = check_schemas(dir.path());
+    assert_eq!(problems.len(), SCHEMAS.len() + PUBLISHED_ARTIFACTS.len());
     assert!(
         problems.iter().all(|p| p.contains("missing")),
         "{problems:?}"
+    );
+}
+
+/// `config.example.toml` is published beside the schemas and linked as a live
+/// URL, so its absence is a 404 the docs advertise, not a quiet omission.
+#[test]
+fn a_missing_published_artifact_is_reported_on_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in SCHEMAS {
+        std::fs::write(dir.path().join(name), "{}").unwrap();
+    }
+    let problems = check_schemas(dir.path());
+    assert_eq!(
+        problems,
+        vec!["docs/schema/config.example.toml: missing".to_string()]
     );
 }
 
@@ -354,7 +369,11 @@ fn a_truncated_schema_is_reported() {
     for name in SCHEMAS {
         std::fs::write(dir.path().join(name), "{\"$schema\": ").unwrap();
     }
-    let problems = check_schemas(dir.path()).unwrap();
+    for name in PUBLISHED_ARTIFACTS {
+        std::fs::write(dir.path().join(name), "# present").unwrap();
+    }
+    let problems = check_schemas(dir.path());
+    assert_eq!(problems.len(), SCHEMAS.len());
     assert!(
         problems.iter().all(|p| p.contains("not valid JSON")),
         "{problems:?}"

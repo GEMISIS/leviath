@@ -80,16 +80,6 @@ pub fn client(timeouts: ClientTimeouts) -> reqwest::Client {
         .expect("building an HTTP client fails only on TLS backend init")
 }
 
-/// A client that re-runs [`check_url`] on every redirect hop.
-///
-/// A hop is a destination the caller's original check never saw: a perfectly
-/// public endpoint answering `307 Location: http://169.254.169.254/…` lands on
-/// the cloud metadata service just the same, and 307/308 preserve the method
-/// *and the body*. Capping the hop count does not help - the first hop is
-/// already somewhere else.
-///
-/// Use this wherever the URL came from outside: a model, a request body, a
-/// config file. [`client`] is for destinations Leviath itself chose.
 /// Whether a redirect hop may be followed, and why not if it may not.
 ///
 /// Split out of the policy closure so it can be tested without standing up a

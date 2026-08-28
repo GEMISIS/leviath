@@ -14,6 +14,8 @@
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
@@ -78,6 +80,24 @@ confidence-threshold = 0.9
 # crypto crate means two sets of advisories to track) but they are routine in a
 # graph this size and blocking on them would make every dependency bump a
 # yak-shave. CI surfaces them; a human decides.
+#
+# The baseline, so a new duplicate stands out against a known set rather than
+# being re-investigated every time. Every family below was traced with
+# `cargo tree -i <crate>@<version>` on 2026-08-27 and is pinned by an upstream
+# crate, not by anything in this workspace:
+#   tower-http 0.6 / 0.7        0.6 is inside reqwest; 0.7 is ours (cors)
+#   rand, rand_core 0.9 / 0.10  0.9 via opentelemetry_sdk and tungstenite
+#   getrandom 0.2 / 0.3 / 0.4   0.2 is proc-macro only (const-random via ahash)
+#   hashbrown 0.16 / 0.17       0.16 via bevy_platform; 0.17 everyone else
+#   fancy-regex 0.17 / 0.19     0.17 via tiktoken-rs; 0.19 via jsonschema
+#   digest, block-buffer, crypto-common, cpufeatures 0.10 / 0.11
+#                               0.10 via sha1 under axum and tungstenite
+#   base64 0.22 / 0.23          0.22 via axum, hyper-util, reqwest, tiktoken-rs
+#   core-foundation 0.9 / 0.10  0.9 via system-configuration under hyper-util
+#   syn 2 / 3                   proc-macro only, zero bytes in the binary
+# Also decided, not a duplicate: TLS is aws-lc-rs everywhere (reqwest and
+# axum-server resolve to the same provider). `ring` would save well under a
+# megabyte and change the audit posture; not worth it.
 multiple-versions = "warn"
 wildcards = "deny"
 # Leviath's own crates depend on each other by `path` with no version, which

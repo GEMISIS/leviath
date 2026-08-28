@@ -499,9 +499,6 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // is unit-testable - the daemon only ever drives it from `serve()`.
     host.set_reaper(make_reaper(tool_service.clone(), parts.mcp_pool.clone()));
 
-    // The shared MCP pool (created + recovery-warmed by the caller). Per-agent
-    // `[[mcp_servers]]` connect lazily through it.
-
     // Preprocessor: before the sync spawner runs, connect the blueprint's declared
     // MCP servers into the shared pool (lazy, deduped) so they're warm to advertise -
     // and pre-warm the servers declared by any `worker_agent`/`worker_query`
@@ -649,12 +646,6 @@ async fn warm_blueprint_mcp(pool: &crate::daemon::mcp_pool::McpPool, blueprint_p
     }
 }
 
-/// Pre-warm the MCP servers declared by this blueprint's `worker_agent` /
-/// `worker_query` fan-out workers, so the *first* worker spawned advertises them
-/// immediately instead of one turn late. `worker_stage` workers reuse
-/// the parent's own blueprint, already warmed by [`warm_blueprint_mcp`], so they
-/// are skipped here. A worker source that can't be read/resolved is skipped.
-/// Extracted from the preprocessor closure so its body is unit-testable.
 /// Every model a blueprint's stages name, bare and deduplicated.
 ///
 /// Every entry, not the first of each stage: which one a stage lands on depends
@@ -716,6 +707,12 @@ async fn warm_blueprint_models(
 /// table rather than that the run is refused.
 const MODEL_WARM_TIMEOUT_SECS: u64 = 90;
 
+/// Pre-warm the MCP servers declared by this blueprint's `worker_agent` /
+/// `worker_query` fan-out workers, so the *first* worker spawned advertises them
+/// immediately instead of one turn late. `worker_stage` workers reuse
+/// the parent's own blueprint, already warmed by [`warm_blueprint_mcp`], so they
+/// are skipped here. A worker source that can't be read/resolved is skipped.
+/// Extracted from the preprocessor closure so its body is unit-testable.
 async fn warm_fanout_worker_mcp(
     pool: &crate::daemon::mcp_pool::McpPool,
     blueprint_path: &str,

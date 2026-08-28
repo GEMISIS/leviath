@@ -46,7 +46,7 @@ impl Runner for RealRunner {
         Ok(std::process::Command::new("cargo")
             .args(args)
             .status()
-            .expect("failed to spawn cargo - is cargo installed in PATH?")
+            .context("spawning cargo - is cargo installed in PATH?")?
             .success())
     }
 
@@ -54,7 +54,7 @@ impl Runner for RealRunner {
         let out = std::process::Command::new("cargo")
             .args(["metadata", "--no-deps", "--format-version", "1"])
             .output()
-            .expect("failed to spawn cargo metadata - is cargo installed in PATH?");
+            .context("spawning cargo metadata - is cargo installed in PATH?")?;
         if !out.status.success() {
             anyhow::bail!("cargo metadata exited non-zero");
         }

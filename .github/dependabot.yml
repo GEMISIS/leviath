@@ -2,7 +2,8 @@ version: 2
 
 # Two ecosystems, because both are part of the attack surface:
 #
-# - `cargo` - the ~370 transitive crates that end up in the shipped binary. Now
+# - `cargo` - the ~380 transitive crates on any one target (~490 across the
+#   release matrix) that end up in the shipped binary. Now
 #   that Cargo.lock is committed, these updates arrive as reviewable diffs
 #   instead of happening invisibly on every CI run.
 # - `github-actions` - the actions that build and publish releases. These run

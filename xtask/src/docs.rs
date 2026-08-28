@@ -287,8 +287,7 @@ fn check_orders(pages: &[Page], problems: &mut Vec<String>) {
     }
 }
 
-/// Read `docs/content/`, run every check, and report.
-/// The machine-readable artifacts published beside the pages.
+/// The machine-readable schemas published beside the pages.
 ///
 /// `llms.txt` links these by name and the S3 sync uses `--delete`, so one that
 /// stops being emitted becomes a 404 the index still advertises.
@@ -298,13 +297,22 @@ pub const SCHEMAS: &[&str] = &[
     "openapi.json",
 ];
 
-/// Every published schema must exist and be parseable JSON.
+/// Published beside the schemas but not JSON: checked for existence only.
 ///
-/// Whether each one *describes the format correctly* is a different question,
-/// answered by tests in `leviath-cli` that validate real manifests and the real
-/// router against them. This only catches the file going missing or being
-/// truncated, which the release would otherwise ship without noticing.
-pub fn check_schemas(dir: &Path) -> Result<Vec<String>> {
+/// `publish-docs.yml` copies `config.example.toml` next to the schemas and
+/// `configuration.md` links it as a live URL, so it is held to the same
+/// "must exist" rule. It is also `include_str!`'d by a `leviath-cli` test,
+/// which proves it parses.
+pub const PUBLISHED_ARTIFACTS: &[&str] = &["config.example.toml"];
+
+/// Every published schema must exist and be parseable JSON, and every other
+/// published artifact must exist.
+///
+/// Whether each schema *describes the format correctly* is a different
+/// question, answered by tests in `leviath-cli` that validate real manifests
+/// and the real router against them. This only catches the file going missing
+/// or being truncated, which the release would otherwise ship without noticing.
+pub fn check_schemas(dir: &Path) -> Vec<String> {
     let mut problems = Vec::new();
     for name in SCHEMAS {
         let path = dir.join(name);
@@ -316,9 +324,15 @@ pub fn check_schemas(dir: &Path) -> Result<Vec<String>> {
             problems.push(format!("docs/schema/{name}: not valid JSON ({e})"));
         }
     }
-    Ok(problems)
+    for name in PUBLISHED_ARTIFACTS {
+        if !dir.join(name).is_file() {
+            problems.push(format!("docs/schema/{name}: missing"));
+        }
+    }
+    problems
 }
 
+/// Read `docs/content/`, run every check, and report.
 pub fn run(_mode: DocsMode) -> Result<()> {
     let dir = Path::new("docs/content");
     let mut pages = Vec::new();
@@ -337,7 +351,7 @@ pub fn run(_mode: DocsMode) -> Result<()> {
     }
 
     let mut problems = check_all(&pages);
-    problems.extend(check_schemas(Path::new("docs/schema"))?);
+    problems.extend(check_schemas(Path::new("docs/schema")));
     if problems.is_empty() {
         println!(
             "docs: {} pages, {} schemas, no problems",
