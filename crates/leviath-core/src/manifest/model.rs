@@ -9,7 +9,7 @@ use super::*;
 /// Parse `[stages.<name>.model]`, or the shipped default when the stage does
 /// not name one.
 pub(super) fn parse_stage_model(stage_value: &toml::Value) -> ModelConfig {
-    let model_table = stage_value.get("model").and_then(|v| v.as_table());
+    let model_table = table_of(stage_value, "model");
     if let Some(mt) = model_table {
         let mut models = Vec::new();
 
@@ -17,7 +17,7 @@ pub(super) fn parse_stage_model(stage_value: &toml::Value) -> ModelConfig {
         // when the route matters (a local or self-hosted model). An absent
         // provider is EMPTY, not "anthropic": an author cannot know what a
         // machine has configured, and defaulting made omission a silent choice.
-        if let Some(models_arr) = mt.get("models").and_then(|v| v.as_array()) {
+        if let Some(models_arr) = array_of(mt, "models") {
             for entry in models_arr {
                 if let Some(name) = entry.as_str() {
                     models.push(ModelEntry::new(String::new(), name.to_string()));
@@ -25,9 +25,9 @@ pub(super) fn parse_stage_model(stage_value: &toml::Value) -> ModelConfig {
                 }
                 // A table naming no model names nothing, so it is dropped.
                 if let Some(t) = entry.as_table()
-                    && let Some(model) = t.get("model").and_then(|v| v.as_str())
+                    && let Some(model) = str_of(t, "model")
                 {
-                    let route = t.get("provider").and_then(|v| v.as_str());
+                    let route = str_of(t, "provider");
                     let route = route.unwrap_or_default().to_string();
                     models.push(ModelEntry::new(route, model.to_string()));
                 }
@@ -37,11 +37,8 @@ pub(super) fn parse_stage_model(stage_value: &toml::Value) -> ModelConfig {
         // Backward compat: old single-model format (provider + model at
         // top level) or old fallbacks list - treat both as models entries.
         if models.is_empty() {
-            if let Some(provider) = mt.get("provider").and_then(|v| v.as_str()) {
-                let model_name = mt
-                    .get("model")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("claude-sonnet-4-6");
+            if let Some(provider) = str_of(mt, "provider") {
+                let model_name = str_of(mt, "model").unwrap_or("claude-sonnet-4-6");
                 models.push(ModelEntry::new(
                     provider.to_string(),
                     model_name.to_string(),
@@ -49,18 +46,14 @@ pub(super) fn parse_stage_model(stage_value: &toml::Value) -> ModelConfig {
             }
 
             // Old fallbacks become additional models entries
-            if let Some(fallbacks_arr) = mt.get("fallbacks").and_then(|v| v.as_array()) {
+            if let Some(fallbacks_arr) = array_of(mt, "fallbacks") {
                 for fb in fallbacks_arr {
                     if let Some(fb_table) = fb.as_table() {
                         models.push(ModelEntry::new(
-                            fb_table
-                                .get("provider")
-                                .and_then(|v| v.as_str())
+                            str_of(fb_table, "provider")
                                 .unwrap_or("anthropic")
                                 .to_string(),
-                            fb_table
-                                .get("model")
-                                .and_then(|v| v.as_str())
+                            str_of(fb_table, "model")
                                 .unwrap_or("claude-sonnet-4-6")
                                 .to_string(),
                         ));
@@ -77,14 +70,11 @@ pub(super) fn parse_stage_model(stage_value: &toml::Value) -> ModelConfig {
             ));
         }
 
-        let allow_user_default = mt
-            .get("allow_user_default")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let allow_user_default = bool_of(mt, "allow_user_default").unwrap_or(true);
 
         // Parse parameters
         let mut parameters = std::collections::HashMap::new();
-        if let Some(params) = mt.get("parameters").and_then(|v| v.as_table()) {
+        if let Some(params) = table_of(mt, "parameters") {
             for (k, v) in params {
                 // Converting a parsed `toml::Value` to JSON is infallible:
                 // serde_json maps non-finite floats to null rather than
@@ -96,7 +86,7 @@ pub(super) fn parse_stage_model(stage_value: &toml::Value) -> ModelConfig {
             }
         }
 
-        let request_timeout_secs = mt.get("request_timeout_secs").and_then(|v| v.as_integer());
+        let request_timeout_secs = int_of(mt, "request_timeout_secs");
         let request_timeout_secs = request_timeout_secs
             .filter(|&secs| secs >= 0)
             .map(|secs| secs as u64);
