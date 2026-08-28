@@ -261,8 +261,13 @@ impl AuthStore {
 /// fallible step to reason about.
 fn create_parent_dir(path: &Path) -> anyhow::Result<()> {
     match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow::anyhow!("Failed to create MCP auth store directory: {}", e)),
+        // Private (0700) like the file inside it: the file mode already keeps
+        // the tokens unreadable, but a world-listable directory around a
+        // `mcp-auth.json` is a map to what is worth stealing.
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            leviath_sys::create_private_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("Failed to create MCP auth store directory: {}", e))
+        }
         _ => Ok(()),
     }
 }

@@ -970,8 +970,9 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                 .and_then(|c| c.as_array())
                 .and_then(|c| c.first());
 
-            // Handle usage-only chunk (no choices)
-            if choice.is_none() {
+            // A usage-only chunk (no choices) carries the totals and nothing
+            // to render; anything else without a choice is skipped.
+            let Some(choice) = choice else {
                 if let Some(usage) = json.get("usage") {
                     let prompt_tokens = usage
                         .get("prompt_tokens")
@@ -1017,9 +1018,7 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                     })));
                 }
                 continue;
-            }
-
-            let choice = choice.unwrap();
+            };
             let delta = choice.get("delta").unwrap_or(&serde_json::Value::Null);
 
             let content = delta

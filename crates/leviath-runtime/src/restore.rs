@@ -146,19 +146,23 @@ pub fn restore_agent(
 
     // 2. Jump to the persisted stage, swapping in its inference config and
     //    tool-result routing.
-    if let Some(inf) = world
+    // `stage_index` comes off disk, so both vectors are indexed with `get`:
+    // the two are built together at spawn and agree in practice, but a guard
+    // on one that then indexes the other is a panic waiting for the day they
+    // do not.
+    let inf = world
         .get::<StageInferences>(entity)
         .expect("a spawned agent has stage inferences")
         .0
         .get(stage_index)
-        .cloned()
-    {
-        let setup = &world
-            .get::<StageSetups>(entity)
-            .expect("a spawned agent has stage setups")
-            .0[stage_index];
-        let cfg = setup.inference_config.clone();
-        let routing = setup.routing.clone();
+        .cloned();
+    let setup = world
+        .get::<StageSetups>(entity)
+        .expect("a spawned agent has stage setups")
+        .0
+        .get(stage_index)
+        .map(|s| (s.inference_config.clone(), s.routing.clone()));
+    if let Some((inf, (cfg, routing))) = inf.zip(setup) {
         world.entity_mut(entity).insert((inf, cfg));
         // Mirror `attach_stage_components`' routing arm: present ⇒ insert,
         // absent ⇒ clear the stale one. Without this a reloaded agent kept the

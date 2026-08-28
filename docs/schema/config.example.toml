@@ -141,6 +141,7 @@ allow_blueprint = true
 
 [rate_limits.anthropic]
 requests_per_minute = 50
+# Parsed and recorded, not yet enforced: only requests_per_minute throttles.
 tokens_per_minute = 100000
 
 # Every field is optional: name only what you are correcting, and the rest keeps
