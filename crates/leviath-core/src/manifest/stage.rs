@@ -243,17 +243,11 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
 
     stage = apply_stage_mode(stage, stage_name, stage_value)?;
 
-    if let Some(max_iter) = stage_value
-        .get("max_iterations")
-        .and_then(|v| v.as_integer())
-    {
+    if let Some(max_iter) = int_of(stage_value, "max_iterations") {
         stage.max_iterations = Some(max_iter as usize);
     }
 
-    if let Some(tools_arr) = stage_value
-        .get("available_tools")
-        .and_then(|v| v.as_array())
-    {
+    if let Some(tools_arr) = array_of(stage_value, "available_tools") {
         stage.available_tools = tools_arr
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -262,10 +256,7 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
 
     // Whole MCP servers this stage may use, resolved at spawn against what
     // each actually advertises.
-    if let Some(arr) = stage_value
-        .get("available_connectors")
-        .and_then(|v| v.as_array())
-    {
+    if let Some(arr) = array_of(stage_value, "available_connectors") {
         stage.available_connectors = arr
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -274,7 +265,7 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
 
     // Human tools this stage keeps even when the run is unattended.
     // Validated against `available_tools` by `Stage::validate`.
-    if let Some(tools_arr) = stage_value.get("required_tools").and_then(|v| v.as_array()) {
+    if let Some(tools_arr) = array_of(stage_value, "required_tools") {
         stage.required_tools = tools_arr
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -285,11 +276,11 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     // had a field and a builder, but the parser never looked at the key, so the
     // line was accepted and dropped. Found while enumerating the keys above,
     // and the same bug in miniature.
-    if let Some(desc) = stage_value.get("description").and_then(|v| v.as_str()) {
+    if let Some(desc) = str_of(stage_value, "description") {
         stage.description = Some(desc.trim().to_string());
     }
 
-    if let Some(sp) = stage_value.get("system_prompt").and_then(|v| v.as_str()) {
+    if let Some(sp) = str_of(stage_value, "system_prompt") {
         stage.config.insert(
             "system_prompt".to_string(),
             serde_json::Value::String(sp.trim().to_string()),
@@ -300,9 +291,7 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     // *after* the `[stages.X.model]` sub-table lands under
     // `stages.X.model` (TOML nesting rules) and is silently ignored, so
     // the stage runs with no instructions. Point the author at the fix.
-    let model_has_system_prompt = stage_value
-        .get("model")
-        .and_then(|v| v.as_table())
+    let model_has_system_prompt = table_of(stage_value, "model")
         .map(|t| t.contains_key("system_prompt"))
         .unwrap_or(false);
     if model_has_system_prompt {
@@ -315,7 +304,7 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     }
 
     // Parse tool_routing configuration
-    if let Some(routing_table) = stage_value.get("tool_routing").and_then(|v| v.as_table()) {
+    if let Some(routing_table) = table_of(stage_value, "tool_routing") {
         reject_unknown_keys(
             &format!("stage '{stage_name}': tool_routing"),
             routing_table,
@@ -323,29 +312,23 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         )?;
         let mut routing = crate::blueprint::ToolResultRouting::default();
 
-        if let Some(dr) = routing_table.get("default_region").and_then(|v| v.as_str()) {
+        if let Some(dr) = str_of(routing_table, "default_region") {
             routing.default_region = dr.to_string();
         }
-        if let Some(p) = routing_table.get("persist").and_then(|v| v.as_bool()) {
+        if let Some(p) = bool_of(routing_table, "persist") {
             routing.persist = p;
         }
-        if let Some(mt) = routing_table
-            .get("max_result_tokens")
-            .and_then(|v| v.as_integer())
-        {
+        if let Some(mt) = int_of(routing_table, "max_result_tokens") {
             routing.max_result_tokens = Some(mt as usize);
         }
-        if let Some(overrides_table) = routing_table.get("overrides").and_then(|v| v.as_table()) {
+        if let Some(overrides_table) = table_of(routing_table, "overrides") {
             for (tool_name, region_val) in overrides_table {
                 parse_tool_override(stage_name, tool_name, region_val, &mut routing)?;
             }
         }
         // Per-tool ceilings, spelled like the region overrides above so the two
         // tables read as the same idea applied to two different limits.
-        if let Some(limits) = routing_table
-            .get("max_result_tokens_per_tool")
-            .and_then(|v| v.as_table())
-        {
+        if let Some(limits) = table_of(routing_table, "max_result_tokens_per_tool") {
             for (tool_name, max_val) in limits {
                 let max = max_val.as_integer().ok_or_else(|| {
                     Error::Other(format!(
@@ -371,30 +354,27 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     }
 
     // Parse requires_children flag
-    if let Some(rc) = stage_value
-        .get("requires_children")
-        .and_then(|v| v.as_bool())
-    {
+    if let Some(rc) = bool_of(stage_value, "requires_children") {
         stage.requires_children = rc;
     }
 
     // Parse allow_complete flag: lets the LLM end the run at this
     // stage (e.g. an approving review) instead of being forced down
     // its only/first transition edge.
-    if let Some(ac) = stage_value.get("allow_complete").and_then(|v| v.as_bool()) {
+    if let Some(ac) = bool_of(stage_value, "allow_complete") {
         stage.allow_complete = ac;
     }
 
     // Parse allow_as_worker flag: opts this stage in to being used as a
     // fan-out `worker_stage` target.
-    if let Some(aw) = stage_value.get("allow_as_worker").and_then(|v| v.as_bool()) {
+    if let Some(aw) = bool_of(stage_value, "allow_as_worker") {
         stage.allow_as_worker = aw;
     }
 
     // Whether the stage must hand back a final output. `mode = "output"`
     // means it by definition; any other stage opts in by hand (a fan-out
     // worker whose merge stage depends on its summary, say).
-    if let Some(ro) = stage_value.get("require_output").and_then(|v| v.as_bool()) {
+    if let Some(ro) = bool_of(stage_value, "require_output") {
         stage.require_output = ro;
     }
 
@@ -446,50 +426,47 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     // Parse allow_blocking_tools flag: says this autonomous stage means
     // to offer `ask_user_*` / `present_for_review`, so `lev validate`
     // stops warning about it.
-    if let Some(ab) = stage_value
-        .get("allow_blocking_tools")
-        .and_then(|v| v.as_bool())
-    {
+    if let Some(ab) = bool_of(stage_value, "allow_blocking_tools") {
         stage.allow_blocking_tools = ab;
     }
 
     // Parse per-stage security override: [stages.<name>.security]
-    if let Some(sec_table) = stage_value.get("security").and_then(|v| v.as_table()) {
+    if let Some(sec_table) = table_of(stage_value, "security") {
         stage.security = Some(parse_security_config(sec_table));
     }
 
     // Parse per-stage batch_tool_hint override: opt an individual stage
     // in/out of the batch-tool-calls system-prompt hint (e.g. `false` for
     // a sequential validate stage). Absent ⇒ inherit agent/global.
-    if let Some(bth) = stage_value.get("batch_tool_hint").and_then(|v| v.as_bool()) {
+    if let Some(bth) = bool_of(stage_value, "batch_tool_hint") {
         stage.batch_tool_hint = Some(bth);
     }
 
     // Parse per-stage shell_hint override: opt an individual stage
     // in/out of the platform shell hint. Absent ⇒ inherit agent/global.
-    if let Some(sh) = stage_value.get("shell_hint").and_then(|v| v.as_bool()) {
+    if let Some(sh) = bool_of(stage_value, "shell_hint") {
         stage.shell_hint = Some(sh);
     }
 
     // Parse per-stage nudge settings: [stages.<name>.nudge]. Absent ⇒
     // each field inherits agent/global.
-    if let Some(nudge_table) = stage_value.get("nudge").and_then(|v| v.as_table()) {
+    if let Some(nudge_table) = table_of(stage_value, "nudge") {
         stage.nudge = Some(parse_nudge_config(nudge_table));
     }
 
     // Parse per-stage sandbox override: [stages.<name>.sandbox]
-    if let Some(sandbox_table) = stage_value.get("sandbox").and_then(|v| v.as_table()) {
+    if let Some(sandbox_table) = table_of(stage_value, "sandbox") {
         stage.sandbox = Some(parse_sandbox_config(sandbox_table)?);
     }
 
     // Script-backed lifecycle hooks: [stages.<name>.hooks]
-    if let Some(hooks_table) = stage_value.get("hooks").and_then(|v| v.as_table()) {
+    if let Some(hooks_table) = table_of(stage_value, "hooks") {
         stage.hooks = parse_stage_hooks(stage_name, hooks_table)?;
     }
 
     // Parse the stage's declared output shape: [stages.<name>.output].
     // Narrows [agent.output]; whoever starts the run overrides both.
-    if let Some(output_table) = stage_value.get("output").and_then(|v| v.as_table()) {
+    if let Some(output_table) = table_of(stage_value, "output") {
         stage.output = Some(parse_output_spec(output_table));
     }
 
@@ -497,18 +474,12 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     // injected into context between inference calls. Defaults to true
     // (via the Stage constructor); set false for stages that shouldn't
     // be interrupted (e.g. a final report generation stage).
-    if let Some(am) = stage_value
-        .get("accepts_messages")
-        .and_then(|v| v.as_bool())
-    {
+    if let Some(am) = bool_of(stage_value, "accepts_messages") {
         stage.accepts_messages = am;
     }
 
     // Parse per-stage tool permissions: [stages.<name>.tool_permissions]
-    if let Some(tp_table) = stage_value
-        .get("tool_permissions")
-        .and_then(|v| v.as_table())
-    {
+    if let Some(tp_table) = table_of(stage_value, "tool_permissions") {
         for (tool_name, policy_val) in tp_table {
             let policy_str = policy_val.as_str().ok_or_else(|| {
                 Error::Other(format!(
@@ -531,13 +502,13 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     // inherits the global [context.regions] layout. NOTE (TOML nesting):
     // like [stages.<name>.model], this must be its own `[...]` section;
     // don't place `context = ...` inline keys after other sub-tables.
-    if let Some(context_table) = stage_value.get("context").and_then(|v| v.as_table()) {
+    if let Some(context_table) = table_of(stage_value, "context") {
         reject_unknown_keys(
             &format!("stage '{stage_name}': context"),
             context_table,
             CONTEXT_KEYS,
         )?;
-        if let Some(regions_table) = context_table.get("regions").and_then(|v| v.as_table()) {
+        if let Some(regions_table) = table_of(context_table, "regions") {
             let (stage_regions, stage_total) = parse_region_layout(regions_table)?;
             stage.context_layout = Some(ContextLayout::new(stage_regions, stage_total));
         }
@@ -564,20 +535,17 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     }
 
     // Parse max_revisits
-    if let Some(mr) = stage_value.get("max_revisits").and_then(|v| v.as_integer()) {
+    if let Some(mr) = int_of(stage_value, "max_revisits") {
         stage.max_revisits = Some(mr as usize);
     }
 
     // Parse transition_prompt
-    if let Some(tp) = stage_value
-        .get("transition_prompt")
-        .and_then(|v| v.as_str())
-    {
+    if let Some(tp) = str_of(stage_value, "transition_prompt") {
         stage.transition_prompt = Some(tp.trim().to_string());
     }
 
     // Parse transitions: [stages.<name>.transitions.<target>]
-    if let Some(transitions_table) = stage_value.get("transitions").and_then(|v| v.as_table()) {
+    if let Some(transitions_table) = table_of(stage_value, "transitions") {
         stage.transitions = Some(parse_transitions(transitions_table)?);
     }
 
@@ -622,36 +590,25 @@ pub(super) fn apply_stage_mode(
     stage_name: &str,
     stage_value: &toml::Value,
 ) -> Result<Stage> {
-    let Some(mode_str) = stage_value.get("mode").and_then(|v| v.as_str()) else {
+    let Some(mode_str) = str_of(stage_value, "mode") else {
         return Ok(stage);
     };
     Ok(match mode_str {
         "interactive" => stage.with_mode(StageMode::Interactive),
         "interactive_points" => {
             let mut points = Vec::new();
-            if let Some(pts_arr) = stage_value
-                .get("interaction_points")
-                .and_then(|v| v.as_array())
-            {
+            if let Some(pts_arr) = array_of(stage_value, "interaction_points") {
                 for pt in pts_arr {
-                    let pt_name = pt
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let pt_prompt = pt
-                        .get("prompt")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let pt_required = pt.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
+                    let pt_name = str_of(pt, "name").unwrap_or("").to_string();
+                    let pt_prompt = str_of(pt, "prompt").unwrap_or("").to_string();
+                    let pt_required = bool_of(pt, "required").unwrap_or(true);
                     // What the point does when nobody is watching.
                     // Absent means auto-approve, the behaviour every
                     // `--yolo` run has had; `"ask"` opts a genuine
                     // human checkpoint out of that. A misspelling
                     // here would silently un-gate the checkpoint, so
                     // it is an error rather than a fallback.
-                    let pt_unattended = match pt.get("unattended").and_then(|v| v.as_str()) {
+                    let pt_unattended = match str_of(pt, "unattended") {
                         None | Some("auto_approve") => {
                             crate::blueprint::UnattendedPolicy::AutoApprove
                         }
@@ -664,7 +621,7 @@ pub(super) fn apply_stage_mode(
                             )));
                         }
                     };
-                    let pt_style = match pt.get("style").and_then(|v| v.as_str()) {
+                    let pt_style = match str_of(pt, "style") {
                         Some("multiple_choice") => {
                             crate::blueprint::InteractionStyle::MultipleChoice
                         }
@@ -709,9 +666,7 @@ pub(super) fn apply_stage_mode(
                         .unwrap_or_default();
                     // Options that immediately abort the run:
                     // abort_options = ["Abort - cancel this run"]
-                    let pt_abort_options: Vec<String> = pt
-                        .get("abort_options")
-                        .and_then(|v| v.as_array())
+                    let pt_abort_options: Vec<String> = array_of(pt, "abort_options")
                         .map(|arr| {
                             arr.iter()
                                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -720,9 +675,7 @@ pub(super) fn apply_stage_mode(
                         .unwrap_or_default();
                     // Options that open the last output for direct editing:
                     // edit_options = ["Add detail - expand a section"]
-                    let pt_edit_options: Vec<String> = pt
-                        .get("edit_options")
-                        .and_then(|v| v.as_array())
+                    let pt_edit_options: Vec<String> = array_of(pt, "edit_options")
                         .map(|arr| {
                             arr.iter()
                                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -731,10 +684,8 @@ pub(super) fn apply_stage_mode(
                         .unwrap_or_default();
                     // Pinned region that holds the authoritative
                     // document: document_region = "plan"
-                    let pt_document_region: Option<String> = pt
-                        .get("document_region")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
+                    let pt_document_region: Option<String> =
+                        str_of(pt, "document_region").map(|s| s.to_string());
                     points.push(crate::blueprint::InteractionPoint {
                         name: pt_name,
                         prompt: pt_prompt,
@@ -758,10 +709,7 @@ pub(super) fn apply_stage_mode(
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
             };
-            let on_worker_failure = match stage_value
-                .get("on_worker_failure")
-                .and_then(|v| v.as_str())
-            {
+            let on_worker_failure = match str_of(stage_value, "on_worker_failure") {
                 Some("fail_all") => crate::blueprint::WorkerFailurePolicy::FailAll,
                 Some("continue") | None => crate::blueprint::WorkerFailurePolicy::Continue,
                 // Unknown used to mean continue, so a misspelled `fail_all`
@@ -868,7 +816,7 @@ pub(super) fn parse_transitions(
                 edge_table,
                 EDGE_KEYS,
             )?;
-            if let Some(gate_table) = edge_table.get("gate").and_then(|v| v.as_table()) {
+            if let Some(gate_table) = table_of(edge_table, "gate") {
                 reject_unknown_keys(
                     &format!("transition to '{target_name}': gate"),
                     gate_table,
@@ -877,12 +825,9 @@ pub(super) fn parse_transitions(
             }
         }
 
-        let hint = edge_value
-            .get("hint")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let hint = str_of(edge_value, "hint").map(|s| s.to_string());
 
-        let condition = match edge_value.get("condition").and_then(|v| v.as_str()) {
+        let condition = match str_of(edge_value, "condition") {
             Some("error") => TransitionCondition::Error,
             Some("max_iterations") => TransitionCondition::MaxIterations,
             Some("llm_choice") => TransitionCondition::LlmChoice,
@@ -922,7 +867,7 @@ pub(super) fn parse_transitions(
             )));
         }
 
-        let transform = match edge_value.get("transform").and_then(|v| v.as_str()) {
+        let transform = match str_of(edge_value, "transform") {
             Some("clear") => EdgeTransform::Clear,
             Some("compact") | Some("summarize") => EdgeTransform::Compact { prompt: None },
             Some("custom") => {
@@ -979,10 +924,7 @@ pub(super) fn parse_transitions(
 
         // Parse the edge gate: `gate = { require_modifications = true, ... }`
         // (or a `[stages.<name>.transitions.<target>.gate]` sub-table).
-        let gate = edge_value
-            .get("gate")
-            .and_then(|v| v.as_table())
-            .map(parse_transition_gate);
+        let gate = table_of(edge_value, "gate").map(parse_transition_gate);
 
         transitions.insert(
             target_name.clone(),
@@ -1009,28 +951,28 @@ pub(super) fn parse_transition_gate(
     table: &toml::value::Table,
 ) -> crate::blueprint::TransitionGate {
     let mut gate = crate::blueprint::TransitionGate::default();
-    if let Some(rm) = table.get("require_modifications").and_then(|v| v.as_bool()) {
+    if let Some(rm) = bool_of(table, "require_modifications") {
         gate.require_modifications = rm;
     }
-    if let Some(msg) = table.get("message").and_then(|v| v.as_str()) {
+    if let Some(msg) = str_of(table, "message") {
         gate.message = Some(msg.trim().to_string());
     }
-    if let Some(region) = table.get("region").and_then(|v| v.as_str()) {
+    if let Some(region) = str_of(table, "region") {
         gate.region = Some(region.to_string());
     }
-    if let Some(region) = table.get("require_region_updated").and_then(|v| v.as_str()) {
+    if let Some(region) = str_of(table, "require_region_updated") {
         gate.require_region_updated = Some(region.to_string());
     }
-    if let Some(regions) = table.get("require_regions").and_then(|v| v.as_array()) {
+    if let Some(regions) = array_of(table, "require_regions") {
         gate.require_regions = regions
             .iter()
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect();
     }
-    if let Some(region) = table.get("require_no_open_items").and_then(|v| v.as_str()) {
+    if let Some(region) = str_of(table, "require_no_open_items") {
         gate.require_no_open_items = Some(region.to_string());
     }
-    if let Some(tools) = table.get("tools").and_then(|v| v.as_array()) {
+    if let Some(tools) = array_of(table, "tools") {
         gate.tools = tools
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -1038,11 +980,7 @@ pub(super) fn parse_transition_gate(
     }
     // A negative budget is a typo, not "never hold the stage" - fall back to the
     // default rather than silently disabling the gate.
-    if let Some(max) = table
-        .get("max_attempts")
-        .and_then(|v| v.as_integer())
-        .filter(|max| *max >= 0)
-    {
+    if let Some(max) = int_of(table, "max_attempts").filter(|max| *max >= 0) {
         gate.max_attempts = Some(max as usize);
     }
     gate
@@ -1076,9 +1014,7 @@ pub(super) fn parse_context_transform(t: &toml::Value) -> ContextTransform {
     ContextTransform {
         from_blueprint: str_field(t, "from_blueprint"),
         to_blueprint: str_field(t, "to_blueprint"),
-        mappings: t
-            .get("mappings")
-            .and_then(|v| v.as_array())
+        mappings: array_of(t, "mappings")
             .map(|arr| arr.iter().map(parse_region_mapping).collect())
             .unwrap_or_default(),
     }
@@ -1089,29 +1025,16 @@ pub(super) fn parse_context_transform(t: &toml::Value) -> ContextTransform {
 /// the broader level).
 pub(super) fn parse_nudge_config(table: &toml::value::Table) -> crate::blueprint::NudgeConfig {
     let mut nudge = crate::blueprint::NudgeConfig::default();
-    if let Some(enabled) = table.get("enabled").and_then(|v| v.as_bool()) {
+    if let Some(enabled) = bool_of(table, "enabled") {
         nudge.enabled = Some(enabled);
     }
     // A negative count is a typo, not "never accept the text" - fall back to
     // inheriting rather than wrapping around.
-    if let Some(max) = table
-        .get("max")
-        .and_then(|v| v.as_integer())
-        .filter(|max| *max >= 0)
-    {
+    if let Some(max) = int_of(table, "max").filter(|max| *max >= 0) {
         nudge.max = Some(max as usize);
     }
-    if let Some(text) = table.get("text").and_then(|v| v.as_str()) {
+    if let Some(text) = str_of(table, "text") {
         nudge.text = Some(text.trim().to_string());
     }
     nudge
-}
-
-/// A required-shaped string field, defaulting to empty when absent (the value's
-/// meaning is validated later by `Blueprint::validate`).
-pub(super) fn str_field(v: &toml::Value, key: &str) -> String {
-    v.get(key)
-        .and_then(|x| x.as_str())
-        .unwrap_or_default()
-        .to_string()
 }
