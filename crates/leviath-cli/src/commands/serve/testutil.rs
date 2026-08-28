@@ -39,6 +39,24 @@ where
     .await
 }
 
+/// An `AppState` whose config lists `paths` under `agent_paths` and that
+/// talks to no daemon, for routes that only need the blueprint catalog.
+pub(super) fn state_with_agent_paths(paths: Vec<std::path::PathBuf>) -> super::types::AppState {
+    let (event_tx, _) = tokio::sync::broadcast::channel(64);
+    super::types::AppState {
+        update_check: Default::default(),
+        update_jobs: Default::default(),
+        config: fixed_config(crate::config::Config {
+            agent_paths: paths,
+            ..Default::default()
+        }),
+        event_tx,
+        control: no_daemon_client(),
+        mcp: super::mcp::McpAdmin::default(),
+        limits: Default::default(),
+    }
+}
+
 /// A control client pointing at an address with no daemon - used by tests that
 /// never exercise agent actions (read/websocket/polling/config paths).
 pub(super) fn no_daemon_client() -> ControlClient {

@@ -411,8 +411,18 @@ fn resolve(query: &RunsQuery) -> Result<Resolved, ApiError> {
 /// `skip_serializing_if = "Option::is_none"`, so a probe left at its defaults
 /// omits them and the allowlist silently refuses a field that does exist -
 /// `?fields=read_paths` and `?fields=final_output` were both rejected on runs
-/// that had them. Filling the options is what makes the sentence above true.
+/// that had them, and then `?fields=waiting_on` was, which is what the
+/// leviath.dev console asks for on every sidebar load (issue #656). Filling
+/// the options is what makes the sentence above true, and
+/// `every_skip_if_none_option_on_run_meta_is_filled_by_the_probe` in the tests
+/// reads the struct's source to catch the next one added without a line here.
 fn known_meta_fields() -> HashSet<String> {
+    serialized_keys(&probe_meta())
+}
+
+/// A `RunMeta` with every `skip_serializing_if` option set, so that
+/// serializing it names every key a real run can carry.
+fn probe_meta() -> RunMeta {
     let mut probe = RunMeta::new(
         String::new(),
         String::new(),
@@ -424,7 +434,14 @@ fn known_meta_fields() -> HashSet<String> {
     );
     probe.read_paths = Some(Default::default());
     probe.final_output = Some(Default::default());
+    probe.waiting_on = Some(leviath_core::run_meta::WaitReason::ToolApproval);
     probe.output_request = Some(Default::default());
+    probe.model_override = Some(String::new());
+    probe
+}
+
+/// The top-level keys `probe` serializes to, plus the two the route adds.
+fn serialized_keys(probe: &RunMeta) -> HashSet<String> {
     // `RunMeta` is a struct, so this is always an object; `as_object` keeps
     // that assumption in one place instead of adding a match arm nothing can
     // reach.

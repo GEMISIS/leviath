@@ -161,11 +161,53 @@ fn fields_always_keeps_run_id_and_rejects_what_it_cannot_serve() {
 /// allowlist honest.
 #[test]
 fn fields_accepts_the_optional_ones_that_only_some_runs_carry() {
-    for optional in ["read_paths", "final_output", "output_request"] {
+    for optional in [
+        "read_paths",
+        "final_output",
+        "waiting_on",
+        "output_request",
+        "model_override",
+    ] {
         let r = resolve_ok(&[("fields", optional)]);
         let fields = r.fields.expect("fields set");
         assert!(fields.contains(optional), "{optional} should be selectable");
     }
+}
+
+/// The probe has to name every field the struct has, and the only place that
+/// list exists is the struct itself. So read it: every `pub` field declared
+/// inside `RunMeta` in `run_meta.rs` must be a key the probe serializes. A
+/// field added with `skip_serializing_if` and no line in `probe_meta` fails
+/// here rather than as a 400 in a console (issue #656 was `waiting_on`).
+#[test]
+fn every_skip_if_none_option_on_run_meta_is_filled_by_the_probe() {
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../leviath-core/src/run_meta.rs"
+    ))
+    .expect("the RunMeta source");
+    // The struct's lines: from its declaration to the first column-zero `}`.
+    let declared: Vec<&str> = source
+        .lines()
+        .skip_while(|line| *line != "pub struct RunMeta {")
+        .skip(1)
+        .take_while(|line| *line != "}")
+        .filter_map(|line| line.trim().strip_prefix("pub "))
+        .filter_map(|rest| rest.split_once(':'))
+        .map(|(name, _)| name.trim())
+        .collect();
+    assert!(declared.len() > 30, "found only {declared:?}");
+
+    let known = known_meta_fields();
+    let missing: Vec<&str> = declared
+        .iter()
+        .copied()
+        .filter(|name| !known.contains(*name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "RunMeta fields the probe does not serialize (fill them in probe_meta): {missing:?}"
+    );
 }
 
 /// A silently ignored parameter is the API smell that produces the worst bug
