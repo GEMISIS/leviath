@@ -1413,7 +1413,7 @@ mod tests {
         let client = build_http_client(Some(2)).expect("a client builds");
 
         let dns = client
-            .get("http://no-such-host-anywhere-12345.invalid/v1/models")
+            .get("https://no-such-host-anywhere-12345.invalid/v1/models")
             .send()
             .await
             .expect_err("does not resolve");
@@ -2385,8 +2385,8 @@ mod tests {
         // The `None` arm must return the builder unchanged (no per-request cap);
         // build a request both ways and confirm both are constructible.
         let client = build_http_client(None).expect("an HTTPS client builds in tests");
-        let with_none = apply_request_timeout(client.post("http://example.invalid/"), None);
-        let with_some = apply_request_timeout(client.post("http://example.invalid/"), Some(5));
+        let with_none = apply_request_timeout(client.post("https://example.invalid/"), None);
+        let with_some = apply_request_timeout(client.post("https://example.invalid/"), Some(5));
         assert!(with_none.build().is_ok());
         assert!(with_some.build().is_ok());
     }

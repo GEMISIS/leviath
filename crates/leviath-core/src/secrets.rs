@@ -520,14 +520,17 @@ mod tests {
     #[test]
     fn filtered_withholds_credentials_and_keeps_toolchains() {
         let out = withheld(ShellEnvMode::Filtered, &[], &[]);
-        for secret in [
+        for withheld in [
             "ANTHROPIC_API_KEY",
             "GITHUB_TOKEN",
             "AWS_SECRET_ACCESS_KEY",
             "LEVIATH_API_TOKEN",
             "DATABASE_URL",
         ] {
-            assert!(out.iter().any(|n| n == secret), "{secret} must be withheld");
+            assert!(
+                out.iter().any(|n| n == withheld),
+                "{withheld} must be withheld"
+            );
         }
         for kept in [
             "SSH_AUTH_SOCK",

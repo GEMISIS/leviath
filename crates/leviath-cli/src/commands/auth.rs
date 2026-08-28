@@ -256,8 +256,8 @@ fn migrate(path: &std::path::Path, to_file: bool, dry_run: bool) -> anyhow::Resu
     }
 
     println!("{}", plan.summary);
-    for account in &plan.moving {
-        println!("  - {account}");
+    for moved in &plan.moving {
+        println!("  - {moved}");
     }
     if dry_run {
         println!("\nDry run: nothing was changed.");

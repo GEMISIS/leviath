@@ -13,14 +13,62 @@ use super::types::{AppState, err};
 use crate::config::Config;
 use leviath_mcp::{AuthStore, LoginOutcome, MCPClient, MCPServerConfig, OAuthClient};
 
-/// Where `lev serve` reads and writes MCP state, plus the seams the login flow
-/// needs. Cheap to clone (paths + fn pointers).
+/// Where this server reads and rewrites the operator's files.
+///
+/// Resolved from `LEVIATH_HOME` and `LEVIATH_CONFIG_PATH`, never from anything
+/// in a request. The distinction matters to a taint scanner: everything
+/// reachable from a handler's parameters, the shared state included, reads as
+/// request data, and a file location that is request data is a path-injection
+/// finding. So the handlers get these from [`admin_paths`], a plain function
+/// over the environment, and not from a field on [`AppState`]. The update
+/// route keeps its own locations in `UpdateEnv` for the same reason.
+#[derive(Clone, Debug)]
+pub struct AdminPaths {
+    /// Config file to read and rewrite.
+    pub config: std::path::PathBuf,
+    /// OAuth token store.
+    pub store: std::path::PathBuf,
+}
+
+/// The operator's file locations for this process.
+///
+/// Resolved on every call: the lookup is two environment reads, and a lazily
+/// cached copy would pin the first test's home directory on the whole test
+/// binary. In a test build a [`TEST_PATHS`] scope wins over the environment,
+/// which is how the handler tests point at a temp dir.
+pub fn admin_paths() -> AdminPaths {
+    #[cfg(test)]
+    if let Ok(paths) = TEST_PATHS.try_with(Clone::clone) {
+        return paths;
+    }
+    AdminPaths {
+        config: Config::config_path(),
+        store: AuthStore::default_path().unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Test override for [`admin_paths`]; see [`scoped`].
+    pub(crate) static TEST_PATHS: AdminPaths;
+}
+
+/// Wrap a router so every request it serves sees `paths` from
+/// [`admin_paths`]. Test-only: production resolves from the environment.
+#[cfg(test)]
+pub(crate) fn scoped(router: axum::Router, paths: AdminPaths) -> axum::Router {
+    router.layer(axum::middleware::from_fn(
+        move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let paths = paths.clone();
+            async move { TEST_PATHS.scope(paths, next.run(req)).await }
+        },
+    ))
+}
+
+/// The seams the login flow needs: how to open a browser, and what time it
+/// is. Cheap to clone (an `Arc` and a fn pointer).
 #[derive(Clone)]
 pub struct McpAdmin {
-    /// Config file to read and rewrite.
-    pub config_path: std::path::PathBuf,
-    /// OAuth token store.
-    pub store_path: std::path::PathBuf,
     /// How to open the browser during a login.
     pub opener: leviath_mcp::BrowserOpener,
     /// Current Unix time; a fn so a long-lived server stays current per request.
@@ -38,8 +86,6 @@ fn system_now() -> u64 {
 impl Default for McpAdmin {
     fn default() -> Self {
         Self {
-            config_path: Config::config_path(),
-            store_path: AuthStore::default_path().unwrap_or_default(),
             opener: std::sync::Arc::new(leviath_sys::open_url),
             clock: system_now,
         }
@@ -98,11 +144,12 @@ fn auth_status(server: &MCPServerConfig, store: &AuthStore, now: u64) -> String 
 /// `GET /api/mcp/servers` - list configured servers with their auth status.
 pub(super) async fn list_servers(State(state): State<AppState>) -> impl IntoResponse {
     let admin = &state.mcp;
-    let config = match Config::load_from_path_public(&admin.config_path) {
+    let paths = admin_paths();
+    let config = match Config::load_from_path_public(&paths.config) {
         Ok(config) => config,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let store = AuthStore::load(&admin.store_path).unwrap_or_default();
+    let store = AuthStore::load(&paths.store).unwrap_or_default();
     let now = (admin.clock)();
     let servers: Vec<McpServerInfo> = config
         .mcp_servers
@@ -127,11 +174,8 @@ pub(super) struct AddServerRequest {
 }
 
 /// `POST /api/mcp/servers` - add a server.
-pub(super) async fn add_server(
-    State(state): State<AppState>,
-    Json(req): Json<AddServerRequest>,
-) -> impl IntoResponse {
-    let admin = &state.mcp;
+pub(super) async fn add_server(Json(req): Json<AddServerRequest>) -> impl IntoResponse {
+    let paths = admin_paths();
     let server = MCPServerConfig {
         name: req.name,
         command: req.command,
@@ -144,7 +188,7 @@ pub(super) async fn add_server(
         return err(StatusCode::BAD_REQUEST, e.to_string()).into_response();
     }
 
-    let mut config = match Config::load_from_path_public(&admin.config_path) {
+    let mut config = match Config::load_from_path_public(&paths.config) {
         Ok(config) => config,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
@@ -156,7 +200,7 @@ pub(super) async fn add_server(
         .into_response();
     }
     config.mcp_servers.push(server.clone());
-    if let Err(e) = config.save_to_path_public(&admin.config_path) {
+    if let Err(e) = config.save_to_path_public(&paths.config) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
     (
@@ -167,12 +211,9 @@ pub(super) async fn add_server(
 }
 
 /// `DELETE /api/mcp/servers/{name}` - remove a server and its credentials.
-pub(super) async fn remove_server(
-    State(state): State<AppState>,
-    AxumPath(name): AxumPath<String>,
-) -> impl IntoResponse {
-    let admin = &state.mcp;
-    let mut config = match Config::load_from_path_public(&admin.config_path) {
+pub(super) async fn remove_server(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
+    let paths = admin_paths();
+    let mut config = match Config::load_from_path_public(&paths.config) {
         Ok(config) => config,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
@@ -185,13 +226,13 @@ pub(super) async fn remove_server(
         )
         .into_response();
     }
-    if let Err(e) = config.save_to_path_public(&admin.config_path) {
+    if let Err(e) = config.save_to_path_public(&paths.config) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
-    if let Ok(mut store) = AuthStore::load(&admin.store_path)
+    if let Ok(mut store) = AuthStore::load(&paths.store)
         && store.remove(&name)
     {
-        let _ = store.save(&admin.store_path);
+        let _ = store.save(&paths.store);
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -205,7 +246,8 @@ pub(super) async fn login(
     AxumPath(name): AxumPath<String>,
 ) -> impl IntoResponse {
     let admin = &state.mcp;
-    let config = match Config::load_from_path_public(&admin.config_path) {
+    let paths = admin_paths();
+    let config = match Config::load_from_path_public(&paths.config) {
         Ok(config) => config,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
@@ -227,7 +269,7 @@ pub(super) async fn login(
         }
     };
 
-    let mut store = AuthStore::load(&admin.store_path).unwrap_or_default();
+    let mut store = AuthStore::load(&paths.store).unwrap_or_default();
     let reuse = store.get(&name).map(|a| a.client_id.clone());
     let outcome = match OAuthClient::new()
         .login(
@@ -251,7 +293,7 @@ pub(super) async fn login(
             .into_response();
     };
     store.set(&name, *auth);
-    if let Err(e) = store.save(&admin.store_path) {
+    if let Err(e) = store.save(&paths.store) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
     Json(serde_json::json!({ "status": "authenticated", "server": name })).into_response()
@@ -263,7 +305,8 @@ pub(super) async fn status(
     AxumPath(name): AxumPath<String>,
 ) -> impl IntoResponse {
     let admin = &state.mcp;
-    let config = match Config::load_from_path_public(&admin.config_path) {
+    let paths = admin_paths();
+    let config = match Config::load_from_path_public(&paths.config) {
         Ok(config) => config,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
@@ -274,7 +317,7 @@ pub(super) async fn status(
         )
         .into_response();
     };
-    let store = AuthStore::load(&admin.store_path).unwrap_or_default();
+    let store = AuthStore::load(&paths.store).unwrap_or_default();
     Json(McpServerInfo::describe(server, &store, (admin.clock)())).into_response()
 }
 
@@ -284,7 +327,8 @@ pub(super) async fn test_server(
     AxumPath(name): AxumPath<String>,
 ) -> impl IntoResponse {
     let admin = &state.mcp;
-    let config = match Config::load_from_path_public(&admin.config_path) {
+    let paths = admin_paths();
+    let config = match Config::load_from_path_public(&paths.config) {
         Ok(config) => config,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
@@ -296,7 +340,7 @@ pub(super) async fn test_server(
         .into_response();
     };
     let auth_header = match OAuthClient::new()
-        .authorization_header(&name, &admin.store_path, (admin.clock)())
+        .authorization_header(&name, &paths.store, (admin.clock)())
         .await
     {
         Ok(header) => header,
@@ -355,11 +399,8 @@ mod tests {
         1_000
     }
 
-    /// An app state whose MCP admin points at temp paths.
-    fn state_at(
-        dir: &std::path::Path,
-        opener: impl Fn(&str) -> bool + Send + Sync + 'static,
-    ) -> AppState {
+    /// An app state with a test browser opener and a fixed clock.
+    fn state_at(opener: impl Fn(&str) -> bool + Send + Sync + 'static) -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
         AppState {
             update_check: Default::default(),
@@ -368,8 +409,6 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: McpAdmin {
-                config_path: dir.join("config.toml"),
-                store_path: dir.join("mcp-auth.json"),
                 opener: Arc::new(opener),
                 clock: fixed_clock,
             },
@@ -385,6 +424,22 @@ mod tests {
             .route("/api/mcp/servers/{name}/login", post(login))
             .route("/api/mcp/servers/{name}/test", post(test_server))
             .with_state(state)
+    }
+
+    /// The config and store a test keeps under `dir`.
+    fn paths_in(dir: &std::path::Path) -> AdminPaths {
+        AdminPaths {
+            config: dir.join("config.toml"),
+            store: dir.join("mcp-auth.json"),
+        }
+    }
+
+    /// A router over [`state_at`] whose handlers read the files under `dir`.
+    fn app_at(
+        dir: &std::path::Path,
+        opener: impl Fn(&str) -> bool + Send + Sync + 'static,
+    ) -> Router {
+        scoped(router(state_at(opener)), paths_in(dir))
     }
 
     async fn send(
@@ -418,7 +473,7 @@ mod tests {
     #[tokio::test]
     async fn add_list_status_and_remove_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
 
         // Empty to start.
         let (status_code, body) = send(&app, "GET", "/api/mcp/servers", None).await;
@@ -456,7 +511,7 @@ mod tests {
     #[tokio::test]
     async fn add_rejects_a_malformed_server() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         let (status_code, _) = send(
             &app,
             "POST",
@@ -471,7 +526,7 @@ mod tests {
     #[tokio::test]
     async fn add_rejects_a_duplicate() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         let body = serde_json::json!({ "name": "x", "command": "npx" });
         send(&app, "POST", "/api/mcp/servers", Some(body.clone())).await;
         let (status_code, _) = send(&app, "POST", "/api/mcp/servers", Some(body)).await;
@@ -481,7 +536,7 @@ mod tests {
     #[tokio::test]
     async fn remove_of_an_unknown_server_is_404() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         let (status_code, _) = send(&app, "DELETE", "/api/mcp/servers/ghost", None).await;
         assert_eq!(status_code, StatusCode::NOT_FOUND);
     }
@@ -489,7 +544,7 @@ mod tests {
     #[tokio::test]
     async fn status_of_an_unknown_server_is_404() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         let (status_code, _) = send(&app, "GET", "/api/mcp/servers/ghost/status", None).await;
         assert_eq!(status_code, StatusCode::NOT_FOUND);
     }
@@ -497,7 +552,7 @@ mod tests {
     #[tokio::test]
     async fn login_of_an_unknown_server_is_404() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         let (status_code, _) = send(&app, "POST", "/api/mcp/servers/ghost/login", None).await;
         assert_eq!(status_code, StatusCode::NOT_FOUND);
     }
@@ -505,7 +560,7 @@ mod tests {
     #[tokio::test]
     async fn login_of_a_stdio_server_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         send(
             &app,
             "POST",
@@ -520,7 +575,7 @@ mod tests {
     #[tokio::test]
     async fn test_of_an_unknown_server_is_404() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         let (status_code, _) = send(&app, "POST", "/api/mcp/servers/ghost/test", None).await;
         assert_eq!(status_code, StatusCode::NOT_FOUND);
     }
@@ -604,7 +659,7 @@ mod tests {
     async fn login_completes_and_status_reports_authenticated() {
         let base = mock_oauth_server().await;
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), auto_consent));
+        let app = app_at(dir.path(), auto_consent);
 
         send(
             &app,
@@ -639,7 +694,7 @@ mod tests {
         )));
 
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         send(
             &app,
             "POST",
@@ -665,7 +720,7 @@ mod tests {
     #[tokio::test]
     async fn login_reports_a_bad_gateway_when_discovery_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         send(
             &app,
             "POST",
@@ -680,7 +735,7 @@ mod tests {
     #[tokio::test]
     async fn test_endpoint_connects_and_lists_tools() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         let stub = r#"
 import sys, json
 for line in sys.stdin:
@@ -709,7 +764,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn test_endpoint_reports_a_bad_gateway_on_connect_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         send(
             &app,
             "POST",
@@ -724,7 +779,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn test_reports_a_bad_gateway_when_the_token_cannot_refresh() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         send(
             &app,
             "POST",
@@ -764,8 +819,6 @@ for line in sys.stdin:
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: McpAdmin {
-                config_path: cfg,
-                store_path: store,
                 opener: Arc::new(never_opens),
                 clock: fixed_clock,
             },
@@ -776,7 +829,13 @@ for line in sys.stdin:
     #[tokio::test]
     async fn read_endpoints_surface_an_unreadable_config() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(broken_state(dir.path()));
+        let app = scoped(
+            router(broken_state(dir.path())),
+            AdminPaths {
+                config: dir.path().join("cfg-dir"),
+                store: dir.path().join("store-dir"),
+            },
+        );
         for (method, uri) in [
             ("GET", "/api/mcp/servers"),
             ("GET", "/api/mcp/servers/x/status"),
@@ -796,7 +855,13 @@ for line in sys.stdin:
     #[tokio::test]
     async fn add_surfaces_an_unreadable_config() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(broken_state(dir.path()));
+        let app = scoped(
+            router(broken_state(dir.path())),
+            AdminPaths {
+                config: dir.path().join("cfg-dir"),
+                store: dir.path().join("store-dir"),
+            },
+        );
         let (status_code, _) = send(
             &app,
             "POST",
@@ -820,14 +885,18 @@ for line in sys.stdin:
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: McpAdmin {
-                config_path: file.join("config.toml"),
-                store_path: dir.path().join("s.json"),
                 opener: Arc::new(never_opens),
                 clock: fixed_clock,
             },
             limits: Default::default(),
         };
-        let app = router(state);
+        let app = scoped(
+            router(state),
+            AdminPaths {
+                config: file.join("config.toml"),
+                store: dir.path().join("s.json"),
+            },
+        );
         let (status_code, _) = send(
             &app,
             "POST",
@@ -842,7 +911,7 @@ for line in sys.stdin:
     async fn remove_surfaces_an_unwritable_config() {
         // Config reads fine, add one server, then make the config file read-only.
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         send(
             &app,
             "POST",
@@ -862,7 +931,7 @@ for line in sys.stdin:
     async fn login_surfaces_an_unwritable_store() {
         let base = mock_oauth_server().await;
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), auto_consent));
+        let app = app_at(dir.path(), auto_consent);
         send(
             &app,
             "POST",
@@ -885,7 +954,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn list_and_status_describe_a_stdio_server() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         send(
             &app,
             "POST",
@@ -904,7 +973,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn remove_clears_stored_credentials() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         send(
             &app,
             "POST",
@@ -927,7 +996,7 @@ for line in sys.stdin:
     async fn a_second_login_reuses_the_client_id() {
         let base = mock_oauth_server().await;
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), auto_consent));
+        let app = app_at(dir.path(), auto_consent);
         send(
             &app,
             "POST",
@@ -944,7 +1013,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn test_endpoint_reports_a_spawn_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         send(
             &app,
             "POST",
@@ -959,7 +1028,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn test_endpoint_reports_a_list_tools_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let app = router(state_at(dir.path(), never_opens));
+        let app = app_at(dir.path(), never_opens);
         let stub = r#"
 import sys, json
 for line in sys.stdin:
@@ -993,8 +1062,13 @@ for line in sys.stdin:
     fn default_admin_uses_real_paths() {
         // Constructing the default must not panic even with no LEVIATH_HOME; it
         // resolves the real config/store locations.
-        let admin = McpAdmin::default();
-        assert!(admin.config_path.to_string_lossy().contains("config.toml"));
+        let _admin = McpAdmin::default();
+        assert!(
+            admin_paths()
+                .config
+                .to_string_lossy()
+                .contains("config.toml")
+        );
     }
 
     #[test]
