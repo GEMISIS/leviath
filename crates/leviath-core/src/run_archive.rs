@@ -386,28 +386,64 @@ fn is_prefix(prev: &[RegionEntrySnapshot], next: &[RegionEntrySnapshot]) -> bool
     prev.len() <= next.len() && next[..prev.len()] == *prev
 }
 
-/// Compute the minimal-ish [`ContextDelta`] turning `prev` into `next`. Regions
-/// that only grew at the tail become a compact `Append`; everything else is
-/// carried as a `Set`/`Clear`/`Remove`.
-pub fn diff_context(prev: &ContextSnapshot, next: &ContextSnapshot) -> ContextDelta {
+/// What the diff needs to know about a region as it was.
+///
+/// Two questions per region: did anything change, and if so, did it change
+/// only by appending at the tail? A full previous snapshot answers them by
+/// comparing entries; a retained [`RegionDigest`] answers them from per-entry
+/// hashes. Everything else about the diff - which regions are new, which
+/// went away, which were cleared - is the same algorithm over either.
+trait PriorRegion {
+    /// The region's name, which is what pairs it with its successor.
+    fn name(&self) -> &str;
+    /// Whether `next` is this region, unchanged.
+    fn unchanged(&self, next: &RegionSnapshot) -> bool;
+    /// Whether `next` kept this region's kind and budget and only appended.
+    fn appended_to(&self, next: &RegionSnapshot) -> bool;
+    /// How many entries this region held.
+    fn entry_count(&self) -> usize;
+}
+
+impl PriorRegion for RegionSnapshot {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn unchanged(&self, next: &RegionSnapshot) -> bool {
+        self == next
+    }
+
+    fn appended_to(&self, next: &RegionSnapshot) -> bool {
+        self.kind == next.kind
+            && self.max_tokens == next.max_tokens
+            && is_prefix(&self.entries, &next.entries)
+    }
+
+    fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// The delta turning the regions `prev` describes into `next`.
+///
+/// Regions that only grew at the tail become a compact `Append`; everything
+/// else is carried as a `Set`/`Clear`/`Remove`.
+fn diff_regions<P: PriorRegion>(prev: &[P], next: &ContextSnapshot) -> ContextDelta {
     let mut regions = Vec::new();
     for nr in &next.regions {
-        match prev.regions.iter().find(|r| r.name == nr.name) {
+        match prev.iter().find(|r| r.name() == nr.name) {
             None => regions.push(RegionDelta::Set(nr.clone())),
             Some(pr) => {
-                if pr == nr {
+                if pr.unchanged(nr) {
                     // unchanged - emit nothing
-                } else if nr.entries.is_empty() && !pr.entries.is_empty() {
+                } else if nr.entries.is_empty() && pr.entry_count() > 0 {
                     regions.push(RegionDelta::Clear {
                         name: nr.name.clone(),
                     });
-                } else if pr.kind == nr.kind
-                    && pr.max_tokens == nr.max_tokens
-                    && is_prefix(&pr.entries, &nr.entries)
-                {
+                } else if pr.appended_to(nr) {
                     regions.push(RegionDelta::Append {
                         name: nr.name.clone(),
-                        entries: nr.entries[pr.entries.len()..].to_vec(),
+                        entries: nr.entries[pr.entry_count()..].to_vec(),
                         current_tokens: nr.current_tokens,
                     });
                 } else {
@@ -416,10 +452,10 @@ pub fn diff_context(prev: &ContextSnapshot, next: &ContextSnapshot) -> ContextDe
             }
         }
     }
-    for pr in &prev.regions {
-        if !next.regions.iter().any(|r| r.name == pr.name) {
+    for pr in prev {
+        if !next.regions.iter().any(|r| r.name == pr.name()) {
             regions.push(RegionDelta::Remove {
-                name: pr.name.clone(),
+                name: pr.name().to_string(),
             });
         }
     }
@@ -429,6 +465,13 @@ pub fn diff_context(prev: &ContextSnapshot, next: &ContextSnapshot) -> ContextDe
         max_tokens: next.max_tokens,
         regions,
     }
+}
+
+/// Compute the minimal-ish [`ContextDelta`] turning `prev` into `next`. Regions
+/// that only grew at the tail become a compact `Append`; everything else is
+/// carried as a `Set`/`Clear`/`Remove`.
+pub fn diff_context(prev: &ContextSnapshot, next: &ContextSnapshot) -> ContextDelta {
+    diff_regions(&prev.regions, next)
 }
 
 // ─── digest-based diffing ───────────────────────────────────────────────────
@@ -511,55 +554,36 @@ fn is_prefix_digest(prev: &[u64], next: &[RegionEntrySnapshot]) -> bool {
             .all(|(hash, entry)| *hash == entry_digest(entry))
 }
 
+impl PriorRegion for RegionDigest {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn unchanged(&self, next: &RegionSnapshot) -> bool {
+        self.kind == next.kind
+            && self.max_tokens == next.max_tokens
+            && self.current_tokens == next.current_tokens
+            && self.entries.len() == next.entries.len()
+            && is_prefix_digest(&self.entries, &next.entries)
+    }
+
+    fn appended_to(&self, next: &RegionSnapshot) -> bool {
+        self.kind == next.kind
+            && self.max_tokens == next.max_tokens
+            && is_prefix_digest(&self.entries, &next.entries)
+    }
+
+    fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 /// [`diff_context`] against a retained [`ContextDigest`] instead of a full
-/// previous snapshot. Produces the same delta shapes for the same changes:
+/// previous snapshot. The same algorithm over a different idea of "before":
 /// unchanged regions emit nothing, tail growth becomes `Append`, everything
 /// else `Set`/`Clear`/`Remove`.
 pub fn diff_context_digest(prev: &ContextDigest, next: &ContextSnapshot) -> ContextDelta {
-    let mut regions = Vec::new();
-    for nr in &next.regions {
-        match prev.regions.iter().find(|r| r.name == nr.name) {
-            None => regions.push(RegionDelta::Set(nr.clone())),
-            Some(pr) => {
-                let unchanged = pr.kind == nr.kind
-                    && pr.max_tokens == nr.max_tokens
-                    && pr.current_tokens == nr.current_tokens
-                    && pr.entries.len() == nr.entries.len()
-                    && is_prefix_digest(&pr.entries, &nr.entries);
-                if unchanged {
-                    // emit nothing
-                } else if nr.entries.is_empty() && !pr.entries.is_empty() {
-                    regions.push(RegionDelta::Clear {
-                        name: nr.name.clone(),
-                    });
-                } else if pr.kind == nr.kind
-                    && pr.max_tokens == nr.max_tokens
-                    && is_prefix_digest(&pr.entries, &nr.entries)
-                {
-                    regions.push(RegionDelta::Append {
-                        name: nr.name.clone(),
-                        entries: nr.entries[pr.entries.len()..].to_vec(),
-                        current_tokens: nr.current_tokens,
-                    });
-                } else {
-                    regions.push(RegionDelta::Set(nr.clone()));
-                }
-            }
-        }
-    }
-    for pr in &prev.regions {
-        if !next.regions.iter().any(|r| r.name == pr.name) {
-            regions.push(RegionDelta::Remove {
-                name: pr.name.clone(),
-            });
-        }
-    }
-    ContextDelta {
-        stage_name: next.stage_name.clone(),
-        total_tokens: next.total_tokens,
-        max_tokens: next.max_tokens,
-        regions,
-    }
+    diff_regions(&prev.regions, next)
 }
 
 /// Apply a [`ContextDelta`] to `base` in place. Lenient: a delta referencing a
