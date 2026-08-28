@@ -142,7 +142,7 @@ pub struct SafeCommands {
     /// already `allow` while `cat file` prompts, and closing that incoherence is
     /// most of what this setting is for.
     ///
-    #[serde(default = "default_true")]
+    #[serde(default = "leviath_core::default_true")]
     pub defaults: bool,
     /// Tools that need no prompt whatever their arguments. Built-in names, or
     /// MCP names in their advertised form (`server__tool`).
@@ -154,12 +154,8 @@ pub struct SafeCommands {
     pub shell: Vec<String>,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 /// Hand-written rather than derived, because `#[derive(Default)]` would give
-/// `defaults: false` while `#[serde(default = "default_true")]` gives `true` for
+/// `defaults: false` while `#[serde(default = "leviath_core::default_true")]` gives `true` for
 /// the same absent section. That split is invisible and load-bearing: a user
 /// with no config file at all goes through `Default`, a user with a config file
 /// and no `[safe_commands]` section goes through serde, and they must land on
@@ -167,7 +163,7 @@ fn default_true() -> bool {
 impl Default for SafeCommands {
     fn default() -> Self {
         Self {
-            defaults: default_true(),
+            defaults: leviath_core::default_true(),
             tools: Vec::new(),
             shell: Vec::new(),
         }

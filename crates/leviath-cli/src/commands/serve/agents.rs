@@ -147,7 +147,7 @@ pub(super) async fn list_agents(
     // signing secret this handler would otherwise hand out whole, and what
     // gives these runs the same `age_secs`/`working_secs` that `/api/runs`
     // reports for the very same run.
-    let now = now_secs();
+    let now = leviath_core::duration::now_secs();
     Json(runs.iter().map(|m| run_json(m, now)).collect())
 }
 
@@ -155,7 +155,7 @@ pub(super) async fn get_agent(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     runstate::read_meta(&id)
-        .map(|m| Json(run_json(&m, now_secs())))
+        .map(|m| Json(run_json(&m, leviath_core::duration::now_secs())))
         .map_err(|_| {
             (
                 StatusCode::NOT_FOUND,
@@ -167,7 +167,7 @@ pub(super) async fn get_agent(
 }
 
 pub(super) async fn agent_children(AxumPath(id): AxumPath<String>) -> Json<Vec<serde_json::Value>> {
-    let now = now_secs();
+    let now = leviath_core::duration::now_secs();
     let children: Vec<serde_json::Value> = runstate::list_runs()
         .into_iter()
         .filter(|r| r.parent_run_id.as_deref() == Some(&id))
@@ -337,14 +337,12 @@ pub(super) async fn agent_context_history(
         });
 
     let items = collected.into_iter().map(|(_, point)| point).collect();
-    Ok(Json(Page::new(items, next_cursor, Some(total), now_secs())))
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    Ok(Json(Page::new(
+        items,
+        next_cursor,
+        Some(total),
+        leviath_core::duration::now_secs(),
+    )))
 }
 
 /// `GET /api/agents/{id}/logs`: what a run has written, by stage.

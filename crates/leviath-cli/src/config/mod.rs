@@ -221,7 +221,7 @@ pub struct Config {
     /// setting `batch_tool_hint = false` in their `[agent]` / `[stages.<name>]`
     /// blocks; when this global is `false`, they opt back *in* by setting it to
     /// `true` at the narrower scope.
-    #[serde(default = "default_true")]
+    #[serde(default = "leviath_core::default_true")]
     pub batch_tool_hint: bool,
 
     /// Global master switch for the platform shell hint.
@@ -234,7 +234,7 @@ pub struct Config {
     /// on Linux and macOS this toggle costs nothing either way. Individual
     /// agents or stages override it with `shell_hint` in their `[agent]` /
     /// `[stages.<name>]` blocks.
-    #[serde(default = "default_true")]
+    #[serde(default = "leviath_core::default_true")]
     pub shell_hint: bool,
 
     /// Machine-wide defaults for the empty-response nudge (`[nudge]`): the
@@ -1014,16 +1014,6 @@ fn set_dir_permissions_with(
     if let Err(e) = secure(path) {
         tracing::warn!("Failed to set config directory permissions: {}", e);
     }
-}
-
-/// Serde default for a flag that ships on.
-///
-/// Shared by `[security]`, `[limits]` and `Config` itself, so it lives here
-/// rather than in whichever section happened to need it first: serde resolves
-/// a `default = "..."` path in the module the struct is defined in, so a helper
-/// three sections use has to be reachable from all three.
-pub(crate) fn default_true() -> bool {
-    true
 }
 
 /// The update check is on when the key is absent.

@@ -30,11 +30,6 @@ use serde::{Deserialize, Serialize};
 /// exactly, so this costs no existing agent anything.
 pub const STAGE_INSTRUCTIONS_REGION: &str = "stage_instructions";
 
-/// Serde default for a flag that is on unless a blueprint turns it off.
-fn default_true() -> bool {
-    true
-}
-
 /// How a region's token ceiling is expressed before it is resolved against a
 /// concrete model context window.
 ///
@@ -651,7 +646,7 @@ pub struct RegionDefinition {
     /// Setting this false protects the region wherever it is used, rather than
     /// at each of the N edges that might touch it. `clear` still applies - this
     /// says "do not paraphrase my content", not "keep it forever".
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::default_true")]
     pub summarizable: bool,
 
     /// What this region does when a write does not fit.

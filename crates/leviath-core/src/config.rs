@@ -7,10 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 
-fn default_true() -> bool {
-    true
-}
-
 /// Configuration for auto-generating a short human-readable run title.
 ///
 /// Example config:
@@ -23,7 +19,7 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleConfig {
     /// Whether to generate titles at all (default: true).
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::default_true")]
     pub enabled: bool,
 
     /// Provider to use for title generation.

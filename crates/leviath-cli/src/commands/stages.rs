@@ -74,7 +74,7 @@ fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
     for stage in stages {
         println!(
             "{:<20} {:<10} {:>10} {:>10} {:>10} {:>10} {:>11}",
-            truncate(&stage.name, 20),
+            leviath_core::truncate_chars(&stage.name, 20),
             format!("{:?}", stage.status).to_lowercase(),
             stage.prompt_tokens,
             stage.completion_tokens,
@@ -116,7 +116,11 @@ fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
             let mut regions: Vec<(&String, &usize)> = stage.region_tokens.iter().collect();
             regions.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
             for (name, tokens) in regions {
-                println!("  {:<18} {:>42}", truncate(name, 18), tokens);
+                println!(
+                    "  {:<18} {:>42}",
+                    leviath_core::truncate_chars(name, 18),
+                    tokens
+                );
             }
         }
     }
@@ -149,16 +153,6 @@ fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
 
 /// `s` cut to `width` **characters**.
 ///
-/// Counted in characters rather than bytes because the width is a column count
-/// in a table, and a byte cut would both misalign the column and land
-/// mid-codepoint on any non-ASCII stage or region name.
-fn truncate(s: &str, width: usize) -> String {
-    match s.chars().count() > width {
-        true => s.chars().take(width).collect(),
-        false => s.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,14 +222,6 @@ mod tests {
         r.region_tokens.insert("alpha".to_string(), 42);
         r.region_tokens.insert("beta".to_string(), 42);
         print_ledger(&[r], true, false);
-    }
-
-    /// A long stage name is cut rather than breaking the columns, and cut on a
-    /// char boundary - region and stage names are author-supplied text.
-    #[test]
-    fn a_long_name_is_truncated_on_a_char_boundary() {
-        assert_eq!(truncate("short", 20), "short");
-        assert_eq!(truncate(&"é".repeat(30), 5).chars().count(), 5);
     }
 
     /// A run whose ledger is on disk, in an isolated runs dir.
