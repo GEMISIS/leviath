@@ -93,6 +93,25 @@ pub struct AgentInstaller {
     install_dir: PathBuf,
 }
 
+/// The version and description an `agent.leviath` declares, with the
+/// defaults the catalogue shows when the file is missing, unreadable or not
+/// TOML: `0.0.0` and an empty description. Three listings used to read and
+/// parse the file each with these same two lookups inline.
+fn manifest_meta(manifest_path: &Path) -> (String, String) {
+    let content = fs::read_to_string(manifest_path).unwrap_or_default();
+    let parsed: toml::Value =
+        toml::from_str(&content).unwrap_or(toml::Value::Table(toml::map::Map::new()));
+    let field = |key: &str, default: &str| -> String {
+        parsed
+            .get("agent")
+            .and_then(|a| a.get(key))
+            .and_then(|v| v.as_str())
+            .unwrap_or(default)
+            .to_string()
+    };
+    (field("version", "0.0.0"), field("description", ""))
+}
+
 impl AgentInstaller {
     /// Create a new installer using the default installation directory.
     ///
@@ -278,28 +297,7 @@ impl AgentInstaller {
             return Err(e);
         }
 
-        // Read agent.leviath to get metadata
-        let manifest_path = agent_dir.join("agent.leviath");
-        let (version, description) = if manifest_path.exists() {
-            let content = fs::read_to_string(&manifest_path).unwrap_or_default();
-            let parsed: toml::Value =
-                toml::from_str(&content).unwrap_or(toml::Value::Table(toml::map::Map::new()));
-            let version = parsed
-                .get("agent")
-                .and_then(|a| a.get("version"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("0.0.0")
-                .to_string();
-            let description = parsed
-                .get("agent")
-                .and_then(|a| a.get("description"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            (version, description)
-        } else {
-            ("0.0.0".to_string(), String::new())
-        };
+        let (version, description) = manifest_meta(&agent_dir.join("agent.leviath"));
 
         tracing::info!(
             name = %name,
@@ -354,22 +352,7 @@ impl AgentInstaller {
                         .unwrap_or("unknown")
                         .to_string();
 
-                    let content = fs::read_to_string(&manifest_path).unwrap_or_default();
-                    let parsed: toml::Value = toml::from_str(&content)
-                        .unwrap_or(toml::Value::Table(toml::map::Map::new()));
-
-                    let version = parsed
-                        .get("agent")
-                        .and_then(|a| a.get("version"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("0.0.0")
-                        .to_string();
-                    let description = parsed
-                        .get("agent")
-                        .and_then(|a| a.get("description"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
+                    let (version, description) = manifest_meta(&manifest_path);
 
                     agents.push(InstalledAgent {
                         name,
@@ -410,22 +393,7 @@ impl AgentInstaller {
             return None;
         }
 
-        let content = fs::read_to_string(&manifest_path).unwrap_or_default();
-        let parsed: toml::Value =
-            toml::from_str(&content).unwrap_or(toml::Value::Table(toml::map::Map::new()));
-
-        let version = parsed
-            .get("agent")
-            .and_then(|a| a.get("version"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("0.0.0")
-            .to_string();
-        let description = parsed
-            .get("agent")
-            .and_then(|a| a.get("description"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let (version, description) = manifest_meta(&manifest_path);
 
         Some(InstalledAgent {
             name: name.to_string(),

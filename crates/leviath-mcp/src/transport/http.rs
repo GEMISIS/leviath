@@ -385,32 +385,22 @@ impl HttpTransport {
         let mut stream = response.bytes_stream();
 
         loop {
-            while let Some(event) = super::sse::parse_sse_frame(&mut buffer) {
-                if event.data.is_empty() {
-                    continue;
-                }
-                let frame: Value = serde_json::from_str(&event.data)
-                    .map_err(|e| anyhow::anyhow!("Failed to parse JSON-RPC response: {}", e))?;
-                if let Some(response) = self.handle_frame(frame, id).await? {
-                    return Ok(response);
-                }
-            }
-
-            match stream.next().await {
-                Some(Ok(chunk)) => match std::str::from_utf8(&chunk) {
-                    Ok(text) => buffer.push_str(text),
-                    Err(e) => {
-                        return Err(anyhow::anyhow!("MCP event stream is not UTF-8: {}", e));
-                    }
-                },
-                Some(Err(e)) => {
-                    return Err(anyhow::anyhow!("MCP event stream failed: {}", e));
-                }
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "MCP event stream ended before answering the request"
-                    ));
-                }
+            let event =
+                next_sse_event(&mut stream, &mut buffer)
+                    .await
+                    .map_err(|end| match end {
+                        SseEnd::NotUtf8(e) => {
+                            anyhow::anyhow!("MCP event stream is not UTF-8: {}", e)
+                        }
+                        SseEnd::Failed(e) => anyhow::anyhow!("MCP event stream failed: {}", e),
+                        SseEnd::Closed => {
+                            anyhow::anyhow!("MCP event stream ended before answering the request")
+                        }
+                    })?;
+            let frame: Value = serde_json::from_str(&event.data)
+                .map_err(|e| anyhow::anyhow!("Failed to parse JSON-RPC response: {}", e))?;
+            if let Some(response) = self.handle_frame(frame, id).await? {
+                return Ok(response);
             }
         }
     }
@@ -642,40 +632,75 @@ async fn read_event_stream(response: reqwest::Response, tx: mpsc::UnboundedSende
     let mut stream = response.bytes_stream();
 
     loop {
-        while let Some(event) = super::sse::parse_sse_frame(&mut buffer) {
-            if event.data.is_empty() {
-                continue;
-            }
-            let decoded = if event.event.as_deref() == Some("endpoint") {
-                LegacyEvent::Endpoint(event.data.clone())
-            } else {
-                match serde_json::from_str(&event.data) {
-                    Ok(frame) => LegacyEvent::Frame(frame),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Discarding unparseable MCP event");
-                        continue;
-                    }
-                }
-            };
-            if tx.send(decoded).is_err() {
-                // Receiver dropped: the transport is closing.
+        let event = match next_sse_event(&mut stream, &mut buffer).await {
+            Ok(event) => event,
+            Err(SseEnd::NotUtf8(e)) => {
+                tracing::warn!(error = %e, "MCP event stream is not UTF-8");
                 return;
             }
-        }
-
-        match stream.next().await {
-            Some(Ok(chunk)) => match std::str::from_utf8(&chunk) {
-                Ok(text) => buffer.push_str(text),
-                Err(e) => {
-                    tracing::warn!(error = %e, "MCP event stream is not UTF-8");
-                    return;
-                }
-            },
-            Some(Err(e)) => {
+            Err(SseEnd::Failed(e)) => {
                 tracing::warn!(error = %e, "MCP event stream failed");
                 return;
             }
-            None => return,
+            Err(SseEnd::Closed) => return,
+        };
+        let decoded = if event.event.as_deref() == Some("endpoint") {
+            LegacyEvent::Endpoint(event.data.clone())
+        } else {
+            match serde_json::from_str(&event.data) {
+                Ok(frame) => LegacyEvent::Frame(frame),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Discarding unparseable MCP event");
+                    continue;
+                }
+            }
+        };
+        if tx.send(decoded).is_err() {
+            // Receiver dropped: the transport is closing.
+            return;
+        }
+    }
+}
+
+/// Why [`next_sse_event`] stopped delivering events.
+enum SseEnd {
+    /// A chunk was not UTF-8; SSE is text, so nothing after it can be framed.
+    NotUtf8(std::str::Utf8Error),
+    /// The HTTP body stream itself failed.
+    Failed(reqwest::Error),
+    /// The server closed the body.
+    Closed,
+}
+
+/// The next SSE event with a body, pulling bytes from `stream` into `buffer`
+/// until one is framed.
+///
+/// Keepalive frames (an event with empty data) are skipped here, so a caller
+/// only ever sees an event worth decoding. The two readers of an MCP event
+/// stream - the reply reader, which fails the request when the stream ends,
+/// and the legacy pump, which logs and stops - used to carry this loop each;
+/// what they do about an ending is theirs, how bytes become events is not.
+async fn next_sse_event<S, B>(
+    stream: &mut S,
+    buffer: &mut String,
+) -> Result<super::sse::SseEvent, SseEnd>
+where
+    S: StreamExt<Item = Result<B, reqwest::Error>> + Unpin,
+    B: AsRef<[u8]>,
+{
+    loop {
+        while let Some(event) = super::sse::parse_sse_frame(buffer) {
+            if !event.data.is_empty() {
+                return Ok(event);
+            }
+        }
+        match stream.next().await {
+            Some(Ok(chunk)) => match std::str::from_utf8(chunk.as_ref()) {
+                Ok(text) => buffer.push_str(text),
+                Err(e) => return Err(SseEnd::NotUtf8(e)),
+            },
+            Some(Err(e)) => return Err(SseEnd::Failed(e)),
+            None => return Err(SseEnd::Closed),
         }
     }
 }

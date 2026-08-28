@@ -461,7 +461,163 @@ impl OtelSink {
     }
 }
 
+impl OtelSink {
+    /// [`TelemetryEvent::RunStarted`].
+    fn run_started(
+        &self,
+        run_id: String,
+        agent_name: String,
+        model: Option<String>,
+        parent_run_id: Option<String>,
+        recovered: bool,
+        at_ms: i64,
+    ) {
+        let mut attrs = vec![
+            KeyValue::new("leviath.run.id", run_id.clone()),
+            KeyValue::new("leviath.agent.name", agent_name),
+            KeyValue::new("leviath.recovered", recovered),
+        ];
+        if let Some(model) = model {
+            attrs.push(KeyValue::new("leviath.model", model));
+        }
+        if let Some(parent) = parent_run_id {
+            attrs.push(KeyValue::new("leviath.parent_run.id", parent));
+        }
+        let span = self.start_span("agent.run", at_ms, attrs, None);
+        self.instruments.active.add(1, &[]);
+        leviath_core::sync::lock(&self.open).insert(run_id, OpenRun { span, stage: None });
+    }
+
+    /// [`TelemetryEvent::StageEntered`].
+    fn stage_entered(&self, run_id: String, stage_index: usize, stage_name: String, at_ms: i64) {
+        let mut open = leviath_core::sync::lock(&self.open);
+        let Some(run) = open.get_mut(&run_id) else {
+            return;
+        };
+        let parent = run.span.span_context().clone();
+        let span = self.start_span(
+            "agent.stage",
+            at_ms,
+            vec![
+                KeyValue::new("leviath.stage.name", stage_name),
+                KeyValue::new("leviath.stage.index", stage_index as i64),
+            ],
+            Some(&parent),
+        );
+        run.stage = Some(OpenStage {
+            index: stage_index,
+            entered_ms: at_ms,
+            span,
+        });
+    }
+
+    /// [`TelemetryEvent::StageExited`].
+    fn stage_exited(
+        &self,
+        run_id: String,
+        stage_index: usize,
+        stage_name: String,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        at_ms: i64,
+    ) {
+        let mut open = leviath_core::sync::lock(&self.open);
+        let Some(run) = open.get_mut(&run_id) else {
+            return;
+        };
+        let Some(stage) = run.stage.as_mut() else {
+            return;
+        };
+        if stage.index != stage_index {
+            return; // stale exit for a stage this sink isn't holding
+        }
+        stage
+            .span
+            .set_attribute(KeyValue::new("leviath.tokens.prompt", prompt_tokens as i64));
+        stage.span.set_attribute(KeyValue::new(
+            "leviath.tokens.completion",
+            completion_tokens as i64,
+        ));
+        let duration_s = (at_ms - stage.entered_ms).max(0) as f64 / 1000.0;
+        Self::close_stage(run, at_ms);
+        self.instruments.stage_duration.record(
+            duration_s,
+            &[KeyValue::new("leviath.stage.name", stage_name)],
+        );
+    }
+
+    /// [`TelemetryEvent::ToolCallCompleted`].
+    fn tool_call_completed(
+        &self,
+        run_id: String,
+        tool_name: String,
+        batch_latency_ms: u64,
+        success: bool,
+    ) {
+        self.instruments.tool_calls.add(
+            1,
+            &[
+                KeyValue::new("leviath.tool.name", tool_name.clone()),
+                KeyValue::new("leviath.outcome", if success { "ok" } else { "error" }),
+            ],
+        );
+        self.emit_leaf(
+            &run_id,
+            "agent.tool_call",
+            batch_latency_ms,
+            vec![
+                KeyValue::new("leviath.tool.name", tool_name),
+                KeyValue::new("leviath.success", success),
+                KeyValue::new("leviath.batch_latency_ms", batch_latency_ms as i64),
+            ],
+        );
+    }
+
+    /// [`TelemetryEvent::CompactionCompleted`].
+    fn compaction_completed(&self, run_id: String, success: bool) {
+        self.emit_leaf(
+            &run_id,
+            "agent.compaction",
+            0,
+            vec![KeyValue::new("leviath.success", success)],
+        );
+    }
+
+    /// [`TelemetryEvent::Log`].
+    fn log(&self, run_id: String, stage_index: usize, kind: LogKind, line: String) {
+        let open = leviath_core::sync::lock(&self.open);
+        let Some(run) = open.get(&run_id) else {
+            return;
+        };
+        let span_context = match run.stage.as_ref() {
+            Some(stage) => stage.span.span_context().clone(),
+            None => run.span.span_context().clone(),
+        };
+        let mut record = self.logger.create_log_record();
+        record.set_timestamp(SystemTime::now());
+        record.set_severity_number(Severity::Info);
+        record.set_body(AnyValue::from(line));
+        record.set_trace_context(
+            span_context.trace_id(),
+            span_context.span_id(),
+            Some(span_context.trace_flags()),
+        );
+        record.add_attribute("leviath.run.id", run_id);
+        record.add_attribute("leviath.stage.index", stage_index as i64);
+        record.add_attribute(
+            "leviath.log.kind",
+            match kind {
+                LogKind::Output => "output",
+                LogKind::Runtime => "runtime",
+            },
+        );
+        self.logger.emit(record);
+    }
+}
+
 impl TelemetrySink for OtelSink {
+    /// The two arms left inline carry more fields than clippy lets a
+    /// method take one by one; the rest each have a method.
     fn emit(&self, event: TelemetryEvent) {
         match event {
             TelemetryEvent::RunStarted {
@@ -471,48 +627,13 @@ impl TelemetrySink for OtelSink {
                 parent_run_id,
                 recovered,
                 at_ms,
-            } => {
-                let mut attrs = vec![
-                    KeyValue::new("leviath.run.id", run_id.clone()),
-                    KeyValue::new("leviath.agent.name", agent_name),
-                    KeyValue::new("leviath.recovered", recovered),
-                ];
-                if let Some(model) = model {
-                    attrs.push(KeyValue::new("leviath.model", model));
-                }
-                if let Some(parent) = parent_run_id {
-                    attrs.push(KeyValue::new("leviath.parent_run.id", parent));
-                }
-                let span = self.start_span("agent.run", at_ms, attrs, None);
-                self.instruments.active.add(1, &[]);
-                leviath_core::sync::lock(&self.open).insert(run_id, OpenRun { span, stage: None });
-            }
+            } => self.run_started(run_id, agent_name, model, parent_run_id, recovered, at_ms),
             TelemetryEvent::StageEntered {
                 run_id,
                 stage_index,
                 stage_name,
                 at_ms,
-            } => {
-                let mut open = leviath_core::sync::lock(&self.open);
-                let Some(run) = open.get_mut(&run_id) else {
-                    return;
-                };
-                let parent = run.span.span_context().clone();
-                let span = self.start_span(
-                    "agent.stage",
-                    at_ms,
-                    vec![
-                        KeyValue::new("leviath.stage.name", stage_name),
-                        KeyValue::new("leviath.stage.index", stage_index as i64),
-                    ],
-                    Some(&parent),
-                );
-                run.stage = Some(OpenStage {
-                    index: stage_index,
-                    entered_ms: at_ms,
-                    span,
-                });
-            }
+            } => self.stage_entered(run_id, stage_index, stage_name, at_ms),
             TelemetryEvent::StageExited {
                 run_id,
                 stage_index,
@@ -520,31 +641,14 @@ impl TelemetrySink for OtelSink {
                 prompt_tokens,
                 completion_tokens,
                 at_ms,
-            } => {
-                let mut open = leviath_core::sync::lock(&self.open);
-                let Some(run) = open.get_mut(&run_id) else {
-                    return;
-                };
-                let Some(stage) = run.stage.as_mut() else {
-                    return;
-                };
-                if stage.index != stage_index {
-                    return; // stale exit for a stage this sink isn't holding
-                }
-                stage
-                    .span
-                    .set_attribute(KeyValue::new("leviath.tokens.prompt", prompt_tokens as i64));
-                stage.span.set_attribute(KeyValue::new(
-                    "leviath.tokens.completion",
-                    completion_tokens as i64,
-                ));
-                let duration_s = (at_ms - stage.entered_ms).max(0) as f64 / 1000.0;
-                Self::close_stage(run, at_ms);
-                self.instruments.stage_duration.record(
-                    duration_s,
-                    &[KeyValue::new("leviath.stage.name", stage_name)],
-                );
-            }
+            } => self.stage_exited(
+                run_id,
+                stage_index,
+                stage_name,
+                prompt_tokens,
+                completion_tokens,
+                at_ms,
+            ),
             TelemetryEvent::InferenceCompleted {
                 run_id,
                 stage_name: _,
@@ -601,37 +705,12 @@ impl TelemetrySink for OtelSink {
                 tool_name,
                 batch_latency_ms,
                 success,
-            } => {
-                self.instruments.tool_calls.add(
-                    1,
-                    &[
-                        KeyValue::new("leviath.tool.name", tool_name.clone()),
-                        KeyValue::new("leviath.outcome", if success { "ok" } else { "error" }),
-                    ],
-                );
-                self.emit_leaf(
-                    &run_id,
-                    "agent.tool_call",
-                    batch_latency_ms,
-                    vec![
-                        KeyValue::new("leviath.tool.name", tool_name),
-                        KeyValue::new("leviath.success", success),
-                        KeyValue::new("leviath.batch_latency_ms", batch_latency_ms as i64),
-                    ],
-                );
-            }
+            } => self.tool_call_completed(run_id, tool_name, batch_latency_ms, success),
             TelemetryEvent::CompactionCompleted {
                 run_id,
                 stage_name: _,
                 success,
-            } => {
-                self.emit_leaf(
-                    &run_id,
-                    "agent.compaction",
-                    0,
-                    vec![KeyValue::new("leviath.success", success)],
-                );
-            }
+            } => self.compaction_completed(run_id, success),
             TelemetryEvent::RunCompleted {
                 run_id,
                 status,
@@ -680,35 +759,7 @@ impl TelemetrySink for OtelSink {
                 stage_index,
                 kind,
                 line,
-            } => {
-                let open = leviath_core::sync::lock(&self.open);
-                let Some(run) = open.get(&run_id) else {
-                    return;
-                };
-                let span_context = match run.stage.as_ref() {
-                    Some(stage) => stage.span.span_context().clone(),
-                    None => run.span.span_context().clone(),
-                };
-                let mut record = self.logger.create_log_record();
-                record.set_timestamp(SystemTime::now());
-                record.set_severity_number(Severity::Info);
-                record.set_body(AnyValue::from(line));
-                record.set_trace_context(
-                    span_context.trace_id(),
-                    span_context.span_id(),
-                    Some(span_context.trace_flags()),
-                );
-                record.add_attribute("leviath.run.id", run_id);
-                record.add_attribute("leviath.stage.index", stage_index as i64);
-                record.add_attribute(
-                    "leviath.log.kind",
-                    match kind {
-                        LogKind::Output => "output",
-                        LogKind::Runtime => "runtime",
-                    },
-                );
-                self.logger.emit(record);
-            }
+            } => self.log(run_id, stage_index, kind, line),
         }
     }
 
