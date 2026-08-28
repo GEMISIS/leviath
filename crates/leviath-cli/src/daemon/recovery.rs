@@ -204,10 +204,10 @@ fn relink_tree(world: &mut PipelineWorld, reloaded: &[(RunMeta, Entity)]) {
 }
 
 /// Read + parse `<run_dir>/meta.json`, returning `None` if it is missing or
-/// invalid.
+/// invalid. Recovery treats both the same way: a run it cannot read is a run
+/// it leaves alone.
 fn read_meta(run_dir: &Path) -> Option<RunMeta> {
-    let text = std::fs::read_to_string(run_dir.join("meta.json")).ok()?;
-    serde_json::from_str(&text).ok()
+    crate::runstate::read_meta_from(run_dir).ok()
 }
 
 /// The cumulative token totals recorded in a run's metadata.
@@ -499,7 +499,7 @@ fn reload_one(
     // merely fail to restore the answer, it would erase the one on disk. It
     // also re-arms the required-output gate correctly: a stage that submitted
     // before the restart is not asked to do it again.
-    if let Some(output) = read_final_output_from(run_dir, meta) {
+    if let Some(output) = crate::runstate::read_final_output_in(run_dir, meta) {
         world
             .world_mut()
             .entity_mut(entity)
@@ -532,26 +532,6 @@ fn reload_one(
     }
 
     Ok(entity)
-}
-
-/// Rebuild a run's submitted answer from its descriptor plus the sidecar in
-/// `dir`.
-///
-/// Recovery works from its configured runs directory rather than the home one,
-/// so it cannot use `runstate::read_final_output`, which resolves the path
-/// itself. A missing sidecar yields `None`: a run written before the answer
-/// moved out of `meta.json`, or one whose directory was pruned.
-fn read_final_output_from(dir: &Path, meta: &RunMeta) -> Option<leviath_core::FinalOutput> {
-    let descriptor = meta.final_output.clone()?;
-    let content = std::fs::read_to_string(dir.join(leviath_core::FINAL_OUTPUT_FILE)).ok()?;
-    Some(leviath_core::FinalOutput {
-        content,
-        format: descriptor.format,
-        stage: descriptor.stage,
-        submitted_at: descriptor.submitted_at,
-        truncated: descriptor.truncated,
-        artifacts: descriptor.artifacts,
-    })
 }
 
 #[cfg(test)]
@@ -891,7 +871,7 @@ mod tests {
         );
 
         // No descriptor at all.
-        assert!(read_final_output_from(dir.path(), &meta).is_none());
+        assert!(crate::runstate::read_final_output_in(dir.path(), &meta).is_none());
 
         // A descriptor, but nothing on disk to go with it.
         let answer = leviath_core::output::FinalOutput::new(
@@ -901,7 +881,7 @@ mod tests {
             777,
         );
         meta.final_output = Some(answer.descriptor());
-        assert!(read_final_output_from(dir.path(), &meta).is_none());
+        assert!(crate::runstate::read_final_output_in(dir.path(), &meta).is_none());
 
         // And with both, the answer comes back whole.
         std::fs::write(
@@ -909,7 +889,8 @@ mod tests {
             &answer.content,
         )
         .unwrap();
-        let restored = read_final_output_from(dir.path(), &meta).expect("both halves");
+        let restored =
+            crate::runstate::read_final_output_in(dir.path(), &meta).expect("both halves");
         assert_eq!(restored.content, "already answered");
         assert_eq!(restored.stage, "implement");
     }

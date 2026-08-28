@@ -368,13 +368,7 @@ pub fn escaping_write_refusal(
     let command = arguments.get("command").and_then(|v| v.as_str())?;
     let escaping = crate::shell_keys::write_target_paths(command)
         .into_iter()
-        .find(|target| {
-            let joined = match std::path::Path::new(target).is_absolute() {
-                true => std::path::PathBuf::from(target),
-                false => workdir.join(target),
-            };
-            !leviath_core::resolves_within(&joined, workdir)
-        })?;
+        .find(|target| !leviath_core::resolves_within(&target_path(target, workdir), workdir))?;
     Some(format!(
         "[denied] Shell redirect writes to '{escaping}', which is outside the working directory \
          ({}). The `write_file` tool refuses the same path; a redirect is not a way around it. \
@@ -470,13 +464,20 @@ pub fn measured_write_bytes(
     crate::shell_keys::write_target_paths(command)
         .into_iter()
         .map(|target| {
-            let path = match std::path::Path::new(&target).is_absolute() {
-                true => std::path::PathBuf::from(&target),
-                false => workdir.join(&target),
-            };
-            std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+            std::fs::metadata(target_path(&target, workdir))
+                .map(|m| m.len())
+                .unwrap_or(0)
         })
         .sum()
+}
+
+/// Where a shell redirect target lands: an absolute target as written, a
+/// relative one against the working directory the shell runs in.
+fn target_path(target: &str, workdir: &std::path::Path) -> std::path::PathBuf {
+    match std::path::Path::new(target).is_absolute() {
+        true => std::path::PathBuf::from(target),
+        false => workdir.join(target),
+    }
 }
 
 /// Tools a blueprint may declare *more* permissively than the built-in default

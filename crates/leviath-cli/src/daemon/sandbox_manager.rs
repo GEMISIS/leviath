@@ -85,13 +85,6 @@ fn sanitize(run_id: &str) -> String {
         .collect()
 }
 
-/// Build the host shell command (no sandbox) - the exact prior behavior.
-fn host_command(shell: &str, flag: &str, command: &str, workdir: &Path) -> TokioCommand {
-    let mut c = leviath_sys::child_command_async(shell);
-    c.arg(flag).arg(command).current_dir(workdir);
-    c
-}
-
 impl SandboxManager {
     /// Build the manager for an agent whose stages resolve (in order) to
     /// `by_index`, bind-mounting `workdir`. `entry_index` selects the initial
@@ -291,7 +284,9 @@ impl ShellExecutor for SandboxManager {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         match cfg.kind {
-            SandboxKind::None => host_command(shell, flag, command, workdir),
+            SandboxKind::None => {
+                crate::daemon::script_host::host_shell_command(shell, flag, command, workdir)
+            }
             SandboxKind::Namespace => {
                 if self.namespace_ok {
                     let argv = leviath_sys::namespace_argv(shell, flag, command, cfg.network);
@@ -301,7 +296,7 @@ impl ShellExecutor for SandboxManager {
                 } else {
                     // Warn-fallback build kept the manager alive without a usable
                     // namespace; run on the host.
-                    host_command(shell, flag, command, workdir)
+                    crate::daemon::script_host::host_shell_command(shell, flag, command, workdir)
                 }
             }
             SandboxKind::Container => match self.containers.get(&signature(&cfg)) {
@@ -322,7 +317,9 @@ impl ShellExecutor for SandboxManager {
                     c
                 }
                 // Warn-fallback: the container was never created; run on the host.
-                None => host_command(shell, flag, command, workdir),
+                None => {
+                    crate::daemon::script_host::host_shell_command(shell, flag, command, workdir)
+                }
             },
         }
     }
