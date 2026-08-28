@@ -483,7 +483,7 @@ impl Dashboard {
         }
         let name = self.editor().name.clone();
         let written = std::fs::create_dir_all(&dir)
-            .and_then(|()| std::fs::write(dir.join("agent.leviath"), &text));
+            .and_then(|()| std::fs::write(dir.join(leviath_core::files::MANIFEST_FILENAME), &text));
         if let Err(e) = written {
             self.editor().message = Some(format!("Could not write {}: {e}", dir.display()));
             return;
@@ -495,7 +495,10 @@ impl Dashboard {
             let _ = editor.layout.save();
             editor.dirty = false;
             editor.is_new = false;
-            editor.message = Some(format!("Saved to {}", dir.join("agent.leviath").display()));
+            editor.message = Some(format!(
+                "Saved to {}",
+                dir.join(leviath_core::files::MANIFEST_FILENAME).display()
+            ));
         }
         self.refresh_catalog();
         self.toast(format!("Saved {name}"), ToastLevel::Info);
@@ -538,7 +541,7 @@ impl Dashboard {
         // An agent never saved leaves nothing behind (its scripts were
         // materialised for the lint's sake).
         if let Some(dir) = unsaved_dir
-            && !dir.join("agent.leviath").exists()
+            && !dir.join(leviath_core::files::MANIFEST_FILENAME).exists()
         {
             let _ = std::fs::remove_dir_all(&dir);
         }

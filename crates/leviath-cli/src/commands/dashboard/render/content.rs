@@ -436,7 +436,7 @@ impl Dashboard {
                 let file_name = match self.stage_content_mode {
                     StageContentMode::Output => "output.log",
                     StageContentMode::Logs => "logs.log",
-                    StageContentMode::Context => "context.json",
+                    StageContentMode::Context => leviath_core::files::CONTEXT_FILE,
                 };
                 runstate::stage_dir(&agent.id, self.selected_stage)
                     .join(file_name)

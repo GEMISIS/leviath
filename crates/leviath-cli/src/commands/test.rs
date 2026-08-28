@@ -157,7 +157,7 @@ async fn execute_with_registry(
     let project_path = Path::new(&path);
 
     // Verify agent.leviath exists
-    let manifest_path = project_path.join("agent.leviath");
+    let manifest_path = project_path.join(leviath_core::files::MANIFEST_FILENAME);
     if !manifest_path.exists() {
         anyhow::bail!(
             "No agent.leviath found in '{}'. Not an agent project.",

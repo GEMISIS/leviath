@@ -627,7 +627,7 @@ fn collect_providers(dir: &Path, out: &mut Vec<ScriptItem>) {
 /// the blueprint routes are where a broken manifest is reported, and a script
 /// listing that failed outright would take the tools down with it.
 fn collect_declared(dir: &Path, agent: &str, out: &mut Vec<ScriptItem>) {
-    let Ok(text) = std::fs::read_to_string(dir.join("agent.leviath")) else {
+    let Ok(text) = std::fs::read_to_string(dir.join(leviath_core::files::MANIFEST_FILENAME)) else {
         return;
     };
     let Ok(bp) = leviath_core::manifest::parse_manifest(&text) else {

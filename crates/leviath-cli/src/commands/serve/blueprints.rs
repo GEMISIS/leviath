@@ -98,7 +98,7 @@ pub(super) fn discover_blueprints(config: &crate::config::Config) -> Vec<Bluepri
             continue;
         }
         // Check dir itself
-        let manifest = dir.join("agent.leviath");
+        let manifest = dir.join(leviath_core::files::MANIFEST_FILENAME);
         if manifest.exists() {
             results.extend(read_blueprint_info(&manifest, &dir));
         }
@@ -115,7 +115,7 @@ pub(super) fn discover_blueprints(config: &crate::config::Config) -> Vec<Bluepri
             .collect();
         subdirs.sort();
         for p in subdirs {
-            let m = p.join("agent.leviath");
+            let m = p.join(leviath_core::files::MANIFEST_FILENAME);
             if m.exists() {
                 results.extend(read_blueprint_info(&m, &p));
             }
@@ -378,7 +378,7 @@ pub(super) async fn create_blueprint(
         )
     })?;
 
-    let manifest_path = dir.join("agent.leviath");
+    let manifest_path = dir.join(leviath_core::files::MANIFEST_FILENAME);
     std::fs::write(&manifest_path, &body.manifest).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -414,7 +414,7 @@ pub(super) async fn update_blueprint(
     })?;
 
     let dir = blueprint_dir(&name)?;
-    let manifest_path = dir.join("agent.leviath");
+    let manifest_path = dir.join(leviath_core::files::MANIFEST_FILENAME);
     if !manifest_path.exists() {
         return Err((
             StatusCode::NOT_FOUND,
@@ -560,7 +560,11 @@ system_prompt = "do it"
             let name = format!("{FIXTURE_PREFIX}{name}");
             let sub = dir.path().join(&name);
             std::fs::create_dir_all(&sub).unwrap();
-            std::fs::write(sub.join("agent.leviath"), manifest(&name, description)).unwrap();
+            std::fs::write(
+                sub.join(leviath_core::files::MANIFEST_FILENAME),
+                manifest(&name, description),
+            )
+            .unwrap();
         }
         dir
     }

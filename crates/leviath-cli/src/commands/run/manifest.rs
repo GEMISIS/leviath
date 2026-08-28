@@ -16,13 +16,15 @@ pub fn find_manifest(path: &str) -> anyhow::Result<PathBuf> {
     let p = Path::new(path);
 
     // 1. Explicit agent.leviath file
-    if p.is_file() && p.file_name() == Some(std::ffi::OsStr::new("agent.leviath")) {
+    if p.is_file()
+        && p.file_name() == Some(std::ffi::OsStr::new(leviath_core::files::MANIFEST_FILENAME))
+    {
         return Ok(p.to_path_buf());
     }
 
     // 2. Directory with agent.leviath inside
     if p.is_dir() {
-        let manifest = p.join("agent.leviath");
+        let manifest = p.join(leviath_core::files::MANIFEST_FILENAME);
         if manifest.exists() {
             return Ok(manifest);
         }
@@ -32,14 +34,14 @@ pub fn find_manifest(path: &str) -> anyhow::Result<PathBuf> {
     //    through the shared LEVIATH_HOME-aware helper, so `lev run <name>`
     //    finds the same install tree `lev add` writes when the override is set.
     if let Some(installed) = leviath_core::paths::agents_dir()
-        .map(|d| d.join(path).join("agent.leviath"))
+        .map(|d| d.join(path).join(leviath_core::files::MANIFEST_FILENAME))
         .filter(|p| p.exists())
     {
         return Ok(installed);
     }
 
     // 4. agent.leviath in current directory (for `lev run` with no path)
-    let current_manifest = PathBuf::from("agent.leviath");
+    let current_manifest = PathBuf::from(leviath_core::files::MANIFEST_FILENAME);
     if current_manifest.exists() {
         return Ok(current_manifest);
     }

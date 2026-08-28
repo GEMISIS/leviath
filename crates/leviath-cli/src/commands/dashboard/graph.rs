@@ -10,10 +10,13 @@ use crate::tui::flowgraph::StageGraph;
 /// `None` when the manifest cannot be read or parsed.
 pub(super) fn load_stage_graph(agent_path: &str) -> Option<Arc<StageGraph>> {
     let path = std::path::Path::new(agent_path);
-    let manifest_path = if path.file_name().is_some_and(|f| f == "agent.leviath") {
+    let manifest_path = if path
+        .file_name()
+        .is_some_and(|f| f == leviath_core::files::MANIFEST_FILENAME)
+    {
         path.to_path_buf()
     } else {
-        path.join("agent.leviath")
+        path.join(leviath_core::files::MANIFEST_FILENAME)
     };
     let content = std::fs::read_to_string(&manifest_path).ok()?;
     let blueprint = leviath_core::manifest::parse_manifest(&content).ok()?;
@@ -31,7 +34,7 @@ pub(super) fn bundled_stage_graph(name: &str) -> Option<Arc<StageGraph>> {
     let content = agent
         .files
         .iter()
-        .find(|(path, _)| *path == "agent.leviath")
+        .find(|(path, _)| *path == leviath_core::files::MANIFEST_FILENAME)
         .map(|(_, content)| *content)
         .unwrap_or_default();
     leviath_core::manifest::parse_manifest(content)
