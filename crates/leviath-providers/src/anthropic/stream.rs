@@ -6,82 +6,28 @@
 //! [`StreamChunk`] the shared collector folds back into one response.
 
 use super::AnthropicProvider;
-use crate::provider::{ProviderError, Result, StreamChunk, TokenUsage, ToolCallDelta};
+use crate::provider::{StreamChunk, TokenUsage, ToolCallDelta};
 use futures_core::Stream;
-use std::pin::Pin;
 
-// The inner byte stream is boxed as a trait object rather than kept generic.
-// In production this is always `reqwest`'s `bytes_stream()`; tests inject
-// dozens of distinct mock stream types via `new`'s generic parameter, and a
-// generic `impl<S> Stream` causes `cargo llvm-cov` to instrument each
-// monomorphized `poll_next` separately, leaving some artificially "uncovered"
-// even though the shared logic is fully exercised. Boxing collapses all of
-// that into a single concrete `poll_next` implementation.
-pub(super) struct AnthropicSseStream {
-    inner: Pin<Box<dyn Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send>>,
-    buffer: String,
-    /// The tool call the argument deltas arriving now belong to, `None` until
-    /// the first one opens. `content_block_start` carries a call's id and its
-    /// name and each `input_json_delta` after it a slice of its arguments, and
-    /// the collector puts them back together by index, so which block is open
-    /// has to survive from one event to the next.
-    open_tool_block: Option<usize>,
-}
-
-impl AnthropicSseStream {
-    pub(super) fn new<S>(inner: S) -> Self
-    where
-        S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
-    {
-        Self {
-            inner: Box::pin(inner),
-            buffer: String::new(),
-            open_tool_block: None,
-        }
-    }
-}
-
-impl Stream for AnthropicSseStream {
-    type Item = Result<StreamChunk>;
-
-    fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
-        loop {
-            // Check if we have complete SSE events in the buffer
-            if let Some(chunk) = parse_sse_event(&mut this.buffer, &mut this.open_tool_block) {
-                return std::task::Poll::Ready(Some(Ok(chunk)));
-            }
-
-            // Try to get more data
-            match this.inner.as_mut().poll_next(cx) {
-                std::task::Poll::Ready(Some(Ok(bytes))) => {
-                    if let Ok(text) = std::str::from_utf8(&bytes) {
-                        this.buffer.push_str(text);
-                    }
-                }
-                std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Some(Err(ProviderError::transport(
-                        "reading the response stream",
-                        &e,
-                    ))));
-                }
-                std::task::Poll::Ready(None) => {
-                    // Stream ended - try to parse any remaining data
-                    if let Some(chunk) =
-                        parse_sse_event(&mut this.buffer, &mut this.open_tool_block)
-                    {
-                        return std::task::Poll::Ready(Some(Ok(chunk)));
-                    }
-                    return std::task::Poll::Ready(None);
-                }
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-            }
-        }
-    }
+/// Wrap a byte stream in Anthropic's server-sent-events framer.
+///
+/// The framer carries the open tool block between events (see
+/// [`parse_sse_event`]), which is why it is a closure over that state rather
+/// than a bare `fn`. `parse_sse_event` answers `None` both for "no complete
+/// event yet" and for an event that carries nothing (`ping`, `message_stop`);
+/// either way the stream polls for more bytes, exactly as it did before.
+pub(super) fn anthropic_sse_stream<S>(inner: S) -> crate::provider::stream::FramedStream
+where
+    S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+{
+    let mut open_tool_block: Option<usize> = None;
+    crate::provider::stream::FramedStream::new(
+        inner,
+        Box::new(move |buffer: &mut String| {
+            parse_sse_event(buffer, &mut open_tool_block).map(|chunk| Some(Ok(chunk)))
+        }),
+        None,
+    )
 }
 
 /// The content-block index an event names, when it names one. Anthropic

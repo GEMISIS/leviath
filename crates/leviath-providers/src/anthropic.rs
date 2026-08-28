@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
-use stream::AnthropicSseStream;
+use stream::anthropic_sse_stream;
 
 /// Read the dump directory from the environment and delegate to
 /// [`dump_request`]. See that function for the rationale.
@@ -852,7 +852,7 @@ impl Provider for AnthropicProvider {
         .await?;
 
         let byte_stream = response.bytes_stream();
-        let stream = AnthropicSseStream::new(byte_stream);
+        let stream = anthropic_sse_stream(byte_stream);
 
         Ok(Box::pin(stream))
     }
@@ -958,7 +958,7 @@ impl Provider for AnthropicProvider {
 mod tests {
     // The SSE parser lives in `stream`, and its tests stayed here beside the
     // request-building ones they share fixtures with.
-    use super::stream::{AnthropicSseStream, parse_sse_event};
+    use super::stream::{anthropic_sse_stream, parse_sse_event};
 
     /// Config beats the shipped table, and an unconfigured model still gets the
     /// published rate rather than falling to unpriced.
@@ -3257,7 +3257,7 @@ mod tests {
         assert_eq!(models[0].id, "valid-model");
     }
 
-    // ─── AnthropicSseStream parser (no HTTP needed) ────────────────────────
+    // ─── anthropic_sse_stream parser (no HTTP needed) ──────────────────────
 
     struct StaticByteStream {
         data: Vec<Vec<u8>>,
@@ -3288,7 +3288,7 @@ mod tests {
             data: vec![data],
             idx: 0,
         };
-        let mut sse = AnthropicSseStream::new(stream);
+        let mut sse = anthropic_sse_stream(stream);
         let chunk = sse.next().await.unwrap().unwrap();
         assert_eq!(chunk.tool_calls.len(), 1);
         assert_eq!(chunk.tool_calls[0].arguments_delta, "{\"a\":1}");
@@ -3306,7 +3306,7 @@ mod tests {
             data: vec![data],
             idx: 0,
         };
-        let mut sse = AnthropicSseStream::new(stream);
+        let mut sse = anthropic_sse_stream(stream);
         assert!(sse.next().await.is_none());
     }
 
@@ -3319,7 +3319,7 @@ mod tests {
             data: vec![data],
             idx: 0,
         };
-        let mut sse = AnthropicSseStream::new(stream);
+        let mut sse = anthropic_sse_stream(stream);
         assert!(sse.next().await.is_none());
     }
 
@@ -3327,7 +3327,7 @@ mod tests {
     async fn infer_stream_body_error_propagates_as_stream_item_error() {
         // Send a Content-Length larger than the actual body and close the
         // connection early - reqwest's body stream then yields a real
-        // Err(reqwest::Error) mid-stream, exercising AnthropicSseStream's
+        // Err(reqwest::Error) mid-stream, exercising the framed stream's
         // Poll::Ready(Some(Err(e))) branch with a genuine error (not a
         // hand-built one - reqwest::Error has no public constructor).
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3370,7 +3370,7 @@ mod tests {
             data: vec![data],
             idx: 0,
         };
-        let mut sse = AnthropicSseStream::new(stream);
+        let mut sse = anthropic_sse_stream(stream);
         let chunk = sse.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "hi");
         assert!(sse.next().await.is_none());
@@ -3387,7 +3387,7 @@ mod tests {
             data: vec![invalid, valid],
             idx: 0,
         };
-        let mut sse = AnthropicSseStream::new(stream);
+        let mut sse = anthropic_sse_stream(stream);
         let chunk = sse.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "ok");
     }
@@ -3633,7 +3633,7 @@ mod tests {
             "event: content_block_delta\ndata: {\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"utc\\\"}\"}}\n\n",
             "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n\n",
         );
-        let stream = AnthropicSseStream::new(StaticByteStream {
+        let stream = anthropic_sse_stream(StaticByteStream {
             data: vec![sse.as_bytes().to_vec()],
             idx: 0,
         });
@@ -3667,7 +3667,7 @@ mod tests {
             "event: content_block_delta\ndata: {\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"url\\\":\\\"b\\\"}\"}}\n\n",
             "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n\n",
         );
-        let stream = AnthropicSseStream::new(StaticByteStream {
+        let stream = anthropic_sse_stream(StaticByteStream {
             data: vec![sse.as_bytes().to_vec()],
             idx: 0,
         });
@@ -3699,7 +3699,7 @@ mod tests {
             "event: content_block_delta\ndata: {\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"url\\\":\\\"b\\\"}\"}}\n\n",
             "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n\n",
         );
-        let stream = AnthropicSseStream::new(StaticByteStream {
+        let stream = anthropic_sse_stream(StaticByteStream {
             data: vec![sse.as_bytes().to_vec()],
             idx: 0,
         });

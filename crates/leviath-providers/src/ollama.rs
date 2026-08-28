@@ -712,7 +712,7 @@ impl Provider for OllamaProvider {
         .map_err(|e| self.explain_truncation(e, request))?;
 
         let byte_stream = response.bytes_stream();
-        let stream = OllamaNdjsonStream::new(byte_stream);
+        let stream = ollama_ndjson_stream(byte_stream);
 
         Ok(Box::pin(stream))
     }
@@ -849,180 +849,143 @@ impl Provider for OllamaProvider {
     }
 }
 
-// NDJSON stream parser for Ollama's streaming API.
-//
-// The inner byte stream is boxed as a trait object rather than kept generic.
-// In production this is always `reqwest`'s `bytes_stream()`; tests inject
-// dozens of distinct mock stream types via `new`'s generic parameter, and a
-// generic `impl<S> Stream` causes `cargo llvm-cov` to instrument each
-// monomorphized `poll_next` separately, leaving some artificially "uncovered"
-// even though the shared logic is fully exercised. Boxing collapses all of
-// that into a single concrete `poll_next` implementation.
-struct OllamaNdjsonStream {
-    inner: Pin<Box<dyn Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send>>,
-    buffer: String,
+/// Wrap a byte stream in the NDJSON framer Ollama's `/api/chat` speaks.
+fn ollama_ndjson_stream<S>(inner: S) -> crate::provider::stream::FramedStream
+where
+    S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+{
+    crate::provider::stream::FramedStream::new(
+        inner,
+        Box::new(ollama_frame),
+        Some(Box::new(ollama_flush)),
+    )
 }
 
-impl OllamaNdjsonStream {
-    fn new<S>(inner: S) -> Self
-    where
-        S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+/// One NDJSON line off the front of the buffer, as a chunk.
+///
+/// Blank lines are skipped; `None` when no newline has arrived yet. A line
+/// that is not JSON is an error the stream delivers rather than a skipped
+/// frame, because with NDJSON there is no other framing to fall back on.
+fn ollama_frame(buffer: &mut String) -> Option<Option<Result<StreamChunk>>> {
+    loop {
+        // Both halves are copied out before the buffer is replaced.
+        let (line, rest) = buffer
+            .split_once('\n')
+            .map(|(line, rest)| (line.to_string(), rest.to_string()))?;
+        *buffer = rest;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let json: serde_json::Value = match serde_json::from_str(line) {
+            Ok(j) => j,
+            Err(e) => {
+                return Some(Some(Err(ProviderError::InvalidResponse(e.to_string()))));
+            }
+        };
+        return Some(Some(Ok(ollama_chunk(&json))));
+    }
+}
+
+/// A parsed NDJSON object as a chunk: text on every line, tool calls and
+/// usage on the one flagged `done`.
+fn ollama_chunk(json: &serde_json::Value) -> StreamChunk {
+    let done = json.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
+    let message = json.get("message");
+    let content = message
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+    if !done {
+        return StreamChunk {
+            delta: content,
+            tool_calls: Vec::new(),
+            tokens: None,
+            finish_reason: None,
+        };
+    }
+
+    let eval_count = json.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let prompt_eval_count = json
+        .get("prompt_eval_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
+    // Parse tool calls from the final chunk's message.tool_calls
+    let mut tool_calls = Vec::new();
+    if let Some(tcs) = message
+        .and_then(|m| m.get("tool_calls"))
+        .and_then(|tc| tc.as_array())
     {
-        Self {
-            inner: Box::pin(inner),
-            buffer: String::new(),
+        for (i, tc) in tcs.iter().enumerate() {
+            let function = tc.get("function").unwrap_or(&serde_json::Value::Null);
+            let name = function
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let arguments = function
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            tool_calls.push(crate::provider::ToolCallDelta {
+                index: i,
+                id: Some(next_tool_call_id()),
+                name: Some(name),
+                arguments_delta: arguments.to_string(),
+                // Local models sign nothing.
+                thought_signature: None,
+            });
         }
+    }
+
+    let finish_reason = if tool_calls.is_empty() {
+        FinishReason::Complete
+    } else {
+        FinishReason::ToolCall
+    };
+
+    StreamChunk {
+        delta: content,
+        tool_calls,
+        tokens: Some(TokenUsage {
+            prompt_tokens: prompt_eval_count,
+            completion_tokens: eval_count,
+            total_tokens: prompt_eval_count + eval_count,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            reported_cost_usd: None,
+        }),
+        finish_reason: Some(finish_reason),
     }
 }
 
-impl Stream for OllamaNdjsonStream {
-    type Item = Result<StreamChunk>;
-
-    fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
-        loop {
-            // Try to parse a complete JSON line
-            // Split off one complete NDJSON line, if the newline ending it has
-            // arrived. Both halves are copied out before the buffer is replaced.
-            let split = this
-                .buffer
-                .split_once('\n')
-                .map(|(line, rest)| (line.to_string(), rest.to_string()));
-            if let Some((line, rest)) = split {
-                this.buffer = rest;
-
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-
-                let json: serde_json::Value = match serde_json::from_str(line) {
-                    Ok(j) => j,
-                    Err(e) => {
-                        return std::task::Poll::Ready(Some(Err(ProviderError::InvalidResponse(
-                            e.to_string(),
-                        ))));
-                    }
-                };
-
-                // Check for done flag
-                let done = json.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
-
-                let message = json.get("message");
-                let content = message
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                if done {
-                    let eval_count =
-                        json.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    let prompt_eval_count = json
-                        .get("prompt_eval_count")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
-
-                    // Parse tool calls from the final chunk's message.tool_calls
-                    let mut tool_calls = Vec::new();
-                    if let Some(tcs) = message
-                        .and_then(|m| m.get("tool_calls"))
-                        .and_then(|tc| tc.as_array())
-                    {
-                        for (i, tc) in tcs.iter().enumerate() {
-                            let function = tc.get("function").unwrap_or(&serde_json::Value::Null);
-                            let name = function
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let arguments = function
-                                .get("arguments")
-                                .cloned()
-                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                            tool_calls.push(crate::provider::ToolCallDelta {
-                                index: i,
-                                id: Some(next_tool_call_id()),
-                                name: Some(name),
-                                arguments_delta: arguments.to_string(),
-                                // Local models sign nothing.
-                                thought_signature: None,
-                            });
-                        }
-                    }
-
-                    let finish_reason = if tool_calls.is_empty() {
-                        FinishReason::Complete
-                    } else {
-                        FinishReason::ToolCall
-                    };
-
-                    return std::task::Poll::Ready(Some(Ok(StreamChunk {
-                        delta: content,
-                        tool_calls,
-                        tokens: Some(TokenUsage {
-                            prompt_tokens: prompt_eval_count,
-                            completion_tokens: eval_count,
-                            total_tokens: prompt_eval_count + eval_count,
-                            cached_tokens: 0,
-                            cache_write_tokens: 0,
-                            reported_cost_usd: None,
-                        }),
-                        finish_reason: Some(finish_reason),
-                    })));
-                }
-
-                return std::task::Poll::Ready(Some(Ok(StreamChunk {
-                    delta: content,
-                    tool_calls: Vec::new(),
-                    tokens: None,
-                    finish_reason: None,
-                })));
-            }
-
-            // Need more data
-            match this.inner.as_mut().poll_next(cx) {
-                std::task::Poll::Ready(Some(Ok(bytes))) => {
-                    if let Ok(text) = std::str::from_utf8(&bytes) {
-                        this.buffer.push_str(text);
-                    }
-                }
-                std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Some(Err(ProviderError::transport(
-                        "reading the response stream",
-                        &e,
-                    ))));
-                }
-                std::task::Poll::Ready(None) => {
-                    // Try remaining buffer
-                    let remaining = this.buffer.trim().to_string();
-                    if !remaining.is_empty() {
-                        this.buffer.clear();
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&remaining) {
-                            let content = json
-                                .get("message")
-                                .and_then(|m| m.get("content"))
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            return std::task::Poll::Ready(Some(Ok(StreamChunk {
-                                delta: content,
-                                tool_calls: Vec::new(),
-                                tokens: None,
-                                finish_reason: Some(FinishReason::Complete),
-                            })));
-                        }
-                    }
-                    return std::task::Poll::Ready(None);
-                }
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-            }
-        }
+/// The last line, if the server closed without a trailing newline.
+///
+/// NDJSON promises a newline between records, not after the last one, so a
+/// final `done` record can be sitting in the buffer with nothing to frame
+/// it. It is read as text and the stream is marked complete; the usage on it
+/// is not recovered, which is what the old loop did too.
+fn ollama_flush(buffer: &mut String) -> Option<StreamChunk> {
+    let remaining = buffer.trim().to_string();
+    if remaining.is_empty() {
+        return None;
     }
+    buffer.clear();
+    let json = serde_json::from_str::<serde_json::Value>(&remaining).ok()?;
+    let content = json
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some(StreamChunk {
+        delta: content,
+        tool_calls: Vec::new(),
+        tokens: None,
+        finish_reason: Some(FinishReason::Complete),
+    })
 }
 
 #[cfg(test)]
@@ -2092,7 +2055,7 @@ mod tests {
             idx: 0,
         };
 
-        let ndjson_stream = OllamaNdjsonStream::new(static_stream);
+        let ndjson_stream = ollama_ndjson_stream(static_stream);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -2147,7 +2110,7 @@ mod tests {
             idx: 0,
         };
 
-        let ndjson_stream = OllamaNdjsonStream::new(static_stream);
+        let ndjson_stream = ollama_ndjson_stream(static_stream);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -2195,7 +2158,7 @@ mod tests {
             idx: 0,
         };
 
-        let ndjson_stream = OllamaNdjsonStream::new(static_stream);
+        let ndjson_stream = ollama_ndjson_stream(static_stream);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -2244,7 +2207,7 @@ mod tests {
             idx: 0,
         };
 
-        let ndjson_stream = OllamaNdjsonStream::new(static_stream);
+        let ndjson_stream = ollama_ndjson_stream(static_stream);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -2291,7 +2254,7 @@ mod tests {
             idx: 0,
         };
 
-        let ndjson_stream = OllamaNdjsonStream::new(static_stream);
+        let ndjson_stream = ollama_ndjson_stream(static_stream);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -2335,7 +2298,7 @@ mod tests {
             }
         }
 
-        let ndjson_stream = OllamaNdjsonStream::new(PendingThenDataStream {
+        let ndjson_stream = ollama_ndjson_stream(PendingThenDataStream {
             polled_once: false,
             yielded: false,
         });
@@ -2386,7 +2349,7 @@ mod tests {
             idx: 0,
         };
 
-        let ndjson_stream = OllamaNdjsonStream::new(static_stream);
+        let ndjson_stream = ollama_ndjson_stream(static_stream);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -2443,7 +2406,7 @@ mod tests {
             idx: 0,
         };
 
-        let ndjson_stream = OllamaNdjsonStream::new(static_stream);
+        let ndjson_stream = ollama_ndjson_stream(static_stream);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -2870,7 +2833,7 @@ mod tests {
     #[test]
     fn ndjson_stream_skips_invalid_utf8_chunk_and_continues() {
         // covers the implicit else of `if let Ok(text) = from_utf8(&bytes)` in
-        // OllamaNdjsonStream::poll_next
+        // the framed stream
         use futures_core::Stream;
         use std::pin::Pin;
         use std::task::{Context, Poll};
@@ -2902,7 +2865,7 @@ mod tests {
             data: vec![invalid_utf8, valid_chunk],
             idx: 0,
         };
-        let ndjson_stream = OllamaNdjsonStream::new(stream);
+        let ndjson_stream = ollama_ndjson_stream(stream);
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use tokio_stream::StreamExt;
