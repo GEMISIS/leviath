@@ -12,6 +12,104 @@
 
 use super::*;
 
+/// The raw bytes a provider's streaming endpoint sends back.
+///
+/// Boxed as a trait object rather than kept generic. In production this is
+/// always `reqwest`'s `bytes_stream()`; tests inject dozens of distinct mock
+/// stream types, and a generic `impl<S> Stream` makes `cargo llvm-cov`
+/// instrument each monomorphized `poll_next` separately, leaving some
+/// artificially "uncovered" even though the shared logic is fully exercised.
+/// Boxing collapses all of that into one concrete `poll_next`.
+pub type ByteStream =
+    Pin<Box<dyn Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send>>;
+
+/// Cut one frame off the front of the buffer, if a whole one has arrived.
+///
+/// `None` means "not yet, poll for more bytes"; `Some(None)` means the frame
+/// said the stream is over; `Some(Some(item))` is a chunk or an error the
+/// provider delivered inside the stream. A framer that consumed a frame with
+/// nothing in it (a keepalive, a `ping`) may answer `None` and be asked
+/// again.
+pub type FrameFn = Box<dyn FnMut(&mut String) -> Option<Option<Result<StreamChunk>>> + Send>;
+
+/// What to make of whatever is left in the buffer once the bytes stop.
+///
+/// Most wire formats end every frame with a delimiter, so a leftover is a
+/// torn frame and there is nothing to do. Ollama's NDJSON does not promise a
+/// trailing newline, so its last line can only be read here.
+pub type FlushFn = Box<dyn FnMut(&mut String) -> Option<StreamChunk> + Send>;
+
+/// A byte stream cut into [`StreamChunk`]s by a provider-specific framer.
+///
+/// One `poll_next` for every provider. Three of them used to carry a copy of
+/// this loop each - the same buffer, the same UTF-8 handling, the same
+/// transport-error mapping - with only the framing call differing, and the
+/// same eight-line comment about why the inner stream is boxed, three times.
+pub struct FramedStream {
+    inner: ByteStream,
+    buffer: String,
+    parse: FrameFn,
+    flush: Option<FlushFn>,
+}
+
+impl FramedStream {
+    /// Wrap `inner`, framing it with `parse` and, at the end, `flush`.
+    pub fn new<S>(inner: S, parse: FrameFn, flush: Option<FlushFn>) -> Self
+    where
+        S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+    {
+        Self {
+            inner: Box::pin(inner),
+            buffer: String::new(),
+            parse,
+            flush,
+        }
+    }
+}
+
+impl Stream for FramedStream {
+    type Item = Result<StreamChunk>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if let Some(item) = (this.parse)(&mut this.buffer) {
+                return std::task::Poll::Ready(item);
+            }
+            match this.inner.as_mut().poll_next(cx) {
+                std::task::Poll::Ready(Some(Ok(bytes))) => {
+                    if let Ok(text) = std::str::from_utf8(&bytes) {
+                        this.buffer.push_str(text);
+                    }
+                }
+                std::task::Poll::Ready(Some(Err(e))) => {
+                    return std::task::Poll::Ready(Some(Err(ProviderError::transport(
+                        "reading the response stream",
+                        &e,
+                    ))));
+                }
+                std::task::Poll::Ready(None) => {
+                    // The bytes are over: a frame that arrived whole with the
+                    // last of them, then whatever the format does with a tail.
+                    if let Some(item) = (this.parse)(&mut this.buffer) {
+                        return std::task::Poll::Ready(item);
+                    }
+                    if let Some(flush) = this.flush.as_mut()
+                        && let Some(chunk) = flush(&mut this.buffer)
+                    {
+                        return std::task::Poll::Ready(Some(Ok(chunk)));
+                    }
+                    return std::task::Poll::Ready(None);
+                }
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+    }
+}
+
 /// Fold a chunk stream back into the single response the runtime works with.
 ///
 /// The exact inverse of [`Provider::infer_stream`]'s default, which takes a
