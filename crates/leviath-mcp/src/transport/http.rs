@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{StatusCode, Url};
 use serde_json::Value;

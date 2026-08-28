@@ -541,7 +541,7 @@ pub async fn dispatch_tools(
     // Each call reports its own completion the moment it resolves - the heart of
     // the crash-replay guarantee: a batch that dies with 2 of 3 calls done has
     // both results in the journal.
-    let executed = futures::future::join_all(queued.iter().map(|(_, is_builtin, tc)| {
+    let executed = futures_util::future::join_all(queued.iter().map(|(_, is_builtin, tc)| {
         let state = Arc::clone(&state);
         let progress = &progress;
         async move {
