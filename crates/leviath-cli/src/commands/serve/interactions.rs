@@ -13,7 +13,7 @@ use super::types::*;
 pub(super) async fn get_interaction(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     match state
         .control
         .request(&ControlRequest::ListInteractions)
@@ -33,10 +33,7 @@ pub(super) async fn get_interaction(
                 )),
             }
         }
-        Ok(other) => Err(err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Unexpected daemon response: {other:?}"),
-        )),
+        Ok(other) => Err(unexpected_response(other)),
         Err(e) => Err(daemon_error(e)),
     }
 }
@@ -61,7 +58,7 @@ pub(super) async fn submit_interaction(
     State(state): State<AppState>,
     AxumPath(_id): AxumPath<String>,
     Json(body): Json<SubmitInteractionReq>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<StatusCode, ApiError> {
     let scope = body.scope.as_deref().map(approval_scope_from_wire);
     let response = InteractionResponse {
         request_id: body.request_id,
@@ -70,22 +67,15 @@ pub(super) async fn submit_interaction(
         approved: body.approved,
         scope,
     };
-    match state
+    let reply = state
         .control
         .request(&ControlRequest::AnswerInteraction { response })
-        .await
-    {
-        Ok(ControlResponse::Ok { ok: true }) => Ok(StatusCode::ACCEPTED),
-        Ok(ControlResponse::Ok { ok: false }) => Err(err(
-            StatusCode::NOT_FOUND,
-            "No such open interaction".to_string(),
-        )),
-        Ok(other) => Err(err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Unexpected daemon response: {other:?}"),
-        )),
-        Err(e) => Err(daemon_error(e)),
-    }
+        .await;
+    daemon_ok(
+        reply,
+        StatusCode::ACCEPTED,
+        "No such open interaction".to_string(),
+    )
 }
 
 /// `POST /api/agents/{id}/message`: deliver a message to a running agent.
@@ -93,27 +83,20 @@ pub(super) async fn send_message(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(body): Json<SendMessageReq>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    match state
+) -> Result<StatusCode, ApiError> {
+    let reply = state
         .control
         .request(&ControlRequest::Message {
             agent_id: id.clone(),
             content: body.message,
             target_region: body.target_region,
         })
-        .await
-    {
-        Ok(ControlResponse::Ok { ok: true }) => Ok(StatusCode::ACCEPTED),
-        Ok(ControlResponse::Ok { ok: false }) => Err(err(
-            StatusCode::NOT_FOUND,
-            format!("Agent run '{id}' is not accepting messages"),
-        )),
-        Ok(other) => Err(err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Unexpected daemon response: {other:?}"),
-        )),
-        Err(e) => Err(daemon_error(e)),
-    }
+        .await;
+    daemon_ok(
+        reply,
+        StatusCode::ACCEPTED,
+        format!("Agent run '{id}' is not accepting messages"),
+    )
 }
 
 #[cfg(test)]
