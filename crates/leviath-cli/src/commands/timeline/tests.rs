@@ -280,8 +280,13 @@ fn durations_read_as_clock_time() {
     assert_eq!(hms(65), "1:05");
     assert_eq!(hms(3_725), "1:02:05");
     assert_eq!(hms(-5), "0:00");
-    assert_eq!(truncate("short", 20), "short");
-    assert_eq!(truncate(&"é".repeat(30), 5).chars().count(), 5);
+    assert_eq!(leviath_core::truncate_chars("short", 20), "short");
+    assert_eq!(
+        leviath_core::truncate_chars(&"é".repeat(30), 5)
+            .chars()
+            .count(),
+        5
+    );
 }
 
 #[test]

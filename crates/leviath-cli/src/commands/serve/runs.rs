@@ -449,7 +449,7 @@ pub(super) async fn list_runs(
     Query(query): Query<RunsQuery>,
 ) -> Result<Json<Page<RunItem>>, ApiError> {
     let resolved = resolve(&query)?;
-    let server_time = now_secs();
+    let server_time = leviath_core::duration::now_secs();
 
     // A batch fetch reads exactly the named runs, rather than scanning the
     // whole directory and filtering it down to them.
@@ -512,13 +512,6 @@ pub(super) async fn list_runs(
     let mut page = Page::new(items, next_cursor, total, server_time);
     page.scan_truncated = scan_truncated;
     Ok(Json(page))
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// Order by `(sort value, run_id)`, with the tie-break following the primary
@@ -884,7 +877,7 @@ pub(super) fn run_json(meta: &RunMeta, now: i64) -> serde_json::Value {
 /// The spans go on before the projection, so `?fields=working_secs` selects one
 /// the way it selects any other key.
 fn build_item(meta: &RunMeta, resolved: &Resolved, highlights: Option<Vec<Highlight>>) -> RunItem {
-    let mut value = run_json(meta, now_secs());
+    let mut value = run_json(meta, leviath_core::duration::now_secs());
     if let (Some(fields), serde_json::Value::Object(map)) = (&resolved.fields, &mut value) {
         map.retain(|key, _| fields.contains(key));
     }

@@ -28,7 +28,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // The plain run-state data types (RunMeta, RunStatus, the snapshot structs, and
 // the per-stage records) live in `leviath_core::run_meta`. Re-exported here so
@@ -245,13 +244,6 @@ pub fn context_history(run_id: &str) -> Vec<leviath_core::run_archive::RunPoint>
         .collect()
 }
 
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 /// Inner implementation of `runs_dir`, parameterised so it can be tested
 /// without touching the process-global env. All callers go through `runs_dir`.
 ///
@@ -412,7 +404,12 @@ pub fn new_run_id(agent_name: &str) -> String {
     use rand::RngExt as _;
     let entropy: u64 = rand::rng().random::<u64>() >> (u64::BITS - RUN_ID_ENTROPY_BITS);
     let safe_name = agent_name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-");
-    format!("{}-{}-{:012x}", safe_name, now_secs(), entropy)
+    format!(
+        "{}-{}-{:012x}",
+        safe_name,
+        leviath_core::duration::now_secs(),
+        entropy
+    )
 }
 
 /// Create the run directory and write initial metadata.
@@ -567,7 +564,7 @@ impl ForceCancelOutcome {
 /// Force a run's on-disk metadata to `Cancelled`, in the runs dir resolved from
 /// the environment. See [`force_cancel_in`].
 pub fn force_cancel(run_id: &str) -> ForceCancelOutcome {
-    force_cancel_in(&run_dir(run_id), now_secs())
+    force_cancel_in(&run_dir(run_id), leviath_core::duration::now_secs())
 }
 
 /// Force the run in `run_dir` to `Cancelled`, stamping `updated_at` with `now`.

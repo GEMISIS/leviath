@@ -561,7 +561,7 @@ pub struct Stage {
     /// Whether this stage accepts mid-run user messages.
     /// When true, messages sent to the agent are injected into context
     /// between inference calls. Default: true.
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::default_true")]
     pub accepts_messages: bool,
 
     /// Whether the LLM may end the run at this stage instead of naming a
@@ -661,11 +661,6 @@ pub struct Stage {
     /// and nothing about the scripting engine is touched for this stage.
     #[serde(default, skip_serializing_if = "StageHooks::is_empty")]
     pub hooks: StageHooks,
-}
-
-/// Default value for bool fields that should default to true.
-fn default_true() -> bool {
-    true
 }
 
 impl Stage {

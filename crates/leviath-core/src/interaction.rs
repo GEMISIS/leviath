@@ -55,7 +55,7 @@ pub struct InteractionRequest {
     /// For ToolApproval: the tool arguments (JSON).
     pub tool_arguments: Option<serde_json::Value>,
     /// Whether an answer is mandatory (empty/cancel not allowed).
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::default_true")]
     pub required: bool,
     /// Stage name that triggered this request.
     pub stage_name: String,
@@ -65,10 +65,6 @@ pub struct InteractionRequest {
     /// Format of the body content.
     #[serde(default)]
     pub body_format: BodyFormat,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl InteractionRequest {

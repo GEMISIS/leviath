@@ -266,15 +266,8 @@ pub(super) async fn list_blueprints(
         remaining,
         next_cursor,
         Some(total),
-        now_secs(),
+        leviath_core::duration::now_secs(),
     )))
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// `GET /api/blueprints/{name}`: one blueprint, with its manifest text.

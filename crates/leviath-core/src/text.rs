@@ -133,6 +133,19 @@ pub fn estimate_tokens(s: &str) -> usize {
     s.len().div_ceil(4)
 }
 
+/// The first `width` characters of `s`, whole characters only.
+///
+/// For fixed-width table cells over author-supplied names: counts characters
+/// rather than bytes, so a name of accented letters is cut where the column
+/// ends and never inside a character. No ellipsis; a cell that wants one
+/// appends it. Two commands had this as a private helper each.
+pub fn truncate_chars(s: &str, width: usize) -> String {
+    match s.chars().count() > width {
+        true => s.chars().take(width).collect(),
+        false => s.to_string(),
+    }
+}
+
 /// Substitute `{name}` placeholders in a template.
 ///
 /// Plain sequential `str::replace`, the same scheme `CompactionConfig`'s
@@ -215,6 +228,17 @@ mod snippet_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn truncate_chars_counts_characters_not_bytes() {
+        assert_eq!(truncate_chars("short", 20), "short");
+        assert_eq!(truncate_chars("exactly", 7), "exactly");
+        assert_eq!(truncate_chars("longer than that", 6), "longer");
+        // Each `é` is two bytes; five characters is five characters.
+        let cut = truncate_chars(&"é".repeat(30), 5);
+        assert_eq!(cut.chars().count(), 5);
+        assert_eq!(cut, "ééééé");
+    }
     use super::*;
 
     #[test]
