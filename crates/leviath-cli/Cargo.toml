@@ -71,7 +71,6 @@ dotenvy = { workspace = true }
 leviath-tools = { workspace = true }
 leviath-sys = { workspace = true }
 async-trait = { workspace = true }
-libc = { workspace = true }
 pulldown-cmark = { workspace = true }
 ratatui-textarea = { workspace = true }
 rataflow = { workspace = true }
@@ -120,7 +119,6 @@ tokio = { workspace = true, features = ["test-util"] }
 # reaching a developer's real one would raise an OS prompt and hang.
 keyring-core = "1"
 
-tempfile = "3"
 temp-env = { workspace = true, features = ["async_closure"] }
 # Validates the bundled blueprints against the published JSON Schema. A test
 # dependency only: nothing at runtime reads that schema, it exists so an agent
