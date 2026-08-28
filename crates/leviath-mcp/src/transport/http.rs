@@ -204,6 +204,11 @@ pub(crate) struct HttpTransport {
     session_id: Option<String>,
     protocol_version: Option<String>,
     legacy: Option<LegacyStream>,
+    /// How long a notification's POST may take. `send_request` takes its
+    /// deadline as an argument; the trait gives a notification none, and a
+    /// server that accepts the connection and stalls used to hold it open
+    /// for the full read-stall timeout. A field so a test can shorten it.
+    notification_timeout: Duration,
     /// Re-auths the bearer on a mid-session `401`, if configured.
     refresher: Option<Arc<dyn BearerRefresher>>,
 }
@@ -238,6 +243,7 @@ impl HttpTransport {
             protocol_version: None,
             legacy: None,
             refresher: None,
+            notification_timeout: crate::transport::DEFAULT_REQUEST_TIMEOUT,
         })
     }
 
@@ -707,7 +713,15 @@ impl Transport for HttpTransport {
         let body = serde_json::to_string(req).expect("JsonRpcRequest is always serializable");
 
         // A notification has no reply; anything 2xx (typically 202) is success.
-        self.post_expecting_success(&body).await
+        let timeout = self.notification_timeout;
+        match tokio::time::timeout(timeout, self.post_expecting_success(&body)).await {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "MCP server did not accept '{}' within {}s",
+                req.method,
+                timeout.as_secs()
+            )),
+        }
     }
 
     async fn close(&mut self) -> anyhow::Result<()> {
@@ -1556,6 +1570,26 @@ mod tests {
             .err()
             .expect("must time out");
         assert!(err.to_string().contains("did not respond"), "got: {err}");
+    }
+
+    /// A notification has no reply to wait for, which is exactly why it had
+    /// no deadline: a server that took the POST and never answered held the
+    /// connection for the whole read-stall timeout.
+    #[tokio::test]
+    async fn a_slow_server_times_out_a_notification_too() {
+        let _guard = always_on_tracing_guard();
+        let app = Router::new().route("/mcp", post(std::future::pending::<()>));
+        let url = format!("{}/mcp", serve(app).await);
+        let mut t = transport(&url);
+        t.notification_timeout = Duration::from_millis(200);
+        let err = t
+            .send_notification(&JsonRpcRequest::notification(
+                "notifications/initialized",
+                serde_json::json!({}),
+            ))
+            .await
+            .expect_err("must time out");
+        assert!(err.to_string().contains("did not accept"), "got: {err}");
     }
 
     // ─── response id matching ─────────────────────────────────────────────
