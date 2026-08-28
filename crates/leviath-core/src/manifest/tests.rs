@@ -5436,3 +5436,36 @@ hide = ["sources"]
         .expect_err("routed into a hidden region");
     assert!(err.to_string().contains("sources"), "{err}");
 }
+
+// ─── Arithmetic on hostile numbers ─────────────────────────────────────
+
+/// `max_tokens = -1` became `usize::MAX` through `as usize`, and the default
+/// compaction threshold (`max_tokens * 8 / 10`) then overflowed. With
+/// `overflow-checks` on in release that aborted the daemon on load, taking
+/// every running agent with it. Loading must not panic; whether it should be
+/// refused is a separate question (it will be).
+#[test]
+fn a_negative_max_tokens_on_a_compacting_region_does_not_abort() {
+    let toml = r#"
+[agent]
+name = "neg"
+
+[context.regions]
+notes = { kind = "compacting", max_tokens = -1 }
+"#;
+    let _ = parse_manifest(toml);
+}
+
+/// Two such regions overflowed the summed total instead.
+#[test]
+fn two_negative_budgets_do_not_abort_the_total() {
+    let toml = r#"
+[agent]
+name = "neg"
+
+[context.regions]
+a = { kind = "pinned", max_tokens = -1 }
+b = { kind = "pinned", max_tokens = -1 }
+"#;
+    let _ = parse_manifest(toml);
+}

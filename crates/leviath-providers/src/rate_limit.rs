@@ -68,16 +68,23 @@ impl RateLimiter {
             let now = Instant::now();
             let mut state = self.state.lock().await;
 
-            // Prune old entries outside the 1-minute window
-            let cutoff = now - window;
+            // Prune old entries outside the 1-minute window. `duration_since`
+            // rather than `now - window`: an `Instant` cannot go before the
+            // platform's epoch, and `Instant - Duration` panics when it would -
+            // on Linux the epoch is boot, so a daemon started under a service
+            // manager within 60s of boot hit that on its first request.
             while state
                 .request_timestamps
                 .front()
-                .is_some_and(|t| *t < cutoff)
+                .is_some_and(|t| now.duration_since(*t) > window)
             {
                 state.request_timestamps.pop_front();
             }
-            while state.token_counts.front().is_some_and(|(t, _)| *t < cutoff) {
+            while state
+                .token_counts
+                .front()
+                .is_some_and(|(t, _)| now.duration_since(*t) > window)
+            {
                 state.token_counts.pop_front();
             }
 
@@ -113,9 +120,12 @@ impl RateLimiter {
         let window = Duration::from_secs(60);
         let mut state = self.state.lock().await;
 
-        // Prune old entries
-        let cutoff = now - window;
-        while state.token_counts.front().is_some_and(|(t, _)| *t < cutoff) {
+        // Prune old entries; see `acquire` for why this is not `now - window`.
+        while state
+            .token_counts
+            .front()
+            .is_some_and(|(t, _)| now.duration_since(*t) > window)
+        {
             state.token_counts.pop_front();
         }
 

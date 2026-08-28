@@ -68,11 +68,18 @@ impl TokenUsage {
     ///
     /// The one constructor for a parsed response, so a provider cannot ship a
     /// total that disagrees with its parts.
+    ///
+    /// Saturating: every count arrives from a provider's response body, and
+    /// `overflow-checks` is on in release, so a gateway reporting a nonsense
+    /// `prompt_tokens` would otherwise abort the daemon rather than one call.
     pub fn new(fresh: usize, cached: usize, cache_write: usize, completion: usize) -> Self {
         Self {
             prompt_tokens: fresh,
             completion_tokens: completion,
-            total_tokens: fresh + cached + cache_write + completion,
+            total_tokens: fresh
+                .saturating_add(cached)
+                .saturating_add(cache_write)
+                .saturating_add(completion),
             cached_tokens: cached,
             cache_write_tokens: cache_write,
             reported_cost_usd: None,
@@ -87,7 +94,9 @@ impl TokenUsage {
 
     /// All input tokens, however they were billed.
     pub fn input_tokens(&self) -> usize {
-        self.prompt_tokens + self.cached_tokens + self.cache_write_tokens
+        self.prompt_tokens
+            .saturating_add(self.cached_tokens)
+            .saturating_add(self.cache_write_tokens)
     }
 
     /// What this one call cost, or `None` when nothing can price it.
@@ -606,5 +615,14 @@ mod cost_tests {
         totals.add(&computed, None);
         assert_eq!(computed.priced_cost(None), None);
         assert_eq!(totals.unpriced_calls, 1);
+    }
+
+    /// Every count arrives from a provider response. A gateway reporting a
+    /// nonsense `prompt_tokens` used to abort the daemon in the constructor.
+    #[test]
+    fn token_usage_saturates_instead_of_aborting() {
+        let usage = TokenUsage::new(usize::MAX, 1, 1, 1);
+        assert_eq!(usage.total_tokens, usize::MAX);
+        assert_eq!(usage.input_tokens(), usize::MAX);
     }
 }

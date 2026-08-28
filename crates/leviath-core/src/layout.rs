@@ -244,7 +244,10 @@ impl ContextLayout {
             return Ok(());
         }
 
-        let total_max: usize = self.regions.iter().map(|r| r.max_tokens).sum();
+        let total_max = self
+            .regions
+            .iter()
+            .fold(0usize, |acc, r| acc.saturating_add(r.max_tokens));
         if total_max > self.total_budget_tokens {
             tracing::warn!(
                 "Sum of region max tokens ({}) exceeds total budget ({})",
@@ -274,8 +277,7 @@ impl ContextLayout {
                         }
                 )
             })
-            .map(|r| r.max_tokens)
-            .sum();
+            .fold(0usize, |acc, r| acc.saturating_add(r.max_tokens));
         // Only enforce the absolute working-budget floor on realistically-sized
         // layouts. Tiny illustrative layouts (toy examples, unit-test fixtures)
         // have small budgets by design and are not real agent runs; applying an
@@ -1264,5 +1266,20 @@ mod tests {
         with_tracing(|| {
             assert!(layout.validate().is_ok());
         });
+    }
+
+    /// `validate` sums every region's ceiling to warn when they exceed the
+    /// budget. Two saturated ceilings used to overflow that sum and abort
+    /// instead of warning.
+    #[test]
+    fn validate_does_not_abort_when_region_ceilings_sum_past_usize_max() {
+        let layout = ContextLayout::new(
+            vec![
+                RegionDefinition::new("a".to_string(), RegionKind::Pinned, usize::MAX),
+                RegionDefinition::new("b".to_string(), RegionKind::Pinned, usize::MAX),
+            ],
+            1_000,
+        );
+        let _ = layout.validate();
     }
 }

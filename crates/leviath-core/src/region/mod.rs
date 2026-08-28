@@ -949,17 +949,17 @@ impl Region {
                     while self.content.len() > max && self.remove_oldest().is_some() {}
                 }
                 EvictionStrategy::Bulk { overflow } => {
-                    if self.content.len() > max + overflow {
+                    if self.content.len() > max.saturating_add(overflow) {
                         while self.content.len() > max && self.remove_oldest().is_some() {}
                     }
                 }
                 EvictionStrategy::Compact { compact_count } => {
-                    if self.content.len() > max + compact_count * 2 {
+                    if self.content.len() > max.saturating_add(compact_count.saturating_mul(2)) {
                         // Fallback: runtime hasn't compacted, bulk-evict to prevent
                         // unbounded growth.
                         while self.content.len() > max && self.remove_oldest().is_some() {}
                         self.needs_message_compaction = false;
-                    } else if self.content.len() > max + compact_count {
+                    } else if self.content.len() > max.saturating_add(compact_count) {
                         self.needs_message_compaction = true;
                     }
                 }
@@ -3670,5 +3670,30 @@ mod tests {
             Some("two"),
             "the oldest rolled off as it always did"
         );
+    }
+
+    /// A `max_items` of `usize::MAX` is what a negative manifest value used to
+    /// resolve to. The bulk-eviction check added `overflow` to it on the first
+    /// write and aborted the daemon mid-run.
+    #[test]
+    fn a_saturated_window_does_not_abort_on_its_first_write() {
+        let mut region = Region::new(
+            "w".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: usize::MAX,
+                eviction_strategy: EvictionStrategy::Bulk { overflow: 10 },
+            },
+            100,
+        );
+        region.add_entry("x".to_string(), 1).unwrap();
+        let mut region = Region::new(
+            "w".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: usize::MAX,
+                eviction_strategy: EvictionStrategy::Compact { compact_count: 10 },
+            },
+            100,
+        );
+        region.add_entry("x".to_string(), 1).unwrap();
     }
 }
