@@ -37,9 +37,18 @@ curl -fsSL https://leviath.dev/install.sh | sh
 irm https://leviath.dev/install.ps1 | iex
 ```
 
+No administrator is needed: it unpacks into `%LOCALAPPDATA%\Leviath\bin` and adds that folder to
+your own PATH.
+
 Paste it into PowerShell rather than Command Prompt. The old form that spawned PowerShell from
 cmd (`powershell -ExecutionPolicy Bypass -c "..."`) is the launch pattern endpoint protection
 refuses on managed machines - it answered "Access is denied." before anything ran.
+
+If Windows Defender or another antivirus quarantines `lev.exe`, that is a false positive on a new,
+unsigned binary, not something it found. You can check the file is exactly what this repo's CI
+built with `gh attestation verify "$env:LOCALAPPDATA\Leviath\bin\lev.exe" --repo GEMISIS/leviath`,
+then restore it from quarantine or add the folder to the exclusions; reporting it as a false
+positive to your vendor helps every later install.
 
 Check it worked:
 
