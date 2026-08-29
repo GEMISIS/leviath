@@ -775,6 +775,7 @@ fn per_agent_mcp_defs(
 mod tests {
     use super::*;
     use crate::test_support::McpStub;
+    use crate::test_support::{FakeProvider, fixtures};
     use leviath_runtime::components::AgentStatus;
     use leviath_runtime::host::{ControlOp, SpawnArgs};
     use tokio::sync::oneshot;
@@ -841,27 +842,8 @@ mod tests {
         assert!(tool_service.take(with_meta.entity()).is_none());
     }
 
-    struct FakeProvider;
-    #[async_trait::async_trait]
-    impl leviath_providers::Provider for FakeProvider {
-        async fn infer(
-            &self,
-            _r: &leviath_providers::InferenceRequest,
-        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
-            Err(leviath_providers::ProviderError::Other("test".to_string()))
-        }
-        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
-            1
-        }
-        fn max_context_tokens(&self, _m: &str) -> usize {
-            1000
-        }
-        fn name(&self) -> &str {
-            "fake"
-        }
-        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
-            leviath_providers::ModelCapabilities::default()
-        }
+    fn fake_provider() -> FakeProvider {
+        FakeProvider::new()
     }
 
     #[test]
@@ -1601,7 +1583,7 @@ system_prompt = "x"
         let manifest = blueprint_with_mcp(agent_dir.path(), &stub);
         // A `fake` provider so stage resolution succeeds.
         let mut providers = ProviderRegistry::new();
-        providers.register("fake".to_string(), Arc::new(FakeProvider));
+        providers.register("fake".to_string(), Arc::new(fake_provider()));
         let runs = tempfile::tempdir().unwrap();
         let mut host = build_host(HostParts {
             config: Config::default(),
@@ -1651,25 +1633,12 @@ system_prompt = "x"
     #[tokio::test]
     async fn fake_provider_methods_are_exercised() {
         use leviath_providers::Provider;
-        let p = FakeProvider;
+        let p = fake_provider();
         assert_eq!(p.name(), "fake");
         assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 1000);
         let _ = p.capabilities("m");
-        assert!(
-            p.infer(&leviath_providers::InferenceRequest {
-                system: vec![],
-                messages: vec![],
-                model: "m".to_string(),
-                max_tokens: 1,
-                temperature: 0.0,
-                tools: vec![],
-                extra: serde_json::Value::Null,
-                request_timeout_secs: None,
-            })
-            .await
-            .is_err()
-        );
+        assert!(p.infer(&fixtures::inference_request()).await.is_err());
     }
 
     #[tokio::test]
@@ -1679,7 +1648,7 @@ system_prompt = "x"
         std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
 
         let mut registry = ProviderRegistry::new();
-        registry.register("anthropic".to_string(), Arc::new(FakeProvider));
+        registry.register("anthropic".to_string(), Arc::new(fake_provider()));
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
 
         let runs = tempfile::tempdir().unwrap();
@@ -1794,7 +1763,7 @@ system_prompt = "x"
         .unwrap();
 
         let mut registry = ProviderRegistry::new();
-        registry.register("anthropic".to_string(), Arc::new(FakeProvider));
+        registry.register("anthropic".to_string(), Arc::new(fake_provider()));
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let mut host = build_host(HostParts {
             config: Config::default(),
@@ -1832,7 +1801,7 @@ system_prompt = "x"
 
         let runs = tempfile::tempdir().unwrap();
         let mut registry = ProviderRegistry::new();
-        registry.register("anthropic".to_string(), Arc::new(FakeProvider));
+        registry.register("anthropic".to_string(), Arc::new(fake_provider()));
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let mut host = build_host(HostParts {
             config: Config::default(),

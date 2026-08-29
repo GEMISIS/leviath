@@ -933,6 +933,7 @@ fn build_agent_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{FakeProvider, fixtures};
     use leviath_core::blueprint::ModelConfig;
     use leviath_runtime::ProviderRegistry;
     use leviath_runtime::world::PipelineWorld;
@@ -1194,34 +1195,13 @@ system = { kind = "pinned", max_tokens = 1000 }
     fn registry_with(providers: &[&str]) -> ProviderRegistry {
         let mut r = ProviderRegistry::new();
         for p in providers {
-            r.register(p.to_string(), Arc::new(FakeProvider));
+            r.register(p.to_string(), Arc::new(fake_provider()));
         }
         r
     }
 
-    struct FakeProvider;
-    #[async_trait::async_trait]
-    impl leviath_providers::Provider for FakeProvider {
-        async fn infer(
-            &self,
-            _r: &leviath_providers::InferenceRequest,
-        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
-            Err(leviath_providers::ProviderError::Other(
-                "test provider".to_string(),
-            ))
-        }
-        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
-            1
-        }
-        fn max_context_tokens(&self, _m: &str) -> usize {
-            1000
-        }
-        fn name(&self) -> &str {
-            "fake"
-        }
-        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
-            leviath_providers::ModelCapabilities::default()
-        }
+    fn fake_provider() -> FakeProvider {
+        FakeProvider::new().failing("test provider")
     }
 
     // ── build_agent (full spawn from a manifest) ──
@@ -2879,25 +2859,12 @@ system = { kind = "pinned", max_tokens = 1000 }
 
     #[tokio::test]
     async fn fake_provider_methods_are_exercised() {
-        let p = FakeProvider;
+        let p = fake_provider();
         assert_eq!(p.name(), "fake");
         assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 1000);
         let _ = p.capabilities("m");
-        assert!(
-            p.infer(&leviath_providers::InferenceRequest {
-                system: vec![],
-                messages: vec![],
-                model: "m".to_string(),
-                max_tokens: 1,
-                temperature: 0.0,
-                tools: vec![],
-                extra: serde_json::Value::Null,
-                request_timeout_secs: None,
-            })
-            .await
-            .is_err()
-        );
+        assert!(p.infer(&fixtures::inference_request()).await.is_err());
     }
 
     // ── [read_paths] policy resolution ────────────────────────────────────

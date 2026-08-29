@@ -2878,11 +2878,11 @@ mod tests {
     /// and the call, so the fast server's calls run while the slow one waits.
     #[tokio::test]
     async fn a_batch_across_two_mcp_servers_is_as_slow_as_its_slowest_call() {
-        let slow_stub = MCP_STUB_SUCCESS.replace(
+        let slow_stub = mcp_stub().replying("ok result").source().replace(
             "    elif method == \"tools/call\":\n",
             "    elif method == \"tools/call\":\n        import time; time.sleep(1.5)\n",
         );
-        let mut executor = mcp_with_stub(MCP_STUB_SUCCESS).await;
+        let mut executor = mcp_with_stub(&mcp_stub().replying("ok result").source()).await;
         // Two slow servers: two 1.5 s calls that can only overlap when the lock
         // is per server. One slow call beside fast ones takes ~1.5 s whether
         // the calls serialise or not, and proves nothing.

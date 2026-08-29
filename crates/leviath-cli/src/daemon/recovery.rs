@@ -540,6 +540,7 @@ fn reload_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{FakeProvider, fixtures};
     // Named here rather than inherited from the parent: production now spells
     // these seven as one `SpawnDeps`, so importing them above would mean seven
     // imports the module itself does not use.
@@ -563,34 +564,15 @@ mod tests {
         tokio::sync::mpsc::unbounded_channel().0
     }
 
-    struct FakeProvider;
-    #[async_trait::async_trait]
-    impl leviath_providers::Provider for FakeProvider {
-        async fn infer(
-            &self,
-            _r: &leviath_providers::InferenceRequest,
-        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
-            Err(leviath_providers::ProviderError::Other("t".to_string()))
-        }
-        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
-            1
-        }
-        fn max_context_tokens(&self, _m: &str) -> usize {
-            1000
-        }
-        fn name(&self) -> &str {
-            "fake"
-        }
-        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
-            leviath_providers::ModelCapabilities::default()
-        }
+    fn fake_provider() -> FakeProvider {
+        FakeProvider::new().failing("t")
     }
 
     fn test_world() -> (PipelineWorld, Arc<CliToolService>) {
         let cli = Arc::new(CliToolService::new());
         let mut registry = ProviderRegistry::new();
         for p in ["anthropic", "openai", "ollama"] {
-            registry.register(p.to_string(), Arc::new(FakeProvider));
+            registry.register(p.to_string(), Arc::new(fake_provider()));
         }
         let world = PipelineWorld::new(
             registry,
@@ -863,15 +845,7 @@ mod tests {
     #[test]
     fn a_descriptor_without_its_sidecar_restores_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let mut meta = RunMeta::new(
-            "run-1".to_string(),
-            "a".to_string(),
-            "/p".to_string(),
-            "t".to_string(),
-            None,
-            "/w".to_string(),
-            1,
-        );
+        let mut meta = fixtures::run_meta("run-1");
 
         // No descriptor at all.
         assert!(crate::runstate::read_final_output_in(dir.path(), &meta).is_none());
@@ -1781,7 +1755,7 @@ mod tests {
 
     #[tokio::test]
     async fn resumes_a_parent_parked_mid_fan_out() {
-        use leviath_core::blueprint::{FanOutConfig, WorkerFailurePolicy};
+        use leviath_core::blueprint::FanOutConfig;
         use leviath_runtime::fanout::{FanOutState, FanOutWaiting};
 
         let agent = agent_dir();
@@ -1800,16 +1774,8 @@ mod tests {
         let state = FanOutState {
             origin: leviath_runtime::fanout::FanOutOrigin::Stage,
             config: FanOutConfig {
-                worker_agent: None,
                 worker_stage: Some("w".to_string()),
-                worker_query: None,
-                merge_stage: None,
-                max_workers: 1,
-                on_worker_failure: WorkerFailurePolicy::Continue,
-                split_prompt: "s".to_string(),
-                results_region: None,
-                max_items: None,
-                max_attempts: None,
+                ..fixtures::fanout_config()
             },
             max_workers: 1,
             pending: vec![],
@@ -2386,25 +2352,12 @@ mod tests {
     #[tokio::test]
     async fn fake_provider_methods_are_exercised() {
         use leviath_providers::Provider;
-        let p = FakeProvider;
+        let p = fake_provider();
         assert_eq!(p.name(), "fake");
         assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 1000);
         let _ = p.capabilities("m");
-        assert!(
-            p.infer(&leviath_providers::InferenceRequest {
-                system: vec![],
-                messages: vec![],
-                model: "m".to_string(),
-                max_tokens: 1,
-                temperature: 0.0,
-                tools: vec![],
-                extra: serde_json::Value::Null,
-                request_timeout_secs: None,
-            })
-            .await
-            .is_err()
-        );
+        assert!(p.infer(&fixtures::inference_request()).await.is_err());
     }
 
     #[test]

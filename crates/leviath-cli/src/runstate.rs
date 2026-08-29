@@ -1021,6 +1021,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::fixtures;
 
     /// `run_id` arrives from URL segments on `GET /api/agents/{id}/logs` and
     /// friends. `Path::join` neither normalizes `..` nor resists an absolute
@@ -1291,15 +1292,7 @@ mod tests {
 
     #[test]
     fn run_meta_touch_updates_timestamp() {
-        let mut meta = RunMeta::new(
-            "r".into(),
-            "a".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/w".into(),
-            1,
-        );
+        let mut meta = fixtures::run_meta("r");
         let before = meta.updated_at;
         // Touch should update (or at least not decrease) updated_at
         meta.touch();
@@ -1501,15 +1494,7 @@ mod tests {
             assert!(read_final_output("no-such-run").is_none());
 
             // A run with no answer recorded.
-            let meta = RunMeta::new(
-                "run-silent".to_string(),
-                "a".to_string(),
-                "/p".to_string(),
-                "t".to_string(),
-                None,
-                "/w".to_string(),
-                1,
-            );
+            let meta = fixtures::run_meta("run-silent");
             create_run(&meta).expect("run dir");
             assert!(read_final_output("run-silent").is_none());
 
@@ -1522,15 +1507,7 @@ mod tests {
                 "present".to_string(),
                 42,
             );
-            let mut claimed = RunMeta::new(
-                "run-claimed".to_string(),
-                "a".to_string(),
-                "/p".to_string(),
-                "t".to_string(),
-                None,
-                "/w".to_string(),
-                1,
-            );
+            let mut claimed = fixtures::run_meta("run-claimed");
             claimed.final_output = Some(answer.descriptor());
             create_run(&claimed).expect("run dir");
             assert!(read_final_output("run-claimed").is_none());
@@ -1740,15 +1717,7 @@ mod tests {
             std::fs::create_dir_all(run_dir(run_id)).unwrap();
             let mut buf = Vec::new();
             run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
-            let meta = RunMeta::new(
-                run_id.to_string(),
-                "a".to_string(),
-                "/p".to_string(),
-                "t".to_string(),
-                None,
-                "/w".to_string(),
-                1,
-            );
+            let meta = fixtures::run_meta(run_id);
             run_archive::write_record(
                 &mut buf,
                 &RunRecord::Header {
@@ -2213,15 +2182,7 @@ mod tests {
         use leviath_core::run_archive::{self, RunIdentity, RunRecord};
         let mut buf = Vec::new();
         run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
-        let meta = RunMeta::new(
-            run_id.to_string(),
-            "a".to_string(),
-            "/p".to_string(),
-            "t".to_string(),
-            None,
-            "/w".to_string(),
-            1,
-        );
+        let meta = fixtures::run_meta(run_id);
         run_archive::write_record(
             &mut buf,
             &RunRecord::Header {
@@ -2268,15 +2229,7 @@ mod tests {
             std::fs::create_dir_all(run_dir(run_id)).unwrap();
             let mut buf = Vec::new();
             run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
-            let mut meta = RunMeta::new(
-                run_id.to_string(),
-                "a".to_string(),
-                "/p".to_string(),
-                "t".to_string(),
-                None,
-                "/w".to_string(),
-                1,
-            );
+            let mut meta = fixtures::run_meta(run_id);
             meta.callback_url = Some("https://example.invalid/hook".to_string());
             meta.callback_secret = Some("super-secret-signing-key".to_string());
             run_archive::write_record(
@@ -3227,15 +3180,7 @@ mod tests {
         let dir = base.join(run_id);
         let meta = RunMeta {
             status,
-            ..RunMeta::new(
-                run_id.into(),
-                "a".into(),
-                "/p".into(),
-                "t".into(),
-                None,
-                "/w".into(),
-                1,
-            )
+            ..fixtures::run_meta(run_id)
         };
         create_run_in(&dir, &meta).unwrap();
         dir

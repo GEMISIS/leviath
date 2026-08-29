@@ -102,6 +102,7 @@ fn format_time(secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::fixtures;
     use leviath_core::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot, RunMeta};
 
     fn point(stage: &str, tokens: usize, entries: Vec<&str>) -> RunPoint {
@@ -202,15 +203,7 @@ mod tests {
                         world_id: "w".to_string(),
                         created_at: 0,
                     },
-                    meta: Box::new(RunMeta::new(
-                        run_id.to_string(),
-                        "a".to_string(),
-                        "/p".to_string(),
-                        "t".to_string(),
-                        None,
-                        "/w".to_string(),
-                        1,
-                    )),
+                    meta: Box::new(fixtures::run_meta(run_id)),
                 },
             )
             .unwrap();
