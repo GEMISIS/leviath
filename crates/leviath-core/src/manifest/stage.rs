@@ -8,7 +8,7 @@ use super::*;
 /// Kept beside the parser because it is only true of the parser: a key added
 /// below and not added here is refused, which is the failure mode worth having
 /// - the alternative was accepting it and doing nothing, forever.
-const STAGE_KEYS: &[&str] = &[
+pub(super) const STAGE_KEYS: &[&str] = &[
     "accepts_messages",
     "allow_as_worker",
     "allow_blocking_tools",
@@ -55,10 +55,10 @@ const STAGE_KEYS: &[&str] = &[
 /// regions from an otherwise inherited one. Either way what is left out is
 /// hidden rather than destroyed. An author who guesses any other key hears
 /// about it instead of quietly carrying the region they meant to drop.
-const CONTEXT_KEYS: &[&str] = &["regions", "hide"];
+pub(super) const CONTEXT_KEYS: &[&str] = &["regions", "hide"];
 
 /// Every key read off `[stages.<name>.tool_routing]`.
-const TOOL_ROUTING_KEYS: &[&str] = &[
+pub(super) const TOOL_ROUTING_KEYS: &[&str] = &[
     "default_region",
     "max_result_tokens",
     "max_result_tokens_per_tool",
@@ -67,7 +67,7 @@ const TOOL_ROUTING_KEYS: &[&str] = &[
 ];
 
 /// Every key read off a transition edge's `gate = { ... }`.
-const GATE_KEYS: &[&str] = &[
+pub(super) const GATE_KEYS: &[&str] = &[
     "max_attempts",
     "message",
     "region",
@@ -79,7 +79,7 @@ const GATE_KEYS: &[&str] = &[
 ];
 
 /// Every key read off one `[stages.<name>.transitions.<target>]` edge.
-const EDGE_KEYS: &[&str] = &[
+pub(super) const EDGE_KEYS: &[&str] = &[
     "condition",
     "gate",
     "hint",
