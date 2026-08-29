@@ -617,10 +617,11 @@ requests_per_minute = 50
 tokens_per_minute   = 40000
 ```
 
-Only `requests_per_minute` is enforced today. `tokens_per_minute` is parsed and
-recorded but no code path throttles on it; it is accepted so a config that sets
-it keeps loading, and it will start to apply without a config change once the
-token bucket is wired in.
+Both are enforced before every call. `requests_per_minute` counts calls made in
+the last minute; `tokens_per_minute` counts the tokens those calls reported
+back, so it lags the request window by one call and errs on the provider's
+side. When either window is full the call waits for the oldest entry to leave
+it. A `tokens_per_minute` of `0` means no token limit.
 
 This shapes request *rate*. `[limits] max_concurrent_inferences` and
 `[limits.max_concurrent_inferences_by_provider]` bound *concurrency*. Both apply. Script providers
