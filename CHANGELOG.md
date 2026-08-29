@@ -116,6 +116,14 @@ same list.
   that fresh figure. It now shows the share of the whole prompt (fresh plus
   cached) that came from cache, so the figure cannot pass 100%. Stored counts
   and the API are unchanged.
+- With taint tracking on, `read_files`, `edit_document`, the `context_*` and
+  `todo_*` tools, `submit_output` and `fan_out` were gated as if they sent
+  data off the machine, because none had a classification of its own and
+  the fallback is the third-party default. Reading two files with anything
+  Private in context raised a leak prompt while reading one did not. Each
+  now carries its sibling's classification (`read_files` reads like
+  `read_file`, `fan_out` spawns like `spawn_agent`, the rest are internal),
+  and a test holds every built-in to an arm of its own.
 - The dashboard cut text to fixed character counts whatever the terminal
   width: the detail view's model name stopped at 24 characters and its
   working directory at 42 with most of a 200-column row empty, the header

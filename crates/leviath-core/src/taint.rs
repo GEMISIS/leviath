@@ -468,8 +468,31 @@ pub enum GateDecisionSource {
 /// service - so an internal default would assume the safest case about the
 /// least-known code. Failing closed costs a prompt; failing open costs the data.
 pub fn builtin_tool_classification(tool_name: &str) -> ToolClassification {
-    match tool_name {
-        "read_file" => ToolClassification::new(
+    // An unknown tool is almost always an MCP or Rhai script tool:
+    // third-party code, usually talking to a third-party service. Treat it
+    // as outbound so the gate sees it. `ToolClassification::default()` -
+    // internal/internal - assumed the safest case about the least-known
+    // code, and left every MCP and script tool ungated.
+    classified_builtin(tool_name).unwrap_or_else(|| {
+        ToolClassification::new(
+            TaintLevel::Public,
+            ToolDirection::Outbound,
+            TaintLevel::Public,
+        )
+    })
+}
+
+/// The classification of a built-in tool by name, or `None` for a name that
+/// has no arm of its own and so takes the third-party default.
+///
+/// Separate from [`builtin_tool_classification`] so a test can hold every
+/// built-in the registry advertises to an arm of its own: the default is
+/// outbound and gated, and a built-in that reached it was blocked in every
+/// taint-tracking run with anything Private in context, silently.
+pub fn classified_builtin(tool_name: &str) -> Option<ToolClassification> {
+    let classification = match tool_name {
+        // `read_files` is `read_file` over several paths.
+        "read_file" | "read_files" => ToolClassification::new(
             TaintLevel::Internal,
             ToolDirection::Inbound,
             TaintLevel::Public,
@@ -479,7 +502,18 @@ pub fn builtin_tool_classification(tool_name: &str) -> ToolClassification {
             ToolDirection::Internal,
             TaintLevel::Public,
         ),
-        "edit_file" => ToolClassification::new(
+        // `edit_document` edits a draft the same way `edit_file` edits a
+        // file, with a person at the other end instead of the disk.
+        "edit_file" | "edit_document" => ToolClassification::new(
+            TaintLevel::Internal,
+            ToolDirection::Internal,
+            TaintLevel::Public,
+        ),
+        // The context, todo and submit tools write the run's own state: the
+        // agent's regions, its checklist, the answer the caller gets back.
+        // Nothing leaves the machine, so none is a channel the gate watches.
+        "context_write" | "context_append" | "context_read" | "context_delete" | "context_list"
+        | "todo_add" | "todo_done" | "todo_note" | "submit_output" => ToolClassification::new(
             TaintLevel::Internal,
             ToolDirection::Internal,
             TaintLevel::Public,
@@ -529,24 +563,16 @@ pub fn builtin_tool_classification(tool_name: &str) -> ToolClassification {
                 TaintLevel::Public,
             )
         }
-        "spawn_agent" | "check_agent" | "wait_for_agent" | "send_to_agent" | "kill_agent" => {
-            ToolClassification::new(
-                TaintLevel::Internal,
-                ToolDirection::Internal,
-                TaintLevel::Public,
-            )
-        }
-        // An unknown tool is almost always an MCP or Rhai script tool:
-        // third-party code, usually talking to a third-party service. Treat it
-        // as outbound so the gate sees it. `ToolClassification::default()` -
-        // internal/internal - assumed the safest case about the least-known
-        // code, and left every MCP and script tool ungated.
-        _ => ToolClassification::new(
-            TaintLevel::Public,
-            ToolDirection::Outbound,
+        // `fan_out` is many `spawn_agent`s at once.
+        "spawn_agent" | "check_agent" | "wait_for_agent" | "send_to_agent" | "kill_agent"
+        | "fan_out" => ToolClassification::new(
+            TaintLevel::Internal,
+            ToolDirection::Internal,
             TaintLevel::Public,
         ),
-    }
+        _ => return None,
+    };
+    Some(classification)
 }
 
 #[cfg(test)]
@@ -1072,6 +1098,60 @@ mod tests {
         assert_eq!(tc.sensitivity, TaintLevel::Internal);
         assert_eq!(tc.direction, ToolDirection::Inbound);
         assert_eq!(tc.clearance, TaintLevel::Public);
+    }
+
+    /// `read_files` is `read_file` over several paths, `fan_out` is many
+    /// `spawn_agent`s at once, `edit_document` hands a draft to the person
+    /// the way `present_for_review` does, and the context, todo and submit
+    /// tools write the run's own state. None had an arm, so each fell to the
+    /// third-party default and was gated as outbound: with taint tracking on
+    /// and anything Private in context, reading two files raised a leak
+    /// prompt while reading one did not.
+    #[test]
+    fn the_remaining_builtins_are_classified_like_their_siblings() {
+        assert_eq!(
+            classified_builtin("read_files"),
+            classified_builtin("read_file"),
+            "read_files"
+        );
+        assert_eq!(
+            classified_builtin("fan_out"),
+            classified_builtin("spawn_agent"),
+            "fan_out"
+        );
+        assert_eq!(
+            classified_builtin("edit_document"),
+            classified_builtin("edit_file"),
+            "edit_document"
+        );
+        for name in [
+            "context_write",
+            "context_append",
+            "context_read",
+            "context_delete",
+            "context_list",
+            "todo_add",
+            "todo_done",
+            "todo_note",
+            "submit_output",
+        ] {
+            let tc = classified_builtin(name);
+            assert!(tc.is_some(), "{name} has no arm");
+            let tc = tc.unwrap();
+            assert_eq!(tc.direction, ToolDirection::Internal, "{name}");
+            assert_eq!(tc.sensitivity, TaintLevel::Internal, "{name}");
+            assert_eq!(tc.clearance, TaintLevel::Public, "{name}");
+        }
+    }
+
+    /// The split exists so a caller can tell an arm from the default.
+    #[test]
+    fn a_third_party_name_has_no_arm_of_its_own() {
+        assert_eq!(classified_builtin("some_mcp_tool"), None);
+        assert_eq!(
+            classified_builtin("shell"),
+            Some(builtin_tool_classification("shell"))
+        );
     }
 
     // ─── resolve_taint_enabled / resolve_security cascade ───────────────────

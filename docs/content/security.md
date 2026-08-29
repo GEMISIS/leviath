@@ -222,8 +222,12 @@ flowchart TD
   P -->|ask| Q["Prompt: allow once /<br/>for session / deny"]
 ```
 
-Taint recovers as entries evict, and an unrecognized tool **fails closed**. Configure with a
-`[security]` block, layer on allowlists and Rhai policy rules, and dry-run any tool:
+Taint recovers as entries evict, and an unrecognized tool **fails closed**: an MCP or script tool
+with no classification of its own is treated as outbound and gated. Every built-in tool carries its
+own classification, so only the ones that can carry bytes out (`shell`, `web_search`, `web_fetch`
+and the HTTP tools) are ever gated; the file, context, todo, sub-agent and interaction tools are
+not. Configure with a `[security]` block, layer on allowlists and Rhai policy rules, and dry-run
+any tool:
 
 ```bash
 lev policy list
