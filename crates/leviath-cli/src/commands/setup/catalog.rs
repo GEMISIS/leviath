@@ -22,6 +22,10 @@ pub enum Credential {
     /// Nothing - the provider is enabled by selecting it. Claude Code
     /// authenticates through its own CLI.
     None,
+    /// One or more `[model_providers.<name>]` endpoints of kind
+    /// `openai-compatible`, each with a name, an address and an optional key.
+    /// The row is a preset; the entries under it are the wizard's own.
+    Endpoint,
 }
 
 /// One configurable provider.
@@ -43,6 +47,9 @@ pub struct Provider {
     pub env_var: Option<&'static str>,
     /// Where to get a credential, opened on request.
     pub signup_url: Option<&'static str>,
+    /// For an endpoint preset, the address a fresh entry starts with. `None`
+    /// for the custom preset, which asks.
+    pub preset_url: Option<&'static str>,
 }
 
 /// Every provider the wizard offers, in the order it offers them.
@@ -56,6 +63,7 @@ pub(crate) fn providers() -> Vec<Provider> {
             hint: "sk-ant-...",
             env_var: Some("ANTHROPIC_API_KEY"),
             signup_url: Some("https://console.anthropic.com/settings/keys"),
+            preset_url: None,
         },
         Provider {
             id: "openai",
@@ -65,6 +73,7 @@ pub(crate) fn providers() -> Vec<Provider> {
             hint: "sk-...",
             env_var: Some("OPENAI_API_KEY"),
             signup_url: Some("https://platform.openai.com/api-keys"),
+            preset_url: None,
         },
         Provider {
             id: "google",
@@ -74,6 +83,7 @@ pub(crate) fn providers() -> Vec<Provider> {
             hint: "AIza...",
             env_var: Some("GOOGLE_API_KEY"),
             signup_url: Some("https://aistudio.google.com/app/apikey"),
+            preset_url: None,
         },
         Provider {
             id: "openrouter",
@@ -83,6 +93,7 @@ pub(crate) fn providers() -> Vec<Provider> {
             hint: "sk-or-...",
             env_var: Some("OPENROUTER_API_KEY"),
             signup_url: Some("https://openrouter.ai/keys"),
+            preset_url: None,
         },
         Provider {
             id: "ollama",
@@ -92,6 +103,7 @@ pub(crate) fn providers() -> Vec<Provider> {
             hint: DEFAULT_OLLAMA_URL,
             env_var: Some("OLLAMA_HOST"),
             signup_url: Some("https://ollama.com/download"),
+            preset_url: None,
         },
         Provider {
             id: "claude-code",
@@ -105,8 +117,68 @@ pub(crate) fn providers() -> Vec<Provider> {
             hint: "",
             env_var: None,
             signup_url: None,
+            preset_url: None,
+        },
+        Provider {
+            id: "llama-cpp",
+            display: "llama.cpp",
+            blurb: "A llama.cpp server on this machine, over its OpenAI-compatible API. \
+                    No key needed.",
+            credential: Credential::Endpoint,
+            hint: LLAMA_CPP_URL,
+            env_var: None,
+            signup_url: Some("https://github.com/ggml-org/llama.cpp"),
+            preset_url: Some(LLAMA_CPP_URL),
+        },
+        Provider {
+            id: "lm-studio",
+            display: "LM Studio",
+            blurb: "LM Studio's local server, over its OpenAI-compatible API. No key \
+                    needed.",
+            credential: Credential::Endpoint,
+            hint: LM_STUDIO_URL,
+            env_var: None,
+            signup_url: Some("https://lmstudio.ai"),
+            preset_url: Some(LM_STUDIO_URL),
+        },
+        Provider {
+            id: "openai-compatible",
+            display: "Custom OpenAI-compatible endpoint",
+            blurb: "vLLM, BionicGPT, a gateway, or any server that speaks the OpenAI \
+                    chat API: a name, a base URL, and a key or headers if it wants them.",
+            credential: Credential::Endpoint,
+            hint: "http://host:port/v1",
+            env_var: None,
+            signup_url: None,
+            preset_url: None,
         },
     ]
+}
+
+/// Where llama.cpp's server listens by default.
+pub const LLAMA_CPP_URL: &str = "http://localhost:8080/v1";
+
+/// Where LM Studio's server listens by default.
+pub const LM_STUDIO_URL: &str = "http://localhost:1234/v1";
+
+/// The catalogue id of the endpoint preset that best describes an entry
+/// read from the config: the preset whose id the name starts with, then the
+/// preset whose default address it uses, then the custom one.
+///
+/// Nothing in the file records which row created an entry, and nothing needs
+/// to: the row only decides which heading the entry is shown under.
+pub(crate) fn preset_for(name: &str, entry: &crate::config::ModelProviderConfig) -> &'static str {
+    let presets: Vec<Provider> = providers()
+        .into_iter()
+        .filter(|p| p.credential == Credential::Endpoint)
+        .collect();
+    let by_name = presets
+        .iter()
+        .find(|p| name == p.id || name.starts_with(&format!("{}-", p.id)));
+    let by_url = presets
+        .iter()
+        .find(|p| p.preset_url.is_some() && p.preset_url == entry.base_url.as_deref());
+    by_name.or(by_url).map_or("openai-compatible", |p| p.id)
 }
 
 /// Ollama's default endpoint, and the value the wizard treats as "unset" so a
@@ -155,6 +227,12 @@ pub(crate) fn set_credential(config: &mut Config, id: &str, value: Option<String
 pub(crate) fn is_configured(config: &Config, id: &str) -> bool {
     match id {
         "claude-code" => config.providers.claude_code_enabled,
+        // An endpoint preset is "configured" when the file holds an endpoint
+        // entry that sits under it.
+        "llama-cpp" | "lm-studio" | "openai-compatible" => config
+            .model_providers
+            .iter()
+            .any(|(name, entry)| entry.is_endpoint() && preset_for(name, entry) == id),
         // Ollama is always usable at its default endpoint, but "configured"
         // here means "the user chose it", which is the stored URL.
         _ => stored_credential(config, id).is_some(),
@@ -219,6 +297,59 @@ mod tests {
         assert!(all.iter().any(|p| p.credential == Credential::ApiKey));
         assert!(all.iter().any(|p| p.credential == Credential::BaseUrl));
         assert!(all.iter().any(|p| p.credential == Credential::None));
+        assert!(all.iter().any(|p| p.credential == Credential::Endpoint));
+    }
+
+    /// The two local presets start at their server's own default port and
+    /// the custom one asks; every preset is an endpoint, and nothing else
+    /// carries a preset address.
+    #[test]
+    fn the_endpoint_presets_carry_their_default_addresses() {
+        let all = providers();
+        let by_id = |id: &str| all.iter().find(|p| p.id == id).expect("in the table");
+        assert_eq!(by_id("llama-cpp").preset_url, Some(LLAMA_CPP_URL));
+        assert_eq!(by_id("lm-studio").preset_url, Some(LM_STUDIO_URL));
+        assert_eq!(by_id("openai-compatible").preset_url, None);
+        for p in &all {
+            assert_eq!(
+                p.preset_url.is_some(),
+                p.credential == Credential::Endpoint && p.id != "openai-compatible",
+                "{}",
+                p.id
+            );
+        }
+    }
+
+    /// Which heading an entry from the file is shown under: the name first,
+    /// then the address, then custom.
+    #[test]
+    fn an_entry_is_filed_under_the_preset_its_name_or_address_names() {
+        use crate::config::{ModelProviderConfig, ModelProviderKind};
+        let at = |url: &str| ModelProviderConfig {
+            kind: Some(ModelProviderKind::OpenaiCompatible),
+            base_url: Some(url.to_string()),
+            ..Default::default()
+        };
+        assert_eq!(preset_for("llama-cpp", &at("http://x")), "llama-cpp");
+        assert_eq!(preset_for("llama-cpp-2", &at("http://x")), "llama-cpp");
+        assert_eq!(
+            preset_for("llama-cppish", &at("http://x")),
+            "openai-compatible"
+        );
+        assert_eq!(preset_for("mine", &at(LM_STUDIO_URL)), "lm-studio");
+        assert_eq!(preset_for("mine", &at("http://x")), "openai-compatible");
+
+        let mut config = Config::default();
+        assert!(!is_configured(&config, "llama-cpp"));
+        config
+            .model_providers
+            .insert("box".to_string(), at(LLAMA_CPP_URL));
+        assert!(is_configured(&config, "llama-cpp"));
+        assert!(!is_configured(&config, "lm-studio"));
+        assert!(!is_configured(&config, "openai-compatible"));
+        // A script entry at that address is not an endpoint.
+        config.model_providers.get_mut("box").unwrap().kind = None;
+        assert!(!is_configured(&config, "llama-cpp"));
     }
 
     #[test]
@@ -256,7 +387,7 @@ mod tests {
         // Catches the top-level/`[providers]` split silently dropping a field.
         for p in providers()
             .iter()
-            .filter(|p| p.credential != Credential::None)
+            .filter(|p| !matches!(p.credential, Credential::None | Credential::Endpoint))
         {
             let mut config = Config::default();
             assert!(

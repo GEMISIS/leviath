@@ -90,8 +90,10 @@ impl ProviderRow {
         match self.provider.credential {
             Credential::ApiKey => !self.value.is_empty() || self.from_env.is_some(),
             // Ollama and the Claude Code transport need no key; selecting them
-            // is the whole configuration, so they are always checkable.
-            Credential::BaseUrl | Credential::None => true,
+            // is the whole configuration, so they are always checkable. An
+            // endpoint preset checks each of its entries, which decide for
+            // themselves.
+            Credential::BaseUrl | Credential::None | Credential::Endpoint => true,
         }
     }
 }
@@ -245,6 +247,13 @@ pub enum EditTarget {
     Credential(usize),
     /// The field at this index of the current step's fields.
     Field(usize),
+    /// A text field of the endpoint entry at this index in `endpoints`.
+    Endpoint {
+        /// Index into `Wizard::endpoints`.
+        entry: usize,
+        /// Which of its fields.
+        field: EndpointField,
+    },
 }
 
 /// An in-progress text edit.
