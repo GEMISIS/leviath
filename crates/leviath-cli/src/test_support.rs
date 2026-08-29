@@ -3,6 +3,7 @@
 //! The tracing subscriber comes from `leviath-testkit` (one workspace-wide
 //! copy); the helpers below are CLI-specific fixtures.
 
+pub(crate) use leviath_testkit::mcp_stub::McpStub;
 pub(crate) use leviath_testkit::with_tracing;
 
 /// A value whose `Serialize` impl always returns `Err`, so tests can drive the

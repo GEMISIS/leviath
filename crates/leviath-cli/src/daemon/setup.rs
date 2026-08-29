@@ -774,6 +774,7 @@ fn per_agent_mcp_defs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::McpStub;
     use leviath_runtime::components::AgentStatus;
     use leviath_runtime::host::{ControlOp, SpawnArgs};
     use tokio::sync::oneshot;
@@ -1171,24 +1172,12 @@ mod tests {
     fn stub_server_py() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stub.py");
-        std::fs::write(
-            &path,
-            r#"
-import sys, json
-def respond(i, r):
-    sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":i,"result":r})+"\n"); sys.stdout.flush()
-for line in sys.stdin:
-    line=line.strip()
-    if not line: continue
-    req=json.loads(line); m=req.get("method",""); i=req.get("id")
-    if m=="initialize": respond(i,{"capabilities":{"tools":{"listChanged":True}},"protocolVersion":"2024-11-05"})
-    elif m=="notifications/initialized": pass
-    elif m=="tools/list": respond(i,{"tools":[{"name":"stub_search","description":"s","inputSchema":{"type":"object","properties":{}}}]})
-    elif m=="tools/call": respond(i,{"content":[{"type":"text","text":"ok"}],"isError":False})
-    else: respond(i,{})
-"#,
-        )
-        .unwrap();
+        let stub = McpStub::new()
+            .list_changed(true)
+            .tool("stub_search", Some("s"))
+            .input_schema(r#"{"type": "object", "properties": {}}"#)
+            .replying("ok");
+        std::fs::write(&path, stub.source()).unwrap();
         (dir, path)
     }
 

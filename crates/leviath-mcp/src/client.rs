@@ -469,7 +469,7 @@ fn negotiated_version(echoed: Option<&Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::always_on_tracing_guard;
+    use crate::test_support::{always_on_tracing_guard, echo_tool_stub};
 
     // ── Additional coverage tests ──────────────────────────────────────────
 
@@ -906,36 +906,6 @@ mod tests {
         let _ = client.shutdown().await;
     }
 
-    // Python script that answers initialize then tools/list then tools/call
-    const STUB_INIT_LIST_CALL: &str = r#"
-import sys, json
-
-def respond(id, result):
-    msg = json.dumps({"jsonrpc": "2.0", "id": id, "result": result})
-    sys.stdout.write(msg + "\n")
-    sys.stdout.flush()
-
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    req = json.loads(line)
-    method = req.get("method", "")
-    id_ = req.get("id")
-    if method == "initialize":
-        respond(id_, {"capabilities": {"tools": {"listChanged": True}}, "protocolVersion": "2024-11-05"})
-    elif method == "notifications/initialized":
-        pass  # notification -- no response
-    elif method == "tools/list":
-        respond(id_, {"tools": [{"name": "echo", "description": "echo tool", "inputSchema": {}}]})
-    elif method == "tools/call":
-        respond(id_, {"content": [{"type": "text", "text": "hello from tool"}], "isError": False})
-    elif method == "notifications/cancelled":
-        pass
-    else:
-        respond(id_, {"error": {"code": -32601, "message": "method not found"}})
-"#;
-
     // Script that always returns a JSON-RPC error for every request
     const STUB_ERROR_SERVER: &str = r#"
 import sys, json
@@ -995,14 +965,14 @@ for line in sys.stdin:
     #[tokio::test]
     async fn test_mcp_client_spawn_succeeds() {
         let _guard = always_on_tracing_guard();
-        let _client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        let _client = spawn_stub_client(&echo_tool_stub().source()).await;
         // If we got here, spawn worked
     }
 
     #[tokio::test]
     async fn test_mcp_client_connect_parses_capabilities() {
         let _guard = always_on_tracing_guard();
-        let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        let mut client = spawn_stub_client(&echo_tool_stub().source()).await;
         client.connect().await.expect("connect should succeed");
 
         let caps = client.capabilities().expect("should have capabilities");
@@ -1012,7 +982,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn test_mcp_client_capabilities_before_connect_is_none() {
-        let client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        let client = spawn_stub_client(&echo_tool_stub().source()).await;
         // Before connect, capabilities should be None
         assert!(client.capabilities().is_none());
     }
@@ -1030,14 +1000,14 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn test_mcp_client_cached_tools_before_list_is_empty() {
-        let client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        let client = spawn_stub_client(&echo_tool_stub().source()).await;
         assert!(client.cached_tools().is_empty());
     }
 
     #[tokio::test]
     async fn test_mcp_client_list_tools_returns_tools() {
         let _guard = always_on_tracing_guard();
-        let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        let mut client = spawn_stub_client(&echo_tool_stub().source()).await;
         client.connect().await.unwrap();
 
         let tools = client
@@ -1055,7 +1025,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn test_mcp_client_call_tool_returns_result() {
         let _guard = always_on_tracing_guard();
-        let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        let mut client = spawn_stub_client(&echo_tool_stub().source()).await;
         client.connect().await.unwrap();
         // Consume the tools/list response first
         client.list_tools().await.unwrap();
@@ -1077,7 +1047,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn test_mcp_client_shutdown_succeeds() {
         let _guard = always_on_tracing_guard();
-        let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        let mut client = spawn_stub_client(&echo_tool_stub().source()).await;
         client.connect().await.unwrap();
         // Shutdown should not fail even if the process is still running
         client.shutdown().await.expect("shutdown should succeed");
@@ -1588,7 +1558,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn protocol_version_is_none_before_connect() {
-        let client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        let client = spawn_stub_client(&echo_tool_stub().source()).await;
         assert!(client.protocol_version().is_none());
     }
 
@@ -1613,7 +1583,7 @@ for line in sys.stdin:
     async fn set_refresher_on_stdio_is_a_noop() {
         // stdio has no bearer, so the transport's default no-op handles it; this
         // drives MCPClient::set_refresher and the default trait method.
-        let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        let mut client = spawn_stub_client(&echo_tool_stub().source()).await;
         client.set_refresher(std::sync::Arc::new(NoopRefresher));
     }
 
@@ -1635,11 +1605,8 @@ for line in sys.stdin:
     #[tokio::test]
     async fn from_config_builds_the_stdio_transport() {
         let _guard = always_on_tracing_guard();
-        let config = MCPServerConfig::stdio(
-            "s",
-            "python3",
-            vec!["-c".into(), STUB_INIT_LIST_CALL.into()],
-        );
+        let config =
+            MCPServerConfig::stdio("s", "python3", vec!["-c".into(), echo_tool_stub().source()]);
         let mut client = MCPClient::from_config(&config)
             .await
             .expect("stdio config should connect");

@@ -9,6 +9,8 @@
 //! per-package `test_support.rs` versions drift silently (`AlwaysOnSubscriber`
 //! reached five copies in two divergent designs, the raw-TCP mock server nine).
 
+pub mod mcp_stub;
+
 use std::sync::{Mutex, OnceLock};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

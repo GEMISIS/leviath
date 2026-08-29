@@ -507,27 +507,20 @@ pub(crate) fn parse_blueprint_mcp_servers(manifest_toml: &str) -> Vec<MCPServerC
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_tracing;
+    use crate::test_support::{McpStub, with_tracing};
 
     /// A minimal stdio MCP server (python3) speaking initialize / tools/list /
     /// tools/call - mirrors the fixtures in `tools.rs`.
-    const STUB: &str = r#"
-import sys, json
-def respond(i, r):
-    sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":i,"result":r})+"\n"); sys.stdout.flush()
-for line in sys.stdin:
-    line=line.strip()
-    if not line: continue
-    req=json.loads(line); m=req.get("method",""); i=req.get("id")
-    if m=="initialize": respond(i,{"capabilities":{"tools":{"listChanged":True}},"protocolVersion":"2024-11-05"})
-    elif m=="notifications/initialized": pass
-    elif m=="tools/list": respond(i,{"tools":[{"name":"echo","description":"e","inputSchema":{"type":"object","properties":{}}}]})
-    elif m=="tools/call": respond(i,{"content":[{"type":"text","text":"ok"}],"isError":False})
-    else: respond(i,{})
-"#;
+    fn stub() -> McpStub {
+        McpStub::new()
+            .list_changed(true)
+            .tool("echo", Some("e"))
+            .input_schema(r#"{"type": "object", "properties": {}}"#)
+            .replying("ok")
+    }
 
     fn stub_config(name: &str) -> MCPServerConfig {
-        MCPServerConfig::stdio(name, "python3", vec!["-c".to_string(), STUB.to_string()])
+        MCPServerConfig::stdio(name, "python3", vec!["-c".to_string(), stub().source()])
     }
 
     fn pool() -> McpPool {
@@ -707,7 +700,7 @@ for line in sys.stdin:
     fn stub_py() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stub.py");
-        std::fs::write(&path, STUB).unwrap();
+        std::fs::write(&path, stub().source()).unwrap();
         (dir, path)
     }
 
