@@ -784,6 +784,7 @@ impl ToolService for CliToolService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::McpStub;
     use leviath_core::interaction::{ApprovalScope, InteractionResponse};
     use leviath_runtime::interaction_hub::InteractionHub;
     use leviath_runtime::pipeline::noop_progress;
@@ -2840,48 +2841,22 @@ mod tests {
 
     // ── MCP execution branches (real python3 JSON-RPC stub) ──
 
-    const MCP_STUB_SUCCESS: &str = r#"
-import sys, json
-def respond(id_, result):
-    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": id_, "result": result}) + "\n")
-    sys.stdout.flush()
-for line in sys.stdin:
-    line = line.strip()
-    if not line: continue
-    req = json.loads(line); method = req.get("method", ""); id_ = req.get("id")
-    if method == "initialize":
-        respond(id_, {"capabilities": {"tools": {"listChanged": False}}, "protocolVersion": "2024-11-05"})
-    elif method == "tools/list":
-        respond(id_, {"tools": [{"name": "stub_mcp_tool", "description": "s", "inputSchema": {"type": "object", "properties": {}}}]})
-    elif method == "tools/call":
-        respond(id_, {"content": [{"type": "text", "text": "ok result"}], "isError": False})
-    elif method != "notifications/initialized" and method != "notifications/cancelled":
-        respond(id_, {})
-"#;
+    /// One tool, `stub_mcp_tool`, whose reply the caller picks.
+    fn mcp_stub() -> McpStub {
+        McpStub::new()
+            .list_changed(false)
+            .tool("stub_mcp_tool", Some("s"))
+            .input_schema(r#"{"type": "object", "properties": {}}"#)
+    }
 
     /// Returns a tool *execution* error. The error flag's wire name is
     /// `isError`, and the stub must spell it exactly that way: a stub writing
     /// `is_error` against a client reading the same wrong name agrees with
     /// itself, so the bug stays invisible here while every real server's tool
     /// errors are reported to the model as successes.
-    const MCP_STUB_ERROR: &str = r#"
-import sys, json
-def respond(id_, result):
-    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": id_, "result": result}) + "\n")
-    sys.stdout.flush()
-for line in sys.stdin:
-    line = line.strip()
-    if not line: continue
-    req = json.loads(line); method = req.get("method", ""); id_ = req.get("id")
-    if method == "initialize":
-        respond(id_, {"capabilities": {"tools": {"listChanged": False}}, "protocolVersion": "2024-11-05"})
-    elif method == "tools/list":
-        respond(id_, {"tools": [{"name": "stub_mcp_tool", "description": "s", "inputSchema": {"type": "object", "properties": {}}}]})
-    elif method == "tools/call":
-        respond(id_, {"content": [{"type": "text", "text": "boom"}], "isError": True})
-    elif method != "notifications/initialized" and method != "notifications/cancelled":
-        respond(id_, {})
-"#;
+    fn mcp_error_stub() -> McpStub {
+        mcp_stub().replying_error("boom")
+    }
 
     async fn mcp_with_stub(stub: &str) -> leviath_mcp::ToolExecutor {
         let mut client = leviath_mcp::MCPClient::spawn("python3", &["-c", stub], &HashMap::new())
@@ -2961,7 +2936,11 @@ for line in sys.stdin:
         let hub = InteractionHub::new();
         let mut allow = HashMap::new();
         allow.insert("stub__stub_mcp_tool".to_string(), ToolPolicy::Allow);
-        let state = state_with(&hub, mcp_with_stub(MCP_STUB_SUCCESS).await, allow);
+        let state = state_with(
+            &hub,
+            mcp_with_stub(&mcp_stub().replying("ok result").source()).await,
+            allow,
+        );
         let out = dispatch_tools(
             state,
             vec![call("c1", "stub__stub_mcp_tool", serde_json::json!({}))],
@@ -2976,7 +2955,7 @@ for line in sys.stdin:
         let hub = InteractionHub::new();
         let mut allow = HashMap::new();
         allow.insert("stub__stub_mcp_tool".to_string(), ToolPolicy::Allow);
-        let state = state_with(&hub, mcp_with_stub(MCP_STUB_ERROR).await, allow);
+        let state = state_with(&hub, mcp_with_stub(&mcp_error_stub().source()).await, allow);
         let out = dispatch_tools(
             state,
             vec![call("c1", "stub__stub_mcp_tool", serde_json::json!({}))],

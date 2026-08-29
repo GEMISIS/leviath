@@ -346,7 +346,9 @@ impl Default for ToolExecutor {
 mod tests {
     use super::*;
     use crate::client::EmbeddedResource;
-    use crate::test_support::always_on_tracing_guard;
+    use crate::test_support::{
+        McpStub, always_on_tracing_guard, echo_tool_stub, spawn_ready_client,
+    };
     use std::sync::Arc;
 
     #[test]
@@ -537,24 +539,12 @@ mod tests {
     /// A stub whose `tools/call` sleeps `secs` before answering, so a call's
     /// duration is observable.
     fn slow_stub(secs: f64) -> String {
-        STUB_INIT_LIST_AND_CALL.replace(
+        echo_tool_stub().source().replace(
             "    elif method == \"tools/call\":\n",
             &format!(
                 "    elif method == \"tools/call\":\n        import time; time.sleep({secs})\n"
             ),
         )
-    }
-
-    async fn spawn_stub(source: &str) -> MCPClient {
-        let mut client = MCPClient::spawn("python3", &["-c", source], &HashMap::new())
-            .await
-            .expect("failed to spawn stub server");
-        client.connect().await.expect("connect should succeed");
-        client
-            .list_tools()
-            .await
-            .expect("list_tools should succeed");
-        client
     }
 
     /// Two servers, one slow: a batch that names both takes as long as the
@@ -565,12 +555,12 @@ mod tests {
         let mut executor = ToolExecutor::new();
         let _ = executor.add_client_advertised(
             "slow".to_string(),
-            spawn_stub(&slow_stub(2.0)).await,
+            spawn_ready_client(&slow_stub(2.0)).await,
             &HashSet::new(),
         );
         let _ = executor.add_client_advertised(
             "fast".to_string(),
-            spawn_stub(STUB_INIT_LIST_AND_CALL).await,
+            spawn_ready_client(&echo_tool_stub().source()).await,
             &HashSet::new(),
         );
         let executor = Arc::new(executor);
@@ -604,7 +594,7 @@ mod tests {
         let mut executor = ToolExecutor::new();
         let _ = executor.add_client_advertised(
             "slow".to_string(),
-            spawn_stub(&slow_stub(0.5)).await,
+            spawn_ready_client(&slow_stub(0.5)).await,
             &HashSet::new(),
         );
         let executor = Arc::new(executor);
@@ -632,7 +622,7 @@ mod tests {
         let mut executor = ToolExecutor::new();
         let _ = executor.add_client_advertised(
             "slow".to_string(),
-            spawn_stub(&slow_stub(1.0)).await,
+            spawn_ready_client(&slow_stub(1.0)).await,
             &HashSet::new(),
         );
         let (client, original) = executor.route("slow__echo").expect("routes");
@@ -662,52 +652,14 @@ mod tests {
     // uncovered here; there's no way to make client.shutdown() fail without
     // changing that documented "always succeeds" behavior.
 
-    const STUB_INIT_LIST_AND_CALL: &str = r#"
-import sys, json
-
-def respond(id, result):
-    msg = json.dumps({"jsonrpc": "2.0", "id": id, "result": result})
-    sys.stdout.write(msg + "\n")
-    sys.stdout.flush()
-
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    req = json.loads(line)
-    method = req.get("method", "")
-    id_ = req.get("id")
-    if method == "initialize":
-        respond(id_, {"capabilities": {"tools": {"listChanged": True}}, "protocolVersion": "2024-11-05"})
-    elif method == "notifications/initialized":
-        pass
-    elif method == "tools/list":
-        respond(id_, {"tools": [{"name": "echo", "description": "echo tool", "inputSchema": {}}]})
-    elif method == "tools/call":
-        respond(id_, {"content": [{"type": "text", "text": "hello from tool"}], "isError": False})
-    elif method == "notifications/cancelled":
-        pass
-    else:
-        respond(id_, {"error": {"code": -32601, "message": "method not found"}})
-"#;
-
-    async fn spawn_ready_client() -> MCPClient {
-        let mut client =
-            MCPClient::spawn("python3", &["-c", STUB_INIT_LIST_AND_CALL], &HashMap::new())
-                .await
-                .expect("failed to spawn stub server");
-        client.connect().await.expect("connect should succeed");
-        client
-            .list_tools()
-            .await
-            .expect("list_tools should succeed");
-        client
+    async fn spawn_echo_client() -> MCPClient {
+        spawn_ready_client(&echo_tool_stub().source()).await
     }
 
     #[tokio::test]
     async fn add_client_and_server_count_reflects_it() {
         let mut executor = ToolExecutor::new();
-        let client = spawn_ready_client().await;
+        let client = spawn_echo_client().await;
         let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
         assert_eq!(executor.server_count(), 1);
     }
@@ -718,7 +670,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn remove_client_takes_the_server_and_its_aliases() {
         let mut executor = ToolExecutor::new();
-        let client = spawn_ready_client().await;
+        let client = spawn_echo_client().await;
         let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
         assert_eq!(executor.server_count(), 1);
 
@@ -737,7 +689,7 @@ for line in sys.stdin:
     async fn execute_finds_owning_server_and_calls_tool() {
         let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
-        let client = spawn_ready_client().await;
+        let client = spawn_echo_client().await;
         let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
 
         let result = executor
@@ -752,7 +704,7 @@ for line in sys.stdin:
     async fn execute_on_specific_server_calls_tool() {
         let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
-        let client = spawn_ready_client().await;
+        let client = spawn_echo_client().await;
         let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
 
         let result = executor
@@ -771,7 +723,7 @@ for line in sys.stdin:
     async fn execute_routes_to_a_live_server_and_succeeds() {
         let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
-        let client = spawn_ready_client().await;
+        let client = spawn_echo_client().await;
         let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
 
         let result = executor
@@ -785,7 +737,7 @@ for line in sys.stdin:
     async fn shutdown_all_with_live_client_succeeds_and_clears() {
         let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
-        let client = spawn_ready_client().await;
+        let client = spawn_echo_client().await;
         let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
 
         let result = executor.shutdown_all().await;
@@ -824,46 +776,17 @@ for line in sys.stdin:
     // Server returns a JSON-RPC error for tools/call, which causes
     // execute_on's `client.call_tool(...).await?` to propagate the error.
 
-    const STUB_CALL_ERROR: &str = r#"
-import sys, json
-
-def respond(id, result):
-    msg = json.dumps({"jsonrpc": "2.0", "id": id, "result": result})
-    sys.stdout.write(msg + "\n")
-    sys.stdout.flush()
-
-def error(id, message):
-    msg = json.dumps({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": message}})
-    sys.stdout.write(msg + "\n")
-    sys.stdout.flush()
-
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    req = json.loads(line)
-    method = req.get("method", "")
-    id_ = req.get("id")
-    if method == "initialize":
-        respond(id_, {"capabilities": {"tools": {}}, "protocolVersion": "2024-11-05"})
-    elif method == "notifications/initialized":
-        pass
-    elif method == "tools/list":
-        respond(id_, {"tools": [{"name": "echo", "description": "echo", "inputSchema": {}}]})
-    elif method == "tools/call":
-        error(id_, "tool execution failed")
-    elif method == "notifications/cancelled":
-        pass
-"#;
-
     #[tokio::test]
     async fn execute_on_propagates_call_tool_error() {
         let _guard = always_on_tracing_guard();
-        let mut client = MCPClient::spawn("python3", &["-c", STUB_CALL_ERROR], &HashMap::new())
-            .await
-            .expect("spawn");
-        client.connect().await.expect("connect");
-        client.list_tools().await.expect("list_tools");
+        let client = spawn_ready_client(
+            &McpStub::new()
+                .capabilities_json(r#"{"tools": {}}"#)
+                .tool("echo", Some("echo"))
+                .call_fails("tool execution failed")
+                .source(),
+        )
+        .await;
 
         let mut executor = ToolExecutor::new();
         let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
@@ -1088,38 +1011,16 @@ for line in sys.stdin:
 
     // ─── advertised routing with live clients ─────────────────────────────
 
-    /// A stub whose single tool is named `tool_name`, echoing a fixed reply.
-    fn stub_named(tool_name: &str) -> String {
-        format!(
-            r#"
-import sys, json
-def respond(id, result):
-    sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": id, "result": result}}) + "\n")
-    sys.stdout.flush()
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    req = json.loads(line)
-    method, id_ = req.get("method", ""), req.get("id")
-    if method == "initialize":
-        respond(id_, {{"capabilities": {{}}, "protocolVersion": "2024-11-05"}})
-    elif method == "tools/list":
-        respond(id_, {{"tools": [{{"name": "{tool_name}", "inputSchema": {{}}}}]}})
-    elif method == "tools/call":
-        respond(id_, {{"content": [{{"type": "text", "text": "called " + req["params"]["name"]}}], "isError": False}})
-"#
-        )
-    }
-
+    /// A client to a stub whose single tool is named `tool_name` and
+    /// replies with the name it was called under.
     async fn spawn_named(tool_name: &str) -> MCPClient {
-        let mut client =
-            MCPClient::spawn("python3", &["-c", &stub_named(tool_name)], &HashMap::new())
-                .await
-                .expect("spawn");
-        client.connect().await.expect("connect");
-        client.list_tools().await.expect("list");
-        client
+        spawn_ready_client(
+            &McpStub::new()
+                .tool(tool_name, None)
+                .echoing_tool_name()
+                .source(),
+        )
+        .await
     }
 
     #[tokio::test]

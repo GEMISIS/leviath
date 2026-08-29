@@ -270,7 +270,7 @@ impl Default for ToolDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::always_on_tracing_guard;
+    use crate::test_support::{McpStub, always_on_tracing_guard, echo_tool_stub};
 
     // --- configured credentials ---
 
@@ -392,37 +392,16 @@ mod tests {
     // Same Python-backed JSON-RPC stub approach used in client.rs's tests
     // (a minimal in-process server reading one request per line from stdin).
 
-    const STUB_INIT_AND_LIST: &str = r#"
-import sys, json
-
-def respond(id, result):
-    msg = json.dumps({"jsonrpc": "2.0", "id": id, "result": result})
-    sys.stdout.write(msg + "\n")
-    sys.stdout.flush()
-
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    req = json.loads(line)
-    method = req.get("method", "")
-    id_ = req.get("id")
-    if method == "initialize":
-        respond(id_, {"capabilities": {"tools": {"listChanged": True}}, "protocolVersion": "2024-11-05"})
-    elif method == "notifications/initialized":
-        pass
-    elif method == "tools/list":
-        respond(id_, {"tools": [{"name": "echo", "description": "echo tool", "inputSchema": {}}]})
-    else:
-        respond(id_, {"error": {"code": -32601, "message": "method not found"}})
-"#;
-
     #[tokio::test]
     async fn discover_from_client_returns_tools_and_indexes_by_server_name() {
         let _guard = always_on_tracing_guard();
-        let mut client = MCPClient::spawn("python3", &["-c", STUB_INIT_AND_LIST], &HashMap::new())
-            .await
-            .expect("failed to spawn stub server");
+        let mut client = MCPClient::spawn(
+            "python3",
+            &["-c", &echo_tool_stub().source()],
+            &HashMap::new(),
+        )
+        .await
+        .expect("failed to spawn stub server");
         client.connect().await.expect("connect should succeed");
 
         let mut discovery = ToolDiscovery::new();
@@ -441,7 +420,7 @@ for line in sys.stdin:
         let config = MCPServerConfig {
             name: "configured-server".to_string(),
             command: Some("python3".to_string()),
-            args: vec!["-c".to_string(), STUB_INIT_AND_LIST.to_string()],
+            args: vec!["-c".to_string(), echo_tool_stub().source()],
             env: HashMap::new(),
             ..Default::default()
         };
@@ -477,69 +456,18 @@ for line in sys.stdin:
         assert_eq!(discovery.server_count(), 0);
     }
 
-    /// Responds with a JSON-RPC error to "initialize", so `connect()` fails.
-    const STUB_INIT_ERRORS: &str = r#"
-import sys, json
-
-def respond(id, result=None, error=None):
-    msg = {"jsonrpc": "2.0", "id": id}
-    if error is not None:
-        msg["error"] = error
-    else:
-        msg["result"] = result
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
-
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    req = json.loads(line)
-    method = req.get("method", "")
-    id_ = req.get("id")
-    if method == "initialize":
-        respond(id_, error={"code": -32000, "message": "initialize failed"})
-    else:
-        respond(id_, error={"code": -32601, "message": "method not found"})
-"#;
-
     /// Initializes successfully but responds with a JSON-RPC error to
     /// "tools/list", so `list_tools()` (and therefore `discover_from_client`)
     /// fails.
-    const STUB_INIT_OK_LIST_ERRORS: &str = r#"
-import sys, json
-
-def respond(id, result=None, error=None):
-    msg = {"jsonrpc": "2.0", "id": id}
-    if error is not None:
-        msg["error"] = error
-    else:
-        msg["result"] = result
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
-
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    req = json.loads(line)
-    method = req.get("method", "")
-    id_ = req.get("id")
-    if method == "initialize":
-        respond(id_, {"capabilities": {}, "protocolVersion": "2024-11-05"})
-    elif method == "notifications/initialized":
-        pass
-    elif method == "tools/list":
-        respond(id_, error={"code": -32000, "message": "listing failed"})
-    else:
-        respond(id_, error={"code": -32601, "message": "method not found"})
-"#;
+    fn list_errors_stub() -> McpStub {
+        McpStub::new().list_fails("listing failed")
+    }
 
     #[tokio::test]
     async fn discover_from_client_list_tools_error_propagates() {
         let mut client = MCPClient::spawn(
             "python3",
-            &["-c", STUB_INIT_OK_LIST_ERRORS],
+            &["-c", &list_errors_stub().source()],
             &HashMap::new(),
         )
         .await
@@ -557,7 +485,10 @@ for line in sys.stdin:
         let config = MCPServerConfig {
             name: "server1".to_string(),
             command: Some("python3".to_string()),
-            args: vec!["-c".to_string(), STUB_INIT_ERRORS.to_string()],
+            args: vec![
+                "-c".to_string(),
+                McpStub::new().init_fails("initialize failed").source(),
+            ],
             env: HashMap::new(),
             ..Default::default()
         };
@@ -573,7 +504,7 @@ for line in sys.stdin:
         let config = MCPServerConfig {
             name: "server1".to_string(),
             command: Some("python3".to_string()),
-            args: vec!["-c".to_string(), STUB_INIT_OK_LIST_ERRORS.to_string()],
+            args: vec!["-c".to_string(), list_errors_stub().source()],
             env: HashMap::new(),
             ..Default::default()
         };
