@@ -1,0 +1,120 @@
+name: Prices (Weekly Monday)
+
+# Refresh the vendor list prices in crates/leviath-providers/pricing/rates.toml
+# by running `cargo xtask prices`, which reads OpenRouter's public catalogue
+# and LiteLLM's price table and rewrites the file only where the two agree.
+# When the file moves, this opens a PR and sets it to auto-merge, so the
+# required checks gate it exactly as they gate a person's PR.
+#
+# REQUIRED SECRET: `PRICES_PAT`, a fine-grained personal access token scoped to
+# this repository with `contents: write` (push the branch) and `pull requests:
+# write` (open the PR, enable auto-merge). It cannot be `GITHUB_TOKEN`: a PR
+# opened with that token gets no CI run on this repo, so it could never merge.
+#
+# Nothing in ci.yml runs `cargo xtask prices --check`. CI must not depend on
+# two third-party endpoints being up; this workflow is the only network path.
+
+on:
+  schedule:
+    # Every Monday at 10am PST (5pm UTC), an hour after the beta promotion.
+    - cron: '0 17 * * 1'
+  workflow_dispatch:
+
+# One refresh at a time. A manual run during the scheduled one queues behind
+# it rather than opening a second PR for the same diff.
+concurrency:
+  group: prices-refresh
+  cancel-in-progress: false
+
+# The PAT carries the write scopes; the workflow token stays read-only.
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    name: Refresh the price table
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The push below uses this identity, so the branch lands under the
+          # PAT and the PR it opens triggers CI.
+          token: ${{ secrets.PRICES_PAT }}
+
+      - uses: ./.github/actions/rust-setup
+        with:
+          shared-key: prices
+
+      - name: Refresh the table
+        id: refresh
+        run: |
+          set -euo pipefail
+          # Exit 2 is "could not reach a source": nothing to do this week and
+          # nothing to alarm about. Any other failure is a refusal (a row would
+          # move implausibly far, a source went empty) and the job stays red so
+          # somebody looks.
+          set +e
+          cargo xtask prices | tee prices.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -eq 2 ]; then
+            echo "A source was unreachable; the table is untouched."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open the PR
+        if: steps.refresh.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PRICES_PAT }}
+        run: |
+          set -euo pipefail
+          date="$(date -u +%Y-%m-%d)"
+          branch="chore/prices-${date}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add crates/leviath-providers/pricing/rates.toml
+
+          # The diff table `cargo xtask prices` printed: one line per row that
+          # moved, the disagreements it declined to write, and the summary.
+          {
+            echo "chore(prices): refresh vendor list prices ${date}"
+            echo
+            echo "Produced by \`cargo xtask prices\` from OpenRouter's catalogue"
+            echo "cross-checked against LiteLLM. Rows both sources agree on within"
+            echo "5% are written; disagreements are listed and left as they were."
+            echo
+            echo '```'
+            cat prices.log
+            echo '```'
+          } > commit-message.txt
+          git commit -F commit-message.txt
+          git push -u origin "$branch"
+
+          {
+            echo "Weekly refresh of \`crates/leviath-providers/pricing/rates.toml\`"
+            echo "by \`cargo xtask prices\`. Auto-merges once the required checks pass."
+            echo
+            echo '```'
+            cat prices.log
+            echo '```'
+          } > pr-body.txt
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "chore(prices): refresh vendor list prices ${date}" \
+            --body-file pr-body.txt
+
+          # Rebase merge, matching how every PR lands here (linear history). The
+          # branch protection's required checks hold it until they are green.
+          gh pr merge "$branch" --auto --rebase
