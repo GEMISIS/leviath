@@ -1447,7 +1447,27 @@ mod tests {
         );
     }
 
-    /// Against the real network stack, because this is the whole point: these
+    /// A resolver that answers every name with a lookup failure.
+    ///
+    /// The DNS half of the test below used to ask the real resolver for a name
+    /// under `.invalid`. That is a network round trip, and on a macOS runner
+    /// whose resolver was slow the two-second request deadline fired first, so
+    /// the error came back as `Timeout` and the test failed on nothing to do
+    /// with the code under test. What the test needs is the error `reqwest`
+    /// builds when a lookup fails, and the resolver hook produces exactly that
+    /// one, on the same wrapper the system resolver's failure travels in.
+    struct NeverResolves;
+
+    impl reqwest::dns::Resolve for NeverResolves {
+        fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(async move {
+                let message = format!("failed to lookup address information: {}", name.as_str());
+                Err(std::io::Error::other(message).into())
+            })
+        }
+    }
+
+    /// Against the real client stack, because this is the whole point: these
     /// used to arrive as one string and `Display` on a `reqwest::Error` says the
     /// same sentence for both of them.
     ///
@@ -1459,14 +1479,18 @@ mod tests {
     /// by the `connect_failure` tests, which do not go near a socket.
     #[tokio::test]
     async fn a_name_that_does_not_resolve_is_told_from_a_port_with_nothing_behind_it() {
-        let client = build_http_client(Some(2)).expect("a client builds");
-
-        let dns = client
+        let unresolvable = http::outbound_builder(Some(2))
+            .dns_resolver(NeverResolves)
+            .build()
+            .expect("a client builds");
+        let dns = unresolvable
             .get("https://no-such-host-anywhere-12345.invalid/v1/models")
             .send()
             .await
             .expect_err("does not resolve");
         assert_eq!(FailureKind::from_reqwest(&dns), FailureKind::DnsFailure);
+
+        let client = build_http_client(Some(2)).expect("a client builds");
 
         // A port nothing is listening on: an ephemeral one is claimed and the
         // listener dropped straight away, which is a port no other process holds.

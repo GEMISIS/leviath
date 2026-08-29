@@ -215,7 +215,10 @@ pub fn side_call_client() -> &'static reqwest::Client {
 }
 
 /// The builder both outbound clients share.
-fn outbound_builder(timeout_secs: Option<u64>) -> reqwest::ClientBuilder {
+///
+/// Visible to the provider tests so one can swap in a resolver and still get
+/// every other setting production uses.
+pub(super) fn outbound_builder(timeout_secs: Option<u64>) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .pool_max_idle_per_host(0)
         // Follow a redirect only while it stays on the host the key was meant
