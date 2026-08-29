@@ -15,12 +15,15 @@ use ratatui::style::Color;
 #[derive(Args)]
 pub struct DashboardArgs {}
 
-/// Whether the detail content pane shows Output or Logs.
+/// What the detail content pane shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StageContentMode {
     Output,
     Logs,
     Context,
+    /// The run's submitted answer, exactly as `GET /api/agents/{id}/result`
+    /// serves it. Offered only while the selected run has one.
+    FinalOutput,
 }
 
 /// How the main run list is ordered. Whatever the mode, the order is a total

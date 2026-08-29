@@ -191,22 +191,41 @@ impl Dashboard {
             return;
         }
 
+        // The run's submitted answer, read through the same function the
+        // HTTP API serves it from, so the Final view and
+        // `GET /api/agents/{id}/result` cannot show different text. Read once
+        // per frame: it decides whether the `[f] final` chip is offered and
+        // what that view shows.
+        let final_output = runstate::read_final_output(&agent.id);
+        // The Final view of a run without an answer (the selection moved to
+        // another run) falls back to Output rather than sitting on an empty
+        // pane whose chip is no longer on offer.
+        if self.stage_content_mode == StageContentMode::FinalOutput && final_output.is_none() {
+            self.stage_content_mode = StageContentMode::Output;
+        }
+
         let inner_h = content_area.height.saturating_sub(2) as usize;
         let render_width = content_area.width.saturating_sub(2);
-        let is_context = self.stage_content_mode == StageContentMode::Context;
         let is_output = self.stage_content_mode == StageContentMode::Output;
 
         // Build content lines. `showing_final_output` records whether the
-        // Output pane fell back to the run's final answer, so the file-path
-        // hint below can point at the file actually being shown.
+        // pane is showing the run's final answer (the Final view, or the
+        // Output pane's fallback to it), so the file-path hint below can point
+        // at the file actually being shown.
         let (all_lines, context_row_lines, showing_final_output): (Vec<Line>, Vec<usize>, bool) =
-            if is_context {
-                let (lines, rows) = self.build_context_lines(agent, render_width);
-                (lines, rows, false)
-            } else {
-                let (lines, showing_final) =
-                    self.build_output_lines(agent, is_output, render_width);
-                (lines, Vec::new(), showing_final)
+            match (self.stage_content_mode, &final_output) {
+                (StageContentMode::Context, _) => {
+                    let (lines, rows) = self.build_context_lines(agent, render_width);
+                    (lines, rows, false)
+                }
+                (StageContentMode::FinalOutput, Some(answer)) => {
+                    (final_output_lines(answer, render_width), Vec::new(), true)
+                }
+                _ => {
+                    let (lines, showing_final) =
+                        self.build_output_lines(agent, is_output, render_width);
+                    (lines, Vec::new(), showing_final)
+                }
             };
         let context_cursor_line = context_row_lines.get(self.context_tree.cursor).copied();
 
@@ -400,17 +419,23 @@ impl Dashboard {
             String::new()
         };
 
+        // The Final chip is offered only while the run has an answer to show.
+        let final_chip = match (self.stage_content_mode, &final_output) {
+            (StageContentMode::FinalOutput, _) | (_, None) => "",
+            _ => "  [f] final",
+        };
         let mode_label = match self.stage_content_mode {
-            StageContentMode::Output => format!(
-                " Output  [l] logs  [c] ctx{}{} ",
-                tool_count, search_indicator
-            ),
-            StageContentMode::Logs => format!(
-                " Logs  [o] output  [c] ctx{}{} ",
-                tool_count, search_indicator
-            ),
+            StageContentMode::Output => {
+                format!(" Output  [l] logs  [c] ctx{final_chip}{tool_count}{search_indicator} ")
+            }
+            StageContentMode::Logs => {
+                format!(" Logs  [o] output  [c] ctx{final_chip}{tool_count}{search_indicator} ")
+            }
             StageContentMode::Context => {
-                format!(" Context Window  [o] output  [l] logs{} ", search_indicator)
+                format!(" Context Window  [o] output  [l] logs{final_chip}{search_indicator} ")
+            }
+            StageContentMode::FinalOutput => {
+                format!(" Final output  [o] output  [l] logs  [c] ctx{search_indicator} ")
             }
         };
         let scroll_info = if total_rows > inner_h {
@@ -425,23 +450,25 @@ impl Dashboard {
 
         // Bottom-left file path hint
         let file_path_hint = {
-            let raw = if showing_final_output {
-                // The pane fell back to the run's final answer, which lives in
-                // the `final_output` sidecar beside `meta.json` rather than in
-                // the stage's `output.log`; name the file actually shown.
-                runstate::final_output_path(&runstate::run_dir(&agent.id))
-                    .to_string_lossy()
-                    .to_string()
-            } else {
-                let file_name = match self.stage_content_mode {
-                    StageContentMode::Output => "output.log",
-                    StageContentMode::Logs => "logs.log",
-                    StageContentMode::Context => leviath_core::files::CONTEXT_FILE,
-                };
-                runstate::stage_dir(&agent.id, self.selected_stage)
+            // The stage file each view reads; the Final view reads none, and
+            // the Output view's fallback to the run's answer reads a run file
+            // instead of its stage's.
+            let stage_file = match self.stage_content_mode {
+                StageContentMode::Output => Some("output.log"),
+                StageContentMode::Logs => Some("logs.log"),
+                StageContentMode::Context => Some(leviath_core::files::CONTEXT_FILE),
+                StageContentMode::FinalOutput => None,
+            };
+            let raw = match stage_file.filter(|_| !showing_final_output) {
+                Some(file_name) => runstate::stage_dir(&agent.id, self.selected_stage)
                     .join(file_name)
                     .to_string_lossy()
-                    .to_string()
+                    .to_string(),
+                // The run's final answer lives in the `final_output` sidecar
+                // beside `meta.json`, not in any stage's directory.
+                None => runstate::final_output_path(&runstate::run_dir(&agent.id))
+                    .to_string_lossy()
+                    .to_string(),
             };
             // Display-only `~` abbreviation of the OS home directory;
             // deliberately NOT the LEVIATH_HOME-aware resolver (see the
@@ -515,7 +542,8 @@ impl Dashboard {
     }
 
     /// Make the content pane's title chips (`[l] logs`, `[o] output`,
-    /// `[c] ctx`) clickable, over the exact columns they were drawn on.
+    /// `[c] ctx`, `[f] final`) clickable, over the exact columns they were
+    /// drawn on.
     ///
     /// The title renders inside the top border, starting one cell in, so the
     /// character offsets in the label are the screen columns. Only the chips
@@ -530,6 +558,7 @@ impl Dashboard {
             ("[l] logs", StageContentMode::Logs),
             ("[o] output", StageContentMode::Output),
             ("[c] ctx", StageContentMode::Context),
+            ("[f] final", StageContentMode::FinalOutput),
         ] {
             let Some(byte) = mode_label.find(chip) else {
                 continue;
@@ -826,6 +855,29 @@ impl Dashboard {
         };
         (lines, showing_final_output)
     }
+}
+
+/// The Final view's lines: one header naming the stage that submitted the
+/// answer and the format it was produced under, then the answer rendered as
+/// markdown, the way the Output view renders a stage's output.
+fn final_output_lines(answer: &leviath_core::FinalOutput, width: u16) -> Vec<Line<'static>> {
+    let format = answer.format.as_deref().unwrap_or("no format");
+    let truncated = match answer.truncated {
+        true => " · truncated",
+        false => "",
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(
+                " submitted by stage {} · format: {format}{truncated}",
+                answer.stage
+            ),
+            Style::default().fg(C_DIM),
+        )),
+        Line::from(""),
+    ];
+    lines.extend(crate::render::markdown_to_text(&answer.content, width).lines);
+    lines
 }
 
 /// The number of display rows `lines` occupy at `width` once `Paragraph`
@@ -1302,29 +1354,169 @@ mod tests {
         stage: &str,
         content: &str,
     ) -> DashboardAgent {
-        // Same defensive cleanup as `setup_run_state_agent_with_logs`: a stale
-        // directory from an earlier panicked test must not leak in.
-        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
-        let answer = leviath_core::output::FinalOutput::new(
-            content,
-            Some("markdown".to_string()),
-            stage.to_string(),
-            42,
+        crate::commands::dashboard::test_support::seed_run_with_final_output(
+            run_id, stage, content,
         );
-        let mut meta = runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/p".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        meta.final_output = Some(answer.descriptor());
-        runstate::create_run(&meta).unwrap();
-        runstate::write_final_output(&runstate::run_dir(run_id), &answer.content).unwrap();
-
         make_test_agent(run_id, AgentDisplayStatus::Complete)
+    }
+
+    // ─── the Final view ──────────────────────────────────────────────────
+
+    /// The `[f] final` chip is on the title only while the run has an answer,
+    /// and its click target with it.
+    #[test]
+    fn the_final_chip_is_offered_only_when_the_run_has_an_answer() {
+        runstate::with_isolated_runs_dir(
+            "the_final_chip_is_offered_only_when_the_run_has_an_answer",
+            |_d| {
+                let mut dash = make_test_dashboard();
+                dash.stage_content_mode = StageContentMode::Output;
+
+                let without = setup_run_state_agent_with_logs("final-chip-no", &[], Some("out"));
+                let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+                terminal
+                    .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 100, 20), &without, 100))
+                    .unwrap();
+                let buf = rendered_buffer(&terminal);
+                assert!(!buf.contains("[f] final"), "{buf}");
+                assert!(
+                    !dash
+                        .click_targets
+                        .iter()
+                        .any(|(_, t)| *t == ClickTarget::ContentMode(StageContentMode::FinalOutput)),
+                    "no chip, no button"
+                );
+
+                dash.click_targets.clear();
+                let with = setup_run_state_agent_with_final_output(
+                    "final-chip-yes",
+                    "present",
+                    "the answer",
+                );
+                let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+                terminal
+                    .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 100, 20), &with, 100))
+                    .unwrap();
+                let buf = rendered_buffer(&terminal);
+                assert!(buf.contains("[f] final"), "{buf}");
+                assert!(
+                    dash.click_targets
+                        .iter()
+                        .any(|(_, t)| *t == ClickTarget::ContentMode(StageContentMode::FinalOutput)),
+                    "the chip is a button"
+                );
+                // Every other view offers it too, and none of them offers its
+                // own chip.
+                for mode in [StageContentMode::Logs, StageContentMode::Context] {
+                    dash.stage_content_mode = mode;
+                    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+                    terminal
+                        .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 100, 20), &with, 100))
+                        .unwrap();
+                    let buf = rendered_buffer(&terminal);
+                    assert!(buf.contains("[f] final"), "{mode:?}: {buf}");
+                }
+            },
+        );
+    }
+
+    /// The view shows the bytes `runstate::read_final_output` returns, which
+    /// is what the HTTP API serves, under a header naming the submitting
+    /// stage and the format, with the sidecar named in the file-path hint.
+    #[test]
+    fn the_final_view_shows_exactly_what_the_api_serves() {
+        runstate::with_isolated_runs_dir(
+            "the_final_view_shows_exactly_what_the_api_serves",
+            |_d| {
+                let run_id = "final-view-content";
+                let agent = setup_run_state_agent_with_final_output(
+                    run_id,
+                    "present",
+                    "The **submitted** answer, not the chat.",
+                );
+                // The same stage also chatted something else into its output.log,
+                // which is what the Output view shows and this view must not.
+                runstate::append_stage_output(run_id, 0, "a chatty draft nobody submitted");
+                let served = runstate::read_final_output(run_id).expect("the sidecar was written");
+                assert!(
+                    served.content.contains("**submitted**"),
+                    "the probe's input is real"
+                );
+
+                let mut dash = make_test_dashboard();
+                dash.stage_content_mode = StageContentMode::FinalOutput;
+                let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+                terminal
+                    .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 100, 20), &agent, 100))
+                    .unwrap();
+                let buf = rendered_buffer(&terminal);
+                assert_eq!(dash.stage_content_mode, StageContentMode::FinalOutput);
+                assert!(
+                    buf.contains(" Final output  [o] output  [l] logs  [c] ctx "),
+                    "{buf}"
+                );
+                // Rendered as markdown: the emphasis markers become styling.
+                assert!(buf.contains("The submitted answer, not the chat."), "{buf}");
+                assert!(!buf.contains("chatty draft"), "{buf}");
+                assert!(buf.contains("submitted by stage present"), "{buf}");
+                assert!(buf.contains("format: markdown"), "{buf}");
+                assert!(buf.contains(leviath_core::FINAL_OUTPUT_FILE), "{buf}");
+                assert!(!buf.contains("output.log"), "{buf}");
+                let chips: Vec<ClickTarget> = dash.click_targets.iter().map(|(_, t)| *t).collect();
+                for mode in [
+                    StageContentMode::Output,
+                    StageContentMode::Logs,
+                    StageContentMode::Context,
+                ] {
+                    assert!(chips.contains(&ClickTarget::ContentMode(mode)), "{mode:?}");
+                }
+                assert!(
+                    !chips.contains(&ClickTarget::ContentMode(StageContentMode::FinalOutput)),
+                    "the view showing has no chip of its own"
+                );
+            },
+        );
+    }
+
+    /// Selecting a run without an answer while in the Final view lands on
+    /// Output, the view the chip would otherwise leave unreachable.
+    #[test]
+    fn the_final_view_falls_back_to_output_for_a_run_without_an_answer() {
+        runstate::with_isolated_runs_dir(
+            "the_final_view_falls_back_to_output_for_a_run_without_an_answer",
+            |_d| {
+                let agent = setup_run_state_agent_with_logs("final-fallback", &[], Some("plain"));
+                let mut dash = make_test_dashboard();
+                dash.stage_content_mode = StageContentMode::FinalOutput;
+                let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+                terminal
+                    .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 100, 20), &agent, 100))
+                    .unwrap();
+                assert_eq!(dash.stage_content_mode, StageContentMode::Output);
+                let buf = rendered_buffer(&terminal);
+                assert!(buf.contains(" Output  [l] logs  [c] ctx "), "{buf}");
+                assert!(buf.contains("plain"), "{buf}");
+                assert!(buf.contains("output.log"), "{buf}");
+            },
+        );
+    }
+
+    #[test]
+    fn final_output_lines_name_a_missing_format_and_truncation() {
+        let mut answer = leviath_core::FinalOutput::new("body", None, "last".to_string(), 1);
+        answer.truncated = true;
+        let lines = final_output_lines(&answer, 80);
+        let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            header,
+            " submitted by stage last · format: no format · truncated"
+        );
+        let body: String = lines
+            .iter()
+            .skip(2)
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(body.contains("body"), "{body}");
     }
 
     /// A minimal stage record carrying just the name the final-output fallback

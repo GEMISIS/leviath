@@ -500,6 +500,17 @@ impl Dashboard {
                 // `c` shows the live current window; leave any history browsing.
                 self.reset_context_history();
             }
+            // The run's submitted answer. Offered only while the run has one:
+            // the chip is off the title otherwise, and the key does nothing.
+            KeyCode::Char('f') => {
+                let has_answer = self
+                    .selected_agent()
+                    .is_some_and(|a| runstate::read_final_output(&a.id).is_some());
+                if has_answer {
+                    self.stage_content_mode = StageContentMode::FinalOutput;
+                    self.detail_scroll = 0;
+                }
+            }
             // Browse the run's archived context-window history in the Context
             // view: `,` = earlier point, `.` = later (past the newest → live).
             KeyCode::Char(',') => self.step_context_history(-1),
@@ -613,6 +624,12 @@ impl Dashboard {
                     )
                     .unwrap_or_default();
                     (json, "Context JSON")
+                }
+                StageContentMode::FinalOutput => {
+                    let answer = runstate::read_final_output(&agent.id)
+                        .map(|answer| answer.content)
+                        .unwrap_or_default();
+                    (answer, "Final output")
                 }
             };
             if content.is_empty() {
@@ -1304,6 +1321,53 @@ mod tests {
         assert_eq!(dash.stage_content_mode, StageContentMode::Output);
         dash.handle_key(key(KeyCode::Char('c')));
         assert_eq!(dash.stage_content_mode, StageContentMode::Context);
+    }
+
+    /// `f` opens the Final view for a run that submitted an answer, and is a
+    /// no-op for one that did not: the chip is not on the title, so the key
+    /// it names is not on offer either.
+    #[test]
+    fn f_opens_the_final_view_only_when_the_run_has_an_answer() {
+        crate::runstate::with_isolated_runs_dir(
+            "f_opens_the_final_view_only_when_the_run_has_an_answer",
+            |_d| {
+                let mut dash = make_test_dashboard();
+                dash.agents.push(make_test_agent(
+                    "run-no-answer",
+                    AgentDisplayStatus::Complete,
+                ));
+                dash.agents.push(make_test_agent(
+                    "run-answered",
+                    AgentDisplayStatus::Complete,
+                ));
+                crate::commands::dashboard::test_support::seed_run_with_final_output(
+                    "run-answered",
+                    "main",
+                    "the answer",
+                );
+                dash.update_display_indices();
+                dash.detail_view = true;
+                dash.detail_scroll = 3;
+                // The list's order is the sort mode's, not the push order.
+                let row_of = |dash: &Dashboard, id: &str| {
+                    dash.display_indices
+                        .iter()
+                        .position(|&i| dash.agents[i].id == id)
+                        .expect("both runs are listed")
+                };
+
+                dash.selected = row_of(&dash, "run-no-answer");
+                dash.handle_key(key(KeyCode::Char('f')));
+                assert_eq!(dash.stage_content_mode, StageContentMode::Output);
+                assert_eq!(dash.detail_scroll, 3, "nothing happened");
+
+                dash.selected = row_of(&dash, "run-answered");
+                dash.handle_key(key(KeyCode::Char('f')));
+
+                assert_eq!(dash.stage_content_mode, StageContentMode::FinalOutput);
+                assert_eq!(dash.detail_scroll, 0);
+            },
+        );
     }
 
     #[test]
@@ -3197,6 +3261,41 @@ mod tests {
         dash.handle_key(key(KeyCode::Char('y')));
 
         assert!(!dash.toasts.is_empty());
+    }
+
+    /// The Final view yanks the answer the API serves, and says so when the
+    /// run has none.
+    #[test]
+    fn yank_final_output_mode_copies_the_answer() {
+        crate::runstate::with_isolated_runs_dir("yank_final_output_mode_copies_the_answer", |_d| {
+            let mut dash = make_test_dashboard();
+            dash.agents.push(make_test_agent(
+                "run-yank-final",
+                AgentDisplayStatus::Complete,
+            ));
+            dash.update_display_indices();
+            dash.detail_view = true;
+            dash.stage_content_mode = StageContentMode::FinalOutput;
+
+            dash.handle_key(key(KeyCode::Char('y')));
+            let toasts: Vec<String> = dash.toasts.iter().map(|t| t.message.clone()).collect();
+            assert!(
+                toasts.iter().any(|m| m.contains("No Final output content")),
+                "{toasts:?}"
+            );
+
+            crate::commands::dashboard::test_support::seed_run_with_final_output(
+                "run-yank-final",
+                "main",
+                "the answer",
+            );
+            dash.handle_yank_with_fn(|text| text == "the answer");
+            let toasts: Vec<String> = dash.toasts.iter().map(|t| t.message.clone()).collect();
+            assert!(
+                toasts.iter().any(|m| m.contains("yanked to clipboard")),
+                "{toasts:?}"
+            );
+        });
     }
 
     #[test]
