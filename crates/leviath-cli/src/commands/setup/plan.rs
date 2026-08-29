@@ -144,12 +144,6 @@ pub fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
     );
     push_if_changed(
         &mut out,
-        "exact token counting",
-        Some(&before.limits.exact_token_counting),
-        Some(&after.limits.exact_token_counting),
-    );
-    push_if_changed(
-        &mut out,
         "batch tool hint",
         Some(&before.batch_tool_hint),
         Some(&after.batch_tool_hint),
@@ -440,7 +434,6 @@ mod tests {
         after.limits.max_concurrent_inferences = Some(1);
         after.limits.max_concurrent_tools = 4;
         after.limits.default_max_iterations = None;
-        after.limits.exact_token_counting = true;
         after.batch_tool_hint = false;
         after.shell_hint = false;
 
@@ -451,7 +444,6 @@ mod tests {
         assert!(lines.contains(&"max concurrent inferences: 8 → 1".to_string()));
         assert!(lines.contains(&"max concurrent tools: 8 → 4".to_string()));
         assert!(lines.contains(&"default max iterations: 50 → (unset)".to_string()));
-        assert!(lines.contains(&"exact token counting: false → true".to_string()));
         assert!(lines.contains(&"batch tool hint: true → false".to_string()));
         assert!(lines.contains(&"platform shell hint: true → false".to_string()));
     }

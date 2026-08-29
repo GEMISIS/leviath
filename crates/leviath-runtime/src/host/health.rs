@@ -125,7 +125,7 @@ impl WorldHost {
     pub(super) fn observe_lanes(&self, snapshot: &LaneSnapshot, relief: usize) {
         // Every `PipelineWorld::new` installs the sink resource (a no-op one
         // unless a host replaced it), so this is a hard invariant rather than a
-        // branch - the same reasoning as `set_exact_token_counting`.
+        // branch - the same reasoning as `set_stream_inference`.
         self.world
             .world()
             .resource::<crate::telemetry::Telemetry>()

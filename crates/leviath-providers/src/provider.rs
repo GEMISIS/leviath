@@ -741,7 +741,7 @@ mod http;
 pub use http::{
     DEFAULT_INFERENCE_TIMEOUT_SECS, HttpClient, HttpClientFactory, HttpError,
     SIDE_CALL_TIMEOUT_SECS, apply_request_timeout, build_http_client, build_http1_client,
-    malformed_url_error,
+    malformed_url_error, side_call_client,
 };
 
 // Folding a streamed answer back into one response.

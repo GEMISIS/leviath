@@ -236,7 +236,8 @@ pub(crate) fn render_custom_region(render: RegionRender<'_>, out: RenderSink<'_>
                     emitted_tokens,
                     budget = region.max_tokens,
                     "custom region render exceeds its budget; sending anyway \
-                     (enable exact_token_counting for a hard guard)"
+                     (the context-window guard refuses it only if the whole \
+                     request would overflow the model)"
                 );
             }
             system_blocks.extend(blocks);

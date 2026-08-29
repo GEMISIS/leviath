@@ -625,6 +625,24 @@ result when it applies. Without one, a large file went into its region whole and
 truncated or dropped as `[result omitted]` depending on how full the region already was. That is a
 cliff rather than a limit.
 
+## Requests are measured before they are sent
+
+The window sizes what it holds with a byte estimate, corrected by what earlier calls in the run
+were charged. That is cheap and it is usually close, but a provider whose window is a hard ceiling
+rejects a request that is over by one token, and the rejection is not transient: the retry resends
+the same request and the stage dies.
+
+So a request that could be near the window is measured before it goes out. When the corrected
+estimate plus the reply budget reaches half the model's window, the runtime asks the provider's own
+tokenizer what the request costs (`/messages/count_tokens` on Anthropic, `:countTokens` on Gemini,
+tiktoken locally on OpenAI, a script's `count_tokens` on a [Rhai provider](/docs/rhai-providers))
+and refuses to send one that would not fit, naming the count and the window in the error. A request
+under that line is sent as it is, so a short turn pays nothing. Every lane is guarded the same
+way: the stage's own call, the routing call at a stage boundary, compaction and titling.
+
+The count is also fed back into the correction, so a refused request tightens the estimate for the
+retry rather than being rediscovered by it.
+
 ## Budgets travel across models
 
 This is why budgets are written as percentages. A region sized at 20% of the window is 20% whether

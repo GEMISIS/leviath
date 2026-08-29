@@ -463,15 +463,13 @@ impl AnthropicProvider {
         }
     }
 
-    /// Apply common Anthropic headers to a request builder.
     /// The headers every Anthropic request carries.
     ///
-    /// The one source of truth for the set: [`Self::apply_headers`] folds it
-    /// onto a builder, and the shared `send_chat_request` takes it as pairs.
-    /// Keeping them separate is how the debug-http log drifted - it hardcoded
-    /// three headers and silently omitted `anthropic-beta`, so under
-    /// `--features debug-http` a 1h-cache request logged something the wire
-    /// never carried.
+    /// The one source of truth for the set: every call, the count included,
+    /// hands it to the shared `send_chat_request` as pairs. Keeping copies is
+    /// how the debug-http log drifted - it hardcoded three headers and silently
+    /// omitted `anthropic-beta`, so under `--features debug-http` a 1h-cache
+    /// request logged something the wire never carried.
     fn header_pairs(&self) -> Vec<(&'static str, String)> {
         let mut headers = vec![
             ("x-api-key", self.api_key.clone()),
@@ -487,32 +485,35 @@ impl AnthropicProvider {
         headers
     }
 
-    fn apply_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        self.header_pairs()
-            .into_iter()
-            .fold(builder, |b, (name, value)| b.header(name, value))
-    }
-
     /// Call Anthropic's exact `/messages/count_tokens` endpoint for `text`.
     ///
     /// Wraps the text as a single user message (the endpoint counts structured
     /// message input). Returns the reported `input_tokens`, or an error the
-    /// caller turns into a heuristic fallback. Does not consume the inference
-    /// rate limiter - counting is a cheap, best-effort side call.
+    /// caller turns into a heuristic fallback.
+    ///
+    /// Over the pooled side-call client rather than the inference client: the
+    /// window guard makes this call before every request large enough to be
+    /// worth measuring, and a fresh TLS handshake per count was most of what it
+    /// cost. Through the rate limiter like `infer`, because the endpoint is
+    /// billed against the same request quota - a run near its quota was being
+    /// pushed over it by its own guard. The 429 handling in `send_chat_request`
+    /// then backs the limiter off the same way an inference refusal does.
     async fn count_tokens_remote(&self, text: &str, model: &str) -> Result<usize> {
         let url = format!("{}/messages/count_tokens", self.base_url);
         let body = serde_json::json!({
             "model": model,
             "messages": [{ "role": "user", "content": text }],
         });
-        let response = crate::provider::apply_request_timeout(
-            self.apply_headers(self.client.post(&url)).json(&body),
+        let response = crate::openai_compat::send_chat_request(
+            crate::provider::side_call_client(),
+            "anthropic",
+            &url,
+            &self.header_pairs(),
+            &body,
+            self.rate_limiter.as_ref(),
             Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
         )
-        .send()
-        .await
-        .map_err(|e| ProviderError::transport("sending the request", &e))?;
-        let response = crate::provider::check_http_response(response, None).await?;
+        .await?;
         let value: serde_json::Value = crate::provider::decode_json(response).await?;
         value
             .get("input_tokens")
@@ -850,8 +851,19 @@ impl Provider for AnthropicProvider {
     }
 
     async fn count_tokens(&self, text: &str, model: &str) -> usize {
-        // Prefer the exact `/messages/count_tokens` endpoint; fall back to the
-        // ~3.5 chars/token heuristic on any error (network, non-2xx, parse).
+        // Through the limiter first, the way `infer` is: the count endpoint
+        // spends the same request quota. Then prefer the exact
+        // `/messages/count_tokens` endpoint, and fall back to the ~3.5
+        // chars/token heuristic on any error (network, non-2xx, parse).
+        if let Some(limiter) = &self.rate_limiter {
+            // Waits for a slot. `acquire` has no failure today, and this
+            // method has no error to carry one anyway: the heuristic below is
+            // the fallback for the count, not for the wait.
+            limiter
+                .acquire()
+                .await
+                .expect("the rate limiter only waits for capacity; it does not fail");
+        }
         match self.count_tokens_remote(text, model).await {
             Ok(n) => n,
             Err(e) => {
@@ -2154,6 +2166,43 @@ mod tests {
         };
         let tokens = provider.count_tokens("anything", "claude-sonnet-4-6").await;
         assert_eq!(tokens, 42);
+    }
+
+    /// The count call spends the provider's request budget like any other
+    /// call to it. A limiter allowing one request a minute lets the first
+    /// count through and holds the second, which is the observable difference
+    /// between a count that goes through the limiter and one that bypasses it
+    /// (as it used to: the endpoint is billed against the same quota, and a
+    /// run near its quota was being pushed over it by its own guard).
+    #[tokio::test]
+    async fn the_count_call_goes_through_the_rate_limiter() {
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", br#"{"input_tokens": 7}"#.to_vec()),
+            (200, "OK", br#"{"input_tokens": 7}"#.to_vec()),
+        ])
+        .await;
+        let provider = AnthropicProvider {
+            client: reqwest::Client::new(),
+            api_key: "test-key".to_string(),
+            base_url: url,
+            rate_limiter: Some(RateLimiter::new(&crate::provider::RateLimitConfig {
+                requests_per_minute: 1,
+                tokens_per_minute: 1_000_000,
+            })),
+            capability_overrides: HashMap::new(),
+            cache_ttl: CacheTtl::default(),
+            learned: Default::default(),
+        };
+        assert_eq!(provider.count_tokens("first", "claude-sonnet-4-6").await, 7);
+        let held = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            provider.count_tokens("second", "claude-sonnet-4-6"),
+        )
+        .await;
+        assert!(
+            held.is_err(),
+            "the second count waits for the minute the limiter allows one request in"
+        );
     }
 
     #[tokio::test]
@@ -3459,14 +3508,12 @@ mod tests {
             provider.cache_control_value(),
             serde_json::json!({ "type": "ephemeral", "ttl": "1h" })
         );
-        let req = provider
-            .apply_headers(provider.client.post("http://localhost/"))
-            .build()
-            .unwrap();
-        assert_eq!(
-            req.headers().get("anthropic-beta").unwrap(),
-            "extended-cache-ttl-2025-04-11"
-        );
+        let beta = provider
+            .header_pairs()
+            .into_iter()
+            .find(|(name, _)| *name == "anthropic-beta")
+            .map(|(_, value)| value);
+        assert_eq!(beta.as_deref(), Some("extended-cache-ttl-2025-04-11"));
     }
 
     #[test]

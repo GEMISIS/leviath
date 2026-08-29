@@ -373,7 +373,6 @@ impl PipelineWorld {
             content_summary_outcomes: cs_tx,
             wake: wake.clone(),
             runtime,
-            exact_token_counting: false,
             // On unless the operator turns it off: a buffered call is a socket
             // that goes silent for as long as the model thinks, which is what
             // anything on the path that reaps idle connections kills.
@@ -621,24 +620,13 @@ impl PipelineWorld {
         &self.world
     }
 
-    /// Enable (or disable) the opt-in exact pre-inference budget guard for this
-    /// world - see `inference_bridge::InferenceJob::exact_token_counting`.
-    /// Call once at startup when the run config requests it, before serving.
-    pub fn set_exact_token_counting(&mut self, enabled: bool) {
-        // `InferenceStage` is inserted by every `PipelineWorld::new` path, so it
-        // is a hard invariant here - `resource_mut` (which panics if absent) is
-        // correct and keeps this branch-free.
-        self.world
-            .resource_mut::<crate::pipeline::InferenceStage>()
-            .exact_token_counting = enabled;
-    }
-
     /// Turn streamed inference off (or back on) for this world - see
     /// `inference_bridge::InferenceJob::stream`. Call once at startup, before
     /// serving.
     pub fn set_stream_inference(&mut self, enabled: bool) {
-        // Same invariant as `set_exact_token_counting`: `InferenceStage` is
-        // inserted by every `PipelineWorld::new` path.
+        // `InferenceStage` is inserted by every `PipelineWorld::new` path, so it
+        // is a hard invariant here - `resource_mut` (which panics if absent) is
+        // correct and keeps this branch-free.
         self.world
             .resource_mut::<crate::pipeline::InferenceStage>()
             .stream_inference = enabled;
@@ -1391,25 +1379,6 @@ mod tests {
         world.world_mut().insert_resource(circuits);
 
         assert_eq!(world.open_circuits().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn set_exact_token_counting_toggles_the_stage_flag() {
-        let mut world = build_world(ProviderRegistry::new());
-        // Default is off.
-        assert!(
-            !world
-                .world()
-                .resource::<crate::pipeline::InferenceStage>()
-                .exact_token_counting
-        );
-        world.set_exact_token_counting(true);
-        assert!(
-            world
-                .world()
-                .resource::<crate::pipeline::InferenceStage>()
-                .exact_token_counting
-        );
     }
 
     /// Streaming is on unless someone turns it off, and the switch reaches the

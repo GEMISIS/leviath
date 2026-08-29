@@ -155,7 +155,7 @@ Load-time problems fail fast. Runtime problems never break an inference:
 | `render` errors or returns an invalid shape | Warning, and the region renders as a plain `[name]:` block |
 | `on_write` errors or returns an invalid type | Warning, and the entry is accepted unchanged |
 | `on_overflow` errors or returns invalid indices | Warning, and oldest-first eviction runs |
-| Rendered output exceeds the region's budget | Warning only, and it is sent anyway. `[limits] exact_token_counting` turns this into a hard guard |
+| Rendered output exceeds the region's budget | Warning only, and it is sent anyway. The [context-window guard](/docs/context#requests-are-measured-before-they-are-sent) refuses it only if the whole request would overflow the model |
 
 > [!NOTE]
 > Region hooks run in the pure-data sandbox: no filesystem, no network, no host I/O functions. They

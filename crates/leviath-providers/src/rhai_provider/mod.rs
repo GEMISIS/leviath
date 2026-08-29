@@ -72,12 +72,38 @@ const REQUIRED_FNS: [(&str, usize, &str); 2] = [
 /// That is not cosmetic: the shared hardening raises Rhai's expression-depth
 /// limits, which are low enough in a debug build to reject legitimate scripts.
 pub fn check_source(label: &str, src: &str) -> Result<ProviderMeta> {
+    Ok(inspect_source(label, src)?.meta)
+}
+
+/// What [`check_source`] learned about a script, with the optional entry
+/// points it found beside the annotations.
+#[derive(Debug, Clone)]
+pub struct SourceReport {
+    /// The script's `// @key value` annotations.
+    pub meta: ProviderMeta,
+    /// Whether the script defines `count_tokens(state, text, model)`.
+    ///
+    /// Reported because it decides how the context-window guard treats the
+    /// provider: with the function, a large request is measured by whatever the
+    /// script asks (a remote count, or its own tokenizer); without it, the guard
+    /// measures with the byte estimate and can only catch an overflow the
+    /// estimate already sees.
+    pub counts_tokens: bool,
+}
+
+/// [`check_source`], keeping the whole report rather than the annotations
+/// alone. `lev validate` uses it to say what a script provider can and cannot
+/// do before a run finds out.
+pub fn inspect_source(label: &str, src: &str) -> Result<SourceReport> {
     let meta = parse_provider_annotations(src);
     let ast = build_init_engine(Arc::new(Vec::new()))
         .compile(src)
         .map_err(|e| ProviderError::Other(format!("compile provider script {label}: {e}")))?;
     require_entry_points(label, &ast)?;
-    Ok(meta)
+    Ok(SourceReport {
+        meta,
+        counts_tokens: has_fn(&ast, "count_tokens", 3),
+    })
 }
 
 /// Check that a compiled script defines `initialize` and `inference`.

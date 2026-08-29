@@ -120,6 +120,24 @@ fn stream(state, request, on_chunk) {
     );
 }
 
+// Called by the context-window guard before a request large enough to be
+// near the model's window goes out (small turns never reach it). Groq has no
+// counting endpoint, so this answers with the local estimate. An API that has
+// one is asked instead, with the estimate as the fallback, so a failed count
+// never turns into a failed request:
+//
+//     fn count_tokens(state, text, model) {
+//         try {
+//             let resp = parse_json(http_post(
+//                 `${state.base_url}/count_tokens`,
+//                 to_json(#{ model: model, messages: [#{ role: "user", content: text }] }),
+//                 auth_headers(state),
+//             ));
+//             resp.input_tokens
+//         } catch {
+//             count_tokens_heuristic(text, "openai")
+//         }
+//     }
 fn count_tokens(state, text, model) {
     count_tokens_heuristic(text, "openai")
 }

@@ -322,6 +322,21 @@ pub fn collect_inference(
                     .insert(ProcessResponse);
             }
             Err(err) => {
+                // A request the pre-flight guard refused was measured with the
+                // provider's own tokenizer, and that measurement is the only
+                // evidence the window will get: the call never happened, so
+                // there is no response to learn from. Folded in here so the
+                // next request - the retry after compaction, or the resume -
+                // is estimated from the figure that was just refused.
+                if let leviath_providers::ProviderError::TokenLimitExceeded { used, .. } = &err {
+                    calibrate(
+                        &mut commands,
+                        outcome.entity,
+                        calibration.as_deref_mut(),
+                        estimate,
+                        *used,
+                    );
+                }
                 // A provider that is out of credits or holding a rejected key
                 // is not this request's problem: every later request to it
                 // fails the same way. Move the stage to the next candidate and

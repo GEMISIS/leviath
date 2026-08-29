@@ -2536,13 +2536,12 @@ pub(super) mod tests {
         wizard.limits[0].value = FieldValue::Number(Some(2));
         wizard.limits[1].value = FieldValue::Number(Some(0));
         wizard.limits[2].value = FieldValue::Number(None);
-        wizard.limits[3].value = FieldValue::Bool(true);
+        wizard.limits[3].value = FieldValue::Bool(false);
         wizard.limits[4].value = FieldValue::Bool(false);
-        wizard.limits[5].value = FieldValue::Bool(false);
-        wizard.limits[6].value = FieldValue::Number(Some(11));
-        wizard.limits[7].value = FieldValue::Number(Some(22));
-        wizard.limits[8].value = FieldValue::Number(Some(33));
-        wizard.limits[9].value = FieldValue::Number(Some(44));
+        wizard.limits[5].value = FieldValue::Number(Some(11));
+        wizard.limits[6].value = FieldValue::Number(Some(22));
+        wizard.limits[7].value = FieldValue::Number(Some(33));
+        wizard.limits[8].value = FieldValue::Number(Some(44));
 
         let config = wizard.build_config();
 
@@ -2552,7 +2551,6 @@ pub(super) mod tests {
             Config::default().limits.max_concurrent_tools
         );
         assert!(config.limits.default_max_iterations.is_none());
-        assert!(config.limits.exact_token_counting);
         assert!(!config.batch_tool_hint);
         assert!(!config.shell_hint);
         // Every remaining field gets a distinct value, so a form that grows a
@@ -2609,10 +2607,10 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut wizard = test_wizard(dir.path());
         wizard.enter(Step::Limits);
+        wizard.limits[5].value = FieldValue::Number(Some(0));
         wizard.limits[6].value = FieldValue::Number(Some(0));
         wizard.limits[7].value = FieldValue::Number(Some(0));
-        wizard.limits[8].value = FieldValue::Number(Some(0));
-        wizard.limits[9].value = FieldValue::Number(Some(300));
+        wizard.limits[8].value = FieldValue::Number(Some(300));
 
         let config = wizard.build_config();
 
@@ -2623,9 +2621,9 @@ pub(super) mod tests {
 
         let mut wizard = test_wizard(dir.path());
         wizard.enter(Step::Limits);
+        wizard.limits[5].value = FieldValue::Number(None);
         wizard.limits[6].value = FieldValue::Number(None);
         wizard.limits[7].value = FieldValue::Number(None);
-        wizard.limits[8].value = FieldValue::Number(None);
         wizard.limits[9].value = FieldValue::Number(None);
 
         let config = wizard.build_config();

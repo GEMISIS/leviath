@@ -703,8 +703,12 @@ impl Provider for OllamaProvider {
         Ok(Box::pin(stream))
     }
 
+    /// The byte heuristic. Ollama's documented HTTP API has no tokenize
+    /// endpoint (a `/api/tokenize` was proposed upstream and never shipped in
+    /// a release this targets), so there is nothing exact to ask for; the
+    /// window guard's count on this provider is the same estimate the window
+    /// already keeps, and the guard reduces to the overflow check.
     async fn count_tokens(&self, text: &str, _model: &str) -> usize {
-        // Ollama exposes no token-count endpoint; approximate locally.
         leviath_core::estimate_tokens(text)
     }
 

@@ -919,7 +919,6 @@ mod tests {
             content_summary_outcomes: cstx,
             wake: Arc::new(Notify::new()),
             runtime: Handle::current(),
-            exact_token_counting: false,
             stream_inference: true,
         });
         world.insert_resource(TitleSink(title_tx));
@@ -1257,6 +1256,87 @@ mod tests {
             outcome.result.expect("the third attempt answers"),
             "Recovered Title"
         );
+    }
+
+    /// A provider whose window is too small for the title request, and which
+    /// records whether the request ever reached it.
+    struct Narrow {
+        inferred: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Narrow {
+        async fn infer(
+            &self,
+            _req: &InferenceRequest,
+        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+            self.inferred
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(leviath_providers::InferenceResponse {
+                content: "A Title".to_string(),
+                tool_calls: vec![],
+                tokens_used: leviath_providers::TokenUsage::new(1, 0, 0, 1),
+                finish_reason: leviath_providers::FinishReason::Complete,
+            })
+        }
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+            600
+        }
+        fn max_context_tokens(&self, _m: &str) -> usize {
+            1_000
+        }
+        fn name(&self) -> &str {
+            "narrow"
+        }
+        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    /// The title lane is guarded like every other: a titling request that
+    /// would overflow the title model's window (600 counted plus the 512-token
+    /// reply budget, against 1,000) is refused before it is sent.
+    #[tokio::test]
+    async fn the_title_lane_refuses_an_overflowing_request() {
+        let provider = Arc::new(Narrow {
+            inferred: std::sync::atomic::AtomicBool::new(false),
+        });
+        assert_eq!(provider.name(), "narrow");
+        let _ = provider.capabilities("m");
+        let pools = default_pools();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_title_job(
+            TitleJob {
+                entity: bevy_ecs::entity::Entity::PLACEHOLDER,
+                provider: provider.clone(),
+                provider_name: "mock".to_string(),
+                model: "m".to_string(),
+                // A task long enough that the estimate alone (500 tokens) puts
+                // the request on the counting side of the line.
+                request: title_request(&"t".repeat(2_000), "mock", "m"),
+                permit: pools.try_acquire("p", "m").expect("free"),
+            },
+            instant_retry(),
+            tx,
+            Arc::new(Notify::new()),
+        )
+        .await;
+        let outcome = rx.recv().await.expect("an outcome is always reported");
+        let err = outcome.result.expect_err("600 + 512 does not fit in 1,000");
+        assert_eq!(err.to_string(), "Token limit exceeded: 600 > 1000");
+        assert!(
+            !provider.inferred.load(std::sync::atomic::Ordering::SeqCst),
+            "refused before the call, not after it"
+        );
+        assert!(outcome.usage.is_none(), "nothing was served");
+        // The provider would have answered had the request reached it, so the
+        // refusal above is the guard's doing and not the mock's.
+        let answered = provider
+            .infer(&title_request("task", "mock", "m"))
+            .await
+            .expect("the mock answers");
+        assert_eq!(answered.content, "A Title");
+        assert!(provider.inferred.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     /// The other half of the schedule: a permanent refusal is not retried, so

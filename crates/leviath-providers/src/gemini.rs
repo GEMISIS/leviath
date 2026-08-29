@@ -194,6 +194,10 @@ impl GeminiProvider {
     ///
     /// Wraps the text as a single user content part. Returns the reported
     /// `totalTokens`, or an error the caller turns into a heuristic fallback.
+    ///
+    /// Over the pooled side-call client and through the rate limiter, for the
+    /// reasons given on the Anthropic twin: the guard makes this call before
+    /// every large request, and it spends the same request quota.
     async fn count_tokens_remote(&self, text: &str, model: &str) -> Result<usize> {
         let native = self.native_base().ok_or_else(|| {
             ProviderError::Other(
@@ -204,18 +208,19 @@ impl GeminiProvider {
         let body = serde_json::json!({
             "contents": [{ "role": "user", "parts": [{ "text": text }] }],
         });
-        let response = crate::provider::apply_request_timeout(
-            self.client
-                .post(&url)
-                .header("x-goog-api-key", &self.api_key)
-                .header("Content-Type", "application/json")
-                .json(&body),
+        let response = send_chat_request(
+            crate::provider::side_call_client(),
+            "gemini",
+            &url,
+            &[
+                ("x-goog-api-key", self.api_key.clone()),
+                ("Content-Type", "application/json".to_string()),
+            ],
+            &body,
+            self.rate_limiter.as_ref(),
             Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
         )
-        .send()
-        .await
-        .map_err(|e| ProviderError::transport("reaching the provider", &e))?;
-        let response = crate::provider::check_http_response(response, None).await?;
+        .await?;
         let value: serde_json::Value = crate::provider::decode_json(response).await?;
         value
             .get("totalTokens")
@@ -299,8 +304,19 @@ impl Provider for GeminiProvider {
     }
 
     async fn count_tokens(&self, text: &str, model: &str) -> usize {
-        // Prefer Gemini's exact native `:countTokens` endpoint; fall back to the
-        // local heuristic on any error (network, non-2xx, parse, non-standard base).
+        // Through the limiter first, the way `infer` is: the count endpoint
+        // spends the same request quota. Then prefer Gemini's exact native
+        // `:countTokens` endpoint, and fall back to the local heuristic on any
+        // error (network, non-2xx, parse, non-standard base).
+        if let Some(limiter) = &self.rate_limiter {
+            // Waits for a slot. `acquire` has no failure today, and this
+            // method has no error to carry one anyway: the heuristic below is
+            // the fallback for the count, not for the wait.
+            limiter
+                .acquire()
+                .await
+                .expect("the rate limiter only waits for capacity; it does not fail");
+        }
         match self.count_tokens_remote(text, model).await {
             Ok(n) => n,
             Err(e) => {
@@ -919,6 +935,39 @@ mod tests {
         };
         let tokens = provider.count_tokens("anything", "gemini-3.5-flash").await;
         assert_eq!(tokens, 99);
+    }
+
+    /// See the Anthropic twin: the native `countTokens` call spends the
+    /// provider's request budget, so a limiter allowing one request a minute
+    /// holds the second count.
+    #[tokio::test]
+    async fn the_count_call_goes_through_the_rate_limiter() {
+        let (base, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (200, "OK", br#"{"totalTokens": 9}"#.to_vec()),
+            (200, "OK", br#"{"totalTokens": 9}"#.to_vec()),
+        ])
+        .await;
+        let provider = GeminiProvider {
+            client: reqwest::Client::new(),
+            api_key: "key".to_string(),
+            base_url: format!("{}/openai", base),
+            rate_limiter: Some(RateLimiter::new(&crate::provider::RateLimitConfig {
+                requests_per_minute: 1,
+                tokens_per_minute: 1_000_000,
+            })),
+            learned: Default::default(),
+            capability_overrides: HashMap::new(),
+        };
+        assert_eq!(provider.count_tokens("first", "gemini-3.5-flash").await, 9);
+        let held = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            provider.count_tokens("second", "gemini-3.5-flash"),
+        )
+        .await;
+        assert!(
+            held.is_err(),
+            "the second count waits for the minute the limiter allows one request in"
+        );
     }
 
     #[tokio::test]

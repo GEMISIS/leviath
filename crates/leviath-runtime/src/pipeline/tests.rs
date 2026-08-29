@@ -560,7 +560,6 @@ fn build_world(pools: InferencePools) -> (World, mpsc::UnboundedReceiver<Inferen
         content_summary_outcomes: cstx,
         wake: Arc::new(Notify::new()),
         runtime: Handle::current(),
-        exact_token_counting: false,
         stream_inference: true,
     });
     (world, rx)
@@ -2093,6 +2092,36 @@ fn collect_folds_a_worse_call_into_an_existing_calibration() {
         shortfall, 400,
         "the agent keeps one correction rather than a fresh one per call"
     );
+}
+
+/// A request the pre-flight guard refused never produced a response, but it
+/// was measured, and the measurement is the only evidence the window gets
+/// about that request. The correction learns from it, so the retry after
+/// compaction is estimated from the figure that was just refused rather than
+/// rediscovering it.
+#[test]
+fn collect_learns_from_a_refused_request_too() {
+    let (mut world, tx) = world_with_results();
+    let e = world
+        .spawn((agent_state(), AwaitingInference, PromptEstimate(1_000)))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(leviath_providers::ProviderError::TokenLimitExceeded {
+            used: 1_300,
+            max: 1_350,
+        }),
+        pricing: None,
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    let shortfall = world
+        .get::<PromptCalibration>(e)
+        .map_or(0, PromptCalibration::shortfall);
+    assert_eq!(shortfall, 300, "the refused count corrects the estimate");
 }
 
 /// An agent that never dispatched through the inference lane - a test driving

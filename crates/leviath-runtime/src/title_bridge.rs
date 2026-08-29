@@ -95,6 +95,11 @@ pub async fn run_title_job(
     // at once. `infer` borrows the request, so every attempt reuses the one
     // assembled copy.
     let attempts = async {
+        // The same pre-flight guard as the stage lane, inside the same deadline.
+        // A title request is a few hundred tokens and almost never reaches the
+        // counting line, but "almost" is not a property a lane gets to rely on:
+        // the model is whatever `[title]` names, and its window is its own.
+        crate::inference_bridge::guard_context_window(provider.as_ref(), &request, None).await?;
         let mut attempt = 1u32;
         let mut spent = std::time::Duration::ZERO;
         loop {
