@@ -734,6 +734,20 @@ nothing about what gets written.
 lev setup --non-interactive --anthropic-key sk-ant-... --install-agents
 ```
 
+The provider list ends with three entries for servers that speak OpenAI's chat API, and picking
+any of them writes a [`kind = "openai-compatible"`](/docs/configuration#openai-compatible-endpoints)
+entry rather than a key. **llama.cpp** and **LM Studio** are presets: each starts at its server's
+default address (`http://localhost:8080/v1` and `http://localhost:1234/v1`) with no key, and is
+written as `llama-cpp` or `lm-studio`. **Custom OpenAI-compatible endpoint** asks for a name, a
+base URL, an optional key and optional headers (`Name: value`, several separated by semicolons).
+All three repeat: the credential screen for a preset is a small form per endpoint with **Add
+another** at the end and **Remove this endpoint** on each, so two llama.cpp servers on two ports
+are two entries. **Check this endpoint** asks the server for its models; on success they are
+listed and the **Default model** row cycles through them, and on failure the entry is kept and the
+**Models** row takes the ids by hand, which is what the entry's `models` list is. Every endpoint
+appears in the default-provider choice by its own name. These entries have no flags; script them
+by writing `config.toml`.
+
 > [!NOTE]
 > The bundled agents are **not** installed unless `--install-agents` is passed in non-interactive
 > mode. That is deliberate, so a scripted setup does not write blueprints you did not ask for.

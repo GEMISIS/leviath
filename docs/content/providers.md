@@ -384,8 +384,16 @@ tokens_per_minute   = 100000
 
 ## Custom OpenAI-compatible providers
 
-Point Leviath at any OpenAI-compatible endpoint with a small Rhai script.
-[Rhai providers](/docs/rhai-providers) walks through a complete Groq provider.
+Any server that speaks OpenAI's chat API is a provider with three lines of config and no script:
+a `[model_providers.<name>]` entry with `kind = "openai-compatible"` and a `base_url`, plus an
+`api_key` or `headers` if the server wants them. That covers llama.cpp, LM Studio, vLLM,
+BionicGPT and most gateways; Leviath asks the server what models it serves and falls back to a
+`models` list you write when it will not say. `lev setup` offers llama.cpp and LM Studio as
+presets and a custom entry for the rest. The details, the detection rules and a two-server
+example are in [OpenAI-compatible endpoints](/docs/configuration#openai-compatible-endpoints).
+
+A server that needs more than the OpenAI shape, or a different one altogether, is a small Rhai
+script instead. [Rhai providers](/docs/rhai-providers) walks through a complete Groq provider.
 
 ## Claude Code transport
 
