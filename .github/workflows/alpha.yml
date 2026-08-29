@@ -153,6 +153,11 @@ jobs:
     secrets: inherit
 
   build:
+    # id-token lets the signing step prove to Azure which workflow it is
+    # (OpenID Connect); contents stays read-only.
+    permissions:
+      contents: read
+      id-token: write
     name: Build (${{ matrix.target }})
     needs: gate
     runs-on: ${{ matrix.os }}
@@ -268,7 +273,8 @@ jobs:
           esac
           echo "RUSTFLAGS=$RUSTFLAGS"
           cargo build --release --bin lev --target "$TARGET"
-      # Authenticode-sign lev.exe when a Trusted Signing account is configured.
+      # Authenticode-sign lev.exe when an Azure Artifact Signing account (the
+      # service formerly called Trusted Signing) is configured.
       #
       # An unsigned exe that talks to the network, spawns processes and reads
       # the credential store is what antivirus heuristics are built to catch,
@@ -276,42 +282,64 @@ jobs:
       # from a publisher Microsoft has verified is the one thing that answers
       # that on the machine itself, before any reputation accrues.
       #
-      # Gated on the secrets being present rather than required, so a fork or
-      # a PR build still produces an (unsigned) binary. To turn it on, create
-      # an Azure Trusted Signing account and a certificate profile, then set:
-      #   AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET   (an app with
-      #     the "Trusted Signing Certificate Profile Signer" role)
-      #   TRUSTED_SIGNING_ENDPOINT   e.g. https://eus.codesigning.azure.net
-      #   TRUSTED_SIGNING_ACCOUNT    the account name
-      #   TRUSTED_SIGNING_PROFILE    the certificate profile name
+      # Authentication is OpenID Connect: GitHub mints a token for this job and
+      # a federated credential on the Entra app trusts it, so there is no
+      # client secret to store or rotate. Gated on the secrets being present
+      # rather than required, so a fork or a PR build still produces an
+      # (unsigned) binary. To turn it on:
+      #   1. Azure portal: create an Artifact Signing account (Basic), complete
+      #      identity validation, add a Public Trust certificate profile.
+      #   2. Entra: create an app registration; under Certificates & secrets add
+      #      a *federated credential* for GitHub Actions - this repo, entity
+      #      "Branch", branch "main" (the alpha build runs from main).
+      #   3. On the signing account, Access control (IAM): give the app the
+      #      "Artifact Signing Certificate Profile Signer" role.
+      #   4. Repo secrets: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_SUBSCRIPTION_ID,
+      #      ARTIFACT_SIGNING_ENDPOINT (e.g. https://eus.codesigning.azure.net),
+      #      ARTIFACT_SIGNING_ACCOUNT, ARTIFACT_SIGNING_PROFILE.
       - name: Decide whether the binary can be signed
         if: matrix.os == 'windows-latest'
         id: signing
         shell: bash
         env:
-          ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+          ACCOUNT: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
         run: |
           if [ -n "$ACCOUNT" ]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::TRUSTED_SIGNING_ACCOUNT is not set; lev.exe ships unsigned"
+            echo "::notice::ARTIFACT_SIGNING_ACCOUNT is not set; lev.exe ships unsigned"
           fi
+      - name: Log in to Azure (OIDC)
+        if: matrix.os == 'windows-latest' && steps.signing.outputs.configured == 'true'
+        uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29 # v3.0.2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Sign lev.exe
         if: matrix.os == 'windows-latest' && steps.signing.outputs.configured == 'true'
-        uses: azure/trusted-signing-action@208f8af4bf26cf2af8597424e3cb5582801523ba # v2.0.0
+        uses: azure/artifact-signing-action@208f8af4bf26cf2af8597424e3cb5582801523ba # v2.0.0
         with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
-          trusted-signing-account-name: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
+          endpoint: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
           files-folder: target/${{ matrix.target }}/release
           files-folder-filter: exe
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
+          # Only the Azure CLI credential the login step established.
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
       - name: Package archive
         shell: bash
         run: |
