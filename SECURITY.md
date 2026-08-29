@@ -270,14 +270,15 @@ it into the installers is planned.
 
 ### Windows code signing
 
-`lev.exe` is Authenticode-signed in the alpha build through Azure Artifact
-Signing (formerly Trusted Signing) when the maintainers have configured it;
-beta and stable promote the alpha artifacts, so the signature travels with
-them. The build authenticates to Azure with OpenID Connect - a federated
-credential on the Entra application trusts GitHub's token for the `main`
-branch of this repository - so no signing secret is stored anywhere. The
-certificate itself never leaves Azure; the workflow submits digests. Check a
-binary with `Get-AuthenticodeSignature lev.exe` (expect `Valid`, signer Sun
-Forge AI). The signature is a second, independent proof alongside the
-attestation: the attestation says *which workflow* built the file, the
-signature says *who* published it - and it is the one Windows itself reads.
+`lev.exe` ships **unsigned**. Authenticode signing needs a certificate from a
+CA Microsoft trusts, and every such certificate costs money; Leviath is free
+and is not paying for one. The consequence is that a new build has no
+reputation with Defender or SmartScreen and may be flagged - a false positive
+on an unknown file, which the build provenance attestation above answers: it
+proves *which workflow* built the file, which is a stronger statement than a
+publisher signature makes.
+
+The release pipeline can sign if a certificate is ever available - the alpha
+build carries an opt-in step for Azure Artifact Signing, and the free path for
+open-source projects is the SignPath Foundation (see CONTRIBUTING). Neither is
+configured; the step prints a notice and ships the binary unsigned.

@@ -128,17 +128,19 @@ provenance:
 gh attestation verify leviath-linux-x64.tar.gz --repo GEMISIS/leviath
 ```
 
-On Windows, `lev.exe` also carries an Authenticode signature (publisher: Sun
-Forge AI) once the release pipeline's signing is enabled, which is what keeps
-Defender and SmartScreen from treating a new build as unknown:
+On Windows, `lev.exe` is **not code-signed**: Microsoft charges for a signing
+certificate and Leviath is free. So a fresh build has no reputation with
+Defender or SmartScreen, and either may flag or quarantine it. That is a false
+positive on an unsigned file, not something it found; the attestation above
+proves the file is exactly what this repo's CI built. Restore it from
+quarantine (Windows Security → Protection history → Allow) or add
+`%LOCALAPPDATA%\Leviath\bin` to the exclusions. Reporting it as a false
+positive to Microsoft (<https://www.microsoft.com/wdsi/filesubmission>) clears
+that build for everyone.
 
-```powershell
-Get-AuthenticodeSignature "$env:LOCALAPPDATA\Leviath\bin\lev.exe"   # Status: Valid
-```
-
-If a build shows `NotSigned`, it predates signing; the attestation above still
-proves it is what CI built, and an antivirus that quarantines it is reporting a
-false positive on an unsigned file rather than something it found.
+Should a build ever be signed (see CONTRIBUTING for the free route),
+`Get-AuthenticodeSignature "$env:LOCALAPPDATA\Leviath\bin\lev.exe"` will
+say `Valid`.
 
 See [SECURITY.md](https://github.com/GEMISIS/leviath/blob/main/SECURITY.md)
 for the full supply-chain story.

@@ -261,10 +261,30 @@ publish skip in seconds. See
 
 ### Signing the Windows binary
 
-The alpha build signs `lev.exe` with Azure Artifact Signing when six repository
-secrets exist, and prints a `::notice` and ships it unsigned when they do not,
-so nothing about a fork or a PR build depends on Azure. Setting it up is a
-one-time job for a maintainer with an Azure subscription:
+`lev.exe` ships unsigned: a certificate a Windows machine trusts has to come
+from a commercial CA, and Leviath is not paying for one. Each new build is
+therefore a new, unknown hash to Defender, and users occasionally see it
+flagged. What keeps that survivable without paying: the version resource the
+build script embeds (so the exe at least says what it is), the provenance
+attestation, and reporting a flagged build to Microsoft as a false positive
+(<https://www.microsoft.com/wdsi/filesubmission>, as a software developer, with
+the detection name from Protection history) - per build, since there is no
+API for that.
+
+**The free route, if anyone wants to pursue it:** the
+[SignPath Foundation](https://signpath.org) signs open-source releases at no
+cost. It is an application (OSI licence, MFA on every maintainer's GitHub
+account, a "Code signing policy" section on the project page naming authors,
+reviewers and approvers), and once accepted the alpha build would submit
+`lev.exe` through `signpath/github-action-submit-signing-request` and receive
+it back signed with the Foundation's certificate - which Windows trusts, and
+which accrues reputation across releases. That is the only way the Defender
+flags stop for good; everything below is the paid alternative.
+
+The alpha build also carries an opt-in step for Azure Artifact Signing (which
+costs money and is not configured). It signs when six repository secrets
+exist and prints a `::notice` and ships unsigned when they do not, so nothing
+about a fork or a PR build depends on Azure. Should that ever be wanted:
 
 1. **Azure portal → Artifact Signing** (Basic tier): create an account, complete
    the identity validation for Sun Forge AI (this is the slow step - days - and
@@ -283,12 +303,7 @@ one-time job for a maintainer with an Azure subscription:
    `ARTIFACT_SIGNING_ACCOUNT`, `ARTIFACT_SIGNING_PROFILE`.
 
 The next alpha run signs. Verify on the published asset with
-`Get-AuthenticodeSignature lev.exe`. Until signing is on, a new build that an
-antivirus quarantines should be reported to the vendor as a false positive
-(Microsoft: <https://www.microsoft.com/wdsi/filesubmission>, as a software
-developer, with the detection name from Protection history); each build is a
-new hash, so that has to be repeated per release, which is the whole reason to
-sign.
+`Get-AuthenticodeSignature lev.exe`.
 
 ## Design notes
 
