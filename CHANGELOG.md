@@ -132,6 +132,12 @@ same list.
   the box, reached with `Tab` or a click, sends on a terminal that cannot
   tell `Ctrl+Enter` from `Enter`. It is the same button the new-run screen
   starts a run with. Single-line boxes keep `Enter` as submit.
+- The unattended warning on the dashboard's new-run screen offered a "don't
+  ask again" box, so after ticking it a second `Ctrl-Y` on, off, and on
+  again armed the setting with no dialog, which read as the toggle
+  misbehaving rather than remembering. Every switch to on now shows the
+  warning; the box is gone. Nothing about it was ever written to disk, so
+  there is no saved value to drop.
 - The dashboard cut text to fixed character counts whatever the terminal
   width: the detail view's model name stopped at 24 characters and its
   working directory at 42 with most of a 200-column row empty, the header

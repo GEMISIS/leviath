@@ -165,10 +165,7 @@ impl Dashboard {
                     }
                 }
                 ConfirmAction::McpRemove { name } => self.mcp_remove_named(&name),
-                // The box is read off the dialog rather than carried in the
-                // outcome: whether to ask again is a note about future
-                // questions, not a third answer to this one.
-                ConfirmAction::EnableYolo => self.accept_yolo_warning(dialog.remembered()),
+                ConfirmAction::EnableYolo => self.accept_yolo_warning(),
                 ConfirmAction::AgentDelete { name } => self.perform_agent_delete(&name),
                 ConfirmAction::AgentReset { name } => self.perform_agent_reset(&name),
                 ConfirmAction::StageDelete { name } => self.editor_delete_stage(&name),

@@ -39,13 +39,6 @@ pub(crate) struct Confirm {
     pub(crate) no_label: &'static str,
     pub(crate) focus_yes: bool,
     pub(crate) danger: bool,
-    /// An optional "and stop asking" box, with its label and whether it is
-    /// ticked. `None` means the dialog does not offer one.
-    ///
-    /// A third button was the other option and is worse: the choice being made
-    /// here is not a third answer to the question, it is a note about future
-    /// questions, and a row of three buttons hides that difference.
-    pub(crate) remember: Option<(&'static str, bool)>,
 }
 
 impl Confirm {
@@ -62,24 +55,7 @@ impl Confirm {
             no_label,
             focus_yes: false,
             danger: false,
-            remember: None,
         }
-    }
-
-    /// Offer a "stop asking" box, unticked, toggled with Space.
-    ///
-    /// The caller reads [`Self::remembered`] after a `Yes` to find out whether
-    /// it was ticked. Deliberately not part of the outcome: whether to ask
-    /// again is a separate decision from the answer, and folding it into the
-    /// answer would make every other dialog carry a field it has no use for.
-    pub(crate) fn with_remember(mut self, label: &'static str) -> Self {
-        self.remember = Some((label, false));
-        self
-    }
-
-    /// Whether the "stop asking" box is ticked.
-    pub(crate) fn remembered(&self) -> bool {
-        matches!(self.remember, Some((_, true)))
     }
 
     /// Style the dialog as destructive (red border, red Yes button).
@@ -109,14 +85,6 @@ impl Confirm {
                     ConfirmOutcome::No
                 }
             }
-            // Space ticks the box rather than answering, and does nothing
-            // at all on a dialog that offers none.
-            KeyCode::Char(' ') => {
-                if let Some((_, checked)) = &mut self.remember {
-                    *checked = !*checked;
-                }
-                ConfirmOutcome::Pending
-            }
             KeyCode::Char('y') | KeyCode::Char('Y') => ConfirmOutcome::Yes,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => ConfirmOutcome::No,
             _ => ConfirmOutcome::Pending,
@@ -131,17 +99,6 @@ impl Confirm {
         let inner = popup_frame(frame, popup, &self.title, accent);
 
         let mut lines = self.body.clone();
-        if let Some((label, checked)) = self.remember {
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled(
-                    if checked { "[x] " } else { "[ ] " },
-                    Style::default().fg(accent),
-                ),
-                Span::styled(label, Style::default().fg(C_WHITE)),
-                Span::styled("  (space)", Style::default().fg(C_DIM)),
-            ]));
-        }
         lines.push(Line::from(""));
         lines.push(self.button_row(accent));
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -279,63 +236,5 @@ mod tests {
             .draw(|frame| confirm.draw(frame, frame.area()))
             .unwrap();
         assert!(terminal.backend().text().contains("[ Kill ]"));
-    }
-
-    /// The box is a note about future questions, not an answer to this one:
-    /// Space ticks it and leaves the dialog open, and the answer still has to
-    /// be given.
-    #[test]
-    fn the_remember_box_ticks_without_answering() {
-        let mut confirm = dialog().with_remember("Don't ask again");
-        assert!(!confirm.remembered());
-
-        assert_eq!(
-            confirm.handle(&press(KeyCode::Char(' '))),
-            ConfirmOutcome::Pending
-        );
-        assert!(confirm.remembered());
-        // And it unticks.
-        confirm.handle(&press(KeyCode::Char(' ')));
-        assert!(!confirm.remembered());
-
-        confirm.handle(&press(KeyCode::Char(' ')));
-        assert_eq!(
-            confirm.handle(&press(KeyCode::Char('y'))),
-            ConfirmOutcome::Yes
-        );
-        assert!(confirm.remembered(), "the tick survives the answer");
-    }
-
-    /// Space on a dialog that offers no box does nothing at all - it must not
-    /// become a second way to answer.
-    #[test]
-    fn space_is_inert_without_a_box() {
-        let mut confirm = dialog();
-        assert_eq!(
-            confirm.handle(&press(KeyCode::Char(' '))),
-            ConfirmOutcome::Pending
-        );
-        assert!(!confirm.remembered());
-    }
-
-    /// The box is on screen, with its state and the key that changes it.
-    #[test]
-    fn the_remember_box_is_drawn_with_its_state() {
-        let mut confirm = dialog().with_remember("Don't ask again this session");
-        let mut terminal =
-            ratatui::Terminal::new(crate::tui::TestBackendHarness::new(70, 16)).unwrap();
-        terminal
-            .draw(|frame| confirm.draw(frame, frame.area()))
-            .unwrap();
-        let text = terminal.backend().text();
-        assert!(text.contains("[ ]"), "unticked to start: {text}");
-        assert!(text.contains("space"));
-
-        confirm.handle(&press(KeyCode::Char(' ')));
-        terminal
-            .draw(|frame| confirm.draw(frame, frame.area()))
-            .unwrap();
-        let text = terminal.backend().text();
-        assert!(text.contains("[x]"), "ticked: {text}");
     }
 }

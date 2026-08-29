@@ -228,14 +228,6 @@ pub(crate) struct Dashboard {
     /// consequences, and a toggle that survives out of sight is one a user can
     /// leave on and forget.
     pub(super) new_run_yolo: bool,
-    /// Whether the unattended warning has been silenced for this session.
-    ///
-    /// In memory only, and by design. "Do not ask again" is a statement about
-    /// the sitting you are in, not a permanent preference, so closing the
-    /// dashboard is what expires it. Persisting it to the config would turn one
-    /// tick of a box into a machine-wide change nothing on screen mentions
-    /// again.
-    pub(super) yolo_warning_silenced: bool,
     /// Paths the screen reads its agents and file candidates from.
     pub(super) new_run_ctx: NewRunContext,
     /// The Agents screen (`a`): catalog and editor. Boxed: it carries a

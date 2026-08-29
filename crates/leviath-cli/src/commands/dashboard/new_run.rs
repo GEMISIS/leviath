@@ -288,8 +288,11 @@ impl Dashboard {
     /// characters - one filters the agent list, the other is the task itself -
     /// so there is no letter left that could mean anything but text.
     ///
-    /// Turning it *on* asks first, once per sitting. Turning it off never asks:
-    /// nothing needs confirming about deciding to be asked more.
+    /// Turning it *on* asks first, every time. The dialog once carried a
+    /// "don't ask again" box, and a warning that appeared on one switch and
+    /// not the next read as the toggle misbehaving rather than remembering.
+    /// Turning it off never asks: nothing needs confirming about deciding to
+    /// be asked more.
     pub(super) fn toggle_new_run_yolo(&mut self) {
         if self.new_run_yolo {
             self.new_run_yolo = false;
@@ -299,21 +302,12 @@ impl Dashboard {
             );
             return;
         }
-        if self.yolo_warning_silenced {
-            self.new_run_yolo = true;
-            self.toast(
-                "Unattended ON: runs approve their own tool calls",
-                ToastLevel::Warning,
-            );
-            return;
-        }
         self.pending_confirm = Some((ConfirmAction::EnableYolo, yolo_warning()));
     }
 
-    /// Apply the answer to that warning.
-    pub(super) fn accept_yolo_warning(&mut self, silence: bool) {
+    /// Apply a yes to that warning.
+    pub(super) fn accept_yolo_warning(&mut self) {
         self.new_run_yolo = true;
-        self.yolo_warning_silenced = silence;
         self.toast(
             "Unattended ON: runs approve their own tool calls",
             ToastLevel::Warning,
@@ -471,7 +465,7 @@ impl Dashboard {
     }
 }
 
-/// The warning shown before the first unattended run of a sitting.
+/// The warning shown every time unattended is switched on.
 ///
 /// It says what `--yolo` does *and* what it does not: a run that still stops
 /// for a person reads as a hang to somebody who was told it would not stop, and
@@ -498,7 +492,6 @@ fn yolo_warning() -> Confirm {
         "Keep asking me",
     )
     .danger()
-    .with_remember("Don't ask again while this dashboard is open")
 }
 
 /// Workdir-relative paths of the files under `root`, sorted, at most `cap`.
@@ -1513,10 +1506,10 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::CONTROL)
     }
 
-    /// The first Ctrl-Y of a sitting warns rather than arming anything, and the
-    /// warning has to be accepted before the setting changes.
+    /// Ctrl-Y warns rather than arming anything, and the warning has to be
+    /// accepted before the setting changes.
     #[test]
-    fn the_first_unattended_toggle_asks_before_it_arms() {
+    fn the_unattended_toggle_asks_before_it_arms() {
         let mut dash = make_test_dashboard();
         dash.new_run_screen = true;
         assert!(!dash.new_run_yolo, "off until somebody says otherwise");
@@ -1561,10 +1554,7 @@ mod tests {
 
         dash.toasts.clear();
         dash.handle_key(ctrl(KeyCode::Char('y')));
-        assert!(
-            dash.pending_confirm.is_some(),
-            "not silenced, so it asks again"
-        );
+        assert!(dash.pending_confirm.is_some(), "it asks again");
         dash.handle_key(key(KeyCode::Enter));
         assert!(dash.pending_confirm.is_none());
         assert!(
@@ -1589,51 +1579,48 @@ mod tests {
         assert!(dash.new_run_help_bar_text().contains("unattended: on"));
     }
 
-    /// The box silences the warning for the rest of the sitting, and only for the
-    /// warning: the setting itself still has to be turned on each time.
+    /// Re-opening the screen resets the setting: this is the half that stops
+    /// somebody leaving it armed and forgetting.
     #[test]
-    fn dont_ask_again_lasts_the_session_but_does_not_arm_anything() {
+    fn reopening_the_screen_turns_unattended_off() {
         let mut dash = make_test_dashboard();
         dash.new_run_screen = true;
-
         dash.handle_key(ctrl(KeyCode::Char('y')));
-        // Space ticks the box, then Enter on the focused button would decline, so
-        // answer explicitly.
-        dash.handle_key(key(KeyCode::Char(' ')));
         dash.handle_key(key(KeyCode::Char('y')));
         assert!(dash.new_run_yolo);
-        assert!(dash.yolo_warning_silenced);
 
-        // Off, then on again: no second warning.
-        dash.handle_key(ctrl(KeyCode::Char('y')));
-        dash.handle_key(ctrl(KeyCode::Char('y')));
-        assert!(dash.pending_confirm.is_none(), "it was told not to ask");
-        assert!(dash.new_run_yolo);
-
-        // Re-opening the screen still resets the setting, silence or not: this is
-        // the half that stops somebody leaving it armed and forgetting.
         dash.open_new_run_screen();
         assert!(!dash.new_run_yolo);
-        assert!(dash.yolo_warning_silenced, "but the silence holds");
     }
 
-    /// A fresh dashboard has forgotten the silence entirely, which is what makes
-    /// it a session and not a preference.
+    /// Every switch to ON asks. Turning unattended off and on again is the
+    /// same decision as the first time, and a dialog that showed up once and
+    /// then never again read as the setting being broken rather than
+    /// remembered. Space on the dialog (which used to tick a "don't ask again"
+    /// box) changes nothing now.
     #[test]
-    fn a_new_dashboard_asks_again() {
+    fn every_switch_to_on_asks_even_after_the_box_was_ticked() {
         let mut dash = make_test_dashboard();
         dash.new_run_screen = true;
+
         dash.handle_key(ctrl(KeyCode::Char('y')));
+        assert!(dash.pending_confirm.is_some(), "first on: asks");
         dash.handle_key(key(KeyCode::Char(' ')));
         dash.handle_key(key(KeyCode::Char('y')));
-        assert!(dash.yolo_warning_silenced);
+        assert!(dash.new_run_yolo, "on");
 
-        let fresh = make_test_dashboard();
+        dash.handle_key(ctrl(KeyCode::Char('y')));
+        assert!(dash.pending_confirm.is_none(), "off never asks");
+        assert!(!dash.new_run_yolo, "off");
+
+        dash.handle_key(ctrl(KeyCode::Char('y')));
         assert!(
-            !fresh.yolo_warning_silenced,
-            "closing the dashboard is what expires it"
+            dash.pending_confirm.is_some(),
+            "second on: asks again, whatever was pressed on the first dialog"
         );
-        assert!(!fresh.new_run_yolo);
+        assert!(!dash.new_run_yolo, "and arms nothing until answered");
+        dash.handle_key(key(KeyCode::Char('y')));
+        assert!(dash.new_run_yolo);
     }
 
     /// The setting reaches the spawn rather than only the screen.
