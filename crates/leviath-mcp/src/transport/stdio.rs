@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use leviath_net::read_caps::{MCP_LINE_CAP, line_cap_message};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use super::Transport;
@@ -107,6 +108,9 @@ pub(crate) struct StdioTransport {
     writer: BufWriter<ChildStdin>,
     reader: BufReader<ChildStdout>,
     stderr: StderrTail,
+    /// The longest line the server may write before the read fails:
+    /// [`MCP_LINE_CAP`], lowered only by a test.
+    line_cap: usize,
 }
 
 impl StdioTransport {
@@ -172,10 +176,21 @@ impl StdioTransport {
         // Drained continuously: an unread stderr pipe fills its buffer and then
         // blocks the server mid-write, which looks exactly like a hang.
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr_pipe).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(line = %line, "MCP server stderr");
-                sink.push(line);
+            let mut reader = BufReader::new(stderr_pipe);
+            loop {
+                match read_line_capped(&mut reader, MCP_LINE_CAP, "the MCP server's stderr").await {
+                    Ok(Some(line)) => {
+                        tracing::debug!(line = %line, "MCP server stderr");
+                        sink.push(line);
+                    }
+                    // An oversized line was discarded past the cap; the pipe
+                    // is still open and still has to be drained, or the server
+                    // blocks on its next write and looks hung.
+                    Err(e) if e.kind() == std::io::ErrorKind::FileTooLarge => {
+                        tracing::debug!(error = %e, "MCP server stderr line dropped");
+                    }
+                    Ok(None) | Err(_) => break,
+                }
             }
         });
 
@@ -184,6 +199,7 @@ impl StdioTransport {
             writer: BufWriter::new(stdin),
             reader: BufReader::new(stdout),
             stderr,
+            line_cap: MCP_LINE_CAP,
         }
     }
 
@@ -225,20 +241,19 @@ impl StdioTransport {
 
     /// Read one frame from the server, or `Ok(None)` at end of stream.
     async fn read_frame(&mut self) -> anyhow::Result<Option<Value>> {
-        let mut line = String::new();
         // Propagated, never unwrapped: an `.expect()` here turns a server dying
-        // mid-read into a whole-daemon panic rather than one failed call.
-        // `read_line` also fails outright on non-UTF-8 output, which a server
-        // writing raw bytes or a mis-encoded log line really does produce.
-        let read = self
-            .reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| self.with_stderr(format!("Failed to read from MCP server: {e}")))?;
-
-        if read == 0 {
+        // mid-read into a whole-daemon panic rather than one failed call. The
+        // read also fails outright on non-UTF-8 output, which a server writing
+        // raw bytes or a mis-encoded log line really does produce, and on a
+        // line past the cap, which is a server streaming a file where a frame
+        // should be. The rest of an oversized line is discarded before the
+        // error is returned, so the next request reads the next frame.
+        let line = read_line_capped(&mut self.reader, self.line_cap, "the MCP server").await;
+        let Some(line) =
+            line.map_err(|e| self.with_stderr(format!("Failed to read from MCP server: {e}")))?
+        else {
             return Ok(None);
-        }
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             // Blank keepalive line; not a frame.
@@ -311,6 +326,73 @@ impl StdioTransport {
             .await
             .map_err(|e| anyhow::anyhow!("{}: {}", flush_err, e))?;
         Ok(())
+    }
+}
+
+/// Read one line, up to `cap` bytes of it, or `Ok(None)` at end of stream.
+///
+/// `read_line` grows its string until the newline arrives, so a peer that
+/// never sends one owns the daemon's heap. This reads through the buffer
+/// piecewise with a running total; past `cap` the rest of the line is drained
+/// and dropped, chunk by chunk, so nothing larger than the reader's own buffer
+/// is ever held, and the error (kind `FileTooLarge`) names the cap and
+/// `peer`. A trait object rather than `impl AsyncBufRead` so production and
+/// each test share one instantiation.
+async fn read_line_capped(
+    reader: &mut (dyn AsyncBufRead + Unpin + Send),
+    cap: usize,
+    peer: &str,
+) -> std::io::Result<Option<String>> {
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        let newline = available.iter().position(|&b| b == b'\n');
+        let take = newline.map_or(available.len(), |i| i + 1);
+        if line.len() + take > cap {
+            reader.consume(take);
+            if newline.is_none() {
+                discard_to_newline(reader).await?;
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                line_cap_message(cap, peer),
+            ));
+        }
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if newline.is_some() {
+            break;
+        }
+    }
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Consume through the next newline (or the end of the stream), keeping none
+/// of it.
+async fn discard_to_newline(reader: &mut (dyn AsyncBufRead + Unpin + Send)) -> std::io::Result<()> {
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(());
+        }
+        match available.iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                reader.consume(i + 1);
+                return Ok(());
+            }
+            None => {
+                let len = available.len();
+                reader.consume(len);
+            }
+        }
     }
 }
 
@@ -880,6 +962,192 @@ sys.stdout.buffer.flush()
             .err()
             .expect("invalid UTF-8 should error");
         assert!(err.to_string().contains("Failed to read"), "got: {err}");
+    }
+
+    /// A server that answers with a 2 MiB line fails that one call with the
+    /// cap and the peer named, and the connection is still good for the next:
+    /// the rest of the oversized line was drained, not left in the pipe to
+    /// be read as the next reply.
+    #[tokio::test]
+    async fn an_oversized_line_fails_the_call_and_the_next_one_still_works() {
+        let _guard = always_on_tracing_guard();
+        let script = r#"
+import sys, json
+first = True
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    req = json.loads(line)
+    if first:
+        first = False
+        pad = "x" * (2 * 1024 * 1024)
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": {"pad": pad}}) + "\n")
+    else:
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": {"short": True}}) + "\n")
+    sys.stdout.flush()
+"#;
+        let mut t = spawn_stub(script).await;
+        let err = t
+            .send_request(&init_request(), DEFAULT_REQUEST_TIMEOUT)
+            .await
+            .err()
+            .expect("a 2 MiB line must fail the call");
+        assert!(
+            err.to_string().contains(
+                "Failed to read from MCP server: line exceeded 1 MiB from the MCP server"
+            ),
+            "got: {err}"
+        );
+        let second = JsonRpcRequest::request(2, "tools/list", serde_json::json!({}));
+        let response = t
+            .send_request(&second, DEFAULT_REQUEST_TIMEOUT)
+            .await
+            .expect("the server is still usable after an oversized line");
+        assert_eq!(
+            response.into_result().expect("a result"),
+            serde_json::json!({"short": true})
+        );
+    }
+
+    /// A stderr line past the cap is dropped, and the drain keeps going: the
+    /// line after it still reaches the diagnostic, and the pipe never fills.
+    #[tokio::test]
+    async fn an_oversized_stderr_line_is_dropped_and_the_drain_continues() {
+        let _guard = always_on_tracing_guard();
+        let script = r#"
+import sys
+sys.stderr.write("y" * (2 * 1024 * 1024) + "\n")
+sys.stderr.write("after the flood\n")
+sys.stderr.flush()
+sys.stdin.readline()
+sys.stdout.close()
+"#;
+        let mut t = spawn_stub(script).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let err = t
+            .send_request(&init_request(), DEFAULT_REQUEST_TIMEOUT)
+            .await
+            .err()
+            .expect("closed stdout should error");
+        let msg = err.to_string();
+        assert!(msg.contains("after the flood"), "got: {msg}");
+        assert!(
+            !msg.contains("yyyy"),
+            "the oversized line is not kept: {msg}"
+        );
+    }
+
+    /// The capped reader on an in-memory stream, chunked four bytes at a time
+    /// so an oversized line spans several `fill_buf` rounds.
+    #[tokio::test]
+    async fn read_line_capped_drains_past_the_cap_and_reads_the_next_line() {
+        let data: &[u8] = b"abcdefgh\nnext\n";
+        let mut reader = BufReader::with_capacity(4, data);
+        let err = read_line_capped(&mut reader, 5, "p")
+            .await
+            .expect_err("nine bytes overrun a cap of five");
+        assert_eq!(err.kind(), std::io::ErrorKind::FileTooLarge);
+        assert_eq!(err.to_string(), "line exceeded 5 bytes from p");
+        assert_eq!(
+            read_line_capped(&mut reader, 5, "p")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("next\n")
+        );
+        assert!(
+            read_line_capped(&mut reader, 5, "p")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_line_capped_with_the_newline_in_the_same_chunk_needs_no_drain() {
+        let data: &[u8] = b"abcdefgh\nnext\n";
+        let mut reader = BufReader::with_capacity(64, data);
+        let err = read_line_capped(&mut reader, 5, "p").await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::FileTooLarge);
+        assert_eq!(
+            read_line_capped(&mut reader, 5, "p")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("next\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_line_capped_drain_stops_at_end_of_stream() {
+        let data: &[u8] = b"abcdefgh";
+        let mut reader = BufReader::with_capacity(4, data);
+        let err = read_line_capped(&mut reader, 5, "p").await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::FileTooLarge);
+        assert!(
+            read_line_capped(&mut reader, 5, "p")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_line_capped_returns_a_final_line_with_no_newline() {
+        let data: &[u8] = b"abc";
+        let mut reader = BufReader::with_capacity(2, data);
+        assert_eq!(
+            read_line_capped(&mut reader, 5, "p")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("abc")
+        );
+    }
+
+    /// A reader that hands out `chunks` and then fails, so the three `?`s on
+    /// `fill_buf` (the first read, the read inside the drain, and the drain's
+    /// failure surfacing through the cap arm) are each reachable.
+    struct ChunksThenError(std::collections::VecDeque<&'static [u8]>);
+
+    impl tokio::io::AsyncRead for ChunksThenError {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            match self.0.pop_front() {
+                Some(chunk) => {
+                    buf.put_slice(chunk);
+                    Poll::Ready(Ok(()))
+                }
+                None => Poll::Ready(Err(std::io::Error::other("pipe broke"))),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn read_line_capped_surfaces_a_read_error() {
+        let mut reader = BufReader::new(ChunksThenError(Default::default()));
+        let err = read_line_capped(&mut reader, 5, "p").await.unwrap_err();
+        assert_eq!(err.to_string(), "pipe broke");
+    }
+
+    #[tokio::test]
+    async fn read_line_capped_surfaces_a_read_error_while_draining() {
+        let mut reader = BufReader::new(ChunksThenError(
+            [&b"abcdefgh"[..], &b"ijkl"[..]].into_iter().collect(),
+        ));
+        let err = read_line_capped(&mut reader, 5, "p").await.unwrap_err();
+        assert_eq!(err.to_string(), "pipe broke");
+    }
+
+    #[tokio::test]
+    async fn read_line_capped_rejects_non_utf8() {
+        let data: &[u8] = b"\xff\xfe\n";
+        let mut reader = BufReader::new(data);
+        let err = read_line_capped(&mut reader, 5, "p").await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[tokio::test]

@@ -375,8 +375,9 @@ impl Provider for OpenAIProvider {
         crate::openai_compat::make_streaming(&mut body);
         let response = self.post_chat(request, body).await?;
 
+        let peer = leviath_net::read_caps::peer_of(&response);
         let byte_stream = response.bytes_stream();
-        let stream = openai_sse_stream(byte_stream);
+        let stream = openai_sse_stream(byte_stream).sent_by(peer);
 
         Ok(Box::pin(stream))
     }
@@ -533,10 +534,12 @@ impl OpenAIProvider {
 
         let status = response.status();
         if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
+            let error_body = leviath_net::read_caps::read_text_capped(
+                response,
+                leviath_net::read_caps::JSON_BODY_CAP,
+            )
+            .await
+            .unwrap_or_else(|_| "unknown error".to_string());
             return Err(ProviderError::ApiError(format!(
                 "HTTP {}: {}",
                 status, error_body

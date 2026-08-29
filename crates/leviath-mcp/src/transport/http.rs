@@ -13,6 +13,9 @@
 //! Streamable is tried first; a `404`/`405` on the POST means the server only
 //! implements the legacy shape, and the connection transparently falls back.
 
+use leviath_net::read_caps::{
+    JSON_BODY_CAP, STREAM_FRAME_CAP, frame_within_cap, peer_of, read_text_capped,
+};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -356,8 +359,7 @@ impl HttpTransport {
 
     /// Read a response whose body is a single JSON document.
     async fn read_json_reply(response: reqwest::Response) -> anyhow::Result<JsonRpcResponse> {
-        let body = response
-            .text()
+        let body = read_text_capped(response, JSON_BODY_CAP)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to read MCP response body: {}", e))?;
         let frame: Value = serde_json::from_str(&body)
@@ -382,21 +384,22 @@ impl HttpTransport {
         id: Option<u64>,
     ) -> anyhow::Result<JsonRpcResponse> {
         let mut buffer = String::new();
+        let peer = peer_of(&response);
         let mut stream = response.bytes_stream();
 
         loop {
-            let event =
-                next_sse_event(&mut stream, &mut buffer)
-                    .await
-                    .map_err(|end| match end {
-                        SseEnd::NotUtf8(e) => {
-                            anyhow::anyhow!("MCP event stream is not UTF-8: {}", e)
-                        }
-                        SseEnd::Failed(e) => anyhow::anyhow!("MCP event stream failed: {}", e),
-                        SseEnd::Closed => {
-                            anyhow::anyhow!("MCP event stream ended before answering the request")
-                        }
-                    })?;
+            let event = next_sse_event(&mut stream, &mut buffer, STREAM_FRAME_CAP, &peer)
+                .await
+                .map_err(|end| match end {
+                    SseEnd::NotUtf8(e) => {
+                        anyhow::anyhow!("MCP event stream is not UTF-8: {}", e)
+                    }
+                    SseEnd::Failed(e) => anyhow::anyhow!("MCP event stream failed: {}", e),
+                    SseEnd::TooLarge(msg) => anyhow::anyhow!("MCP event {}", msg),
+                    SseEnd::Closed => {
+                        anyhow::anyhow!("MCP event stream ended before answering the request")
+                    }
+                })?;
             let frame: Value = serde_json::from_str(&event.data)
                 .map_err(|e| anyhow::anyhow!("Failed to parse JSON-RPC response: {}", e))?;
             if let Some(response) = self.handle_frame(frame, id).await? {
@@ -618,7 +621,9 @@ fn response_matches(response: &JsonRpcResponse, id: Option<u64>) -> bool {
 
 /// Build an error from a failed HTTP status, including the body if readable.
 async fn error_for_status(status: StatusCode, response: reqwest::Response) -> anyhow::Error {
-    let body = response.text().await.unwrap_or_default();
+    let body = read_text_capped(response, JSON_BODY_CAP)
+        .await
+        .unwrap_or_default();
     if body.is_empty() {
         anyhow::anyhow!("MCP server returned HTTP {}", status)
     } else {
@@ -629,10 +634,11 @@ async fn error_for_status(status: StatusCode, response: reqwest::Response) -> an
 /// Decode an SSE response, forwarding decoded events onto `tx`.
 async fn read_event_stream(response: reqwest::Response, tx: mpsc::UnboundedSender<LegacyEvent>) {
     let mut buffer = String::new();
+    let peer = peer_of(&response);
     let mut stream = response.bytes_stream();
 
     loop {
-        let event = match next_sse_event(&mut stream, &mut buffer).await {
+        let event = match next_sse_event(&mut stream, &mut buffer, STREAM_FRAME_CAP, &peer).await {
             Ok(event) => event,
             Err(SseEnd::NotUtf8(e)) => {
                 tracing::warn!(error = %e, "MCP event stream is not UTF-8");
@@ -640,6 +646,10 @@ async fn read_event_stream(response: reqwest::Response, tx: mpsc::UnboundedSende
             }
             Err(SseEnd::Failed(e)) => {
                 tracing::warn!(error = %e, "MCP event stream failed");
+                return;
+            }
+            Err(SseEnd::TooLarge(msg)) => {
+                tracing::warn!(error = %msg, "MCP event stream stopped at the frame cap");
                 return;
             }
             Err(SseEnd::Closed) => return,
@@ -668,6 +678,9 @@ enum SseEnd {
     NotUtf8(std::str::Utf8Error),
     /// The HTTP body stream itself failed.
     Failed(reqwest::Error),
+    /// A partial event grew past the frame cap; the message names the cap
+    /// and the peer.
+    TooLarge(String),
     /// The server closed the body.
     Closed,
 }
@@ -683,6 +696,8 @@ enum SseEnd {
 async fn next_sse_event<S, B>(
     stream: &mut S,
     buffer: &mut String,
+    frame_cap: usize,
+    peer: &str,
 ) -> Result<super::sse::SseEvent, SseEnd>
 where
     S: StreamExt<Item = Result<B, reqwest::Error>> + Unpin,
@@ -693,6 +708,12 @@ where
             if !event.data.is_empty() {
                 return Ok(event);
             }
+        }
+        // Measured once the whole events are off the front, so this is one
+        // partial event: a peer that never sends the blank line.
+        if let Err(msg) = frame_within_cap(buffer.len(), frame_cap, peer) {
+            buffer.clear();
+            return Err(SseEnd::TooLarge(msg));
         }
         match stream.next().await {
             Some(Ok(chunk)) => match std::str::from_utf8(chunk.as_ref()) {
@@ -1768,6 +1789,86 @@ mod tests {
             err.to_string().contains("event stream failed"),
             "got: {err}"
         );
+    }
+
+    /// A reply stream that never sends the blank line ending its event is
+    /// stopped at the frame cap, with the cap and the peer in the error.
+    #[tokio::test]
+    async fn a_reply_event_past_the_frame_cap_is_an_error() {
+        let _guard = always_on_tracing_guard();
+        let app = Router::new().route(
+            "/mcp",
+            post(|| async {
+                (
+                    [(CONTENT_TYPE, "text/event-stream")],
+                    format!("data: {}", "x".repeat(STREAM_FRAME_CAP + 1)),
+                )
+                    .into_response()
+            }),
+        );
+        let url = format!("{}/mcp", serve(app).await);
+        let mut t = transport(&url);
+        let err = t
+            .send_request(&init(), DEFAULT_REQUEST_TIMEOUT)
+            .await
+            .err()
+            .expect("an event past the cap must fail");
+        assert!(
+            err.to_string()
+                .contains("MCP event stream frame exceeded 8 MiB from 127.0.0.1"),
+            "got: {err}"
+        );
+    }
+
+    /// The same overrun on the legacy server-to-client stream stops the pump,
+    /// which the waiting request sees as a stream that ended.
+    #[tokio::test]
+    async fn a_legacy_event_past_the_frame_cap_ends_the_stream() {
+        let _guard = always_on_tracing_guard();
+        let app = legacy_router(get(|| async {
+            (
+                [(CONTENT_TYPE, "text/event-stream")],
+                format!("data: {}", "x".repeat(STREAM_FRAME_CAP + 1)),
+            )
+                .into_response()
+        }));
+        let url = format!("{}/sse", serve(app).await);
+        let mut t = transport(&url);
+        let err = t
+            .send_request(&init(), DEFAULT_REQUEST_TIMEOUT)
+            .await
+            .err()
+            .expect("a stream cut at the cap never names an endpoint");
+        assert!(
+            err.to_string().contains("before naming a POST endpoint"),
+            "got: {err}"
+        );
+    }
+
+    /// The framing helper itself, with a cap small enough to overrun in one
+    /// chunk: the buffer is measured only after whole events are cut off it,
+    /// and is released once the cap fires.
+    #[tokio::test]
+    async fn next_sse_event_measures_the_partial_event_against_the_cap() {
+        let chunks: Vec<Result<&[u8], reqwest::Error>> = vec![
+            Ok(b"data: ok\n\n"),
+            Ok(b"data: this partial event is longer than the cap"),
+        ];
+        let mut stream = futures_util::stream::iter(chunks);
+        let mut buffer = String::new();
+        let first = next_sse_event(&mut stream, &mut buffer, 16, "mcp.example")
+            .await
+            .ok()
+            .expect("a whole event under the cap");
+        assert_eq!(first.data, "ok");
+        let err = next_sse_event(&mut stream, &mut buffer, 16, "mcp.example")
+            .await
+            .expect_err("the partial event overruns the cap");
+        assert!(
+            matches!(err, SseEnd::TooLarge(ref msg) if msg == "stream frame exceeded 16 bytes from mcp.example"),
+            "got a different ending"
+        );
+        assert!(buffer.is_empty(), "the oversized partial event is released");
     }
 
     #[tokio::test]

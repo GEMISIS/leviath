@@ -17,6 +17,7 @@ pub(crate) mod metadata;
 mod pkce;
 pub mod store;
 
+use leviath_net::read_caps::{JSON_BODY_CAP, read_body_capped, read_text_capped};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -544,17 +545,20 @@ impl OAuthClient {
             .map_err(|e| anyhow::anyhow!("client registration request failed: {}", e))?;
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+            let text = read_text_capped(response, JSON_BODY_CAP)
+                .await
+                .unwrap_or_default();
             return Err(anyhow::anyhow!(
                 "client registration failed with HTTP {}: {}",
                 status,
                 text.trim()
             ));
         }
-        let registration: RegistrationResponse = response
-            .json()
+        let value = read_json_body(response)
             .await
-            .map_err(|e| anyhow::anyhow!("failed to parse registration response: {}", e))?;
+            .map_err(registration_parse_error)?;
+        let registration: RegistrationResponse =
+            serde_json::from_value(value).map_err(registration_parse_error)?;
         Ok(registration.client_id)
     }
 
@@ -594,7 +598,7 @@ impl OAuthClient {
         if !response.status().is_success() {
             anyhow::bail!("HTTP {}", response.status());
         }
-        Ok(response.json().await?)
+        read_json_body(response).await
     }
 
     /// POST a form and return the JSON response as a value, surfacing an OAuth
@@ -607,7 +611,9 @@ impl OAuthClient {
     ) -> anyhow::Result<serde_json::Value> {
         let response = self.http.post(url).form(params).send().await?;
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = read_text_capped(response, JSON_BODY_CAP)
+            .await
+            .unwrap_or_default();
         if !status.is_success() {
             anyhow::bail!("HTTP {}: {}", status, body.trim());
         }
@@ -849,6 +855,22 @@ async fn write_response(stream: &mut tokio::net::TcpStream, status: &str, messag
     );
     let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.flush().await;
+}
+
+/// A body read through the shared cap and parsed as JSON.
+///
+/// The read and the parse fail separately (a connection that dropped, a body
+/// that is not JSON), and both are reachable from a test through a raw
+/// socket; a named function rather than two closures so each caller adds no
+/// uncovered region of its own.
+async fn read_json_body(response: reqwest::Response) -> anyhow::Result<serde_json::Value> {
+    let body = read_body_capped(response, JSON_BODY_CAP).await?;
+    Ok(serde_json::from_slice(&body)?)
+}
+
+/// The context every failure to read or parse a registration reply carries.
+fn registration_parse_error(e: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!("failed to parse registration response: {}", e)
 }
 
 #[cfg(test)]
@@ -2382,6 +2404,88 @@ mod tests {
                 .post_form("http://127.0.0.1:1/token", &[("a", "b")])
                 .await
                 .is_err()
+        );
+    }
+
+    /// One connection answering with `raw`, for the failures axum cannot
+    /// produce: a body shorter than its `Content-Length`.
+    async fn serve_raw(raw: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock.write_all(raw).await;
+            let _ = sock.shutdown().await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn get_json_errors_on_a_body_that_stops_early() {
+        let base = serve_raw(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\nConnection: close\r\n\r\n{\"a\":",
+        )
+        .await;
+        let err = OAuthClient::new()
+            .get_json(&format!("{base}/x"))
+            .await
+            .expect_err("a truncated body must fail");
+        assert!(
+            !err.to_string().contains("expected"),
+            "a read failure, not a parse one: {err}"
+        );
+    }
+
+    fn registration_meta(endpoint: &str) -> AuthServerMetadata {
+        serde_json::from_value(serde_json::json!({
+            "issuer": "https://x",
+            "authorization_endpoint": "https://x/a",
+            "token_endpoint": "https://x/t",
+            "registration_endpoint": endpoint,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn register_errors_on_a_body_that_stops_early() {
+        let base = serve_raw(
+            b"HTTP/1.1 201 Created\r\nContent-Length: 500\r\nConnection: close\r\n\r\n{\"c",
+        )
+        .await;
+        let err = OAuthClient::new()
+            .register(
+                &registration_meta(&format!("{base}/register")),
+                "http://127.0.0.1:5000/callback",
+            )
+            .await
+            .expect_err("a truncated registration reply must fail");
+        assert!(
+            err.to_string()
+                .contains("failed to parse registration response"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_errors_on_a_reply_without_a_client_id() {
+        let base = serve_raw(
+            b"HTTP/1.1 201 Created\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"other\":1}",
+        )
+        .await;
+        let err = OAuthClient::new()
+            .register(
+                &registration_meta(&format!("{base}/register")),
+                "http://127.0.0.1:5000/callback",
+            )
+            .await
+            .expect_err("a reply with no client_id must fail");
+        assert!(
+            err.to_string()
+                .contains("failed to parse registration response"),
+            "got: {err}"
         );
     }
 

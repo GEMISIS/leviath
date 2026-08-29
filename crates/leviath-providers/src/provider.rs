@@ -6,6 +6,7 @@ pub use crate::capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOv
 pub use crate::failure::FailureKind;
 use async_trait::async_trait;
 use futures_core::Stream;
+use leviath_net::read_caps::{BodyReadError, JSON_BODY_CAP, read_body_capped, read_text_capped};
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use thiserror::Error;
@@ -1042,7 +1043,11 @@ pub(crate) async fn check_http_response(
         });
     }
     if !status.is_success() {
-        let error_body = response.text().await.unwrap_or_else(|e| e.to_string());
+        // Capped like a good body: an error page is a body too, and a gateway
+        // that answers a 502 with its whole access log is still a peer.
+        let error_body = read_text_capped(response, JSON_BODY_CAP)
+            .await
+            .unwrap_or_else(|e| e.to_string());
         // The kind rides in front of the status so it survives every layer that
         // only passes strings - including a Rhai script, which sees the message
         // and nothing else. A bare status left "their endpoint is down" and
@@ -1089,11 +1094,39 @@ pub(crate) async fn check_http_response(
 pub(crate) async fn decode_json<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,
 ) -> Result<T> {
-    let bytes = response
-        .bytes()
+    decode_json_capped(response, JSON_BODY_CAP).await
+}
+
+/// [`decode_json`] with the body cap as a parameter, so a test can hit the
+/// cap with a few kilobytes rather than 64 MiB.
+///
+/// A body past the cap is [`ProviderError::InvalidResponse`]: the same
+/// request would draw the same oversized answer, so retrying it only spends
+/// the attempts, and the message names the cap and the peer.
+pub(crate) async fn decode_json_capped<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    cap: usize,
+) -> Result<T> {
+    let bytes = read_body_capped(response, cap)
         .await
-        .map_err(|e| ProviderError::transport("reading the response body", &e))?;
+        .map_err(ProviderError::from)?;
     serde_json::from_slice(&bytes).map_err(|e| ProviderError::InvalidResponse(e.to_string()))
+}
+
+impl From<BodyReadError> for ProviderError {
+    /// Bytes that never arrived are a transport failure (retried, counted
+    /// against the breaker); a body past the cap is the provider's own fault
+    /// and permanent, since the same request draws the same oversized answer.
+    fn from(e: BodyReadError) -> Self {
+        match e {
+            BodyReadError::Transport(e) => {
+                ProviderError::transport("reading the response body", &e)
+            }
+            too_large @ BodyReadError::TooLarge { .. } => {
+                ProviderError::InvalidResponse(too_large.to_string())
+            }
+        }
+    }
 }
 
 // Helper module for single-item streams
@@ -2596,6 +2629,30 @@ mod tests {
             err.unavailable_reason(),
             None,
             "the provider is fine: {err}"
+        );
+    }
+
+    /// A body that keeps coming past the cap stops the read where the cap
+    /// is, and the error says which cap and which peer.
+    #[tokio::test]
+    async fn decode_json_refuses_a_body_past_the_cap() {
+        let mut raw = b"HTTP/1.1 200 OK\r\nContent-Length: 20000\r\n\r\n".to_vec();
+        raw.extend(std::iter::repeat_n(b'[', 20000));
+        let url = serve_raw(raw.leak()).await;
+        let client = build_http_client(None).expect("an HTTPS client builds in tests");
+        let response = client.get(url).send().await.expect("headers arrive");
+
+        let err = decode_json_capped::<serde_json::Value>(response, 4096)
+            .await
+            .expect_err("a body past the cap cannot decode");
+
+        assert_eq!(
+            err.to_string(),
+            "Invalid response: response body exceeded 4096 bytes from 127.0.0.1"
+        );
+        assert!(
+            !err.is_transient(),
+            "the same request draws the same body: {err}"
         );
     }
 

@@ -23,6 +23,8 @@
 //! resolve privately, and redirects), which is the whole of the reachable
 //! surface for a model that is picking URLs rather than running an attack.
 
+pub mod read_caps;
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::time::Duration;
 

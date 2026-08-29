@@ -18,6 +18,9 @@ readme = "README.md"
 # holds plain serializable data with no async dependencies. Depending on
 # Leviath's data types cost a full HTTP client and everything under it.
 reqwest = { workspace = true }
+# The decoder `reqwest::Response::text` uses, so a capped read of a body
+# declaring `charset=` decodes it the same way the uncapped one did.
+encoding_rs = "0.8"
 tracing = { workspace = true }
 url = { workspace = true }
 

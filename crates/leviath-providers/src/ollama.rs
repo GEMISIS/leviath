@@ -357,7 +357,7 @@ impl OllamaProvider {
         else {
             return HashMap::new();
         };
-        let Ok(body) = response.json::<serde_json::Value>().await else {
+        let Ok(body) = crate::provider::decode_json::<serde_json::Value>(response).await else {
             return HashMap::new();
         };
         body.get("models")
@@ -697,8 +697,9 @@ impl Provider for OllamaProvider {
         .await
         .map_err(|e| self.explain_truncation(e, request))?;
 
+        let peer = leviath_net::read_caps::peer_of(&response);
         let byte_stream = response.bytes_stream();
-        let stream = ollama_ndjson_stream(byte_stream);
+        let stream = ollama_ndjson_stream(byte_stream).sent_by(peer);
 
         Ok(Box::pin(stream))
     }

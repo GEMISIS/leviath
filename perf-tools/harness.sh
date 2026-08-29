@@ -6,6 +6,8 @@
 #   LEVIATH_SKIP_DOTENV  the repo-root .env holds a real key; never load it
 #   OPENAI_*       point the native OpenAI provider at mock.py
 #   LV_RUNS_DIR    optional; forwarded as LEVIATH_RUNS_DIR (the fake-runs corpus)
+#   LV_MOCK_OVERSIZE_MIB  optional; forwarded to mock.py, which then answers
+#                  every completion with one frame that never closes
 #
 # Nothing here reads the caller's environment: `env -i` first, then exactly
 # these names, so a probe cannot accidentally reach a real provider.
@@ -29,5 +31,8 @@ exec env -i \
   OPENAI_BASE_URL="http://127.0.0.1:$LV_MOCK_PORT/v1" \
   TERM="${TERM:-xterm-256color}" \
   ${LV_RUNS_DIR:+LEVIATH_RUNS_DIR="$LV_RUNS_DIR"} \
+  ${LV_MOCK_OVERSIZE_MIB:+LV_MOCK_OVERSIZE_MIB="$LV_MOCK_OVERSIZE_MIB"} \
+  LV_MOCK_PORT="$LV_MOCK_PORT" \
+  ${LV_SERVE_PORT:+LV_SERVE_PORT="$LV_SERVE_PORT"} \
   LV_BIN="$LV_BIN" \
   "$@"

@@ -14,6 +14,7 @@ readme = "README.md"
 
 [dependencies]
 leviath-core = { workspace = true }
+leviath-net = { workspace = true }
 leviath-sys = { workspace = true }
 tokio = { workspace = true, features = ["process", "io-util", "sync", "macros", "rt"] }
 serde = { workspace = true }

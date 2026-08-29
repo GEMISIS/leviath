@@ -11,6 +11,7 @@
 //! finished response apart into one chunk.
 
 use super::*;
+use leviath_net::read_caps::{STREAM_FRAME_CAP, frame_within_cap};
 
 /// The raw bytes a provider's streaming endpoint sends back.
 ///
@@ -50,6 +51,12 @@ pub struct FramedStream {
     buffer: String,
     parse: FrameFn,
     flush: Option<FlushFn>,
+    /// The most `buffer` may hold between frames before the stream fails;
+    /// [`STREAM_FRAME_CAP`] in production, smaller in the test that hits it.
+    frame_cap: usize,
+    /// Who the bytes are from, for the cap error. The host, once a provider
+    /// has named it with [`FramedStream::sent_by`].
+    peer: String,
 }
 
 impl FramedStream {
@@ -63,7 +70,23 @@ impl FramedStream {
             buffer: String::new(),
             parse,
             flush,
+            frame_cap: STREAM_FRAME_CAP,
+            peer: "the provider".to_string(),
         }
+    }
+
+    /// Name the peer the cap error reports; every provider passes the host
+    /// it connected to.
+    pub fn sent_by(mut self, peer: String) -> Self {
+        self.peer = peer;
+        self
+    }
+
+    /// Lower the frame cap, so a test can overrun it with a few kilobytes.
+    #[cfg(test)]
+    pub fn with_frame_cap(mut self, cap: usize) -> Self {
+        self.frame_cap = cap;
+        self
     }
 }
 
@@ -83,6 +106,17 @@ impl Stream for FramedStream {
                 std::task::Poll::Ready(Some(Ok(bytes))) => {
                     if let Ok(text) = std::str::from_utf8(&bytes) {
                         this.buffer.push_str(text);
+                    }
+                    // Checked after the frames were cut (the top of the
+                    // loop), so what is measured is one partial frame: a peer
+                    // that never sends a boundary, not a fast one.
+                    if let Err(msg) =
+                        frame_within_cap(this.buffer.len(), this.frame_cap, &this.peer)
+                    {
+                        this.buffer.clear();
+                        return std::task::Poll::Ready(Some(Err(ProviderError::InvalidResponse(
+                            msg,
+                        ))));
                     }
                 }
                 std::task::Poll::Ready(Some(Err(e))) => {
@@ -253,6 +287,34 @@ mod tests {
 
     /// The whole point of the fold: a turn arrives in pieces and the runtime is
     /// handed one finished answer, indistinguishable from a buffered one.
+    /// A peer that streams forever without a frame boundary is stopped at
+    /// the cap with an error naming it, and the buffer it grew is let go.
+    #[tokio::test]
+    async fn a_frame_that_never_closes_fails_at_the_cap() {
+        use tokio_stream::StreamExt as _;
+        // 100 chunks of 100 bytes, no `\n\n` anywhere: one frame, 10 KB.
+        let chunks = (0..100)
+            .map(|_| Ok::<bytes::Bytes, reqwest::Error>(bytes::Bytes::from(vec![b'x'; 100])));
+        let mut stream = FramedStream::new(
+            tokio_stream::iter(chunks),
+            Box::new(|_buffer: &mut String| None),
+            None,
+        )
+        .sent_by("api.example".to_string())
+        .with_frame_cap(4096);
+
+        let err = stream
+            .next()
+            .await
+            .expect("the stream yields the cap error")
+            .expect_err("it is an error");
+        assert_eq!(
+            err.to_string(),
+            "Invalid response: stream frame exceeded 4096 bytes from api.example"
+        );
+        assert!(stream.buffer.is_empty(), "the oversized frame is released");
+    }
+
     #[tokio::test]
     async fn collect_stream_reassembles_text_and_a_tool_call() {
         let stream = chunks(vec![

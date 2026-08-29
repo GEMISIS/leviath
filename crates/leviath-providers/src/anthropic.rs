@@ -862,8 +862,9 @@ impl Provider for AnthropicProvider {
         )
         .await?;
 
+        let peer = leviath_net::read_caps::peer_of(&response);
         let byte_stream = response.bytes_stream();
-        let stream = anthropic_sse_stream(byte_stream);
+        let stream = anthropic_sse_stream(byte_stream).sent_by(peer);
 
         Ok(Box::pin(stream))
     }
@@ -1018,10 +1019,24 @@ impl AnthropicProvider {
         // fixable by the operator, the other by waiting.
         let response = crate::provider::check_http_response(response, None).await?;
 
-        response
-            .json()
-            .await
-            .map_err(|e| ProviderError::transport("reaching the provider", &e))
+        // Read through the cap; a body past it is `InvalidResponse` like any
+        // other provider's. A listing that arrived and does not parse keeps
+        // the classification it always had here (a transport failure, so the
+        // caller retries it) rather than picking up `decode_json`'s: this
+        // change is about the size of the read, not what a bad listing means.
+        let bytes = leviath_net::read_caps::read_body_capped(
+            response,
+            leviath_net::read_caps::JSON_BODY_CAP,
+        )
+        .await
+        .map_err(ProviderError::from)?;
+        serde_json::from_slice(&bytes).map_err(|e| {
+            ProviderError::labelled(
+                crate::failure::FailureKind::ConnectionDropped,
+                "reaching the provider",
+                &e.to_string(),
+            )
+        })
     }
 }
 
@@ -3346,6 +3361,15 @@ mod tests {
         let provider = provider_with_url(url);
         let msg = provider.list_models().await.unwrap_err().to_string();
         assert!(msg.contains("401"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn list_models_body_that_stops_early_is_a_transport_failure() {
+        let url = spawn_mock_server_truncated_error_body(200, "OK").await;
+        let provider = provider_with_url(url);
+        let err = provider.list_models().await.unwrap_err();
+        assert!(err.is_transient(), "{err}");
+        assert!(err.to_string().starts_with("Request failed:"), "{err}");
     }
 
     #[tokio::test]

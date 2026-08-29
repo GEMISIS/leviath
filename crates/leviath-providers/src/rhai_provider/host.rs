@@ -7,6 +7,9 @@
 //! tests inject a fake so no socket is ever bound. Rate limiting lives in the
 //! provider (around the executor), not here - the executor is pure transport.
 
+use leviath_net::read_caps::{
+    BodyReadError, JSON_BODY_CAP, STREAM_FRAME_CAP, frame_within_cap, peer_of, read_text_capped,
+};
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
@@ -133,6 +136,9 @@ pub struct ReqwestExecutor {
     /// An HTTP/1.1-only client, used only to retry an HTTP/2 protocol fault.
     /// `None` when one could not be built, which just means no fallback.
     h1_client: Option<reqwest::Client>,
+    /// The most of a buffered body `execute` reads: [`JSON_BODY_CAP`],
+    /// lowered only by a test.
+    body_cap: usize,
 }
 
 impl ReqwestExecutor {
@@ -143,7 +149,15 @@ impl ReqwestExecutor {
         Self {
             client,
             h1_client: None,
+            body_cap: JSON_BODY_CAP,
         }
+    }
+
+    /// Lower the body cap, so a test can overrun it with a few kilobytes.
+    #[cfg(test)]
+    pub(crate) fn with_body_cap(mut self, cap: usize) -> Self {
+        self.body_cap = cap;
+        self
     }
 
     /// An executor that can fall back to `h1_client` when an origin negotiates
@@ -153,6 +167,7 @@ impl ReqwestExecutor {
         Self {
             client,
             h1_client: Some(h1_client),
+            body_cap: JSON_BODY_CAP,
         }
     }
 
@@ -224,7 +239,9 @@ async fn classify(resp: reqwest::Response) -> Result<reqwest::Response, HostHttp
         return Err(HostHttpError::RateLimited { retry_after });
     }
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_else(|e| e.to_string());
+        let body = read_text_capped(resp, JSON_BODY_CAP)
+            .await
+            .unwrap_or_else(|e| e.to_string());
         return Err(HostHttpError::Api(format!("HTTP {status}: {body}")));
     }
     Ok(resp)
@@ -381,10 +398,14 @@ impl HttpExecutor for ReqwestExecutor {
         if let Some(reason) = unsupported_content_type(content_type.as_deref()) {
             return Err(HostHttpError::Api(format!("unreadable body: {reason}")));
         }
-        let body = resp
-            .text()
+        let body = read_text_capped(resp, self.body_cap)
             .await
-            .map_err(|e| HostHttpError::Transport(e.to_string()))?;
+            .map_err(|e| match e {
+                BodyReadError::Transport(e) => HostHttpError::Transport(e.to_string()),
+                too_large @ BodyReadError::TooLarge { .. } => {
+                    HostHttpError::Api(too_large.to_string())
+                }
+            })?;
         // Named rather than returned. A caller cannot tell mojibake from a page
         // that genuinely says very little, and a model handed either will cite
         // whatever it remembers being at that URL.
@@ -420,16 +441,23 @@ impl HttpExecutor for ReqwestExecutor {
                 return;
             }
         };
-        forward_sse(resp.bytes_stream(), events).await;
+        let peer = peer_of(&resp);
+        forward_sse(resp.bytes_stream(), events, STREAM_FRAME_CAP, &peer).await;
     }
 }
 
 /// Drain a byte stream as Server-Sent Events, forwarding each `data:` payload
 /// into `events`. Stops on the `[DONE]` sentinel; on a read error sends one
 /// `Err` and stops. Dropping `events` on return signals stream end.
+///
+/// A partial event that grows past `frame_cap` (a peer that never sends the
+/// blank line) is reported as an `Api` error naming the cap and `peer`, and
+/// the stream stops there.
 pub(crate) async fn forward_sse<S, E>(
     stream: S,
     events: mpsc::Sender<Result<String, HostHttpError>>,
+    frame_cap: usize,
+    peer: &str,
 ) where
     S: futures_core::Stream<Item = Result<bytes::Bytes, E>>,
     E: std::fmt::Display,
@@ -443,7 +471,12 @@ pub(crate) async fn forward_sse<S, E>(
                 if let Ok(text) = std::str::from_utf8(&bytes) {
                     buffer.push_str(text);
                 }
-                for ev in drain_sse_events(&mut buffer) {
+                let events_drained = drain_sse_events(&mut buffer);
+                if let Err(msg) = frame_within_cap(buffer.len(), frame_cap, peer) {
+                    let _ = events.send(Err(HostHttpError::Api(msg))).await;
+                    return;
+                }
+                for ev in events_drained {
                     match ev {
                         SseEvent::Data(payload) => {
                             if events.send(Ok(payload)).await.is_err() {

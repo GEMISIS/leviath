@@ -3,6 +3,7 @@
 //! cargo-llvm-cov's default ignore regex excludes `tests.rs` and
 //! `*_tests.rs` files, so only production code answers to the 100% gate.
 use super::*;
+use leviath_net::read_caps::STREAM_FRAME_CAP;
 
 fn ev(kind: &SseEvent) -> String {
     match kind {
@@ -49,6 +50,20 @@ fn final_event_flushes_untrimmed_tail() {
 }
 
 #[tokio::test]
+async fn forward_sse_fails_an_event_that_never_closes() {
+    // One `data:` line that keeps growing with no blank line to end it.
+    let chunks: Vec<Result<bytes::Bytes, String>> =
+        std::iter::repeat_n(Ok(bytes::Bytes::from(vec![b'x'; 100])), 100).collect();
+    let (tx, mut rx) = mpsc::channel(16);
+    forward_sse(tokio_stream::iter(chunks), tx, 4096, "api.example").await;
+    assert!(matches!(
+        rx.recv().await.unwrap(),
+        Err(HostHttpError::Api(msg)) if msg == "stream frame exceeded 4096 bytes from api.example"
+    ));
+    assert!(rx.recv().await.is_none(), "the stream stops at the cap");
+}
+
+#[tokio::test]
 async fn forward_sse_emits_payloads_then_stops_on_done() {
     let chunks: Vec<Result<bytes::Bytes, String>> = vec![
         Ok(bytes::Bytes::from("data: {\"a\":1}\n\n")),
@@ -57,7 +72,7 @@ async fn forward_sse_emits_payloads_then_stops_on_done() {
     ];
     let stream = tokio_stream::iter(chunks);
     let (tx, mut rx) = mpsc::channel(16);
-    forward_sse(stream, tx).await;
+    forward_sse(stream, tx, STREAM_FRAME_CAP, "test").await;
     let mut got = Vec::new();
     while let Some(item) = rx.recv().await {
         got.push(item.unwrap());
@@ -75,7 +90,7 @@ async fn forward_sse_reports_read_error() {
         Ok(bytes::Bytes::from("data: y\n\n")),
     ];
     let (tx, mut rx) = mpsc::channel(16);
-    forward_sse(tokio_stream::iter(chunks), tx).await;
+    forward_sse(tokio_stream::iter(chunks), tx, STREAM_FRAME_CAP, "test").await;
     assert_eq!(rx.recv().await.unwrap().unwrap(), "x");
     assert!(matches!(
         rx.recv().await.unwrap(),
@@ -90,7 +105,7 @@ async fn forward_sse_stops_when_receiver_dropped() {
         vec![Ok(bytes::Bytes::from("data: a\n\ndata: b\n\n"))];
     let (tx, rx) = mpsc::channel(1);
     drop(rx); // receiver gone before we forward
-    forward_sse(tokio_stream::iter(chunks), tx).await; // must return, not hang
+    forward_sse(tokio_stream::iter(chunks), tx, STREAM_FRAME_CAP, "test").await; // must return, not hang
 }
 
 #[tokio::test]
@@ -98,7 +113,7 @@ async fn forward_sse_flushes_trailing_event() {
     let chunks: Vec<Result<bytes::Bytes, String>> =
         vec![Ok(bytes::Bytes::from("data: {\"tail\":1}"))];
     let (tx, mut rx) = mpsc::channel(16);
-    forward_sse(tokio_stream::iter(chunks), tx).await;
+    forward_sse(tokio_stream::iter(chunks), tx, STREAM_FRAME_CAP, "test").await;
     assert_eq!(rx.recv().await.unwrap().unwrap(), "{\"tail\":1}");
 }
 
@@ -111,7 +126,7 @@ async fn forward_sse_skips_invalid_utf8_and_ends_clean() {
         Ok(bytes::Bytes::from("data: a\n\n")),
     ];
     let (tx, mut rx) = mpsc::channel(16);
-    forward_sse(tokio_stream::iter(chunks), tx).await;
+    forward_sse(tokio_stream::iter(chunks), tx, STREAM_FRAME_CAP, "test").await;
     assert_eq!(rx.recv().await.unwrap().unwrap(), "a");
     assert!(rx.recv().await.is_none());
 }
@@ -558,6 +573,27 @@ async fn flaky_server(fail_first: usize, body: &'static str) -> String {
         }
     });
     format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn a_body_past_the_cap_is_an_api_error_naming_the_peer() {
+    // 10 KB of body against a 4 KB cap: the read stops at the cap and the
+    // error says which cap and which host, without the body ever being held.
+    let url = flaky_server(0, "x".repeat(10 * 1024).leak()).await;
+    let err = ReqwestExecutor::new(
+        crate::provider::build_http_client(None).expect("a test client builds"),
+    )
+    .with_body_cap(4096)
+    .execute(req(HttpMethod::Get, url, None))
+    .await
+    .expect_err("a body past the cap fails");
+    assert!(
+        matches!(
+            &err,
+            HostHttpError::Api(msg) if msg == "response body exceeded 4096 bytes from 127.0.0.1"
+        ),
+        "got: {err:?}"
+    );
 }
 
 #[tokio::test]
