@@ -53,10 +53,10 @@ lev create my-agent              # scaffold your own agent
 curl -fsSL https://leviath.dev/install.sh | sh
 ```
 
-**Windows**, pasting into either Command Prompt or PowerShell:
+**Windows**, in PowerShell (Windows Terminal opens one; not Command Prompt):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://leviath.dev/install.ps1 | iex"
+irm https://leviath.dev/install.ps1 | iex
 ```
 
 Both install prebuilt binaries, so no Rust toolchain is needed. Stable is the default; for beta or

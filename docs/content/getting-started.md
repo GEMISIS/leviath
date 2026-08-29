@@ -31,11 +31,15 @@ One command, any platform. It installs a prebuilt binary, so no Rust toolchain i
 curl -fsSL https://leviath.dev/install.sh | sh
 ```
 
-**Windows**
+**Windows**, in PowerShell (Windows Terminal opens one):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://leviath.dev/install.ps1 | iex"
+irm https://leviath.dev/install.ps1 | iex
 ```
+
+Paste it into PowerShell rather than Command Prompt. The old form that spawned PowerShell from
+cmd (`powershell -ExecutionPolicy Bypass -c "..."`) is the launch pattern endpoint protection
+refuses on managed machines - it answered "Access is denied." before anything ran.
 
 Check it worked:
 
