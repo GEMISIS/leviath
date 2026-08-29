@@ -203,9 +203,13 @@ for a run whose blueprint could not be read, the flat tab strip stays.
 | `?` / `F1` | Help |
 | `Ctrl-C` | Quit. `q` is unbound here, so a stray keystroke cannot close the dashboard mid-run |
 
-While you are typing a response, `Enter` sends it, `Alt+Enter` inserts a newline, `PgUp` / `PgDn`
-scroll the document above the prompt, and `Esc` cancels. `/quit` or `/exit` on its own line ends
-the conversation without answering.
+While you are typing a response, `Enter` inserts a newline, the way it does in the new-run task
+box, and `Ctrl+Enter` sends. Only a terminal with the kitty keyboard protocol can tell
+`Ctrl+Enter` from `Enter`; elsewhere `Tab` moves to the Send button under the box, where `Enter`
+or `Space` sends, as does a click on it. `PgUp` / `PgDn` scroll the document above the prompt, and
+`Esc` cancels. `/quit` or `/exit` on its own line ends the conversation when sent. An in-place
+document edit takes the same keys, with a Save button in place of Send. Single-line boxes (a
+rename, a filter, a server URL) still submit on `Enter`.
 
 Destructive keys always confirm on a dialog with real buttons: `←`/`→` pick an answer, `Enter`
 activates it, and a stray keypress does nothing. The safe answer holds focus to start.

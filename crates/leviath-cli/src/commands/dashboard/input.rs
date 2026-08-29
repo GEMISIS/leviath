@@ -205,7 +205,7 @@ impl Dashboard {
     /// Seed the input textarea when entering input mode. For an `EditText`
     /// pending request the buffer is pre-filled with the request's `body` (the
     /// current document) so the user edits it in place; otherwise it starts empty.
-    fn seed_input_textarea(&mut self) {
+    pub(super) fn seed_input_textarea(&mut self) {
         use interaction::InteractionKind;
         let seed = self
             .selected_agent()
@@ -327,29 +327,10 @@ impl Dashboard {
         }
         match &kind {
             Some(InteractionKind::FreeText) | Some(InteractionKind::EditText) | None => {
-                match key_code {
-                    KeyCode::Enter if key.modifiers.is_empty() => {
-                        self.submit_input();
-                    }
-                    KeyCode::Esc => {
-                        self.input_mode = false;
-                        self.input_textarea = MarkdownEdit::default();
-                        self.choice_selected = 0;
-                    }
-                    KeyCode::PageUp if self.has_scrollable_document() => self.scroll_by(10),
-                    KeyCode::PageDown if self.has_scrollable_document() => self.scroll_by(-10),
-                    _ => {
-                        let outcome = self.input_textarea.handle_key(&key);
-                        self.remember_md_mode(outcome);
-                    }
-                }
+                self.handle_response_box_key(key);
             }
             _ => match key_code {
-                KeyCode::Esc => {
-                    self.input_mode = false;
-                    self.input_textarea = MarkdownEdit::default();
-                    self.choice_selected = 0;
-                }
+                KeyCode::Esc => self.close_input_box(),
                 KeyCode::Enter => {
                     self.submit_input();
                 }
@@ -372,6 +353,49 @@ impl Dashboard {
                 _ => {}
             },
         }
+    }
+
+    /// Keys in the long-form response box and on the Send button under it.
+    ///
+    /// Enter breaks the line, the way it does in the new-run task and every
+    /// other text box, and Ctrl+Enter sends. Ctrl+Enter reaches the program
+    /// only under the kitty keyboard protocol; elsewhere it arrives as a plain
+    /// Enter, which is a newline here, and the Send button (Tab, then Enter
+    /// or Space, or a click) is how such a terminal sends. `/quit` on its own
+    /// line still ends the conversation when sent.
+    fn handle_response_box_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyModifiers;
+        if self.response_focus_send {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char(' ') => self.submit_input(),
+                KeyCode::Tab | KeyCode::BackTab => self.response_focus_send = false,
+                KeyCode::Esc => self.close_input_box(),
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.submit_input();
+            }
+            KeyCode::Tab => self.response_focus_send = true,
+            KeyCode::Esc => self.close_input_box(),
+            KeyCode::PageUp if self.has_scrollable_document() => self.scroll_by(10),
+            KeyCode::PageDown if self.has_scrollable_document() => self.scroll_by(-10),
+            _ => {
+                let outcome = self.input_textarea.handle_key(&key);
+                self.remember_md_mode(outcome);
+            }
+        }
+    }
+
+    /// Leave input mode with nothing sent: the box, its focus, and the
+    /// highlighted choice all go back to their starting state.
+    pub(super) fn close_input_box(&mut self) {
+        self.input_mode = false;
+        self.response_focus_send = false;
+        self.input_textarea = MarkdownEdit::default();
+        self.choice_selected = 0;
     }
 
     /// Enter/Space in the Context view (or a click on the row): fold or unfold
@@ -531,6 +555,7 @@ impl Dashboard {
                 // any active agent that accepts them - same key, same input area.
                 if self.selected_stage_can_respond() || self.selected_agent_accepts_messages() {
                     self.input_mode = true;
+                    self.response_focus_send = false;
                     self.choice_selected = 0;
                     self.seed_input_textarea();
                 }
@@ -1067,9 +1092,7 @@ impl Dashboard {
             }
         };
 
-        self.input_mode = false;
-        self.input_textarea = MarkdownEdit::default();
-        self.choice_selected = 0;
+        self.close_input_box();
 
         let answered_id = resp.request_id.clone();
         // The index is still valid because nothing since the
@@ -3367,10 +3390,11 @@ mod tests {
 
     // ─── d key from main list for non-run-state agent ─────────────────────
 
-    // ─── input_mode_key: FreeText Enter submits ───────────────────────────
+    // ─── input_mode_key: the response box ─────────────────────────────────
 
-    #[test]
-    fn input_mode_free_text_enter_submits() {
+    /// A dashboard in the detail view with the response box open over a
+    /// free-text question.
+    fn dash_answering_free_text() -> Dashboard {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
         agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
@@ -3380,13 +3404,119 @@ mod tests {
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.detail_view = true;
-        dash.input_mode = true;
-
+        dash.handle_key(key(KeyCode::Char('i')));
+        assert!(dash.input_mode);
         dash.input_textarea.area_mut().insert_str("answer");
+        dash
+    }
 
-        // Enter with no modifiers should submit
+    /// Enter breaks the line, the way it does in the new-run task; it used to
+    /// send, which made the response box the one text box on the dashboard
+    /// where a newline needed a chord. Ctrl+Enter is what sends.
+    #[test]
+    fn response_box_enter_is_a_newline_and_ctrl_enter_sends() {
+        let mut dash = dash_answering_free_text();
+
         dash.handle_key(key(KeyCode::Enter));
+        assert!(dash.input_mode, "Enter did not send");
+        dash.input_textarea.area_mut().insert_str("second line");
+        assert_eq!(dash.input_textarea.text(), "answer\nsecond line");
+
+        dash.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(!dash.input_mode, "Ctrl+Enter sent");
+        assert!(dash.agents[0].pending_request.is_none());
+    }
+
+    /// Tab moves the keys to the Send button, where Enter or Space sends and
+    /// Tab or Shift+Tab goes back to the box. Other keys on the button do
+    /// nothing: they must not land in the text behind it.
+    #[test]
+    fn tab_reaches_the_send_button_and_enter_there_sends() {
+        let mut dash = dash_answering_free_text();
+
+        dash.handle_key(key(KeyCode::Tab));
+        assert!(dash.response_focus_send);
+        dash.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(
+            dash.input_textarea.text(),
+            "answer",
+            "a stray key is dropped"
+        );
+        dash.handle_key(key(KeyCode::BackTab));
+        assert!(!dash.response_focus_send, "Shift+Tab returns to the box");
+        dash.handle_key(key(KeyCode::Tab));
+        dash.handle_key(key(KeyCode::Tab));
+        assert!(!dash.response_focus_send, "Tab returns to the box too");
+
+        dash.handle_key(key(KeyCode::Tab));
+        dash.handle_key(key(KeyCode::Enter));
+        assert!(!dash.input_mode, "Enter on the button sent");
+        assert!(
+            !dash.response_focus_send,
+            "and the focus reset with the box"
+        );
+
+        let mut dash = dash_answering_free_text();
+        dash.handle_key(key(KeyCode::Tab));
+        dash.handle_key(key(KeyCode::Char(' ')));
+        assert!(!dash.input_mode, "Space on the button sends too");
+    }
+
+    /// Esc cancels from the button as well as from the box, and reopening the
+    /// box starts in the box, not on the button.
+    #[test]
+    fn esc_on_the_send_button_cancels_and_reopening_starts_in_the_box() {
+        let mut dash = dash_answering_free_text();
+        dash.handle_key(key(KeyCode::Tab));
+        dash.handle_key(key(KeyCode::Esc));
         assert!(!dash.input_mode);
+        assert!(!dash.response_focus_send);
+        assert!(dash.agents[0].pending_request.is_some(), "nothing was sent");
+
+        dash.handle_key(key(KeyCode::Tab));
+        assert!(
+            !dash.response_focus_send,
+            "Tab outside the box is not a button move"
+        );
+        dash.handle_key(key(KeyCode::Char('i')));
+        dash.handle_key(key(KeyCode::Tab));
+        assert!(dash.response_focus_send);
+        dash.handle_key(key(KeyCode::Char('i')));
+        assert!(dash.response_focus_send, "i on the button is a stray key");
+        dash.perform_kill("run-1");
+        assert!(
+            !dash.response_focus_send,
+            "a kill closes the box, button and all"
+        );
+    }
+
+    /// An in-place document edit is the same box in a different pane, so it
+    /// takes the same keys: Enter breaks the line, Ctrl+Enter saves, Tab
+    /// reaches the button.
+    #[test]
+    fn document_edit_enter_is_a_newline_and_ctrl_enter_saves() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::edit_text(
+            "et1", "Edit", "main", "old",
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.seed_input_textarea();
+
+        dash.handle_key(key(KeyCode::End));
+        dash.handle_key(key(KeyCode::Enter));
+        dash.input_textarea.area_mut().insert_str("new");
+        assert_eq!(dash.input_textarea.text(), "old\nnew");
+        assert!(dash.input_mode);
+
+        dash.handle_key(key(KeyCode::Tab));
+        assert!(dash.response_focus_send);
+        dash.handle_key(key(KeyCode::Enter));
+        assert!(!dash.input_mode, "saved from the button");
+        assert!(dash.agents[0].pending_request.is_none());
     }
 
     // ─── input_mode_key: MultipleChoice Enter submits ─────────────────────

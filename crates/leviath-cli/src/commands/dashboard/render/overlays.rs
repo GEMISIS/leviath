@@ -397,8 +397,9 @@ fn detail_sections() -> Vec<HelpSection> {
         HelpSection {
             title: "Writing a response (i)",
             entries: vec![
-                ("enter", "send"),
-                ("alt+enter", "insert a newline"),
+                ("ctrl+enter", "send (needs the kitty keyboard protocol)"),
+                ("enter", "insert a newline; so does alt+enter"),
+                ("tab", "move to the Send button; enter or space there sends"),
                 ("pgup / pgdn", "scroll the document above the prompt"),
                 ("esc", "cancel"),
                 ("/quit or /exit", "end the conversation without answering"),

@@ -2,6 +2,7 @@
 //!
 //! The main `draw()` method dispatches to sub-modules for each region of the UI.
 
+mod button;
 mod content;
 mod graph_view;
 mod header;
@@ -11,6 +12,10 @@ mod new_run;
 mod overlays;
 mod stages;
 mod table;
+
+// The button faces, so a click test can size its press by the drawn text.
+#[cfg(test)]
+pub(super) use input::{SAVE_BUTTON, SEND_BUTTON};
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -229,7 +234,8 @@ impl Dashboard {
             let n = options.len() as u16;
             if self.input_mode {
                 match &kind {
-                    Some(InteractionKind::FreeText) | None => 11,
+                    // The editor's rows plus one for the Send button under it.
+                    Some(InteractionKind::FreeText) | None => 12,
                     _ => (n + 4).min(14),
                 }
             } else {

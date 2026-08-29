@@ -5,7 +5,6 @@ use super::helpers::truncate;
 use super::state::Dashboard;
 use super::types::*;
 use crate::runstate;
-use crate::tui::widgets::markdown_edit::MarkdownEdit;
 
 impl Dashboard {
     /// Open the kill confirmation. Acts on every marked run that is killable
@@ -121,8 +120,7 @@ impl Dashboard {
             a.pending_request = None;
         }
         // Any half-typed response to the killed run is moot.
-        self.input_mode = false;
-        self.input_textarea = MarkdownEdit::default();
+        self.close_input_box();
         self.add_log(format!("{run_id}: kill requested"));
     }
 

@@ -136,11 +136,7 @@ impl Dashboard {
 
     fn draw_new_run_task(&mut self, frame: &mut Frame, area: Rect) {
         // The editor keeps every row but the last, which is the Start button's.
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1)])
-            .split(area);
-        let (area, button_row) = (rows[0], rows[1]);
+        let (area, button_row) = super::button::editor_and_button_rows(area);
         let focused = self.new_run_focus == NewRunPane::Task;
         let agent = self
             .new_run_selected_agent()
@@ -170,30 +166,16 @@ impl Dashboard {
             focused,
         );
         self.new_run_task.render(frame, area, &view);
-        self.draw_new_run_start_button(frame, button_row);
-    }
-
-    /// The Start button, right-aligned under the editor. Lit like a focused
-    /// pane's border when Tab has reached it; a click on it starts the run
-    /// whether or not it has focus.
-    fn draw_new_run_start_button(&mut self, frame: &mut Frame, row: Rect) {
-        let focused = self.new_run_focus == NewRunPane::Start;
-        let style = match focused {
-            true => Style::default()
-                .fg(Color::Black)
-                .bg(C_BORDER_FOCUS)
-                .add_modifier(Modifier::BOLD),
-            false => Style::default().fg(C_BORDER).add_modifier(Modifier::BOLD),
-        };
-        let width = (START_BUTTON.chars().count() as u16).min(row.width);
-        let rect = Rect {
-            x: row.x + row.width - width,
-            y: row.y,
-            width,
-            height: row.height.min(1),
-        };
-        frame.render_widget(Paragraph::new(Span::styled(START_BUTTON, style)), rect);
-        self.register_click(rect, ClickTarget::NewRunStart);
+        // The Start button, right-aligned under the editor. Lit like a focused
+        // pane's border when Tab has reached it; a click on it starts the run
+        // whether or not it has focus.
+        self.draw_action_button(
+            frame,
+            button_row,
+            START_BUTTON,
+            self.new_run_focus == NewRunPane::Start,
+            ClickTarget::NewRunStart,
+        );
     }
 
     /// The `@` completion, drawn as a floating menu inside the task pane.
