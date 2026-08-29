@@ -424,9 +424,12 @@ fn print_listing(
         let rates = entry
             .pricing
             .or_else(|| leviath_providers::pricing::published_rates(&entry.provider, &entry.id));
+        // `n/a` rather than a blank: a blank reads as "free" or "forgot", and
+        // a run on this model reports its cost as unavailable, which is what
+        // the column should say too.
         let (input, output) = match rates {
             Some(p) => (fmt_rate(p.input_per_mtok), fmt_rate(p.output_per_mtok)),
-            None => (String::new(), String::new()),
+            None => (UNPRICED.to_owned(), UNPRICED.to_owned()),
         };
 
         println!(
@@ -693,6 +696,10 @@ fn fmt_tokens(n: usize) -> String {
     }
 }
 
+/// What the price columns say for a model no listing, config entry or table
+/// row prices.
+const UNPRICED: &str = "n/a";
+
 /// A USD-per-million rate for a table column: two decimals for anything a
 /// person would read as dollars, more for the fractions of a cent the cheap
 /// models are quoted at, so `0.02` and `0.0416` do not both print as `0.02`.
@@ -709,23 +716,25 @@ fn fmt_rate(per_mtok: f64) -> String {
 /// Three sources, and the difference matters to a reader. A rate the
 /// provider's listing quoted is current as of the request. An operator's
 /// config entry is their own contracted rate and is current by definition. A
-/// shipped rate is a transcription of a vendor's public page on a particular
-/// day and cannot notice a repricing, so it is the one that carries a date
-/// and a warning; printing it is the only way somebody can judge whether to
-/// trust the number.
+/// shipped rate is a row of the price table this build compiled in, refreshed
+/// from OpenRouter's catalogue and LiteLLM on a particular day, so it is the
+/// one that names its source and carries a date; printing both is the only
+/// way somebody can judge whether to trust the number.
 ///
-/// A model with none prints nothing rather than a zero: a run that touches
-/// it reports its cost as unavailable, and a "$0.00" line here would
-/// contradict that.
+/// A model with none prints `n/a` rather than a zero: a run that touches it
+/// reports its cost as unavailable, and a "$0.00" line here would contradict
+/// that.
 fn print_model_pricing(provider: &str, model: &str, listed: Option<ModelPricing>) {
-    let published = listed.is_none();
-    let Some(p) = listed.or_else(|| leviath_providers::pricing::published_rates(provider, model))
-    else {
-        return;
-    };
     println!();
     println!("Pricing (USD per million tokens)");
     println!("--------------------------------");
+    let published = listed.is_none();
+    let Some(p) = listed.or_else(|| leviath_providers::pricing::published_rates(provider, model))
+    else {
+        println!("  {UNPRICED}: no listing, config entry or published row prices this model.");
+        println!("  A rate under [model_capabilities.\"{model}\"] in your config would.");
+        return;
+    };
     println!("  Input:          ${:.4}", p.input_per_mtok);
     println!("  Cached input:   ${:.4}", p.cached_input_per_mtok);
     println!("  Cache write:    ${:.4}", p.cache_write_per_mtok);
@@ -738,14 +747,29 @@ fn print_model_pricing(provider: &str, model: &str, listed: Option<ModelPricing>
     // capability override says nothing about whether they also declared a rate,
     // and claiming "your config" for a figure that came from this table would
     // be worse than not showing a source at all.
+    let source = leviath_providers::pricing::published_rate(provider, model)
+        .map(|row| describe_source(&row.source))
+        .unwrap_or_default();
     println!(
-        "  Source:         published list price, read {}",
+        "  Source:         published list price ({source}), table read {}",
         leviath_providers::pricing::rates_read_on()
     );
-    println!("  \u{26a0}  {provider} does not serve prices through its API, so this was");
-    println!("     transcribed by hand and may be out of date. A rate set on the");
-    println!("     model's config entry overrides this, and is the only way to");
-    println!("     record a negotiated price no public page would show.");
+    println!("  \u{26a0}  {provider} does not serve prices through its API, so this is a");
+    println!("     row of the table compiled into this build, which cannot notice a");
+    println!("     repricing until the next refresh. A rate set on the model's config");
+    println!("     entry overrides it, and is the only way to record a negotiated");
+    println!("     price no public page would show.");
+}
+
+/// A row's `source` field as a reader would say it.
+fn describe_source(source: &str) -> &str {
+    match source {
+        "both" => "OpenRouter's catalogue, agreed by LiteLLM",
+        "openrouter" => "OpenRouter's catalogue only",
+        "litellm" => "LiteLLM's table only",
+        "manual" => "written by hand",
+        other => other,
+    }
 }
 
 /// Print a detailed capability sheet for a single model.
@@ -872,16 +896,28 @@ mod tests {
         // through the table, which is what a reader is actually shown.
         print_model_pricing("anthropic", "claude-opus-5", None);
         print_model_pricing("openai", "gpt-5.5", None);
-        // A model with no listed rate prints nothing rather than a zero, which
+        // A model with no listed rate prints `n/a` rather than a zero, which
         // would contradict the run reporting its cost as unavailable.
         print_model_pricing("openrouter", "x-ai/grok-4.6", None);
         print_model_pricing("anthropic", "claude-opus-9", None);
+        print_model_pricing("google", "gemini-3-flash", None);
         // A rate the listing quoted is labelled as such and carries no date.
         print_model_pricing(
             "openrouter",
             "qwen/qwen3.6-plus",
             Some(ModelPricing::flat(1.0, 4.0)),
         );
+    }
+
+    /// Every source the table can carry has a reading, and one it cannot is
+    /// shown as written rather than hidden.
+    #[test]
+    fn a_rate_source_is_said_in_words() {
+        assert!(describe_source("both").contains("agreed by LiteLLM"));
+        assert!(describe_source("openrouter").contains("only"));
+        assert!(describe_source("litellm").contains("only"));
+        assert_eq!(describe_source("manual"), "written by hand");
+        assert_eq!(describe_source("elsewhere"), "elsewhere");
     }
 
     #[test]
