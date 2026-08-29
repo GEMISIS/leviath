@@ -163,10 +163,10 @@ still on screen when the cursor is at the end. See
 [Formatting a long-form box](#formatting-a-long-form-box) for what the toolbar
 along its top does.
 
-`Ctrl-Y` warns the first time you use it in a sitting, and the warning is worth reading: an
-unattended run approves its own file edits and shell commands, but it does **not** skip a checkpoint
-the blueprint asks a person for. Those still stop, and one nobody answers ends the run when the
-interaction timeout expires. The setting is off again every time the screen opens.
+`Ctrl-Y` warns every time you turn it on (turning it off never asks), and the warning is worth
+reading: an unattended run approves its own file edits and shell commands, but it does **not** skip
+a checkpoint the blueprint asks a person for. Those still stop, and one nobody answers ends the run
+when the interaction timeout expires. The setting is off again every time the screen opens.
 
 ### Detail view
 

@@ -192,7 +192,6 @@ impl Dashboard {
             pending_open_run: None,
             help_scroll: std::cell::Cell::new(0),
             new_run_yolo: false,
-            yolo_warning_silenced: false,
             new_run_ctx,
             agent_builder: None,
             layout_store_path: None,
