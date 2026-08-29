@@ -194,6 +194,14 @@ same list.
   `max`, `request_timeout_secs`, a `stuck_after_*` threshold) dropped the
   value without a word. A misspelled sandbox key such as `netwrok = false`
   was ignored, so the sandbox ran looser than the file said.
+- Every read from a remote peer is capped. A provider's buffered JSON reply is
+  cut at 64 MiB, one streamed frame (SSE or NDJSON) at 8 MiB, and one line
+  from an MCP stdio server at 1 MiB; the same caps cover MCP HTTP replies and
+  their event streams. Past a cap the inference or tool call fails with a
+  message naming the cap and the peer instead of the daemon buffering until
+  it is killed. The rest of an oversized MCP line is drained, so the next
+  call to that server still works. The caps are constants in
+  `leviath_net::read_caps`, not configuration.
 - The published list prices for OpenAI, Anthropic and Google live in
   `crates/leviath-providers/pricing/rates.toml` rather than in Rust, and each
   row names where it came from. `lev models list` prints `n/a` where nothing

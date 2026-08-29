@@ -312,8 +312,9 @@ impl Provider for GeminiProvider {
         )
         .await?;
 
+        let peer = leviath_net::read_caps::peer_of(&response);
         let byte_stream = response.bytes_stream();
-        let stream = openai_sse_stream(byte_stream);
+        let stream = openai_sse_stream(byte_stream).sent_by(peer);
 
         Ok(Box::pin(stream))
     }

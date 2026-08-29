@@ -240,10 +240,12 @@ impl EndpointProvider {
 
         let status = response.status();
         if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
+            let error_body = leviath_net::read_caps::read_text_capped(
+                response,
+                leviath_net::read_caps::JSON_BODY_CAP,
+            )
+            .await
+            .unwrap_or_else(|_| "unknown error".to_string());
             return Err(ProviderError::ApiError(format!(
                 "HTTP {status}: {error_body}"
             )));
@@ -349,7 +351,10 @@ impl Provider for EndpointProvider {
         crate::openai_compat::make_streaming(&mut body);
         let response = self.post_chat(request, body).await?;
 
-        Ok(Box::pin(openai_sse_stream(response.bytes_stream())))
+        let peer = leviath_net::read_caps::peer_of(&response);
+        Ok(Box::pin(
+            openai_sse_stream(response.bytes_stream()).sent_by(peer),
+        ))
     }
 
     async fn count_tokens(&self, text: &str, _model: &str) -> usize {

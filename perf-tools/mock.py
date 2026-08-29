@@ -22,17 +22,26 @@ Routes:
                              were served (probe counters)
     POST /reset              zero the counters
 
+Set `LV_MOCK_OVERSIZE_MIB=N` to answer every completion with N MiB of one
+frame that never closes, for probing the daemon's read caps.
+
 The count tally is what makes the context-window guard measurable from the
 outside: a run whose request is under half the model's window must show zero
 count calls, and one above it exactly one per inference.
 """
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 PORT = int(sys.argv[1])
 TOOL = sys.argv[2] if len(sys.argv) > 2 else None
 ARGS = sys.argv[3] if len(sys.argv) > 3 else "{}"
+# `LV_MOCK_OVERSIZE_MIB=N` makes every completion answer with N MiB of a single
+# never-ending frame (one `data:` line with no terminator when streaming, one
+# JSON string otherwise), which is what a peer that never stops looks like to
+# the daemon's read caps.
+OVERSIZE_MIB = int(os.environ.get("LV_MOCK_OVERSIZE_MIB", "0"))
 
 
 def tool_calls(streaming):
@@ -120,6 +129,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/v1/messages"):
             return self._anthropic(req)
         CALLS[0] += 1
+        if OVERSIZE_MIB:
+            return self._oversize(bool(req.get("stream")))
         seen_tool = any(m.get("role") == "tool" for m in req.get("messages", []))
         want_tool = TOOL is not None and not seen_tool
         if req.get("stream"):
@@ -155,6 +166,19 @@ class Handler(BaseHTTPRequestHandler):
                     "model": req.get("model", "gpt-mock"), "content": content,
                     "stop_reason": stop,
                     "usage": {"input_tokens": 12, "output_tokens": 3}})
+
+    def _oversize(self, streaming):
+        """One frame of OVERSIZE_MIB MiB that never closes."""
+        pad = b"x" * (OVERSIZE_MIB * 1024 * 1024)
+        if streaming:
+            body, content_type = b"data: " + pad, "text/event-stream"
+        else:
+            body, content_type = b'{"pad":"' + pad + b'"}', "application/json"
+        self.send_response(200)
+        self.send_header("content-type", content_type)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _sse(self, want_tool):
         if want_tool:

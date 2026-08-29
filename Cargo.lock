@@ -2553,6 +2553,7 @@ dependencies = [
  "form_urlencoded",
  "futures-util",
  "leviath-core",
+ "leviath-net",
  "leviath-sys",
  "leviath-testkit",
  "rand 0.10.2",
@@ -2572,6 +2573,7 @@ dependencies = [
 name = "leviath-net"
 version = "0.5.5"
 dependencies = [
+ "encoding_rs",
  "leviath-testkit",
  "reqwest",
  "tokio",
@@ -2601,6 +2603,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "leviath-core",
+ "leviath-net",
  "leviath-scripting",
  "leviath-sys",
  "leviath-testkit",

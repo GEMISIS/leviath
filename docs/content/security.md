@@ -238,6 +238,20 @@ lev policy test bash --target example.com
 `lev policy add` and `lev policy test` take the tool name as a **positional** argument
 (`lev policy add <tool> …`, `lev policy test <tool> --target …`).
 
+## Response size caps
+
+The daemon stops reading a remote peer at a fixed size rather than buffering
+whatever it sends. A provider's buffered JSON reply (and any error page it
+quotes) is cut at **64 MiB**, one streamed frame or partial line on a
+streaming reply is cut at **8 MiB**, and one line from an MCP stdio server is
+cut at **1 MiB**. Past the cap the call fails with a message naming the cap
+and the peer (`response body exceeded 64 MiB from api.openai.com`, or `line
+exceeded 1 MiB from the MCP server`), and the connection is dropped so the
+rest is never read. The same caps apply to MCP HTTP replies, their SSE
+streams, and the OAuth exchanges behind `lev mcp login`. They are constants,
+not configuration: every well-formed reply is far below them, and a knob that
+only matters under attack would be a knob for the attacker.
+
 ## Threat model
 
 `lev serve` runs LLM-driven tools, so treat it as trusted-network only unless hardened. See

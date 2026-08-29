@@ -17,6 +17,7 @@ debug-http = []
 
 [dependencies]
 leviath-core = { workspace = true }
+leviath-net = { workspace = true }
 # Owner-only writes for the opt-in request dump, which contains whole transcripts.
 leviath-sys = { workspace = true }
 # For the shared Rhai sandbox limits (`leviath_scripting::harden`), so provider
