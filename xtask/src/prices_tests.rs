@@ -608,7 +608,11 @@ fn the_file_round_trips_sorted_with_float_literals() {
 #[test]
 fn the_shipped_file_parses_and_renders_to_itself() {
     let path = workspace_root().join(RATES_FILE);
-    let text = std::fs::read_to_string(&path).unwrap();
+    // A Windows checkout with `core.autocrlf` hands us CRLF; the refresh
+    // always writes LF, so compare the file as git stores it.
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("\r\n", "\n");
     let t = parse_table(&text).unwrap();
     assert!(!t.rows.is_empty());
     assert_eq!(
