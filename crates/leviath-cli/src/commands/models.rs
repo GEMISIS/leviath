@@ -1854,6 +1854,32 @@ mod tests {
         }
     }
 
+    /// A script that will not compile is a candidate name the registry cannot
+    /// hand back. `show` skips it the way `list` does, and still answers from
+    /// whatever else it has: here, nothing, so the model is reported unknown
+    /// rather than the command failing on a script it never named.
+    #[tokio::test]
+    async fn show_skips_a_script_provider_that_does_not_load() {
+        let dir = tempfile::tempdir().expect("a temp providers dir");
+        std::fs::write(dir.path().join("broken.rhai"), "fn initialize(config) { #{")
+            .expect("the temp dir is writable");
+        let dir = dir.path().to_path_buf();
+        crate::config::with_isolated_config_path_async(
+            "models-show_skips_a_broken_script_provider",
+            |_fake_dir| async move {
+                let args = ShowArgs {
+                    model: "nothing-has-this".to_string(),
+                    provider: None,
+                    remote: false,
+                    offline: false,
+                };
+                let result = show_with_registry(args, &script_registry(dir)).await;
+                assert!(result.is_ok(), "{result:?}");
+            },
+        )
+        .await;
+    }
+
     /// The command `rhai-providers.md` prescribes as a provider script's smoke
     /// test: it has to reach the script layer, since the built-in table has no
     /// row for a provider that names its own models at run time (issue #523).
