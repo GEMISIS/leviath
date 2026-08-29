@@ -386,6 +386,11 @@ async fn execute_with_shutdown(
             // Config-write persists provider secrets to disk, so it is gated the
             // same way as MCP admin: unmounted (404) unless --allow-admin.
             .route("/api/config", put(config::put_config))
+            // The probe makes this host open a connection to any address the
+            // caller names, the same act as testing an MCP server, and it
+            // exists to precede the write above. Gated with it; there is no
+            // read half, so without admin the path 404s.
+            .route("/api/models/probe", post(config::probe_models))
             // Carrying out the update the GET half only describes: it runs a
             // package manager, replaces the blueprints in the agents directory
             // and rewrites the config. Same category of act as the three above,
@@ -2340,6 +2345,62 @@ system_prompt = "Run"
     /// mounted case really does write a file, and it must not be a developer's
     /// own `~/.leviath/tools`. One `temp_env` call, since it serializes
     /// process-wide and holds its lock across the future.
+    /// The probe has no read half, so without admin the path is a plain 404;
+    /// with admin it answers (a 502 here, since nothing listens).
+    #[tokio::test]
+    async fn the_models_probe_is_mounted_only_with_allow_admin() {
+        let home = tempfile::tempdir().expect("a temp dir");
+        let root = home.path().to_path_buf();
+        let mut vars = crate::config::config_isolation_vars(&root);
+        vars.push(("LEVIATH_HOME", Some(root.clone().into_os_string())));
+
+        temp_env::async_with_vars(vars, async move {
+            for allow_admin in [false, true] {
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+                let args = ServeArgs {
+                    port: 0,
+                    host: "127.0.0.1".to_string(),
+                    cors: None,
+                    token: Some("t".to_string()),
+                    allow_admin,
+                    workdir_root: None,
+                    no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
+                };
+                let server = tokio::spawn(serve_for_test(
+                    args,
+                    no_daemon_control(),
+                    Box::pin(async move {
+                        let _ = stop_rx.await;
+                    }),
+                    Some(ready_tx),
+                ));
+                let addr = ready_rx.await.expect("bound");
+                let client = reqwest::Client::new();
+
+                let status = client
+                    .post(format!("http://{addr}/api/models/probe"))
+                    .bearer_auth("t")
+                    .json(&serde_json::json!({ "base_url": "http://127.0.0.1:1/v1" }))
+                    .send()
+                    .await
+                    .expect("request")
+                    .status()
+                    .as_u16();
+                match allow_admin {
+                    false => assert_eq!(status, 404, "the probe must not be mounted"),
+                    true => assert_eq!(status, 502, "mounted, and nothing listens"),
+                }
+
+                let _ = stop_tx.send(());
+                let _ = server.await;
+            }
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn the_script_write_routes_are_mounted_only_with_allow_admin() {
         let home = tempfile::tempdir().expect("a temp dir");
