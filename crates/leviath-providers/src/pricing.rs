@@ -9,6 +9,8 @@
 //! onward, and understates by however much it silently skipped - worse than
 //! admitting the figure is not available.
 
+use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
 
 /// Token usage breakdown.
@@ -158,18 +160,90 @@ impl ModelPricing {
     }
 }
 
-/// The day the rates in [`published_rates`] were read from the vendors' pages.
+/// The rows of `pricing/rates.toml`, parsed once.
+///
+/// A parse failure is a panic on first use rather than an error: the file is
+/// compiled in, so a malformed one is a build of this crate that cannot price
+/// anything, and the tests below catch it before it ships.
+static RATE_TABLE: LazyLock<RateTable> = LazyLock::new(|| {
+    toml::from_str(include_str!("../pricing/rates.toml"))
+        .expect("pricing/rates.toml is well-formed; `cargo xtask prices` writes it")
+});
+
+/// The shape of `pricing/rates.toml`.
+#[derive(Debug, Deserialize)]
+struct RateTable {
+    /// The day the rows were last refreshed, `YYYY-MM-DD`.
+    read_on: String,
+    /// Every row, in file order.
+    #[serde(default)]
+    rate: Vec<PublishedRate>,
+}
+
+/// One row of the shipped price table: what a family of models charges, and
+/// where the figure came from.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PublishedRate {
+    /// The provider the row applies to: `anthropic`, `openai` or `google`.
+    pub provider: String,
+    /// The model-id prefix the row covers. A dated variant such as
+    /// `gpt-5.5-2026-04-23` is covered by `gpt-5.5`; the longest matching
+    /// prefix wins, so `gpt-5.4-mini` is not swallowed by `gpt-5.4`.
+    pub prefix: String,
+    /// Fresh input, USD per million tokens.
+    pub input: f64,
+    /// Input served from cache, USD per million tokens.
+    pub cache_read: f64,
+    /// Input written into the cache, USD per million tokens.
+    pub cache_write: f64,
+    /// Output, USD per million tokens.
+    pub output: f64,
+    /// Where the row came from: `both` when OpenRouter's catalogue and LiteLLM
+    /// agreed, `openrouter` or `litellm` when only one listed it, `manual` for
+    /// a row a person wrote, which `cargo xtask prices` never overwrites.
+    pub source: String,
+}
+
+impl PublishedRate {
+    /// The row as the four rates cost accounting bills by.
+    pub fn pricing(&self) -> ModelPricing {
+        ModelPricing {
+            input_per_mtok: self.input,
+            cached_input_per_mtok: self.cache_read,
+            cache_write_per_mtok: self.cache_write,
+            output_per_mtok: self.output,
+        }
+    }
+}
+
+/// The day the rates in [`published_rates`] were last refreshed.
 ///
 /// Shipped with the numbers so staleness is visible rather than assumed. A
 /// build months old is quoting months-old prices, and the only honest thing to
 /// do about that is say so.
-pub const RATES_READ_ON: &str = "2026-08-23";
+pub fn rates_read_on() -> &'static str {
+    &RATE_TABLE.read_on
+}
+
+/// The table row that prices `model` at `provider`, with its source, or `None`
+/// when no row's prefix matches. The longest matching prefix wins.
+pub fn published_rate(provider: &str, model: &str) -> Option<&'static PublishedRate> {
+    RATE_TABLE
+        .rate
+        .iter()
+        .filter(|row| row.provider == provider && model.starts_with(&row.prefix))
+        .max_by_key(|row| row.prefix.len())
+}
 
 /// Published list prices for the providers whose APIs do not quote them.
 ///
 /// ⚠️ **A snapshot, not a feed.** Anthropic, OpenAI and Google publish rates on
-/// a web page with nothing programmatic behind it, so these were transcribed by
-/// hand on [`RATES_READ_ON`] and cannot notice a repricing. They are a floor
+/// a web page with nothing programmatic behind it, so the rows live in
+/// `pricing/rates.toml`, compiled into this crate and refreshed by `cargo xtask
+/// prices`, which reads the vendors' list prices as OpenRouter's catalogue
+/// carries them, cross-checks them against LiteLLM's table, and rewrites the
+/// file when the two agree. A build cannot notice a repricing between
+/// refreshes; [`rates_read_on`] says how old the figures are. They are a floor
 /// under "no cost at all", not an authority:
 ///
 /// * a per-model config entry overrides any row here, and is the right place
@@ -190,41 +264,7 @@ pub const RATES_READ_ON: &str = "2026-08-23";
 /// modelled. They would need per-request state this table does not see, and a
 /// wrong adjustment is worse than a plain list price.
 pub fn published_rates(provider: &str, model: &str) -> Option<ModelPricing> {
-    // (model prefix, input, cache read, cache write, output), longest prefix
-    // first so `gpt-5.5` is not swallowed by `gpt-5`.
-    let rows: &[(&str, f64, f64, f64, f64)] = match provider {
-        "anthropic" => &[
-            ("claude-fable-5", 10.0, 1.0, 12.5, 50.0),
-            ("claude-opus-5", 5.0, 0.5, 6.25, 25.0),
-            ("claude-opus-4-8", 5.0, 0.5, 6.25, 25.0),
-            ("claude-opus-4-7", 5.0, 0.5, 6.25, 25.0),
-            ("claude-opus-4-6", 5.0, 0.5, 6.25, 25.0),
-            ("claude-sonnet-5", 2.0, 0.2, 2.5, 10.0),
-            ("claude-sonnet-4-6", 3.0, 0.3, 3.75, 15.0),
-            ("claude-haiku-4-5", 1.0, 0.1, 1.25, 5.0),
-        ],
-        "openai" => &[
-            ("gpt-5.5", 5.0, 0.5, 5.0, 30.0),
-            ("gpt-5.4-mini", 0.75, 0.075, 0.75, 4.5),
-            ("gpt-5.4-nano", 0.2, 0.02, 0.2, 1.25),
-            ("gpt-5.4", 2.5, 0.25, 2.5, 15.0),
-        ],
-        "google" => &[
-            ("gemini-3.5-flash", 1.5, 0.15, 1.5, 9.0),
-            ("gemini-3.1-pro", 2.0, 0.2, 2.0, 12.0),
-            ("gemini-3.1-flash-lite", 0.25, 0.025, 0.25, 1.5),
-            ("gemini-3-flash", 0.5, 0.05, 0.5, 3.0),
-        ],
-        _ => return None,
-    };
-    rows.iter()
-        .find(|(prefix, ..)| model.starts_with(prefix))
-        .map(|&(_, input, read, write, output)| ModelPricing {
-            input_per_mtok: input,
-            cached_input_per_mtok: read,
-            cache_write_per_mtok: write,
-            output_per_mtok: output,
-        })
+    published_rate(provider, model).map(PublishedRate::pricing)
 }
 
 impl crate::ModelCapabilityOverride {
@@ -414,8 +454,60 @@ mod cost_tests {
     /// current price from one transcribed a year ago.
     #[test]
     fn the_table_carries_the_day_it_was_read() {
-        assert_eq!(RATES_READ_ON.len(), "YYYY-MM-DD".len());
-        assert!(RATES_READ_ON.starts_with("202"));
+        let read_on = rates_read_on();
+        assert_eq!(read_on.len(), "YYYY-MM-DD".len());
+        assert!(read_on.starts_with("202"));
+    }
+
+    /// A row names where its figures came from, and only from the four places
+    /// `cargo xtask prices` knows, so a typo in the file cannot invent a fifth.
+    #[test]
+    fn every_row_names_a_known_source_and_provider() {
+        let rows = &RATE_TABLE.rate;
+        assert!(!rows.is_empty());
+        let bad_source: Vec<&PublishedRate> = rows
+            .iter()
+            .filter(|r| !["openrouter", "litellm", "both", "manual"].contains(&r.source.as_str()))
+            .collect();
+        assert!(bad_source.is_empty(), "unknown source: {bad_source:?}");
+        let bad_provider: Vec<&PublishedRate> = rows
+            .iter()
+            .filter(|r| !["anthropic", "openai", "google"].contains(&r.provider.as_str()))
+            .collect();
+        assert!(
+            bad_provider.is_empty(),
+            "unknown provider: {bad_provider:?}"
+        );
+    }
+
+    /// The file is sorted by provider then prefix with no duplicate prefix, so
+    /// a hand edit and the refresh produce the same file for the same rows and
+    /// a diff shows only what changed.
+    #[test]
+    fn the_file_is_sorted_and_has_no_duplicate_prefixes() {
+        let keys: Vec<(&str, &str)> = RATE_TABLE
+            .rate
+            .iter()
+            .map(|r| (r.provider.as_str(), r.prefix.as_str()))
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(keys, sorted);
+    }
+
+    /// `lev models show` names a rate's source, which the row carries and the
+    /// four-rate view does not.
+    #[test]
+    fn a_row_carries_its_source_and_prices_like_the_rate_view() {
+        let row = published_rate("openai", "gpt-5.5-2026-04-23").expect("listed");
+        assert_eq!(row.prefix, "gpt-5.5");
+        assert!(!row.source.is_empty());
+        assert_eq!(
+            Some(row.pricing()),
+            published_rates("openai", "gpt-5.5-2026-04-23")
+        );
+        assert_eq!(published_rate("openai", "davinci"), None);
     }
 
     /// Rates declared on a model's config entry are what the direct providers

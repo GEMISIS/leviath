@@ -27,6 +27,8 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The shipped price table is a TOML file compiled in with `include_str!`.
+toml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tiktoken-rs = { workspace = true }

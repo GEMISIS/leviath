@@ -740,7 +740,7 @@ fn print_model_pricing(provider: &str, model: &str, listed: Option<ModelPricing>
     // be worse than not showing a source at all.
     println!(
         "  Source:         published list price, read {}",
-        leviath_providers::pricing::RATES_READ_ON
+        leviath_providers::pricing::rates_read_on()
     );
     println!("  \u{26a0}  {provider} does not serve prices through its API, so this was");
     println!("     transcribed by hand and may be out of date. A rate set on the");
