@@ -166,6 +166,18 @@ base_url = "https://api.groq.com/openai/v1"
 requests_per_minute = 30
 tokens_per_minute = 60000
 
+# A server that speaks OpenAI's chat API needs no script: llama.cpp, LM Studio,
+# vLLM, BionicGPT or a gateway. base_url is required; api_key, headers and
+# models are optional. models is read only when GET /models fails.
+# [model_providers.llama-cpp]
+# kind = "openai-compatible"
+# base_url = "http://localhost:8080/v1"
+# api_key = "..."
+# models = ["qwen3-8b"]
+#
+# [model_providers.llama-cpp.headers]
+# X-Org = "research"
+
 [[mcp_servers]]
 name = "filesystem"
 transport = "stdio"

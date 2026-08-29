@@ -179,6 +179,15 @@ same list.
 
 ### Added
 
+- `[model_providers.<name>] kind = "openai-compatible"` reaches any server that speaks
+  OpenAI's chat API (llama.cpp, LM Studio, vLLM, BionicGPT, a gateway) natively, with no
+  Rhai script: `base_url`, an optional `api_key`, `headers` and a `models` fallback for a
+  server that does not list its own. Models are detected from `GET /models`. `lev setup`
+  offers llama.cpp and LM Studio as presets and a custom entry, each repeatable, with the
+  detected models offered as the default. `GET /api/config` reports each gateway's `kind`,
+  `header_names` and `models`, `PUT /api/config` accepts `kind`, `headers` and `models`,
+  and `POST /api/models/probe` (admin) asks a server what it serves before the write.
+
 - In `lev dash`'s new-run screen, Enter now breaks the line in the task box
   and Ctrl+Enter starts the run. A Start button sits under the editor (Tab
   reaches it, Enter or Space or a click presses it) for terminals without the

@@ -50,6 +50,7 @@ a test, so a client generator or an agent can consume the contract directly.
   | `POST /api/mcp/servers` | 405, because `GET /api/mcp/servers` is mounted |
   | `DELETE /api/mcp/servers/{name}` | 404, because nothing else is mounted on that path |
   | `POST /api/update` | 405, because `GET /api/update` is mounted |
+  | `POST /api/models/probe` | 404, because nothing else is mounted on that path |
 - **`--workdir-root`** confines agent workdirs; **`--no-remote-yolo`** forbids `"yolo": true` and
   `"allow": [...]` on spawn, which are one lever rather than two.
 
@@ -176,7 +177,8 @@ Base path `/api`; all JSON unless noted.
 | `GET/POST /api/agents/{id}/interaction` | Read / answer a pending question |
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation. The listing is paginated and takes `q`; the detail carries the manifest, the regions and the [fan-out limits](#fan-out-limits) |
 | `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key |
-| `GET /api/models` | Enumerate models, with each one's token limits and where they came from |
+| `GET /api/models` | Enumerate models, with each one's token limits and where they came from. An OpenAI-compatible gateway's detected models are listed under the gateway's name |
+| `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves before writing a gateway for it: `{"base_url", "api_key"?, "headers"?}` → `{"models": [ids]}`, or 502 carrying the server's own error text. See [below](#gateways) |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
 | `GET /api/scripts?agent=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai: the agent's tools, hooks and validators, and the global model providers. Writes need admin. See [below](#tools-and-scripts) |
 | `GET /api/mcp/servers` · `GET /{name}/status` · `POST /{name}/login` *(admin)* · `POST /{name}/test` *(admin)* | MCP servers. Add, remove, login and test need admin: each connects to a server, opens a browser, or spawns a command |
@@ -824,6 +826,28 @@ without an `agent`, since the answer is the same either way.
 
 Each listed provider carries a `provider` object with what its leading `// @` comments declare:
 `description`, `default_model`, `max_context_tokens`, `max_output_tokens` and `supports_streaming`.
+
+## Gateways
+
+`gateways` on `GET /api/config` lists every `[model_providers.<name>]` entry, name-sorted, and
+each one says what backs it: `kind` is `script` for a Rhai provider or `openai-compatible` for a
+server that speaks OpenAI's chat API. Beside `name`, `base_url`, `has_api_key` and `script`, an
+endpoint reports `header_names` (the names of its extra headers, never their values, because a
+header is where a second credential goes) and `models`, the ids it falls back to when its server
+will not list them. `extra_keys` names a script's forwarded keys the same way.
+
+`PUT /api/config` takes the same fields on each gateway in `gateways`: `kind`, `base_url`,
+`api_key`, `script`, `headers` (a name-to-value map) and `models`. Every field is optional and an
+absent one leaves what the entry already had, so a console can edit a URL without knowing the
+key or sending the headers back. An unknown `kind`, or an `openai-compatible` gateway with no
+`base_url`, is refused with a 400 and nothing is written.
+
+`POST /api/models/probe` is for the form before the write: it sends `GET /models` to `base_url`
+with the given `api_key` and `headers`, exactly as the gateway would, and answers
+`{"models": [ids]}` sorted. A server that refuses or does not answer is a 502 whose `error` is the
+server's own text, and a `base_url` with no scheme is a 400. It is mounted only with
+`--allow-admin`, like the write it precedes: it makes the serving host open a connection to any
+address the caller names.
 
 Each entry from `GET /api/models` also carries `limits_source`: `api` when the provider reported the
 token limits itself, `builtin` when this build matched them off the model's name, and `override`

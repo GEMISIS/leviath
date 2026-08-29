@@ -741,8 +741,11 @@ the line that fixes it.
 
 ## `[model_providers.<name>]`
 
-Optional overrides for a [Rhai script provider](/docs/rhai-providers). A script activates by being
-referenced and existing in `~/.leviath/providers/`; this table only supplies extras.
+A custom provider, keyed by the name a blueprint writes before the slash. Without a `kind` the
+entry is overrides for a [Rhai script provider](/docs/rhai-providers): a script activates by being
+referenced and existing in `~/.leviath/providers/`, and this table only supplies extras. With
+`kind = "openai-compatible"` it is a native provider for a server that speaks OpenAI's chat API,
+described in [its own section](#openai-compatible-endpoints) below.
 
 ```toml
 [model_providers.groq]
@@ -768,6 +771,68 @@ serves = ["deepseek-v4-flash"]
 Only needed by a script with no `list_models`; one that has it is asked directly and its answer
 wins. A provider that reports neither claims no models and can only be reached by a blueprint that
 pins it. See [preferring a script provider](/docs/providers#preferring-a-script-provider).
+
+## OpenAI-compatible endpoints
+
+A `[model_providers.<name>]` entry with `kind = "openai-compatible"` reaches any server that
+answers `POST /chat/completions` and `GET /models` in OpenAI's shape, with no script to write:
+llama.cpp, LM Studio, vLLM, BionicGPT, and any OpenAI-compatible gateway. llama.cpp and LM Studio
+are presets in `lev setup`; the rest go through the wizard's **Custom OpenAI-compatible endpoint**
+entry, or straight into the file.
+
+```toml
+default_provider = "llama-cpp"
+default_model    = "qwen3-8b"
+
+[providers]
+anthropic_api_key = "sk-ant-..."
+
+[model_providers.llama-cpp]
+kind     = "openai-compatible"
+base_url = "http://localhost:8080/v1"
+
+[model_providers.llama-cpp-big]
+kind     = "openai-compatible"
+base_url = "http://192.168.1.20:8080/v1"
+api_key  = "..."                   # optional; sent as a bearer token
+headers  = { "X-Org" = "research" }  # optional; extra headers on every request
+```
+
+This is three providers: two llama.cpp servers under their own names, and Anthropic. A blueprint
+reaches a model on one of them as `llama-cpp/qwen3-8b` or `llama-cpp-big/llama-3-70b`, and the
+`default_provider` above sends every stage that allows a user default to the first. `base_url` is
+required and includes the path prefix the server expects, usually `/v1`. Each entry may also carry
+`rate_limit` and `serves`, which mean what they mean for a script provider.
+
+Streaming and tool calls are on. Each request carries the temperature the stage asks for, and a
+server that refuses one is asked again without it and remembered for the rest of the process.
+
+**Detection.** At start-up Leviath asks each endpoint `GET /models` and uses the ids it lists,
+with no filtering: `lev models list --provider llama-cpp` and `GET /api/models` show them, and the
+wizard offers them as the default model. A server that refuses the route or does not answer falls
+back to the ids named in `models`:
+
+```toml
+[model_providers.gateway]
+kind     = "openai-compatible"
+base_url = "https://llm.example.com/v1"
+models   = ["mixtral-8x22b", "llama-3-70b"]
+```
+
+`models` is read only when detection fails; a server that lists its models is believed over it.
+With neither a listing nor a `models` list the provider does not say what it serves, and a
+blueprint that pins a model on it is sent through rather than refused.
+
+**Windows and cost.** A `/models` listing says nothing reliable about context windows, so an
+endpoint's models are assumed to hold 128 000 tokens until a
+[`[model_capabilities]`](#model_capabilitiesmodel_id) entry names the real figure; `lev models
+show <model>` reports which it is. Token counts are the local estimate, and cost is reported as
+unknown unless the same entry sets a price.
+
+Ollama keeps its own native provider ([`[providers] ollama_base_url`](#providers)) rather than
+going through this kind, because Leviath reads a model's context window and tool support from
+Ollama's `/api/show`, which the OpenAI-style shim does not report. Pointing an
+`openai-compatible` entry at Ollama works, but loses that.
 
 ## `[[mcp_servers]]`
 

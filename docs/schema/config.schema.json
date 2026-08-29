@@ -583,11 +583,18 @@
     },
     "model_providers": {
       "type": "object",
-      "description": "Overrides for Rhai script providers, keyed by the name an agent references. Any key not listed here is forwarded verbatim to the script's initialize().",
+      "description": "Custom providers, keyed by the name an agent references. Without a kind, overrides for a Rhai script provider (any key not listed here is forwarded verbatim to the script's initialize()); with kind = \"openai-compatible\", a native provider for the server at base_url.",
       "additionalProperties": {
         "type": "object",
         "additionalProperties": true,
         "properties": {
+          "kind": {
+            "enum": [
+              "script",
+              "openai-compatible"
+            ],
+            "description": "What backs the entry. Absent means script. openai-compatible requires base_url."
+          },
           "script": {
             "type": "string"
           },
@@ -596,6 +603,27 @@
           },
           "base_url": {
             "type": "string"
+          },
+          "headers": {
+            "type": "object",
+            "description": "Extra headers on every request to an openai-compatible endpoint.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "models": {
+            "type": "array",
+            "description": "Model ids an openai-compatible endpoint serves, read only when GET /models fails.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "serves": {
+            "type": "array",
+            "description": "Model ids a bare model name may resolve to this provider on.",
+            "items": {
+              "type": "string"
+            }
           },
           "rate_limit": {
             "type": "object",
