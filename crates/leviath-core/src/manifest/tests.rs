@@ -398,12 +398,14 @@ fn parse_manifest_rejects_a_stuck_condition_with_no_threshold() {
 
 /// A zero threshold reads as unset (mirroring `max_iterations = 0` meaning
 /// "unlimited"), so it leaves the edge dead rather than firing on turn zero.
+/// A negative one is refused outright; see
+/// `every_negative_manifest_integer_fails_to_load_naming_the_key`.
 #[test]
-fn parse_manifest_treats_non_positive_stuck_thresholds_as_unset() {
+fn parse_manifest_treats_zero_stuck_thresholds_as_unset() {
     let toml = stuck_edge_manifest(
         r#"condition = "stuck"
 stuck_after_iterations = 0
-stuck_after_minutes = -5"#,
+stuck_after_minutes = 0"#,
     );
     let err = parse_manifest(&toml).unwrap_err().to_string();
     assert!(
@@ -2168,9 +2170,10 @@ mode = "autonomous"
 }
 
 #[test]
-fn parse_manifest_nudge_ignores_bad_types_and_negative_max() {
-    // An empty block is inert; wrong-typed values and a negative `max`
-    // fall back to inheriting rather than misconfiguring the stage.
+fn parse_manifest_nudge_ignores_bad_types() {
+    // An empty block is inert; wrong-typed values fall back to inheriting
+    // rather than misconfiguring the stage. (A negative `max` is refused;
+    // see `every_negative_manifest_integer_fails_to_load_naming_the_key`.)
     let toml = r#"
 [agent]
 name = "nudge-bad"
@@ -2182,7 +2185,7 @@ mode = "autonomous"
 
 [stages.main.nudge]
 enabled = "yes"
-max = -1
+max = "many"
 text = 7
 "#;
     let bp = parse_manifest(toml).unwrap();
@@ -2544,7 +2547,7 @@ mode = "autonomous"
 hint = "no gate here"
 
 [stages.a.transitions.c]
-gate = { require_modifications = "yes", message = 3, region = [], tools = "write_file", max_attempts = -4 }
+gate = { require_modifications = "yes", message = 3, region = [], tools = "write_file", max_attempts = "four" }
 
 [stages.b]
 mode = "autonomous"
@@ -2556,13 +2559,14 @@ mode = "autonomous"
     let transitions = bp.find_stage("a").unwrap().transitions.as_ref().unwrap();
     // An edge with no `gate` table has no gate at all.
     assert!(transitions["b"].gate.is_none());
-    // A gate whose every key is the wrong type - including a negative
-    // attempt budget - falls back to the defaults, i.e. a gate that blocks
-    // nothing rather than one that silently never holds.
+    // A gate whose every key is the wrong type falls back to the defaults,
+    // i.e. a gate that blocks nothing rather than one that silently never
+    // holds. (A negative attempt budget is refused instead; see
+    // `every_negative_manifest_integer_fails_to_load_naming_the_key`.)
     let gate = transitions["c"].gate.as_ref().unwrap();
     assert_eq!(gate, &crate::blueprint::TransitionGate::default());
     // Zero, on the other hand, is a deliberate "record it but never hold".
-    let toml = toml.replace("max_attempts = -4", "max_attempts = 0");
+    let toml = toml.replace("max_attempts = \"four\"", "max_attempts = 0");
     let bp = parse_manifest(&toml).unwrap();
     assert_eq!(
         bp.find_stage("a").unwrap().transitions.as_ref().unwrap()["c"]
@@ -3632,7 +3636,7 @@ model = "claude-sonnet-5"
 }
 
 #[test]
-fn parse_manifest_negative_request_timeout_is_ignored() {
+fn parse_manifest_negative_request_timeout_is_refused() {
     let toml = r#"
 [agent]
 name = "neg-timeout-test"
@@ -3642,12 +3646,12 @@ provider = "anthropic"
 model = "claude-sonnet-5"
 request_timeout_secs = -5
 "#;
-    let bp = parse_manifest(toml).unwrap();
-    // A nonsensical negative value is dropped rather than wrapping into a
-    // huge u64.
-    assert_eq!(
-        bp.find_stage("main").unwrap().model.request_timeout_secs,
-        None
+    // A negative timeout used to be dropped without a word, so the stage ran
+    // on the default while the file said otherwise. It fails the load now.
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(
+        err.contains("stage 'main': model: request_timeout_secs must not be negative (got -5)"),
+        "{err}"
     );
 }
 
@@ -5571,4 +5575,167 @@ fn the_published_schema_and_the_parser_agree_on_every_key() {
             "keys of the {table} table"
         );
     }
+}
+
+// ─── negative integers and unknown sandbox keys are load errors ─────────
+
+/// Every integer a manifest carries, with a negative value, and the error
+/// each must produce. Before this list existed, `max_items = -1` went through
+/// `as usize` and became the largest possible cap, `max_child_depth = -1`
+/// became unlimited nesting, and a handful of keys quietly dropped the value
+/// instead; none of them said anything.
+fn negative_integer_cases() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "[agent]\nname = \"a\"\nmax_child_depth = -1\n",
+            "[agent]: max_child_depth must not be negative (got -1)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[compaction]\nmax_summary_tokens = -2\n",
+            "[compaction]: max_summary_tokens must not be negative (got -2)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[context.file_tracking]\nmax_file_tokens = -3\n",
+            "[context.file_tracking]: max_file_tokens must not be negative (got -3)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[repetition_detection]\nmax_repeat_calls = -4\n",
+            "[repetition_detection]: max_repeat_calls must not be negative (got -4)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[repetition_detection]\nmax_readonly_streak = -5\n",
+            "[repetition_detection]: max_readonly_streak must not be negative (got -5)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[context.regions]\nr = { kind = \"pinned\", max_tokens = -6 }\n",
+            "region 'r': max_tokens must not be negative (got -6)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[context.regions]\nr = { kind = \"pinned\", budget = \"10%\", min_tokens = -7 }\n",
+            "region 'r': min_tokens must not be negative (got -7)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[context.regions]\nr = { kind = \"compacting\", threshold_tokens = -8 }\n",
+            "region 'r': threshold_tokens must not be negative (got -8)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[context.regions]\nr = { kind = \"sliding_window\", max_items = -9 }\n",
+            "region 'r': max_items must not be negative (got -9)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[context.regions]\nr = { kind = \"sliding_window\", strategy = \"bulk\", overflow = -10 }\n",
+            "region 'r': overflow must not be negative (got -10)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[context.regions]\nr = { kind = \"sliding_window\", strategy = \"compact\", compact_count = -11 }\n",
+            "region 'r': compact_count must not be negative (got -11)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[context.regions]\nr = { kind = \"hashmap\", max_entries = -12 }\n",
+            "region 'r': max_entries must not be negative (got -12)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[stages.s]\nmax_iterations = -13\n",
+            "stage 's': max_iterations must not be negative (got -13)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[stages.s]\nmax_revisits = -14\n",
+            "stage 's': max_revisits must not be negative (got -14)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[stages.s.tool_routing]\nmax_result_tokens = -15\n",
+            "stage 's': tool_routing: max_result_tokens must not be negative (got -15)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[stages.s.model]\nprovider = \"p\"\nmodel = \"m\"\nrequest_timeout_secs = -16\n",
+            "stage 's': model: request_timeout_secs must not be negative (got -16)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[stages.s.transitions.t]\ngate = { max_attempts = -17 }\n[stages.t]\n",
+            "stage 's': transition to 't': gate: max_attempts must not be negative (got -17)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[stages.s.transitions.t]\ncondition = \"stuck\"\nstuck_after_minutes = -18\n[stages.t]\n",
+            "stage 's': transition to 't': stuck_after_minutes must not be negative (got -18)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[stages.s.transitions.t]\ncondition = \"stuck\"\nstuck_after_iterations = -21\n[stages.t]\n",
+            "stage 's': transition to 't': stuck_after_iterations must not be negative (got -21)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[stages.s.transitions.t]\ncondition = \"stuck\"\nstuck_after_same_file_edits = -22\n[stages.t]\n",
+            "stage 's': transition to 't': stuck_after_same_file_edits must not be negative (got -22)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[stages.s.transitions.t]\ncondition = \"stuck\"\nstuck_after_tool_calls = -23\n[stages.t]\n",
+            "stage 's': transition to 't': stuck_after_tool_calls must not be negative (got -23)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[agent.nudge]\nmax = -19\n",
+            "[agent.nudge]: max must not be negative (got -19)",
+        ),
+        (
+            "[agent]\nname = \"a\"\n[stages.s.nudge]\nmax = -20\n",
+            "stage 's': nudge: max must not be negative (got -20)",
+        ),
+    ]
+}
+
+#[test]
+fn every_negative_manifest_integer_fails_to_load_naming_the_key() {
+    for (toml, expected) in negative_integer_cases() {
+        let err = match parse_manifest(toml) {
+            Ok(_) => panic!("loaded despite a negative value:\n{toml}"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains(expected), "want {expected:?} in {err:?}");
+    }
+}
+
+/// The same keys at zero still load: zero is a value each key gives a
+/// meaning to (unlimited, never hold, unset), not a typo.
+#[test]
+fn every_manifest_integer_still_loads_at_zero() {
+    for (toml, _) in negative_integer_cases() {
+        let zeroed = with_negative_literal_zeroed(toml);
+        let bp = parse_manifest(&zeroed);
+        // A `stuck` edge at zero has no threshold, which is its own error.
+        if zeroed.contains("condition = \"stuck\"") {
+            let err = bp.unwrap_err().to_string();
+            assert!(err.contains("no threshold"), "{err}");
+            continue;
+        }
+        assert!(bp.is_ok(), "{zeroed}\n{:?}", bp.err());
+    }
+}
+
+/// Replace the one negative literal in a fixture with `0`.
+fn with_negative_literal_zeroed(toml: &str) -> String {
+    let (head, tail) = toml
+        .split_once("= -")
+        .expect("fixture has a negative literal");
+    let tail = tail.trim_start_matches(|c: char| c.is_ascii_digit());
+    format!("{head}= 0{tail}")
+}
+
+#[test]
+fn sandbox_refuses_an_unknown_key_naming_it() {
+    let err = parse_manifest(&sandbox_manifest("netwrok = false"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("sandbox has unknown key 'netwrok'"), "{err}");
+    assert!(
+        err.contains("network"),
+        "the error lists the valid keys: {err}"
+    );
+}
+
+#[test]
+fn a_stage_sandbox_refuses_an_unknown_key_naming_it() {
+    let toml = "[agent]\nname = \"a\"\n[stages.s.sandbox]\nnetwrok = false\n";
+    let err = parse_manifest(toml).unwrap_err().to_string();
+    assert!(
+        err.contains("stage 's': sandbox has unknown key 'netwrok'"),
+        "{err}"
+    );
 }

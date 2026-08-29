@@ -5,7 +5,7 @@ use super::*;
 
 /// Parse `[compaction]` over the defaults, leaving any field the manifest does
 /// not mention at its default rather than at zero.
-pub(super) fn parse_compaction_config(table: &toml::value::Table) -> CompactionConfig {
+pub(super) fn parse_compaction_config(table: &toml::value::Table) -> Result<CompactionConfig> {
     let mut cc = CompactionConfig::default();
 
     if let Some(provider) = str_of(table, "provider") {
@@ -17,14 +17,14 @@ pub(super) fn parse_compaction_config(table: &toml::value::Table) -> CompactionC
     if let Some(sp) = str_of(table, "system_prompt") {
         cc.system_prompt = Some(sp.to_string());
     }
-    if let Some(mst) = int_of(table, "max_summary_tokens") {
-        cc.max_summary_tokens = mst as usize;
+    if let Some(mst) = count_of(table, "[compaction]", "max_summary_tokens")? {
+        cc.max_summary_tokens = mst;
     }
     if let Some(temp) = table.get("temperature").and_then(|v| v.as_float()) {
         cc.temperature = temp as f32;
     }
 
-    cc
+    Ok(cc)
 }
 
 /// Parse `[read_paths]`. Entries are syntax-checked here so a broken one fails
@@ -106,25 +106,26 @@ pub(super) fn tool_permission_metadata(
 
 /// Parse `[context.file_tracking]`. Tracking both directions into a `files`
 /// region is the default because that is what the shipped layouts assume.
-pub(super) fn parse_file_tracking(table: &toml::value::Table) -> crate::FileTrackingConfig {
-    crate::FileTrackingConfig {
+pub(super) fn parse_file_tracking(table: &toml::value::Table) -> Result<crate::FileTrackingConfig> {
+    Ok(crate::FileTrackingConfig {
         region: str_of(table, "region").unwrap_or("files").to_string(),
         track_reads: bool_of(table, "track_reads").unwrap_or(true),
         track_writes: bool_of(table, "track_writes").unwrap_or(true),
-        max_file_tokens: int_of(table, "max_file_tokens").map(|v| v as usize),
-    }
+        max_file_tokens: count_of(table, "[context.file_tracking]", "max_file_tokens")?,
+    })
 }
 
 /// Parse `[repetition_detection]`. Every field stays `None` when absent so the
 /// global config's value survives; there are no local defaults to apply here.
 pub(super) fn parse_repetition_detection(
     table: &toml::value::Table,
-) -> crate::RepetitionDetectionConfig {
-    crate::RepetitionDetectionConfig {
-        max_repeat_calls: int_of(table, "max_repeat_calls").map(|v| v as usize),
-        max_readonly_streak: int_of(table, "max_readonly_streak").map(|v| v as usize),
+) -> Result<crate::RepetitionDetectionConfig> {
+    let where_ = "[repetition_detection]";
+    Ok(crate::RepetitionDetectionConfig {
+        max_repeat_calls: count_of(table, where_, "max_repeat_calls")?,
+        max_readonly_streak: count_of(table, where_, "max_readonly_streak")?,
         enabled: bool_of(table, "enabled"),
-    }
+    })
 }
 
 /// Parse an `[agent.output]` or `[stages.<name>.output]` block.
@@ -166,10 +167,10 @@ pub(super) fn parse_security_config(security_table: &toml::value::Table) -> crat
     sc
 }
 
-/// Every key read off a `[sandbox]` table. Test-only: the parser above reads
-/// them one by one, and the schema guard in `tests.rs` holds the published
-/// schema to this list.
-#[cfg(test)]
+/// Every key read off a `[sandbox]` table. Anything else is refused: a
+/// misspelled `netwrok = false` used to be ignored, leaving the sandbox
+/// looser than the file said. The schema guard in `tests.rs` holds the
+/// published schema to this list.
 pub(super) const SANDBOX_KEYS: &[&str] = &[
     "engine",
     "image",
@@ -185,12 +186,16 @@ pub(super) const SANDBOX_KEYS: &[&str] = &[
 /// A present block with no `kind` means host passthrough; omit the block to
 /// inherit the broader (agent/global) sandbox. An unknown `kind` or
 /// `on_unavailable` value is a hard error rather than a silently-ignored
-/// misconfiguration (mirrors transition-condition/transform validation).
+/// misconfiguration (mirrors transition-condition/transform validation), and
+/// so is a key the table does not have. `where_` is the prefix an error
+/// carries: empty for the agent's own block, the stage for a stage's.
 pub(super) fn parse_sandbox_config(
+    where_: &str,
     table: &toml::value::Table,
 ) -> Result<crate::sandbox::ToolSandboxConfig> {
     use crate::sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig};
 
+    reject_unknown_keys(&format!("{where_}sandbox"), table, SANDBOX_KEYS)?;
     let mut sc = ToolSandboxConfig::default();
 
     if let Some(kind) = str_of(table, "kind") {

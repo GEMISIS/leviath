@@ -166,6 +166,12 @@ same list.
   the `--claude-code` and `--claude-code-effort` flags, and the MCP import
   from Claude Code's own config all work as before, and a config that
   already has it on comes out of the wizard with it still on.
+- A blueprint with a negative integer, or an unknown key under `[sandbox]`,
+  no longer loads; the error names the key. `max_items = -1` used to read as
+  the largest possible cap, and a few keys (a gate's `max_attempts`, a nudge
+  `max`, `request_timeout_secs`, a `stuck_after_*` threshold) dropped the
+  value without a word. A misspelled sandbox key such as `netwrok = false`
+  was ignored, so the sandbox ran looser than the file said.
 - The published list prices for OpenAI, Anthropic and Google live in
   `crates/leviath-providers/pricing/rates.toml` rather than in Rust, and each
   row names where it came from. `lev models list` prints `n/a` where nothing

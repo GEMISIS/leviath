@@ -408,6 +408,20 @@ transform   = "summarize"
 `extract` additionally takes `fields` to pull named pieces out. See
 [Sub-agents](/docs/sub-agents).
 
+## Counts are never negative
+
+Every count a blueprint carries (`max_iterations`, `max_items`, `max_tokens`, `max_child_depth`,
+`request_timeout_secs`, a gate's `max_attempts`, a `stuck_after_*` threshold, and the rest) must
+be zero or more. A negative value fails the load, and the error names the key and the value:
+
+```text
+region 'notes': max_items must not be negative (got -1)
+```
+
+Earlier versions read `-1` as the largest possible number, so a cap written as a typo loaded as
+no cap at all. Zero keeps whatever meaning the key gives it (`max_iterations = 0` is unlimited,
+a gate's `max_attempts = 0` never holds, a `stuck_after_*` of zero is unset).
+
 ## Validate before you run
 
 ```bash

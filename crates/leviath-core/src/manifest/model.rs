@@ -8,7 +8,10 @@ use super::*;
 
 /// Parse `[stages.<name>.model]`, or the shipped default when the stage does
 /// not name one.
-pub(super) fn parse_stage_model(stage_value: &toml::Value) -> ModelConfig {
+pub(super) fn parse_stage_model(
+    stage_name: &str,
+    stage_value: &toml::Value,
+) -> Result<ModelConfig> {
     let model_table = table_of(stage_value, "model");
     if let Some(mt) = model_table {
         let mut models = Vec::new();
@@ -86,18 +89,23 @@ pub(super) fn parse_stage_model(stage_value: &toml::Value) -> ModelConfig {
             }
         }
 
-        let request_timeout_secs = int_of(mt, "request_timeout_secs");
-        let request_timeout_secs = request_timeout_secs
-            .filter(|&secs| secs >= 0)
-            .map(|secs| secs as u64);
+        let request_timeout_secs = count_of(
+            mt,
+            &format!("stage '{stage_name}': model"),
+            "request_timeout_secs",
+        )?
+        .map(|secs| secs as u64);
 
-        ModelConfig {
+        Ok(ModelConfig {
             models,
             allow_user_default,
             parameters,
             request_timeout_secs,
-        }
+        })
     } else {
-        ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string())
+        Ok(ModelConfig::new(
+            "anthropic".to_string(),
+            "claude-sonnet-4-6".to_string(),
+        ))
     }
 }
