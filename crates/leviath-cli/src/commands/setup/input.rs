@@ -18,7 +18,8 @@ use ratatui::layout::Rect;
 
 use super::catalog::Credential;
 use super::state::{
-    ConfirmPurpose, DetailAction, Edit, EditTarget, FieldValue, Picker, Step, Wizard,
+    ConfirmPurpose, DetailAction, Edit, EditTarget, EndpointCursor, EndpointField, FieldValue,
+    Picker, Step, Wizard,
 };
 use crate::tui::keymap;
 use crate::tui::widgets::confirm::ConfirmOutcome;
@@ -253,6 +254,13 @@ impl Wizard {
                 }
             };
         }
+        if self.step == Step::ProviderDetail
+            && let Some(index) = self.detail_row()
+            && self.is_endpoint_preset(index)
+        {
+            self.activate_endpoint_row(index);
+            return Action::Continue;
+        }
         match self.step {
             Step::Providers | Step::Agents | Step::Mcp => self.toggle(),
             Step::ProviderDetail => match self.detail_actions().get(self.cursor.wrapping_sub(1)) {
@@ -274,6 +282,36 @@ impl Wizard {
             Step::Welcome | Step::Review => {}
         }
         Action::Continue
+    }
+
+    /// Enter on an endpoint preset's screen (the preset at provider row
+    /// `index`): a text field opens its editor, the default model cycles, the
+    /// buttons do what they say, and the add row adds.
+    fn activate_endpoint_row(&mut self, index: usize) {
+        match self.endpoint_cursor(index) {
+            Some(EndpointCursor::Add) => {
+                self.add_endpoint(index);
+            }
+            Some(EndpointCursor::Field(entry, field)) if field.is_text() => {
+                self.open_endpoint_editor(entry, field);
+            }
+            Some(EndpointCursor::Field(entry, EndpointField::DefaultModel)) => {
+                self.cycle_endpoint_model(entry, 1);
+            }
+            Some(EndpointCursor::Field(entry, EndpointField::Verify)) => {
+                self.request_endpoint_verification(entry);
+                self.message = Some("Checking…".to_string());
+            }
+            Some(EndpointCursor::Field(entry, EndpointField::Remove)) => {
+                self.remove_endpoint(entry);
+                // The rows above the cursor are gone with the entry.
+                self.cursor = self.cursor.min(self.row_count());
+            }
+            // Every field kind is matched above, so this is the cursor past
+            // the rows: reachable only with a hand-forced cursor, and acting
+            // on nothing is correct then.
+            Some(EndpointCursor::Field(..)) | None => {}
+        }
     }
 
     /// Enter on a Defaults/Limits row always acts on that row's kind: toggle
@@ -312,7 +350,7 @@ impl Wizard {
         }) else {
             return false;
         };
-        if credential == Credential::None {
+        if matches!(credential, Credential::None | Credential::Endpoint) {
             return false;
         }
         self.edit = Some(Edit {
@@ -341,7 +379,18 @@ impl Wizard {
     fn toggle(&mut self) {
         match self.step {
             Step::Providers => {
-                if let Some(row) = self.providers.get_mut(self.cursor) {
+                // An endpoint preset is selected by having entries: picking
+                // it adds the first, unpicking it drops them all.
+                if self.is_endpoint_preset(self.cursor) {
+                    let index = self.cursor;
+                    if self.providers[index].selected {
+                        self.remove_endpoints_under(self.providers[index].provider.id);
+                        self.providers[index].selected = false;
+                        self.dirty = true;
+                    } else {
+                        self.add_endpoint(index);
+                    }
+                } else if let Some(row) = self.providers.get_mut(self.cursor) {
                     row.selected = !row.selected;
                     self.dirty = true;
                     // Deselecting the Claude Code transport withdraws the
@@ -398,6 +447,18 @@ impl Wizard {
     fn adjust(&mut self, delta: isize) {
         match self.step {
             Step::ProviderDetail => {
+                // On an endpoint preset's screen the default model cycles;
+                // everything else there is typed.
+                if let Some(index) = self.detail_row()
+                    && self.is_endpoint_preset(index)
+                {
+                    if let Some(EndpointCursor::Field(entry, EndpointField::DefaultModel)) =
+                        self.endpoint_cursor(index)
+                    {
+                        self.cycle_endpoint_model(entry, delta);
+                    }
+                    return;
+                }
                 // The effort selector is the only cyclable value here.
                 if let Some(index) = self.detail_row()
                     && let Some(row) = self.providers.get_mut(index)

@@ -20,6 +20,8 @@ use crate::config::Config;
 
 // Sections of the former single-file wizard state. Glob re-exported so every
 // existing `state::Wizard` path keeps working.
+mod endpoints;
+pub(crate) use endpoints::*;
 mod limits;
 use limits::*;
 mod types;
@@ -33,6 +35,8 @@ pub struct Wizard {
     pub cursor: usize,
     /// Every provider the wizard offers, picked or not.
     pub providers: Vec<ProviderRow>,
+    /// The OpenAI-compatible endpoints, under whichever preset row each sits.
+    pub endpoints: Vec<EndpointRow>,
     /// Which selected provider the credential screen is showing.
     pub detail: usize,
     /// The Defaults screen's settings.
@@ -206,10 +210,12 @@ impl Wizard {
         let (verify_tx, verify_rx) = mpsc::unbounded_channel();
         let (reply_tx, reply_rx) = mpsc::unbounded_channel();
 
+        let endpoints = Self::endpoints_from_config(&base);
         let mut wizard = Self {
             step: Step::Welcome,
             cursor: 0,
             providers,
+            endpoints,
             detail: 0,
             defaults: Vec::new(),
             limits: limits_fields(&base),
@@ -312,6 +318,11 @@ impl Wizard {
         let Some(index) = self.detail_row() else {
             return Vec::new();
         };
+        // An endpoint preset's screen is its entries' own rows, each with its
+        // check and remove buttons; see `endpoint_row_count`.
+        if self.is_endpoint_preset(index) {
+            return Vec::new();
+        }
         let mut actions = Vec::new();
         if self.providers[index].provider.signup_url.is_some() {
             actions.push(DetailAction::OpenSignup);
@@ -326,6 +337,7 @@ impl Wizard {
             Step::Welcome | Step::Review => 0,
             Step::Providers => self.providers.len(),
             Step::ProviderDetail => match self.detail_row() {
+                Some(index) if self.is_endpoint_preset(index) => self.endpoint_row_count(index),
                 Some(_) => 1 + self.detail_actions().len(),
                 None => 0,
             },
@@ -525,6 +537,10 @@ impl Wizard {
     /// blank API key would fail with a message about the key rather than saying
     /// the obvious, that none was given.
     pub(crate) fn request_verification(&mut self, index: usize) {
+        if self.is_endpoint_preset(index) {
+            self.verify_endpoints_under(index);
+            return;
+        }
         let Some(row) = self.providers.get_mut(index) else {
             return;
         };
@@ -577,7 +593,12 @@ impl Wizard {
     pub(crate) fn drain_verifications(&mut self) {
         let mut landed = false;
         while let Ok(reply) = self.reply_rx.try_recv() {
-            if let Some(row) = self
+            // Entries first: an entry is named after its preset by default
+            // (`llama-cpp`), and the preset's own row never asks for a check
+            // under its id, so a reply carrying that name is the entry's.
+            if self.settle_endpoint_reply(&reply) {
+                landed = true;
+            } else if let Some(row) = self
                 .providers
                 .iter_mut()
                 .find(|r| r.provider.id == reply.provider_id)
@@ -644,6 +665,13 @@ impl Wizard {
             .filter(|r| r.selected)
             .flat_map(|r| r.outcome.models().iter().cloned())
             .collect();
+        let selected = self.selected_endpoint_names();
+        models.extend(
+            self.endpoints
+                .iter()
+                .filter(|e| selected.contains(&e.name))
+                .flat_map(|e| e.model_choices()),
+        );
         models.sort();
         models.dedup();
         models
@@ -655,10 +683,19 @@ impl Wizard {
     /// list and the discovered models can change between visits.
     pub(crate) fn rebuild_defaults(&mut self) {
         let chosen = self.current_default_provider();
+        // The built-ins by id, and an endpoint preset by each entry under it:
+        // the entry's name is what `default_provider` has to hold.
         let providers: Vec<String> = self
             .selected_providers()
             .iter()
-            .map(|i| self.providers[*i].provider.id.to_string())
+            .flat_map(|&i| match self.is_endpoint_preset(i) {
+                true => self
+                    .endpoints_under(self.providers[i].provider.id)
+                    .into_iter()
+                    .map(|e| self.endpoints[e].name.clone())
+                    .collect(),
+                false => vec![self.providers[i].provider.id.to_string()],
+            })
             .collect();
         // Fall back to whatever is configured when nothing is selected, so the
         // field is never empty.
@@ -671,8 +708,13 @@ impl Wizard {
 
         let mut models = vec![Self::NO_DEFAULT_MODEL.to_string()];
         models.extend(self.discovered_models());
+        // An endpoint entry chosen as the default provider brings the model
+        // picked on its own screen, unless a model was already chosen here.
+        let chosen_provider = providers.get(index).cloned().unwrap_or_default();
         let current_model = self
             .current_default_model()
+            .filter(|m| m != Self::NO_DEFAULT_MODEL)
+            .or_else(|| self.endpoint_default_model(&chosen_provider))
             .unwrap_or_else(|| Self::NO_DEFAULT_MODEL.to_string());
         if !models.contains(&current_model) {
             models.push(current_model.clone());
@@ -770,12 +812,22 @@ impl Wizard {
 
     /// What a provider id is, for the chooser's second column.
     fn provider_detail(&self, id: &str) -> String {
-        match self.providers.iter().find(|r| r.provider.id == id) {
-            Some(row) => row.provider.display.to_string(),
-            // A provider that is configured but not in the catalog: it came
-            // from the config file, so it is still a legitimate choice.
-            None => "from your config".to_string(),
+        // Entries before rows: an entry is named after its preset by default,
+        // and the preset row is never itself a choice here.
+        if let Some(entry) = self.endpoints.iter().find(|e| e.name == id) {
+            let preset = self
+                .providers
+                .iter()
+                .find(|r| r.provider.id == entry.preset)
+                .map_or(entry.preset, |r| r.provider.display);
+            return format!("{preset} at {}", entry.base_url);
         }
+        if let Some(row) = self.providers.iter().find(|r| r.provider.id == id) {
+            return row.provider.display.to_string();
+        }
+        // A provider that is configured but not in the catalog: it came
+        // from the config file, so it is still a legitimate choice.
+        "from your config".to_string()
     }
 
     /// Which providers reported a model, so the row says where it came from.
@@ -944,6 +996,9 @@ impl Wizard {
                     row.outcome = Outcome::Skipped;
                 }
             }
+            EditTarget::Endpoint { entry, field } => {
+                self.commit_endpoint_edit(entry, field, edit.line.value());
+            }
             EditTarget::Field(index) => {
                 let Some(fields) = self.fields_mut() else {
                     return;
@@ -974,7 +1029,8 @@ impl Wizard {
 
         for row in &self.providers {
             match row.provider.credential {
-                Credential::None => {}
+                // Written below, from the entries rather than the row.
+                Credential::None | Credential::Endpoint => {}
                 _ if !row.selected => catalog::set_credential(&mut config, row.provider.id, None),
                 // An environment-supplied credential is left out of the file:
                 // the user put it in their environment on purpose, and
@@ -1003,6 +1059,8 @@ impl Wizard {
             config.providers.claude_code_effort =
                 Some(effort_options()[row.effort.min(effort_options().len() - 1)].to_string());
         }
+
+        self.write_endpoints(&mut config);
 
         config.default_provider = self.current_default_provider();
         config.default_model = self

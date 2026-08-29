@@ -1583,3 +1583,156 @@ fn f1_opens_the_wizard_help_too() {
     assert!(!w.show_help);
     assert_eq!(w.help_scroll.get(), 0, "closing resets it");
 }
+
+// ─── OpenAI-compatible endpoints ────────────────────────────────────────
+
+fn preset(w: &Wizard, id: &str) -> usize {
+    w.providers
+        .iter()
+        .position(|r| r.provider.id == id)
+        .expect("the preset is in the table")
+}
+
+/// Space on a preset row adds the first entry; Space again drops every
+/// entry under it.
+#[test]
+fn toggling_an_endpoint_preset_adds_and_removes_its_entries() {
+    let (_dir, mut w) = wizard();
+    w.enter(Step::Providers);
+    w.cursor = preset(&w, "lm-studio");
+
+    w.handle_key(press(KeyCode::Char(' ')));
+    assert_eq!(w.endpoints.len(), 1);
+    assert_eq!(w.endpoints[0].name, "lm-studio");
+    assert_eq!(
+        w.endpoints[0].base_url,
+        crate::commands::setup::catalog::LM_STUDIO_URL
+    );
+    assert!(w.providers[w.cursor].selected);
+
+    w.handle_key(press(KeyCode::Char(' ')));
+    assert!(w.endpoints.is_empty());
+    assert!(!w.providers[w.cursor].selected);
+    assert!(w.dirty);
+}
+
+/// Enter on each row of an entry's form does what the row says.
+#[test]
+fn enter_on_the_endpoint_form_edits_cycles_checks_removes_and_adds() {
+    let (_dir, mut w) = wizard();
+    let (mut requests, _replies) = w.take_verify_ends().expect("first take");
+    let llama = preset(&w, "llama-cpp");
+    w.add_endpoint(llama);
+    w.enter(Step::ProviderDetail);
+    assert_eq!(w.detail_row(), Some(llama));
+    assert_eq!(w.row_count(), 9);
+
+    // Name: the editor opens, typing lands, Enter commits.
+    w.cursor = 0;
+    w.handle_key(press(KeyCode::Enter));
+    assert!(w.edit.is_some());
+    for c in "-x".chars() {
+        w.handle_key(press(KeyCode::Char(c)));
+    }
+    w.handle_key(press(KeyCode::Enter));
+    assert_eq!(w.endpoints[0].name, "llama-cpp-x");
+
+    // Default model: nothing to cycle yet, so a message and no change.
+    w.cursor = 5;
+    w.handle_key(press(KeyCode::Enter));
+    assert_eq!(w.endpoints[0].default_model, None);
+    assert!(w.message.take().is_some());
+    w.endpoints[0].models = "a, b".to_string();
+    w.handle_key(press(KeyCode::Enter));
+    assert_eq!(w.endpoints[0].default_model.as_deref(), Some("a"));
+    w.handle_key(press(KeyCode::Left));
+    assert_eq!(w.endpoints[0].default_model.as_deref(), Some("b"));
+    // Arrows elsewhere on the form do nothing.
+    w.cursor = 1;
+    w.handle_key(press(KeyCode::Right));
+    assert_eq!(w.endpoints[0].default_model.as_deref(), Some("b"));
+
+    // Check: a request goes out.
+    w.cursor = 6;
+    w.handle_key(press(KeyCode::Enter));
+    assert!(w.endpoints[0].checking);
+    assert_eq!(
+        requests.try_recv().expect("sent").provider_id,
+        "llama-cpp-x"
+    );
+    assert!(w.message.take().unwrap().contains("Checking"));
+
+    // Add another: a second form appears; Remove takes it away and the
+    // cursor stays inside the screen.
+    w.cursor = 8;
+    w.handle_key(press(KeyCode::Enter));
+    assert_eq!(w.endpoints.len(), 2);
+    assert_eq!(w.row_count(), 17);
+    w.cursor = 8 + 7;
+    w.handle_key(press(KeyCode::Enter));
+    assert_eq!(w.endpoints.len(), 1);
+    assert!(w.cursor <= w.row_count());
+
+    // The Continue button still advances.
+    w.cursor = w.row_count();
+    w.handle_key(press(KeyCode::Enter));
+    assert_eq!(w.step, Step::Defaults);
+    assert_eq!(
+        w.defaults[Wizard::PROVIDER_FIELD].value.display(),
+        "llama-cpp-x"
+    );
+}
+
+/// `v` on the preset's screen checks every entry under it, and Tab does the
+/// same on the way out.
+#[test]
+fn v_and_tab_check_every_entry_under_the_preset() {
+    let (_dir, mut w) = wizard();
+    let (mut requests, _replies) = w.take_verify_ends().expect("first take");
+    let custom = preset(&w, "openai-compatible");
+    w.add_endpoint(custom);
+    w.add_endpoint(custom);
+    w.endpoints[0].base_url = "http://127.0.0.1:1/v1".to_string();
+    w.endpoints[1].base_url = "http://127.0.0.1:2/v1".to_string();
+    w.enter(Step::ProviderDetail);
+
+    w.handle_key(press(KeyCode::Char('v')));
+    assert!(requests.try_recv().is_ok());
+    assert!(requests.try_recv().is_ok());
+    assert!(requests.try_recv().is_err());
+
+    w.handle_key(press(KeyCode::Tab));
+    assert!(requests.try_recv().is_ok());
+    assert!(requests.try_recv().is_ok());
+    assert_eq!(w.step, Step::Defaults);
+}
+
+/// A cursor forced past the form's rows (tests can do this; keys cannot)
+/// acts on nothing.
+#[test]
+fn enter_past_the_endpoint_forms_rows_does_nothing() {
+    let (_dir, mut w) = wizard();
+    let llama = preset(&w, "llama-cpp");
+    w.add_endpoint(llama);
+    w.enter(Step::ProviderDetail);
+    w.cursor = w.row_count() + 5;
+    w.handle_key(press(KeyCode::Enter));
+    assert_eq!(w.step, Step::ProviderDetail);
+    assert_eq!(w.endpoints.len(), 1);
+    assert!(w.edit.is_none());
+}
+
+/// The Escape that cancels an endpoint edit leaves the value alone.
+#[test]
+fn cancelling_an_endpoint_edit_keeps_the_old_value() {
+    let (_dir, mut w) = wizard();
+    let llama = preset(&w, "llama-cpp");
+    w.add_endpoint(llama);
+    w.enter(Step::ProviderDetail);
+    w.cursor = 2;
+    w.handle_key(press(KeyCode::Enter));
+    w.handle_key(press(KeyCode::Char('k')));
+    w.handle_key(press(KeyCode::Esc));
+    assert!(w.endpoints[0].api_key.is_empty());
+    assert!(w.edit.is_none());
+}

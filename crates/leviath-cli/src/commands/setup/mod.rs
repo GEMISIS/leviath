@@ -215,19 +215,30 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
 ///
 /// Ollama sits last on purpose. It needs no key, so a config that merely
 /// mentions it is not a statement of preference, and putting it first would
-/// make it the default on a machine that never installed it.
-fn configured_providers(config: &Config) -> Vec<&'static str> {
+/// make it the default on a machine that never installed it. An
+/// OpenAI-compatible endpoint was written deliberately, so it sits with the
+/// keyed providers, after them and in name order.
+fn configured_providers(config: &Config) -> Vec<String> {
+    let mut endpoints: Vec<&str> = config
+        .model_providers
+        .iter()
+        .filter(|(_, e)| e.is_endpoint())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    endpoints.sort_unstable();
     [
         ("anthropic", config.providers.anthropic_api_key.is_some()),
         ("openai", config.providers.openai_api_key.is_some()),
         ("google", config.providers.google_api_key.is_some()),
         ("openrouter", config.openrouter_api_key.is_some()),
         ("claude-code", config.providers.claude_code_enabled),
-        ("ollama", config.ollama_base_url.is_some()),
     ]
     .into_iter()
     .filter(|(_, configured)| *configured)
     .map(|(id, _)| id)
+    .chain(endpoints)
+    .chain(config.ollama_base_url.is_some().then_some("ollama"))
+    .map(str::to_string)
     .collect()
 }
 
@@ -243,11 +254,11 @@ fn configured_providers(config: &Config) -> Vec<&'static str> {
 /// already in the file survives.
 fn retarget_default_provider(config: &mut Config) {
     let configured = configured_providers(config);
-    if configured.contains(&config.default_provider.as_str()) {
+    if configured.contains(&config.default_provider) {
         return;
     }
     if let Some(first) = configured.first() {
-        config.default_provider = (*first).to_string();
+        config.default_provider = first.clone();
     }
 }
 
@@ -517,6 +528,52 @@ mod tests {
             },
         );
         assert_eq!(config.default_provider, "google");
+    }
+
+    /// An endpoint written by hand is a deliberate provider, so it can be
+    /// the default, after any keyed provider and before Ollama.
+    #[test]
+    fn an_endpoint_entry_can_become_the_default_provider() {
+        use crate::config::{ModelProviderConfig, ModelProviderKind};
+        let mut config = Config {
+            ollama_base_url: Some("http://localhost:11434".to_string()),
+            ..Config::default()
+        };
+        for name in ["zeta", "alpha"] {
+            config.model_providers.insert(
+                name.to_string(),
+                ModelProviderConfig {
+                    kind: Some(ModelProviderKind::OpenaiCompatible),
+                    base_url: Some("http://h/v1".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+        // A script entry is not a provider this can point at.
+        config.model_providers.insert(
+            "groq".to_string(),
+            ModelProviderConfig {
+                script: Some("groq.rhai".to_string()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(configured_providers(&config), ["alpha", "zeta", "ollama"]);
+        apply_flags(&mut config, &args());
+        assert_eq!(config.default_provider, "alpha");
+
+        // A key still comes first.
+        apply_flags(
+            &mut config,
+            &SetupArgs {
+                openai_key: Some("sk-test".to_string()),
+                ..args()
+            },
+        );
+        assert_eq!(configured_providers(&config)[0], "openai");
+        assert_eq!(
+            config.default_provider, "alpha",
+            "already reachable, so kept"
+        );
     }
 
     #[test]

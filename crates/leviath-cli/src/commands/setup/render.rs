@@ -23,6 +23,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 
+mod endpoints;
+
 use super::catalog::{self, Credential};
 use super::state::{FieldValue, Step, Wizard};
 use crate::tui::theme::*;
@@ -549,6 +551,7 @@ fn build_providers(wizard: &Wizard) -> Screen {
             ),
             Span::styled(row.provider.display, name_style(index == wizard.cursor)),
         ];
+        let entries = wizard.endpoints_under(row.provider.id).len();
         if let Some(var) = row.from_env {
             spans.push(Span::styled(
                 format!("  (${var})"),
@@ -556,6 +559,13 @@ fn build_providers(wizard: &Wizard) -> Screen {
             ));
         } else if !row.value.is_empty() {
             spans.push(Span::styled("  (set)", Style::default().fg(C_MUTED)));
+        } else if entries == 1 {
+            spans.push(Span::styled("  (1 endpoint)", Style::default().fg(C_MUTED)));
+        } else if entries > 1 {
+            spans.push(Span::styled(
+                format!("  ({entries} endpoints)"),
+                Style::default().fg(C_MUTED),
+            ));
         }
         screen.row();
         screen.push(Line::from(spans));
@@ -632,6 +642,8 @@ fn build_provider_detail(wizard: &Wizard) -> Screen {
                 Style::default().fg(C_DIM),
             )));
         }
+        // A preset's screen is a form per entry, not this card.
+        Credential::Endpoint => return endpoints::build_endpoint_detail(wizard, index),
         Credential::None => {
             lines.push(Line::from(vec![
                 Span::styled(row_marker, Style::default().fg(C_ACCENT)),
@@ -1061,7 +1073,7 @@ mod tests {
 
     /// Render one frame and return every non-blank line of the buffer, so a
     /// test can assert on what a user would actually read.
-    fn rendered(wizard: &Wizard) -> String {
+    pub(super) fn rendered(wizard: &Wizard) -> String {
         let mut terminal = Terminal::new(TestBackendHarness::new(140, 44)).unwrap();
         terminal.draw(|frame| draw(frame, wizard)).unwrap();
         terminal.backend().text()
@@ -1362,7 +1374,7 @@ mod tests {
         assert_eq!(row_at(Rect::new(0, 0, 10, 4), &w, 2, 2), None);
     }
 
-    fn wizard() -> (tempfile::TempDir, Wizard) {
+    pub(super) fn wizard() -> (tempfile::TempDir, Wizard) {
         let dir = tempfile::tempdir().unwrap();
         let wizard = crate::commands::setup::state::tests::test_wizard(dir.path());
         (dir, wizard)

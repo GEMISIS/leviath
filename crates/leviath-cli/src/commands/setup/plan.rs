@@ -102,6 +102,34 @@ pub(crate) fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
         }
     }
 
+    // Endpoints by name: added, removed, or changed in what is sent.
+    let endpoints = |config: &Config| -> Vec<(String, crate::config::ModelProviderConfig)> {
+        let mut entries: Vec<_> = config
+            .model_providers
+            .iter()
+            .filter(|(_, e)| e.is_endpoint())
+            .map(|(name, e)| (name.clone(), e.clone()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    };
+    let old_endpoints = endpoints(before);
+    let new_endpoints = endpoints(after);
+    for (name, entry) in &new_endpoints {
+        match old_endpoints.iter().find(|(old, _)| old == name) {
+            None => out.push(format!("endpoint {name}: added")),
+            Some((_, old)) if !same_endpoint(old, entry) => {
+                out.push(format!("endpoint {name}: changed"))
+            }
+            Some(_) => {}
+        }
+    }
+    for (name, _) in &old_endpoints {
+        if !new_endpoints.iter().any(|(new, _)| new == name) {
+            out.push(format!("endpoint {name}: removed"));
+        }
+    }
+
     if before.providers.claude_code_enabled != after.providers.claude_code_enabled {
         out.push(format!(
             "Claude Code transport: {}",
@@ -192,6 +220,18 @@ pub(crate) fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
     out
 }
 
+/// Whether two endpoint entries would send the same requests: the address,
+/// the key, the headers and the fallback models.
+fn same_endpoint(
+    a: &crate::config::ModelProviderConfig,
+    b: &crate::config::ModelProviderConfig,
+) -> bool {
+    a.base_url == b.base_url
+        && a.api_key == b.api_key
+        && a.headers == b.headers
+        && a.models == b.models
+}
+
 /// Append a `field: old → new` line when the two differ.
 fn push_if_changed<T: PartialEq + std::fmt::Display>(
     out: &mut Vec<String>,
@@ -215,6 +255,59 @@ fn push_if_changed<T: PartialEq + std::fmt::Display>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Endpoints are reviewed by name: added, removed, or changed in what
+    /// they send. A change to a field the request never carries is not a
+    /// change worth a line.
+    #[test]
+    fn the_review_names_endpoints_added_removed_and_changed() {
+        use crate::config::{ModelProviderConfig, ModelProviderKind};
+        let endpoint = |url: &str| ModelProviderConfig {
+            kind: Some(ModelProviderKind::OpenaiCompatible),
+            base_url: Some(url.to_string()),
+            ..Default::default()
+        };
+        let mut before = Config::default();
+        before
+            .model_providers
+            .insert("gone".to_string(), endpoint("http://old"));
+        before
+            .model_providers
+            .insert("moved".to_string(), endpoint("http://a"));
+        before
+            .model_providers
+            .insert("same".to_string(), endpoint("http://s"));
+        let mut after = before.clone();
+        after.model_providers.remove("gone");
+        after
+            .model_providers
+            .insert("moved".to_string(), endpoint("http://b"));
+        after
+            .model_providers
+            .insert("new".to_string(), endpoint("http://n"));
+        // `serves` is not part of what is sent, so it is not a change.
+        after.model_providers.get_mut("same").unwrap().serves = Some(vec!["x".to_string()]);
+
+        let plan = SetupPlan {
+            config: after,
+            agents: Vec::new(),
+            declined: Default::default(),
+        };
+        let lines = changes(&before, &plan);
+        assert!(
+            lines.contains(&"endpoint new: added".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"endpoint moved: changed".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"endpoint gone: removed".to_string()),
+            "{lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("same")), "{lines:?}");
+    }
     use crate::bundled::BUNDLED_AGENTS;
 
     fn plan_of(config: Config) -> SetupPlan {
