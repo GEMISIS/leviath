@@ -53,19 +53,34 @@ pub struct OpenAIProvider {
 }
 
 /// Whether `model_key` is shaped like one of OpenAI's chat or reasoning
-/// models: `gpt-*`, or `o<digit>*`.
+/// models: `gpt-*`, or `o<digit>*`, and not one of the `gpt-*` names that
+/// speak a different API.
 ///
 /// One rule for two questions. [`Provider::serves_model`] uses it to route a
 /// bare model name, and [`Provider::served_catalog`] uses it to keep the
 /// embeddings, transcription and image models the listing also carries from
 /// being published as chat models. Sharing it is what guarantees the catalogue
 /// can never refuse a name routing would have accepted.
+///
+/// The exclusions are the `gpt-` families measured in the live listing that
+/// do not answer `/chat/completions`: realtime and transcription models speak
+/// their own endpoints, and image and speech models produce no text. The
+/// listing itself says nothing about which endpoint a model speaks, so the
+/// name is the only signal.
 fn is_chat_model_id(model_key: &str) -> bool {
+    const NOT_CHAT: &[&str] = &[
+        "realtime",
+        "transcribe",
+        "audio",
+        "tts",
+        "image",
+        "search-api",
+    ];
     let reasoning = model_key.starts_with('o')
         && model_key
             .get(1..2)
             .is_some_and(|c| c.chars().all(|c| c.is_ascii_digit()));
-    model_key.starts_with("gpt") || reasoning
+    (model_key.starts_with("gpt") || reasoning) && !NOT_CHAT.iter().any(|s| model_key.contains(s))
 }
 
 /// What [`MODELS`] says about `model`, for a caller with no provider in hand.
@@ -1555,6 +1570,9 @@ mod learned_tests {
             {"id":"gpt-5.5","object":"model","created":1776824847,"owned_by":"system","shutdown_date":null},
             {"id":"text-embedding-3-large","object":"model","created":1,"owned_by":"system"},
             {"id":"whisper-1","object":"model","created":2,"owned_by":"openai-internal"},
+            {"id":"gpt-realtime-2.1","object":"model","created":4,"owned_by":"system"},
+            {"id":"gpt-transcribe","object":"model","created":5,"owned_by":"system"},
+            {"id":"gpt-4o-mini-tts","object":"model","created":6,"owned_by":"system"},
             {"id":"o3","object":"model","created":3,"owned_by":"system","shutdown_date":"2027-01-01"}
         ]}"#;
         // One response only: `list_models` after priming must not fetch again.
@@ -1567,7 +1585,11 @@ mod learned_tests {
 
         let mut catalog = provider.served_catalog().expect("primed");
         catalog.sort();
-        assert_eq!(catalog, ["gpt-5.5", "o3"], "chat and reasoning ids only");
+        assert_eq!(
+            catalog,
+            ["gpt-5.5", "o3"],
+            "chat and reasoning ids only: no embeddings, speech, realtime or transcription"
+        );
         assert_eq!(provider.capabilities("gpt-5.5"), before);
 
         let listed = provider.list_models().await.expect("from the store");
