@@ -414,6 +414,28 @@ mod tests {
         assert!(decision.is_allowed());
     }
 
+    /// `read_files` had no arm in the classification table, so it took the
+    /// third-party default (outbound) and was blocked whenever anything
+    /// Private sat in context, while `read_file` on the same paths passed.
+    /// The same held for `edit_document`, the context and todo tools,
+    /// `submit_output` and `fan_out`.
+    #[test]
+    fn gate_allows_the_builtins_that_had_no_arm() {
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        let window = make_window_with_taint(TaintLevel::Private);
+        for name in [
+            "read_files",
+            "edit_document",
+            "context_append",
+            "todo_add",
+            "submit_output",
+            "fan_out",
+        ] {
+            let decision = gate.check_traditional("agent-1", name, &window);
+            assert!(decision.is_allowed(), "{name}: {decision:?}");
+        }
+    }
+
     #[test]
     fn gate_allows_outbound_when_taint_within_clearance() {
         let mut gate = TaintGate::new(SecurityConfig::default());

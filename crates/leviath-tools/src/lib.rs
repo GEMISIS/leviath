@@ -443,6 +443,25 @@ mod tests {
         assert_eq!(tools.names().len(), 28);
     }
 
+    /// The taint gate's fallback arm is the third-party default: outbound,
+    /// so gated. A built-in that reaches it is blocked in every
+    /// taint-tracking run with anything Private in context, and nothing says
+    /// why. This holds every name the registry advertises, and every
+    /// sub-agent tool, to an arm of its own, so a tool added later cannot
+    /// slip through the way `read_files` and the context tools did.
+    #[test]
+    fn every_builtin_tool_has_its_own_taint_arm() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let subagent = SUBAGENT_TOOLS.iter().map(|s| s.to_string());
+        for name in tools.names().into_iter().chain(subagent) {
+            assert!(
+                leviath_core::taint::classified_builtin(&name).is_some(),
+                "{name} falls to the third-party default arm"
+            );
+        }
+    }
+
     // ── Sub-agent tool definitions ────────────────────────────────────────
 
     #[test]
