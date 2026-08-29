@@ -159,6 +159,13 @@ same list.
 
 ### Changed
 
+- `lev setup` no longer offers the Claude Code transport on its provider
+  list, and with it the reasoning-effort row, the terms dialog on save, and
+  the review-screen warning are gone. The transport itself stays: the
+  `claude_code_enabled`, `claude_code_effort` and `claude_code_binary` keys,
+  the `--claude-code` and `--claude-code-effort` flags, and the MCP import
+  from Claude Code's own config all work as before, and a config that
+  already has it on comes out of the wizard with it still on.
 - The published list prices for OpenAI, Anthropic and Google live in
   `crates/leviath-providers/pricing/rates.toml` rather than in Rust, and each
   row names where it came from. `lev models list` prints `n/a` where nothing

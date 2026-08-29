@@ -131,7 +131,8 @@ fn confirm_and_editor_guards_hold_when_driven_directly() {
 
     // The credential editor refuses an empty credential screen.
     w.enter(Step::ProviderDetail);
-    assert!(!w.open_credential_editor());
+    w.open_credential_editor();
+    assert!(w.edit.is_none());
 }
 
 #[test]
@@ -231,29 +232,6 @@ fn the_cursor_moves_within_an_edit() {
     w.handle_key(press(KeyCode::Char('c')));
 
     assert_eq!(w.edit.as_ref().expect("still editing").line.value(), "acd");
-}
-
-#[test]
-fn the_claude_code_transport_has_nothing_to_type_so_enter_cycles_effort() {
-    let (_dir, mut w) = wizard();
-    let index = w
-        .providers
-        .iter()
-        .position(|r| r.provider.id == "claude-code")
-        .expect("the transport is offered");
-    w.providers[index].selected = true;
-    w.enter(Step::ProviderDetail);
-    let before = w.providers[index].effort;
-
-    w.handle_key(press(KeyCode::Enter));
-
-    assert!(w.edit.is_none());
-    assert_eq!(
-        w.step,
-        Step::ProviderDetail,
-        "acting on a row never advances"
-    );
-    assert_ne!(w.providers[index].effort, before, "Enter acts on the row");
 }
 
 #[test]
@@ -613,40 +591,18 @@ fn choosing_ollama_as_the_default_lowers_the_concurrency_limit() {
 }
 
 #[test]
-fn left_and_right_cycle_the_claude_code_effort() {
-    let (_dir, mut w) = wizard();
-    let index = w
-        .providers
-        .iter()
-        .position(|r| r.provider.id == "claude-code")
-        .expect("the transport is offered");
-    w.providers[index].selected = true;
-    w.enter(Step::ProviderDetail);
-    let before = w.providers[index].effort;
-
-    w.handle_key(press(KeyCode::Right));
-    assert_ne!(w.providers[index].effort, before);
-    w.handle_key(press(KeyCode::Left));
-    assert_eq!(w.providers[index].effort, before);
-    // Wrapping backwards from the first level lands on the last.
-    w.providers[index].effort = 0;
-    w.handle_key(press(KeyCode::Left));
-    assert_eq!(
-        w.providers[index].effort,
-        crate::commands::setup::state::effort_options().len() - 1
-    );
-}
-
-#[test]
 fn arrows_on_a_keyed_provider_do_not_change_anything() {
     let (_dir, mut w) = wizard();
     w.providers[0].selected = true;
     w.enter(Step::ProviderDetail);
-    let before = w.providers[0].effort;
+    let before = w.providers[0].value.clone();
 
     w.handle_key(press(KeyCode::Right));
+    w.handle_key(press(KeyCode::Left));
 
-    assert_eq!(w.providers[0].effort, before);
+    assert_eq!(w.providers[0].value, before);
+    assert!(w.edit.is_none());
+    assert!(!w.dirty);
 }
 
 #[test]
@@ -903,10 +859,10 @@ fn o_where_there_is_nothing_to_open_says_so() {
     let index = w
         .providers
         .iter()
-        .position(|r| r.provider.id == "claude-code")
-        .expect("the transport is offered");
-    w.providers[index].selected = true;
-    w.enter(Step::ProviderDetail);
+        .position(|r| r.provider.signup_url.is_none())
+        .expect("a provider with nowhere to go");
+    w.enter(Step::Providers);
+    w.cursor = index;
 
     w.handle_key(press(KeyCode::Char('o')));
     assert_eq!(w.message.as_deref(), Some("Nothing to open here."));
@@ -941,134 +897,18 @@ fn an_unbound_key_does_nothing() {
     assert!(!w.should_quit);
 }
 
-// ─── Claude Code ToS confirmation gate ──────────────────────────────────
-
-fn wizard_with_claude_code() -> (tempfile::TempDir, Wizard) {
-    let (dir, mut w) = wizard();
-    let index = w
-        .providers
-        .iter()
-        .position(|r| r.provider.id == "claude-code")
-        .expect("the transport is offered");
-    w.providers[index].selected = true;
-    (dir, w)
-}
-
-#[test]
-fn enter_on_review_with_claude_code_shows_tos_confirmation() {
-    let (_dir, mut w) = wizard_with_claude_code();
-    w.enter(Step::Review);
-
-    let action = w.handle_key(press(KeyCode::Enter));
-
-    assert_eq!(
-        action,
-        Action::Continue,
-        "must not save without ToS acceptance"
-    );
-    assert_eq!(
-        w.confirm.as_ref().expect("dialog open").purpose,
-        ConfirmPurpose::SaveTos
-    );
-}
-
-#[test]
-fn ctrl_s_with_claude_code_shows_tos_confirmation() {
-    let (_dir, mut w) = wizard_with_claude_code();
-    w.enter(Step::Providers);
-
-    let action = w.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-
-    assert_eq!(action, Action::Continue);
-    assert_eq!(
-        w.confirm.as_ref().expect("dialog open").purpose,
-        ConfirmPurpose::SaveTos
-    );
-}
-
-#[test]
-fn pressing_y_on_tos_confirmation_accepts_and_saves() {
-    let (_dir, mut w) = wizard_with_claude_code();
-    w.enter(Step::Review);
-    w.handle_key(press(KeyCode::Enter));
-    assert!(w.confirm.is_some());
-
-    let action = w.handle_key(press(KeyCode::Char('y')));
-
-    assert!(w.claude_code_tos_accepted);
-    assert!(w.confirm.is_none());
-    assert_eq!(
-        action,
-        Action::Save,
-        "confirming is the last word on the save the user already asked for"
-    );
-}
-
-#[test]
-fn moving_focus_and_pressing_enter_also_accepts() {
-    let (_dir, mut w) = wizard_with_claude_code();
-    w.enter(Step::Review);
-    w.handle_key(press(KeyCode::Enter));
-
-    w.handle_key(press(KeyCode::Right)); // focus Accept
-    let action = w.handle_key(press(KeyCode::Enter));
-
-    assert!(w.claude_code_tos_accepted);
-    assert_eq!(action, Action::Save);
-}
-
-#[test]
-fn dismissing_the_tos_confirmation_stays_put_without_accepting() {
-    let (_dir, mut w) = wizard_with_claude_code();
-    w.enter(Step::Review);
-    w.handle_key(press(KeyCode::Enter));
-
-    let action = w.handle_key(press(KeyCode::Char('n')));
-
-    assert!(!w.claude_code_tos_accepted);
-    assert!(w.confirm.is_none());
-    assert_eq!(action, Action::Continue, "the save stays blocked");
-    assert_eq!(w.step, Step::Review, "declining must not navigate away");
-}
-
-#[test]
-fn second_enter_on_review_after_accepting_saves() {
-    let (_dir, mut w) = wizard_with_claude_code();
-    w.enter(Step::Review);
-    w.handle_key(press(KeyCode::Enter)); // shows the dialog
-    w.handle_key(press(KeyCode::Char('y'))); // accept
-
-    w.enter(Step::Review);
-    let action = w.handle_key(press(KeyCode::Enter));
-
-    assert_eq!(action, Action::Save, "should save after ToS accepted");
-}
-
-#[test]
-fn deselecting_claude_code_resets_tos_acceptance() {
-    let (_dir, mut w) = wizard_with_claude_code();
-    w.claude_code_tos_accepted = true;
-
-    let index = w
-        .providers
-        .iter()
-        .position(|r| r.provider.id == "claude-code")
-        .unwrap();
-    w.enter(Step::Providers);
-    w.cursor = index;
-    w.handle_key(press(KeyCode::Char(' '))); // deselect
-
-    assert!(!w.claude_code_tos_accepted);
-}
+// ─── dialogs and saving ─────────────────────────────────────────────────
 
 #[test]
 fn a_dialog_holds_focus_against_stray_keys() {
-    let (_dir, mut w) = wizard_with_claude_code();
+    let (_dir, mut w) = wizard();
+    w.dirty = true;
     w.enter(Step::Review);
-    w.handle_key(press(KeyCode::Enter));
+    w.handle_key(press(KeyCode::Char('q')));
     assert!(w.confirm.is_some());
 
-    // q neither quits nor dismisses: a stray key never answers a dialog.
+    // A second q neither quits nor dismisses: a stray key never answers a
+    // dialog.
     w.handle_key(press(KeyCode::Char('q')));
     assert!(!w.should_quit, "q must not quit while a dialog is open");
     assert!(w.confirm.is_some(), "and must not dismiss it either");
@@ -1076,16 +916,18 @@ fn a_dialog_holds_focus_against_stray_keys() {
     // Esc explicitly declines.
     w.handle_key(press(KeyCode::Esc));
     assert!(w.confirm.is_none());
-    assert!(!w.claude_code_tos_accepted);
+    assert!(!w.should_quit);
 }
 
 #[test]
-fn without_claude_code_review_saves_immediately() {
+fn enter_on_review_saves_immediately() {
+    // No provider gates the save behind a dialog any more.
     let (_dir, mut w) = wizard();
     w.enter(Step::Review);
 
     let action = w.handle_key(press(KeyCode::Enter));
-    assert_eq!(action, Action::Save, "no claude-code means no gate");
+    assert_eq!(action, Action::Save);
+    assert!(w.confirm.is_none());
 }
 
 // ─── the mouse ──────────────────────────────────────────────────────────
@@ -1178,16 +1020,13 @@ fn the_credential_screen_offers_its_actions_as_clickable_rows() {
 }
 
 /// A provider with nowhere to sign up offers only the check, and the rows stay
-/// contiguous rather than leaving a gap where a button would have been.
+/// contiguous rather than leaving a gap where a button would have been. Every
+/// keyed row in the catalog has a key page today, so the test strips one.
 #[test]
 fn a_provider_without_a_key_page_offers_only_the_check() {
     let (_dir, mut w) = wizard();
-    let index = w
-        .providers
-        .iter()
-        .position(|r| r.provider.signup_url.is_none())
-        .expect("the catalog has one");
-    w.providers[index].selected = true;
+    w.providers[0].provider.signup_url = None;
+    w.providers[0].selected = true;
     w.enter(Step::ProviderDetail);
 
     assert_eq!(w.detail_actions(), vec![DetailAction::Verify]);

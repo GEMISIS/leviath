@@ -130,16 +130,6 @@ pub(crate) fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
         }
     }
 
-    if before.providers.claude_code_enabled != after.providers.claude_code_enabled {
-        out.push(format!(
-            "Claude Code transport: {}",
-            if after.providers.claude_code_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        ));
-    }
     push_if_changed(
         &mut out,
         "default provider",
@@ -501,21 +491,6 @@ mod tests {
         before.providers.anthropic_api_key = Some("sk-ant-same".to_string());
 
         assert!(changes(&before, &plan_of(before.clone())).is_empty());
-    }
-
-    #[test]
-    fn the_claude_code_toggle_is_reported_both_ways() {
-        let before = Config::default();
-        let mut on = before.clone();
-        on.providers.claude_code_enabled = true;
-
-        assert!(
-            changes(&before, &plan_of(on.clone()))
-                .contains(&"Claude Code transport: enabled".to_string())
-        );
-        assert!(
-            changes(&on, &plan_of(before)).contains(&"Claude Code transport: disabled".to_string())
-        );
     }
 
     #[test]

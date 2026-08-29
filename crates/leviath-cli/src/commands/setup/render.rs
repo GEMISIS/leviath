@@ -606,8 +606,8 @@ fn build_provider_detail(wizard: &Wizard) -> Screen {
         Line::from(""),
     ];
 
-    // The credential (or effort) row is the screen's one cursor row; the
-    // marker shows whether it or the Continue button holds focus.
+    // The credential row is the screen's one cursor row; the marker shows
+    // whether it or the Continue button holds focus.
     let row_marker = if wizard.on_continue() { "  " } else { "› " };
     let credential_row = lines.len();
     match row.provider.credential {
@@ -644,33 +644,6 @@ fn build_provider_detail(wizard: &Wizard) -> Screen {
         }
         // A preset's screen is a form per entry, not this card.
         Credential::Endpoint => return endpoints::build_endpoint_detail(wizard, index),
-        Credential::None => {
-            lines.push(Line::from(vec![
-                Span::styled(row_marker, Style::default().fg(C_ACCENT)),
-                Span::styled("Reasoning effort: ", Style::default().fg(C_MUTED)),
-                Span::styled(
-                    super::state::effort_options()[row.effort],
-                    Style::default().fg(C_ACCENT),
-                ),
-            ]));
-            lines.push(Line::from(Span::styled(
-                "← / → to change.  Sign in with `claude` if you have not already.",
-                Style::default().fg(C_DIM),
-            )));
-            // The transport is opt-in, so the terms risk has to be on the
-            // screen where it is opted into - not only in the README.
-            for warning in [
-                "⚠️  Anthropic's terms prohibit third-party use of subscription auth",
-                "    without prior approval. By enabling this transport you accept",
-                "    responsibility for compliance with their terms.",
-                "    For unambiguous compliance, use a direct Anthropic API key.",
-            ] {
-                lines.push(Line::from(Span::styled(
-                    warning,
-                    Style::default().fg(C_WARN),
-                )));
-            }
-        }
     }
 
     lines.push(Line::from(""));
@@ -936,24 +909,6 @@ fn build_review(wizard: &Wizard) -> Screen {
         }
     }
 
-    if wizard
-        .providers
-        .iter()
-        .any(|r| r.selected && r.provider.id == "claude-code")
-    {
-        lines.push(Line::from(""));
-        for warning in [
-            "Claude Code transport: Anthropic's terms may prohibit third-party use of",
-            "subscription auth without prior approval. By enabling it you accept",
-            "responsibility for compliance with their terms.",
-        ] {
-            lines.push(Line::from(Span::styled(
-                warning,
-                Style::default().fg(C_WARN),
-            )));
-        }
-    }
-
     Screen {
         lines,
         rows: Vec::new(),
@@ -1080,7 +1035,7 @@ mod tests {
     }
 
     /// A provider blurb on a narrow window must wrap, not clip: the tail of
-    /// the sentence (here the transport's "cannot be disabled" caveat) has to
+    /// the longest sentence (the custom endpoint blurb ends in "them.") has to
     /// reach the screen.
     #[test]
     fn narrow_window_wraps_provider_blurbs_instead_of_clipping() {
@@ -1090,7 +1045,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &w)).unwrap();
         let screen = terminal.backend().text();
         assert!(
-            screen.contains("disabled"),
+            screen.contains("    them."),
             "the blurb tail must survive a 48-column window:\n{screen}"
         );
     }
@@ -1556,74 +1511,23 @@ mod tests {
     }
 
     #[test]
-    fn the_claude_code_card_shows_its_effort_and_its_caveat() {
+    fn a_confirmation_dialog_draws_over_the_review_screen() {
         let (_dir, mut w) = wizard();
-        let index = w
-            .providers
-            .iter()
-            .position(|r| r.provider.id == "claude-code")
-            .expect("the transport is offered");
-        w.providers[index].selected = true;
-        w.enter(Step::ProviderDetail);
-
-        let screen = rendered(&w);
-        assert!(screen.contains("Reasoning effort"));
-        assert!(
-            screen.contains("email"),
-            "the privacy cost must be on screen"
-        );
-        assert!(
-            screen.contains("terms"),
-            "the terms-of-service risk must be on screen:\n{screen}"
-        );
-    }
-
-    #[test]
-    fn the_review_screen_warns_about_the_claude_code_terms() {
-        let (_dir, mut w) = wizard();
-        let index = w
-            .providers
-            .iter()
-            .position(|r| r.provider.id == "claude-code")
-            .expect("the transport is offered");
         w.enter(Step::Review);
-        assert!(
-            !rendered(&w).contains("Claude Code transport: Anthropic"),
-            "the warning is only for a setup that enables it"
-        );
-
-        w.providers[index].selected = true;
-        let screen = rendered(&w);
-        assert!(
-            screen.contains("Claude Code transport: Anthropic"),
-            "{screen}"
-        );
-        assert!(screen.contains("responsibility for compliance"), "{screen}");
-    }
-
-    #[test]
-    fn the_tos_confirmation_dialog_draws_over_the_review_screen() {
-        let (_dir, mut w) = wizard();
-        let index = w
-            .providers
-            .iter()
-            .position(|r| r.provider.id == "claude-code")
-            .expect("the transport is offered");
-        w.providers[index].selected = true;
-        w.enter(Step::Review);
-        w.open_tos_confirm();
+        w.dirty = true;
+        w.open_quit_confirm();
 
         let screen = rendered(&w);
         assert!(
-            screen.contains("terms of service"),
+            screen.contains("Quit setup?"),
             "dialog title missing:\n{screen}"
         );
         assert!(
-            screen.contains("[ Accept and save ]"),
+            screen.contains("[ Quit ]"),
             "the affirmative button is missing:\n{screen}"
         );
         assert!(
-            screen.contains("[ Cancel ]"),
+            screen.contains("[ Stay ]"),
             "the safe button is missing:\n{screen}"
         );
     }
