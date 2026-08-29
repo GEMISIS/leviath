@@ -268,6 +268,50 @@ jobs:
           esac
           echo "RUSTFLAGS=$RUSTFLAGS"
           cargo build --release --bin lev --target "$TARGET"
+      # Authenticode-sign lev.exe when a Trusted Signing account is configured.
+      #
+      # An unsigned exe that talks to the network, spawns processes and reads
+      # the credential store is what antivirus heuristics are built to catch,
+      # and an install that Defender quarantines is not an install. A signature
+      # from a publisher Microsoft has verified is the one thing that answers
+      # that on the machine itself, before any reputation accrues.
+      #
+      # Gated on the secrets being present rather than required, so a fork or
+      # a PR build still produces an (unsigned) binary. To turn it on, create
+      # an Azure Trusted Signing account and a certificate profile, then set:
+      #   AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET   (an app with
+      #     the "Trusted Signing Certificate Profile Signer" role)
+      #   TRUSTED_SIGNING_ENDPOINT   e.g. https://eus.codesigning.azure.net
+      #   TRUSTED_SIGNING_ACCOUNT    the account name
+      #   TRUSTED_SIGNING_PROFILE    the certificate profile name
+      - name: Decide whether the binary can be signed
+        if: matrix.os == 'windows-latest'
+        id: signing
+        shell: bash
+        env:
+          ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+        run: |
+          if [ -n "$ACCOUNT" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::TRUSTED_SIGNING_ACCOUNT is not set; lev.exe ships unsigned"
+          fi
+      - name: Sign lev.exe
+        if: matrix.os == 'windows-latest' && steps.signing.outputs.configured == 'true'
+        uses: azure/trusted-signing-action@208f8af4bf26cf2af8597424e3cb5582801523ba # v2.0.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
+          files-folder: target/${{ matrix.target }}/release
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
       - name: Package archive
         shell: bash
         run: |

@@ -174,7 +174,34 @@ fn write_bundled_agents(out_dir: &Path, agents_dir: &Path) {
         .expect("failed to write the generated bundled_agents.rs");
 }
 
+/// Embed the Windows version resource, so the exe carries its own name,
+/// version and publisher (Explorer's Properties → Details, and the fields
+/// antivirus heuristics weigh). Only when *building on* Windows: the resource
+/// compiler is part of the MSVC toolchain, and the release exe is built on a
+/// Windows runner.
+#[cfg(windows)]
+fn embed_windows_resource() {
+    let version = env!("CARGO_PKG_VERSION");
+    let mut resource = winresource::WindowsResource::new();
+    resource
+        .set("ProductName", "Leviath")
+        .set("FileDescription", "Leviath agent runtime (lev)")
+        .set("CompanyName", "Sun Forge AI")
+        .set("LegalCopyright", "Copyright Sun Forge AI. MIT License.")
+        .set("OriginalFilename", "lev.exe")
+        .set("InternalName", "lev")
+        .set("ProductVersion", version)
+        .set("FileVersion", version);
+    if let Err(e) = resource.compile() {
+        println!("cargo:warning=could not embed the Windows version resource: {e}");
+    }
+}
+
+#[cfg(not(windows))]
+fn embed_windows_resource() {}
+
 fn main() {
+    embed_windows_resource();
     let hash = git(&["rev-parse", "--short", "HEAD"])
         .and_then(|o| String::from_utf8(o).ok())
         .map(|s| s.trim().to_string())

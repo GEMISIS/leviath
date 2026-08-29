@@ -145,3 +145,10 @@ overflow-checks = true
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
+
+# Windows only, build script only: writes the VERSIONINFO resource into lev.exe
+# (product name, version, company, description). An unsigned console exe with
+# no version block is the anonymous shape antivirus heuristics score worst;
+# with one, `lev.exe` says what it is in Properties → Details and to Defender.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.31"
