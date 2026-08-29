@@ -10,9 +10,12 @@
 //!   `docs`                      Check `docs/content/` for dead links and bad frontmatter.
 //!   `structure`                 Hold every source file to the production-line limit.
 //!   `structure --list`          Print every file's production-line count, longest first.
+//!   `prices`                    Refresh the vendor list prices from OpenRouter and LiteLLM.
+//!   `prices --check`            Print the diff and fail if the price table would change.
 
 mod coverage;
 mod docs;
+mod prices;
 mod structure;
 mod version;
 
@@ -27,7 +30,14 @@ fn main() -> Result<()> {
 ///
 /// Extracted from `main` so it can be unit-tested without spawning processes.
 pub fn dispatch(args: &[String]) -> Result<()> {
-    dispatch_with(args, coverage::run, version::run, docs::run, structure::run)
+    dispatch_with(
+        args,
+        coverage::run,
+        version::run,
+        docs::run,
+        structure::run,
+        prices::run,
+    )
 }
 
 /// Route the CLI arguments to the provided handler closures.
@@ -40,6 +50,7 @@ pub fn dispatch_with(
     run_ver: impl FnOnce(version::VersionMode) -> Result<()>,
     run_docs: impl FnOnce(docs::DocsMode) -> Result<()>,
     run_struct: impl FnOnce(structure::StructureMode) -> Result<()>,
+    run_prices: impl FnOnce(prices::PricesMode) -> Result<()>,
 ) -> Result<()> {
     let subcommand = args.first().map(String::as_str).unwrap_or("help");
     match subcommand {
@@ -59,6 +70,10 @@ pub fn dispatch_with(
             let mode = structure::StructureMode::parse(&args[1..])?;
             run_struct(mode)
         }
+        "prices" => {
+            let mode = prices::PricesMode::parse(&args[1..])?;
+            run_prices(mode)
+        }
         "help" | "--help" | "-h" => {
             println!("Usage: cargo xtask <subcommand>");
             println!();
@@ -70,6 +85,8 @@ pub fn dispatch_with(
             println!("  structure                 Hold every file to the production-line limit");
             println!("  structure --list          Print every file's production-line count");
             println!("  docs                      Check docs/content for dead links + frontmatter");
+            println!("  prices                    Refresh the vendor list prices (network)");
+            println!("  prices --check            Fail if the price table would change (network)");
             Ok(())
         }
         other => anyhow::bail!("Unknown subcommand: '{other}'. Run `cargo xtask help` for usage."),
@@ -109,6 +126,11 @@ mod tests {
         Ok(())
     }
 
+    /// A `run_prices` stub matching `impl FnOnce(PricesMode) -> Result<()>`.
+    fn prices_ok(_mode: prices::PricesMode) -> Result<()> {
+        Ok(())
+    }
+
     /// Covers the stub body so tests that pass it without calling it still get
     /// this single coverage hit.
     #[test]
@@ -116,6 +138,8 @@ mod tests {
         assert!(cov_ok(CoverageMode::All).is_ok());
         assert!(ver_ok(VersionMode::Check).is_ok());
         assert!(docs_ok(docs::DocsMode::Check).is_ok());
+        assert!(struct_ok(structure::StructureMode::Check).is_ok());
+        assert!(prices_ok(prices::PricesMode::Check).is_ok());
     }
 
     /// Build an owned-args slice from string literals (dispatch takes `&[String]`).
@@ -178,6 +202,7 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
+            prices_ok,
         )
         .unwrap();
         assert_eq!(got, Some(CoverageMode::All));
@@ -195,6 +220,7 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
+            prices_ok,
         )
         .unwrap();
         assert_eq!(got, Some(CoverageMode::Package("leviath-core".to_owned())));
@@ -209,6 +235,7 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
+            prices_ok,
         );
         assert!(
             result.is_err(),
@@ -224,6 +251,7 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
+            prices_ok,
         );
         assert!(result.is_err());
         assert!(
@@ -248,6 +276,7 @@ mod tests {
                 Ok(())
             },
             struct_ok,
+            prices_ok,
         )
         .unwrap();
         assert_eq!(got, Some(docs::DocsMode::Check));
@@ -261,10 +290,47 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
+            prices_ok,
         );
         assert!(
             result.is_err(),
             "an unknown docs flag must error: {result:?}"
+        );
+    }
+
+    // ── prices arm: mode parsing + dispatch ─────────────────────────────────
+
+    #[test]
+    fn dispatch_with_prices_parses_check() {
+        let mut got = None;
+        dispatch_with(
+            &args(&["prices", "--check"]),
+            cov_ok,
+            ver_ok,
+            docs_ok,
+            struct_ok,
+            |mode| {
+                got = Some(mode);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(got, Some(prices::PricesMode::Check));
+    }
+
+    #[test]
+    fn dispatch_with_prices_bad_arg_returns_err_without_calling_run_prices() {
+        let result = dispatch_with(
+            &args(&["prices", "--write"]),
+            cov_ok,
+            ver_ok,
+            docs_ok,
+            struct_ok,
+            prices_ok,
+        );
+        assert!(
+            result.is_err(),
+            "an unknown prices flag must error: {result:?}"
         );
     }
 
@@ -282,6 +348,7 @@ mod tests {
             },
             docs_ok,
             struct_ok,
+            prices_ok,
         )
         .unwrap();
         assert_eq!(got, Some(VersionMode::Set("1.2.3".to_owned())));
@@ -299,6 +366,7 @@ mod tests {
             },
             docs_ok,
             struct_ok,
+            prices_ok,
         )
         .unwrap();
         assert_eq!(got, Some(VersionMode::Check));
@@ -312,6 +380,7 @@ mod tests {
             ver_ok,
             docs_ok,
             struct_ok,
+            prices_ok,
         );
         assert!(
             result.is_err(),
@@ -327,6 +396,7 @@ mod tests {
             |_mode| anyhow::bail!("simulated version failure"),
             docs_ok,
             struct_ok,
+            prices_ok,
         );
         assert!(
             result
