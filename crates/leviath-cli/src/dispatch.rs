@@ -608,6 +608,7 @@ mod tests {
                 command: commands::models::ModelsCommand::List(commands::models::ListArgs {
                     provider: None,
                     remote: false,
+                    offline: false,
                     all: false,
                     json: false,
                 }),

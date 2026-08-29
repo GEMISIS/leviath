@@ -44,17 +44,19 @@ is. Browse the full catalog at [openrouter.ai/models](https://openrouter.ai/mode
 install:
 
 ```bash
-lev models list --provider openrouter        # what Leviath knows offline
-lev models list --provider openrouter --remote   # live from the provider's API
+lev models list --provider openrouter        # live from the gateway, with dates and prices
+lev models list --provider openrouter --offline   # only what this build's table names
 lev models list --all                        # every provider, even unconfigured ones
 ```
 
 > [!NOTE]
-> Without `--remote`, `lev models list` prints a built-in table of well-known models (the exception
-> is `--provider <name>` naming a [script provider](/docs/rhai-providers), which is always asked
-> directly - it has no row in that table). It is a convenience, not the catalog. A model absent from it is not necessarily invalid: `lev validate`
-> flags an unrecognized string with an `unknown-model` warning, never an error, and the string is
-> still sent to the provider exactly as written. Locally an unrecognized model gets conservative
+> `lev models list` asks each provider for its own listing and shows that; the table compiled into
+> this build is shown only for a provider that could not be reached, or with `--offline`. The table
+> is a convenience, not the catalog. A model absent from it is not necessarily invalid: with no
+> listing read, `lev validate` flags an unrecognized string with an `unknown-model` warning, never
+> an error, and the string is still sent to the provider exactly as written. Once a provider's
+> listing has been read, a model it does not carry is an `unserved-model` error instead, because
+> the provider has said outright what it serves. Locally an unrecognized model gets conservative
 > capability assumptions: 128K context and 8192 output on OpenRouter, 8192 context and 4096 output
 > elsewhere.
 

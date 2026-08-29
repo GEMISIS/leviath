@@ -829,8 +829,12 @@ Each entry from `GET /api/models` also carries `limits_source`: `api` when the p
 token limits itself, `builtin` when this build matched them off the model's name, and `override`
 when a `[model_capabilities]` entry set them. Read it before treating a window as a fact - a
 `builtin` figure for a model the table does not know is a guess, and region budgets resolve against
-it. Which providers can report, and from where, is in
-[where a window comes from](/docs/configuration#where-a-window-comes-from).
+it. Beside it: `supports_temperature` and `supports_tools`; `learned`, true when the provider's own
+listing described the model and false for a row from this build's table; and, when the listing
+carries them, `released` (Unix seconds), `retires` (the date the provider published) and `pricing`
+(USD per million tokens: `input_per_mtok`, `cached_input_per_mtok`, `cache_write_per_mtok`,
+`output_per_mtok`), each `null` otherwise. Which providers can report what, and from where, is in
+[where a model's capabilities come from](/docs/configuration#where-a-models-capabilities-come-from).
 That is what lets a console show the catalog without fetching and re-parsing every script. No other
 kind carries the key at all.
 

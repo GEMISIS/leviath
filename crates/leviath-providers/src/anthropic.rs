@@ -304,6 +304,24 @@ pub struct AnthropicProvider {
     learned: LearnedModels,
 }
 
+/// What [`MODELS`] says about `model`, for a caller with no provider in hand.
+pub(crate) fn table_capabilities(model: &str) -> ModelCapabilities {
+    crate::capabilities::lookup(MODELS, model, ModelCapabilities::default())
+}
+
+/// The models this build names when the listing cannot be read: the current
+/// line-up, as `(id, display name)`.
+pub(crate) const CATALOG: &[(&str, &str)] = &[
+    ("claude-opus-5", "Claude Opus 5"),
+    ("claude-sonnet-5", "Claude Sonnet 5"),
+    ("claude-fable-5", "Claude Fable 5"),
+    ("claude-opus-4-8", "Claude Opus 4.8"),
+    ("claude-opus-4-7", "Claude Opus 4.7"),
+    ("claude-opus-4-6", "Claude Opus 4.6"),
+    ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+    ("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
+];
+
 /// What this build knows about Anthropic's models, most specific first.
 ///
 /// The generic Claude 4.x row at the bottom catches older 4.5 snapshots; it
@@ -419,7 +437,7 @@ impl AnthropicProvider {
 
     /// Return built-in capabilities for a model based on its name pattern.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        crate::capabilities::lookup(MODELS, model, ModelCapabilities::default())
+        table_capabilities(model)
     }
 
     /// Point this provider at a different host.

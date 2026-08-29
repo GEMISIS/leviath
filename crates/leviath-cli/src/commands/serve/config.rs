@@ -294,6 +294,11 @@ pub(super) async fn list_models_from_config(
                     max_output_tokens: m.capabilities.max_output_tokens,
                     limits_source: limits_source_label(m.capabilities.limits_source),
                     supports_tools: m.capabilities.supports_tools,
+                    supports_temperature: m.capabilities.supports_temperature,
+                    learned: m.learned,
+                    released: m.released,
+                    retires: m.retires,
+                    pricing: m.pricing,
                 });
             }
         }
@@ -638,6 +643,17 @@ mod tests {
         assert!(!models.is_empty());
         assert!(models.iter().any(|m| m["provider"] == "claude-code"));
         assert!(models.iter().all(|m| m["id"].is_string()));
+        // The fields The Lair reads to describe a model beyond its size: the
+        // shape flags, whether the row is the provider's own answer, and the
+        // dates and rates a listing carries when it has them.
+        for m in &models {
+            assert!(m["supports_temperature"].is_boolean(), "{m}");
+            assert!(m["supports_tools"].is_boolean(), "{m}");
+            assert!(m["learned"].is_boolean(), "{m}");
+            assert!(m.get("released").is_some(), "{m}");
+            assert!(m.get("retires").is_some(), "{m}");
+            assert!(m.get("pricing").is_some(), "{m}");
+        }
     }
 
     /// A script provider's models must reach `GET /api/models`, or The Lair
