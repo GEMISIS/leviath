@@ -27,6 +27,8 @@ pub(crate) mod render;
 pub mod runstate;
 pub(crate) mod shell_keys;
 #[cfg(test)]
+mod test_fixtures;
+#[cfg(test)]
 mod test_support;
 pub(crate) mod tool_inventory;
 pub(crate) mod tools;

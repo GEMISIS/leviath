@@ -1085,6 +1085,7 @@ impl Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::fixtures;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
 
@@ -3468,15 +3469,7 @@ mod tests {
         dash.update_display_indices();
         dash.detail_view = true;
         let points = vec![leviath_core::run_archive::RunPoint {
-            meta: leviath_core::run_meta::RunMeta::new(
-                "run-1".to_string(),
-                "a".to_string(),
-                "/p".to_string(),
-                "t".to_string(),
-                None,
-                "/w".to_string(),
-                1,
-            ),
+            meta: fixtures::run_meta("run-1"),
             context: leviath_core::run_meta::ContextSnapshot {
                 stage_name: "s".to_string(),
                 total_tokens: 0,

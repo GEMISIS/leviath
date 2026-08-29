@@ -510,7 +510,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{with_tracing, write_test_agent};
+    use crate::test_support::{fixtures, with_tracing, write_test_agent};
 
     // ─── validate_test_case ────────────────────────────────────────────────
 
@@ -1296,9 +1296,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     // which covers the same assertion/response-handling logic without any
     // I/O.
 
-    use leviath_providers::{
-        FinishReason, InferenceRequest, InferenceResponse, Provider, TokenUsage, ToolCall,
-    };
+    use leviath_providers::{InferenceRequest, InferenceResponse, Provider, ToolCall};
 
     /// A mock provider that returns a fixed canned response, entirely in
     /// memory - no network calls, no subprocess spawning.
@@ -1314,17 +1312,8 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             _request: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             Ok(InferenceResponse {
-                content: self.content.clone(),
                 tool_calls: self.tool_calls.clone(),
-                tokens_used: TokenUsage {
-                    prompt_tokens: 1,
-                    completion_tokens: 1,
-                    total_tokens: 2,
-                    cached_tokens: 0,
-                    cache_write_tokens: 0,
-                    reported_cost_usd: None,
-                },
-                finish_reason: FinishReason::Complete,
+                ..fixtures::inference_response(&self.content)
             })
         }
 
@@ -1355,19 +1344,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             &self,
             _request: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
-            Ok(InferenceResponse {
-                content: "cold hello".to_string(),
-                tool_calls: vec![],
-                tokens_used: TokenUsage {
-                    prompt_tokens: 1,
-                    completion_tokens: 1,
-                    total_tokens: 2,
-                    cached_tokens: 0,
-                    cache_write_tokens: 0,
-                    reported_cost_usd: None,
-                },
-                finish_reason: FinishReason::Complete,
-            })
+            Ok(fixtures::inference_response("cold hello"))
         }
 
         async fn count_tokens(&self, text: &str, _model: &str) -> usize {
@@ -1467,19 +1444,7 @@ max_tokens = 5000
             request: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             *self.seen.lock().unwrap() = Some(request.clone());
-            Ok(InferenceResponse {
-                content: "recorded".to_string(),
-                tool_calls: vec![],
-                tokens_used: TokenUsage {
-                    prompt_tokens: 1,
-                    completion_tokens: 1,
-                    total_tokens: 2,
-                    cached_tokens: 0,
-                    cache_write_tokens: 0,
-                    reported_cost_usd: None,
-                },
-                finish_reason: FinishReason::Complete,
-            })
+            Ok(fixtures::inference_response("recorded"))
         }
 
         async fn count_tokens(&self, text: &str, _model: &str) -> usize {

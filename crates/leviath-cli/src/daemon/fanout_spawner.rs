@@ -254,20 +254,16 @@ fn discover_worker(agents_dir: Option<&Path>, query: &str) -> Result<PathBuf, St
 mod tests {
     use super::*;
     use crate::config::Config;
-    use leviath_core::blueprint::WorkerFailurePolicy;
+    use crate::test_support::{FakeProvider, fixtures};
 
     fn cfg(stage: Option<&str>, agent: Option<&str>, query: Option<&str>) -> FanOutConfig {
         FanOutConfig {
             worker_agent: agent.map(String::from),
             worker_stage: stage.map(String::from),
             worker_query: query.map(String::from),
-            merge_stage: None,
             max_workers: 4,
-            on_worker_failure: WorkerFailurePolicy::Continue,
             split_prompt: "split".to_string(),
-            results_region: None,
-            max_items: None,
-            max_attempts: None,
+            ..fixtures::fanout_config()
         }
     }
 
@@ -365,27 +361,10 @@ mod tests {
     use std::collections::HashMap;
     use tokio::runtime::Handle;
 
-    struct FakeProvider;
-    #[async_trait::async_trait]
-    impl leviath_providers::Provider for FakeProvider {
-        async fn infer(
-            &self,
-            _r: &leviath_providers::InferenceRequest,
-        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
-            Err(leviath_providers::ProviderError::Other("test".to_string()))
-        }
-        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
-            1
-        }
-        fn max_context_tokens(&self, _m: &str) -> usize {
-            100_000
-        }
-        fn name(&self) -> &str {
-            "fake"
-        }
-        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
-            leviath_providers::ModelCapabilities::default()
-        }
+    /// Fails every inference; the window is wide enough for the budgets
+    /// the manifests here declare.
+    fn fake_provider() -> FakeProvider {
+        FakeProvider::new().context_window(100_000)
     }
 
     /// A two-stage blueprint whose second stage opts in as a fan-out worker.
@@ -485,7 +464,7 @@ mod tests {
     ) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
         let cli = Arc::new(CliToolService::new());
         let mut registry = leviath_runtime::ProviderRegistry::new();
-        registry.register("anthropic".to_string(), Arc::new(FakeProvider));
+        registry.register("anthropic".to_string(), Arc::new(fake_provider()));
         let mut world = PipelineWorld::new(
             registry,
             cli.clone(),
@@ -786,7 +765,7 @@ mod tests {
     #[tokio::test]
     async fn fake_provider_metadata_is_exercised() {
         use leviath_providers::Provider;
-        let p = FakeProvider;
+        let p = fake_provider();
         assert_eq!(p.name(), "fake");
         assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 100_000);
@@ -796,21 +775,8 @@ mod tests {
     #[tokio::test]
     async fn fake_provider_infer_errors() {
         use leviath_providers::Provider;
-        let p = FakeProvider;
-        assert!(
-            p.infer(&leviath_providers::InferenceRequest {
-                system: vec![],
-                messages: vec![],
-                model: "m".to_string(),
-                max_tokens: 1,
-                temperature: 0.0,
-                tools: vec![],
-                extra: serde_json::Value::Null,
-                request_timeout_secs: None,
-            })
-            .await
-            .is_err()
-        );
+        let p = fake_provider();
+        assert!(p.infer(&fixtures::inference_request()).await.is_err());
     }
 
     #[tokio::test]

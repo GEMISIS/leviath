@@ -335,6 +335,7 @@ pub async fn respond(client: &ControlClient, args: &RespondArgs) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::fixtures;
     use leviath_runtime::control_socket::{ControlId, bind_control_listener, control_id};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::task::JoinHandle;
@@ -568,15 +569,7 @@ mod tests {
     fn seed_live_run(run_id: &str) {
         crate::runstate::create_run(&crate::runstate::RunMeta {
             status: crate::runstate::RunStatus::Running,
-            ..crate::runstate::RunMeta::new(
-                run_id.into(),
-                "a".into(),
-                "/p".into(),
-                "t".into(),
-                None,
-                "/w".into(),
-                1,
-            )
+            ..fixtures::run_meta(run_id)
         })
         .unwrap();
     }
@@ -640,15 +633,7 @@ mod tests {
         crate::runstate::with_isolated_runs_dir_async("ctl-force-terminal", |_base| async {
             crate::runstate::create_run(&crate::runstate::RunMeta {
                 status: crate::runstate::RunStatus::Complete,
-                ..crate::runstate::RunMeta::new(
-                    "done-1".into(),
-                    "a".into(),
-                    "/p".into(),
-                    "t".into(),
-                    None,
-                    "/w".into(),
-                    1,
-                )
+                ..fixtures::run_meta("done-1")
             })
             .unwrap();
 

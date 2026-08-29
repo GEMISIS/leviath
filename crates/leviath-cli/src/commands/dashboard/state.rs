@@ -908,6 +908,7 @@ impl Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::fixtures;
 
     use crate::commands::dashboard::test_support::make_test_dashboard;
     // Only the tests speak the control protocol now: the polling itself moved
@@ -1128,15 +1129,7 @@ mod tests {
                     world_id: "w".to_string(),
                     created_at: 0,
                 },
-                meta: Box::new(leviath_core::run_meta::RunMeta::new(
-                    run_id.to_string(),
-                    "a".to_string(),
-                    "/p".to_string(),
-                    "t".to_string(),
-                    None,
-                    "/w".to_string(),
-                    1,
-                )),
+                meta: Box::new(fixtures::run_meta(run_id)),
             },
         )
         .unwrap();
@@ -1227,15 +1220,7 @@ mod tests {
         static LOADS: AtomicUsize = AtomicUsize::new(0);
         fn counting_loader(_run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
             LOADS.fetch_add(1, Ordering::SeqCst);
-            let mut meta = leviath_core::run_meta::RunMeta::new(
-                "run-1".to_string(),
-                "a".to_string(),
-                "/p".to_string(),
-                "t".to_string(),
-                None,
-                "/w".to_string(),
-                1,
-            );
+            let mut meta = fixtures::run_meta("run-1");
             meta.current_stage = "main".to_string();
             let point = |at: i64| leviath_core::run_archive::RunPoint {
                 meta: meta.clone(),
@@ -1282,15 +1267,7 @@ mod tests {
     #[test]
     fn a_run_switch_invalidates_the_cache_and_the_browsed_point() {
         fn one_point_loader(_run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
-            let meta = leviath_core::run_meta::RunMeta::new(
-                "x".to_string(),
-                "a".to_string(),
-                "/p".to_string(),
-                "t".to_string(),
-                None,
-                "/w".to_string(),
-                1,
-            );
+            let meta = fixtures::run_meta("x");
             vec![leviath_core::run_archive::RunPoint {
                 meta,
                 context: leviath_core::run_meta::ContextSnapshot {
