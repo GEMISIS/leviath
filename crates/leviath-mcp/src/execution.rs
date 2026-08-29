@@ -2,6 +2,7 @@
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::client::{MCPClient, ToolResult, ToolResultContent};
 use crate::discovery::ToolMetadata;
@@ -47,10 +48,18 @@ pub struct ExecutionResult {
     pub text: String,
 }
 
+/// A registered server's client, shared with every call in flight to it.
+///
+/// One lock per server rather than one around the executor: a `tools/call`
+/// holds its client for the whole round trip, and a batch that names two
+/// servers should not have the fast one wait behind the slow one. Calls to
+/// the same server still run one at a time, in the order they took the lock.
+pub type SharedClient = Arc<tokio::sync::Mutex<MCPClient>>;
+
 /// Tool execution service that routes tool calls to the correct MCP server.
 pub struct ToolExecutor {
     /// Active MCP clients, keyed by server name
-    clients: HashMap<String, MCPClient>,
+    clients: HashMap<String, SharedClient>,
     /// Advertised tool name → (server name, original tool name).
     ///
     /// The name advertised to the LLM is sanitized to the provider's character
@@ -102,7 +111,8 @@ impl ToolExecutor {
                 schema: tool.schema.clone(),
             });
         }
-        self.clients.insert(server_name, client);
+        self.clients
+            .insert(server_name, Arc::new(tokio::sync::Mutex::new(client)));
         advertised
     }
 
@@ -115,7 +125,20 @@ impl ToolExecutor {
     /// leasing run ended has no caller left, and before this the connection
     /// (and its child process) lived until the daemon exited.
     pub fn remove_client(&mut self, server_name: &str) -> Option<MCPClient> {
-        let client = self.clients.remove(server_name)?;
+        let shared = self.clients.remove(server_name)?;
+        // A call still in flight holds a clone of the `Arc`. Removing the
+        // server out from under it would end a `tools/call` mid-flight, so the
+        // client goes back and the caller is told there is nothing to take;
+        // the pool's idle-disconnect only removes a server no run is leasing,
+        // so in practice this arm is a race that was lost by a hair.
+        let client = match Arc::try_unwrap(shared) {
+            Ok(mutex) => mutex.into_inner(),
+            Err(shared) => {
+                tracing::debug!(server = %server_name, "a call is in flight; keeping the server");
+                self.clients.insert(server_name.to_string(), shared);
+                return None;
+            }
+        };
         self.aliases.retain(|_, (server, _)| server != server_name);
         Some(client)
     }
@@ -184,40 +207,70 @@ impl ToolExecutor {
 
     /// Execute a tool by its advertised name, routing to the owning server.
     pub async fn execute(
-        &mut self,
+        &self,
         tool_name: &str,
         arguments: Value,
     ) -> anyhow::Result<ExecutionResult> {
+        let (client, original) = self.route(tool_name)?;
+        Self::call_routed(&client, &original, arguments).await
+    }
+
+    /// Resolve an advertised name to its server's client and the name that
+    /// server knows the tool by.
+    ///
+    /// Split from [`execute`](Self::execute) so a caller holding a lock around
+    /// the executor can let it go before the call: the route is a map lookup,
+    /// the call is a network round trip, and only the first needs the executor.
+    pub fn route(&self, tool_name: &str) -> anyhow::Result<(SharedClient, String)> {
         tracing::info!(tool = %tool_name, "Executing tool");
-
         // The advertised → (server, original) alias is the authoritative route.
-        if let Some((server, original)) = self.aliases.get(tool_name).cloned() {
-            return self.execute_on(&server, &original, arguments).await;
-        }
-
-        Err(anyhow::anyhow!(
-            "No MCP server found with tool '{}'. Available tools: {:?}",
-            tool_name,
-            self.aliases.keys().collect::<Vec<_>>()
-        ))
+        // Aliases and clients are inserted and removed together, so an alias
+        // whose server is missing cannot happen; folding the two lookups into
+        // one answer keeps that from being a branch of its own.
+        self.aliases
+            .get(tool_name)
+            .and_then(|(server, original)| {
+                self.clients
+                    .get(server)
+                    .map(|client| (client.clone(), original.clone()))
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No MCP server found with tool '{}'. Available tools: {:?}",
+                    tool_name,
+                    self.aliases.keys().collect::<Vec<_>>()
+                )
+            })
     }
 
     /// Execute a tool on a specific server.
     pub async fn execute_on(
-        &mut self,
+        &self,
         server_name: &str,
         tool_name: &str,
         arguments: Value,
     ) -> anyhow::Result<ExecutionResult> {
         tracing::info!(server = %server_name, tool = %tool_name, "Executing tool on server");
+        let client = self.shared_client(server_name)?;
+        Self::call_routed(&client, tool_name, arguments).await
+    }
 
-        let client = self
-            .clients
-            .get_mut(server_name)
-            .ok_or_else(|| anyhow::anyhow!("MCP server '{}' not found", server_name))?;
-
-        let tool_result = client.call_tool(tool_name, arguments).await?;
+    /// The call itself, on a client already resolved by [`route`](Self::route)
+    /// or [`execute_on`](Self::execute_on). Holds only that server's lock.
+    pub async fn call_routed(
+        client: &SharedClient,
+        tool_name: &str,
+        arguments: Value,
+    ) -> anyhow::Result<ExecutionResult> {
+        let tool_result = client.lock().await.call_tool(tool_name, arguments).await?;
         Ok(Self::map_result(tool_result))
+    }
+
+    fn shared_client(&self, server_name: &str) -> anyhow::Result<SharedClient> {
+        self.clients
+            .get(server_name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("MCP server '{}' not found", server_name))
     }
 
     /// Shutdown all connected MCP clients.
@@ -227,8 +280,8 @@ impl ToolExecutor {
     /// are discarded here too.
     pub async fn shutdown_all(&mut self) -> anyhow::Result<()> {
         tracing::info!("Shutting down all MCP clients");
-        for client in self.clients.values_mut() {
-            let _ = client.shutdown().await;
+        for client in self.clients.values() {
+            let _ = client.lock().await.shutdown().await;
         }
         self.clients.clear();
         Ok(())
@@ -294,6 +347,7 @@ mod tests {
     use super::*;
     use crate::client::EmbeddedResource;
     use crate::test_support::always_on_tracing_guard;
+    use std::sync::Arc;
 
     #[test]
     fn test_tool_executor_creation() {
@@ -447,7 +501,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_no_server_errors() {
         let _guard = always_on_tracing_guard();
-        let mut executor = ToolExecutor::new();
+        let executor = ToolExecutor::new();
         let result = executor
             .execute("nonexistent_tool", serde_json::json!({}))
             .await;
@@ -459,7 +513,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_on_unknown_server() {
         let _guard = always_on_tracing_guard();
-        let mut executor = ToolExecutor::new();
+        let executor = ToolExecutor::new();
         let result = executor
             .execute_on("unknown_server", "tool", serde_json::json!({}))
             .await;
@@ -476,6 +530,127 @@ mod tests {
         let result = executor.shutdown_all().await;
         assert!(result.is_ok());
         assert_eq!(executor.server_count(), 0);
+    }
+
+    // ─── one lock per server ─────────────────────────────────────────────
+
+    /// A stub whose `tools/call` sleeps `secs` before answering, so a call's
+    /// duration is observable.
+    fn slow_stub(secs: f64) -> String {
+        STUB_INIT_LIST_AND_CALL.replace(
+            "    elif method == \"tools/call\":\n",
+            &format!(
+                "    elif method == \"tools/call\":\n        import time; time.sleep({secs})\n"
+            ),
+        )
+    }
+
+    async fn spawn_stub(source: &str) -> MCPClient {
+        let mut client = MCPClient::spawn("python3", &["-c", source], &HashMap::new())
+            .await
+            .expect("failed to spawn stub server");
+        client.connect().await.expect("connect should succeed");
+        client
+            .list_tools()
+            .await
+            .expect("list_tools should succeed");
+        client
+    }
+
+    /// Two servers, one slow: a batch that names both takes as long as the
+    /// slow one, not the sum. Before the per-server lock the executor's own
+    /// lock serialised every call behind whichever was in flight.
+    #[tokio::test]
+    async fn calls_to_different_servers_overlap() {
+        let mut executor = ToolExecutor::new();
+        let _ = executor.add_client_advertised(
+            "slow".to_string(),
+            spawn_stub(&slow_stub(2.0)).await,
+            &HashSet::new(),
+        );
+        let _ = executor.add_client_advertised(
+            "fast".to_string(),
+            spawn_stub(STUB_INIT_LIST_AND_CALL).await,
+            &HashSet::new(),
+        );
+        let executor = Arc::new(executor);
+        let started = std::time::Instant::now();
+        let mut tasks = Vec::new();
+        for i in 0..10 {
+            let executor = executor.clone();
+            let server = if i == 0 { "slow" } else { "fast" };
+            tasks.push(tokio::spawn(async move {
+                executor
+                    .execute(&format!("{server}__echo"), serde_json::json!({}))
+                    .await
+                    .expect("the call succeeds")
+            }));
+        }
+        for task in tasks {
+            let result = task.await.expect("the task completes");
+            assert!(result.success);
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(3500),
+            "ten calls, one of them 2 s, took {elapsed:?}: the fast server waited on the slow one"
+        );
+    }
+
+    /// Two calls to the same server run one after the other: the second
+    /// cannot overlap the first on one stdio pipe.
+    #[tokio::test]
+    async fn calls_to_the_same_server_stay_in_order() {
+        let mut executor = ToolExecutor::new();
+        let _ = executor.add_client_advertised(
+            "slow".to_string(),
+            spawn_stub(&slow_stub(0.5)).await,
+            &HashSet::new(),
+        );
+        let executor = Arc::new(executor);
+        let started = std::time::Instant::now();
+        let a = {
+            let executor = executor.clone();
+            tokio::spawn(async move { executor.execute("slow__echo", serde_json::json!({})).await })
+        };
+        let b = {
+            let executor = executor.clone();
+            tokio::spawn(async move { executor.execute("slow__echo", serde_json::json!({})).await })
+        };
+        a.await.expect("task").expect("first call");
+        b.await.expect("task").expect("second call");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(900),
+            "two half-second calls on one server serialise"
+        );
+    }
+
+    /// A server with a call in flight is not taken away mid-call: `remove_client`
+    /// says there was nothing to take, and the server stays registered.
+    #[tokio::test]
+    async fn remove_client_keeps_a_server_with_a_call_in_flight() {
+        let mut executor = ToolExecutor::new();
+        let _ = executor.add_client_advertised(
+            "slow".to_string(),
+            spawn_stub(&slow_stub(1.0)).await,
+            &HashSet::new(),
+        );
+        let (client, original) = executor.route("slow__echo").expect("routes");
+        let in_flight = tokio::spawn(async move {
+            ToolExecutor::call_routed(&client, &original, serde_json::json!({})).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            executor.remove_client("slow").is_none(),
+            "a busy server is kept"
+        );
+        assert_eq!(executor.server_count(), 1);
+        in_flight
+            .await
+            .expect("task")
+            .expect("the call still completes");
+        let mut taken = executor.remove_client("slow").expect("idle now, so taken");
+        taken.shutdown().await.expect("best-effort shutdown");
     }
 
     // ─── add_client / execute / execute_on with a live client ───────────

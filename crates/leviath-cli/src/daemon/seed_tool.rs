@@ -208,8 +208,13 @@ pub fn production_runner(ctx: SeedToolContext, resolve: SeedPolicyResolver) -> S
                 let name = name.to_string();
                 let args = args.clone();
                 block_on_daemon(async move {
-                    let mut mcp = mcp.lock().await;
-                    mcp_text(mcp.execute(&name, args).await)
+                    let routed = mcp.lock().await.route(&name);
+                    mcp_text(match routed {
+                        Ok((client, original)) => {
+                            leviath_mcp::ToolExecutor::call_routed(&client, &original, args).await
+                        }
+                        Err(e) => Err(e),
+                    })
                 })
             }
         }
@@ -602,6 +607,48 @@ mod tests {
         let runner = production_runner(ctx_over(dir.path(), Default::default()), allow_all());
         let out = runner("acme__do_thing", &serde_json::json!({})).expect("answered");
         assert!(out.starts_with("[error]"), "{out}");
+    }
+
+    /// The same name with a server behind it: the seed routes to the server
+    /// and carries its text back, going through the executor's per-server
+    /// lock the way the tool lane does.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_connected_mcp_tool_answers_a_seed() {
+        const STUB: &str = r#"
+import sys, json
+def respond(id_, result):
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": id_, "result": result}) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    req = json.loads(line); method = req.get("method", ""); id_ = req.get("id")
+    if method == "initialize":
+        respond(id_, {"capabilities": {"tools": {"listChanged": False}}, "protocolVersion": "2024-11-05"})
+    elif method == "tools/list":
+        respond(id_, {"tools": [{"name": "do_thing", "description": "s", "inputSchema": {"type": "object", "properties": {}}}]})
+    elif method == "tools/call":
+        respond(id_, {"content": [{"type": "text", "text": "seeded by acme"}], "isError": False})
+    elif method != "notifications/initialized" and method != "notifications/cancelled":
+        respond(id_, {})
+"#;
+        let mut client = leviath_mcp::MCPClient::spawn("python3", &["-c", STUB], &HashMap::new())
+            .await
+            .expect("spawn stub");
+        client.connect().await.expect("connect");
+        client.list_tools().await.expect("list_tools");
+        let mut executor = leviath_mcp::ToolExecutor::new();
+        let _ = executor.add_client_advertised(
+            "acme".to_string(),
+            client,
+            &std::collections::HashSet::new(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_over(dir.path(), Default::default());
+        ctx.mcp = Arc::new(tokio::sync::Mutex::new(executor));
+        let runner = production_runner(ctx, allow_all());
+        let out = runner("acme__do_thing", &serde_json::json!({})).expect("answered");
+        assert_eq!(out, "seeded by acme");
     }
 
     #[test]
