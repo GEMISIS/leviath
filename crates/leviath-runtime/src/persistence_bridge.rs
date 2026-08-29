@@ -1438,16 +1438,23 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let worker = tokio::spawn(persistence_worker(Some(runs.clone()), rx));
 
-        // The run establishes its directory the ordinary way.
+        // The run establishes its directory the ordinary way. The lane handles
+        // messages in order and an append carries an ack, so an acked append
+        // sent after the snapshot is a barrier: when it answers, the snapshot
+        // is entirely on disk. This used to poll for `meta.json` alone, and
+        // `remove_dir_all` below then raced the lane still writing the rest
+        // of the snapshot beside it - `DirectoryNotEmpty` on a macOS runner.
         tx.send(PersistMsg::Snapshot(Box::new(job("run-1"))))
             .unwrap();
+        let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
+        tx.send(PersistMsg::Append {
+            run_id: "run-1".to_string(),
+            record: Box::new(batch_record(0, "c0")),
+            ack: Some(settled_tx),
+        })
+        .unwrap();
+        settled_rx.await.expect("the first snapshot is written");
         let run_dir = runs.join("run-1");
-        for _ in 0..500 {
-            if run_dir.join("meta.json").exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
         assert!(
             run_dir.join("meta.json").exists(),
             "the first write establishes the directory"
