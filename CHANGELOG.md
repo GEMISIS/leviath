@@ -124,6 +124,14 @@ same list.
   now carries its sibling's classification (`read_files` reads like
   `read_file`, `fan_out` spawns like `spawn_agent`, the rest are internal),
   and a test holds every built-in to an arm of its own.
+- The dashboard's response box sent on `Enter` while the new-run task box
+  broke the line on it, so the same key did opposite things in the two
+  long-form boxes on the screen, and a newline in a reply needed `Alt+Enter`.
+  `Enter` now inserts a newline in the response box and the in-place
+  document editor too, `Ctrl+Enter` sends, and a Send (or Save) button under
+  the box, reached with `Tab` or a click, sends on a terminal that cannot
+  tell `Ctrl+Enter` from `Enter`. It is the same button the new-run screen
+  starts a run with. Single-line boxes keep `Enter` as submit.
 - The dashboard cut text to fixed character counts whatever the terminal
   width: the detail view's model name stopped at 24 characters and its
   working directory at 42 with most of a 200-column row empty, the header

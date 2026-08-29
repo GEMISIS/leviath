@@ -122,6 +122,7 @@ impl Dashboard {
             log,
             input_textarea: MarkdownEdit::default(),
             input_mode: false,
+            response_focus_send: false,
             detail_view: false,
             cmd_tx,
             pending_interactions: HashMap::new(),

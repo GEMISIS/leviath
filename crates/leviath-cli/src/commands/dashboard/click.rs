@@ -158,6 +158,7 @@ impl Dashboard {
                 self.toggle_context_row();
             }
             ClickTarget::NewRunStart => self.submit_new_run(),
+            ClickTarget::ResponseSend => self.submit_input(),
         }
         true
     }
@@ -166,6 +167,7 @@ impl Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::dashboard::render::{SAVE_BUTTON, SEND_BUTTON};
     use crate::commands::dashboard::state::Dashboard;
     use crate::commands::dashboard::test_support::make_test_dashboard;
     use crate::commands::dashboard::types::{AgentDisplayStatus, DashboardAgent};
@@ -632,6 +634,71 @@ mod tests {
         dash.input_mode = false;
         draw(&mut dash, 120, 40);
         assert!(!dash.markdown_toolbar_click(x, y));
+    }
+
+    /// The Send button under the response box sends with a click, the way
+    /// Enter on it does. It is the same widget as the new-run Start button,
+    /// so its rect is the drawn text and a press beside it is not a press.
+    #[test]
+    fn clicking_the_send_button_sends_the_response() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1");
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
+            "ft1", "prompt", "main", true,
+        ));
+        agent.waiting_prompt = Some("prompt".to_string());
+        agent.status = AgentDisplayStatus::Waiting;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.input_textarea.area_mut().insert_str("answer");
+
+        draw(&mut dash, 120, 40);
+        let button = dash
+            .click_targets
+            .iter()
+            .find(|(_, t)| *t == ClickTarget::ResponseSend)
+            .map(|(r, _)| *r)
+            .expect("the Send button is on screen");
+        assert_eq!(button.width as usize, SEND_BUTTON.chars().count());
+        press_and_release(&mut dash, button.x.saturating_sub(1), button.y);
+        assert!(
+            dash.input_mode,
+            "a press beside the button is not a press on it"
+        );
+        press_and_release(&mut dash, button.x + 2, button.y);
+        assert!(!dash.input_mode, "the click sent");
+        assert!(dash.agents[0].pending_request.is_none());
+    }
+
+    /// The Save button under an in-place document edit is the same wiring in
+    /// the content pane.
+    #[test]
+    fn clicking_the_save_button_saves_the_document() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1");
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::edit_text(
+            "et1", "Edit", "main", "old",
+        ));
+        agent.status = AgentDisplayStatus::Waiting;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.seed_input_textarea();
+
+        draw(&mut dash, 120, 40);
+        let button = dash
+            .click_targets
+            .iter()
+            .find(|(_, t)| *t == ClickTarget::ResponseSend)
+            .map(|(r, _)| *r)
+            .expect("the Save button is on screen");
+        assert_eq!(button.width as usize, SAVE_BUTTON.chars().count());
+        press_and_release(&mut dash, button.x + 2, button.y);
+        assert!(!dash.input_mode, "the click saved");
+        assert!(dash.agents[0].pending_request.is_none());
     }
 
     /// A press on the run list, with no long-form box open anywhere, must not

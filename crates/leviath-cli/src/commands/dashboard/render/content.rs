@@ -182,12 +182,20 @@ impl Dashboard {
         // in place rather than in the bottom input bar.
         if self.editing_document() {
             let view = MdEditView::new(
-                " ✎ Editing this document - your changes replace it  ·  [Enter] save  \
-                 [Alt+↵] newline  [Esc] cancel ",
+                " ✎ Editing this document - your changes replace it  ·  [^Enter] save  \
+                 [Enter] newline  [Tab] Save button  [Esc] cancel ",
                 C_SUCCESS,
-                true,
+                !self.response_focus_send,
             );
-            self.input_textarea.render(frame, content_area, &view);
+            let (editor_area, button_row) = super::button::editor_and_button_rows(content_area);
+            self.input_textarea.render(frame, editor_area, &view);
+            self.draw_action_button(
+                frame,
+                button_row,
+                super::input::SAVE_BUTTON,
+                self.response_focus_send,
+                ClickTarget::ResponseSend,
+            );
             return;
         }
 
@@ -1134,6 +1142,12 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        assert!(
+            dash.click_targets
+                .iter()
+                .any(|(_, t)| *t == ClickTarget::ResponseSend),
+            "the Save button is drawn under the editor"
+        );
     }
 
     #[test]

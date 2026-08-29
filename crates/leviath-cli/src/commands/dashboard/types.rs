@@ -190,6 +190,9 @@ pub(super) enum ClickTarget {
     ContextRow(usize),
     /// The new-run screen's Start button.
     NewRunStart,
+    /// The Send button under the response box (or the Save button under an
+    /// in-place document edit): a click sends what was typed.
+    ResponseSend,
 }
 
 /// Cursor + expansion state of the structured Context view.

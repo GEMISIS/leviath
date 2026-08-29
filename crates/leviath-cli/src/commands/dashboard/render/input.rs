@@ -15,6 +15,12 @@ use crate::commands::dashboard::types::*;
 use crate::tui::widgets::markdown_edit::MdEditView;
 use leviath_core::interaction;
 
+/// The Send button's face. Fixed text, so the click rect is the drawn text.
+pub(in crate::commands::dashboard) const SEND_BUTTON: &str = "[ Send ]";
+
+/// The Save button's face, under an in-place document edit.
+pub(in crate::commands::dashboard) const SAVE_BUTTON: &str = "[ Save document ]";
+
 impl Dashboard {
     pub(in crate::commands::dashboard) fn render_review_body(
         &mut self,
@@ -109,14 +115,24 @@ impl Dashboard {
             // specific question - label it accordingly for consistent UX.
             let is_message_mode = pending_req.is_none() && agent.waiting_prompt.is_none();
             let hint = if is_message_mode {
-                " Provide input while this is running  [Enter] send  [Alt+↵] newline  [Esc] cancel "
+                " Provide input while this is running  [^Enter] send  [Enter] newline  [Tab] Send button  [Esc] cancel "
             } else {
-                " Response  [Enter] send  [Alt+↵] newline  [Esc] cancel "
+                " Response  [^Enter] send  [Enter] newline  [Tab] Send button  [Esc] cancel "
             };
             // The response box is a long-form field: it wraps, and it carries
-            // the same formatting toolbar as the task editor.
-            let view = MdEditView::new(hint, C_SUCCESS, true);
-            self.input_textarea.render(frame, prompt_area, &view);
+            // the same formatting toolbar as the task editor. Enter breaks the
+            // line there, so the Send button under it is how a terminal that
+            // cannot send Ctrl+Enter submits.
+            let (editor_area, button_row) = super::button::editor_and_button_rows(prompt_area);
+            let view = MdEditView::new(hint, C_SUCCESS, !self.response_focus_send);
+            self.input_textarea.render(frame, editor_area, &view);
+            self.draw_action_button(
+                frame,
+                button_row,
+                SEND_BUTTON,
+                self.response_focus_send,
+                ClickTarget::ResponseSend,
+            );
         } else {
             let (title, prompt_lines): (&str, Vec<Line>) = if self.input_mode {
                 let mut lines: Vec<Line> = vec![];
@@ -393,6 +409,42 @@ mod tests {
             .unwrap();
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("Esc"), "{buf}");
+        assert!(buf.contains("[Enter] newline"), "{buf}");
+        assert!(buf.contains(SEND_BUTTON), "{buf}");
+    }
+
+    /// Tab lights the Send button the way it lights the Start button: the
+    /// box's border goes quiet and the button takes the focus colour.
+    #[test]
+    fn the_send_button_lights_when_tab_reaches_it() {
+        let agent = make_test_agent("run-ft", AgentDisplayStatus::Waiting);
+        let pending: Option<interaction::InteractionRequest> = None;
+        let kind = Some(interaction::InteractionKind::FreeText);
+        let options: Vec<String> = vec![];
+        let mut styles = vec![];
+        for focus_send in [false, true] {
+            let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+            let mut dash = make_test_dashboard();
+            dash.input_mode = true;
+            dash.response_focus_send = focus_send;
+            terminal
+                .draw(|f| {
+                    let area = Rect::new(0, 0, 80, 12);
+                    dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
+                })
+                .unwrap();
+            let button = dash
+                .click_targets
+                .iter()
+                .find(|(_, t)| *t == ClickTarget::ResponseSend)
+                .map(|(r, _)| *r)
+                .expect("the button registered its rect");
+            assert_eq!(button.y, 11, "on the pane's last row");
+            assert_eq!(button.x + button.width, 80, "right-aligned");
+            styles.push(terminal.backend().buffer()[(button.x, button.y)].style());
+        }
+        assert_ne!(styles[0], styles[1], "focus changes the button's look");
+        assert_eq!(styles[1].bg, Some(C_BORDER_FOCUS));
     }
 
     #[test]
