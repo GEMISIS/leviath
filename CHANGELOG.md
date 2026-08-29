@@ -109,6 +109,16 @@ same list.
 
 ### Fixed
 
+- The dashboard cut text to fixed character counts whatever the terminal
+  width: the detail view's model name stopped at 24 characters and its
+  working directory at 42 with most of a 200-column row empty, the header
+  title and the review prompt were capped the same way, and a run table cell
+  longer than its column was clipped at the edge with no sign anything was
+  missing. Those lines now shrink only where they do not fit, least important
+  part first (the model before the directory, the title before the status),
+  and cells are cut to their column with an ellipsis. The cut is measured in
+  terminal columns rather than bytes, so a title with em dashes or emoji is
+  no longer shortened to a third of its room.
 - The toast for turning unattended on carried the warning icon, which was a
   pause glyph, and the one for turning it off carried the green check, so on
   read as held back and off as armed. The warning icon is now `!`, and the

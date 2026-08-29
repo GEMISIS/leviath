@@ -1,17 +1,42 @@
 //! Agent table, log panel, and help bar rendering.
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table};
 use unicode_width::UnicodeWidthStr;
 
-use crate::commands::dashboard::helpers::{format_tokens, relative_time, truncate};
+use crate::commands::dashboard::helpers::{fit_parts, format_tokens, relative_time, truncate};
 use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::*;
 use leviath_core::interaction;
+
+/// The run table's columns, as shares of the width inside its border.
+const TABLE_COLUMNS: [Constraint; 6] = [
+    Constraint::Percentage(22),
+    Constraint::Percentage(12),
+    Constraint::Percentage(14),
+    Constraint::Percentage(18),
+    Constraint::Percentage(14),
+    Constraint::Percentage(20),
+];
+
+/// The column widths the table will draw with, in columns, for a table drawn
+/// over `area`: the same layout the widget runs, over the same inner width,
+/// with its default one-column spacing. A cell longer than its column is
+/// clipped at the column edge with no sign that anything is missing, so each
+/// text cell is cut to this width with an ellipsis before it is handed over.
+fn table_column_widths(area: Rect) -> Vec<usize> {
+    let inner = Rect::new(0, 0, area.width.saturating_sub(2), 1);
+    Layout::horizontal(TABLE_COLUMNS)
+        .spacing(1)
+        .split(inner)
+        .iter()
+        .map(|r| r.width as usize)
+        .collect()
+}
 
 impl Dashboard {
     pub(in crate::commands::dashboard) fn draw_agent_table(
@@ -53,6 +78,7 @@ impl Dashboard {
         // A mark column appears only while at least one run is marked, so the
         // table looks exactly as before until the feature is used.
         let any_marked = !self.marked.is_empty();
+        let col_w = table_column_widths(area);
 
         let rows: Vec<Row> = self
             .display_indices
@@ -74,8 +100,8 @@ impl Dashboard {
                 let title_str = agent
                     .title
                     .as_deref()
-                    .map(|t| truncate(t.trim_start_matches('#').trim(), 26))
-                    .unwrap_or_else(|| truncate(&agent.task, 26));
+                    .map(|t| t.trim_start_matches('#').trim().to_string())
+                    .unwrap_or_else(|| agent.task.trim().to_string());
                 let tok_str = if agent.tokens_in == 0 && agent.tokens_out == 0 {
                     "-".to_string()
                 } else {
@@ -85,15 +111,20 @@ impl Dashboard {
                         format_tokens(agent.tokens_out)
                     )
                 };
+                // The stage name gives way to its counter, and the whole cell
+                // to its column.
                 let stage_str = if agent.num_stages > 1 {
-                    format!(
-                        "{} {}/{}",
-                        truncate(&agent.stage, 10),
-                        agent.stage_index + 1,
-                        agent.num_stages
+                    fit_parts(
+                        &[
+                            agent.stage.clone(),
+                            format!(" {}/{}", agent.stage_index + 1, agent.num_stages),
+                        ],
+                        col_w[2],
+                        &[0],
                     )
+                    .concat()
                 } else {
-                    truncate(&agent.stage, 14)
+                    truncate(&agent.stage, col_w[2])
                 };
                 let status_str = match (&agent.status, &agent.wait_reason) {
                     (AgentDisplayStatus::Active, _) => format!("{} ACTIVE", spinner_frame),
@@ -114,50 +145,52 @@ impl Dashboard {
                     (status, _) => status.to_string(),
                 };
                 let short_id = agent.id.split('-').next_back().unwrap_or("").to_string();
-                let mut title_spans = Vec::new();
-                if any_marked {
-                    if self.marked.contains(&agent.id) {
-                        title_spans.push(Span::styled("✓ ", Style::default().fg(C_ACCENT)));
-                    } else {
-                        // Unmarked rows get the same width, so titles stay aligned.
-                        title_spans.push(Span::raw("  "));
-                    }
-                }
-                title_spans.push(Span::styled(
-                    tree.prefix.clone(),
-                    Style::default().fg(C_DIM),
-                ));
+                // The mark, shown only while something is marked; unmarked
+                // rows get the same width, so titles stay aligned.
+                let mark = match (any_marked, self.marked.contains(&agent.id)) {
+                    (false, _) => "",
+                    (true, true) => "✓ ",
+                    (true, false) => "  ",
+                };
                 // The fold arrow, on runs that have sub-agents. Leaves get the
                 // same two columns of blank so every title still lines up.
-                title_spans.push(Span::styled(
-                    if !tree.expandable {
-                        "  "
-                    } else if tree.collapsed {
-                        "▸ "
-                    } else {
-                        "▾ "
-                    },
-                    Style::default().fg(C_ACCENT),
-                ));
-                title_spans.push(Span::styled(title_str, Style::default().fg(C_WHITE)));
-                title_spans.push(Span::styled(
-                    format!(" #{}", short_id),
-                    Style::default().fg(C_DIM),
-                ));
+                let arrow = if !tree.expandable {
+                    "  "
+                } else if tree.collapsed {
+                    "▸ "
+                } else {
+                    "▾ "
+                };
                 // A fold has to say what it swallowed, or the run simply looks
                 // like it has no workers.
-                if tree.collapsed {
-                    title_spans.push(Span::styled(
-                        format!(" +{}", tree.hidden),
-                        Style::default().fg(C_ACCENT),
-                    ));
-                }
+                let hidden = if tree.collapsed {
+                    format!(" +{}", tree.hidden)
+                } else {
+                    String::new()
+                };
+                // Only the title gives way: the id and the fold count are
+                // what tell one row from another.
+                let title_parts = [
+                    mark.to_string(),
+                    tree.prefix.clone(),
+                    arrow.to_string(),
+                    title_str,
+                    format!(" #{}", short_id),
+                    hidden,
+                ];
+                let title_colors = [C_ACCENT, C_DIM, C_ACCENT, C_WHITE, C_DIM, C_ACCENT];
+                let title_spans: Vec<Span> = fit_parts(&title_parts, col_w[0], &[3])
+                    .into_iter()
+                    .zip(title_colors)
+                    .map(|(text, color)| Span::styled(text, Style::default().fg(color)))
+                    .collect();
                 let title_cell = Cell::from(Line::from(title_spans));
                 Row::new(vec![
                     title_cell,
-                    Cell::from(agent.blueprint_name.clone()),
+                    Cell::from(truncate(&agent.blueprint_name, col_w[1])),
                     Cell::from(stage_str),
-                    Cell::from(status_str).style(Style::default().fg(status_color)),
+                    Cell::from(truncate(&status_str, col_w[3]))
+                        .style(Style::default().fg(status_color)),
                     Cell::from(tok_str),
                     Cell::from(started_str).style(Style::default().fg(C_DIM)),
                 ])
@@ -231,24 +264,14 @@ impl Dashboard {
             return;
         }
 
-        let table = Table::new(
-            rows,
-            [
-                ratatui::layout::Constraint::Percentage(22),
-                ratatui::layout::Constraint::Percentage(12),
-                ratatui::layout::Constraint::Percentage(14),
-                ratatui::layout::Constraint::Percentage(18),
-                ratatui::layout::Constraint::Percentage(14),
-                ratatui::layout::Constraint::Percentage(20),
-            ],
-        )
-        .header(header)
-        .block(block)
-        .row_highlight_style(
-            Style::default()
-                .add_modifier(Modifier::REVERSED)
-                .fg(C_WHITE),
-        );
+        let table = Table::new(rows, TABLE_COLUMNS)
+            .header(header)
+            .block(block)
+            .row_highlight_style(
+                Style::default()
+                    .add_modifier(Modifier::REVERSED)
+                    .fg(C_WHITE),
+            );
 
         frame.render_stateful_widget(table, area, &mut self.table_state);
         self.register_run_row_clicks(area, any_marked);
@@ -872,7 +895,7 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-no-title", AgentDisplayStatus::Active);
         agent.title = None;
-        agent.task = "fallback task text".to_string();
+        agent.task = "fallback task".to_string();
         dash.agents.push(agent);
         dash.update_display_indices();
         terminal
@@ -882,7 +905,7 @@ mod tests {
             })
             .unwrap();
         let buf = rendered_buffer(&terminal);
-        assert!(buf.contains("fallback task text"), "{buf}");
+        assert!(buf.contains("fallback task #title"), "{buf}");
     }
 
     #[test]
@@ -1682,5 +1705,87 @@ mod tests {
         let line = dash.build_main_list_help_bar();
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("[space] mark"), "{text}");
+    }
+
+    // ── Cells cut to their column ──────────────────────────────────────────
+
+    fn table_at(width: u16, dash: &mut Dashboard) -> String {
+        let backend = TestBackend::new(width, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+        rendered_buffer(&terminal)
+    }
+
+    /// The widths the table draws with sum to the inner width less the five
+    /// gaps, and a zero-width area does not underflow.
+    #[test]
+    fn table_column_widths_follow_the_layout() {
+        let widths = table_column_widths(Rect::new(0, 0, 120, 10));
+        assert_eq!(widths.len(), 6);
+        assert_eq!(widths.iter().sum::<usize>(), 118 - 5);
+        assert_eq!(
+            table_column_widths(Rect::new(0, 0, 0, 0))
+                .iter()
+                .sum::<usize>(),
+            0
+        );
+    }
+
+    /// A long title is whole when its column is wide enough and cut with an
+    /// ellipsis, keeping its id, when it is not. Before, it was always cut to
+    /// 26 characters, and a title longer than the column was clipped silently.
+    #[test]
+    fn draw_agent_table_cuts_the_title_to_its_column_and_keeps_the_id() {
+        let title = "Add adversarial and cross-company risk analysis";
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-abc-zz9", AgentDisplayStatus::Active);
+        agent.title = Some(title.to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        let wide = table_at(300, &mut dash);
+        assert!(wide.contains(&format!("{title} #zz9")), "{wide}");
+
+        let narrow = table_at(100, &mut dash);
+        assert!(!narrow.contains(title), "{narrow}");
+        assert!(narrow.contains("… #zz9"), "{narrow}");
+    }
+
+    /// The blueprint, stage, and status cells are cut to their columns too,
+    /// and the stage counter outlives the stage name.
+    #[test]
+    fn draw_agent_table_cuts_the_other_text_cells_to_their_columns() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-cells", AgentDisplayStatus::Active);
+        agent.blueprint_name = "a-very-long-blueprint-name-indeed".to_string();
+        agent.stage = "gather-and-cross-check-sources".to_string();
+        agent.num_stages = 3;
+        agent.stage_index = 1;
+        agent.status = AgentDisplayStatus::Error(
+            "provider returned 502 after three attempts and the breaker opened".to_string(),
+        );
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        let buf = table_at(100, &mut dash);
+        assert!(!buf.contains("a-very-long-blueprint-name-indeed"), "{buf}");
+        assert!(buf.contains("a-very-l"), "{buf}");
+        assert!(!buf.contains("gather-and-cross-check-sources"), "{buf}");
+        assert!(buf.contains("… 2/3"), "{buf}");
+        assert!(!buf.contains("breaker opened"), "{buf}");
+        assert!(buf.contains("ERROR: "), "{buf}");
+
+        let wide = table_at(500, &mut dash);
+        assert!(wide.contains("a-very-long-blueprint-name-indeed"), "{wide}");
+        assert!(
+            wide.contains("gather-and-cross-check-sources 2/3"),
+            "{wide}"
+        );
+        assert!(wide.contains("breaker opened"), "{wide}");
     }
 }

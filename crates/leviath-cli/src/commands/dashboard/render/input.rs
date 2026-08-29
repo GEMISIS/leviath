@@ -36,8 +36,11 @@ impl Dashboard {
         }
         let rv_scroll_y = max_rv_scroll - self.review_scroll;
 
+        // The prompt is the pane's title, so it gets the top border less the
+        // corners and its own padding, rather than a fixed 50 characters.
         let rv_title = if let Some(req) = &pending_req {
-            format!(" {} ", truncate(&req.prompt, 50))
+            let room = (review_area.width as usize).saturating_sub(4);
+            format!(" {} ", truncate(&req.prompt, room))
         } else {
             " Review ".to_string()
         };
@@ -569,5 +572,39 @@ mod tests {
             .unwrap();
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("Anything else?"), "{buf}");
+    }
+
+    /// The prompt in the review pane's title is cut to the pane, not to a
+    /// fixed 50 characters: whole on a wide pane, ellipsis on a narrow one.
+    #[test]
+    fn render_review_body_fits_the_prompt_to_the_pane() {
+        let prompt = "Review the draft and say whether the executive summary is ready";
+        let mut req = make_pending_req(interaction::InteractionKind::FreeText);
+        req.prompt = prompt.to_string();
+        let pending = Some(req);
+        let lines: Vec<ratatui::text::Line<'static>> =
+            vec![ratatui::text::Line::from("Review content")];
+        let mut dash = make_test_dashboard();
+
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| dash.render_review_body(f, Rect::new(0, 0, 120, 10), &lines, &pending))
+            .unwrap();
+        let wide = rendered_buffer(&terminal);
+        assert!(wide.contains(prompt), "{wide}");
+
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| dash.render_review_body(f, Rect::new(0, 0, 40, 10), &lines, &pending))
+            .unwrap();
+        let narrow = rendered_buffer(&terminal);
+        assert!(!narrow.contains(prompt), "{narrow}");
+        // 40 wide, 4 off: 36 columns, 35 of prompt and the ellipsis.
+        assert!(
+            narrow.contains("Review the draft and say whether th…"),
+            "{narrow}"
+        );
     }
 }
