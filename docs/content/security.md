@@ -79,6 +79,11 @@ kind = "none"             # run discovery on the host…
 The sandbox bind-mounts the run's workdir, so sandboxed commands and host-side file tools see the
 same files.
 
+A `[sandbox]` table, at the agent or the stage level, accepts only the keys shown here (`kind`,
+`image`, `engine`, `network`, `mount` or `mounts`, `persist`, `on_unavailable`). Anything else
+fails the load and the error names it, so a misspelled `netwrok = false` cannot leave the sandbox
+looser than the file reads.
+
 **Containers**, using Docker or Podman, give you the real thing. The daemon keeps a warm container
 per sandbox configuration, so stages with identical settings share one, and tears them down when
 the agent finishes. Inside it, every Linux capability is dropped and the process cannot regain

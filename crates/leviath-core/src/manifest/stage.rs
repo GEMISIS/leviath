@@ -123,7 +123,11 @@ pub(super) fn validate_tool_policy(where_: &str, tool: &str, policy: &str) -> Re
 /// had not been written - which is what it was doing (#362). Region kinds and
 /// transition conditions have always been strict; this extends that to the
 /// tables holding them, with the same "valid: …" phrasing.
-fn reject_unknown_keys(where_: &str, table: &toml::value::Table, allowed: &[&str]) -> Result<()> {
+pub(super) fn reject_unknown_keys(
+    where_: &str,
+    table: &toml::value::Table,
+    allowed: &[&str],
+) -> Result<()> {
     for key in table.keys() {
         if !allowed.contains(&key.as_str()) {
             return Err(Error::Other(format!(
@@ -230,7 +234,7 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         reject_unknown_keys(&format!("stage '{stage_name}'"), table, STAGE_KEYS)?;
     }
 
-    let model_config = parse_stage_model(stage_value);
+    let model_config = parse_stage_model(stage_name, stage_value)?;
     // A cap that does not parse fails the load. Left as a pass-through it
     // would reach the provider as a nonsense parameter or, worse, as no cap
     // at all, and a typo in a limit is the kind of mistake that only shows
@@ -243,8 +247,9 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
 
     stage = apply_stage_mode(stage, stage_name, stage_value)?;
 
-    if let Some(max_iter) = int_of(stage_value, "max_iterations") {
-        stage.max_iterations = Some(max_iter as usize);
+    let where_ = format!("stage '{stage_name}'");
+    if let Some(max_iter) = count_of(stage_value, &where_, "max_iterations")? {
+        stage.max_iterations = Some(max_iter);
     }
 
     if let Some(tools_arr) = array_of(stage_value, "available_tools") {
@@ -318,8 +323,12 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         if let Some(p) = bool_of(routing_table, "persist") {
             routing.persist = p;
         }
-        if let Some(mt) = int_of(routing_table, "max_result_tokens") {
-            routing.max_result_tokens = Some(mt as usize);
+        if let Some(mt) = count_of(
+            routing_table,
+            &format!("{where_}: tool_routing"),
+            "max_result_tokens",
+        )? {
+            routing.max_result_tokens = Some(mt);
         }
         if let Some(overrides_table) = table_of(routing_table, "overrides") {
             for (tool_name, region_val) in overrides_table {
@@ -451,12 +460,15 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     // Parse per-stage nudge settings: [stages.<name>.nudge]. Absent ⇒
     // each field inherits agent/global.
     if let Some(nudge_table) = table_of(stage_value, "nudge") {
-        stage.nudge = Some(parse_nudge_config(nudge_table));
+        stage.nudge = Some(parse_nudge_config(
+            &format!("{where_}: nudge"),
+            nudge_table,
+        )?);
     }
 
     // Parse per-stage sandbox override: [stages.<name>.sandbox]
     if let Some(sandbox_table) = table_of(stage_value, "sandbox") {
-        stage.sandbox = Some(parse_sandbox_config(sandbox_table)?);
+        stage.sandbox = Some(parse_sandbox_config(&format!("{where_}: "), sandbox_table)?);
     }
 
     // Script-backed lifecycle hooks: [stages.<name>.hooks]
@@ -535,8 +547,8 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     }
 
     // Parse max_revisits
-    if let Some(mr) = int_of(stage_value, "max_revisits") {
-        stage.max_revisits = Some(mr as usize);
+    if let Some(mr) = count_of(stage_value, &where_, "max_revisits")? {
+        stage.max_revisits = Some(mr);
     }
 
     // Parse transition_prompt
@@ -546,7 +558,7 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
 
     // Parse transitions: [stages.<name>.transitions.<target>]
     if let Some(transitions_table) = table_of(stage_value, "transitions") {
-        stage.transitions = Some(parse_transitions(transitions_table)?);
+        stage.transitions = Some(parse_transitions(&where_, transitions_table)?);
     }
 
     Ok(stage)
@@ -806,10 +818,12 @@ pub(super) fn parse_stage_hooks(
 /// because both failure modes build an edge the runtime never takes and a
 /// dead edge is invisible until the run wedges.
 pub(super) fn parse_transitions(
+    stage: &str,
     transitions_table: &toml::value::Table,
 ) -> Result<std::collections::HashMap<String, TransitionEdge>> {
     let mut transitions = std::collections::HashMap::new();
     for (target_name, edge_value) in transitions_table {
+        let where_ = format!("{stage}: transition to '{target_name}'");
         if let Some(edge_table) = edge_value.as_table() {
             reject_unknown_keys(
                 &format!("transition to '{target_name}'"),
@@ -850,7 +864,7 @@ pub(super) fn parse_transitions(
         // Both halves are required together: a bare `condition =
         // "stuck"` edge could never fire, and thresholds under any
         // other condition would be silently ignored.
-        let stuck = parse_stuck_config(edge_value);
+        let stuck = parse_stuck_config(&where_, edge_value)?;
         let is_stuck = condition == TransitionCondition::Stuck;
         if is_stuck && stuck.is_none() {
             return Err(Error::Other(format!(
@@ -924,7 +938,10 @@ pub(super) fn parse_transitions(
 
         // Parse the edge gate: `gate = { require_modifications = true, ... }`
         // (or a `[stages.<name>.transitions.<target>.gate]` sub-table).
-        let gate = table_of(edge_value, "gate").map(parse_transition_gate);
+        let gate = match table_of(edge_value, "gate") {
+            Some(table) => Some(parse_transition_gate(&format!("{where_}: gate"), table)?),
+            None => None,
+        };
 
         transitions.insert(
             target_name.clone(),
@@ -948,8 +965,9 @@ pub(super) fn parse_transitions(
 /// Parse a transition edge's `gate = { ... }` table. Every key is optional; an
 /// empty table yields a gate that blocks nothing (`require_modifications` off).
 pub(super) fn parse_transition_gate(
+    where_: &str,
     table: &toml::value::Table,
-) -> crate::blueprint::TransitionGate {
+) -> Result<crate::blueprint::TransitionGate> {
     let mut gate = crate::blueprint::TransitionGate::default();
     if let Some(rm) = bool_of(table, "require_modifications") {
         gate.require_modifications = rm;
@@ -978,34 +996,30 @@ pub(super) fn parse_transition_gate(
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect();
     }
-    // A negative budget is a typo, not "never hold the stage" - fall back to the
-    // default rather than silently disabling the gate.
-    if let Some(max) = int_of(table, "max_attempts").filter(|max| *max >= 0) {
-        gate.max_attempts = Some(max as usize);
+    // A negative budget is a typo, not "never hold the stage", and used to
+    // fall back to the default without a word. It is refused now.
+    if let Some(max) = count_of(table, where_, "max_attempts")? {
+        gate.max_attempts = Some(max);
     }
-    gate
+    Ok(gate)
 }
 
 /// Parse a transition edge's `stuck_after_*` thresholds into a [`StuckConfig`],
 /// or `None` when the edge arms none of them.
 ///
-/// Non-positive values read as unset - mirroring `enforce_max_iterations`, where
-/// `max == 0` means "unlimited" - so `stuck_after_iterations = 0` leaves the edge
-/// unarmed and the caller rejects it, rather than the edge firing on turn zero.
-pub(super) fn parse_stuck_config(edge: &toml::Value) -> Option<StuckConfig> {
-    let threshold = |key: &str| {
-        edge.get(key)
-            .and_then(|v| v.as_integer())
-            .filter(|v| *v > 0)
-            .map(|v| v as usize)
-    };
+/// Zero reads as unset - mirroring `enforce_max_iterations`, where `max == 0`
+/// means "unlimited" - so `stuck_after_iterations = 0` leaves the edge unarmed
+/// and the caller rejects it, rather than the edge firing on turn zero. A
+/// negative used to read as unset too, silently; it is refused now.
+pub(super) fn parse_stuck_config(where_: &str, edge: &toml::Value) -> Result<Option<StuckConfig>> {
+    let threshold = |key: &str| count_of(edge, where_, key).map(|n| n.filter(|n| *n > 0));
     let cfg = StuckConfig {
-        after_iterations: threshold("stuck_after_iterations"),
-        after_minutes: threshold("stuck_after_minutes"),
-        after_same_file_edits: threshold("stuck_after_same_file_edits"),
-        after_tool_calls: threshold("stuck_after_tool_calls"),
+        after_iterations: threshold("stuck_after_iterations")?,
+        after_minutes: threshold("stuck_after_minutes")?,
+        after_same_file_edits: threshold("stuck_after_same_file_edits")?,
+        after_tool_calls: threshold("stuck_after_tool_calls")?,
     };
-    cfg.is_armed().then_some(cfg)
+    Ok(cfg.is_armed().then_some(cfg))
 }
 
 /// Parse one `[[transforms]]` entry: a parent region mapped onto a child region
@@ -1023,18 +1037,21 @@ pub(super) fn parse_context_transform(t: &toml::Value) -> ContextTransform {
 /// Parse an `[agent.nudge]` / `[stages.X.nudge]` table into a `NudgeConfig`.
 /// Every key is optional; an empty table is inert (each field still inherits
 /// the broader level).
-pub(super) fn parse_nudge_config(table: &toml::value::Table) -> crate::blueprint::NudgeConfig {
+pub(super) fn parse_nudge_config(
+    where_: &str,
+    table: &toml::value::Table,
+) -> Result<crate::blueprint::NudgeConfig> {
     let mut nudge = crate::blueprint::NudgeConfig::default();
     if let Some(enabled) = bool_of(table, "enabled") {
         nudge.enabled = Some(enabled);
     }
-    // A negative count is a typo, not "never accept the text" - fall back to
-    // inheriting rather than wrapping around.
-    if let Some(max) = int_of(table, "max").filter(|max| *max >= 0) {
-        nudge.max = Some(max as usize);
+    // A negative count is a typo, not "never accept the text", and used to
+    // fall back to inheriting without a word. It is refused now.
+    if let Some(max) = count_of(table, where_, "max")? {
+        nudge.max = Some(max);
     }
     if let Some(text) = str_of(table, "text") {
         nudge.text = Some(text.trim().to_string());
     }
-    nudge
+    Ok(nudge)
 }

@@ -26,7 +26,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     let version = str_of(agent, "version").unwrap_or("0.1.0").to_string();
     let description = str_of(agent, "description").unwrap_or("").to_string();
 
-    let max_child_depth = int_of(agent, "max_child_depth").map(|v| v as usize);
+    let max_child_depth = count_of(agent, "[agent]", "max_child_depth")?;
 
     let entry_stage = str_of(agent, "entry_stage").map(|s| s.to_string());
 
@@ -86,7 +86,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     blueprint.dynamic_tools = dynamic_tools;
 
     if let Some(compaction_table) = table_of(&parsed, "compaction") {
-        blueprint.compaction_config = Some(parse_compaction_config(compaction_table));
+        blueprint.compaction_config = Some(parse_compaction_config(compaction_table)?);
     }
 
     // Parse agent-level security config: [security]
@@ -109,7 +109,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     // Parse agent-level nudge defaults: [agent.nudge]. Absent ⇒ each field
     // inherits the global config's [nudge] section; a per-stage block wins.
     if let Some(nudge_table) = table_of(agent, "nudge") {
-        blueprint.nudge = Some(parse_nudge_config(nudge_table));
+        blueprint.nudge = Some(parse_nudge_config("[agent.nudge]", nudge_table)?);
     }
 
     // Parse the agent's default output shape: [agent.output]. A per-stage
@@ -120,7 +120,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
 
     // Parse agent-level sandbox config: [sandbox]
     if let Some(sandbox_table) = table_of(&parsed, "sandbox") {
-        blueprint.sandbox = Some(parse_sandbox_config(sandbox_table)?);
+        blueprint.sandbox = Some(parse_sandbox_config("", sandbox_table)?);
     }
 
     // Parse agent-level read-path declarations: [read_paths]. Entries are
@@ -149,12 +149,12 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     if let Some(context_table) = table_of(&parsed, "context")
         && let Some(ft_table) = table_of(context_table, "file_tracking")
     {
-        blueprint.file_tracking = Some(parse_file_tracking(ft_table));
+        blueprint.file_tracking = Some(parse_file_tracking(ft_table)?);
     }
 
     // Parse repetition-detection config: [repetition_detection]
     if let Some(rd_table) = table_of(&parsed, "repetition_detection") {
-        blueprint.repetition_detection = Some(parse_repetition_detection(rd_table));
+        blueprint.repetition_detection = Some(parse_repetition_detection(rd_table)?);
     }
 
     // Parse cross-blueprint context transforms: [[transforms]]. Each maps a

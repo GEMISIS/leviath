@@ -8,6 +8,8 @@
 //! the wrong type, exactly as the inline form did; a caller that wants to
 //! tell those apart still looks at the value itself.
 
+use crate::error::{Error, Result};
+
 /// Something with named fields: a TOML value (which may be a table) or a
 /// table itself. The parser holds both, depending on how far into the
 /// document it has descended, and asks the same questions of either.
@@ -48,6 +50,24 @@ pub(super) fn bool_of(v: &impl Fields, key: &str) -> Option<bool> {
 /// no range check, since each caller decides what a negative means.
 pub(super) fn int_of(v: &impl Fields, key: &str) -> Option<i64> {
     v.field(key).and_then(|x| x.as_integer())
+}
+
+/// The count under `key`: a non-negative integer, if the key is present and
+/// holds an integer at all. `where_` names the table for the error.
+///
+/// Every count a manifest carries used to go through `as usize`, so
+/// `max_items = -1` became the largest possible cap and read at a glance as
+/// "no limit", the opposite of what was written; a few keys dropped the value
+/// instead. Either way nothing said so. A negative is refused here, naming
+/// the key and the value, so the file fails to load rather than loading
+/// looser than it reads.
+pub(super) fn count_of(v: &impl Fields, where_: &str, key: &str) -> Result<Option<usize>> {
+    match int_of(v, key) {
+        None => Ok(None),
+        Some(n) => usize::try_from(n)
+            .map(Some)
+            .map_err(|_| Error::Other(format!("{where_}: {key} must not be negative (got {n})"))),
+    }
 }
 
 /// The array under `key`, if present and an array.
@@ -93,6 +113,12 @@ mod tests {
         assert_eq!(str_field(v, "s"), "text");
         assert_eq!(str_field(v, "missing"), "");
         assert_eq!(str_field(v, "i"), "");
+        assert_eq!(count_of(v, "[t]", "missing").unwrap(), None);
+        assert_eq!(count_of(v, "[t]", "s").unwrap(), None);
+        assert_eq!(
+            count_of(v, "[t]", "i").unwrap_err().to_string(),
+            "[t]: i must not be negative (got -3)"
+        );
     }
 
     #[test]

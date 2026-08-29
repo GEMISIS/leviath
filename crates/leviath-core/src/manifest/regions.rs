@@ -26,6 +26,8 @@ pub(super) fn parse_region_layout(
     let mut total_tokens = 0usize;
 
     for (region_name, region_value) in regions_table {
+        let where_ = format!("region '{region_name}'");
+        let count = |key: &str| count_of(region_value, &where_, key);
         // `budget = "N%"` opts a region into percentage mode; `max_tokens` then
         // becomes the absolute cap and `min_tokens` the absolute floor. Without a
         // `budget`, `max_tokens` is the literal ceiling (legacy behavior).
@@ -33,8 +35,8 @@ pub(super) fn parse_region_layout(
             Some(s) => Some(crate::BudgetSpec::parse_budget(s).map_err(Error::Other)?),
             None => None,
         };
-        let max_tokens_opt = int_of(region_value, "max_tokens").map(|v| v as usize);
-        let min_tokens = int_of(region_value, "min_tokens").map(|v| v as usize);
+        let max_tokens_opt = count("max_tokens")?;
+        let min_tokens = count("min_tokens")?;
 
         let budget = match percent {
             Some(percent) => crate::BudgetSpec::Percent {
@@ -60,22 +62,21 @@ pub(super) fn parse_region_layout(
             Some(s) => Some(crate::BudgetSpec::parse_budget(s).map_err(Error::Other)?),
             None => None,
         };
-        let explicit_threshold = int_of(region_value, "threshold_tokens").map(|v| v as usize);
+        let explicit_threshold = count("threshold_tokens")?;
 
         let kind_str = str_of(region_value, "kind").unwrap_or("temporary");
 
         let kind = match kind_str {
             "pinned" => RegionKind::Pinned,
             "sliding_window" => {
-                let max_items = int_of(region_value, "max_items").unwrap_or(10) as usize;
+                let max_items = count("max_items")?.unwrap_or(10);
                 let eviction_strategy = match str_of(region_value, "strategy") {
                     Some("bulk") => {
-                        let overflow = int_of(region_value, "overflow").unwrap_or(10) as usize;
+                        let overflow = count("overflow")?.unwrap_or(10);
                         EvictionStrategy::Bulk { overflow }
                     }
                     Some("compact") => {
-                        let compact_count =
-                            int_of(region_value, "compact_count").unwrap_or(10) as usize;
+                        let compact_count = count("compact_count")?.unwrap_or(10);
                         EvictionStrategy::Compact { compact_count }
                     }
                     Some("per_item") | None => EvictionStrategy::PerItem,
@@ -124,7 +125,7 @@ pub(super) fn parse_region_layout(
             }
             "checklist" => RegionKind::Checklist,
             "hashmap" | "hash_map" => {
-                let max_entries = int_of(region_value, "max_entries").map(|v| v as usize);
+                let max_entries = count("max_entries")?;
                 RegionKind::HashMap { max_entries }
             }
             "custom" => {

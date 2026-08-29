@@ -201,6 +201,10 @@ Check a blueprint before running it. `PATH` defaults to `.`.
 Beyond parsing and structural validation, it reports what the blueprint leaves unsaid. Findings come
 in three levels: an **error** exits non-zero, a **warning** does not, and a **note** never does.
 
+Parsing itself refuses a few things outright, before any finding is reported: a negative count
+anywhere in the file (`max_items = -1`), an unknown key under `[sandbox]`, and an unknown key in a
+stage table. Each of those errors names the key.
+
 | Level | Code | What it means |
 |---|---|---|
 | error | `unknown-tool` | A name in `available_tools` matches nothing. See below |
