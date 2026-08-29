@@ -293,12 +293,18 @@ impl Dashboard {
     pub(super) fn toggle_new_run_yolo(&mut self) {
         if self.new_run_yolo {
             self.new_run_yolo = false;
-            self.toast("Unattended off: you will be asked", ToastLevel::Info);
+            self.toast(
+                "Unattended OFF: runs will ask you before each tool call",
+                ToastLevel::Info,
+            );
             return;
         }
         if self.yolo_warning_silenced {
             self.new_run_yolo = true;
-            self.toast("Unattended on", ToastLevel::Warning);
+            self.toast(
+                "Unattended ON: runs approve their own tool calls",
+                ToastLevel::Warning,
+            );
             return;
         }
         self.pending_confirm = Some((ConfirmAction::EnableYolo, yolo_warning()));
@@ -308,7 +314,10 @@ impl Dashboard {
     pub(super) fn accept_yolo_warning(&mut self, silence: bool) {
         self.new_run_yolo = true;
         self.yolo_warning_silenced = silence;
-        self.toast("Unattended on", ToastLevel::Warning);
+        self.toast(
+            "Unattended ON: runs approve their own tool calls",
+            ToastLevel::Warning,
+        );
     }
 
     // ── Keys ─────────────────────────────────────────────────────────────────
@@ -1568,7 +1577,7 @@ mod tests {
             .map(|t| t.message.clone())
             .unwrap_or_default();
         assert!(
-            toast.contains("stays off") && toast.contains("Ctrl-Y"),
+            toast.contains("stays OFF") && toast.contains("Ctrl-Y"),
             "the decline is said out loud: {toast:?}"
         );
         let help = dash.new_run_help_bar_text();

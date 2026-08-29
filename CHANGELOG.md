@@ -109,6 +109,10 @@ same list.
 
 ### Fixed
 
+- The toast for turning unattended on carried the warning icon, which was a
+  pause glyph, and the one for turning it off carried the green check, so on
+  read as held back and off as armed. The warning icon is now `!`, and the
+  three unattended toasts say ON or OFF in so many words.
 - An approval prompt nobody answered before `[limits] interaction_timeout_secs`
   was reported to the model as `User declined tool call`, as if a person had
   refused it. A six-hour deep-researcher run lost all three of its report
