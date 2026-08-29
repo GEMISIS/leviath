@@ -128,6 +128,18 @@ provenance:
 gh attestation verify leviath-linux-x64.tar.gz --repo GEMISIS/leviath
 ```
 
+On Windows, `lev.exe` also carries an Authenticode signature (publisher: Sun
+Forge AI) once the release pipeline's signing is enabled, which is what keeps
+Defender and SmartScreen from treating a new build as unknown:
+
+```powershell
+Get-AuthenticodeSignature "$env:LOCALAPPDATA\Leviath\bin\lev.exe"   # Status: Valid
+```
+
+If a build shows `NotSigned`, it predates signing; the attestation above still
+proves it is what CI built, and an antivirus that quarantines it is reporting a
+false positive on an unsigned file rather than something it found.
+
 See [SECURITY.md](https://github.com/GEMISIS/leviath/blob/main/SECURITY.md)
 for the full supply-chain story.
 

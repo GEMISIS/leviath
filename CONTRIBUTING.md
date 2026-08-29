@@ -259,6 +259,37 @@ following Monday and stable the Thursday after. Channels with nothing new to
 publish skip in seconds. See
 [Releases and channels](https://leviath.dev/docs/releases) for the full picture.
 
+### Signing the Windows binary
+
+The alpha build signs `lev.exe` with Azure Artifact Signing when six repository
+secrets exist, and prints a `::notice` and ships it unsigned when they do not,
+so nothing about a fork or a PR build depends on Azure. Setting it up is a
+one-time job for a maintainer with an Azure subscription:
+
+1. **Azure portal → Artifact Signing** (Basic tier): create an account, complete
+   the identity validation for Sun Forge AI (this is the slow step - days - and
+   nothing signs until it is approved), then add a certificate profile of type
+   *Public Trust*. Note the account's endpoint (for example
+   `https://eus.codesigning.azure.net`).
+2. **Microsoft Entra → App registrations**: create an app. Under *Certificates &
+   secrets → Federated credentials*, add one for GitHub Actions: organization
+   `GEMISIS`, repository `leviath`, entity **Branch**, branch `main`. No client
+   secret - the workflow authenticates with OpenID Connect, and the alpha build
+   only ever runs from `main`.
+3. **The signing account → Access control (IAM)**: assign the app the role
+   *Artifact Signing Certificate Profile Signer*.
+4. **Repository secrets**: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
+   `AZURE_SUBSCRIPTION_ID`, `ARTIFACT_SIGNING_ENDPOINT`,
+   `ARTIFACT_SIGNING_ACCOUNT`, `ARTIFACT_SIGNING_PROFILE`.
+
+The next alpha run signs. Verify on the published asset with
+`Get-AuthenticodeSignature lev.exe`. Until signing is on, a new build that an
+antivirus quarantines should be reported to the vendor as a false positive
+(Microsoft: <https://www.microsoft.com/wdsi/filesubmission>, as a software
+developer, with the detection name from Protection history); each build is a
+new hash, so that has to be repeated per release, which is the whole reason to
+sign.
+
 ## Design notes
 
 Longer-form rationale that does not belong in the user docs lives in `docs/design/`. Today that is

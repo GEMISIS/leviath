@@ -267,3 +267,17 @@ checksum, but the attestation is signed by GitHub's OIDC identity for the build
 workflow and cannot be forged from inside the release. The installers do not
 run it automatically yet, so `gh attestation verify` is a manual step; wiring
 it into the installers is planned.
+
+### Windows code signing
+
+`lev.exe` is Authenticode-signed in the alpha build through Azure Artifact
+Signing (formerly Trusted Signing) when the maintainers have configured it;
+beta and stable promote the alpha artifacts, so the signature travels with
+them. The build authenticates to Azure with OpenID Connect - a federated
+credential on the Entra application trusts GitHub's token for the `main`
+branch of this repository - so no signing secret is stored anywhere. The
+certificate itself never leaves Azure; the workflow submits digests. Check a
+binary with `Get-AuthenticodeSignature lev.exe` (expect `Valid`, signer Sun
+Forge AI). The signature is a second, independent proof alongside the
+attestation: the attestation says *which workflow* built the file, the
+signature says *who* published it - and it is the one Windows itself reads.
