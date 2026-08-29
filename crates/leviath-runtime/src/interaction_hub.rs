@@ -85,6 +85,11 @@ impl InteractionHub {
         self.timeout_secs.store(secs, Ordering::Relaxed);
     }
 
+    /// The configured deadline in seconds; `0` means the hub waits indefinitely.
+    pub fn timeout_secs(&self) -> u64 {
+        self.timeout_secs.load(Ordering::Relaxed)
+    }
+
     /// The current deadline, or `None` when the hub waits indefinitely.
     fn timeout(&self) -> Option<Duration> {
         match self.timeout_secs.load(Ordering::Relaxed) {
@@ -249,6 +254,14 @@ impl InteractionHub {
 pub struct HubInteractionBackend {
     hub: InteractionHub,
     agent_id: String,
+}
+
+impl HubInteractionBackend {
+    /// The hub's prompt deadline in seconds (`0`: it waits indefinitely), so a
+    /// caller can say in its own words how long an unanswered prompt waited.
+    pub fn timeout_secs(&self) -> u64 {
+        self.hub.timeout_secs()
+    }
 }
 
 #[async_trait::async_trait]

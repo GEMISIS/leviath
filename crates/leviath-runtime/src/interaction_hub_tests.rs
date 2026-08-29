@@ -318,3 +318,14 @@ async fn an_answer_that_lands_as_the_deadline_passes_still_wins() {
     let response = hub.expire("agent-a", "q1", &mut rx);
     assert_eq!(response.value.as_deref(), Some("approved by hand"));
 }
+
+/// The deadline reads back through the hub and through a per-agent backend,
+/// which is how a tool result can name it when a prompt expires.
+#[test]
+fn the_timeout_reads_back_through_the_hub_and_its_backends() {
+    let hub = InteractionHub::new();
+    assert_eq!(hub.timeout_secs(), 0, "a fresh hub waits indefinitely");
+    hub.set_timeout_secs(7);
+    assert_eq!(hub.timeout_secs(), 7);
+    assert_eq!(hub.backend_for("agent-a").timeout_secs(), 7);
+}

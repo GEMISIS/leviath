@@ -1533,6 +1533,53 @@ mod tests {
         assert!(!dash.new_run_yolo);
     }
 
+    /// The sequence that lost a six-hour run its file writes: unattended on
+    /// (confirmed), off again, on again, and Enter on the re-asked warning.
+    /// The dialog's focus starts on "Keep asking me", so Enter declines, and
+    /// before this the only trace was a "Cancelled" log line nobody reads.
+    /// The setting stays off (that is the dialog's safe default), but the
+    /// screen now says so where the person is looking.
+    #[test]
+    fn declining_the_re_asked_warning_with_enter_says_unattended_stayed_off() {
+        let mut dash = make_test_dashboard();
+        dash.new_run_screen = true;
+
+        dash.handle_key(ctrl(KeyCode::Char('y')));
+        dash.handle_key(key(KeyCode::Char('y')));
+        assert!(dash.new_run_yolo, "on, confirmed");
+        dash.handle_key(ctrl(KeyCode::Char('y')));
+        assert!(!dash.new_run_yolo, "off again");
+
+        dash.toasts.clear();
+        dash.handle_key(ctrl(KeyCode::Char('y')));
+        assert!(
+            dash.pending_confirm.is_some(),
+            "not silenced, so it asks again"
+        );
+        dash.handle_key(key(KeyCode::Enter));
+        assert!(dash.pending_confirm.is_none());
+        assert!(
+            !dash.new_run_yolo,
+            "Enter on the focused Keep-asking button declines"
+        );
+        let toast = dash
+            .toasts
+            .last()
+            .map(|t| t.message.clone())
+            .unwrap_or_default();
+        assert!(
+            toast.contains("stays off") && toast.contains("Ctrl-Y"),
+            "the decline is said out loud: {toast:?}"
+        );
+        let help = dash.new_run_help_bar_text();
+        assert!(help.contains("unattended: off"), "{help}");
+
+        dash.handle_key(ctrl(KeyCode::Char('y')));
+        dash.handle_key(key(KeyCode::Char('y')));
+        assert!(dash.new_run_yolo);
+        assert!(dash.new_run_help_bar_text().contains("unattended: on"));
+    }
+
     /// The box silences the warning for the rest of the sitting, and only for the
     /// warning: the setting itself still has to be turned on each time.
     #[test]
