@@ -100,7 +100,9 @@ pub(super) async fn spawn_agent(
         callback_url: body.callback_url.clone(),
         callback_secret: body.callback_secret.clone(),
         yolo: body.yolo,
-        no_seed_commands: body.no_seed_commands,
+        // Either side may refuse: the caller for this run, or the operator
+        // for every run that comes in this way.
+        no_seed_commands: body.no_seed_commands || state.limits.no_remote_seed_commands,
         allow: body.allow.clone(),
         output: output_request(&body),
         max_depth: body.max_depth,
@@ -869,6 +871,8 @@ mod tests {
                 allow_local_network: false,
                 workdir_root: Some(root.path().to_path_buf()),
                 no_remote_yolo: true,
+                no_remote_seed_commands: false,
+                request_limits: Default::default(),
             }),
         };
 
@@ -964,6 +968,8 @@ mod tests {
             allow_local_network: false,
             workdir_root: None,
             no_remote_yolo: false,
+            no_remote_seed_commands: false,
+            request_limits: Default::default(),
         };
         assert!(
             permissive
@@ -1200,6 +1206,52 @@ system_prompt = "Plan the work"
             .await,
             StatusCode::OK
         );
+    }
+
+    /// `--no-remote-seed-commands` reaches the daemon as `no_seed_commands`
+    /// on every spawn, whatever the body said; without the flag the body's
+    /// own answer is what goes through. Read off the request the fake daemon
+    /// receives, so this holds the wire rather than a local variable.
+    #[tokio::test]
+    async fn no_remote_seed_commands_marks_every_spawn() {
+        async fn seen(flag: bool, body: &str) -> bool {
+            let captured = Arc::new(std::sync::Mutex::new(None));
+            let sink = Arc::clone(&captured);
+            let (control, _dir, _srv) = fake_daemon(move |req| {
+                // Through its wire form rather than a pattern match: the only
+                // request this handler sends is a spawn, so an arm for any
+                // other would be one nothing runs.
+                let wire = serde_json::to_value(&req).unwrap();
+                *sink.lock().unwrap() = wire["args"]["no_seed_commands"].as_bool();
+                ControlResponse::Spawned {
+                    run_id: "run-1".to_string(),
+                }
+            });
+            let agents = tempfile::tempdir().unwrap();
+            write_test_blueprint(&agents.path().join("spawnable"), "spawnable");
+            let mut state = test_state_with_agent_paths(vec![agents.path().to_path_buf()], control);
+            state.limits = Arc::new(ServeLimits {
+                no_remote_seed_commands: flag,
+                ..Default::default()
+            });
+            let app = Router::new()
+                .route("/api/agents", axum::routing::post(spawn_agent))
+                .with_state(state);
+            assert_eq!(post_spawn(app, body).await, StatusCode::OK);
+            let seen = captured.lock().unwrap().take();
+            seen.expect("the daemon saw a spawn")
+        }
+
+        const PLAIN: &str = r#"{"blueprint":"spawnable","task":"t","workdir":"/tmp"}"#;
+        const OPTED_OUT: &str =
+            r#"{"blueprint":"spawnable","task":"t","workdir":"/tmp","no_seed_commands":true}"#;
+        assert!(!seen(false, PLAIN).await, "no flag, no request: seeds run");
+        assert!(
+            seen(false, OPTED_OUT).await,
+            "the body alone still opts out"
+        );
+        assert!(seen(true, PLAIN).await, "the flag opts out for the caller");
+        assert!(seen(true, OPTED_OUT).await, "both is still out");
     }
 
     #[tokio::test]

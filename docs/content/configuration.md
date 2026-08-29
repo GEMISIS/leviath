@@ -406,6 +406,21 @@ the symlink-resolved real path and are written with `/` on every OS. `~/` expand
 a relative entry resolves against the run's workdir. Full walkthrough in
 [Security](/docs/security#reading-outside-the-workdir).
 
+## `[serve]`
+
+What `lev serve` takes on at once and how long it gives each request. Every key has a default,
+so the whole section can be omitted; the `lev serve` flags of the same name win over it, and `0`
+switches a limit off. See [Limits](/docs/api#limits) for what a client sees.
+
+```toml
+[serve]
+max_concurrent_requests = 64   # in flight at once; the next is answered 503
+request_timeout_secs    = 30   # per request; over it the client gets 408
+```
+
+The websocket routes are outside both limits. Neither is a ceiling on the runs behind the API:
+a spawn the daemon takes a minute to accept still spawns.
+
 ## `[agent_read_paths.<agent>]`
 
 Per-agent read grants, the itemized counterpart of `allow_blueprint_read_paths`.

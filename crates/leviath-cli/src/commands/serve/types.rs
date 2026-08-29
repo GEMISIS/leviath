@@ -90,6 +90,31 @@ pub struct ServeArgs {
     /// same wildcard override `"yolo": true` writes.
     #[arg(long)]
     pub no_remote_yolo: bool,
+
+    /// Run every spawn as if it carried `"no_seed_commands": true`, so a
+    /// blueprint's `seed = { command = ... }` regions never execute for a
+    /// remotely started run.
+    ///
+    /// A command seed runs at spawn, before the first inference and so before
+    /// any approval prompt. `[security] allow_seed_commands = false` refuses
+    /// them machine-wide; this refuses them only for runs that arrive over
+    /// the API, leaving `lev run` on the host as it was.
+    #[arg(long)]
+    pub no_remote_seed_commands: bool,
+
+    /// Requests in flight at once before the next one is answered 503.
+    ///
+    /// Overrides `[serve] max_concurrent_requests` (default 64). `0` disables
+    /// the cap. The websocket routes are never counted.
+    #[arg(long, value_name = "N")]
+    pub max_concurrent_requests: Option<u64>,
+
+    /// Seconds one request may take before it is answered 408.
+    ///
+    /// Overrides `[serve] request_timeout_secs` (default 30). `0` disables the
+    /// timeout. The websocket routes are never timed.
+    #[arg(long, value_name = "SECS")]
+    pub request_timeout_secs: Option<u64>,
 }
 
 // ─── Shared state ────────────────────────────────────────────────────────────
@@ -163,6 +188,12 @@ pub(super) struct ServeLimits {
     /// `[security] allow_local_network`: whether a completion webhook may point
     /// at loopback, private or link-local addresses.
     pub(super) allow_local_network: bool,
+    /// `--no-remote-seed-commands`: whether every spawn is treated as having
+    /// asked for `"no_seed_commands": true`.
+    pub(super) no_remote_seed_commands: bool,
+    /// The request cap and timeout in force, after the flags and `[serve]`
+    /// have been reconciled. Reported by `GET /api/config`.
+    pub(super) request_limits: super::request_limits::RequestLimits,
 }
 
 impl ServeLimits {
@@ -1256,7 +1287,7 @@ mod tests {
             mcp_server_count: 0,
             api_version: API_VERSION.to_string(),
             capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
-            limits: ApiLimits::current(),
+            limits: ApiLimits::current(&Default::default()),
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: RedactedConfig = serde_json::from_str(&json).unwrap();

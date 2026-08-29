@@ -77,6 +77,10 @@ shell_env_withhold = []
 read_paths = ["~/reference"]
 credential_store = "file"
 
+[serve]
+max_concurrent_requests = 64
+request_timeout_secs = 30
+
 [webhook]
 max_retries = 3
 base_delay_ms = 500

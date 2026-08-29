@@ -38,8 +38,10 @@ fn gateways_of(c: &Config) -> Vec<GatewayInfo> {
     gateways
 }
 
-/// Redacted view of a config — booleans for keys, never their values.
-fn redact(c: &Config) -> RedactedConfig {
+/// Redacted view of a config: booleans for keys, never their values.
+/// `requests` is what this server resolved at start-up, which no config
+/// file alone can say once a flag is involved.
+fn redact(c: &Config, requests: &super::request_limits::RequestLimits) -> RedactedConfig {
     RedactedConfig {
         default_provider: c.default_provider.clone(),
         has_anthropic_key: c.providers.anthropic_api_key.is_some(),
@@ -52,7 +54,7 @@ fn redact(c: &Config) -> RedactedConfig {
         mcp_server_count: c.mcp_servers.len(),
         api_version: API_VERSION.to_string(),
         capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
-        limits: ApiLimits::current(),
+        limits: ApiLimits::current(requests),
     }
 }
 
@@ -60,13 +62,17 @@ fn redact(c: &Config) -> RedactedConfig {
 /// made through [`put_config`] - or by anything else on the machine - is
 /// visible to the very next request (issue #532).
 pub(super) async fn get_config(State(state): State<AppState>) -> Json<RedactedConfig> {
-    Json(redact(&state.current_config()))
+    Json(redact(
+        &state.current_config(),
+        &state.limits.request_limits,
+    ))
 }
 
 /// `PUT /api/config` (admin-only). Loads the on-disk config, applies every
 /// present field, and writes it back with the file's `0600` permissions — the
 /// same file `lev setup` and MCP admin edits. Returns the new redacted config.
 pub(super) async fn put_config(
+    State(state): State<AppState>,
     Json(req): Json<WriteConfigReq>,
 ) -> Result<Json<RedactedConfig>, ApiError> {
     let paths = super::mcp::admin_paths();
@@ -159,7 +165,7 @@ pub(super) async fn put_config(
             format!("failed to write config: {e}"),
         )
     })?;
-    Ok(Json(redact(&config)))
+    Ok(Json(redact(&config, &state.limits.request_limits)))
 }
 
 /// `POST /api/models/probe` (admin-only): what an OpenAI-compatible server
@@ -821,7 +827,7 @@ mod tests {
             mcp_server_count: 2,
             api_version: API_VERSION.to_string(),
             capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
-            limits: ApiLimits::current(),
+            limits: ApiLimits::current(&Default::default()),
         };
         let json = serde_json::to_string(&config).unwrap();
         // Must NOT contain actual key values
@@ -845,7 +851,7 @@ mod tests {
             mcp_server_count: 0,
             api_version: API_VERSION.to_string(),
             capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
-            limits: ApiLimits::current(),
+            limits: ApiLimits::current(&Default::default()),
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"ollama_base_url\":\"http://localhost:11434\""));
@@ -1396,7 +1402,7 @@ mod tests {
             },
         );
 
-        let redacted = redact(&config);
+        let redacted = redact(&config, &Default::default());
         let gateway = &redacted.gateways[0];
         assert_eq!(gateway.name, "groq");
         assert_eq!(gateway.kind, "script");

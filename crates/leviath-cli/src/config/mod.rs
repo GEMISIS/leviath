@@ -17,6 +17,8 @@ mod providers;
 pub(crate) use providers::*;
 mod security;
 pub(crate) use security::*;
+mod serve;
+pub(crate) use serve::*;
 
 // Two helpers with no `[table]` of their own: reading a repository's `.env`,
 // and hardening the config file's permissions. Private to this module; the
@@ -295,6 +297,11 @@ pub struct Config {
     #[serde(default)]
     pub security: SecurityConfig,
 
+    /// `[serve]`: the request cap and timeout `lev serve` applies. The flags
+    /// of the same name on `lev serve` win over these.
+    #[serde(default)]
+    pub serve: ServeConfig,
+
     /// Per-agent read grants, keyed by agent name - the itemized counterpart
     /// of `SecurityConfig::allow_blueprint_read_paths`, analogous to
     /// [`Self::agent_tool_permissions`]:
@@ -355,6 +362,7 @@ impl Default for Config {
             sandbox: None,
             tool_script_permissions: ScriptToolPermissions::default(),
             security: SecurityConfig::default(),
+            serve: ServeConfig::default(),
             agent_read_paths: HashMap::new(),
         }
     }
@@ -3684,6 +3692,10 @@ enabled = false
                 allow_blueprint_permissions: false,
                 shell_env: leviath_core::ShellEnvMode::default(),
                 shell_env_withhold: Vec::new(),
+            },
+            serve: ServeConfig {
+                max_concurrent_requests: 16,
+                request_timeout_secs: 5,
             },
             agent_read_paths: HashMap::from([(
                 "cto".to_string(),
