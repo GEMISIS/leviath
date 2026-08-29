@@ -34,11 +34,86 @@ pub struct ProviderCreds {
     pub rate_limit: Option<leviath_providers::RateLimitConfig>,
     /// Provider-specific settings that don't fit the api-key / base-URL shape.
     ///
-    /// Currently only `claude-code` reads this, for `binary` (path to the
-    /// `claude` executable) and `effort` (reasoning level). Kept as a map rather
-    /// than named fields so one provider's options don't accrete onto a struct
-    /// shared by six.
+    /// `claude-code` reads `binary` (path to the `claude` executable) and
+    /// `effort` (reasoning level). An OpenAI-compatible endpoint is marked by
+    /// `kind` and carries its headers and model list here too; see
+    /// [`Self::openai_compatible`] and [`EndpointSpec`], which are the only
+    /// two places that spell those keys. Kept as a map rather than named
+    /// fields so one provider's options don't accrete onto a struct shared by
+    /// seven.
     pub options: std::collections::HashMap<String, String>,
+}
+
+/// The `options` key that marks an entry as an OpenAI-compatible endpoint.
+const KIND_OPTION: &str = "kind";
+/// The `kind` value for one.
+const OPENAI_COMPATIBLE: &str = "openai-compatible";
+/// The `options` key prefix a request header travels under: `header:0:X-Org`.
+const HEADER_PREFIX: &str = "header:";
+/// The `options` key holding the configured model ids, as a JSON array.
+const MODELS_OPTION: &str = "models";
+/// The `options` key holding the `serves` routing hints, as a JSON array.
+const SERVES_OPTION: &str = "serves";
+
+/// What [`build_provider_registry`] needs to build an
+/// [`leviath_providers::EndpointProvider`], read back out of a
+/// [`ProviderCreds`] made by [`ProviderCreds::openai_compatible`].
+///
+/// A struct rather than five loose reads so the encoding is written once
+/// there and read once in [`Self::from_creds`], and nothing else has to know
+/// how a header is spelled in the options map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointSpec {
+    /// Where the server listens, including any path prefix.
+    pub base_url: String,
+    /// Extra headers on every request, in the order the config listed them.
+    pub headers: Vec<(String, String)>,
+    /// The ids to fall back to when the server will not list. `None` when the
+    /// config named none.
+    pub models: Option<Vec<String>>,
+    /// Ids a bare model name may route here on.
+    pub serves: Vec<String>,
+}
+
+impl EndpointSpec {
+    /// The endpoint `creds` describes, or `None` when it is not one.
+    ///
+    /// An endpoint with no base URL is not an endpoint: the config layer
+    /// refuses to load one, so this is a second guard rather than the first.
+    pub fn from_creds(creds: &ProviderCreds) -> Option<Self> {
+        if creds.options.get(KIND_OPTION).map(String::as_str) != Some(OPENAI_COMPATIBLE) {
+            return None;
+        }
+        let base_url = creds.base_url.clone()?;
+        // Sorted by the position the encoder stamped, so the config's own
+        // order is what the wire sees whatever order the map iterates in.
+        let mut headers: Vec<(usize, String, String)> = creds
+            .options
+            .iter()
+            .filter_map(|(key, value)| {
+                let rest = key.strip_prefix(HEADER_PREFIX)?;
+                let (position, name) = rest.split_once(':')?;
+                Some((position.parse().ok()?, name.to_string(), value.clone()))
+            })
+            .collect();
+        headers.sort();
+        Some(Self {
+            base_url,
+            headers: headers
+                .into_iter()
+                .map(|(_, name, value)| (name, value))
+                .collect(),
+            models: creds
+                .options
+                .get(MODELS_OPTION)
+                .and_then(|json| serde_json::from_str(json).ok()),
+            serves: creds
+                .options
+                .get(SERVES_OPTION)
+                .and_then(|json| serde_json::from_str(json).ok())
+                .unwrap_or_default(),
+        })
+    }
 }
 
 /// Hand-written so the API key can never reach a log line.
@@ -48,6 +123,18 @@ pub struct ProviderCreds {
 /// Nothing did, which is when it is cheap to make impossible.
 impl std::fmt::Debug for ProviderCreds {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // A header value is a credential as often as not (`X-Api-Key`), so
+        // the options map is printed with those values replaced. Sorted so
+        // two lines from one struct read the same.
+        let mut options: Vec<(&str, &str)> = self
+            .options
+            .iter()
+            .map(|(key, value)| match key.starts_with(HEADER_PREFIX) {
+                true => (key.as_str(), "<set>"),
+                false => (key.as_str(), value.as_str()),
+            })
+            .collect();
+        options.sort_unstable();
         f.debug_struct("ProviderCreds")
             .field("name", &self.name)
             .field(
@@ -61,7 +148,7 @@ impl std::fmt::Debug for ProviderCreds {
             .field("model_capabilities", &self.model_capabilities)
             .field("request_timeout_secs", &self.request_timeout_secs)
             .field("rate_limit", &self.rate_limit)
-            .field("options", &self.options)
+            .field("options", &options)
             .finish()
     }
 }
@@ -77,6 +164,49 @@ impl ProviderCreds {
             request_timeout_secs: None,
             rate_limit: None,
             options: std::collections::HashMap::new(),
+        }
+    }
+
+    /// A cred entry for an OpenAI-compatible endpoint registered as `name`.
+    ///
+    /// Everything an [`leviath_providers::EndpointProvider`] needs travels in
+    /// the fields every other provider already has, plus the options map:
+    /// the kind marker, one `header:<n>:<name>` entry per header (numbered so
+    /// the config's order survives a `HashMap`), and the model lists as JSON.
+    /// [`EndpointSpec::from_creds`] reads it back.
+    pub fn openai_compatible(
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        headers: Vec<(String, String)>,
+        models: Option<Vec<String>>,
+        serves: Vec<String>,
+    ) -> Self {
+        let mut options = std::collections::HashMap::new();
+        options.insert(KIND_OPTION.to_string(), OPENAI_COMPATIBLE.to_string());
+        for (position, (header, value)) in headers.into_iter().enumerate() {
+            options.insert(format!("{HEADER_PREFIX}{position}:{header}"), value);
+        }
+        if let Some(models) = models {
+            options.insert(
+                MODELS_OPTION.to_string(),
+                serde_json::to_string(&models).expect("a list of strings is JSON"),
+            );
+        }
+        if !serves.is_empty() {
+            options.insert(
+                SERVES_OPTION.to_string(),
+                serde_json::to_string(&serves).expect("a list of strings is JSON"),
+            );
+        }
+        Self {
+            name: name.into(),
+            api_key,
+            base_url: Some(base_url.into()),
+            model_capabilities: std::collections::HashMap::new(),
+            request_timeout_secs: None,
+            rate_limit: None,
+            options,
         }
     }
 }
@@ -215,6 +345,28 @@ pub fn build_provider_registry_probing(
     for c in creds {
         let caps = c.model_capabilities.clone();
         let timeout = c.request_timeout_secs;
+        // Decided by kind before the name is looked at: an endpoint is
+        // registered under whatever name the config gave it, and that name is
+        // the user's to choose.
+        if let Some(endpoint) = EndpointSpec::from_creds(c) {
+            registry.register(
+                c.name.clone(),
+                Arc::new(
+                    leviath_providers::EndpointProvider::new(
+                        clients.get_or_build(timeout, build_client)?,
+                        c.name.clone(),
+                        endpoint.base_url,
+                        c.api_key.clone(),
+                        endpoint.headers,
+                    )
+                    .with_overrides(caps)
+                    .with_rate_limit(c.rate_limit.as_ref())
+                    .with_models(endpoint.models)
+                    .with_serves(endpoint.serves),
+                ),
+            );
+            continue;
+        }
         match c.name.as_str() {
             "anthropic" => {
                 if let Some(ref key) = c.api_key {
@@ -385,6 +537,127 @@ mod tests {
         // A provider that needs no key says so rather than claiming one.
         let keyless = format!("{:?}", ProviderCreds::simple("ollama"));
         assert!(keyless.contains("<unset>"), "{keyless}");
+    }
+
+    /// The options map is the only place an endpoint's extras travel, so the
+    /// encoder and the decoder have to agree on every key, including the
+    /// order headers come back in.
+    #[test]
+    fn an_endpoint_cred_round_trips_through_the_options_map() {
+        let creds = ProviderCreds::openai_compatible(
+            "vllm",
+            "http://localhost:8000/v1",
+            Some("k".to_string()),
+            vec![
+                ("X-Org".to_string(), "research".to_string()),
+                ("Accept".to_string(), "application/json".to_string()),
+            ],
+            Some(vec!["llama-3".to_string()]),
+            vec!["llama".to_string()],
+        );
+        let spec = EndpointSpec::from_creds(&creds).expect("an endpoint");
+        assert_eq!(
+            spec,
+            EndpointSpec {
+                base_url: "http://localhost:8000/v1".to_string(),
+                headers: vec![
+                    ("X-Org".to_string(), "research".to_string()),
+                    ("Accept".to_string(), "application/json".to_string()),
+                ],
+                models: Some(vec!["llama-3".to_string()]),
+                serves: vec!["llama".to_string()],
+            }
+        );
+
+        // Nothing configured stays nothing rather than becoming an empty list.
+        let bare = ProviderCreds::openai_compatible("x", "http://h", None, vec![], None, vec![]);
+        let spec = EndpointSpec::from_creds(&bare).expect("an endpoint");
+        assert_eq!(spec.models, None);
+        assert!(spec.serves.is_empty());
+        assert!(spec.headers.is_empty());
+    }
+
+    /// Not an endpoint: a native provider, an endpoint that lost its address,
+    /// and options written by hand that do not decode.
+    #[test]
+    fn a_cred_that_is_not_an_endpoint_yields_no_spec() {
+        assert_eq!(
+            EndpointSpec::from_creds(&ProviderCreds::simple("anthropic")),
+            None
+        );
+
+        let mut no_url =
+            ProviderCreds::openai_compatible("x", "http://h", None, vec![], None, vec![]);
+        no_url.base_url = None;
+        assert_eq!(EndpointSpec::from_creds(&no_url), None);
+
+        let mut odd = ProviderCreds::openai_compatible("x", "http://h", None, vec![], None, vec![]);
+        odd.options
+            .insert("header:X-No-Position".to_string(), "v".to_string());
+        odd.options
+            .insert("header:notanumber:X-Bad".to_string(), "v".to_string());
+        odd.options
+            .insert("models".to_string(), "not json".to_string());
+        odd.options.insert("serves".to_string(), "[".to_string());
+        let spec = EndpointSpec::from_creds(&odd).expect("still an endpoint");
+        assert!(spec.headers.is_empty());
+        assert_eq!(spec.models, None);
+        assert!(spec.serves.is_empty());
+    }
+
+    /// A header value is a credential as often as not.
+    #[test]
+    fn debug_output_never_contains_a_header_value() {
+        let creds = ProviderCreds::openai_compatible(
+            "gw",
+            "http://h/v1",
+            None,
+            vec![("X-Api-Key".to_string(), "hdr-SECRET-VALUE".to_string())],
+            None,
+            vec![],
+        );
+        let rendered = format!("{creds:?}");
+        assert!(
+            !rendered.contains("SECRET-VALUE"),
+            "header leaked: {rendered}"
+        );
+        assert!(rendered.contains("header:0:X-Api-Key"), "{rendered}");
+        assert!(rendered.contains("openai-compatible"), "{rendered}");
+    }
+
+    /// An endpoint registers under its own name, whatever that name is, and
+    /// carries its rate limit and overrides.
+    #[test]
+    fn an_endpoint_cred_registers_a_native_provider_under_its_name() {
+        let mut creds = ProviderCreds::openai_compatible(
+            "mock",
+            "http://127.0.0.1:1/v1",
+            None,
+            vec![],
+            Some(vec!["gpt-mock".to_string()]),
+            vec![],
+        );
+        creds.rate_limit = Some(leviath_providers::RateLimitConfig {
+            requests_per_minute: 10,
+            tokens_per_minute: 1000,
+        });
+        creds.model_capabilities.insert(
+            "gpt-mock".to_string(),
+            leviath_providers::ModelCapabilityOverride {
+                max_context_tokens: Some(4096),
+                ..Default::default()
+            },
+        );
+        let registry = build_provider_registry(&[creds]).expect("an HTTPS client builds in tests");
+        let provider = registry.get("mock").expect("registered");
+        assert_eq!(provider.name(), "mock");
+        assert_eq!(provider.max_context_tokens("gpt-mock"), 4096);
+        assert_eq!(
+            provider.served_catalog(),
+            Some(vec!["gpt-mock".to_string()])
+        );
+        // Nothing else was registered under a built-in name by accident.
+        assert!(!registry.has("openai"));
     }
 
     #[test]
@@ -610,9 +883,14 @@ mod tests {
         // One case per branch that needs a client. A single provider would leave
         // the other arms' error paths unproven, which is exactly the hole this
         // seam exists to close.
-        for name in ["anthropic", "openai", "google", "openrouter", "ollama"] {
+        let endpoint =
+            ProviderCreds::openai_compatible("mock", "http://h/v1", None, vec![], None, vec![]);
+        let keyed = ["anthropic", "openai", "google", "openrouter", "ollama"].map(|name| {
             let mut cred = ProviderCreds::simple(name);
             cred.api_key = Some("k".to_string());
+            cred
+        });
+        for cred in keyed.into_iter().chain([endpoint]) {
             // Ollama's arm is only reached when something answers at its
             // address, so the probe is injected rather than left to depend on
             // whether the machine running the suite has Ollama up. It does not

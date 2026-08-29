@@ -128,13 +128,56 @@ fn redacted(value: &Option<String>) -> &'static str {
     }
 }
 
-/// Optional overrides for a Rhai script provider, from `[model_providers.<name>]`.
+/// What backs a `[model_providers.<name>]` entry.
 ///
-/// Every field is optional. Keys not recognized below flow into [`Self::extra`]
-/// and are forwarded to the script's `initialize(config)` alongside `base_url`
-/// and `api_key`.
+/// Absent from the file means [`Self::Script`], which is what every entry
+/// written before the field existed is. Spelled out here rather than inferred
+/// from which fields are set, so a config says what it means and a typo in
+/// the value is a load error instead of a silently different provider.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelProviderKind {
+    /// A Rhai provider script in `~/.leviath/providers/`.
+    #[default]
+    Script,
+    /// A server speaking OpenAI's chat API, reached natively with no script:
+    /// llama.cpp, vLLM, LM Studio, or a gateway.
+    OpenaiCompatible,
+}
+
+impl ModelProviderKind {
+    /// The spelling the config file uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Script => "script",
+            Self::OpenaiCompatible => "openai-compatible",
+        }
+    }
+
+    /// The kind a config file spelling names, if it is one.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "script" => Some(Self::Script),
+            "openai-compatible" => Some(Self::OpenaiCompatible),
+            _ => None,
+        }
+    }
+}
+
+/// A `[model_providers.<name>]` entry: a Rhai script provider's overrides, or
+/// an OpenAI-compatible endpoint.
+///
+/// Every field is optional. For a script, keys not recognized below flow into
+/// [`Self::extra`] and are forwarded to the script's `initialize(config)`
+/// alongside `base_url` and `api_key`. For an endpoint, `base_url` is required
+/// and `headers` and `models` are read; `extra` is ignored.
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct ModelProviderConfig {
+    /// What backs the entry. Absent means a script, so every existing config
+    /// reads as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ModelProviderKind>,
+
     /// Script filename stem or path. Defaults to `<name>.rhai` in the providers
     /// directory (`~/.leviath/providers/`).
     #[serde(default)]
@@ -177,28 +220,99 @@ pub struct ModelProviderConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serves: Option<Vec<String>>,
 
+    /// Extra headers on every request to an OpenAI-compatible endpoint, as
+    /// `Name = "value"`. A gateway that wants an organisation or routing header
+    /// is the usual reason. Not read for a script.
+    ///
+    /// A `BTreeMap` so the file, the debug line and the API all list them in
+    /// one order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
+
+    /// The model ids an OpenAI-compatible endpoint serves, for a server that
+    /// does not answer `GET /models`. Read only when detection fails: a server
+    /// that lists its models is believed over this. Not read for a script.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+
     /// Any additional keys, forwarded verbatim into the script's `initialize`.
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
 }
 
+impl ModelProviderConfig {
+    /// The kind this entry is, with absent read as a script.
+    pub fn kind(&self) -> ModelProviderKind {
+        self.kind.unwrap_or_default()
+    }
+
+    /// Whether this entry is an OpenAI-compatible endpoint rather than a
+    /// script.
+    pub fn is_endpoint(&self) -> bool {
+        self.kind() == ModelProviderKind::OpenaiCompatible
+    }
+
+    /// What is wrong with this entry, if anything, named against `name`.
+    ///
+    /// Checked at config load rather than at the first inference: an endpoint
+    /// with nowhere to send a request is a config that cannot work, and the
+    /// message should name the table to fix while the file is still in front
+    /// of the person who wrote it.
+    pub fn validate(&self, name: &str) -> anyhow::Result<()> {
+        if self.is_endpoint()
+            && self
+                .base_url
+                .as_deref()
+                .is_none_or(|url| url.trim().is_empty())
+        {
+            anyhow::bail!(
+                "[model_providers.{name}] has kind = \"openai-compatible\" but no \
+                 base_url; set base_url to where the server listens, such as \
+                 \"http://localhost:8080/v1\""
+            );
+        }
+        Ok(())
+    }
+
+    /// The headers as an ordered list, for a provider constructor.
+    pub fn header_pairs(&self) -> Vec<(String, String)> {
+        self.headers
+            .iter()
+            .flatten()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+}
+
 /// Hand-written for the same reason [`ProviderConfig`]'s is, and with one extra
 /// hazard: `extra` is forwarded verbatim into the script's `initialize`, which
 /// is exactly where a second credential goes when a gateway wants one under its
-/// own name. A derived `Debug` would print both `api_key` and every value in
-/// `extra`, so this reports whether the key is set and the *names* in `extra`
-/// and nothing else - the same shape `GatewayInfo` puts on the wire.
+/// own name, and an endpoint's `headers` carry the same thing. A derived `Debug`
+/// would print `api_key` and every value in both, so this reports whether the
+/// key is set and the *names* in `extra` and `headers` and nothing else - the
+/// same shape `GatewayInfo` puts on the wire.
 impl std::fmt::Debug for ModelProviderConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Sorted: a `HashMap` iterates differently between two calls, and a
         // debug line that reorders itself is one nobody can diff.
         let mut extra_keys: Vec<&str> = self.extra.keys().map(String::as_str).collect();
         extra_keys.sort_unstable();
+        // Header values are the same hazard as `extra`: an endpoint's second
+        // credential is a header. Names only, for the same reason.
+        let header_names: Vec<&str> = self
+            .headers
+            .iter()
+            .flatten()
+            .map(|(name, _)| name.as_str())
+            .collect();
         f.debug_struct("ModelProviderConfig")
+            .field("kind", &self.kind())
             .field("script", &self.script)
             .field("api_key", &redacted(&self.api_key))
             .field("base_url", &self.base_url)
             .field("rate_limit", &self.rate_limit)
+            .field("header_names", &header_names)
+            .field("models", &self.models)
             .field("extra_keys", &extra_keys)
             .finish()
     }
