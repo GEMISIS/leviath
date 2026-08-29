@@ -157,6 +157,7 @@ impl Dashboard {
                 self.context_tree.cursor = idx;
                 self.toggle_context_row();
             }
+            ClickTarget::NewRunStart => self.submit_new_run(),
         }
         true
     }
@@ -444,8 +445,45 @@ mod tests {
         );
     }
 
+    /// The new-run screen's Start button starts the run with a click, the
+    /// way Enter on it does: the whole point of the button is a terminal
+    /// where Ctrl+Enter cannot be told from Enter.
+    #[test]
+    fn clicking_the_start_button_starts_the_run() {
+        let mut dash = make_test_dashboard();
+        dash.new_run_screen = true;
+        dash.new_run_agents = vec![crate::commands::dashboard::types::NewRunAgent {
+            name: "alpha".to_string(),
+            source: "installed".to_string(),
+            description: "first".to_string(),
+            path: "/agents/alpha".to_string(),
+        }];
+        dash.new_run_task.area_mut().insert_str("ship it");
+        draw(&mut dash, 120, 40);
+
+        let button = dash
+            .click_targets
+            .iter()
+            .find(|(_, t)| *t == ClickTarget::NewRunStart)
+            .map(|(r, _)| *r)
+            .expect("the Start button is on screen");
+        press_and_release(&mut dash, button.x + 2, button.y);
+
+        assert!(
+            !dash.new_run_screen,
+            "the run was dispatched and the form closed"
+        );
+        let cmd = dash
+            .spawn_cmd_rx_for_test()
+            .try_recv()
+            .expect("a spawn was dispatched");
+        assert_eq!(cmd.task, "ship it");
+        assert_eq!(cmd.agent_path, "/agents/alpha");
+    }
+
     /// A click resolves to the innermost target: the toggle registered over
     /// part of a row wins against the row it sits in.
+
     #[test]
     fn the_last_registered_target_over_a_cell_wins() {
         let mut dash = make_test_dashboard();

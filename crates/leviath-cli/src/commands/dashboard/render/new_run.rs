@@ -11,7 +11,7 @@ use ratatui::widgets::{
 
 use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
-use crate::commands::dashboard::types::NewRunPane;
+use crate::commands::dashboard::types::{ClickTarget, NewRunPane};
 use crate::tui::widgets::markdown_edit::{MODE_CHORD, MdAction, MdEditView, chord_label};
 
 impl Dashboard {
@@ -135,6 +135,12 @@ impl Dashboard {
     }
 
     fn draw_new_run_task(&mut self, frame: &mut Frame, area: Rect) {
+        // The editor keeps every row but the last, which is the Start button's.
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area);
+        let (area, button_row) = (rows[0], rows[1]);
         let focused = self.new_run_focus == NewRunPane::Task;
         let agent = self
             .new_run_selected_agent()
@@ -164,6 +170,30 @@ impl Dashboard {
             focused,
         );
         self.new_run_task.render(frame, area, &view);
+        self.draw_new_run_start_button(frame, button_row);
+    }
+
+    /// The Start button, right-aligned under the editor. Lit like a focused
+    /// pane's border when Tab has reached it; a click on it starts the run
+    /// whether or not it has focus.
+    fn draw_new_run_start_button(&mut self, frame: &mut Frame, row: Rect) {
+        let focused = self.new_run_focus == NewRunPane::Start;
+        let style = match focused {
+            true => Style::default()
+                .fg(Color::Black)
+                .bg(C_BORDER_FOCUS)
+                .add_modifier(Modifier::BOLD),
+            false => Style::default().fg(C_BORDER).add_modifier(Modifier::BOLD),
+        };
+        let width = (START_BUTTON.chars().count() as u16).min(row.width);
+        let rect = Rect {
+            x: row.x + row.width - width,
+            y: row.y,
+            width,
+            height: row.height.min(1),
+        };
+        frame.render_widget(Paragraph::new(Span::styled(START_BUTTON, style)), rect);
+        self.register_click(rect, ClickTarget::NewRunStart);
     }
 
     /// The `@` completion, drawn as a floating menu inside the task pane.
@@ -224,9 +254,13 @@ impl Dashboard {
             // and only there: on the picker it would be a key that does
             // nothing.
             (false, NewRunPane::Task) => format!(
-                " Enter start · Alt+↵ newline · @ file · {} bold · {MODE_CHORD} preview · ^Y unattended · F1 help · Esc back ",
+                " ^Enter start · Enter newline · Tab Start button · @ file · {} bold · {MODE_CHORD} preview · ^Y unattended · F1 help · Esc back ",
                 chord_label(MdAction::Bold)
             ),
+            (false, NewRunPane::Start) => {
+                " Enter/Space start the run · Shift+Tab task · Tab agents · ^Y unattended · F1 help · Esc back "
+                    .to_string()
+            }
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(C_DIM)))),
@@ -234,6 +268,9 @@ impl Dashboard {
         );
     }
 }
+
+/// The Start button's face. Fixed text, so the click rect is the drawn text.
+const START_BUTTON: &str = "[ Start run ]";
 
 /// Border colour for a pane, by whether it holds the keys.
 fn focus_style(focused: bool) -> Style {
@@ -355,8 +392,42 @@ mod tests {
         let mut dash = screen();
         dash.new_run_focus = NewRunPane::Task;
         let out = rendered(&mut dash);
-        assert!(out.contains("Enter start"), "{out}");
+        assert!(out.contains("^Enter start"), "{out}");
+        assert!(out.contains("Enter newline"), "{out}");
         assert!(out.contains("@ file"), "{out}");
+    }
+
+    /// The button is on screen whichever part of the form has the keys, and
+    /// lights up only when Tab has reached it; the help bar then names the
+    /// two keys that press it.
+    #[test]
+    fn the_start_button_sits_under_the_task_and_lights_when_focused() {
+        use crate::commands::dashboard::test_support::style_at_text;
+        let mut dash = screen();
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        let quiet = style_at_text(&terminal, START_BUTTON);
+        assert_eq!(quiet.fg, Some(C_BORDER), "unfocused: {quiet:?}");
+        let out = rendered(&mut dash);
+        assert!(out.contains(START_BUTTON), "{out}");
+        assert!(!out.contains("Enter/Space start"), "{out}");
+
+        dash.new_run_focus = NewRunPane::Start;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        let lit = style_at_text(&terminal, START_BUTTON);
+        assert_eq!(lit.bg, Some(C_BORDER_FOCUS), "focused: {lit:?}");
+        let out = rendered(&mut dash);
+        assert!(out.contains("Enter/Space start"), "help bar: {out}");
+        let button = dash
+            .click_targets
+            .iter()
+            .find(|(_, t)| *t == ClickTarget::NewRunStart)
+            .map(|(r, _)| *r)
+            .expect("the button registered its rect");
+        assert_eq!(button.width as usize, START_BUTTON.chars().count());
+        assert_eq!(button.x + button.width, 120, "right-aligned to the pane");
     }
 
     #[test]

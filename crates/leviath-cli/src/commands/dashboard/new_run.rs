@@ -2,7 +2,8 @@
 //! spawn lane.
 //!
 //! `lev dash` could only ever watch runs somebody else had started. This is the
-//! other half: pick an agent, write the task, press Enter. The screen is modal
+//! other half: pick an agent, write the task, press Ctrl+Enter (or the Start
+//! button, on a terminal that cannot tell Ctrl+Enter from Enter). The screen is modal
 //! like the MCP one, and for the same reason - it owns the keys while open, so
 //! typing a task can never also mean "kill the selected run".
 //!
@@ -346,6 +347,7 @@ impl Dashboard {
         match self.new_run_focus {
             NewRunPane::Agents => self.handle_new_run_agents_key(key.code),
             NewRunPane::Task => self.handle_new_run_task_key(key),
+            NewRunPane::Start => self.handle_new_run_start_key(key.code),
         }
     }
 
@@ -364,9 +366,8 @@ impl Dashboard {
                     self.new_run_selected = 0;
                 }
             },
-            KeyCode::Tab | KeyCode::BackTab | KeyCode::Enter => {
-                self.new_run_focus = NewRunPane::Task;
-            }
+            KeyCode::Tab | KeyCode::Enter => self.new_run_focus = NewRunPane::Task,
+            KeyCode::BackTab => self.new_run_focus = NewRunPane::Start,
             KeyCode::Up => {
                 self.new_run_selected = self.new_run_selected.saturating_sub(1);
             }
@@ -387,14 +388,23 @@ impl Dashboard {
         }
     }
 
-    /// Task editor keys. Enter starts the run and Alt+Enter breaks the line,
-    /// matching the response pane so the two editors do not disagree.
+    /// Task editor keys. Enter breaks the line, the way it does in any other
+    /// text box, and Ctrl+Enter starts the run.
+    ///
+    /// Ctrl+Enter reaches the program only under the kitty keyboard protocol;
+    /// a terminal without it sends Ctrl+Enter as a plain Enter, which is a
+    /// newline here. That is what the Start button under the editor is for.
+    /// The response pane's editor keeps Enter as send: a reply is one line
+    /// far more often than a task is.
     fn handle_new_run_task_key(&mut self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
         match key.code {
             KeyCode::Esc => self.new_run_focus = NewRunPane::Agents,
-            KeyCode::Tab | KeyCode::BackTab => self.new_run_focus = NewRunPane::Agents,
-            KeyCode::Enter if key.modifiers.is_empty() => self.submit_new_run(),
+            KeyCode::Tab => self.new_run_focus = NewRunPane::Start,
+            KeyCode::BackTab => self.new_run_focus = NewRunPane::Agents,
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.submit_new_run();
+            }
             KeyCode::Char('@') => {
                 self.new_run_task.area_mut().insert_char('@');
                 self.new_run_file_ref = true;
@@ -403,6 +413,17 @@ impl Dashboard {
                 let outcome = self.new_run_task.handle_key(&key);
                 self.remember_md_mode(outcome);
             }
+        }
+    }
+
+    /// Keys while the Start button holds focus: Enter or Space presses it.
+    fn handle_new_run_start_key(&mut self, code: crossterm::event::KeyCode) {
+        use crossterm::event::KeyCode;
+        match code {
+            KeyCode::Enter | KeyCode::Char(' ') => self.submit_new_run(),
+            KeyCode::Tab | KeyCode::Esc => self.new_run_focus = NewRunPane::Agents,
+            KeyCode::BackTab => self.new_run_focus = NewRunPane::Task,
+            _ => {}
         }
     }
 
@@ -928,13 +949,41 @@ mod tests {
     }
 
     #[test]
-    fn tab_enter_and_backtab_all_reach_the_task_editor() {
+    fn tab_and_enter_reach_the_task_editor() {
         let dir = tempfile::tempdir().unwrap();
         let mut dash = dash_at(dir.path());
-        for code in [KeyCode::Tab, KeyCode::Enter, KeyCode::BackTab] {
+        for code in [KeyCode::Tab, KeyCode::Enter] {
             dash.open_new_run_screen();
             dash.handle_new_run_key(key(code));
             assert_eq!(dash.new_run_focus, NewRunPane::Task, "{code:?}");
+        }
+    }
+
+    /// Tab walks agents, task, Start and round again; Shift+Tab walks the
+    /// same ring the other way.
+    #[test]
+    fn tab_cycles_agents_task_start_and_backtab_reverses() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+        assert_eq!(dash.new_run_focus, NewRunPane::Agents);
+        for expected in [
+            NewRunPane::Task,
+            NewRunPane::Start,
+            NewRunPane::Agents,
+            NewRunPane::Task,
+        ] {
+            dash.handle_new_run_key(key(KeyCode::Tab));
+            assert_eq!(dash.new_run_focus, expected);
+        }
+        for expected in [
+            NewRunPane::Agents,
+            NewRunPane::Start,
+            NewRunPane::Task,
+            NewRunPane::Agents,
+        ] {
+            dash.handle_new_run_key(key(KeyCode::BackTab));
+            assert_eq!(dash.new_run_focus, expected);
         }
     }
 
@@ -950,33 +999,98 @@ mod tests {
 
     // ─── keys: task editor ────────────────────────────────────────────────
 
+    /// Enter and Alt+Enter both break the line: with an agent picked and text
+    /// in the box, a plain Enter still leaves the screen open with nothing
+    /// dispatched.
     #[test]
-    fn the_task_editor_takes_text_and_alt_enter_breaks_the_line() {
+    fn the_task_editor_takes_text_and_enter_breaks_the_line() {
         let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents/alpha"), "alpha", "first");
         let mut dash = dash_at(dir.path());
         dash.open_new_run_screen();
+        dash.new_run_filter = "alpha".to_string();
         dash.new_run_focus = NewRunPane::Task;
 
         dash.handle_new_run_key(key(KeyCode::Char('h')));
         dash.handle_new_run_key(key(KeyCode::Char('i')));
-        dash.handle_new_run_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        dash.handle_new_run_key(key(KeyCode::Enter));
         dash.handle_new_run_key(key(KeyCode::Char('!')));
+        dash.handle_new_run_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        dash.handle_new_run_key(key(KeyCode::Char('?')));
         assert_eq!(
             dash.new_run_task.lines(),
-            vec!["hi".to_string(), "!".to_string()]
+            vec!["hi".to_string(), "!".to_string(), "?".to_string()]
         );
+        assert!(dash.new_run_screen, "Enter did not start the run");
+        assert!(dash.spawn_cmd_rx_for_test().try_recv().is_err());
     }
 
     #[test]
-    fn escape_and_tab_hand_focus_back_to_the_picker() {
+    fn escape_and_backtab_hand_focus_back_to_the_picker_and_tab_reaches_start() {
         let dir = tempfile::tempdir().unwrap();
         let mut dash = dash_at(dir.path());
-        for code in [KeyCode::Esc, KeyCode::Tab, KeyCode::BackTab] {
+        for code in [KeyCode::Esc, KeyCode::BackTab] {
             dash.open_new_run_screen();
             dash.new_run_focus = NewRunPane::Task;
             dash.handle_new_run_key(key(code));
             assert_eq!(dash.new_run_focus, NewRunPane::Agents, "{code:?}");
         }
+        dash.new_run_focus = NewRunPane::Task;
+        dash.handle_new_run_key(key(KeyCode::Tab));
+        assert_eq!(dash.new_run_focus, NewRunPane::Start);
+    }
+
+    // ─── keys: Start button ───────────────────────────────────────────────
+
+    /// A screen with an agent picked and a task written, focus on the button.
+    fn dash_on_the_start_button(dir: &Path) -> Dashboard {
+        write_agent(&dir.join("agents/alpha"), "alpha", "first");
+        let mut dash = dash_at(dir);
+        dash.open_new_run_screen();
+        dash.new_run_filter = "alpha".to_string();
+        dash.new_run_task.area_mut().insert_str("ship it");
+        dash.new_run_focus = NewRunPane::Start;
+        dash
+    }
+
+    #[test]
+    fn enter_and_space_on_the_start_button_start_the_run() {
+        for code in [KeyCode::Enter, KeyCode::Char(' ')] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut dash = dash_on_the_start_button(dir.path());
+            dash.handle_new_run_key(key(code));
+            assert!(!dash.new_run_screen, "{code:?} pressed the button");
+            let cmd = dash
+                .spawn_cmd_rx_for_test()
+                .try_recv()
+                .expect("a spawn was dispatched");
+            assert_eq!(cmd.task, "ship it");
+        }
+    }
+
+    #[test]
+    fn other_keys_on_the_start_button_move_focus_or_do_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = dash_on_the_start_button(dir.path());
+        for (code, expected) in [
+            (KeyCode::Esc, NewRunPane::Agents),
+            (KeyCode::Tab, NewRunPane::Agents),
+            (KeyCode::BackTab, NewRunPane::Task),
+        ] {
+            dash.new_run_focus = NewRunPane::Start;
+            dash.handle_new_run_key(key(code));
+            assert_eq!(dash.new_run_focus, expected, "{code:?}");
+        }
+        dash.new_run_focus = NewRunPane::Start;
+        dash.handle_new_run_key(key(KeyCode::Char('x')));
+        assert_eq!(dash.new_run_focus, NewRunPane::Start, "a letter is ignored");
+        assert_eq!(
+            dash.new_run_task.text(),
+            "ship it",
+            "and not typed anywhere"
+        );
+        assert!(dash.new_run_screen);
+        assert!(dash.spawn_cmd_rx_for_test().try_recv().is_err());
     }
 
     // ─── keys: `@` completion ─────────────────────────────────────────────
@@ -1178,7 +1292,7 @@ mod tests {
         dash.new_run_focus = NewRunPane::Task;
         dash.new_run_task.area_mut().insert_str("  ship it  ");
 
-        dash.handle_new_run_key(key(KeyCode::Enter));
+        dash.handle_new_run_key(ctrl(KeyCode::Enter));
 
         assert!(!dash.new_run_screen, "the screen closes on dispatch");
         let cmd = dash
@@ -1199,8 +1313,9 @@ mod tests {
         dash.new_run_focus = NewRunPane::Task;
         dash.new_run_task.area_mut().insert_str("   ");
 
-        dash.handle_new_run_key(key(KeyCode::Enter));
+        dash.handle_new_run_key(ctrl(KeyCode::Enter));
         assert!(dash.new_run_screen, "the screen stays open to fix it");
+
         assert!(dash.spawn_cmd_rx_for_test().try_recv().is_err());
         let toasts = dash.toast_messages_for_test();
         assert!(toasts.iter().any(|m| m.contains("task")), "got: {toasts:?}");

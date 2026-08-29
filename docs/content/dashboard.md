@@ -146,13 +146,15 @@ rather than back into the form.
 |---|---|
 | `↑` / `↓` | Choose an agent. Any letter filters the list; `Backspace` shortens the filter |
 | `Tab` / `Enter` | Move from the agent list to the task |
-| `Enter` (in the task) | Start the run |
-| `Alt+Enter` | Newline, rather than starting the run |
+| `Ctrl+Enter` (in the task) | Start the run. Only a terminal with the kitty keyboard protocol (kitty, WezTerm, Ghostty, foot, recent Alacritty) can tell Ctrl+Enter from Enter; elsewhere it inserts a newline, and the Start button is the way to submit |
+| `Enter` / `Alt+Enter` | Newline |
+| `Tab` (in the task) | Move to the Start button under the editor. `Enter` or `Space` there starts the run, as does a click on it; `Tab` again returns to the agent list, `Shift+Tab` to the task |
 | `@` | Reference a file from the working directory: `↑` / `↓` choose a path, `Enter` or `Tab` inserts it, `Backspace` over the `@` ends the reference, `Esc` dismisses the list and keeps what you typed |
 | `Ctrl-Y` | Run unattended, so the agent approves its own tool calls |
 | `F1` | Help. `?` types a question mark here |
 | `Esc` (in the agent list) | Clear the filter, then close the screen |
-| `Esc` or `Tab` (in the task) | Back to the agent list |
+| `Esc` or `Shift+Tab` (in the task) | Back to the agent list |
+
 
 The task box wraps: a task longer than the pane is wide folds onto the next
 row rather than scrolling sideways, so the beginning of what you wrote is
