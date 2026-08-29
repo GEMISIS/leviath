@@ -11,6 +11,84 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+### Breaking
+
+- `lev add` refuses an agent whose manifest name is not a single safe path
+  component, a manifest that is not valid TOML, and a directory containing a
+  symlink. The name was read off the first `name` line and joined onto the
+  agents directory unchecked, so `name = "../../pwned"` installed two levels up
+  and removed whatever was there first (#664).
+- Without `--allow-admin`, `lev serve` no longer mounts `POST
+  /api/mcp/servers/{name}/login` and `/test` (they open a browser and spawn a
+  server's command on the serving host), and `GET /api/doctor` runs only the
+  offline checks and bills nothing. The billed doctor is `POST /api/doctor/live`,
+  admin only and single-flight (409 while one runs). `lev doctor --offline`
+  stops at the same point on the CLI (#667).
+- A shell line whose redirect cannot be read ahead of time (a heredoc, a
+  backtick, an unterminated quote, an unbalanced `$(`) is refused when it
+  contains `>`, even when the target would have landed inside the workdir.
+  Under `--yolo` such a line used to write anywhere (#668).
+- Tool seeds and Rhai tool scripts answer to the same fences as the tool lane:
+  workdir confinement, the write policy, and the run's write budget, which is
+  now one budget shared from the first seed onward. A seed that would escape
+  fails a required region and is skipped, with a warning, in an optional one.
+  Seed files and Rhai seed results are capped at 900 KB like any script I/O
+  (#669).
+- A write refused by policy or declined at the prompt no longer spends the
+  run's write budget (#666).
+- Every save of `config.toml`, `mcp-auth.json`, an agent manifest, the
+  dashboard's UI state and layouts, and the editor is atomic (staged beside the
+  target, then renamed), so a crash mid-save cannot leave the file empty. The
+  inode changes on each save: an open handle keeps the old bytes and a hard link
+  stops following. Prompts handed to `$EDITOR` go to an owner-only, randomly
+  named scratch directory instead of a predictable path in the shared temp dir
+  (#671).
+- For embedders of the library crates: `leviath-scripting` drops
+  `SandboxConfig`, the `sandbox` module, `ScriptEngine::validate` and
+  `Error::{RhaiError, CoreError}`; `parse_annotations`, `parse_tool_toml`,
+  `SCRIPT_TOOL_MAX_OPERATIONS` and `HOOK_NAMES` are crate-private.
+  `leviath-net::client_builder`, fourteen injected seams in `leviath-sys` and
+  `leviath-agent-client::JsonRpcMessage::is_notification` are no longer public
+  (#675).
+
+### Fixed
+
+- Sums that a hostile number could overflow (pricing, stream byte counts, the
+  rate limiter's window, region and layout sizes) saturate instead of aborting
+  the daemon (#649).
+- `Debug` output never prints a secret: `SpawnArgs` redacts its callback
+  secret and the Rhai host's request redacts header values (#650).
+- Residual panics on malformed input in restore, spawn, the installer and the
+  providers are errors; the dump directory is created private; the control
+  client caps a reply line; an MCP notification has a deadline; the OAuth
+  client is reused (#651, #652).
+- The parked log buffer taken over by the TUI is bounded and reports how many
+  lines it dropped (#652).
+- A dependency bump to rhai 1.26 broke streaming Rhai providers, because
+  `FnPtr::new` no longer accepts a name starting with an underscore. The chunk
+  sink is `leviath_emit_chunk`; scripts are unaffected, they call
+  `on_chunk.call(...)` (#677).
+
+### Changed
+
+- `lev dash` stats only what can change on each poll tick and keeps parsed run
+  records instead of re-reading them: 34% less CPU with 750 runs, 42% while
+  scrolling (#673).
+- The release binary is 1.7 MB smaller: the tiktoken vocabularies no
+  supported model uses are no longer linked (#672).
+- `[rate_limits] tokens_per_minute` is documented as parsed but not enforced
+  (#651). Wiring it up is planned.
+- Every CodeQL finding is resolved in code (17 alerts, none dismissed) and the
+  scan is a required check. `CONTRIBUTING.md` has the recipe for running the
+  same queries locally (#679).
+- Internal: one path-confinement function, one streaming parser behind the
+  three providers, table-driven model capabilities, typed manifest readers,
+  named run-directory files, and the largest runtime files split. No behaviour
+  change; the refactors carry 100% coverage on Linux, macOS and Windows
+  (#653-#663, #674).
+
 ## 0.5.5 - 2026-08-27
 
 - Fixed: a stage whose model can answer at nearly the width of its own context
