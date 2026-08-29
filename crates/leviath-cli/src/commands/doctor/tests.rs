@@ -351,12 +351,24 @@ fn search_check_reports_a_key_nobody_has_as_unconfigured() {
 
 // ─── config_check ─────────────────────────────────────────────────────────────
 
+/// `config_check` reads the unread keys off `Config::config_path()`, so a
+/// test that calls it bare sees whatever this machine's real config says (a
+/// stale key there turned two of these red). Each call runs under its own
+/// isolated config path instead.
+fn checked(tag: &str, config: &Config, registry: &ProviderRegistry) -> Check {
+    crate::config::with_isolated_config_path(tag, |_| config_check(config, registry))
+}
+
 #[test]
 fn config_check_lists_registered_providers_sorted() {
     let config = Config::default();
     let mut registry = registry_with("openrouter", StubProvider::replying("hi"));
     registry.register("anthropic".to_string(), StubProvider::replying("hi"));
-    let check = config_check(&config, &registry);
+    let check = checked(
+        "doctor-config_check_lists_registered_providers_sorted",
+        &config,
+        &registry,
+    );
     assert_eq!(check.status, CheckStatus::Ok);
     assert!(
         check.detail.contains("registered: anthropic, openrouter"),
@@ -367,7 +379,11 @@ fn config_check_lists_registered_providers_sorted() {
 
 #[test]
 fn config_check_says_none_when_nothing_is_registered() {
-    let check = config_check(&Config::default(), &ProviderRegistry::new());
+    let check = checked(
+        "doctor-config_check_says_none_when_nothing_is_registered",
+        &Config::default(),
+        &ProviderRegistry::new(),
+    );
     assert!(
         check.detail.contains("registered: none"),
         "{}",
@@ -392,7 +408,11 @@ fn config_check_names_a_rate_limit_for_a_provider_that_does_not_exist() {
     // note would just be reporting every rate limit anyone set.
     config.rate_limits.insert("anthropic".to_string(), limit);
 
-    let check = config_check(&config, &ProviderRegistry::new());
+    let check = checked(
+        "doctor-config_check_names_a_rate_limit_for_a_provider_that_does_not_exist",
+        &config,
+        &ProviderRegistry::new(),
+    );
     assert_eq!(check.status, CheckStatus::Ok, "not broken wiring");
     assert!(
         check.detail.contains("rate_limits.anthropc"),
@@ -420,7 +440,11 @@ fn config_check_counts_more_than_one_unread_key() {
             },
         );
     }
-    let check = config_check(&config, &ProviderRegistry::new());
+    let check = checked(
+        "doctor-config_check_counts_more_than_one_unread_key",
+        &config,
+        &ProviderRegistry::new(),
+    );
     assert!(
         check
             .detail
@@ -440,7 +464,11 @@ fn config_check_is_quiet_when_every_rate_limit_names_a_real_provider() {
             tokens_per_minute: 1000,
         },
     );
-    let check = config_check(&config, &ProviderRegistry::new());
+    let check = checked(
+        "doctor-config_check_is_quiet_when_every_rate_limit_names_a_real_provider",
+        &config,
+        &ProviderRegistry::new(),
+    );
     assert!(
         !check.detail.contains("read by nothing"),
         "got: {}",
