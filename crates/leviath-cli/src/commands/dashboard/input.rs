@@ -143,7 +143,7 @@ impl Dashboard {
                 // six-hour run through three approval prompts nobody saw.
                 if matches!(action, ConfirmAction::EnableYolo) {
                     self.toast(
-                        "Unattended stays off: runs will ask you (Ctrl-Y to try again)",
+                        "Unattended stays OFF: runs will ask you (Ctrl-Y to try again)",
                         ToastLevel::Info,
                     );
                 }

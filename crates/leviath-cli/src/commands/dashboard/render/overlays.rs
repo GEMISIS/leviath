@@ -38,7 +38,7 @@ impl Dashboard {
             };
             let icon = match toast.level {
                 super::super::types::ToastLevel::Info => "✓",
-                super::super::types::ToastLevel::Warning => "⏸",
+                super::super::types::ToastLevel::Warning => "!",
                 super::super::types::ToastLevel::Error => "✗",
             };
             let msg = truncate(&toast.message, (toast_w - 4) as usize);
