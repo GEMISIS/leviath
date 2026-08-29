@@ -3,7 +3,10 @@
 //! OpenRouter provides access to multiple models through a unified API.
 //! Uses OpenAI-compatible format with additional headers.
 
+mod catalog;
+
 use crate::capabilities::{Match, Row};
+use crate::learned::LearnedModels;
 use crate::openai_compat::{
     openai_sse_stream, parse_openai_response, send_chat_request, temperature_refused,
 };
@@ -13,6 +16,7 @@ use crate::provider::{
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
+use catalog::parse_entry;
 use futures_core::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -45,78 +49,41 @@ pub struct OpenRouterProvider {
     /// this build's table already names only a few dozen of hundreds.
     temperature_unsupported: crate::provider::ModelMemo,
 
-    /// What OpenRouter's own `/models` endpoint says each model's window is,
-    /// filled once by [`Provider::prime_capabilities`].
+    /// What OpenRouter's own `/models` endpoint says about each model, filled
+    /// once by [`Provider::prime_capabilities`].
     ///
     /// OpenRouter fronts hundreds of models and this build's table names a few
     /// dozen, so the table is out of date the day it ships and an unlisted
     /// model silently got a conservative 128 000 tokens. Region budgets are
     /// percentages of the window, so that sized a `budget = "30%"` region on a
-    /// 1M-token model at 38 400 instead of 314 572 (#337, #360).
+    /// 1M-token model at 38 400 instead of 314 572 (#337, #360). The same
+    /// listing says whether a model takes a temperature or tools, what it
+    /// charges, and whether its upstream bills a cache write (#568); all of it
+    /// is kept now, and [`Self::capabilities`] answers from it.
     ///
     /// Empty until primed, and empty forever if the endpoint could not be
     /// reached - both mean "fall back to the built-in table", which is what
     /// happened before this existed.
-    api_windows: std::sync::Arc<std::sync::Mutex<HashMap<String, ApiWindow>>>,
-
-    /// Per-model rates as `/models` reports them, filled by the same priming
-    /// pass that fills [`Self::api_windows`].
-    ///
-    /// A fallback only. `usage.cost` on the response is what the account is
-    /// actually charged and always wins; this covers a reply that arrives
-    /// without it. Empty until primed, and empty forever if the endpoint could
-    /// not be reached - which reports the call unpriced rather than guessing.
-    api_pricing: std::sync::Arc<std::sync::Mutex<HashMap<String, crate::ModelPricing>>>,
-}
-
-/// One model's rates from a `/models` entry, or `None` when it does not quote
-/// both sides.
-///
-/// The endpoint reports USD **per token** as strings; `ModelPricing` is per
-/// million, hence the scale. A model missing either half is skipped rather than
-/// half-priced: a total built from a prompt rate and no completion rate is
-/// wrong in a way that looks right.
-///
-/// Cache rates are quoted separately and often absent. When they are, the read
-/// rate falls back to the input rate and the write rate with it - the same
-/// shape as a provider that does not price caching separately, which is what
-/// `ModelPricing::flat` encodes.
-fn parse_pricing(entry: &serde_json::Value) -> Option<crate::ModelPricing> {
-    let p = entry.get("pricing")?;
-    let rate = |key: &str| -> Option<f64> {
-        p.get(key)
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<f64>().ok())
-            .map(|per_token| per_token * 1_000_000.0)
-    };
-    let input = rate("prompt")?;
-    let output = rate("completion")?;
-    Some(crate::ModelPricing {
-        input_per_mtok: input,
-        cached_input_per_mtok: rate("input_cache_read").unwrap_or(input),
-        cache_write_per_mtok: rate("input_cache_write").unwrap_or(input),
-        output_per_mtok: output,
-    })
-}
-
-/// What `/models` reports about one model's sizes.
-#[derive(Debug, Clone, Copy)]
-struct ApiWindow {
-    /// The context window OpenRouter will actually accept for this model.
-    context_length: usize,
-    /// The largest completion it will return, when the endpoint says.
-    max_completion_tokens: Option<usize>,
-}
-
-/// Whether OpenRouter forwards `cache_control` markers to this model's
-/// upstream. Anthropic and Google both read them; every other upstream
-/// OpenRouter routes to caches automatically by prefix, or not at all, and
-/// is sent plain text so an unknown field cannot be refused.
-fn explicit_cache_control(model: &str) -> bool {
-    model.contains("claude") || model.contains("gemini")
+    learned: LearnedModels,
 }
 
 impl OpenRouterProvider {
+    /// Whether to send this model explicit `cache_control` markers.
+    ///
+    /// The listing's cache-write price decides once priming has read it: an
+    /// upstream that bills a write expects a marker, and one that quotes only
+    /// a read price caches by prefix on its own and may charge extra for the
+    /// marker (see [`crate::learned::LearnedModel::explicit_cache_control`]).
+    /// Before priming, or for a model the listing omits, the old rule stands:
+    /// Anthropic and Google read markers and everyone else is sent plain
+    /// text so an unknown field cannot be refused.
+    fn explicit_cache_control(&self, model: &str) -> bool {
+        self.learned
+            .get(model)
+            .and_then(|m| m.explicit_cache_control)
+            .unwrap_or_else(|| model.contains("claude") || model.contains("gemini"))
+    }
+
     /// Create a new OpenRouter provider.
     pub fn new(client: reqwest::Client, api_key: String) -> Self {
         Self {
@@ -127,8 +94,7 @@ impl OpenRouterProvider {
             capability_overrides: HashMap::new(),
             warned_unknown: Default::default(),
             temperature_unsupported: Default::default(),
-            api_windows: Default::default(),
-            api_pricing: Default::default(),
+            learned: Default::default(),
         }
     }
 
@@ -147,8 +113,7 @@ impl OpenRouterProvider {
             capability_overrides: overrides,
             warned_unknown: Default::default(),
             temperature_unsupported: Default::default(),
-            api_windows: Default::default(),
-            api_pricing: Default::default(),
+            learned: Default::default(),
         }
     }
 
@@ -194,7 +159,7 @@ impl OpenRouterProvider {
     /// writes an entry that can never be read back, and that logic already
     /// exists and is tested.
     fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
-        let is_anthropic = explicit_cache_control(&request.model);
+        let is_anthropic = self.explicit_cache_control(&request.model);
         // Anthropic allows four `cache_control` markers per request across
         // system and messages together. System takes its claim first and the
         // conversation gets the rest, matching the direct provider. Gemini
@@ -484,26 +449,6 @@ impl OpenRouterProvider {
     ///
     /// Reported once per model rather than per inference, and it names the
     /// stanza that fixes it, which is now a partial entry (#338).
-    /// `base` with the sizes OpenRouter reported for this model, if it did.
-    ///
-    /// Only the two sizes. The rest of `ModelCapabilities` is about how a
-    /// request must be *shaped* - whether temperature is accepted, whether
-    /// tools work - and `/models` describes what a model is, not the quirks of
-    /// talking to it. Taking sizes from the live answer and shape from the
-    /// compiled table gives each the question it can answer.
-    fn api_corrected(&self, model: &str, base: ModelCapabilities) -> ModelCapabilities {
-        let windows = leviath_core::sync::lock(&self.api_windows);
-        let Some(api) = windows.get(model) else {
-            return base;
-        };
-        ModelCapabilities {
-            max_context_tokens: api.context_length,
-            max_output_tokens: api.max_completion_tokens.unwrap_or(base.max_output_tokens),
-            limits_source: LimitsSource::Api,
-            ..base
-        }
-    }
-
     /// GET `/models`, shared by [`Provider::list_models`] and
     /// [`Provider::prime_capabilities`] so the two cannot disagree about what
     /// the endpoint is or how its failures read.
@@ -541,7 +486,7 @@ impl OpenRouterProvider {
         // a guess apart from a model that genuinely has a 128 000-token window.
         // If the API told us about this model, we are not guessing, whatever
         // the number came out as.
-        if leviath_core::sync::lock(&self.api_windows).contains_key(model) {
+        if self.learned.contains(model) {
             return;
         }
         if !self.warned_unknown.insert(model) {
@@ -678,15 +623,23 @@ impl Provider for OpenRouterProvider {
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // Three answers, narrowest first: what the user wrote, what OpenRouter
         // says, what this build was compiled with.
-        let base = self.api_corrected(model, builtin_capabilities(model));
+        let base = self.learned.corrected(model, builtin_capabilities(model));
         // Merged, not swapped: an entry names only what it corrects.
-        match self.capability_overrides.get(model) {
+        let mut caps = match self.capability_overrides.get(model) {
             Some(o) => o.apply_to(base),
             None => {
                 self.warn_if_unknown(model, &base);
                 base
             }
+        };
+        // A refusal the gateway has already sent outranks every other source,
+        // the operator's entry included: the request was made and the answer
+        // was no, and the runtime reads this flag to decide whether to resolve
+        // a temperature at all.
+        if self.temperature_is_unsupported(model) {
+            caps.supports_temperature = false;
         }
+        caps
     }
 
     fn serves_model(&self, model_key: &str) -> Option<String> {
@@ -695,10 +648,7 @@ impl Provider for OpenRouterProvider {
         // so the table would deny models the gateway serves perfectly well.
         // Matching on the last path segment because the gateway prefixes a
         // vendor namespace (`openai/gpt-5.5`) that the blueprint does not name.
-        let primed = leviath_core::sync::lock(&self.api_windows)
-            .keys()
-            .find(|id| id.rsplit('/').next().unwrap_or(id) == model_key)
-            .cloned();
+        let primed = self.learned.find_by_key(model_key);
         // An empty catalogue means priming failed or has not run, and answering
         // "no" to everything there would deny models this gateway plainly
         // carries. The compiled-in table is the fallback, read directly rather
@@ -721,16 +671,20 @@ impl Provider for OpenRouterProvider {
     /// opposite of true. An empty catalogue is "not asked yet", not "serves
     /// nothing".
     fn served_catalog(&self) -> Option<Vec<String>> {
-        let windows = leviath_core::sync::lock(&self.api_windows);
-        (!windows.is_empty()).then(|| windows.keys().cloned().collect())
+        self.learned.catalog()
     }
 
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
-        leviath_core::sync::lock(&self.api_pricing)
-            .get(model)
-            .copied()
+        self.learned.get(model).and_then(|m| m.pricing)
     }
 
+    /// Read the gateway's listing into `Self::learned`.
+    ///
+    /// What `GET /models` fills, measured against the live endpoint: both
+    /// limits (`context_length`, `top_provider.max_completion_tokens`), the
+    /// temperature and tools flags (`supported_parameters`), the cache-write
+    /// signal and rates (`pricing`), the display name and release date. It
+    /// carries no retirement date. See `catalog::parse_entry`.
     async fn prime_capabilities(&self) -> Result<()> {
         let body = self.fetch_models_json().await?;
         let data = body
@@ -738,97 +692,30 @@ impl Provider for OpenRouterProvider {
             .and_then(|d| d.as_array())
             .ok_or_else(|| ProviderError::InvalidResponse("Missing 'data' array".to_string()))?;
 
-        let mut windows = HashMap::with_capacity(data.len());
-        let mut pricing = HashMap::with_capacity(data.len());
-        for entry in data {
-            let Some(id) = entry.get("id").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            if let Some(rates) = parse_pricing(entry) {
-                pricing.insert(id.to_string(), rates);
-            }
-            // No `context_length` means the endpoint is telling us nothing
-            // useful; skipping leaves the built-in table in charge rather than
-            // recording a guess that outranks it.
-            let Some(context_length) = entry.get("context_length").and_then(|v| v.as_u64()) else {
-                continue;
-            };
-            windows.insert(
-                id.to_string(),
-                ApiWindow {
-                    context_length: context_length as usize,
-                    max_completion_tokens: entry
-                        .get("top_provider")
-                        .and_then(|tp| tp.get("max_completion_tokens"))
-                        .and_then(|v| v.as_u64())
-                        .map(|v| v as usize),
-                },
-            );
-        }
-
-        let count = windows.len();
-        let priced = pricing.len();
-        *leviath_core::sync::lock(&self.api_windows) = windows;
-        *leviath_core::sync::lock(&self.api_pricing) = pricing;
+        let learned: HashMap<_, _> = data.iter().filter_map(parse_entry).collect();
+        let count = learned.len();
+        let priced = learned.values().filter(|m| m.pricing.is_some()).count();
+        self.learned.replace(learned);
         tracing::debug!(
             models = count,
             priced,
-            "learned OpenRouter model windows and rates"
+            "learned OpenRouter model capabilities and rates"
         );
         Ok(())
     }
 
+    /// The listing, answered from `Self::learned` so it cannot disagree
+    /// with what an inference is told about the same model.
+    ///
+    /// Primes first when nothing has been learned yet, which is the one fetch
+    /// this makes; a caller that already primed pays nothing.
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        let body = self.fetch_models_json().await?;
-
-        let data = body
-            .get("data")
-            .and_then(|d| d.as_array())
-            .ok_or_else(|| ProviderError::InvalidResponse("Missing 'data' array".to_string()))?;
-
-        let mut models = Vec::with_capacity(data.len());
-        for entry in data {
-            let id = entry
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let name = entry
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let context_length = entry
-                .get("context_length")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(128_000) as usize;
-            let max_completion_tokens = entry
-                .get("top_provider")
-                .and_then(|tp| tp.get("max_completion_tokens"))
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize);
-
-            let base_caps = self.capabilities(&id);
-            let capabilities = ModelCapabilities {
-                // `context_length` is read from this response, so the label
-                // says so. The output fallback is left as it was: changing what
-                // a listing reports for an entry that names no
-                // `max_completion_tokens` is a behaviour change, and this is a
-                // labelling fix.
-                max_context_tokens: context_length,
-                max_output_tokens: max_completion_tokens.unwrap_or(8192),
-                limits_source: LimitsSource::Api,
-                ..base_caps
-            };
-
-            models.push(ModelInfo {
-                id,
-                display_name: name,
-                provider: "openrouter".into(),
-                capabilities,
-            });
+        if self.learned.is_empty() {
+            self.prime_capabilities().await?;
         }
-
-        Ok(models)
+        Ok(self
+            .learned
+            .to_model_infos("openrouter", |id| self.capabilities(id)))
     }
 }
 
@@ -849,7 +736,7 @@ mod tests {
                 "input_cache_write": "0.0000025"
             }
         });
-        let p = parse_pricing(&entry).expect("both sides quoted");
+        let p = catalog::parse_pricing(&entry).expect("both sides quoted");
         // Compared with a tolerance, not for equality: scaling a per-token rate
         // by a million lands a hair off the decimal it came from
         // (0.0000002 * 1e6 is 0.19999999999999998), and a cost report does not
@@ -872,7 +759,7 @@ mod tests {
             "id": "m",
             "pricing": { "prompt": "0.000003", "completion": "0.000009" }
         });
-        let p = parse_pricing(&entry).expect("both sides quoted");
+        let p = catalog::parse_pricing(&entry).expect("both sides quoted");
         assert_eq!(p.cached_input_per_mtok, 3.0);
         assert_eq!(p.cache_write_per_mtok, 3.0);
     }
@@ -887,9 +774,9 @@ mod tests {
             serde_json::json!({ "prompt": "free", "completion": "0.000009" }),
         ] {
             let entry = serde_json::json!({ "id": "m", "pricing": pricing });
-            assert!(parse_pricing(&entry).is_none(), "{pricing}");
+            assert!(catalog::parse_pricing(&entry).is_none(), "{pricing}");
         }
-        assert!(parse_pricing(&serde_json::json!({ "id": "m" })).is_none());
+        assert!(catalog::parse_pricing(&serde_json::json!({ "id": "m" })).is_none());
     }
 
     /// Until priming has run there are no rates, and a call is unpriced rather
@@ -1584,13 +1471,13 @@ mod tests {
     /// tokens on 200k-token prompts without them), so it gets them too.
     #[test]
     fn gemini_gets_explicit_cache_markers_and_grok_does_not() {
-        assert!(explicit_cache_control("google/gemini-3.1-pro-preview"));
-        assert!(explicit_cache_control("anthropic/claude-sonnet-5"));
-        assert!(!explicit_cache_control("x-ai/grok-4.6"));
         let provider = OpenRouterProvider::new(
             crate::provider::build_http_client(None).expect("a test client builds"),
             "key".to_string(),
         );
+        assert!(provider.explicit_cache_control("google/gemini-3.1-pro-preview"));
+        assert!(provider.explicit_cache_control("anthropic/claude-sonnet-5"));
+        assert!(!provider.explicit_cache_control("x-ai/grok-4.6"));
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -1911,10 +1798,10 @@ mod tests {
         assert_eq!(after.max_output_tokens, 32_768);
     }
 
-    /// Sizes come from the API; how a request must be shaped stays with the
-    /// compiled table, which is the only thing that knows it.
+    /// An entry with no `supported_parameters` says nothing about shape, so
+    /// the compiled table keeps that answer while the size still moves.
     #[tokio::test]
-    async fn priming_leaves_request_shape_alone() {
+    async fn priming_leaves_request_shape_alone_when_the_listing_is_silent() {
         let body = br#"{"data":[{"id":"openai/o3","context_length":200000}]}"#;
         let url = spawn_mock_server(200, "OK", body).await;
         let provider = provider_with_url(url);
@@ -2071,10 +1958,7 @@ mod tests {
     #[test]
     fn an_unprimed_gateway_answers_from_the_built_in_table() {
         let provider = provider_with_url("http://127.0.0.1:1".to_string());
-        assert!(
-            leviath_core::sync::lock(&provider.api_windows).is_empty(),
-            "nothing has primed this one"
-        );
+        assert!(provider.learned.is_empty(), "nothing has primed this one");
         assert_eq!(
             provider.serves_model("deepseek-v4-pro"),
             Some("deepseek-v4-pro".to_string()),
@@ -2128,13 +2012,21 @@ mod tests {
         let url = spawn_mock_server(200, "OK", body).await;
         let provider = provider_with_url(url);
         let models = provider.list_models().await.unwrap();
+        // Sorted by id, so the two cannot come back in listing order.
         assert_eq!(models.len(), 2);
-        assert_eq!(models[0].id, "openai/gpt-4o");
-        assert_eq!(models[0].display_name, Some("GPT-4o".to_string()));
-        assert_eq!(models[0].capabilities.max_output_tokens, 16384);
-        assert_eq!(models[1].id, "anthropic/claude-3");
-        assert_eq!(models[1].display_name, None);
-        assert_eq!(models[1].capabilities.max_output_tokens, 8192);
+        assert_eq!(models[1].id, "openai/gpt-4o");
+        assert_eq!(models[1].display_name, Some("GPT-4o".to_string()));
+        assert_eq!(models[1].capabilities.max_output_tokens, 16384);
+        assert!(models[1].learned);
+        assert_eq!(models[0].id, "anthropic/claude-3");
+        assert_eq!(models[0].display_name, None);
+        // No `max_completion_tokens` on the entry: the table's number, not a
+        // default dressed up as the API's.
+        assert_eq!(
+            models[0].capabilities.max_output_tokens,
+            builtin_capabilities("anthropic/claude-3").max_output_tokens
+        );
+        assert_eq!(models[0].capabilities.max_context_tokens, 200_000);
     }
 
     #[tokio::test]
@@ -2184,5 +2076,190 @@ mod tests {
             None,
         );
         assert!(unlimited.rate_limiter.is_none());
+    }
+}
+
+#[cfg(test)]
+mod learned_tests {
+    use super::*;
+    use leviath_testkit::{spawn_mock_sequence, spawn_mock_server};
+
+    fn provider_at(url: String) -> OpenRouterProvider {
+        OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        )
+        .with_base_url(Some(url))
+    }
+
+    /// The listing measured on 2026-08-28, reduced to the four shapes that
+    /// matter: a model that takes everything and bills a cache write (qwen), one
+    /// listed without `temperature` (gpt-5.5, which refuses one), one with no
+    /// `supported_parameters` at all, and one with no `context_length`.
+    const LISTING: &[u8] = br#"{"data":[
+        {"id":"qwen/qwen3.6-plus","name":"Qwen3.6 Plus","created":1775133557,"context_length":1000000,
+         "top_provider":{"max_completion_tokens":65536},
+         "pricing":{"prompt":"0.000001","completion":"0.000004","input_cache_write":"0.0000004"},
+         "supported_parameters":["temperature","tools","max_tokens"]},
+        {"id":"openai/gpt-5.5","context_length":1050000,
+         "pricing":{"prompt":"0.00001","completion":"0.00003","input_cache_read":"0.000001"},
+         "supported_parameters":["tools","max_tokens","reasoning"]},
+        {"id":"sakana/sakana-namazu","context_length":32000},
+        {"id":"x/no-size","supported_parameters":["temperature","tools"]}
+    ]}"#;
+
+    #[tokio::test]
+    async fn the_listing_decides_shape_size_price_and_markers() {
+        let url = spawn_mock_server(200, "OK", LISTING).await;
+        let provider = provider_at(url);
+        let gpt_before = provider.capabilities("openai/gpt-5.5");
+        assert!(
+            provider.explicit_cache_control("anthropic/claude-sonnet-5"),
+            "unprimed, the name rule stands"
+        );
+        assert!(!provider.explicit_cache_control("qwen/qwen3.6-plus"));
+
+        provider.prime_capabilities().await.expect("primes");
+
+        let qwen = provider.capabilities("qwen/qwen3.6-plus");
+        assert!(qwen.supports_temperature);
+        assert!(qwen.supports_tools);
+        assert_eq!(qwen.max_context_tokens, 1_000_000);
+        assert_eq!(qwen.max_output_tokens, 65_536);
+        assert_eq!(qwen.limits_source, LimitsSource::Api);
+        assert!(
+            provider.explicit_cache_control("qwen/qwen3.6-plus"),
+            "a cache-write price is the marker signal"
+        );
+        assert!(
+            !provider.explicit_cache_control("openai/gpt-5.5"),
+            "a read-only price means the upstream caches on its own"
+        );
+        let rates = provider.pricing("qwen/qwen3.6-plus").expect("quoted");
+        assert!((rates.input_per_mtok - 1.0).abs() < 1e-9);
+
+        let gpt = provider.capabilities("openai/gpt-5.5");
+        assert!(!gpt.supports_temperature, "listed without `temperature`");
+        assert!(gpt.supports_tools);
+        assert_eq!(
+            gpt.max_output_tokens, gpt_before.max_output_tokens,
+            "no `max_completion_tokens` on the entry: the table's number"
+        );
+        assert_eq!(gpt.max_context_tokens, 1_050_000);
+
+        let namazu = provider.capabilities("sakana/sakana-namazu");
+        assert!(
+            namazu.supports_temperature && namazu.supports_tools,
+            "no `supported_parameters`: the table (here, the fallback) answers"
+        );
+        assert_eq!(namazu.max_context_tokens, 32_000);
+
+        let no_size = provider.capabilities("x/no-size");
+        assert_eq!(
+            no_size.limits_source,
+            LimitsSource::Builtin,
+            "flags learned, sizes not"
+        );
+        assert_eq!(
+            provider.serves_model("no-size").as_deref(),
+            Some("x/no-size"),
+            "and it is still a model the gateway serves"
+        );
+        let mut catalog = provider.served_catalog().expect("primed");
+        catalog.sort();
+        assert_eq!(
+            catalog,
+            [
+                "openai/gpt-5.5",
+                "qwen/qwen3.6-plus",
+                "sakana/sakana-namazu",
+                "x/no-size"
+            ]
+        );
+    }
+
+    /// Markers land on the request only when the listing said the upstream
+    /// bills a write, whatever the model's name.
+    #[tokio::test]
+    async fn markers_follow_the_cache_write_price_not_the_name() {
+        let url = spawn_mock_server(200, "OK", LISTING).await;
+        let provider = provider_at(url);
+        provider.prime_capabilities().await.expect("primes");
+
+        let request_for = |model: &str| InferenceRequest {
+            system: vec![],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "First".into(),
+                cache_breakpoint: true,
+            }],
+            model: model.to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+
+        let qwen = provider.build_request_body(&request_for("qwen/qwen3.6-plus"));
+        let msgs = qwen["messages"].as_array().unwrap();
+        assert_eq!(
+            msgs[0]["content"][0]["cache_control"]["type"], "ephemeral",
+            "qwen bills a cache write, so the breakpoint is marked"
+        );
+
+        let gpt = provider.build_request_body(&request_for("openai/gpt-5.5"));
+        let msgs = gpt["messages"].as_array().unwrap();
+        assert!(
+            msgs[0]["content"].is_string(),
+            "a read-only price: plain text, no marker to refuse"
+        );
+        assert!(
+            gpt.get("temperature").is_none(),
+            "and no temperature, because the listing said not to"
+        );
+    }
+
+    /// One fetch serves both priming and the listing.
+    #[tokio::test]
+    async fn the_listing_is_read_once() {
+        // One response only: a second fetch would be answered with a 500.
+        let (url, _bodies) = spawn_mock_sequence(vec![(200, "OK", LISTING.to_vec())]).await;
+        let provider = provider_at(url);
+
+        let listed = provider.list_models().await.expect("fetches once");
+        assert_eq!(listed.len(), 4);
+        assert_eq!(listed[0].id, "openai/gpt-5.5", "sorted by id");
+        let qwen = listed.iter().find(|m| m.id == "qwen/qwen3.6-plus").unwrap();
+        assert_eq!(qwen.display_name.as_deref(), Some("Qwen3.6 Plus"));
+        assert_eq!(qwen.released, Some(1_775_133_557));
+        assert!(qwen.pricing.is_some());
+        assert!(qwen.learned);
+
+        let again = provider.list_models().await.expect("from the store");
+        assert_eq!(again.len(), 4);
+    }
+
+    /// A refusal the gateway has already sent shows in `capabilities`, above
+    /// the listing and the operator's entry alike.
+    #[test]
+    fn a_refused_temperature_outranks_everything() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "x/model".to_string(),
+            ModelCapabilityOverride {
+                supports_temperature: Some(true),
+                ..Default::default()
+            },
+        );
+        let provider = OpenRouterProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+            overrides,
+            None,
+        );
+        assert!(provider.capabilities("x/model").supports_temperature);
+        provider.remember_temperature_unsupported("x/model");
+        assert!(!provider.capabilities("x/model").supports_temperature);
     }
 }

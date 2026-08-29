@@ -355,6 +355,55 @@ pub struct ModelInfo {
 
     /// Capabilities of this model
     pub capabilities: ModelCapabilities,
+
+    /// When the provider released it, as Unix seconds, if its listing says.
+    pub released: Option<i64>,
+
+    /// When the provider will withdraw it, as published, if its listing says.
+    pub retires: Option<String>,
+
+    /// What it costs, when the provider's listing quotes a rate.
+    pub pricing: Option<crate::pricing::ModelPricing>,
+
+    /// Whether this entry came from the provider's own listing rather than a
+    /// table compiled into this build.
+    pub learned: bool,
+}
+
+impl ModelInfo {
+    /// An entry from a compiled table: nothing learned, nothing dated.
+    pub fn new(
+        id: impl Into<String>,
+        provider: impl Into<String>,
+        caps: ModelCapabilities,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            display_name: None,
+            provider: provider.into(),
+            capabilities: caps,
+            released: None,
+            retires: None,
+            pricing: None,
+            learned: false,
+        }
+    }
+
+    /// This entry with a display name.
+    pub fn named(mut self, display_name: Option<String>) -> Self {
+        self.display_name = display_name;
+        self
+    }
+
+    /// This entry marked as read from the listing, carrying what it said.
+    pub fn learned_from(mut self, learned: &crate::learned::LearnedModel) -> Self {
+        self.display_name = learned.display_name.clone();
+        self.released = learned.released;
+        self.retires = learned.retires.clone();
+        self.pricing = learned.pricing;
+        self.learned = true;
+        self
+    }
 }
 
 /// Rich message content: either a plain text string or structured content blocks.

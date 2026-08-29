@@ -1,6 +1,7 @@
 //! OpenAI provider implementation.
 
 use crate::capabilities::{Match, Row};
+use crate::learned::{LearnedModel, LearnedModels};
 use crate::openai_compat::{
     TokenLimitField, build_openai_request_body_with, openai_sse_stream, parse_openai_response,
     send_chat_request, temperature_refused, tools_refused_over_reasoning_effort,
@@ -43,6 +44,28 @@ pub struct OpenAIProvider {
     /// Models the API has refused a temperature for, so the next request to one
     /// omits it instead of spending a round trip learning the same thing again.
     temperature_unsupported: crate::provider::ModelMemo,
+    /// What `GET /v1/models` said, filled by [`Provider::prime_capabilities`].
+    ///
+    /// Ids and dates only: see that method for what the listing cannot say.
+    /// Empty until primed, and empty for good if the endpoint could not be
+    /// reached, in which case the compiled table answers everything.
+    learned: LearnedModels,
+}
+
+/// Whether `model_key` is shaped like one of OpenAI's chat or reasoning
+/// models: `gpt-*`, or `o<digit>*`.
+///
+/// One rule for two questions. [`Provider::serves_model`] uses it to route a
+/// bare model name, and [`Provider::served_catalog`] uses it to keep the
+/// embeddings, transcription and image models the listing also carries from
+/// being published as chat models. Sharing it is what guarantees the catalogue
+/// can never refuse a name routing would have accepted.
+fn is_chat_model_id(model_key: &str) -> bool {
+    let reasoning = model_key.starts_with('o')
+        && model_key
+            .get(1..2)
+            .is_some_and(|c| c.chars().all(|c| c.is_ascii_digit()));
+    model_key.starts_with("gpt") || reasoning
 }
 
 /// What this build knows about OpenAI's models, most specific first.
@@ -95,6 +118,7 @@ impl OpenAIProvider {
             capability_overrides: HashMap::new(),
             reasoning_effort_none: Default::default(),
             temperature_unsupported: Default::default(),
+            learned: Default::default(),
         }
     }
 
@@ -113,6 +137,7 @@ impl OpenAIProvider {
             capability_overrides: overrides,
             reasoning_effort_none: Default::default(),
             temperature_unsupported: Default::default(),
+            learned: Default::default(),
         }
     }
 
@@ -344,14 +369,8 @@ impl Provider for OpenAIProvider {
         // OpenAI's chat models are `gpt-*`, and its reasoning line is `o1`/`o3`
         // and successors. See the note on the Gemini provider for why the
         // capability table is the wrong thing to ask.
-        let reasoning = model_key.starts_with('o')
-            && model_key
-                .get(1..2)
-                .is_some_and(|c| c.chars().all(|c| c.is_ascii_digit()));
-        (model_key.starts_with("gpt")
-            || reasoning
-            || self.capability_overrides.contains_key(model_key))
-        .then(|| model_key.to_string())
+        (is_chat_model_id(model_key) || self.capability_overrides.contains_key(model_key))
+            .then(|| model_key.to_string())
     }
 
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
@@ -365,14 +384,97 @@ impl Provider for OpenAIProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
-        // Merged, not swapped: an entry names only what it corrects.
-        match self.capability_overrides.get(model) {
+        // The listing says nothing about size or shape (see
+        // `prime_capabilities`), so the table is the base and the operator's
+        // entry is merged onto it, not swapped in: an entry names only what
+        // it corrects.
+        let mut caps = match self.capability_overrides.get(model) {
             Some(o) => o.apply_to(self.builtin_capabilities(model)),
             None => self.builtin_capabilities(model),
+        };
+        // A refusal the API has already sent outranks every other source,
+        // the operator's entry included: the request was made and the answer
+        // was no, and the runtime reads this flag to decide whether to resolve
+        // a temperature at all.
+        if self.temperature_unsupported.contains(model) {
+            caps.supports_temperature = false;
         }
+        caps
     }
 
+    /// The chat and reasoning models the listing named, once primed.
+    ///
+    /// Filtered through `is_chat_model_id` because `GET /v1/models` also
+    /// carries embeddings, transcription, speech and image models (130 entries
+    /// against a few dozen chat models, measured), and a complete catalogue
+    /// that named `text-embedding-3-large` would let a blueprint route a stage
+    /// to it. The same rule routes a bare name, so nothing routing accepts is
+    /// refused here.
+    fn served_catalog(&self) -> Option<Vec<String>> {
+        self.learned
+            .catalog()
+            .map(|ids| ids.into_iter().filter(|id| is_chat_model_id(id)).collect())
+    }
+
+    /// Read `GET /v1/models` into `Self::learned`.
+    ///
+    /// What the listing fills, measured against the live endpoint: the id,
+    /// `created` and `shutdown_date`. It carries no context window, no output
+    /// cap, no display name and nothing about temperature or tools, which is
+    /// why every one of those stays `None` here and the compiled table plus
+    /// the temperature-refusal memo remain the sources for them. This is the
+    /// one provider whose listing says nothing about size.
+    async fn prime_capabilities(&self) -> Result<()> {
+        let body = self.fetch_models_json().await?;
+        let learned: HashMap<String, LearnedModel> = body
+            .get("data")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| {
+                ProviderError::InvalidResponse("No data field in models response".to_string())
+            })?
+            .iter()
+            .filter_map(|item| {
+                let id = item.get("id")?.as_str()?.to_string();
+                Some((
+                    id,
+                    LearnedModel {
+                        released: item.get("created").and_then(|v| v.as_i64()),
+                        retires: item
+                            .get("shutdown_date")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        ..Default::default()
+                    },
+                ))
+            })
+            .collect();
+        let count = learned.len();
+        self.learned.replace(learned);
+        tracing::debug!(models = count, "learned OpenAI model ids and dates");
+        Ok(())
+    }
+
+    /// The chat and reasoning models, answered from `Self::learned`.
+    ///
+    /// Primes first when nothing has been learned yet, so this is the one
+    /// fetch. Filtered the way [`Self::served_catalog`] is, for the same
+    /// reason: a picker offering `whisper-1` as a chat model is a trap.
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        if self.learned.is_empty() {
+            self.prime_capabilities().await?;
+        }
+        Ok(self
+            .learned
+            .to_model_infos("openai", |id| self.capabilities(id))
+            .into_iter()
+            .filter(|m| is_chat_model_id(&m.id))
+            .collect())
+    }
+}
+
+impl OpenAIProvider {
+    /// GET `/models`, as the endpoint answers it.
+    async fn fetch_models_json(&self) -> Result<serde_json::Value> {
         let response = crate::provider::apply_request_timeout(
             self.client
                 .get(format!("{}/models", self.base_url))
@@ -395,28 +497,7 @@ impl Provider for OpenAIProvider {
             )));
         }
 
-        let body: serde_json::Value = crate::provider::decode_json(response).await?;
-
-        let models = body
-            .get("data")
-            .and_then(|d| d.as_array())
-            .ok_or_else(|| {
-                ProviderError::InvalidResponse("No data field in models response".to_string())
-            })?
-            .iter()
-            .filter_map(|item| {
-                let id = item.get("id")?.as_str()?.to_string();
-                let capabilities = self.capabilities(&id);
-                Some(ModelInfo {
-                    id: id.clone(),
-                    display_name: None,
-                    provider: "openai".into(),
-                    capabilities,
-                })
-            })
-            .collect();
-
-        Ok(models)
+        crate::provider::decode_json(response).await
     }
 }
 
@@ -1273,23 +1354,23 @@ mod tests {
 
     #[tokio::test]
     async fn list_models_skips_entries_without_id() {
-        let body = br#"{"data":[{"no_id": true}, {"id":"valid-model"}]}"#;
+        let body = br#"{"data":[{"no_id": true}, {"id":"gpt-valid"}]}"#;
         let url = spawn_mock_server(200, "OK", body).await;
         let provider = provider_with_url(url);
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "valid-model");
+        assert_eq!(models[0].id, "gpt-valid");
     }
 
     #[tokio::test]
     async fn list_models_skips_entries_with_non_string_id() {
         // covers the `.as_str()?` None branch in the filter_map
-        let body = br#"{"data":[{"id": 42}, {"id":"valid-model"}]}"#;
+        let body = br#"{"data":[{"id": 42}, {"id":"gpt-valid"}]}"#;
         let url = spawn_mock_server(200, "OK", body).await;
         let provider = provider_with_url(url);
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "valid-model");
+        assert_eq!(models[0].id, "gpt-valid");
     }
 
     // ─── transport-failure arms (connection refused, no server listening) ──
@@ -1399,5 +1480,87 @@ mod tests {
             provider.serves_model("not-a-real-model-xyz").is_none(),
             "a model nobody has"
         );
+    }
+}
+
+#[cfg(test)]
+mod learned_tests {
+    use super::*;
+    use leviath_testkit::{spawn_mock_sequence, spawn_mock_server};
+
+    fn provider_at(url: String) -> OpenAIProvider {
+        OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        )
+        .with_base_url(Some(url))
+    }
+
+    /// `GET /v1/models` names every model the account can reach, embeddings
+    /// and transcription included, and says nothing about size or shape. So
+    /// priming learns ids and dates, publishes only the chat-shaped ids, and
+    /// leaves every capability exactly where the table had it.
+    #[tokio::test]
+    async fn priming_learns_ids_and_dates_but_not_shape() {
+        let body = br#"{"object":"list","data":[
+            {"id":"gpt-5.5","object":"model","created":1776824847,"owned_by":"system","shutdown_date":null},
+            {"id":"text-embedding-3-large","object":"model","created":1,"owned_by":"system"},
+            {"id":"whisper-1","object":"model","created":2,"owned_by":"openai-internal"},
+            {"id":"o3","object":"model","created":3,"owned_by":"system","shutdown_date":"2027-01-01"}
+        ]}"#;
+        // One response only: `list_models` after priming must not fetch again.
+        let (url, _bodies) = spawn_mock_sequence(vec![(200, "OK", body.to_vec())]).await;
+        let provider = provider_at(url);
+        assert_eq!(provider.served_catalog(), None, "unprimed: cannot say");
+        let before = provider.capabilities("gpt-5.5");
+
+        provider.prime_capabilities().await.expect("primes");
+
+        let mut catalog = provider.served_catalog().expect("primed");
+        catalog.sort();
+        assert_eq!(catalog, ["gpt-5.5", "o3"], "chat and reasoning ids only");
+        assert_eq!(provider.capabilities("gpt-5.5"), before);
+
+        let listed = provider.list_models().await.expect("from the store");
+        let ids: Vec<&str> = listed.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["gpt-5.5", "o3"]);
+        assert_eq!(listed[0].released, Some(1_776_824_847));
+        assert_eq!(listed[0].retires, None);
+        assert_eq!(listed[1].retires.as_deref(), Some("2027-01-01"));
+        assert!(listed[1].learned);
+        assert_eq!(listed[1].display_name, None, "the listing carries none");
+    }
+
+    /// The API's refusal is the last word, above even an operator's entry:
+    /// the runtime reads this flag to decide whether to resolve a temperature
+    /// at all, and resolving one for a model that has already said no spends
+    /// a round trip per call learning the same thing.
+    #[test]
+    fn a_refused_temperature_outranks_the_table_and_the_override() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "gpt-5.5".to_string(),
+            ModelCapabilityOverride {
+                supports_temperature: Some(true),
+                ..Default::default()
+            },
+        );
+        let provider = OpenAIProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+            overrides,
+            None,
+        );
+        assert!(provider.capabilities("gpt-5.5").supports_temperature);
+        provider.temperature_unsupported.insert("gpt-5.5");
+        assert!(!provider.capabilities("gpt-5.5").supports_temperature);
+    }
+
+    #[tokio::test]
+    async fn a_listing_without_data_is_an_error() {
+        let url = spawn_mock_server(200, "OK", br#"{"object":"list"}"#).await;
+        let provider = provider_at(url);
+        let err = provider.prime_capabilities().await.unwrap_err();
+        assert!(err.to_string().contains("data"), "{err}");
     }
 }

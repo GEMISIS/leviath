@@ -1,8 +1,10 @@
 //! Anthropic Claude provider implementation.
 
+mod catalog;
 mod stream;
 
 use crate::capabilities::{Match, Row};
+use crate::learned::LearnedModels;
 use crate::provider::{
     FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride,
     ModelInfo, Provider, ProviderError, Result, StreamChunk, TokenUsage, ToolCall,
@@ -294,6 +296,12 @@ pub struct AnthropicProvider {
 
     /// Cache TTL for prompt caching breakpoints.
     cache_ttl: CacheTtl,
+
+    /// What `GET /v1/models` said, filled by [`Provider::prime_capabilities`].
+    ///
+    /// Empty until primed, and empty for good if the endpoint could not be
+    /// reached, in which case the compiled table answers everything.
+    learned: LearnedModels,
 }
 
 /// What this build knows about Anthropic's models, most specific first.
@@ -387,6 +395,7 @@ impl AnthropicProvider {
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
+            learned: Default::default(),
         }
     }
 
@@ -404,6 +413,7 @@ impl AnthropicProvider {
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
             capability_overrides: overrides,
             cache_ttl: CacheTtl::default(),
+            learned: Default::default(),
         }
     }
 
@@ -880,17 +890,90 @@ impl Provider for AnthropicProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
+        // Three answers, narrowest first: what the user wrote, what the API
+        // says, what this build was compiled with.
+        let base = self
+            .learned
+            .corrected(model, self.builtin_capabilities(model));
         // Merged, not swapped: an entry names only what it corrects.
         match self.capability_overrides.get(model) {
-            Some(o) => o.apply_to(self.builtin_capabilities(model)),
-            None => self.builtin_capabilities(model),
+            Some(o) => o.apply_to(base),
+            None => base,
         }
     }
 
+    /// Every id the listing named, once primed.
+    ///
+    /// `GET /v1/models` carries chat models only, so unlike OpenAI's there is
+    /// nothing to filter out.
+    fn served_catalog(&self) -> Option<Vec<String>> {
+        self.learned.catalog()
+    }
+
+    /// Read `GET /v1/models` into `Self::learned`, every page of it.
+    ///
+    /// What the listing fills, measured against the live endpoint: the
+    /// display name, `created_at`, and both limits (`max_input_tokens`,
+    /// `max_tokens`). It carries a `capabilities` object about batching,
+    /// citations, thinking and effort, but nothing about temperature, so
+    /// that flag stays `None` and the compiled table remains the only source
+    /// for which models refuse one. Tools are recorded as taken by every
+    /// entry, an assumption grounded in every Anthropic chat model taking
+    /// them. There is no retirement date. See `catalog::parse_entry`.
+    ///
+    /// Paginated: the endpoint answers twenty entries by default and reports
+    /// `has_more`, and the listing that read one page silently truncated.
+    async fn prime_capabilities(&self) -> Result<()> {
+        let learned = self.fetch_catalog().await?;
+        let count = learned.len();
+        self.learned.replace(learned);
+        tracing::debug!(models = count, "learned Anthropic model capabilities");
+        Ok(())
+    }
+
+    /// The listing, answered from `Self::learned` so it cannot disagree
+    /// with what an inference is told about the same model.
+    ///
+    /// Primes first when nothing has been learned yet, so this is the one
+    /// fetch.
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        if self.learned.is_empty() {
+            self.prime_capabilities().await?;
+        }
+        Ok(self
+            .learned
+            .to_model_infos("anthropic", |id| self.capabilities(id)))
+    }
+}
+
+impl AnthropicProvider {
+    /// Every page of `GET /v1/models`, parsed.
+    async fn fetch_catalog(&self) -> Result<HashMap<String, crate::learned::LearnedModel>> {
+        let mut learned = HashMap::new();
+        let mut after_id: Option<String> = None;
+        loop {
+            let mut url = format!("{}/models?limit={}", self.base_url, catalog::PAGE_LIMIT);
+            if let Some(after) = &after_id {
+                url.push_str("&after_id=");
+                url.push_str(after);
+            }
+            let body = self.fetch_models_page(url).await?;
+            let data = body.get("data").and_then(|d| d.as_array()).ok_or_else(|| {
+                ProviderError::RequestFailed("missing 'data' field in /models response".to_string())
+            })?;
+            learned.extend(data.iter().filter_map(catalog::parse_entry));
+            match catalog::next_page(&body) {
+                Some(last_id) => after_id = Some(last_id),
+                None => return Ok(learned),
+            }
+        }
+    }
+
+    /// One page of the listing, as the endpoint answers it.
+    async fn fetch_models_page(&self, url: String) -> Result<serde_json::Value> {
         let response = crate::provider::apply_request_timeout(
             self.client
-                .get(format!("{}/models", self.base_url))
+                .get(url)
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", "2023-06-01"),
             Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
@@ -905,34 +988,10 @@ impl Provider for AnthropicProvider {
         // fixable by the operator, the other by waiting.
         let response = crate::provider::check_http_response(response, None).await?;
 
-        let body: serde_json::Value = response
+        response
             .json()
             .await
-            .map_err(|e| ProviderError::transport("reaching the provider", &e))?;
-
-        let data = body.get("data").and_then(|d| d.as_array()).ok_or_else(|| {
-            ProviderError::RequestFailed("missing 'data' field in /models response".to_string())
-        })?;
-
-        let models = data
-            .iter()
-            .filter_map(|entry| {
-                let id = entry.get("id").and_then(|v| v.as_str())?.to_string();
-                let display_name = entry
-                    .get("display_name")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let capabilities = self.capabilities(&id);
-                Some(ModelInfo {
-                    id,
-                    display_name,
-                    provider: "anthropic".to_string(),
-                    capabilities,
-                })
-            })
-            .collect();
-
-        Ok(models)
+            .map_err(|e| ProviderError::transport("reaching the provider", &e))
     }
 }
 
@@ -2050,6 +2109,7 @@ mod tests {
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
+            learned: Default::default(),
         }
     }
 
@@ -2090,6 +2150,7 @@ mod tests {
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
+            learned: Default::default(),
         };
         let tokens = provider.count_tokens("anything", "claude-sonnet-4-6").await;
         assert_eq!(tokens, 42);
@@ -2106,6 +2167,7 @@ mod tests {
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
+            learned: Default::default(),
         };
         let tokens = provider.count_tokens("1234567", "claude-sonnet-4-6").await;
         assert_eq!(tokens, 2);
@@ -2122,6 +2184,7 @@ mod tests {
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
+            learned: Default::default(),
         };
         let tokens = provider.count_tokens("1234567", "claude-sonnet-4-6").await;
         assert_eq!(tokens, 2);
@@ -2138,6 +2201,7 @@ mod tests {
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
+            learned: Default::default(),
         };
         let tokens = provider.count_tokens("1234567", "claude-sonnet-4-6").await;
         assert_eq!(tokens, 2);
@@ -2776,6 +2840,7 @@ mod tests {
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
+            learned: Default::default(),
         };
         let request = InferenceRequest {
             system: vec![],
@@ -2810,6 +2875,7 @@ mod tests {
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
+            learned: Default::default(),
         };
         let request = InferenceRequest {
             system: vec![],
@@ -2837,6 +2903,7 @@ mod tests {
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
+            learned: Default::default(),
         };
         let result = provider.list_models().await;
         assert!(result.is_err());
@@ -3386,6 +3453,7 @@ mod tests {
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::Ephemeral1h,
+            learned: Default::default(),
         };
         assert_eq!(
             provider.cache_control_value(),
@@ -3699,5 +3767,103 @@ mod tests {
             response.tool_calls[1].arguments,
             serde_json::json!({ "url": "b" })
         );
+    }
+}
+
+#[cfg(test)]
+mod learned_tests {
+    use super::*;
+    use crate::provider::LimitsSource;
+    use leviath_testkit::{spawn_mock_sequence, spawn_mock_server};
+
+    fn provider_at(url: String) -> AnthropicProvider {
+        AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        )
+        .with_base_url(Some(url))
+    }
+
+    /// The endpoint pages at twenty by default and this used to read one page,
+    /// so a catalogue past that was silently short. Both pages land now, and
+    /// the limits the listing reports outrank the table's.
+    #[tokio::test]
+    async fn priming_reads_every_page_and_what_each_says() {
+        let page_one = br#"{"data":[
+            {"type":"model","id":"claude-opus-5","display_name":"Claude Opus 5",
+             "created_at":"2026-07-24T00:00:00Z","max_input_tokens":2000000,"max_tokens":256000}
+        ],"has_more":true,"first_id":"claude-opus-5","last_id":"claude-opus-5"}"#;
+        let page_two = br#"{"data":[
+            {"type":"model","id":"claude-sonnet-5","display_name":"Claude Sonnet 5",
+             "max_input_tokens":0,"max_tokens":null}
+        ],"has_more":false}"#;
+        let (url, _bodies) = spawn_mock_sequence(vec![
+            (200, "OK", page_one.to_vec()),
+            (200, "OK", page_two.to_vec()),
+        ])
+        .await;
+        let provider = provider_at(url);
+        assert_eq!(provider.served_catalog(), None, "unprimed: cannot say");
+        let table = provider.capabilities("claude-opus-5");
+
+        provider.prime_capabilities().await.expect("primes");
+
+        let mut catalog = provider.served_catalog().expect("primed");
+        catalog.sort();
+        assert_eq!(catalog, ["claude-opus-5", "claude-sonnet-5"]);
+
+        let opus = provider.capabilities("claude-opus-5");
+        assert_eq!(opus.max_context_tokens, 2_000_000);
+        assert_eq!(opus.max_output_tokens, 256_000);
+        assert_eq!(opus.limits_source, LimitsSource::Api);
+        assert_eq!(
+            opus.supports_temperature, table.supports_temperature,
+            "the listing says nothing about temperature, so the table's answer stands"
+        );
+
+        let sonnet = provider.capabilities("claude-sonnet-5");
+        assert_eq!(
+            sonnet.limits_source,
+            LimitsSource::Builtin,
+            "zero and null are the listing not saying"
+        );
+    }
+
+    /// One fetch feeds both the runtime and the picker, and the picker sees
+    /// what the listing carried beyond capabilities.
+    #[tokio::test]
+    async fn the_listing_is_answered_from_what_priming_read() {
+        let body = br#"{"data":[
+            {"type":"model","id":"claude-haiku-4-5","display_name":"Claude Haiku 4.5",
+             "created_at":"2025-10-15T00:00:00Z","max_input_tokens":200000,"max_tokens":64000}
+        ],"has_more":false}"#;
+        // One response only: a second fetch would be answered with a 500.
+        let (url, _bodies) = spawn_mock_sequence(vec![(200, "OK", body.to_vec())]).await;
+        let provider = provider_at(url);
+
+        let listed = provider.list_models().await.expect("lists");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "claude-haiku-4-5");
+        assert_eq!(listed[0].provider, "anthropic");
+        assert_eq!(listed[0].display_name.as_deref(), Some("Claude Haiku 4.5"));
+        assert_eq!(listed[0].released, Some(1_760_486_400));
+        assert!(listed[0].learned);
+        assert_eq!(listed[0].capabilities.max_context_tokens, 200_000);
+
+        let again = provider
+            .list_models()
+            .await
+            .expect("answered from the store");
+        assert_eq!(again.len(), 1);
+    }
+
+    /// A page without a `data` array is the listing being wrong, not empty.
+    #[tokio::test]
+    async fn a_page_without_data_is_an_error() {
+        let url = spawn_mock_server(200, "OK", br#"{"has_more":false}"#).await;
+        let provider = provider_at(url);
+        let err = provider.prime_capabilities().await.unwrap_err();
+        assert!(err.to_string().contains("data"), "{err}");
+        assert_eq!(provider.served_catalog(), None);
     }
 }

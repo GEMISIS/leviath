@@ -135,9 +135,11 @@ pub enum LimitsSource {
     /// Matched from the model's name against a table compiled into this build.
     ///
     /// The default, and the honest answer for a provider whose API does not
-    /// report limits at all: Anthropic's and OpenAI's `/models` both return an
-    /// id and a display name and nothing about size. It is also the answer when
-    /// a provider that *could* say has not been asked yet, since
+    /// report limits at all: OpenAI's `/v1/models` returns an id, a date and
+    /// an owner and nothing about size. (Anthropic's used to say nothing
+    /// either; measured in 2026-08 it reports `max_input_tokens` and
+    /// `max_tokens`, and `crate::anthropic` reads them.) It is also the answer
+    /// when a provider that *could* say has not been asked yet, since
     /// `prime_capabilities` runs at daemon start-up and a short-lived command
     /// may not have waited for it.
     #[default]

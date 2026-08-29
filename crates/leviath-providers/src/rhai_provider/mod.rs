@@ -31,7 +31,7 @@ mod meta;
 use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -138,7 +138,7 @@ pub struct RhaiProvider {
     /// for the provider a machine names as its default - a script is compiled
     /// on demand, and asking every script on disk what it serves is the cost
     /// the registry exists to avoid.
-    served_models: Arc<Mutex<Vec<String>>>,
+    served_models: crate::learned::LearnedModels,
     /// Model ids `[model_providers.<name>] serves` declares, for a script with
     /// no `list_models` to ask. Static, so it needs no priming.
     declared_models: Arc<Vec<String>>,
@@ -244,7 +244,7 @@ impl RhaiProvider {
             has_list_models,
             has_warm_models,
             env_allowlist,
-            served_models: Arc::new(Mutex::new(Vec::new())),
+            served_models: Default::default(),
             declared_models: Arc::new(serves),
         })
     }
@@ -573,14 +573,9 @@ impl Provider for RhaiProvider {
     /// table is how a provider comes to claim every model in existence, which
     /// [`Provider::serves_model_from_table`] documents having measured.
     fn serves_model(&self, model_key: &str) -> Option<String> {
-        let served = leviath_core::sync::lock(&self.served_models);
-        if let Some(id) = served
-            .iter()
-            .find(|id| id.as_str() == model_key || id.rsplit('/').next() == Some(model_key))
-        {
-            return Some(id.clone());
+        if let Some(id) = self.served_models.find_by_key(model_key) {
+            return Some(id);
         }
-        drop(served);
         if self.declared_models.iter().any(|m| m == model_key)
             || self.capability_overrides.contains_key(model_key)
         {
@@ -604,11 +599,9 @@ impl Provider for RhaiProvider {
     /// serve it, but a handful of described models is not a statement that the
     /// rest are refused.
     fn served_catalog(&self) -> Option<Vec<String>> {
-        let served = leviath_core::sync::lock(&self.served_models);
-        if !served.is_empty() {
-            return Some(served.clone());
+        if let Some(served) = self.served_models.catalog() {
+            return Some(served);
         }
-        drop(served);
         (!self.declared_models.is_empty()).then(|| (*self.declared_models).clone())
     }
 
@@ -623,9 +616,16 @@ impl Provider for RhaiProvider {
         if !self.has_list_models {
             return Ok(());
         }
+        // Only the ids. A script's `list_models` already reports its
+        // limits through `ModelInfo`, and the script's own `capabilities`
+        // answer is what an inference reads, so nothing else is kept here.
         let models = self.list_models().await?;
-        let ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
-        *leviath_core::sync::lock(&self.served_models) = ids;
+        self.served_models.replace(
+            models
+                .into_iter()
+                .map(|m| (m.id, crate::learned::LearnedModel::default()))
+                .collect(),
+        );
         Ok(())
     }
 
@@ -687,27 +687,22 @@ fn parse_models(value: Dynamic, provider: &str) -> Vec<ModelInfo> {
             arr.iter()
                 .filter_map(|m| {
                     let id = m.get("id").and_then(|v| v.as_str())?.to_string();
-                    Some(ModelInfo {
-                        display_name: m
-                            .get("display_name")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string),
-                        capabilities: ModelCapabilities {
-                            max_context_tokens: m
-                                .get("max_context_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(8192)
-                                as usize,
-                            max_output_tokens: m
-                                .get("max_output_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(4096)
-                                as usize,
-                            ..Default::default()
-                        },
-                        id,
-                        provider: provider.to_string(),
-                    })
+                    let capabilities = ModelCapabilities {
+                        max_context_tokens: m
+                            .get("max_context_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(8192) as usize,
+                        max_output_tokens: m
+                            .get("max_output_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(4096) as usize,
+                        ..Default::default()
+                    };
+                    let display_name = m
+                        .get("display_name")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    Some(ModelInfo::new(id, provider, capabilities).named(display_name))
                 })
                 .collect()
         })
