@@ -15,6 +15,7 @@ pub mod capabilities;
 pub mod claude_code;
 #[cfg(feature = "debug-http")]
 pub(crate) mod debug_http;
+pub mod endpoint;
 pub mod failure;
 pub mod gemini;
 pub mod learned;
@@ -35,6 +36,7 @@ mod test_support;
 pub use anthropic::AnthropicProvider;
 pub use capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOverride};
 pub use claude_code::ClaudeCodeProvider;
+pub use endpoint::EndpointProvider;
 pub use gemini::GeminiProvider;
 pub use learned::{LearnedModel, LearnedModels};
 pub use ollama::OllamaProvider;
