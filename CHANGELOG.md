@@ -152,6 +152,12 @@ same list.
 
 ### Changed
 
+- The published list prices for OpenAI, Anthropic and Google live in
+  `crates/leviath-providers/pricing/rates.toml` rather than in Rust, and each
+  row names where it came from. `lev models list` prints `n/a` where nothing
+  prices a model instead of a blank, and `lev models show` names a table
+  row's source and the day the table was read. A model that gains a row goes
+  from unpriced to a computed (still not exact) cost.
 - MCP tool calls in one batch no longer wait on each other across servers.
   The executor held one lock around every call, so a batch naming a slow
   server and a fast one ran the fast one after the slow one finished. Each
@@ -188,6 +194,11 @@ same list.
   `header_names` and `models`, `PUT /api/config` accepts `kind`, `headers` and `models`,
   and `POST /api/models/probe` (admin) asks a server what it serves before the write.
 
+- `cargo xtask prices` refreshes the vendor price table from OpenRouter's
+  public catalogue cross-checked against LiteLLM, writing a row only where
+  the two agree within 5% and refusing a move it does not believe. A weekly
+  workflow runs it and opens an auto-merging PR when the table changed, so
+  the prices stay current without a person transcribing them.
 - In `lev dash`'s new-run screen, Enter now breaks the line in the task box
   and Ctrl+Enter starts the run. A Start button sits under the editor (Tab
   reaches it, Enter or Space or a click presses it) for terminals without the
