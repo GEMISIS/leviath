@@ -18,6 +18,22 @@ pub use providers::*;
 mod security;
 pub use security::*;
 
+// Two helpers with no `[table]` of their own: reading a repository's `.env`,
+// and hardening the config file's permissions. Private to this module; the
+// tests below reach them through the imports here.
+mod dotenv;
+mod perms;
+use dotenv::load_dotenv_filtered;
+#[cfg(test)]
+use dotenv::requote;
+use perms::{check_permissions, create_config_dir};
+#[cfg(test)]
+use perms::{check_permissions_at_with, set_dir_permissions_with};
+// The on-disk permission tests are Unix-only (Windows has no mode bits to
+// loosen), so these two are imported only where a test can reach them.
+#[cfg(all(test, unix))]
+use perms::{check_permissions_at, set_dir_permissions};
+
 /// Record every dotted path in `found` that is missing from `kept`.
 ///
 /// `kept` is what survived a deserialize/serialize round trip, so a path that
@@ -867,154 +883,6 @@ impl Config {
 /// narrower `LEVIATH_CONFIG_PATH` override above.
 pub use leviath_core::paths::home_dir as leviath_home_dir;
 pub use leviath_core::paths::providers_dir;
-
-/// Create the config directory with restrictive permissions.
-fn create_config_dir(dir: &std::path::Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dir)
-        .map_err(|e| anyhow::anyhow!("Failed to create config directory: {}", e))?;
-    set_dir_permissions(dir);
-    Ok(())
-}
-
-/// Set every variable in `path` that a repository's `.env` is allowed to set,
-/// warning once about the rest.
-///
-/// Matches dotenvy's own precedence: a variable already present in the
-/// environment wins, because the person who exported it meant it and a file in
-/// a directory they happened to `cd` into did not.
-///
-/// A missing or unreadable `.env` is not an error - most working directories do
-/// not have one.
-/// Re-quote an already-parsed value so dotenvy reads it back unchanged.
-///
-/// Double quotes, not single. Single quotes look right - dotenvy's *value*
-/// parser treats everything inside them literally - but its *line reader* is a
-/// separate state machine that honours `\` escapes inside single quotes. The
-/// two disagree, so a value ending in a backslash ate its own closing quote,
-/// swallowed the next line, and failed the whole document. Since the load
-/// result is discarded, every variable after it vanished with no warning.
-///
-/// Inside double quotes both layers agree on the same escape set, so escaping
-/// `\`, `"`, `$` and a newline round-trips exactly. Escaping `$` is also what
-/// stops a second substitution pass: these values were already `$VAR`-expanded
-/// by the parse that produced them.
-fn requote(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for c in value.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '$' => out.push_str("\\$"),
-            '\n' => out.push_str("\\n"),
-            other => out.push(other),
-        }
-    }
-    out.push('"');
-    out
-}
-
-fn load_dotenv_filtered(path: &str) {
-    let Ok(entries) = dotenvy::from_filename_iter(path) else {
-        return;
-    };
-    // A malformed line is skipped rather than ending the read, so one bad entry
-    // costs its own variable and not every variable after it.
-    let (allowed, skipped): (Vec<_>, Vec<_>) = entries
-        .flatten()
-        .partition(|(key, _)| leviath_core::dotenv_var_allowed(key));
-
-    // Hand the survivors back to dotenvy rather than calling `set_var` here:
-    // the workspace forbids `unsafe`, and `std::env::set_var` is unsafe in
-    // edition 2024.
-    //
-    // One path, not a fast path plus a filtered one. Re-reading the file when
-    // nothing was filtered looked cheap, but it re-parsed content that could
-    // have changed since the decision was made and gave the two paths
-    // different error semantics for a malformed line. Always re-serializing
-    // means what gets set is exactly what was inspected.
-    let doc: String = allowed
-        .iter()
-        .map(|(key, value)| format!("{key}={}\n", requote(value)))
-        .collect();
-    let _ = dotenvy::from_read(doc.as_bytes());
-
-    // The common case is that a `.env` sets nothing sensitive, and warning then
-    // printed "Ignoring  from .env" with an empty list where a name belonged.
-    if skipped.is_empty() {
-        return;
-    }
-
-    // Joined before the macro rather than inside it: `tracing` does not
-    // evaluate field expressions when no subscriber is interested, so an
-    // argument built in place reads as an unexecuted region even on the run
-    // that logged it.
-    let names = skipped
-        .iter()
-        .map(|(key, _)| key.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    tracing::warn!(
-        "Ignoring {names} from {path}: these decide where configuration is read from or what \
-         gets executed, so a repository may not set them. Export them yourself if you meant to."
-    );
-}
-
-/// Check permissions on the config file and auto-fix if too permissive.
-///
-/// A no-op on non-Unix platforms - see [`leviath_sys::ensure_file_private`].
-fn check_permissions() {
-    check_permissions_at(&Config::config_path());
-}
-
-/// Core of [`check_permissions`], parameterized by path so it can be exercised
-/// in tests against a tempfile instead of the real config path.
-///
-/// The permission mechanism (metadata probe + `chmod`) lives in `leviath_sys`;
-/// this function owns only the policy of what to log for each outcome.
-fn check_permissions_at(path: &std::path::Path) {
-    check_permissions_at_with(path, leviath_sys::ensure_file_private);
-}
-
-/// Core of [`check_permissions_at`] with the permission-hardening operation
-/// injected, so the "fix failed" arm can be covered deterministically on every
-/// OS. On disk that `Err` only occurs when a file exists but `chmod` fails -
-/// forcing that without root differs per platform (macOS `chflags uchg`, no
-/// portable Linux equivalent), so a `fn` pointer is injected instead of relying
-/// on an OS-specific trick. A `fn` pointer (not `impl Fn`) keeps this to a
-/// single monomorphization.
-fn check_permissions_at_with(
-    path: &std::path::Path,
-    ensure: fn(&std::path::Path) -> std::io::Result<Option<u32>>,
-) {
-    match ensure(path) {
-        Ok(Some(old_mode)) => {
-            let masked_mode = old_mode & 0o777;
-            tracing::warn!(
-                "Config file has overly permissive permissions ({:o}), fixing to 600",
-                masked_mode
-            );
-        }
-        Ok(None) => {}
-        Err(e) => tracing::warn!("Failed to fix config file permissions: {}", e),
-    }
-}
-
-/// Set restrictive permissions on the config directory.
-fn set_dir_permissions(path: &std::path::Path) {
-    set_dir_permissions_with(path, leviath_sys::secure_dir_perms);
-}
-
-/// Core of [`set_dir_permissions`] with the hardening operation injected; see
-/// [`check_permissions_at_with`] for why.
-fn set_dir_permissions_with(
-    path: &std::path::Path,
-    secure: fn(&std::path::Path) -> std::io::Result<()>,
-) {
-    if let Err(e) = secure(path) {
-        tracing::warn!("Failed to set config directory permissions: {}", e);
-    }
-}
 
 /// The update check is on when the key is absent.
 ///
