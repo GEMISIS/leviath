@@ -29,9 +29,11 @@ mod ui_state;
 use crate::tui::theme;
 
 pub use helpers::yank_to_clipboard_via;
-pub use types::{AgentDisplayStatus, DashboardAgent, DashboardArgs};
+pub use types::DashboardArgs;
+#[cfg(test)]
+use types::{AgentDisplayStatus, DashboardAgent};
 
-/// The terminal seams are crate-level too ([`crate::tui`]) now that `lev setup`
+/// The terminal seams are crate-level too (`crate::tui`) now that `lev setup`
 /// is a second ratatui surface driving the same `CrosstermSetup` from the
 /// binary. Re-exported here because `main.rs` and the dashboard tests import
 /// them through this path.
@@ -468,7 +470,6 @@ mod tests {
             AgentDisplayStatus::Complete,
             AgentDisplayStatus::CompleteInteractive,
             AgentDisplayStatus::Error("test error".to_string()),
-            AgentDisplayStatus::Idle,
             AgentDisplayStatus::Cancelled,
         ];
         for status in statuses {
@@ -789,7 +790,7 @@ mod tests {
             stage: "init".to_string(),
             stage_index: 0,
             num_stages: 1,
-            status: AgentDisplayStatus::Idle,
+            status: AgentDisplayStatus::Active,
             tokens_in: 0,
             tokens_out: 0,
             cached_tokens: 0,
@@ -806,14 +807,12 @@ mod tests {
             title: None,
             model: None,
             parent_id: None,
-            depth: 0,
             started_at: 0,
             last_progress_at: None,
             runtime_secs: 0,
             clock_now: 0,
             graph: None,
             accepts_messages: false,
-            taint_summary: vec![],
         };
         assert_eq!(agent.id, "run-test");
         assert_eq!(agent.blueprint_name, "tester");

@@ -29,7 +29,7 @@ pub struct ResultArgs {
 }
 
 /// Execute `lev result`.
-pub async fn execute(args: ResultArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: ResultArgs) -> anyhow::Result<()> {
     let meta = crate::runstate::read_meta(&args.run_id)
         .map_err(|e| anyhow::anyhow!("no run '{}': {e}", args.run_id))?;
     // `meta.json` says whether there is an answer and how big; the bytes are in

@@ -25,11 +25,13 @@ pub enum ToolPolicy {
 // `TitleConfig` (plain data used by the engine's title generation) lives in
 // `leviath_core::config` so `leviath-runtime` can reference it without a CLI
 // dependency. Re-exported here so `crate::config::TitleConfig` paths resolve.
-pub use leviath_core::config::TitleConfig;
+pub(crate) use leviath_core::config::TitleConfig;
 
 // Same arrangement for the `[observability]` section: the plain data lives in
 // `leviath_core::config` (the telemetry sink crate reads it), re-exported here.
-pub use leviath_core::config::{ObservabilityConfig, TelemetryExporterKind};
+pub(crate) use leviath_core::config::ObservabilityConfig;
+#[cfg(test)]
+pub(crate) use leviath_core::config::TelemetryExporterKind;
 
 /// Permission for one Rhai *script-tool* host function (Layer 3 of the
 /// four-layer permission model). Gates what a registered script may *do*,

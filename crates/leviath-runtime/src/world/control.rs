@@ -29,7 +29,7 @@ impl PipelineWorld {
     /// longer exists. The async-starting dispatchers only act on `Active` agents,
     /// so this is how the world pauses/resumes/cancels an agent - a non-`Active`
     /// agent is simply data the systems skip until it is `Active` again.
-    pub fn set_status(&mut self, agent: AgentId, status: AgentStatus) -> bool {
+    pub(crate) fn set_status(&mut self, agent: AgentId, status: AgentStatus) -> bool {
         // Every status mutation funnels through here, so this is the one place a
         // foreign id has to be refused.
         if agent.world != self.id {
@@ -62,7 +62,7 @@ impl PipelineWorld {
     /// agent that has not ticked yet), and so is `Cancelled`: cancelling stops a
     /// run rather than ending it, and everything it needs to carry on is still
     /// on disk (#576). Anything else returns `false`.
-    pub fn resume(&mut self, agent: AgentId) -> bool {
+    pub(crate) fn resume(&mut self, agent: AgentId) -> bool {
         // Resolved once, up front. Doing it again inside the arm below would
         // be a second check that cannot fail - the status lookup already
         // proved the entity is here - and an arm nothing can reach is an arm
@@ -129,7 +129,7 @@ impl PipelineWorld {
     }
 
     /// Cancel an agent (it stops starting new work; in-flight results still land).
-    pub fn cancel(&mut self, agent: AgentId) -> bool {
+    pub(crate) fn cancel(&mut self, agent: AgentId) -> bool {
         self.set_status(agent, AgentStatus::Cancelled)
     }
 }

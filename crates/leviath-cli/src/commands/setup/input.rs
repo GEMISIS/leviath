@@ -28,7 +28,7 @@ use crate::tui::widgets::picker::PickerOutcome;
 
 /// What the loop should do after a key press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
+pub(crate) enum Action {
     /// Keep going.
     Continue,
     /// Apply the plan, then stop.
@@ -37,7 +37,7 @@ pub enum Action {
 
 impl Wizard {
     /// Handle one key press.
-    pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Action {
         // Ctrl-C always works, even mid-edit and even inside a dialog: it is
         // the one binding a user reaches for expecting it to obey no matter
         // what. With unsaved choices it asks once; pressed again (the dialog
@@ -89,7 +89,7 @@ impl Wizard {
     /// finds on their own. Clicks are ignored while a dialog, an edit or the
     /// help overlay is up, because a click cannot mean anything there and
     /// dismissing them by accident would lose typed input.
-    pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) -> Action {
+    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) -> Action {
         if self.confirm.is_some() || self.edit.is_some() || self.show_help {
             return Action::Continue;
         }

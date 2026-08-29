@@ -100,7 +100,7 @@ fn agent_name(args: &SafeArgs) -> &str {
 }
 
 /// Run `lev approvals`.
-pub async fn execute(args: ApprovalsArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: ApprovalsArgs) -> anyhow::Result<()> {
     let ApprovalsCommand::Safe(safe) = args.command;
     let config = Config::load()?;
     // The blueprint layer is deliberately absent: it depends on which manifest

@@ -38,12 +38,12 @@ use crate::daemon::script_host::{
 /// failure, non-zero exit) are testable without spawning real processes. The
 /// production implementation is built by [`SeedCommandPolicy::new`]. Mirrors
 /// the `BrowserOpener` seam.
-pub type SeedCommandRunner =
+pub(crate) type SeedCommandRunner =
     Arc<dyn Fn(&str, &Path, Duration) -> Result<String, String> + Send + Sync>;
 
 /// How command seeds are executed for one spawn.
 #[derive(Clone)]
-pub struct SeedCommandPolicy {
+pub(crate) struct SeedCommandPolicy {
     /// Whether command seeds may run at all. `false` makes every command seed a
     /// no-op (a warning, or a hard error when the region is `required`).
     pub allowed: bool,
@@ -60,7 +60,7 @@ pub struct SeedCommandPolicy {
 impl SeedCommandPolicy {
     /// The production policy: run through `sandbox` when the agent declares one,
     /// else on the host, both targeting the run's workdir.
-    pub fn new(
+    pub(crate) fn new(
         allowed: bool,
         timeout: Duration,
         safe_keys: Arc<std::collections::HashSet<String>>,
@@ -75,9 +75,10 @@ impl SeedCommandPolicy {
         }
     }
 
-    /// A policy that never runs anything - used on the reload/restore path and
-    /// wherever seeds are resolved without a live sandbox.
-    pub fn disabled() -> Self {
+    /// A policy that never runs anything, for tests that resolve seeds without
+    /// a live sandbox.
+    #[cfg(test)]
+    pub(crate) fn disabled() -> Self {
         Self {
             allowed: false,
             timeout: Duration::from_secs(0),
@@ -102,7 +103,7 @@ impl SeedCommandPolicy {
     /// This inherits the shell key grammar's hardening for free - a seed of
     /// `PATH=/tmp/x git ls-files` or `git ls-files > ~/.bashrc` is refused by
     /// construction, because neither keys as a bare `git ls-files`.
-    pub fn run(&self, command: &str, workdir: &Path) -> Result<String, String> {
+    pub(crate) fn run(&self, command: &str, workdir: &Path) -> Result<String, String> {
         // Only when seeds are running at all: where they are switched off the
         // runner already says so, and "not pre-approved" would be a less
         // specific answer to a question that is already settled.

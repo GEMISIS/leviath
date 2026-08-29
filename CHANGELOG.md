@@ -69,6 +69,43 @@ same list.
   `provider::{json_number, parse_tool_arguments, parse_openai_finish_reason,
   check_http_response, decode_json}` are crate-private;
   `tokenizer::approximate_count` is private (`count_tokens` still reaches it).
+- For embedders of `leviath-runtime`: `pipeline` names what it re-exports
+  instead of globbing every section. Still public from it: `AgentBlueprint`,
+  `StageCursor`, `force_transition`, `is_terminal_status`,
+  `WORKSPACE_CHECK_INTERVAL`, `ResolvedStage`, `SeededSpawn`,
+  `spawn_agent_seeded`, `PersistWatermark`, `CompactionSettings`,
+  `is_stage_specific`, `GateScriptRules`, `PolicyGate`, `ToolSensitivities`,
+  `DynamicTools`, `ToolProgress`, `ToolService`, `noop_progress`,
+  `StageLedger`, the `resolve` helpers (`ModelDefaults`, `ToolCatalog`,
+  `ToolOwners`, `bare_default_model`, `expand_connector_grants`,
+  `filter_tools_for_stage`, `model_key`, `providers_tried`,
+  `resolve_stage_model`, `resolve_stages`), the stall, wedge and circuit
+  settings, and the marker components. Everything else in `pipeline`, the
+  `inference_usage`, `output_tool`, `runtime_info_tool` and `stage_seeds`
+  modules, `gate_prompt`, `context_transform`, `convergence`,
+  `transition_choice`, `ContextWindow::assemble`,
+  `control_socket::handle_connection`, `ControlClient::with_token`,
+  `FanOutWaiting::is_paused`, `TokenTotals::add_usage`, `ToolStage::detached`,
+  `PipelineWorld::{spawn_from_blueprint, run}`, `WorldHost::{new,
+  interactions, subscribe, set_redrive_interval}` and the other items nothing
+  outside the crate used are crate-private (or compiled only for tests).
+  Removed: the unused `taint::GatePrompt` trait, `AgentMessage::timestamp`
+  and `StageSetup::output`, which nothing read.
+- For anyone linking `leviath-cli` as a library: it now exposes only what the
+  `lev` binary and its integration tests use. The `approvals`,
+  `blueprint_edit`, `bundled`, `held_checkpoints`, `lint`, `read_path_report`,
+  `render`, `shell_keys`, `tool_inventory`, `tools` and `tui` modules are
+  crate-private; under `commands` only `agent_client`, `auth`, `ctl`, `daemon`,
+  `daemon_service`, `dashboard`, `doctor`, `mcp`, `ps`, `run`, `serve`,
+  `setup` and `update` stay public, under `daemon` only `client`, `lifecycle`,
+  `mcp_pool`, `readiness` and `setup`, and inside those the items the binary
+  does not reach (`serve::{ServerEvent, AppState}`, `serve::tls`,
+  `dashboard::{AgentDisplayStatus, DashboardAgent}`, `timeline::analyze`,
+  `ps::{offline_runs, format_offline, format_runs}`, `daemon::format_status`,
+  `update::latest` and the rest) are crate-private. Removed:
+  `AgentDisplayStatus::Idle` and the flow graph's `RunPhase::Idle`, which no
+  run state ever produced; `DashboardAgent::{depth, taint_summary}` and
+  `setup::import::Source::id`, which nothing read.
 
 ### Fixed
 

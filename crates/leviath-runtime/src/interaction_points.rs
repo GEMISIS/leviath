@@ -9,14 +9,14 @@
 //! answer deterministically routes what happens next.
 //!
 //! This is a first-class ECS lane, mirroring the transition-choice lane:
-//! - [`gate_interaction_points`] intercepts a would-be transition
-//!   ([`ResolveTransition`]) for an interactive-points stage and instead marks the
-//!   agent [`ReadyForInteractionPoint`].
-//! - [`dispatch_interaction_point`] spawns an async task that asks through the
+//! - `gate_interaction_points` intercepts a would-be transition
+//!   (`ResolveTransition`) for an interactive-points stage and instead marks the
+//!   agent `ReadyForInteractionPoint`.
+//! - `dispatch_interaction_point` spawns an async task that asks through the
 //!   shared [`InteractionHub`] (so the dashboard surfaces the prompt via
-//!   [`reflect_interaction_status`](crate::pipeline::reflect_interaction_status)),
-//!   resolves the answer, and reports a [`PointOutcome`] on the lane.
-//! - [`collect_interaction_point`] applies the outcome: approve ⇒ proceed to the
+//!   `reflect_interaction_status`),
+//!   resolves the answer, and reports a `PointOutcome` on the lane.
+//! - `collect_interaction_point` applies the outcome: approve ⇒ proceed to the
 //!   transition, abort ⇒ cancel the run, a directive ⇒ inject it and re-run
 //!   inference in-stage, an edit ⇒ inject the edited text and re-present the
 //!   point. Directive/edit loops are bounded by [`MAX_REVISION_ROUNDS`].
@@ -52,7 +52,7 @@ pub const MAX_REVISION_ROUNDS: usize = 4;
 /// The agent's current stage is done and has an unsatisfied interaction point;
 /// the dispatch system should ask it. (Set by the gate or by an edit re-present.)
 #[derive(Component, Debug, Clone, Copy)]
-pub struct ReadyForInteractionPoint;
+pub(crate) struct ReadyForInteractionPoint;
 
 /// An interaction point is in flight (its request is open in the hub); the
 /// collect system applies the answer when the lane reports it.
@@ -62,19 +62,19 @@ pub struct AwaitingInteractionPoint;
 /// Which interaction point (index into the stage's `points`) the agent is on.
 /// Absent ⇒ 0. Advanced on approve; reset when a new stage is entered.
 #[derive(Component, Debug, Clone, Copy)]
-pub struct InteractionPointCursor(pub usize);
+pub(crate) struct InteractionPointCursor(pub usize);
 
 /// How many directive/edit revision rounds have been taken at the current point.
 /// Absent ⇒ 0. Reset on approve (advancing points) and on entering a new stage.
 #[derive(Component, Debug, Clone, Copy)]
-pub struct InteractionPointRounds(pub usize);
+pub(crate) struct InteractionPointRounds(pub usize);
 
 /// The authoritative document to present as the point's `body` on the next
 /// dispatch, overriding the last inference response. Set when the user edits the
 /// document directly (so the re-presented approval shows the *edited* text, not
 /// the pre-edit version) and consumed on the next dispatch.
 #[derive(Component, Debug, Clone)]
-pub struct PlanBodyOverride(pub String);
+pub(crate) struct PlanBodyOverride(pub String);
 
 // ─── Restart persistence ─────────────────────────────────────────────────────
 
@@ -99,7 +99,7 @@ pub struct InteractionPointState {
 /// What the user's answer resolved to, routed deterministically from the option
 /// label. Carries the text the collect system must inject into context.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PointOutcome {
+pub(crate) enum PointOutcome {
     /// A plain option (no directive/abort/edit) ⇒ complete the point.
     Approve {
         /// The option's label, injected into context so the next turn knows
@@ -129,7 +129,7 @@ pub enum PointOutcome {
 }
 
 /// One resolved interaction-point answer, reported on the lane.
-pub struct InteractionPointOutcome {
+pub(crate) struct InteractionPointOutcome {
     /// The agent the answer is for.
     pub entity: Entity,
     /// The routed decision.
@@ -139,7 +139,7 @@ pub struct InteractionPointOutcome {
 /// The sending side of the interaction-point lane + the handle/wake needed to
 /// drive the async ask task, as a world resource.
 #[derive(Resource)]
-pub struct InteractionPointStage {
+pub(crate) struct InteractionPointStage {
     /// Where resolved outcomes are reported.
     pub outcomes: UnboundedSender<InteractionPointOutcome>,
     /// Wakes the tick loop when an outcome lands.
@@ -150,7 +150,7 @@ pub struct InteractionPointStage {
 
 /// The receiving side of the interaction-point lane, for the collect system.
 #[derive(Resource)]
-pub struct InteractionPointResults(pub UnboundedReceiver<InteractionPointOutcome>);
+pub(crate) struct InteractionPointResults(pub UnboundedReceiver<InteractionPointOutcome>);
 
 // ─── Pure routing helpers (ported from the deleted imperative stage loop) ─────
 
@@ -282,7 +282,7 @@ enum Routed {
 /// Held apart from the lane it reports on for the same reason as
 /// the taint gate's own `GatedCall`: these five are what the person sees, and
 /// the lane is only where their answer goes.
-pub struct PointAsk {
+pub(crate) struct PointAsk {
     /// The agent parked on this point.
     pub entity: Entity,
     /// That agent's run id, which the request id is namespaced by so two runs
@@ -371,7 +371,7 @@ async fn run_interaction_point(ask: PointAsk, lane: PromptLane<InteractionPointO
 /// ask task so the request re-registers in the hub with the same id
 /// (`{agent_id}-point-{name}-{round}`). From there it is indistinguishable from a live
 /// dispatch: a client that had the prompt open still sees it, and answering it later
-/// routes normally through [`collect_interaction_point`].
+/// routes normally through `collect_interaction_point`.
 ///
 /// A no-op (leaving the default restore in place) when the interaction-point lane
 /// isn't wired (a test world), or when the stage is no longer an interactive-points
@@ -484,7 +484,7 @@ type InteractionPointQuery = (
 /// points aren't all satisfied yet, routing the agent to the interaction-point
 /// lane instead. Stages with no points, or whose point cursor is past the end
 /// (all approved), fall through to the normal transition.
-pub fn gate_interaction_points(
+pub(crate) fn gate_interaction_points(
     agents: Query<InteractionPointQuery, With<ResolveTransition>>,
     mut commands: Commands,
 ) {
@@ -525,7 +525,7 @@ type DispatchInteractionPointQuery = (
 /// Dispatch: for each `ReadyForInteractionPoint` agent, spawn the ask task for
 /// its current point and move it to `AwaitingInteractionPoint`. No hub (test
 /// world) ⇒ no-op; a non-interactive stage ⇒ fall back to the transition.
-pub fn dispatch_interaction_point(
+pub(crate) fn dispatch_interaction_point(
     mut agents: Query<DispatchInteractionPointQuery, With<ReadyForInteractionPoint>>,
     hub: Option<Res<InteractionHub>>,
     stage: Option<Res<InteractionPointStage>>,
@@ -642,7 +642,7 @@ type CollectInteractionPointQuery = (
 /// (or transitions when all points are done), abort cancels, a directive injects
 /// the directive and re-infers in-stage, an edit injects the edited text and
 /// re-presents; both revision paths are bounded by [`MAX_REVISION_ROUNDS`].
-pub fn collect_interaction_point(
+pub(crate) fn collect_interaction_point(
     mut results: ResMut<InteractionPointResults>,
     mut agents: Query<CollectInteractionPointQuery, With<AwaitingInteractionPoint>>,
     mut commands: Commands,
@@ -904,7 +904,6 @@ mod tests {
             response: text.to_string(),
             tool_calls: vec![],
             tokens_used: 0,
-            timestamp: 0,
             cut_off_at: None,
         }
     }

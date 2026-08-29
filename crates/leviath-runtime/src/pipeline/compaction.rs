@@ -13,12 +13,12 @@ pub struct CompactionSettings(pub leviath_core::CompactionConfig);
 /// A compaction job (LLM summarization) is in flight; the agent is held out of
 /// inference until its summaries land.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AwaitingCompaction;
+pub(crate) struct AwaitingCompaction;
 
 /// The receiving end of the compaction-outcomes channel, as a world resource.
 /// (The sending end lives in [`InferenceStage::compaction_outcomes`].)
 #[derive(Resource)]
-pub struct CompactionResults(pub UnboundedReceiver<CompactionOutcome>);
+pub(crate) struct CompactionResults(pub UnboundedReceiver<CompactionOutcome>);
 
 /// The eviction threshold (fraction of budget) at which compaction kicks in -
 /// the same 0.9 the imperative `evict_and_compact` uses.
@@ -82,7 +82,7 @@ type CompactionQuery = (
 /// to summarize, provider missing, pool full) simply leaves the agent
 /// `ReadyToInfer` so inference proceeds - compaction is best-effort. (Ported from
 /// `AgentEngine::evict_and_compact`.)
-pub fn dispatch_compaction(
+pub(crate) fn dispatch_compaction(
     mut agents: Query<CompactionQuery, (With<ReadyToInfer>, Without<AwaitingCompaction>)>,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,
@@ -184,7 +184,7 @@ type CollectCompactionQuery = (
 /// source region. A provider error leaves the context untouched (best-effort).
 /// Either way the agent returns to `ReadyToInfer`. (Ported from the storage tail
 /// of `AgentEngine::compact_region`.)
-pub fn collect_compaction(
+pub(crate) fn collect_compaction(
     mut results: ResMut<CompactionResults>,
     mut agents: Query<CollectCompactionQuery, With<AwaitingCompaction>>,
     persist: Option<Res<crate::pipeline::PersistenceStage>>,
@@ -313,7 +313,7 @@ pub(crate) fn compaction_request(
 /// Regions an edge transform asked to LLM-compact after a transition, awaiting
 /// the compaction lane (drained by [`dispatch_edge_compact`]).
 #[derive(Component, Debug, Clone)]
-pub struct PendingEdgeCompact(pub Vec<String>);
+pub(crate) struct PendingEdgeCompact(pub Vec<String>);
 
 /// Whether a region kind is "stage-specific" - eligible for an edge transform to
 /// clear or compact. The always-preserved kinds (pinned identity, compaction
@@ -423,7 +423,7 @@ type EdgeCompactQuery = (
 /// agent `AwaitingCompaction`. If the agent has no compaction config, nothing to
 /// summarize, or no provider/permit, the request is dropped and the agent proceeds
 /// to inference un-compacted (memory-pressure compaction still applies later).
-pub fn dispatch_edge_compact(
+pub(crate) fn dispatch_edge_compact(
     mut agents: Query<EdgeCompactQuery, (With<ReadyToInfer>, Without<AwaitingCompaction>)>,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,

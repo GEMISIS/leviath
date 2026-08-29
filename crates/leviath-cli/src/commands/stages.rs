@@ -29,7 +29,7 @@ pub struct StagesArgs {
 }
 
 /// Execute `lev stages`.
-pub async fn execute(args: StagesArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: StagesArgs) -> anyhow::Result<()> {
     let stages = crate::runstate::read_stages_index(&args.run_id);
     if stages.is_empty() {
         anyhow::bail!(

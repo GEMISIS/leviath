@@ -3544,7 +3544,6 @@ fn infer_result_only(with_tools: bool) -> crate::components::InferenceResult {
             vec![]
         },
         tokens_used: 0,
-        timestamp: 0,
         cut_off_at: None,
     }
 }
@@ -3621,7 +3620,6 @@ fn process_response_counts_edits_by_path() {
                     call("bash", None),
                 ],
                 tokens_used: 0,
-                timestamp: 0,
                 cut_off_at: None,
             },
             StageProgress::default(),
@@ -4678,7 +4676,6 @@ fn infer_with(
             response: "r".to_string(),
             tool_calls: calls,
             tokens_used: 0,
-            timestamp: 0,
             cut_off_at: None,
         },
     )
@@ -5398,7 +5395,6 @@ async fn a_refused_submission_leaves_an_earlier_answer_alone() {
                     submit_call("o2", "not json at all"),
                 ],
                 tokens_used: 0,
-                timestamp: 0,
                 cut_off_at: None,
             },
             output_window(),
@@ -5712,7 +5708,6 @@ async fn dispatch_tools_refuses_arguments_that_fail_the_advertised_schema() {
             fcall("c2", "read_file", serde_json::json!({"path": "a.txt"})),
         ],
         tokens_used: 0,
-        timestamp: 0,
         cut_off_at: None,
     };
     let e = world
@@ -5757,7 +5752,6 @@ async fn dispatch_tools_skips_validation_when_the_schema_does_not_compile() {
         response: "r".to_string(),
         tool_calls: vec![fcall("c1", "typod", serde_json::json!({"whatever": true}))],
         tokens_used: 0,
-        timestamp: 0,
         cut_off_at: None,
     };
     let e = world
@@ -5803,7 +5797,6 @@ async fn dispatch_tools_validates_through_a_tool_alias() {
         response: "r".to_string(),
         tool_calls: vec![fcall("c1", canonical, serde_json::json!({}))],
         tokens_used: 0,
-        timestamp: 0,
         cut_off_at: None,
     };
     let e = world
@@ -5856,7 +5849,6 @@ async fn dispatch_tools_validates_an_mcp_style_schema() {
             ),
         ],
         tokens_used: 0,
-        timestamp: 0,
         cut_off_at: None,
     };
     let e = world
@@ -6716,7 +6708,6 @@ fn collect_tools_applies_and_loops_back_to_infer() {
                 response: "r".to_string(),
                 tool_calls: vec![tc("c1", "read")],
                 tokens_used: 0,
-                timestamp: 0,
                 cut_off_at: None,
             },
             AwaitingTools,
@@ -6982,7 +6973,6 @@ fn setup() -> StageSetup {
         context_layout: None,
         context_hide: Vec::new(),
         system_prompt: None,
-        output: None,
     }
 }
 
@@ -12976,7 +12966,6 @@ fn collect_tools_records_one_activity_per_call_with_error_detection() {
                 response: "r".to_string(),
                 tool_calls: vec![tc("c1", "read_file"), tc("c2", "write_file")],
                 tokens_used: 0,
-                timestamp: 0,
                 cut_off_at: None,
             },
             AwaitingTools,
@@ -14379,7 +14368,6 @@ fn spawn_after(world: &mut World, src: &str) -> Entity {
                 response: "the raw answer".to_string(),
                 tool_calls: vec![],
                 tokens_used: 7,
-                timestamp: 0,
                 cut_off_at: None,
             },
             hook_scripts(src, &["after_inference"]),
@@ -14657,7 +14645,6 @@ fn after_inference_sees_tool_call_names_but_cannot_change_them() {
                     thought_signature: None,
                 }],
                 tokens_used: 0,
-                timestamp: 0,
                 cut_off_at: None,
             },
             hook_scripts(
@@ -14693,7 +14680,6 @@ fn after_inference_skips_an_out_of_range_stage() {
                 response: "x".to_string(),
                 tool_calls: vec![],
                 tokens_used: 0,
-                timestamp: 0,
                 cut_off_at: None,
             },
             hook_scripts(
@@ -14723,7 +14709,6 @@ fn after_inference_skips_a_stage_that_declared_none() {
                 response: "x".to_string(),
                 tool_calls: vec![],
                 tokens_used: 0,
-                timestamp: 0,
                 cut_off_at: None,
             },
             hook_scripts(
@@ -14782,7 +14767,6 @@ fn spawn_tool_hooked(
                 response: String::new(),
                 tool_calls: calls,
                 tokens_used: 0,
-                timestamp: 0,
                 cut_off_at: None,
             },
             hook_scripts(src, &["on_tool_call"]),
@@ -14868,7 +14852,6 @@ fn on_tool_call_cannot_mark_its_own_calls_approved() {
                 response: String::new(),
                 tool_calls: vec![call("shell", serde_json::json!({"command": "ls"}))],
                 tokens_used: 0,
-                timestamp: 0,
                 cut_off_at: None,
             },
             crate::taint::TaintGate::new(leviath_core::taint::SecurityConfig::default()),
@@ -15069,7 +15052,6 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
                 response: String::new(),
                 tool_calls: vec![call("shell", serde_json::json!({}))],
                 tokens_used: 0,
-                timestamp: 0,
                 cut_off_at: None,
             },
             hook_scripts(
@@ -15092,7 +15074,6 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
                 response: String::new(),
                 tool_calls: vec![call("shell", serde_json::json!({}))],
                 tokens_used: 0,
-                timestamp: 0,
                 cut_off_at: None,
             },
             hook_scripts(
@@ -16956,7 +16937,6 @@ async fn dispatch_tools_refuses_a_call_whose_arguments_were_cut_off() {
             serde_json::json!("{\"path\": \"report.md\", \"content\": \"# Local LLM hardw"),
         )],
         tokens_used: 0,
-        timestamp: 0,
         cut_off_at: Some(24_000),
     };
     let e = world

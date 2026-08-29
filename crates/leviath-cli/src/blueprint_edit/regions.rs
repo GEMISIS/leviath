@@ -16,7 +16,7 @@ use super::{EditError, require_name};
 
 /// Whose regions: the agent's shared layout, or one stage's own.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RegionScope {
+pub(crate) enum RegionScope {
     /// `[context.regions]`.
     Shared,
     /// `[stages.<name>.context.regions]`.
@@ -25,7 +25,7 @@ pub enum RegionScope {
 
 impl RegionScope {
     /// The stage name, for [`ManifestDoc::regions`] and friends.
-    pub fn stage(&self) -> Option<&str> {
+    pub(crate) fn stage(&self) -> Option<&str> {
         match self {
             RegionScope::Shared => None,
             RegionScope::Stage(s) => Some(s),
@@ -35,7 +35,7 @@ impl RegionScope {
 
 /// The per-region keys the editor writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RegionField {
+pub(crate) enum RegionField {
     /// `kind` (never deleted: a region always has one).
     Kind,
     /// `budget = "N%"`, 0 to 100.
@@ -62,7 +62,7 @@ pub enum RegionField {
 
 /// A value for a [`RegionField`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RegionValue {
+pub(crate) enum RegionValue {
     /// For the text keys; empty deletes.
     Text(String),
     /// For the numeric keys; `None` deletes.
@@ -79,7 +79,7 @@ impl ManifestDoc {
     /// percentage on every model with a window worth having, and a new region
     /// has no reason to want one. The author can add a floor or a ceiling
     /// deliberately.
-    pub fn add_region(&mut self, scope: &RegionScope, name: &str) -> Result<(), EditError> {
+    pub(crate) fn add_region(&mut self, scope: &RegionScope, name: &str) -> Result<(), EditError> {
         require_name(name)?;
         let regions = self.regions_item_ensure(scope)?;
         let table = regions
@@ -101,7 +101,7 @@ impl ManifestDoc {
     /// Rename a region, rewriting the tool routing that named it: every
     /// stage's for a shared region (except stages with their own layout,
     /// whose routing names their own regions), that stage's for its own.
-    pub fn rename_region(
+    pub(crate) fn rename_region(
         &mut self,
         scope: &RegionScope,
         from: &str,
@@ -130,7 +130,11 @@ impl ManifestDoc {
 
     /// Delete a region, and stop routing tool results into it wherever the
     /// scope's routing did.
-    pub fn delete_region(&mut self, scope: &RegionScope, name: &str) -> Result<(), EditError> {
+    pub(crate) fn delete_region(
+        &mut self,
+        scope: &RegionScope,
+        name: &str,
+    ) -> Result<(), EditError> {
         let regions = self
             .regions_item_mut(scope)
             .ok_or_else(|| EditError::NoSuchRegion(name.to_string()))?;
@@ -145,7 +149,7 @@ impl ManifestDoc {
     }
 
     /// Write one key of a region.
-    pub fn set_region_field(
+    pub(crate) fn set_region_field(
         &mut self,
         scope: &RegionScope,
         name: &str,
@@ -220,7 +224,7 @@ impl ManifestDoc {
     /// Give a stage its own layout: a deep copy of the shared regions as they
     /// are now, so it starts from what it inherited. A stage that already
     /// has one is left alone.
-    pub fn create_stage_override(&mut self, stage: &str) -> Result<(), EditError> {
+    pub(crate) fn create_stage_override(&mut self, stage: &str) -> Result<(), EditError> {
         self.require_stage(stage)?;
         if self.regions_item(Some(stage)).is_some() {
             return Ok(());
@@ -246,7 +250,7 @@ impl ManifestDoc {
 
     /// Drop a stage's own layout, `[stages.<name>.context]` and everything in
     /// it, so it inherits the shared regions again.
-    pub fn remove_stage_override(&mut self, stage: &str) -> Result<(), EditError> {
+    pub(crate) fn remove_stage_override(&mut self, stage: &str) -> Result<(), EditError> {
         let table = self.stage_table_mut(stage)?;
         table.remove("context");
         Ok(())
@@ -254,7 +258,11 @@ impl ManifestDoc {
 
     /// Set a stage's default region for tool results; empty removes it (and
     /// the `tool_routing` table when nothing else keeps it).
-    pub fn set_tool_routing_default(&mut self, stage: &str, region: &str) -> Result<(), EditError> {
+    pub(crate) fn set_tool_routing_default(
+        &mut self,
+        stage: &str,
+        region: &str,
+    ) -> Result<(), EditError> {
         let stage_item = self
             .stage_item_mut(stage)
             .ok_or_else(|| EditError::NoSuchStage(stage.to_string()))?;
@@ -283,7 +291,7 @@ impl ManifestDoc {
 
     /// Route one tool's results to a region; an empty region stops routing
     /// it, tidying emptied `overrides`/`tool_routing` tables away.
-    pub fn set_tool_routing_override(
+    pub(crate) fn set_tool_routing_override(
         &mut self,
         stage: &str,
         tool: &str,

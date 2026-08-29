@@ -59,7 +59,7 @@ use tool_state::*;
 /// transposing two of them type-checks in some orders, and the compiler is the
 /// only thing that was ever going to notice.
 #[derive(Clone)]
-pub struct SpawnDeps<'a> {
+pub(crate) struct SpawnDeps<'a> {
     /// The daemon's tool service, which per-agent state is registered against.
     pub tool_service: &'a CliToolService,
     /// The resolved daemon configuration for this run.
@@ -89,7 +89,7 @@ pub struct SpawnDeps<'a> {
 /// caller-input regions weren't provided fails here. Use
 /// [`build_agent_for_reload`] on the recovery path, where the window is restored
 /// from a snapshot afterward and the gate must not re-fire.
-pub fn build_agent(
+pub(crate) fn build_agent(
     world: &mut World,
     deps: SpawnDeps<'_>,
     args: &SpawnArgs,
@@ -100,7 +100,7 @@ pub fn build_agent(
 /// Like [`build_agent`], but skips the required-at-spawn region gate - used by
 /// restart recovery, which reloads a run that already passed the gate when first
 /// spawned and whose context window is restored from a snapshot after this call.
-pub fn build_agent_for_reload(
+pub(crate) fn build_agent_for_reload(
     world: &mut World,
     deps: SpawnDeps<'_>,
     args: &SpawnArgs,

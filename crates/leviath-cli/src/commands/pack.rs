@@ -19,7 +19,7 @@ pub struct PackArgs {
 }
 
 /// Run `lev pack`: build a distributable bundle from an agent directory.
-pub async fn execute(args: PackArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: PackArgs) -> anyhow::Result<()> {
     execute_with_bundle(args, &|dir| AgentBundler::new().bundle(dir)).await
 }
 

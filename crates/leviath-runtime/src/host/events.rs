@@ -19,7 +19,7 @@ use leviath_core::interaction::InteractionRequest;
 /// (`Spawned`/`Status`/`Renamed`/`Tokens`/`Context`/`Completed`) are emitted by
 /// the host's change-detection pass as it drives the world;
 /// `StageTransition`/`ToolCallStarted`/`ToolCallFinished`/`Log` are pushed at
-/// the source by pipeline systems through [`WorldEventSink`]. Streamed over the
+/// the source by pipeline systems through `WorldEventSink`. Streamed over the
 /// control transport via `ControlRequest::Subscribe`.
 ///
 /// Deliberately *not* `#[non_exhaustive]`. A catch-all arm in the websocket
@@ -274,7 +274,7 @@ impl WorldEvent {
 /// systems that depend on it become no-ops.
 // `Resource` moved from `bevy_ecs::system` to `bevy_ecs::resource` in 0.19.
 #[derive(bevy_ecs::resource::Resource, Clone)]
-pub struct WorldEventSink(pub broadcast::Sender<WorldEvent>);
+pub(crate) struct WorldEventSink(pub broadcast::Sender<WorldEvent>);
 
 /// A short, stable status label for [`WorldEvent`]. Part of the daemon's wire
 /// contract (the REST WebSocket forwards it verbatim), so it comes from the one

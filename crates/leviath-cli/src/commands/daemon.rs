@@ -53,7 +53,7 @@ pub async fn send_shutdown(client: &ControlClient) -> anyhow::Result<()> {
 }
 
 /// The `lev daemon status` line for a `running` daemon hosting `run_count` agents.
-pub fn format_status(running: bool, run_count: usize) -> String {
+pub(crate) fn format_status(running: bool, run_count: usize) -> String {
     if !running {
         return "daemon not running".to_string();
     }

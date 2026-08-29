@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 
 /// Everything the terminal UIs remember, in one file.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UiState {
+pub(crate) struct UiState {
     /// `lev dash`.
     #[serde(default)]
     pub dashboard: DashboardUi,
@@ -48,7 +48,7 @@ pub struct UiState {
 
 /// What the dashboard remembers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DashboardUi {
+pub(crate) struct DashboardUi {
     /// Run ids whose sub-agents are folded away in the run list. A set, so the
     /// file is stable rather than reordering itself on every save.
     #[serde(default)]
@@ -81,7 +81,7 @@ pub struct DashboardUi {
 
 /// How one run's Context tree was left.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextUi {
+pub(crate) struct ContextUi {
     /// Regions whose entry list is folded away.
     #[serde(default)]
     pub collapsed_regions: BTreeSet<String>,
@@ -102,7 +102,7 @@ pub struct ContextUi {
 /// that and offers accordingly. A decline leaves no trace anywhere else, which
 /// is exactly why it has to leave one here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SetupUi {
+pub(crate) struct SetupUi {
     /// MCP servers offered by the import step and left unchecked, as
     /// `<source>:<name>`. Still listed next time, just not pre-selected.
     #[serde(default)]
@@ -123,7 +123,7 @@ pub struct SetupUi {
 /// One function so the write and the read cannot spell it differently - a
 /// decline recorded under one key and looked up under another is a memory that
 /// silently does nothing, and nothing about the UI would show it.
-pub fn mcp_decline_key(source: &str, name: &str) -> String {
+pub(crate) fn mcp_decline_key(source: &str, name: &str) -> String {
     format!("{source}:{name}")
 }
 
@@ -137,7 +137,7 @@ pub fn default_path() -> Option<PathBuf> {
 
 /// Read the state at `path`. A missing, unreadable or unparseable file is an
 /// empty state.
-pub fn load(path: &Path) -> UiState {
+pub(crate) fn load(path: &Path) -> UiState {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
@@ -148,7 +148,7 @@ pub fn load(path: &Path) -> UiState {
 ///
 /// Best effort: a UI that cannot write its memory still works, and a toast
 /// about it would be noise in the middle of whatever the person was doing.
-pub fn save(path: &Path, state: &UiState) {
+pub(crate) fn save(path: &Path, state: &UiState) {
     // A relative file name has an empty parent, which `create_dir_all` treats
     // as already there.
     let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new("")));
@@ -161,7 +161,7 @@ pub fn save(path: &Path, state: &UiState) {
 /// The dashboard and setup share a file and never run at once, but they do run
 /// in either order, and a whole-struct write built from a stale read would let
 /// the second one silently forget what the first recorded.
-pub fn update(path: &Path, edit: impl FnOnce(&mut UiState)) {
+pub(crate) fn update(path: &Path, edit: impl FnOnce(&mut UiState)) {
     let mut state = load(path);
     edit(&mut state);
     save(path, &state);

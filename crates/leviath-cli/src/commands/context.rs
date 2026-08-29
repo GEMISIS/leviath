@@ -22,7 +22,7 @@ pub struct ContextArgs {
 }
 
 /// Execute `lev context`.
-pub async fn execute(args: ContextArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: ContextArgs) -> anyhow::Result<()> {
     let history = crate::runstate::context_history(&args.run_id);
     if history.is_empty() {
         anyhow::bail!(

@@ -47,18 +47,18 @@ thread_local! {
 }
 
 /// Record `entity` as the agent being processed right now.
-pub fn enter(entity: Entity) {
+pub(crate) fn enter(entity: Entity) {
     CURRENT.with(|c| c.set(Some(entity)));
 }
 
 /// Forget the current agent - call this when a per-agent loop finishes, so a
 /// later panic in agent-independent code isn't blamed on the last agent seen.
-pub fn clear() {
+pub(crate) fn clear() {
     CURRENT.with(|c| c.set(None));
 }
 
 /// The agent recorded by the last [`enter`] that has not been [`clear`]ed.
-pub fn current() -> Option<Entity> {
+pub(crate) fn current() -> Option<Entity> {
     CURRENT.with(Cell::get)
 }
 
@@ -68,7 +68,7 @@ pub fn current() -> Option<Entity> {
 /// the schedule returns and fails each marked agent, exactly as it would for a
 /// panic caught on the driver thread.
 #[derive(Component, Debug, Clone)]
-pub struct PanickedInParallel {
+pub(crate) struct PanickedInParallel {
     /// The panic payload, rendered as text.
     pub message: String,
 }
@@ -85,7 +85,11 @@ pub struct PanickedInParallel {
 /// `body` is a `&mut dyn FnMut` rather than a generic so every caller shares one
 /// instantiation - the workspace gates a hard 100%, and a generic would give
 /// each call site its own panic arm to cover.
-pub fn run_agent_parallel(entity: Entity, par_commands: &ParallelCommands, body: &mut dyn FnMut()) {
+pub(crate) fn run_agent_parallel(
+    entity: Entity,
+    par_commands: &ParallelCommands,
+    body: &mut dyn FnMut(),
+) {
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
     if let Err(payload) = caught {
         let message = leviath_core::panic_message(payload.as_ref());

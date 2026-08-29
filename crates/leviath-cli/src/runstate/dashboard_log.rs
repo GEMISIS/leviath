@@ -26,7 +26,7 @@ pub(super) fn dashboard_log_path_from(env_override: Option<&str>) -> PathBuf {
 /// override, and `Dashboard` carries an injected log path (a temp dir under
 /// `make_test_dashboard`) so no dashboard-input test ever appends to the real
 /// `~/.leviath/dashboard.log`.
-pub fn dashboard_log_path() -> PathBuf {
+pub(crate) fn dashboard_log_path() -> PathBuf {
     match std::env::var("LEVIATH_DASHBOARD_LOG_PATH") {
         Ok(path) => dashboard_log_path_from(Some(&path)),
         Err(_) => dashboard_log_path_from(None),
@@ -35,7 +35,8 @@ pub fn dashboard_log_path() -> PathBuf {
 
 /// Append a timestamped line to the persistent dashboard activity log at the
 /// default [`dashboard_log_path`]. Silently ignores I/O errors - best-effort.
-pub fn append_dashboard_log(msg: &str) {
+#[cfg(test)]
+pub(crate) fn append_dashboard_log(msg: &str) {
     append_dashboard_log_to(&dashboard_log_path(), msg);
 }
 
@@ -45,7 +46,7 @@ pub fn append_dashboard_log(msg: &str) {
 /// The path is a parameter so `Dashboard` can inject a test-isolated log
 /// location, guaranteeing no dashboard-input test appends to the user's real
 /// `~/.leviath/dashboard.log` (see [`dashboard_log_path`]).
-pub fn append_dashboard_log_to(path: &Path, msg: &str) {
+pub(crate) fn append_dashboard_log_to(path: &Path, msg: &str) {
     append_dashboard_log_capped(path, msg, DASHBOARD_LOG_MAX_BYTES);
 }
 

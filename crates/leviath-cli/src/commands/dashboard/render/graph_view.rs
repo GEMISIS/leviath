@@ -396,14 +396,12 @@ mode = "output"
             title: None,
             model: None,
             parent_id: None,
-            depth: 0,
             started_at: 1000,
             last_progress_at: None,
             runtime_secs: 0,
             clock_now: 0,
             graph: Some(stage_graph()),
             accepts_messages: true,
-            taint_summary: vec![],
         }
     }
 

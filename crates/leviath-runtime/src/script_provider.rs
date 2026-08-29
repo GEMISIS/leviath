@@ -133,7 +133,7 @@ impl ScriptProviderLayer {
     /// The seam that makes the "no usable HTTPS client" path reachable: reqwest
     /// cannot be made to fail from the outside, so a test has to hand in the
     /// failure.
-    pub fn with_executor(
+    pub(crate) fn with_executor(
         dir: PathBuf,
         overrides: HashMap<String, ScriptProviderSpec>,
         default_caps: HashMap<String, ModelCapabilityOverride>,
@@ -238,7 +238,7 @@ impl ScriptProviderLayer {
     /// script on disk". Somebody wrote its name, its key and its base URL down.
     /// Leaving those unprimed is what made a working `list_models` go unasked
     /// the moment its provider stopped being the machine's default.
-    pub fn configured_names(&self) -> Vec<String> {
+    pub(crate) fn configured_names(&self) -> Vec<String> {
         (self.config)().overrides.keys().cloned().collect()
     }
 
@@ -254,7 +254,7 @@ impl ScriptProviderLayer {
     /// Deliberately not folded into `ProviderRegistry::provider_names`, whose
     /// contract is "registered natively" and whose callers rely on every name
     /// it returns being `get`-able without compiling anything.
-    pub fn candidate_names(&self) -> Vec<String> {
+    pub(crate) fn candidate_names(&self) -> Vec<String> {
         let mut names: Vec<String> = (self.config)().overrides.keys().cloned().collect();
         // A directory that cannot be read is not an error here: it means no
         // convention-named scripts, which is the same answer as an empty one.
@@ -287,7 +287,7 @@ impl ScriptProviderLayer {
     /// compile it. Both get a working provider and the later `insert` wins -
     /// wasted work, never a wrong answer, and it self-corrects on the next
     /// lookup because entries are validated by mtime.
-    pub fn get_or_load(&self, name: &str) -> Option<Arc<dyn Provider>> {
+    pub(crate) fn get_or_load(&self, name: &str) -> Option<Arc<dyn Provider>> {
         // One read per lookup, used for both the path and the settings, so a
         // config that changes mid-load cannot resolve one file and configure
         // another.

@@ -1,9 +1,9 @@
 //! Observability as an ECS system: watch the components every other system
 //! already writes and narrate them into the installed [`TelemetrySink`].
 //!
-//! The pipeline's collect systems leave pure-data [`ActivityRecord`]s on the
+//! The pipeline's collect systems leave pure-data `ActivityRecord`s on the
 //! agent (an inference landed, a tool batch ran, a compaction finished);
-//! [`observe_lifecycle`] runs once per schedule pass near the end of the tick,
+//! `observe_lifecycle` runs once per schedule pass near the end of the tick,
 //! turns those plus the agent's own state into [`TelemetryEvent`]s, and emits
 //! them. Ordering in the tick chain is load-bearing twice over: the system
 //! must run *before* `sync_tool_stages` (which consumes the transient
@@ -30,7 +30,7 @@ pub struct Telemetry(pub Arc<dyn TelemetrySink>);
 /// applied it and drained into events by [`observe_lifecycle`]. Carries only
 /// what the collect site knows; run/stage identity is added at drain time.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ActivityRecord {
+pub(crate) enum ActivityRecord {
     /// An inference call finished (either way).
     Inference {
         /// The provider that answered, after fallback resolution.
@@ -75,11 +75,11 @@ pub enum ActivityRecord {
 /// collect systems treat it as optional and skip recording until then (an
 /// agent's first inference cannot land before the observer has run once).
 #[derive(Component, Debug, Default)]
-pub struct StageActivity(pub Vec<ActivityRecord>);
+pub(crate) struct StageActivity(pub Vec<ActivityRecord>);
 
 /// The observer's per-agent memory: what it has already narrated.
 #[derive(Component, Debug, Clone, Default)]
-pub struct TelemetryState {
+pub(crate) struct TelemetryState {
     /// A `RunStarted` was emitted and no `RunCompleted` yet.
     run_open: bool,
     /// The stage the observer last reported as entered.
@@ -131,7 +131,7 @@ type LifecycleQuery = (
 /// agent's first sighting standing in for the marker-less initial stage);
 /// a re-entry into the same stage index keeps the stage open rather than
 /// closing and reopening it, matching how the stage ledger accrues.
-pub fn observe_lifecycle(
+pub(crate) fn observe_lifecycle(
     telemetry: Res<Telemetry>,
     mut agents: Query<LifecycleQuery>,
     mut commands: Commands,

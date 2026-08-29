@@ -20,7 +20,7 @@ pub const PROVIDER_KEYS: &[&str] = &["anthropic", "openai", "google", "openroute
 /// A thin adapter over `leviath_sys::keychain`: the platform work, the feature
 /// gate, and the "no store available" fallback all live there, so this is only
 /// the trait impl that lets the rest of the CLI stay generic over the backend.
-pub struct KeychainStore {
+pub(crate) struct KeychainStore {
     service: String,
 }
 
@@ -30,7 +30,7 @@ impl KeychainStore {
     /// Availability is [`store_for`]'s job, not this one's: it probes once and
     /// reports a missing keychain there, rather than letting every individual
     /// key read fail separately with an error that reads like a missing key.
-    pub fn new(service: &str) -> Self {
+    pub(crate) fn new(service: &str) -> Self {
         Self {
             service: service.to_string(),
         }
@@ -61,7 +61,7 @@ pub fn store_for(kind: CredentialStoreKind) -> Resolved {
 
 /// The resolved backend: `Ok(None)` for the file store, `Ok(Some(_))` for a
 /// working keychain, `Err` for a keychain that was asked for but is unreachable.
-pub type Resolved = Result<Option<Box<dyn CredentialStore>>, String>;
+pub(crate) type Resolved = Result<Option<Box<dyn CredentialStore>>, String>;
 
 /// Core of [`store_for`] with the availability check injected.
 ///

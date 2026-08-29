@@ -19,7 +19,7 @@ use crate::ContextWindow;
 /// region literally named `task`, it seeds the first pinned region instead.
 /// Pure over the window (no engine/entity), so both the imperative engine and
 /// the ECS pipeline's spawner can share it.
-pub fn init_window_seeded(
+pub(crate) fn init_window_seeded(
     window: &mut ContextWindow,
     blueprint: &Blueprint,
     seeds: &HashMap<String, String>,
@@ -145,7 +145,7 @@ fn task_region_name(blueprint: &Blueprint) -> Option<String> {
 }
 
 /// Initialize a [`ContextWindow`] seeding only the task text - the thin
-/// back-compat wrapper over [`init_window_seeded`] used by callers that carry a
+/// back-compat wrapper over `init_window_seeded` used by callers that carry a
 /// single task string (the imperative engine and existing tests).
 pub fn init_window(window: &mut ContextWindow, blueprint: &Blueprint, task: &str) {
     let seeds = HashMap::from([("task".to_string(), task.to_string())]);
@@ -156,7 +156,7 @@ pub fn init_window(window: &mut ContextWindow, blueprint: &Blueprint, task: &str
 /// carried-over region's existing content by name. Pure over the window (no
 /// engine/entity), so both the imperative engine and the ECS pipeline's
 /// stage-entry can share it.
-pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
+pub(crate) fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
     let mut new_regions = Vec::new();
     let mut kept: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for region_def in &layout.regions {
@@ -277,7 +277,10 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
 /// `task`, which is the caller's.
 ///
 /// [`STAGE_INSTRUCTIONS_REGION`]: leviath_core::layout::STAGE_INSTRUCTIONS_REGION
-pub fn ensure_stage_instructions_region(window: &mut ContextWindow, prompts: &[Option<String>]) {
+pub(crate) fn ensure_stage_instructions_region(
+    window: &mut ContextWindow,
+    prompts: &[Option<String>],
+) {
     let declared = leviath_core::layout::STAGE_INSTRUCTIONS_REGION;
     if window.get_region(declared).is_some() {
         return;

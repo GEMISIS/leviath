@@ -237,7 +237,7 @@ pub(super) enum ConfirmAction {
 
 /// Display status for agents in the dashboard.
 #[derive(Debug, Clone, PartialEq)]
-pub enum AgentDisplayStatus {
+pub(crate) enum AgentDisplayStatus {
     /// Working.
     Active,
     /// Blocked on a person answering.
@@ -248,11 +248,8 @@ pub enum AgentDisplayStatus {
     CompleteInteractive,
     /// Stopped by a failure, carrying its message.
     Error(String),
-    /// Loaded but not currently doing anything.
-    Idle,
-    /// Paused by the user; resumable with `r` (or `lev resume`). Distinct from
-    /// `Idle` because a paused run is deliberate unfinished business, not a run
-    /// that merely has not ticked yet.
+    /// Paused by the user; resumable with `r` (or `lev resume`): deliberate
+    /// unfinished business, not a run that merely has not ticked yet.
     Paused,
     /// Stopped from outside, by `lev kill` or a shutting-down daemon.
     Cancelled,
@@ -273,7 +270,6 @@ impl std::fmt::Display for AgentDisplayStatus {
             Self::Complete => write!(f, "{}COMPLETE", GLYPH_COMPLETE),
             Self::CompleteInteractive => write!(f, "{}COMPLETE", GLYPH_COMPLETE),
             Self::Error(msg) => write!(f, "{}ERROR: {}", GLYPH_ERROR, msg),
-            Self::Idle => write!(f, "{}IDLE", GLYPH_PENDING),
             Self::Paused => write!(f, "{}PAUSED", GLYPH_PENDING),
             Self::Cancelled => write!(f, "⊘CANCEL"),
             Self::Stale => write!(f, "{}STALE", GLYPH_ERROR),
@@ -291,8 +287,8 @@ impl AgentDisplayStatus {
     }
 
     /// Whether the run can be killed. Anything that has not finished can be -
-    /// `Idle` and `Stale` included: skipping those would leave a run the
-    /// dashboard shows as live with no way to get rid of it.
+    /// `Stale` included: skipping it would leave a run the dashboard shows as
+    /// live with no way to get rid of it.
     pub(super) fn is_killable(&self) -> bool {
         !self.is_terminal()
     }
@@ -303,7 +299,6 @@ impl AgentDisplayStatus {
             Self::Waiting => C_WARN,
             Self::Complete | Self::CompleteInteractive => C_SUCCESS,
             Self::Error(_) => C_ERROR,
-            Self::Idle => C_DIM,
             Self::Paused => C_WARN,
             Self::Cancelled => C_DIM,
             Self::Stale => C_WARN,
@@ -313,7 +308,7 @@ impl AgentDisplayStatus {
 
 /// An agent displayed in the dashboard.
 #[derive(Debug, Clone)]
-pub struct DashboardAgent {
+pub(crate) struct DashboardAgent {
     /// The run id, which is also what every action against this row quotes.
     pub id: String,
     /// The blueprint's name, as the manifest declares it.
@@ -373,8 +368,6 @@ pub struct DashboardAgent {
     pub model: Option<String>,
     /// Parent agent ID (if this is a sub-agent)
     pub parent_id: Option<String>,
-    /// Depth in the sub-agent tree (0 = root)
-    pub depth: usize,
     /// Unix timestamp when the run started (for elapsed display)
     pub started_at: i64,
     /// Unix timestamp of the run's last recorded progress (`None` before the
@@ -400,9 +393,6 @@ pub struct DashboardAgent {
     pub(super) graph: Option<std::sync::Arc<crate::tui::flowgraph::StageGraph>>,
     /// Whether the current stage accepts mid-run user messages
     pub accepts_messages: bool,
-    /// Per-region taint levels (region_name, taint_level_string).
-    /// Empty when taint tracking is disabled or not yet populated.
-    pub taint_summary: Vec<(String, String)>,
 }
 
 /// Log entry for the dashboard log panel.
@@ -643,7 +633,6 @@ mod tests {
                 .to_string()
                 .contains("boom")
         );
-        assert!(AgentDisplayStatus::Idle.to_string().contains("IDLE"));
         assert!(AgentDisplayStatus::Paused.to_string().contains("PAUSED"));
         assert!(AgentDisplayStatus::Cancelled.to_string().contains("CANCEL"));
         assert!(AgentDisplayStatus::Stale.to_string().contains("STALE"));
@@ -659,8 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_display_status_color_idle_and_cancelled() {
-        assert_eq!(AgentDisplayStatus::Idle.color(), C_DIM);
+    fn agent_display_status_color_cancelled() {
         assert_eq!(AgentDisplayStatus::Cancelled.color(), C_DIM);
         // Stale is a warning, not a finished state: it wants attention.
         assert_eq!(AgentDisplayStatus::Stale.color(), C_WARN);
@@ -749,14 +737,12 @@ mod tests {
             title: Some("My Task".to_string()),
             model: None,
             parent_id: None,
-            depth: 0,
             started_at: 1000,
             last_progress_at: None,
             runtime_secs: 0,
             clock_now: 0,
             graph: None,
             accepts_messages: true,
-            taint_summary: vec![],
         };
         let cloned = agent.clone();
         assert_eq!(cloned.id, "run-1");

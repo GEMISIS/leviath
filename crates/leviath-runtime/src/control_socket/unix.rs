@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 pub type ControlId = PathBuf;
 
 /// The client end of a control connection.
-pub type ClientStream = tokio::net::UnixStream;
+pub(crate) type ClientStream = tokio::net::UnixStream;
 
 /// The server end of an accepted control connection.
 pub type ServerStream = tokio::net::UnixStream;
@@ -144,7 +144,7 @@ fn peer_is_ours(peer: Option<u32>, ours: u32) -> bool {
 }
 
 /// Connect to the daemon's control socket at `id`.
-pub async fn connect(id: &Path) -> std::io::Result<ClientStream> {
+pub(crate) async fn connect(id: &Path) -> std::io::Result<ClientStream> {
     tokio::net::UnixStream::connect(id).await
 }
 

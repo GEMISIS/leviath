@@ -39,32 +39,32 @@ use crate::config::ToolPolicy;
 /// Injected rather than called directly so every failure arm is testable
 /// without a live MCP connection or a compiled Rhai engine. Mirrors
 /// [`crate::daemon::seed_command::SeedCommandRunner`].
-pub type SeedToolRunner =
+pub(crate) type SeedToolRunner =
     Arc<dyn Fn(&str, &serde_json::Value) -> Result<String, String> + Send + Sync>;
 
 /// How tool seeds are executed for one spawn.
 #[derive(Clone)]
-pub struct SeedToolPolicy {
+pub(crate) struct SeedToolPolicy {
     /// The executor.
     pub runner: SeedToolRunner,
 }
 
 impl SeedToolPolicy {
     /// A policy over an explicit runner.
-    pub fn new(runner: SeedToolRunner) -> Self {
+    pub(crate) fn new(runner: SeedToolRunner) -> Self {
         Self { runner }
     }
 
-    /// A policy that runs nothing - the reload/restore path, where the window is
-    /// restored from a snapshot and re-running seeds would overwrite it.
-    pub fn disabled() -> Self {
+    /// A policy that runs nothing, for tests that spawn without seed tools.
+    #[cfg(test)]
+    pub(crate) fn disabled() -> Self {
         Self {
             runner: Arc::new(|name, _| Err(format!("tool seeds are not resolved here ('{name}')"))),
         }
     }
 
     /// Run `call`, or report why it did not.
-    pub fn run(&self, call: &SeedToolCall) -> Result<String, String> {
+    pub(crate) fn run(&self, call: &SeedToolCall) -> Result<String, String> {
         (self.runner)(&call.name, &call.args)
     }
 }
@@ -73,7 +73,7 @@ impl SeedToolPolicy {
 ///
 /// Separated from the running so the decision is testable on its own, and so
 /// the refusal text is written once rather than at each call site.
-pub fn seed_policy_refusal(name: &str, policy: ToolPolicy) -> Option<String> {
+pub(crate) fn seed_policy_refusal(name: &str, policy: ToolPolicy) -> Option<String> {
     match policy {
         ToolPolicy::Allow => None,
         ToolPolicy::Deny => Some(format!(
@@ -92,12 +92,12 @@ pub fn seed_policy_refusal(name: &str, policy: ToolPolicy) -> Option<String> {
 /// Headed with the tool's name, following the `--- <path> ---` headings the
 /// `files` and `glob` seeds already use, so a region seeded from several
 /// sources reads the same however it was filled.
-pub fn seed_block(name: &str, result: &str) -> String {
+pub(crate) fn seed_block(name: &str, result: &str) -> String {
     format!("--- {name} ---\n{}", result.trim_end())
 }
 
 /// Join the blocks of one region's seed.
-pub fn join_blocks(blocks: Vec<String>) -> Option<String> {
+pub(crate) fn join_blocks(blocks: Vec<String>) -> Option<String> {
     (!blocks.is_empty()).then(|| blocks.join("\n\n"))
 }
 
@@ -105,7 +105,7 @@ pub fn join_blocks(blocks: Vec<String>) -> Option<String> {
 ///
 /// Borrowed from the spawn path rather than rebuilt, so a seed and a mid-run
 /// call cannot disagree about what the user configured.
-pub struct SeedToolPermissions<'a> {
+pub(crate) struct SeedToolPermissions<'a> {
     /// `--allow` / `--ask` / `--deny` / `--yolo` for this run.
     pub launch: &'a HashMap<String, ToolPolicy>,
     /// The entry stage's `[stages.<name>.tool_permissions]`.
@@ -120,7 +120,7 @@ pub struct SeedToolPermissions<'a> {
 
 impl SeedToolPermissions<'_> {
     /// The resolved policy for `name`.
-    pub fn resolve(&self, name: &str, is_builtin: bool) -> ToolPolicy {
+    pub(crate) fn resolve(&self, name: &str, is_builtin: bool) -> ToolPolicy {
         crate::tools::resolve_policy(
             name,
             is_builtin,
@@ -137,7 +137,7 @@ impl SeedToolPermissions<'_> {
 ///
 /// Cloned into the closure rather than borrowed, because the runner outlives
 /// the borrow of the spawn locals it is built from.
-pub struct SeedToolContext {
+pub(crate) struct SeedToolContext {
     /// The agent's built-in tools, over its workdir.
     pub builtins: Arc<leviath_tools::BuiltinTools>,
     /// Which names dispatch to `builtins` rather than to MCP.
@@ -158,11 +158,14 @@ pub struct SeedToolContext {
 /// A closure rather than [`SeedToolPermissions`] itself, so the spawn path can
 /// hand over the layered resolution it already built without this module
 /// learning its shape or borrowing its four maps for the runner's lifetime.
-pub type SeedPolicyResolver = Arc<dyn Fn(&str, bool) -> ToolPolicy + Send + Sync>;
+pub(crate) type SeedPolicyResolver = Arc<dyn Fn(&str, bool) -> ToolPolicy + Send + Sync>;
 
 /// Build the runner a real spawn uses.
 ///
-pub fn production_runner(ctx: SeedToolContext, resolve: SeedPolicyResolver) -> SeedToolRunner {
+pub(crate) fn production_runner(
+    ctx: SeedToolContext,
+    resolve: SeedPolicyResolver,
+) -> SeedToolRunner {
     Arc::new(move |name: &str, args: &serde_json::Value| {
         let is_builtin = ctx.builtin_names.contains(name);
         // The same three fences the tool lane applies to a mid-run call, in

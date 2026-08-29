@@ -15,7 +15,7 @@
 use crate::components::ContextWindow;
 
 /// Whether `name` is the runtime self-report tool.
-pub fn is_runtime_info_tool(name: &str) -> bool {
+pub(crate) fn is_runtime_info_tool(name: &str) -> bool {
     name == "runtime_info"
 }
 
@@ -24,7 +24,7 @@ pub fn is_runtime_info_tool(name: &str) -> bool {
 /// A struct rather than a dozen arguments because the caller assembles it from
 /// six different components, and a positional list of that length is one
 /// transposition away from reporting the stage index as the iteration count.
-pub struct RuntimeFacts<'a> {
+pub(crate) struct RuntimeFacts<'a> {
     /// The `lev` version this run is executing under.
     pub version: &'a str,
     /// The run's id, as it appears in `lev ps` and on disk.
@@ -53,7 +53,10 @@ pub struct RuntimeFacts<'a> {
 ///
 /// Pure over [`RuntimeFacts`] so every field can be asserted without building a
 /// world: the caller's job is to gather, this one's is to shape.
-pub fn describe_runtime(facts: &RuntimeFacts<'_>, window: &ContextWindow) -> serde_json::Value {
+pub(crate) fn describe_runtime(
+    facts: &RuntimeFacts<'_>,
+    window: &ContextWindow,
+) -> serde_json::Value {
     let used = window.calculate_tokens();
     let (stage_iterations, stage_max) = facts.stage_iterations;
     let (provider, model) = facts.provider_model;
@@ -96,7 +99,7 @@ pub fn describe_runtime(facts: &RuntimeFacts<'_>, window: &ContextWindow) -> ser
 }
 
 /// Answer one `runtime_info` call.
-pub fn handle_runtime_info(facts: &RuntimeFacts<'_>, window: &ContextWindow) -> String {
+pub(crate) fn handle_runtime_info(facts: &RuntimeFacts<'_>, window: &ContextWindow) -> String {
     let value = describe_runtime(facts, window);
     // Indented to match what the `leviath-tools` environment tools return, so
     // the family reads the same however it is dispatched. Serializing a `Value`

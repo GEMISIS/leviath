@@ -147,7 +147,7 @@ const OFFLINE_TABLE_LIMIT: usize = 20;
 /// made issue #202 hard to diagnose, so the two sources stay in two arrays, each
 /// honest about where it came from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OfflineRun {
+pub(crate) struct OfflineRun {
     /// The run id.
     pub run_id: String,
     /// The status recorded on disk, verbatim.
@@ -201,7 +201,7 @@ pub struct OfflineRun {
 ///
 /// `live` is `None` when the daemon gave no answer, in which case every run on
 /// disk is reported (there is no live set to subtract) and none is judged.
-pub fn offline_runs(
+pub(crate) fn offline_runs(
     on_disk: Vec<RunMeta>,
     live: Option<&std::collections::HashSet<String>>,
     now: i64,
@@ -260,7 +260,7 @@ fn offline_status_cell(run: &OfflineRun) -> String {
 }
 
 /// Render the `NOT RUNNING` block. `None` when there is nothing to show.
-pub fn format_offline(runs: &[OfflineRun], now: i64) -> Option<String> {
+pub(crate) fn format_offline(runs: &[OfflineRun], now: i64) -> Option<String> {
     if runs.is_empty() {
         return None;
     }
@@ -485,7 +485,7 @@ fn health_footer(health: &DaemonHealth) -> Option<String> {
 ///
 /// `now` is unix seconds, passed in rather than read here so the output is
 /// deterministic under test.
-pub fn format_runs(
+pub(crate) fn format_runs(
     runs: &[RunListEntry],
     finished: &[RunListEntry],
     health: &DaemonHealth,

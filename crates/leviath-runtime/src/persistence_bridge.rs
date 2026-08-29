@@ -18,7 +18,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 /// One agent snapshot to write to disk.
-pub struct PersistJob {
+pub(crate) struct PersistJob {
     /// The run id (its directory name under the runs dir).
     pub run_id: String,
     /// The `meta.json` contents.
@@ -58,7 +58,7 @@ pub struct PersistJob {
 }
 
 /// One message on the persistence lane.
-pub enum PersistMsg {
+pub(crate) enum PersistMsg {
     /// A whole-agent snapshot (`meta.json` + `context.json` + the archive step).
     /// Boxed: a snapshot dwarfs an `Append` and the channel moves these by value.
     Snapshot(Box<PersistJob>),
@@ -107,7 +107,7 @@ pub enum PersistMsg {
 /// [`flush_and_stop`](crate::world::PipelineWorld::flush_and_stop) still joins
 /// it - and still acking appends, so a dispatch-side barrier never waits on a
 /// dead channel.
-pub async fn persistence_worker(
+pub(crate) async fn persistence_worker(
     runs_dir: Option<PathBuf>,
     mut jobs: UnboundedReceiver<PersistMsg>,
 ) {

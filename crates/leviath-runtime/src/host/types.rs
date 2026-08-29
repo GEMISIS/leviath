@@ -21,7 +21,7 @@ use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
 /// The parameters for spawning an agent into the world. The runtime doesn't know
 /// how to load blueprints or resolve tools - that policy lives in the
-/// [`Spawner`] the daemon installs - so this just carries the raw request.
+/// `Spawner` the daemon installs - so this just carries the raw request.
 ///
 /// `Debug` is hand-written (below) so `callback_secret` cannot reach a log
 /// line; `Serialize` keeps it, because the secret has to cross the control
@@ -33,7 +33,7 @@ pub struct SpawnArgs {
     /// Path to the agent manifest directory or bundle.
     pub blueprint_path: String,
     /// The task prompt. Seeded into the region keyed `task` (see
-    /// [`crate::context_setup::init_window_seeded`]); a matching `regions`
+    /// `crate::context_setup::init_window_seeded`); a matching `regions`
     /// entry, if present, overrides it.
     pub task: String,
     /// Literal seed content for named caller-input regions, keyed by the
@@ -298,7 +298,8 @@ pub struct DaemonHealth {
 /// loads the blueprint, resolves stages/tools, spawns into the world, and
 /// returns the new entity (the host records the run-id mapping). Returns `Err`
 /// with a human-readable message on failure.
-pub type Spawner = Box<dyn FnMut(&mut PipelineWorld, &SpawnArgs) -> Result<Entity, String> + Send>;
+pub(crate) type Spawner =
+    Box<dyn FnMut(&mut PipelineWorld, &SpawnArgs) -> Result<Entity, String> + Send>;
 
 /// The daemon-installed function that pages a previously-unloaded run back into
 /// the world from its on-disk state: given a run id, it reloads the agent (its
@@ -307,7 +308,7 @@ pub type Spawner = Box<dyn FnMut(&mut PipelineWorld, &SpawnArgs) -> Result<Entit
 /// control/sub-agent op targeting a run that isn't currently in memory pages it
 /// in first via the host's internal resolve-or-reload step. Installed with
 /// [`super::WorldHost::set_reloader`].
-pub type Reloader = Box<dyn FnMut(&mut PipelineWorld, &str) -> Option<AgentId> + Send>;
+pub(crate) type Reloader = Box<dyn FnMut(&mut PipelineWorld, &str) -> Option<AgentId> + Send>;
 
 /// The daemon-installed last resort for cancelling a run the world cannot hold:
 /// given a run id, it forces that run's **on-disk** state to a terminal status
@@ -321,7 +322,7 @@ pub type Reloader = Box<dyn FnMut(&mut PipelineWorld, &str) -> Option<AgentId> +
 /// The runtime has no notion of the on-disk layout, so the daemon supplies the
 /// writer. Installed with [`super::WorldHost::set_force_terminator`]; without one, a
 /// cancel that misses in the world simply misses (the prior behavior).
-pub type ForceTerminator = Box<dyn FnMut(&str) -> bool + Send>;
+pub(crate) type ForceTerminator = Box<dyn FnMut(&str) -> bool + Send>;
 
 /// The daemon-installed hook run just before a terminal agent's entity is
 /// despawned (reaped). It receives the world and the entity while both are still
@@ -337,13 +338,13 @@ pub type Reaper = Box<dyn FnMut(&mut PipelineWorld, Entity) + Send>;
 /// `'static` (it must clone anything it needs from the `SpawnArgs`). Installed
 /// with [`super::WorldHost::set_spawn_preprocessor`]; when none is set, spawns proceed
 /// straight to the spawner.
-pub type SpawnPreprocessor = Box<
+pub(crate) type SpawnPreprocessor = Box<
     dyn Fn(&SpawnArgs) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send,
 >;
 
 /// A world-access request from an agent's tool lane. The sub-agent tools
 /// (`spawn_agent`/`check_agent`/`send_to_agent`/`kill_agent`) need the world and
-/// the [`Spawner`], which only the host holds - the tool lane runs async, off the
+/// the `Spawner`, which only the host holds - the tool lane runs async, off the
 /// world. Each carries a oneshot reply, so the (sequential) tool lane blocks on
 /// the host applying it, mirroring the interaction hub.
 pub enum SubAgentOp {

@@ -27,14 +27,14 @@ use leviath_core::floor_char_boundary;
 /// offset lands on a line boundary and never splits a multi-byte character;
 /// [`String::from_utf8_lossy`] guards the theoretical torn-read anyway.
 #[derive(Debug, Default)]
-pub struct StageTail {
+pub(crate) struct StageTail {
     /// Bytes already surfaced from stage `i`, indexed by stage.
     offsets: Vec<usize>,
 }
 
 impl StageTail {
     /// A tail positioned at the start of a run with no stages seen yet.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -45,7 +45,7 @@ impl StageTail {
     /// production passes [`crate::runstate::runs_dir`]. Stages are created lazily
     /// as output first arrives, in ascending order, so scanning stops at the
     /// first stage index that neither exists on disk nor has a recorded offset.
-    pub fn pump(&mut self, runs_dir: &Path, run_id: &str) -> String {
+    pub(crate) fn pump(&mut self, runs_dir: &Path, run_id: &str) -> String {
         let mut out = String::new();
         let mut idx = 0;
         loop {
@@ -87,7 +87,7 @@ fn stage_output_path(runs_dir: &Path, run_id: &str, idx: usize) -> PathBuf {
 /// Returns an empty vec for empty input (the caller emits nothing rather than a
 /// zero-length chunk). The common case - output well under one frame - returns a
 /// single slice.
-pub fn split_chunks(text: &str) -> Vec<&str> {
+pub(crate) fn split_chunks(text: &str) -> Vec<&str> {
     let mut chunks = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {

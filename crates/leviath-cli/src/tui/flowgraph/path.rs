@@ -360,8 +360,8 @@ condition = "llm_choice"
         );
         assert_eq!(live.workers, None);
         // An empty path has nothing to be current.
-        assert_eq!(path_overlay(&[], &[], RunPhase::Idle, 0).current, None);
-        assert_eq!(path_overlay(&[], &[], RunPhase::Idle, 0).iteration, 0);
+        assert_eq!(path_overlay(&[], &[], RunPhase::Paused, 0).current, None);
+        assert_eq!(path_overlay(&[], &[], RunPhase::Paused, 0).iteration, 0);
     }
 
     #[test]

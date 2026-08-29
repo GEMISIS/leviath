@@ -6,7 +6,7 @@
 //! server is connected **on first use**, deduped by its config signature, and
 //! its tools reused by every agent that declares it. Connection is async and is
 //! driven from every spawn path: the spawn preprocessor for top-level and
-//! sub-agent spawns (both run in the serve loop), [`McpPool::warm_recovered`] for
+//! sub-agent spawns (both run in the serve loop), `McpPool::warm_recovered` for
 //! runs reloaded on daemon restart, and a detached warm task for fan-out workers.
 //! So the pool is warm by the time an agent's tools are advertised.
 
@@ -90,7 +90,7 @@ pub const DEFAULT_MCP_IDLE_DISCONNECT_SECS: u64 = 60;
 
 impl McpPool {
     /// Build a pool over `shared`, reserving `reserved` names from advertisement.
-    pub fn new(shared: Arc<Mutex<ToolExecutor>>, reserved: HashSet<String>) -> Self {
+    pub(crate) fn new(shared: Arc<Mutex<ToolExecutor>>, reserved: HashSet<String>) -> Self {
         Self {
             shared,
             reserved,
@@ -104,19 +104,19 @@ impl McpPool {
 
     /// How long a per-agent server may sit unleased before disconnection.
     /// `0` disables it.
-    pub fn with_idle_disconnect_secs(mut self, secs: u64) -> Self {
+    pub(crate) fn with_idle_disconnect_secs(mut self, secs: u64) -> Self {
         self.idle_disconnect = std::time::Duration::from_secs(secs);
         self
     }
 
     /// Allow these credential-shaped variables in MCP `${VAR}` headers.
-    pub fn with_env_allowlist(mut self, allow: Vec<String>) -> Self {
+    pub(crate) fn with_env_allowlist(mut self, allow: Vec<String>) -> Self {
         self.allow_env_vars = allow;
         self
     }
 
     /// Read and write MCP grants through `kind`'s backend.
-    pub fn with_credential_store(mut self, kind: leviath_core::CredentialStoreKind) -> Self {
+    pub(crate) fn with_credential_store(mut self, kind: leviath_core::CredentialStoreKind) -> Self {
         self.credential_store = kind;
         self
     }
@@ -145,7 +145,7 @@ impl McpPool {
     /// them where the user asked for them to be kept - otherwise the first
     /// refresh after a keychain migration would put a fresh refresh token back
     /// on disk.
-    pub fn for_daemon_with(
+    pub(crate) fn for_daemon_with(
         shared_mcp: Arc<Mutex<ToolExecutor>>,
         config_servers: &[MCPServerConfig],
         credential_store: leviath_core::CredentialStoreKind,
@@ -174,7 +174,7 @@ impl McpPool {
     /// the global config servers, connected once by `ToolRegistry::build`).
     /// Seeded servers are global: their lifecycle belongs to the daemon, so
     /// they are exempt from lease-driven idle disconnection.
-    pub fn seed(&self, config: &MCPServerConfig, defs: Vec<Tool>) {
+    pub(crate) fn seed(&self, config: &MCPServerConfig, defs: Vec<Tool>) {
         let sig = signature(config);
         self.leases
             .lock()
@@ -196,7 +196,7 @@ impl McpPool {
     /// blueprint: the spawner, the restart reloader, and the fan-out worker
     /// spawner. The matching release is [`Self::release_run`], from the reap
     /// hook.
-    pub fn lease_blueprint(&self, blueprint_path: &str, run_id: &str) {
+    pub(crate) fn lease_blueprint(&self, blueprint_path: &str, run_id: &str) {
         let Ok(toml) = std::fs::read_to_string(blueprint_path) else {
             return;
         };
@@ -225,7 +225,7 @@ impl McpPool {
     /// zero get an idle-disconnect scheduled (when a runtime is available and
     /// `idle_disconnect` is non-zero); a new lease during the grace window
     /// bumps the generation and turns the pending disconnect into a no-op.
-    pub fn release_run(self: &Arc<Self>, run_id: &str) {
+    pub(crate) fn release_run(self: &Arc<Self>, run_id: &str) {
         let zeroed = self.release_run_bookkeeping(run_id);
         if self.idle_disconnect.is_zero() {
             return;
@@ -268,7 +268,12 @@ impl McpPool {
     /// cached defs (so the next spawn reconnects lazily), take its client out
     /// of the shared executor, and shut it down - which is what actually ends
     /// a stdio server's child process. Returns whether it disconnected.
-    pub async fn disconnect_if_still_idle(&self, sig: &str, name: &str, generation: u64) -> bool {
+    pub(crate) async fn disconnect_if_still_idle(
+        &self,
+        sig: &str,
+        name: &str,
+        generation: u64,
+    ) -> bool {
         {
             let mut table = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
             let still_idle = table
@@ -310,7 +315,7 @@ impl McpPool {
     /// advertised tool defs. A connection failure logs and returns no defs (the
     /// agent simply doesn't get that server's tools); it is not cached, so a later
     /// spawn retries.
-    pub async fn ensure(&self, config: &MCPServerConfig) -> Vec<Tool> {
+    pub(crate) async fn ensure(&self, config: &MCPServerConfig) -> Vec<Tool> {
         let sig = signature(config);
         if let Some(defs) = self
             .connected
@@ -392,7 +397,7 @@ impl McpPool {
     /// Connect every server in `servers` (idempotent). Takes `Arc<Self>` + owned
     /// `servers` so it can be `tokio::spawn`ed directly as a detached warm task
     /// (e.g. by the fan-out spawner) without a wrapping closure.
-    pub async fn ensure_all(self: Arc<Self>, servers: Vec<MCPServerConfig>) {
+    pub(crate) async fn ensure_all(self: Arc<Self>, servers: Vec<MCPServerConfig>) {
         for server in servers {
             self.ensure(&server).await;
         }
@@ -404,7 +409,7 @@ impl McpPool {
     /// only the shared connection is lost across a restart). Blueprint paths are
     /// collected synchronously, then connected - no fs iterator is held across an
     /// `.await`.
-    pub async fn warm_recovered(&self, runs_dir: &std::path::Path) {
+    pub(crate) async fn warm_recovered(&self, runs_dir: &std::path::Path) {
         use leviath_core::run_meta::RunStatus;
         let Ok(entries) = std::fs::read_dir(runs_dir) else {
             return;
@@ -441,7 +446,7 @@ impl McpPool {
     /// Derived from the same cache rather than stored separately: every def
     /// filed under a config's signature came from that config's server, so a
     /// second map would only be a chance for the two to disagree.
-    pub fn cached_owners_for(
+    pub(crate) fn cached_owners_for(
         &self,
         configs: &[MCPServerConfig],
     ) -> leviath_runtime::pipeline::ToolOwners {
@@ -459,7 +464,7 @@ impl McpPool {
     /// The cached defs for every config in `configs` (pool must already be warm
     /// for them - call [`Self::ensure`] first). Unknown/unconnected configs
     /// contribute nothing. This is the sync read the spawner uses.
-    pub fn cached_defs_for(&self, configs: &[MCPServerConfig]) -> Vec<Tool> {
+    pub(crate) fn cached_defs_for(&self, configs: &[MCPServerConfig]) -> Vec<Tool> {
         let cache = self
             .connected
             .lock()
@@ -477,7 +482,7 @@ impl McpPool {
 /// CLI-side because `leviath-core` cannot depend on `leviath-mcp` (that crate
 /// already depends on core - a cycle). Returns an empty vec when the section is
 /// absent or malformed; a malformed entry is skipped with a warning.
-pub fn parse_blueprint_mcp_servers(manifest_toml: &str) -> Vec<MCPServerConfig> {
+pub(crate) fn parse_blueprint_mcp_servers(manifest_toml: &str) -> Vec<MCPServerConfig> {
     // `toml::from_str`, not `manifest_toml.parse::<toml::Value>()`. In toml 1.x
     // `FromStr for Value` parses a single *value*, not a document - so a real
     // manifest starting with `[agent]` reads as an array literal followed by

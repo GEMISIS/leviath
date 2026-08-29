@@ -46,7 +46,7 @@ pub struct Provider {
 }
 
 /// Every provider the wizard offers, in the order it offers them.
-pub fn providers() -> Vec<Provider> {
+pub(crate) fn providers() -> Vec<Provider> {
     vec![
         Provider {
             id: "anthropic",
@@ -125,7 +125,7 @@ pub const OLLAMA_MAX_CONCURRENT_INFERENCES: usize = 1;
 /// Note `openrouter_api_key` and `ollama_base_url` sit at the top level of
 /// `Config` while the other three live under `[providers]` - a historical split
 /// this function hides from everything else.
-pub fn stored_credential(config: &Config, id: &str) -> Option<String> {
+pub(crate) fn stored_credential(config: &Config, id: &str) -> Option<String> {
     match id {
         "anthropic" => config.providers.anthropic_api_key.clone(),
         "openai" => config.providers.openai_api_key.clone(),
@@ -137,7 +137,7 @@ pub fn stored_credential(config: &Config, id: &str) -> Option<String> {
 }
 
 /// Write a provider's credential into a config. `None` clears it.
-pub fn set_credential(config: &mut Config, id: &str, value: Option<String>) {
+pub(crate) fn set_credential(config: &mut Config, id: &str, value: Option<String>) {
     match id {
         "anthropic" => config.providers.anthropic_api_key = value,
         "openai" => config.providers.openai_api_key = value,
@@ -152,7 +152,7 @@ pub fn set_credential(config: &mut Config, id: &str, value: Option<String>) {
 
 /// Whether a provider counts as configured in this config: it has a credential,
 /// or it needs none and is switched on.
-pub fn is_configured(config: &Config, id: &str) -> bool {
+pub(crate) fn is_configured(config: &Config, id: &str) -> bool {
     match id {
         "claude-code" => config.providers.claude_code_enabled,
         // Ollama is always usable at its default endpoint, but "configured"
@@ -173,7 +173,7 @@ pub fn is_configured(config: &Config, id: &str) -> bool {
 /// Kept as a named wrapper rather than replacing every call site, so this
 /// module's UI code reads the same and there is one place to look if the
 /// wizard ever needs a different presentation.
-pub fn redact(key: &str) -> String {
+pub(crate) fn redact(key: &str) -> String {
     leviath_core::redact(key)
 }
 

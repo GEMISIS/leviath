@@ -158,7 +158,7 @@ impl Default for RetryPolicy {
 }
 
 /// A unit of inference work the dispatch system hands to the worker pool.
-pub struct InferenceJob {
+pub(crate) struct InferenceJob {
     /// The agent this inference is for.
     pub entity: Entity,
     /// The provider to call (already resolved for the agent's model).
@@ -332,7 +332,7 @@ pub(crate) fn backoff_after(
 
 /// The completed result of an [`InferenceJob`], applied on a later tick by the
 /// inference-collect system.
-pub struct InferenceOutcome {
+pub(crate) struct InferenceOutcome {
     /// The agent the result belongs to.
     pub entity: Entity,
     /// The provider's response, or the error it failed with.
@@ -356,7 +356,7 @@ pub struct InferenceOutcome {
 ///
 /// Meant to be `tokio::spawn`ed by the dispatch system. If the results receiver
 /// has been dropped (the world is shutting down) the send is a harmless no-op.
-pub async fn run_inference_job(
+pub(crate) async fn run_inference_job(
     job: InferenceJob,
     results: UnboundedSender<InferenceOutcome>,
     wake: Arc<Notify>,

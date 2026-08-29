@@ -255,7 +255,7 @@ impl SegmentKey {
 ///
 /// Empty means the line is not grantable at all: either nothing in it runs a
 /// program, or some part of it could not be read.
-pub fn command_keys(command: &str) -> Vec<String> {
+pub(crate) fn command_keys(command: &str) -> Vec<String> {
     let Some(segments) = tokenize(command) else {
         return Vec::new();
     };
@@ -313,7 +313,7 @@ fn keys_from_segments(segments: &[Segment]) -> Vec<String> {
 ///
 /// `&dyn Fn` rather than a generic: one instantiation, so the coverage gate sees
 /// one set of regions instead of one per call site.
-pub fn all_covered(
+pub(crate) fn all_covered(
     keys: &[String],
     safe: &dyn Fn(&str) -> bool,
     granted: &dyn Fn(&str) -> bool,
@@ -333,7 +333,7 @@ pub fn all_covered(
 /// Conservative on an unparseable line: a line this cannot read is treated as
 /// writing, because the alternative is deciding it does not on evidence that
 /// was already too weak to name its programs.
-pub fn writes_a_file(command: &str) -> bool {
+pub(crate) fn writes_a_file(command: &str) -> bool {
     let Some(segments) = tokenize(command) else {
         return true;
     };
@@ -347,7 +347,7 @@ pub fn writes_a_file(command: &str) -> bool {
 
 /// Where a line's redirects go, as far as this can read them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WriteTargets {
+pub(crate) enum WriteTargets {
     /// Every literal path the line redirects a write to.
     Known(Vec<String>),
     /// The line has a `>` in it and cannot be read as commands: a heredoc, a
@@ -374,7 +374,7 @@ pub enum WriteTargets {
 /// /tmp/pwned` then wrote outside the tree where `write_file` on the same path
 /// is refused. Such a line is now [`WriteTargets::Unreadable`] when it holds a
 /// `>` at all, and the caller refuses it rather than guessing.
-pub fn write_targets(command: &str) -> WriteTargets {
+pub(crate) fn write_targets(command: &str) -> WriteTargets {
     let Some(segments) = tokenize(command) else {
         return match command.contains('>') {
             true => WriteTargets::Unreadable,
@@ -395,7 +395,7 @@ pub fn write_targets(command: &str) -> WriteTargets {
 
 /// The literal paths of [`write_targets`], with an unreadable line yielding
 /// none. For callers that report rather than refuse.
-pub fn write_target_paths(command: &str) -> Vec<String> {
+pub(crate) fn write_target_paths(command: &str) -> Vec<String> {
     match write_targets(command) {
         WriteTargets::Known(paths) => paths,
         WriteTargets::Unreadable => Vec::new(),
@@ -413,7 +413,7 @@ pub fn write_target_paths(command: &str) -> Vec<String> {
 /// wrote in their own config, where naming `cat` means every `cat`. A grant made
 /// at a prompt still matches exactly, so approving `git diff` never covers
 /// `git push`.
-pub fn program_of(key: &str) -> &str {
+pub(crate) fn program_of(key: &str) -> &str {
     match key.split_once(' ') {
         Some((program, _)) => program,
         None => key,
@@ -432,7 +432,7 @@ pub fn program_of(key: &str) -> &str {
 /// pre-approvable write. A write is approved by a person, per target, or not at
 /// all - which is what the safe list's own admission rule has always said and
 /// could not previously enforce.
-pub fn is_valid_prefix(entry: &str) -> bool {
+pub(crate) fn is_valid_prefix(entry: &str) -> bool {
     !entry.starts_with('>') && command_keys(entry) == [format!("{KEY_PREFIX}{entry}")]
 }
 

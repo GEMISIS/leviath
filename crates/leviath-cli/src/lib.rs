@@ -4,32 +4,32 @@
 //! ships the `lev` binary rather than a library anyone calls, so the case for
 //! exempting it was real - and the case against turned out to be stronger: the
 //! `pub` surface is what the integration tests drive, and a wire type like
-//! [`commands::serve::ServerEvent`] is read by clients that never see this
+//! `commands::serve::ServerEvent` is read by clients that never see this
 //! source. An undocumented field there is a gap for somebody.
 //!
 //! What the rule asks for is a sentence saying something the name does not. A
 //! clap `Args` field already carries its user-facing text for `--help`; the
 //! struct around it says which command it belongs to.
 
-pub mod approvals;
-pub mod blueprint_edit;
-pub mod bundled;
+pub(crate) mod approvals;
+pub(crate) mod blueprint_edit;
+pub(crate) mod bundled;
 pub mod commands;
 pub mod config;
 pub mod credentials;
 pub mod daemon;
 pub mod dispatch;
-pub mod held_checkpoints;
-pub mod lint;
+pub(crate) mod held_checkpoints;
+pub(crate) mod lint;
 pub mod logging;
-pub mod read_path_report;
-pub mod render;
+pub(crate) mod read_path_report;
+pub(crate) mod render;
 pub mod runstate;
-pub mod shell_keys;
+pub(crate) mod shell_keys;
 #[cfg(test)]
 mod test_support;
-pub mod tool_inventory;
-pub mod tools;
-pub mod tui;
+pub(crate) mod tool_inventory;
+pub(crate) mod tools;
+pub(crate) mod tui;
 pub mod ui_state;
 pub mod workdir_guard;

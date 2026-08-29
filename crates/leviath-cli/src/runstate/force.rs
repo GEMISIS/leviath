@@ -5,7 +5,7 @@ use super::*;
 
 /// The outcome of forcing a run to a terminal state on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ForceCancelOutcome {
+pub(crate) enum ForceCancelOutcome {
     /// The run was live on disk and is now recorded terminal.
     Terminated,
     /// The run was already finished; nothing was written.
@@ -19,14 +19,14 @@ pub enum ForceCancelOutcome {
 impl ForceCancelOutcome {
     /// Whether the id named a run at all - i.e. whether the cancel had a target,
     /// regardless of whether it needed to write anything.
-    pub fn found_run(&self) -> bool {
+    pub(crate) fn found_run(&self) -> bool {
         !matches!(self, Self::NoSuchRun)
     }
 }
 
 /// Force a run's on-disk metadata to `Cancelled`, in the runs dir resolved from
 /// the environment. See [`force_cancel_in`].
-pub fn force_cancel(run_id: &str) -> ForceCancelOutcome {
+pub(crate) fn force_cancel(run_id: &str) -> ForceCancelOutcome {
     force_cancel_in(&run_dir(run_id), leviath_core::duration::now_secs())
 }
 
@@ -41,7 +41,7 @@ pub fn force_cancel(run_id: &str) -> ForceCancelOutcome {
 /// A directory whose `meta.json` is missing or unparseable still gets a minimal
 /// `Cancelled` record written: such a run is otherwise skipped by `list_runs`,
 /// which makes it invisible *and* permanent.
-pub fn force_cancel_in(run_dir: &Path, now: i64) -> ForceCancelOutcome {
+pub(crate) fn force_cancel_in(run_dir: &Path, now: i64) -> ForceCancelOutcome {
     force_terminal_in(run_dir, RunStatus::Cancelled, None, now)
 }
 
@@ -53,7 +53,7 @@ pub fn force_cancel_in(run_dir: &Path, now: i64) -> ForceCancelOutcome {
 /// terminal, so that placeholder went on claiming the run was alive for ever,
 /// showing up in `lev ps` and the dashboard with nothing behind it (issue #190).
 /// Recording the failure where the placeholder is turns it into an answer.
-pub fn force_error_in(run_dir: &Path, message: &str, now: i64) -> ForceCancelOutcome {
+pub(crate) fn force_error_in(run_dir: &Path, message: &str, now: i64) -> ForceCancelOutcome {
     force_terminal_in(run_dir, RunStatus::Error, Some(message.to_string()), now)
 }
 

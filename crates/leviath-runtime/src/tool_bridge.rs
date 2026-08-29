@@ -49,7 +49,7 @@ use crate::inference_pool::expect_permit;
 /// The future produced by a boxed tool-execution closure: resolves to
 /// `(tool_call_id, result)` pairs - the same shape the engine's tool executors
 /// already return.
-pub type ToolExecFuture = Pin<Box<dyn Future<Output = Vec<(String, String)>> + Send>>;
+pub(crate) type ToolExecFuture = Pin<Box<dyn Future<Output = Vec<(String, String)>> + Send>>;
 
 /// A boxed, per-agent tool-execution closure. Built by the dispatch system so it
 /// captures that agent's own tool registry, workdir, and policy; run once by the
@@ -149,12 +149,12 @@ impl ToolLaneStats {
     }
 
     /// Batches waiting for lane capacity.
-    pub fn queued(&self) -> usize {
+    pub(crate) fn queued(&self) -> usize {
         self.queued.load(Ordering::Relaxed)
     }
 
     /// Batches holding a permit and running.
-    pub fn busy(&self) -> usize {
+    pub(crate) fn busy(&self) -> usize {
         self.busy.load(Ordering::Relaxed)
     }
 
@@ -164,7 +164,7 @@ impl ToolLaneStats {
     }
 
     /// The lane's concurrency cap.
-    pub fn workers(&self) -> usize {
+    pub(crate) fn workers(&self) -> usize {
         self.workers.load(Ordering::Relaxed)
     }
 
@@ -181,7 +181,7 @@ impl ToolLaneStats {
     /// Whether every unit of capacity is taken and batches are waiting behind
     /// them.
     #[must_use]
-    pub fn is_saturated(&self) -> bool {
+    pub(crate) fn is_saturated(&self) -> bool {
         self.busy() >= self.workers() && self.queued() > 0
     }
 }
@@ -237,7 +237,7 @@ impl ToolLane {
     /// [`Self::narrow`] hands the extra capacity back, so a single historical
     /// wedge does not raise the daemon's peak concurrency (and with it, peak
     /// memory) for the rest of its life.
-    pub fn relieve(&self, extra: usize) -> usize {
+    pub(crate) fn relieve(&self, extra: usize) -> usize {
         if extra == 0 {
             return 0;
         }
@@ -253,7 +253,7 @@ impl ToolLane {
     /// this can never stall a batch that is running or block waiting for one to
     /// finish - a busy lane just gives back fewer (possibly zero) permits, and
     /// the caller tries again on a later healthy cycle.
-    pub fn narrow(&self, upto: usize) -> usize {
+    pub(crate) fn narrow(&self, upto: usize) -> usize {
         if upto == 0 {
             return 0;
         }

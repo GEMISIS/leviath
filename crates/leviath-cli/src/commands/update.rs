@@ -89,7 +89,7 @@ doing it.";
 
 /// What to do about the binary.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BinaryStep {
+pub(crate) enum BinaryStep {
     /// Run these, argv-style, in order, stopping at the first failure.
     ///
     /// A sequence rather than one command because a package manager will not
@@ -105,7 +105,7 @@ pub enum BinaryStep {
 ///
 /// Built before anything happens and rendered before anything happens, so the
 /// report, the JSON and the actions can never disagree about what was planned.
-pub struct UpdatePlan {
+pub(crate) struct UpdatePlan {
     /// How this copy was installed.
     pub method: InstallMethod,
     /// The binary step.
@@ -123,7 +123,7 @@ pub struct UpdatePlan {
 /// Joined with `&&` because that is both how the sequence behaves (each
 /// command only runs if the one before it succeeded) and what a user would
 /// paste into a shell to do it themselves.
-pub fn render_commands(commands: &[Vec<String>]) -> String {
+pub(crate) fn render_commands(commands: &[Vec<String>]) -> String {
     commands
         .iter()
         .map(|argv| argv.join(" "))
@@ -133,7 +133,7 @@ pub fn render_commands(commands: &[Vec<String>]) -> String {
 
 /// The upgrade step for an install method: the commands to run, or the reason
 /// there are none.
-pub fn binary_step(method: &InstallMethod) -> BinaryStep {
+pub(crate) fn binary_step(method: &InstallMethod) -> BinaryStep {
     match method {
         // `brew update` first, every time. Homebrew upgrades against the tap
         // metadata it already has, so a formula published minutes ago is
@@ -183,7 +183,7 @@ pub fn binary_step(method: &InstallMethod) -> BinaryStep {
 }
 
 /// Work out everything the command would do, without doing any of it.
-pub fn plan(args: &UpdateArgs, env: &UpdateEnv) -> UpdatePlan {
+pub(crate) fn plan(args: &UpdateArgs, env: &UpdateEnv) -> UpdatePlan {
     let method = detect(
         &env.exe,
         env.home.as_deref(),
@@ -226,7 +226,7 @@ fn changing(plan: &UpdatePlan) -> Vec<&(&'static BundledAgent, AgentAction)> {
 ///
 /// Pure, so the tests assert the text exactly - everything that varies between
 /// machines is already in the [`UpdatePlan`].
-pub fn format_plan(plan: &UpdatePlan, version: &str) -> String {
+pub(crate) fn format_plan(plan: &UpdatePlan, version: &str) -> String {
     let mut out = format!(
         "\nlev {version}, installed with {}\n\n",
         plan.method.describe()
@@ -284,7 +284,7 @@ pub fn format_plan(plan: &UpdatePlan, version: &str) -> String {
 
 /// The plan as JSON. Built by hand, like `lev tools` and `lev doctor`, so the
 /// shape is explicit and does not move when a type gains a field.
-pub fn plan_json(
+pub(crate) fn plan_json(
     plan: &UpdatePlan,
     version: &str,
     latest: &latest::LatestCheck,
@@ -378,7 +378,7 @@ pub struct UpdateArgs {
 /// Injected rather than called directly so the tests assert *which* command
 /// would run without spawning anything. Mirrors the `BrowserOpener` and
 /// `SeedCommandRunner` seams.
-pub type CommandRunner = Arc<dyn Fn(&[String]) -> anyhow::Result<()> + Send + Sync>;
+pub(crate) type CommandRunner = Arc<dyn Fn(&[String]) -> anyhow::Result<()> + Send + Sync>;
 
 /// What to make of an upgrade command a caller ran with its output captured
 /// rather than letting it draw on a terminal.
@@ -428,7 +428,7 @@ fn last_line(bytes: &[u8]) -> Option<String> {
 /// has no terminal, and which questions a flag answers on the user's behalf -
 /// and, for a blueprint they edited, which ones no flag answers - is something
 /// the tests have to be able to prove rather than describe.
-pub type Confirm = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+pub(crate) type Confirm = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// The real I/O `lev update` depends on, injected so the command logic is
 /// testable without a package manager, a terminal, or the real home directory.
@@ -456,7 +456,7 @@ pub struct UpdateEnv {
     /// switch for turning the check off - an air-gapped install passes one that
     /// declines, and every caller renders that as "can't tell" already.
     pub latest: latest::ReleaseFetcher,
-    /// The migrations to consider, in order. Production passes [`MIGRATIONS`].
+    /// The migrations to consider, in order. Production passes `MIGRATIONS`.
     pub migrations: &'static [Migration],
 }
 
@@ -474,7 +474,7 @@ impl UpdateEnv {
     /// is a symlink into the Cellar, and the Cellar path is the only place the
     /// formula name - and so the channel - is written down, so the link has to
     /// be followed before [`detect`] can read anything off it.
-    pub fn for_planning() -> Self {
+    pub(crate) fn for_planning() -> Self {
         Self::real(
             std::sync::Arc::new(refuse_to_run),
             std::sync::Arc::new(say_no),
@@ -487,7 +487,7 @@ impl UpdateEnv {
     /// API route answers from a cache and refreshes elsewhere, so a fetcher
     /// that declines is the honest thing to hand it rather than one it is
     /// trusted not to call.
-    pub fn for_planning_offline() -> Self {
+    pub(crate) fn for_planning_offline() -> Self {
         Self {
             latest: std::sync::Arc::new(decline_update_check),
             ..Self::for_planning()
@@ -508,14 +508,14 @@ impl UpdateEnv {
     /// from its own cache, and an apply that blocked on a release feed would
     /// turn a step that runs a package manager into one that first waits on
     /// GitHub.
-    pub fn for_applying(runner: CommandRunner) -> Self {
+    pub(crate) fn for_applying(runner: CommandRunner) -> Self {
         Self {
             latest: std::sync::Arc::new(decline_update_check),
             ..Self::real(runner, std::sync::Arc::new(say_no))
         }
     }
 
-    /// [`Self::real`], with the update check switched off when the config says
+    /// `Self::real`, with the update check switched off when the config says
     /// so.
     ///
     /// Declining rather than skipping: every caller already renders "could not
@@ -542,7 +542,7 @@ impl UpdateEnv {
     /// answer; refusing to answer is not, and a `lev update` that failed
     /// outright because it could not locate its own binary would be strictly
     /// less useful than one that says so.
-    pub fn real(runner: CommandRunner, confirm: Confirm) -> Self {
+    pub(crate) fn real(runner: CommandRunner, confirm: Confirm) -> Self {
         let home = dirs::home_dir();
         // A path that cannot be read, or cannot be canonicalized, is used as
         // whatever it came out as. An empty one detects as `Unknown`.
@@ -766,11 +766,11 @@ pub fn execute_with(args: &UpdateArgs, env: &UpdateEnv, version: &str) -> anyhow
 }
 
 mod detect;
-pub mod latest;
+pub(crate) mod latest;
 mod migrate;
 
-pub use detect::{Channel, InstallMethod, brew_prefix, detect};
-pub use migrate::{ConfigState, MIGRATIONS, Migration};
+pub(crate) use detect::{Channel, InstallMethod, brew_prefix, detect};
+pub(crate) use migrate::{ConfigState, MIGRATIONS, Migration};
 use migrate::{load_config, migrate_config};
 
 #[cfg(test)]

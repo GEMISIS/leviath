@@ -66,7 +66,7 @@ pub struct SubAgentChildren {
 /// so the reflection is distinct from fan-out waiting
 /// ([`FanOutWaiting`](crate::fanout::FanOutWaiting)).
 #[derive(Component, Debug, Clone)]
-pub struct AwaitingInteraction;
+pub(crate) struct AwaitingInteraction;
 
 /// Marker: auto-approve this agent's taint-gate blocks instead of raising a
 /// gate prompt.
@@ -76,7 +76,7 @@ pub struct AwaitingInteraction;
 /// tool-policy `--yolo` wildcard does not cover, so without this a headless run -
 /// e.g. one driven over the Agent Client Protocol, where no human can answer -
 /// would block forever on a gate no one resolves. When present,
-/// [`dispatch_tools`](crate::pipeline::dispatch_tools) still evaluates the gate
+/// `dispatch_tools` still evaluates the gate
 /// (so an over-cleared call is recorded in the audit trail as
 /// [`YoloAutoApprove`](leviath_core::taint::GateDecisionSource::YoloAutoApprove))
 /// but auto-approves the call instead of raising a prompt - enforcement is
@@ -100,7 +100,7 @@ pub struct OutputValidators {
     /// Which of them threw, so the run can say a script it needed did not work.
     ///
     /// Recorded here rather than handed back through
-    /// [`crate::output_tool::handle_output_tool`], which answers the model and
+    /// `crate::output_tool::handle_output_tool`, which answers the model and
     /// has no third channel to spare. The component that holds the validators is
     /// the thing that knows one failed, and interior mutability is what lets it
     /// say so from a `&` borrow on the tool path.
@@ -126,12 +126,12 @@ impl OutputValidators {
 
     /// Note that `script` could not be used, and answer whether this is the
     /// first time - so a caller logs it once rather than once per retry.
-    pub fn note_broken(&self, script: &str) -> bool {
+    pub(crate) fn note_broken(&self, script: &str) -> bool {
         leviath_core::sync::lock(&self.broken).insert(script.to_string())
     }
 
     /// The scripts noted broken, in a stable order.
-    pub fn broken_names(&self) -> Vec<String> {
+    pub(crate) fn broken_names(&self) -> Vec<String> {
         leviath_core::sync::lock(&self.broken)
             .iter()
             .cloned()
@@ -146,7 +146,7 @@ impl OutputValidators {
 /// interaction hub exactly like a tool approval does, so an unattended run
 /// would park at the first one forever - the same dead end a blocking tool
 /// approval poses for a headless run, reached a different way. When present,
-/// [`dispatch_interaction_point`](crate::interaction_points::dispatch_interaction_point)
+/// `dispatch_interaction_point`
 /// still publishes the document to its region (so the decision is inspectable
 /// afterwards) but resolves the point as approved.
 #[derive(Component, Debug, Clone, Copy, Default)]
@@ -218,7 +218,7 @@ impl AgentStatus {
     /// An error's message does not survive the round trip - the label never
     /// carried it - so this returns the variant with an empty one. Match on
     /// what the status *is*; the message is on the event that carried it.
-    pub fn from_label(label: &str) -> Option<Self> {
+    pub(crate) fn from_label(label: &str) -> Option<Self> {
         Some(match label {
             "idle" => Self::Idle,
             "active" => Self::Active,
@@ -282,7 +282,7 @@ impl StageHookScripts {
     /// Returns `None` rather than erroring on a miss: spawn already refused a
     /// blueprint whose script was unreadable or did not define what it was
     /// named for, so a miss here means the stage simply has no such hook.
-    pub fn script_for(
+    pub(crate) fn script_for(
         &self,
         stage: &leviath_core::Stage,
         hook: &str,
@@ -306,7 +306,7 @@ impl StageHookScripts {
 /// Stores the result of an LLM inference call, including the response
 /// and any tool calls that need to be executed.
 #[derive(Component, Debug, Clone)]
-pub struct InferenceResult {
+pub(crate) struct InferenceResult {
     /// The model's response text
     pub response: String,
 
@@ -315,9 +315,6 @@ pub struct InferenceResult {
 
     /// Tokens used in this inference
     pub tokens_used: usize,
-
-    /// Timestamp of this inference
-    pub timestamp: i64,
 
     /// Output tokens the reply had reached when the provider cut it off at
     /// the output cap (`finish_reason = length`); `None` when the reply ended
@@ -328,7 +325,7 @@ pub struct InferenceResult {
 
 /// A tool call requested by the model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
+pub(crate) struct ToolCall {
     /// Tool identifier
     pub tool_id: String,
 
@@ -373,12 +370,12 @@ impl MessageInbox {
     /// arrived, and deliberately carry no priority: nothing that sends one
     /// has a reason to reorder, and a priority field nobody sets is a field
     /// every reader of the inbox has to rule out first.
-    pub fn push(&mut self, msg: AgentMessage) {
+    pub(crate) fn push(&mut self, msg: AgentMessage) {
         self.messages.push(msg);
     }
 
     /// Drain all messages from the inbox.
-    pub fn drain_all(&mut self) -> Vec<AgentMessage> {
+    pub(crate) fn drain_all(&mut self) -> Vec<AgentMessage> {
         std::mem::take(&mut self.messages)
     }
 }
@@ -945,7 +942,6 @@ mod tests {
                 thought_signature: None,
             }],
             tokens_used: 100,
-            timestamp: 99999,
             cut_off_at: None,
         };
         assert_eq!(ir.response, "Hello");

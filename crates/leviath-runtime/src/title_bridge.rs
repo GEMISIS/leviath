@@ -23,7 +23,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::inference_pool::InferencePermit;
 
 /// One agent's title-generation call.
-pub struct TitleJob {
+pub(crate) struct TitleJob {
     /// The agent whose run is being titled.
     pub entity: Entity,
     /// The provider resolved for the title model.
@@ -41,7 +41,7 @@ pub struct TitleJob {
 
 /// The completed result of a [`TitleJob`]: the model's raw reply, or the
 /// provider error the call failed with.
-pub struct TitleOutcome {
+pub(crate) struct TitleOutcome {
     /// The agent the title belongs to.
     pub entity: Entity,
     /// The raw model reply (sanitized by the collect system), or the error.
@@ -74,7 +74,7 @@ pub struct TitleOutcome {
 /// Its `job_timeout` is the outer bound: the permit must be released within a
 /// fixed time even when the provider's own timer is missing (script providers)
 /// or defeated. A hung title call once held its pool slot forever.
-pub async fn run_title_job(
+pub(crate) async fn run_title_job(
     job: TitleJob,
     retry: crate::inference_bridge::RetryPolicy,
     results: UnboundedSender<TitleOutcome>,

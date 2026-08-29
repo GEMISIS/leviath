@@ -10,24 +10,24 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Stage name to `(x, y)` on the canvas.
-pub type Positions = BTreeMap<String, (f64, f64)>;
+pub(crate) type Positions = BTreeMap<String, (f64, f64)>;
 
 /// The saved arrangements, keyed by agent name.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct LayoutStore {
+pub(crate) struct LayoutStore {
     path: Option<PathBuf>,
     layouts: BTreeMap<String, Positions>,
 }
 
 impl LayoutStore {
     /// The file under the data directory: `dash/graph-layouts.json`.
-    pub fn default_path() -> Option<PathBuf> {
+    pub(crate) fn default_path() -> Option<PathBuf> {
         leviath_core::paths::data_dir().map(|d| d.join("dash").join("graph-layouts.json"))
     }
 
     /// Read the store at `path`; a missing or unreadable file is an empty
     /// store that will write there on the next save.
-    pub fn open(path: PathBuf) -> Self {
+    pub(crate) fn open(path: PathBuf) -> Self {
         let layouts = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
@@ -39,22 +39,23 @@ impl LayoutStore {
     }
 
     /// A store that never touches disk.
-    pub fn in_memory() -> Self {
+    pub(crate) fn in_memory() -> Self {
         Self::default()
     }
 
     /// The file this store writes to, when it has one.
-    pub fn path(&self) -> Option<&Path> {
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
 
     /// The saved positions of an agent's stages.
-    pub fn positions(&self, agent: &str) -> Option<&Positions> {
+    pub(crate) fn positions(&self, agent: &str) -> Option<&Positions> {
         self.layouts.get(agent)
     }
 
     /// Remember an agent's arrangement (in memory; `save` writes it).
-    pub fn set(&mut self, agent: &str, positions: Positions) {
+    pub(crate) fn set(&mut self, agent: &str, positions: Positions) {
         if positions.is_empty() {
             self.layouts.remove(agent);
         } else {
@@ -63,12 +64,12 @@ impl LayoutStore {
     }
 
     /// Drop an agent's arrangement (a deleted or reset agent).
-    pub fn forget(&mut self, agent: &str) {
+    pub(crate) fn forget(&mut self, agent: &str) {
         self.layouts.remove(agent);
     }
 
     /// Carry an arrangement over to a new name (a cloned agent).
-    pub fn copy(&mut self, from: &str, to: &str) {
+    pub(crate) fn copy(&mut self, from: &str, to: &str) {
         if let Some(p) = self.layouts.get(from).cloned() {
             self.layouts.insert(to.to_string(), p);
         }
@@ -76,7 +77,7 @@ impl LayoutStore {
 
     /// Write the store, creating its directory. A store without a path does
     /// nothing.
-    pub fn save(&self) -> std::io::Result<()> {
+    pub(crate) fn save(&self) -> std::io::Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
         };

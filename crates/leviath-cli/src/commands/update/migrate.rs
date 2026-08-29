@@ -85,7 +85,7 @@ pub const MIGRATIONS: &[Migration] = &[Migration {
 /// one read: re-opening the file would add an error arm only a race could take,
 /// and applying a migration to a document nobody has looked at since the report
 /// was printed is exactly the surprise this command exists to avoid.
-pub enum ConfigState {
+pub(crate) enum ConfigState {
     /// The config as it stands, for the migrations to be applied to. Boxed
     /// because a `Config` is far larger than the message beside it.
     Loaded(Box<Config>),

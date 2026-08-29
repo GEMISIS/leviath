@@ -14,7 +14,7 @@ use leviath_runtime::taint::ScriptRuleChecker;
 /// unconditionally. Each script receives a `context` map
 /// (`tool` / `target` / `taint_level`) and should evaluate to `true` to allow the
 /// call; the first script that allows wins and its file stem is the rule name.
-pub fn build_gate_script_checker(rules_dir: &Path) -> Arc<ScriptRuleChecker> {
+pub(crate) fn build_gate_script_checker(rules_dir: &Path) -> Arc<ScriptRuleChecker> {
     let scripts: Vec<(String, String)> = std::fs::read_dir(rules_dir)
         .ok()
         .into_iter()

@@ -27,7 +27,7 @@
 /// the real process stdin here, so the library core stays free of direct
 /// `std::io::stdin()` access and is fully testable. In production the binary
 /// passes `&|| std::io::stdin().is_terminal()`.
-pub fn resolve_task(
+pub(crate) fn resolve_task(
     arg: Option<&str>,
     agent_name: &str,
     description: &str,
@@ -92,7 +92,7 @@ fn resolve_task_with(
 /// contents; anything else is literal text. Unlike `--task`, the `@` is an
 /// explicit file marker, so a missing `@file` is an error (the user meant a
 /// file), not a literal fallback.
-pub fn read_region_value(raw: &str) -> anyhow::Result<String> {
+pub(crate) fn read_region_value(raw: &str) -> anyhow::Result<String> {
     match raw.strip_prefix('@') {
         Some(path) => {
             let content = std::fs::read_to_string(path)

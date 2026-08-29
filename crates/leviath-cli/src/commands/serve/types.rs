@@ -97,7 +97,7 @@ pub struct ServeArgs {
 /// What every request handler is given: the config, the event fan-out, and the
 /// control-socket client that reaches the daemon.
 #[derive(Clone)]
-pub struct AppState {
+pub(crate) struct AppState {
     /// Where the config comes from, rather than a copy of it.
     ///
     /// A snapshot taken at start-up was wrong in both directions: an edit made
@@ -635,7 +635,7 @@ pub(super) struct SpawnAgentReq {
 /// reformats it - and `format` is the label it was asked for. A UI that renders
 /// a2ui differently from markdown matches on that string; the server never does.
 #[derive(Serialize, Debug, Clone)]
-pub struct FinalOutputResp {
+pub(crate) struct FinalOutputResp {
     pub content: String,
     pub format: Option<String>,
     /// The stage that produced it.

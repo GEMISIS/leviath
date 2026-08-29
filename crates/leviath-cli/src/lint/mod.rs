@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 /// Declared worst-first so sorting by it groups the report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum LintSeverity {
+pub(crate) enum LintSeverity {
     /// The manifest says something that cannot be what the author meant - a
     /// tool name matching nothing, a permission for a tool the stage never
     /// granted.
@@ -57,7 +57,7 @@ pub enum LintSeverity {
 
 impl LintSeverity {
     /// Fixed-width label for the report, so the messages line up.
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Error => "ERR ",
             Self::Warning => "WARN",
@@ -71,7 +71,7 @@ impl LintSeverity {
 /// Serialize only: `code` is a `&'static str` pointing at a literal in this
 /// file, which no deserializer can produce.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LintFinding {
+pub(crate) struct LintFinding {
     /// How much this matters, and therefore whether it fails the check.
     pub severity: LintSeverity,
     /// Stable slug (`"unknown-tool"`), so a finding can be referenced in an
@@ -107,12 +107,13 @@ impl LintFinding {
     }
 
     /// Whether this finding should fail the command.
-    pub fn is_error(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_error(&self) -> bool {
         self.severity == LintSeverity::Error
     }
 
     /// One-line rendering for a log record: `stage 'x': message`.
-    pub fn one_line(&self) -> String {
+    pub(crate) fn one_line(&self) -> String {
         match &self.stage {
             Some(stage) => format!("stage '{stage}': {}", self.message),
             None => self.message.clone(),
@@ -122,7 +123,7 @@ impl LintFinding {
 
 /// What one provider answered when asked what models it takes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProviderCatalog {
+pub(crate) enum ProviderCatalog {
     /// It named everything it carries. A model outside this list is a model it
     /// will refuse, so naming one is a fault in the blueprint rather than a
     /// fact about the machine.
@@ -149,7 +150,7 @@ pub enum ProviderCatalog {
 /// check entirely rather than guessing. A linter that cannot see the installed
 /// MCP servers must not claim their tools do not exist.
 #[derive(Debug, Default, Clone)]
-pub struct LintEnv {
+pub(crate) struct LintEnv {
     /// Every tool name a manifest may legally write: canonical built-ins, their
     /// aliases, the sub-agent tools, this agent's own `tools/*.rhai`, and any
     /// MCP tools already resolved. Empty skips the unknown-tool check.
@@ -228,7 +229,7 @@ impl LintEnv {
     /// when no listed provider is registered, so re-deriving that here would
     /// cost a registry build per agent to say something the spawn will say
     /// louder a moment later.
-    pub fn offline(agent_dir: &Path) -> Self {
+    pub(crate) fn offline(agent_dir: &Path) -> Self {
         // The four discovery rules live in `tool_inventory` rather than here,
         // because `GET /api/tools` has to answer the same question and two
         // copies of "where does a tool come from" would not have stayed equal.
@@ -257,7 +258,11 @@ impl LintEnv {
     /// Add the answer to "can this install reach the providers the blueprint
     /// names", asked of the same registry the runtime resolves stages against
     /// so a script provider counts exactly when it would really load.
-    pub fn with_providers(mut self, blueprint: &Blueprint, config: &crate::config::Config) -> Self {
+    pub(crate) fn with_providers(
+        mut self,
+        blueprint: &Blueprint,
+        config: &crate::config::Config,
+    ) -> Self {
         let registry = crate::commands::run::build_provider_registry_from_config(config);
         self.available_providers = Some(
             blueprint
@@ -280,7 +285,7 @@ impl LintEnv {
     /// has no catalogue to report and would turn every check below into a
     /// shrug. `lev validate` primes once, at `primed_registry`, and hands the
     /// same registry here.
-    pub fn with_provider_catalogs(
+    pub(crate) fn with_provider_catalogs(
         mut self,
         blueprint: &Blueprint,
         config: &crate::config::Config,
@@ -348,7 +353,7 @@ impl LintEnv {
     /// Separate from [`Self::with_providers`] because it needs a workdir:
     /// relative entries resolve against the one a run would use, which for a
     /// command run outside a run is the directory it was invoked from.
-    pub fn with_read_paths(
+    pub(crate) fn with_read_paths(
         mut self,
         blueprint: &Blueprint,
         config: &crate::config::Config,
@@ -372,7 +377,11 @@ impl LintEnv {
 ///
 /// The two arguments describe the same manifest: `blueprint` for what the
 /// engine will do with it, `content` for what the author actually wrote.
-pub fn lint_manifest(content: &str, blueprint: &Blueprint, env: &LintEnv) -> Vec<LintFinding> {
+pub(crate) fn lint_manifest(
+    content: &str,
+    blueprint: &Blueprint,
+    env: &LintEnv,
+) -> Vec<LintFinding> {
     let declared = Declared::from_text(content);
     let mut findings = Vec::new();
 

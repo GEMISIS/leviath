@@ -5,7 +5,7 @@ use super::{EditError, ManifestDoc};
 
 /// The smallest agent that does something: `work` then `finish`, with
 /// placeholder prompts. The same starter The Lair's "Start simple" gives.
-pub fn empty_blueprint(name: &str) -> Result<String, EditError> {
+pub(crate) fn empty_blueprint(name: &str) -> Result<String, EditError> {
     let mut doc = ManifestDoc::parse(EMPTY).expect("the starter is a valid manifest");
     doc.set_agent_name(name)?;
     Ok(doc.to_toml())
@@ -37,7 +37,7 @@ system_prompt = "Summarize what was done, what changed, and anything left open."
 
 /// A copy of an existing manifest under a new name: only `[agent].name`
 /// changes.
-pub fn clone_of(text: &str, new_name: &str) -> Result<String, EditError> {
+pub(crate) fn clone_of(text: &str, new_name: &str) -> Result<String, EditError> {
     let mut doc = ManifestDoc::parse(text)?;
     doc.set_agent_name(new_name)?;
     Ok(doc.to_toml())

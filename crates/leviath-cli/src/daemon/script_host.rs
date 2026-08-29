@@ -31,16 +31,16 @@ mod permissions;
 use http_limits::*;
 #[cfg(test)]
 pub(crate) use http_limits::{REDIRECT_MIRROR, lock_redirect_mirror};
-pub use http_limits::{
+pub(crate) use http_limits::{
     set_local_network_allowed, set_script_http_max_per_host, set_script_http_timeout,
 };
-pub use permissions::{effective_script_permissions, resolve_script_permissions};
+pub(crate) use permissions::{effective_script_permissions, resolve_script_permissions};
 
 /// The resolved allow/deny decision for each of the five side-effecting host
 /// functions, computed once at spawn from the config's `[tool_script_permissions]`
 /// and the agent's own tool permissions (for the `inherit` cases).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScriptAllow {
+pub(crate) struct ScriptAllow {
     /// Whether `http_get` may run.
     pub http_get: bool,
     /// Whether `http_post` may run.
@@ -57,7 +57,7 @@ pub struct ScriptAllow {
 
 /// The raw I/O a [`DaemonScriptHost`] performs, behind a seam so the host's
 /// permission/confinement logic is testable without real side effects.
-pub trait ScriptIo: Send + Sync {
+pub(crate) trait ScriptIo: Send + Sync {
     /// Perform an HTTP GET, returning the response body (or an error message).
     fn http_get(&self, url: &str, headers: BTreeMap<String, String>) -> Result<String, String>;
     /// Perform an HTTP POST, returning the response body (or an error message).
@@ -81,7 +81,7 @@ pub trait ScriptIo: Send + Sync {
 
 /// The daemon's script host: enforces permissions + workdir confinement, then
 /// delegates the actual work to a [`ScriptIo`].
-pub struct DaemonScriptHost {
+pub(crate) struct DaemonScriptHost {
     allow: ScriptAllow,
     workdir: PathBuf,
     io: Arc<dyn ScriptIo>,
@@ -114,7 +114,7 @@ impl DaemonScriptHost {
     /// Build a host with an explicit I/O backend (used by tests). Defaults to no
     /// sandbox and the built-in shell tool's 60-second timeout; override with
     /// [`with_shell`](Self::with_shell).
-    pub fn with_io(allow: ScriptAllow, workdir: PathBuf, io: Arc<dyn ScriptIo>) -> Self {
+    pub(crate) fn with_io(allow: ScriptAllow, workdir: PathBuf, io: Arc<dyn ScriptIo>) -> Self {
         Self {
             allow,
             workdir,
@@ -130,7 +130,7 @@ impl DaemonScriptHost {
 
     /// Charge this run's write budget for what scripts write. Consuming
     /// builder used at spawn.
-    pub fn with_write_budget(
+    pub(crate) fn with_write_budget(
         mut self,
         writes: Arc<crate::daemon::tool_service::WriteBudget>,
     ) -> Self {
@@ -140,26 +140,26 @@ impl DaemonScriptHost {
 
     /// Permit fetches to loopback / private / link-local addresses, from
     /// `[security] allow_local_network`. Consuming builder used at spawn.
-    pub fn with_local_network(mut self, allow: bool) -> Self {
+    pub(crate) fn with_local_network(mut self, allow: bool) -> Self {
         self.allow_local_network = allow;
         self
     }
 
     /// Permit scripts to read these credential-shaped environment variables,
     /// from `[security] allow_env_vars`. Consuming builder used at spawn.
-    pub fn with_env_allowlist(mut self, names: Vec<String>) -> Self {
+    pub(crate) fn with_env_allowlist(mut self, names: Vec<String>) -> Self {
         self.allow_env_vars = names;
         self
     }
 
     /// Build a host wired to the real network/process/filesystem/env backend.
-    pub fn new(allow: ScriptAllow, workdir: PathBuf) -> Self {
+    pub(crate) fn new(allow: ScriptAllow, workdir: PathBuf) -> Self {
         Self::with_io(allow, workdir, Arc::new(RealScriptIo))
     }
 
     /// Route `shell()` through `sandbox` (the agent's per-stage isolation) and cap
     /// each call at `shell_timeout`. Consuming builder used at spawn.
-    pub fn with_shell(
+    pub(crate) fn with_shell(
         mut self,
         sandbox: Option<Arc<SandboxManager>>,
         shell_timeout: Duration,
@@ -333,7 +333,7 @@ impl ScriptHost for DaemonScriptHost {
 /// Every method runs synchronously (the script engine is driven from a
 /// `spawn_blocking` context), so a blocking `reqwest` client and `std::process`
 /// are safe here.
-pub struct RealScriptIo;
+pub(crate) struct RealScriptIo;
 
 /// The one process-wide blocking HTTP client for script tools.
 ///

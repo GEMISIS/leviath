@@ -8,7 +8,7 @@ use super::*;
 /// `ReadyToInfer` marker either way - but they are opposites in kind, which is
 /// what the watchdog acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StallReason {
+pub(crate) enum StallReason {
     /// The stage names a provider that is not in the registry. Nothing the
     /// runtime does will change that: no work is in flight to finish, no permit
     /// will free up. Only editing the config and restarting the daemon (or
@@ -76,7 +76,7 @@ impl StallReason {
 /// reason persists, and removed the moment work is dispatched - so its presence
 /// means "runnable right now, and has been going nowhere since `since`".
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DispatchStall {
+pub(crate) struct DispatchStall {
     /// Unix seconds when this stall started (not when it was last observed, so
     /// the age is the whole stall).
     pub since: i64,
@@ -124,10 +124,10 @@ impl Default for StallTimeout {
 /// deliberately sitting one second inside the grace period, which turns a
 /// boundary test into a coin toss that lands wrong on a loaded runner.
 #[derive(Resource, Debug, Clone, Copy)]
-pub struct StallClock(
+pub(crate) struct StallClock(
     /// Returns Unix seconds. A bare `fn` rather than a boxed closure so the
     /// resource stays `Copy` and costs nothing when it is absent.
-    pub fn() -> i64,
+    pub(crate) fn() -> i64,
 );
 
 /// Wall-clock seconds since the Unix epoch: what the watchdog reads when no
@@ -220,7 +220,7 @@ pub struct PausedForSetup {
 /// the collect system uses, and the run genuinely is still waiting on this
 /// result.
 #[derive(Component)]
-pub struct HeldInference {
+pub(crate) struct HeldInference {
     /// The parked outcome, replayed verbatim on resume.
     pub outcome: crate::inference_bridge::InferenceOutcome,
     /// Which collect system is waiting for it. The two lanes have separate
@@ -231,7 +231,7 @@ pub struct HeldInference {
 
 /// Which inference lane a [`HeldInference`] belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeldLane {
+pub(crate) enum HeldLane {
     /// An ordinary agent turn, collected by `collect_inference`.
     Stage,
     /// A stage-boundary routing call, collected by `collect_transition_choice`.
@@ -257,7 +257,7 @@ pub enum HeldLane {
 /// and dispatching removes it - so an agent holding one has nothing
 /// outstanding. A fifteen-minute inference is `AwaitingInference` with no stall
 /// record, and is never a candidate here.
-pub fn fail_stalled_dispatch(
+pub(crate) fn fail_stalled_dispatch(
     mut agents: Query<StalledDispatchQuery>,
     timeout: Option<Res<StallTimeout>>,
     clock: Option<Res<StallClock>>,

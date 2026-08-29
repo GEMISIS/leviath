@@ -23,7 +23,7 @@ use leviath_mcp::{AuthStore, LoginOutcome, MCPClient, MCPServerConfig, OAuthClie
 /// over the environment, and not from a field on [`AppState`]. The update
 /// route keeps its own locations in `UpdateEnv` for the same reason.
 #[derive(Clone, Debug)]
-pub struct AdminPaths {
+pub(crate) struct AdminPaths {
     /// Config file to read and rewrite.
     pub config: std::path::PathBuf,
     /// OAuth token store.
@@ -36,7 +36,7 @@ pub struct AdminPaths {
 /// cached copy would pin the first test's home directory on the whole test
 /// binary. In a test build a [`TEST_PATHS`] scope wins over the environment,
 /// which is how the handler tests point at a temp dir.
-pub fn admin_paths() -> AdminPaths {
+pub(crate) fn admin_paths() -> AdminPaths {
     #[cfg(test)]
     if let Ok(paths) = TEST_PATHS.try_with(Clone::clone) {
         return paths;
@@ -68,7 +68,7 @@ pub(crate) fn scoped(router: axum::Router, paths: AdminPaths) -> axum::Router {
 /// The seams the login flow needs: how to open a browser, and what time it
 /// is. Cheap to clone (an `Arc` and a fn pointer).
 #[derive(Clone)]
-pub struct McpAdmin {
+pub(crate) struct McpAdmin {
     /// How to open the browser during a login.
     pub opener: leviath_mcp::BrowserOpener,
     /// Current Unix time; a fn so a long-lived server stays current per request.

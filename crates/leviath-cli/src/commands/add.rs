@@ -16,7 +16,7 @@ fn agents_dir_or_error(dir: Option<std::path::PathBuf>) -> anyhow::Result<std::p
 }
 
 /// Run `lev add`: install an agent from a directory or a bundle file.
-pub async fn execute(args: AddArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: AddArgs) -> anyhow::Result<()> {
     let installer = leviath_package::AgentInstaller::new();
     let agents_dir = resolve_agents_dir()?;
     // Best-effort, unlike `lev list`: a config that will not parse is a reason

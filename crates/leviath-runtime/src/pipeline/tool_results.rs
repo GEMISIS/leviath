@@ -4,7 +4,7 @@ use super::*;
 
 /// The receiving end of the tool-outcomes channel, as a world resource.
 #[derive(Resource)]
-pub struct ToolResults(pub UnboundedReceiver<ToolOutcome>);
+pub(crate) struct ToolResults(pub UnboundedReceiver<ToolOutcome>);
 
 /// What a region actually did with a tool result routed into it.
 ///
@@ -574,7 +574,7 @@ type ToolQuery = (
 /// written into the agent's context window (routing/truncation/taint honored)
 /// and the agent loops back to `ReadyToInfer`. Outcomes for agents no longer
 /// `AwaitingTools` (cancelled/despawned) are dropped.
-pub fn collect_tools(
+pub(crate) fn collect_tools(
     mut results: ResMut<ToolResults>,
     mut agents: Query<ToolQuery, With<AwaitingTools>>,
     // Stage-entry seed batches ride the same lane, so they arrive on the same

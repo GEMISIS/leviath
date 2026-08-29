@@ -33,7 +33,7 @@ pub struct ValidateArgs {
 
 /// The blueprint itself, for a caller that wants to know what it just validated.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct BlueprintSummary {
+pub(crate) struct BlueprintSummary {
     /// The blueprint's `[agent] name`.
     pub name: String,
     /// Its declared version.
@@ -58,7 +58,7 @@ pub struct BlueprintSummary {
 /// `regions.<key>` field over the API, or an ACP `---region:<key>---` block)
 /// and the region its value seeds.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct InputSummary {
+pub(crate) struct InputSummary {
     /// The caller key. `task` is the `--task` flag; anything else is a
     /// blueprint-defined `--<key>` flag.
     pub key: String,
@@ -140,7 +140,7 @@ fn input_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
 /// finding is a stable slug to branch on, where the prose line is written to be
 /// read.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct ValidateReport {
+pub(crate) struct ValidateReport {
     /// True when nothing would have failed the command.
     pub valid: bool,
     /// Present when the manifest parsed and validated.
@@ -843,7 +843,7 @@ async fn primed_registry_with(
 const VALIDATE_PRIME_TIMEOUT_SECS: u64 = 5;
 
 /// Run `lev validate`: check a blueprint and print what is wrong with it.
-pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
     let config = crate::config::Config::load().ok();
     // Appended to a load failure, and only when the file is an installed copy
     // of a bundled agent this build ships a different version of. Then the

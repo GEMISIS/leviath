@@ -18,7 +18,7 @@ pub struct CreateArgs {
 }
 
 /// Run `lev create`: scaffold a new agent from a template.
-pub async fn execute(args: CreateArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: CreateArgs) -> anyhow::Result<()> {
     execute_with(args, &|path, contents| fs::write(path, contents))
 }
 

@@ -12,7 +12,7 @@ pub(super) static HTTP_MAX_PER_HOST: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(4);
 
 /// Apply `[limits] script_http_max_per_host` for this process.
-pub fn set_script_http_max_per_host(max: usize) {
+pub(crate) fn set_script_http_max_per_host(max: usize) {
     HTTP_MAX_PER_HOST.store(max, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -91,7 +91,7 @@ pub(super) static HTTP_TIMEOUT_SECS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(30);
 
 /// Apply `[limits] script_http_timeout_secs` for this process.
-pub fn set_script_http_timeout(secs: u64) {
+pub(crate) fn set_script_http_timeout(secs: u64) {
     HTTP_TIMEOUT_SECS.store(secs, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -155,7 +155,7 @@ pub(crate) fn lock_redirect_mirror() -> tokio::sync::MutexGuard<'static, ()> {
 }
 
 /// Apply `[security] allow_local_network` to redirect following for this process.
-pub fn set_local_network_allowed(allow: bool) {
+pub(crate) fn set_local_network_allowed(allow: bool) {
     ALLOW_LOCAL_REDIRECTS.store(allow, std::sync::atomic::Ordering::Relaxed);
 }
 

@@ -49,7 +49,7 @@ const SAME_SIZE_TOLERANCE: f64 = 0.10;
 /// moment the usage record landed. Includes any time the call queued for an
 /// inference slot, which is deliberate: the run experienced that as latency.
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct CallSpan {
+pub(crate) struct CallSpan {
     /// Stage name (empty for the title call).
     pub stage: String,
     /// Stage-local iteration.
@@ -72,14 +72,14 @@ pub struct CallSpan {
 
 impl CallSpan {
     /// Wall seconds the call took.
-    pub fn secs(&self) -> i64 {
+    pub(crate) fn secs(&self) -> i64 {
         self.ended_at - self.started_at
     }
 }
 
 /// Per-stage roll-up of [`CallSpan`]s.
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct StageSummary {
+pub(crate) struct StageSummary {
     /// Stage name.
     pub name: String,
     /// Seconds spent in model calls for this stage.
@@ -94,7 +94,7 @@ pub struct StageSummary {
 
 /// Where the wall clock went.
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
-pub struct Totals {
+pub(crate) struct Totals {
     /// `updated_at - started_at`.
     pub wall: i64,
     /// Seconds in model calls (queueing included).
@@ -109,7 +109,7 @@ pub struct Totals {
 
 /// The whole picture for one run.
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct RunTimeline {
+pub(crate) struct RunTimeline {
     /// The run.
     pub run_id: String,
     /// Its agent.
@@ -131,7 +131,7 @@ pub struct RunTimeline {
 }
 
 /// Execute `lev timeline`.
-pub async fn execute(args: TimelineArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: TimelineArgs) -> anyhow::Result<()> {
     let root = load(&args.run_id)?;
     let mut runs = vec![root];
     if args.tree {
@@ -171,7 +171,7 @@ fn load(run_id: &str) -> anyhow::Result<RunTimeline> {
 
 /// Reduce a run's journal to its timeline. Pure, so the shape is testable
 /// without a runs directory.
-pub fn analyze(meta: &RunMeta, records: &[RunRecord]) -> RunTimeline {
+pub(crate) fn analyze(meta: &RunMeta, records: &[RunRecord]) -> RunTimeline {
     let mut calls = Vec::new();
     let mut totals = Totals {
         wall: (meta.updated_at - meta.started_at).max(0),

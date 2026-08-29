@@ -10,13 +10,13 @@ use std::path::PathBuf;
 // Glob re-exported so every existing `config::SecurityConfig` path keeps
 // working and the split stays a pure move.
 mod limits;
-pub use limits::*;
+pub(crate) use limits::*;
 mod policy;
-pub use policy::*;
+pub(crate) use policy::*;
 mod providers;
-pub use providers::*;
+pub(crate) use providers::*;
 mod security;
-pub use security::*;
+pub(crate) use security::*;
 
 // Two helpers with no `[table]` of their own: reading a repository's `.env`,
 // and hardening the config file's permissions. Private to this module; the
@@ -115,7 +115,7 @@ pub struct Config {
     /// Keys are tool names (e.g. `"bash"`, `"write_file"`). Values override the
     /// built-in defaults, and act as a **ceiling** that a blueprint's own
     /// `[tool_permissions]` may tighten but never loosen - see
-    /// [`crate::tools::resolve_policy`]. To grant one agent more than this
+    /// `crate::tools::resolve_policy`. To grant one agent more than this
     /// without loosening it everywhere, use [`Self::agent_tool_permissions`].
     #[serde(default)]
     pub tool_permissions: HashMap<String, ToolPolicy>,
@@ -293,7 +293,7 @@ pub struct Config {
     pub security: SecurityConfig,
 
     /// Per-agent read grants, keyed by agent name - the itemized counterpart
-    /// of [`SecurityConfig::allow_blueprint_read_paths`], analogous to
+    /// of `SecurityConfig::allow_blueprint_read_paths`, analogous to
     /// [`Self::agent_tool_permissions`]:
     ///
     /// ```toml
@@ -365,7 +365,7 @@ impl Config {
     /// Returned by value (rather than as two maps threaded through
     /// [`crate::tools::resolve_policy`]) so the ceiling is resolved exactly once,
     /// at spawn, and every later lookup reads a single flat map.
-    pub fn permissions_for_agent(&self, agent_name: &str) -> HashMap<String, ToolPolicy> {
+    pub(crate) fn permissions_for_agent(&self, agent_name: &str) -> HashMap<String, ToolPolicy> {
         let mut merged = self.tool_permissions.clone();
         if let Some(per_agent) = self.agent_tool_permissions.get(agent_name) {
             merged.extend(per_agent.iter().map(|(k, v)| (k.clone(), *v)));
@@ -379,7 +379,7 @@ impl Config {
     /// `blueprint` is the manifest's own `[safe_commands]`, which contributes
     /// only when the user opted in - see
     /// [`crate::approvals::resolve_safe_keys`].
-    pub fn safe_keys_for_agent(
+    pub(crate) fn safe_keys_for_agent(
         &self,
         agent_name: &str,
         blueprint: Option<&leviath_core::blueprint::SafeCommandsConfig>,
@@ -396,7 +396,7 @@ impl Config {
     /// `[security] read_paths` list plus that agent's
     /// `[agent_read_paths.<name>]` entries. Resolved once at spawn, mirroring
     /// [`Self::permissions_for_agent`].
-    pub fn read_path_grants_for_agent(&self, agent_name: &str) -> Vec<String> {
+    pub(crate) fn read_path_grants_for_agent(&self, agent_name: &str) -> Vec<String> {
         let mut grants = self.security.read_paths.clone();
         if let Some(per_agent) = self.agent_read_paths.get(agent_name) {
             grants.extend(per_agent.allow.iter().cloned());
@@ -527,7 +527,7 @@ impl Config {
     /// `default_model` when it is written qualified with the default provider's
     /// own name: the value as written and the bare id it is read as. `None`
     /// when unset or already bare.
-    pub fn qualified_default_model(&self) -> Option<(&str, &str)> {
+    pub(crate) fn qualified_default_model(&self) -> Option<(&str, &str)> {
         let written = self.default_model.as_deref()?;
         let bare = leviath_runtime::pipeline::bare_default_model(&self.default_provider, written);
         (bare != written).then_some((written, bare))
@@ -540,7 +540,7 @@ impl Config {
     /// what `lev doctor` does with it. An unreadable or absent file has no
     /// unread keys, because that is a different problem and one the caller has
     /// already reported.
-    pub fn unread_keys_at(path: &std::path::Path) -> Vec<String> {
+    pub(crate) fn unread_keys_at(path: &std::path::Path) -> Vec<String> {
         std::fs::read_to_string(path)
             .map(|content| Self::unknown_config_keys(&content))
             .unwrap_or_default()
@@ -815,12 +815,12 @@ impl Config {
 
     /// Load a config from an explicit path (`lev mcp` uses this to read the
     /// file it is about to rewrite). Public wrapper over the tested `load_from_path`.
-    pub fn load_from_path_public(path: &std::path::Path) -> anyhow::Result<Self> {
+    pub(crate) fn load_from_path_public(path: &std::path::Path) -> anyhow::Result<Self> {
         Self::load_from_path(path)
     }
 
     /// Save a config to an explicit path. Public wrapper over `save_to_path`, for `lev mcp` rewriting the config file.
-    pub fn save_to_path_public(&self, path: &std::path::Path) -> anyhow::Result<()> {
+    pub(crate) fn save_to_path_public(&self, path: &std::path::Path) -> anyhow::Result<()> {
         self.save_to_path(path)
     }
 
@@ -850,7 +850,7 @@ impl Config {
     // `config_path_honors_leviath_home`.
 
     /// Validate API key formats and return warnings for suspicious keys.
-    pub fn validate_keys(&self) -> Vec<String> {
+    pub(crate) fn validate_keys(&self) -> Vec<String> {
         // A blank key means "not configured" (that is what `lev setup` writes
         // for a provider the user skipped), so it earns no warning - warning
         // about the shape of a key nobody set is noise that trains users to
@@ -882,7 +882,7 @@ impl Config {
 /// components). `Config::config_path()` stays separate: it has its own
 /// narrower `LEVIATH_CONFIG_PATH` override above.
 pub use leviath_core::paths::home_dir as leviath_home_dir;
-pub use leviath_core::paths::providers_dir;
+pub(crate) use leviath_core::paths::providers_dir;
 
 /// The update check is on when the key is absent.
 ///

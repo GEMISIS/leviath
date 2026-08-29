@@ -42,7 +42,7 @@ pub(crate) const PROGRESS_REPORT_REGION: &str = "progress_report";
 /// running when it accrued, and by the time it is closed out the agent has
 /// already moved on.
 #[derive(Component, Debug, Clone)]
-pub struct StageEntrySizes {
+pub(crate) struct StageEntrySizes {
     /// The stage these sizes were taken on entry to.
     pub stage: String,
     /// Region name to token count at entry.
@@ -55,18 +55,18 @@ pub struct StageEntrySizes {
 /// between a loop's own visits: `gather` adding little says nothing about
 /// whether `analyze` has converged.
 #[derive(Component, Debug, Clone, Default)]
-pub struct VisitYield(pub HashMap<String, Vec<Yield>>);
+pub(crate) struct VisitYield(pub HashMap<String, Vec<Yield>>);
 
 /// One visit's growth across the accumulating regions.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Yield {
+pub(crate) struct Yield {
     /// Per-region growth in tokens, only regions that actually grew.
     pub grew: Vec<(String, usize)>,
 }
 
 impl Yield {
     /// Total tokens added across every accumulating region.
-    pub fn total(&self) -> usize {
+    pub(crate) fn total(&self) -> usize {
         self.grew.iter().map(|(_, n)| n).sum()
     }
 }
@@ -153,7 +153,7 @@ type ProgressQuery = (
 ///
 /// Ordered with the other `StageJustEntered` consumers, before `sync_tool_stages`
 /// clears the marker and therefore before the stage's first inference is built.
-pub fn track_stage_progress(mut commands: Commands, mut agents: Query<ProgressQuery>) {
+pub(crate) fn track_stage_progress(mut commands: Commands, mut agents: Query<ProgressQuery>) {
     crate::tick_scope::clear();
     for (entity, entered, mut window, previous, yields) in agents.iter_mut() {
         crate::tick_scope::enter(entity);

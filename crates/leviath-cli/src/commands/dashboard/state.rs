@@ -335,7 +335,6 @@ impl Dashboard {
                 AgentDisplayStatus::CompleteInteractive => 2,
                 AgentDisplayStatus::Complete => 3,
                 AgentDisplayStatus::Error(_) => 4,
-                AgentDisplayStatus::Idle => 5,
                 AgentDisplayStatus::Cancelled => 6,
                 // Above the finished states: a stale run is unfinished business
                 // the user probably wants to clear.
@@ -950,14 +949,12 @@ mod tests {
             title: None,
             model: None,
             parent_id: None,
-            depth: 0,
             started_at: 1000,
             last_progress_at: None,
             runtime_secs: 0,
             clock_now: 0,
             graph: None,
             accepts_messages: true,
-            taint_summary: vec![],
         }
     }
 
@@ -1943,8 +1940,6 @@ mod tests {
         dash.agents
             .push(make_test_agent("cancelled", AgentDisplayStatus::Cancelled));
         dash.agents
-            .push(make_test_agent("idle", AgentDisplayStatus::Idle));
-        dash.agents
             .push(make_test_agent("active", AgentDisplayStatus::Active));
         dash.agents
             .push(make_test_agent("waiting", AgentDisplayStatus::Waiting));
@@ -1961,7 +1956,7 @@ mod tests {
         dash.update_display_indices();
 
         // Expected priority: Active(0) < Waiting(1) < CompleteInteractive(2)
-        // < Complete(3) < Error(4) < Idle(5) < Cancelled(6)
+        // < Complete(3) < Error(4) < Cancelled(6)
         let ids: Vec<&str> = dash
             .display_indices
             .iter()
@@ -1972,8 +1967,7 @@ mod tests {
         assert_eq!(ids[2], "interactive");
         assert_eq!(ids[3], "complete");
         assert_eq!(ids[4], "error");
-        assert_eq!(ids[5], "idle");
-        assert_eq!(ids[6], "cancelled");
+        assert_eq!(ids[5], "cancelled");
     }
 
     #[test]

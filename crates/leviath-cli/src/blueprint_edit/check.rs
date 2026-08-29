@@ -12,7 +12,7 @@ use crate::lint::{LintEnv, LintSeverity, lint_manifest};
 
 /// How much a problem matters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Severity {
+pub(crate) enum Severity {
     /// The manifest will not run, or will not save.
     Error,
     /// A decision left to a default the author may not know about.
@@ -23,7 +23,7 @@ pub enum Severity {
 
 impl Severity {
     /// A short tag for a status line.
-    pub fn tag(self) -> &'static str {
+    pub(crate) fn tag(self) -> &'static str {
         match self {
             Severity::Error => "error",
             Severity::Warning => "warning",
@@ -34,7 +34,7 @@ impl Severity {
 
 /// One thing to tell the author.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Problem {
+pub(crate) struct Problem {
     /// How much it matters.
     pub severity: Severity,
     /// A stable slug: a lint code, or `parse` / `validate` for the two
@@ -50,19 +50,19 @@ pub struct Problem {
 
 /// Everything wrong with a manifest, most serious first.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Problems {
+pub(crate) struct Problems {
     /// In the order found: errors, then warnings, then notes.
     pub items: Vec<Problem>,
 }
 
 impl Problems {
     /// How many are errors.
-    pub fn error_count(&self) -> usize {
+    pub(crate) fn error_count(&self) -> usize {
         self.count(Severity::Error)
     }
 
     /// How many are warnings.
-    pub fn warning_count(&self) -> usize {
+    pub(crate) fn warning_count(&self) -> usize {
         self.count(Severity::Warning)
     }
 
@@ -71,12 +71,12 @@ impl Problems {
     }
 
     /// Whether the manifest may be saved: no errors.
-    pub fn is_saveable(&self) -> bool {
+    pub(crate) fn is_saveable(&self) -> bool {
         self.error_count() == 0
     }
 
     /// The problems that name `stage`.
-    pub fn for_stage(&self, stage: &str) -> Vec<&Problem> {
+    pub(crate) fn for_stage(&self, stage: &str) -> Vec<&Problem> {
         self.items
             .iter()
             .filter(|p| p.stage.as_deref() == Some(stage))
@@ -84,7 +84,7 @@ impl Problems {
     }
 
     /// The most serious problem, for a one-line summary.
-    pub fn first(&self) -> Option<&Problem> {
+    pub(crate) fn first(&self) -> Option<&Problem> {
         self.items.first()
     }
 }
@@ -92,7 +92,7 @@ impl Problems {
 /// Check a manifest as the runtime would. `dir` is the blueprint's directory
 /// (for the tools its scripts define); a blueprint not yet saved anywhere
 /// can pass any directory.
-pub fn check(text: &str, dir: &Path) -> Problems {
+pub(crate) fn check(text: &str, dir: &Path) -> Problems {
     let bp = match parse_manifest(text) {
         Ok(bp) => bp,
         Err(e) => {

@@ -14,25 +14,13 @@ use crate::components::ContextWindow;
 
 /// The user's resolution of a blocked outbound tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GateResolution {
+pub(crate) enum GateResolution {
     /// Allow this one call.
     AllowOnce,
     /// Allow this tool for the rest of the run (session allow).
     AlwaysAllow,
     /// Deny the call - it is not executed; the model gets a blocked result.
     Deny,
-}
-
-/// Injected resolver used when the gate blocks an outbound tool call.
-///
-/// The runtime cannot prompt the user itself (no stdin/IPC), so the CLI
-/// provides an implementation that asks via the dashboard/stdin and returns
-/// the user's decision. Mirrors how tool execution is injected as a closure.
-#[async_trait::async_trait]
-pub trait GatePrompt: Send + Sync {
-    /// Ask the user how to resolve a blocked outbound call. Implementations
-    /// should default to [`GateResolution::Deny`] when no answer is available.
-    async fn resolve(&self, decision: &GateDecision) -> GateResolution;
 }
 
 /// Type alias for a scripted rule checker function.
@@ -64,7 +52,8 @@ impl TaintGate {
     }
 
     /// Create a disabled taint gate (no tracking, no gating).
-    pub fn disabled() -> Self {
+    #[cfg(test)]
+    pub(crate) fn disabled() -> Self {
         Self {
             config: SecurityConfig {
                 taint_tracking: false,
@@ -75,12 +64,13 @@ impl TaintGate {
     }
 
     /// Get the security config.
-    pub fn config(&self) -> &SecurityConfig {
+    #[cfg(test)]
+    pub(crate) fn config(&self) -> &SecurityConfig {
         &self.config
     }
 
     /// Register a tool classification override.
-    pub fn set_tool_classification(
+    pub(crate) fn set_tool_classification(
         &mut self,
         tool_name: String,
         classification: ToolClassification,
@@ -105,7 +95,7 @@ impl TaintGate {
     /// a security property.
     ///
     /// Called at gate construction. A later session-scoped "always allow"
-    /// writes the same map through [`Self::set_tool_classification`], so the
+    /// writes the same map through `Self::set_tool_classification`, so the
     /// user's runtime decision still wins over the config file.
     pub fn apply_mcp_overrides(
         &mut self,
@@ -137,7 +127,7 @@ impl TaintGate {
     ///
     /// In traditional mode, the overall taint (max across all regions) is
     /// compared against the tool's clearance.
-    pub fn check_traditional(
+    pub(crate) fn check_traditional(
         &mut self,
         agent_id: &str,
         tool_name: &str,
@@ -273,7 +263,7 @@ impl TaintGate {
     }
 
     /// Record an allow decision from the user or allowlist.
-    pub fn record_allow(
+    pub(crate) fn record_allow(
         &mut self,
         agent_id: &str,
         tool_name: &str,
@@ -285,7 +275,7 @@ impl TaintGate {
     }
 
     /// Record a deny decision (the user or a default policy denied the call).
-    pub fn record_deny(
+    pub(crate) fn record_deny(
         &mut self,
         agent_id: &str,
         tool_name: &str,
@@ -303,7 +293,7 @@ impl TaintGate {
     ///
     /// Synchronous so it can be unit-tested directly, keeping the async run-loop
     /// path that awaits the prompt as thin as possible.
-    pub fn apply_resolution(
+    pub(crate) fn apply_resolution(
         &mut self,
         agent_id: &str,
         tool_name: &str,

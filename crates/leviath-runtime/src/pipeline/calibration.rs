@@ -48,7 +48,7 @@ use bevy_ecs::prelude::Component;
 /// rather than folded into [`PromptCalibration`] because dispatch overwrites it
 /// wholesale on every call while the calibration accumulates across them.
 #[derive(Component, Debug, Clone, Copy)]
-pub struct PromptEstimate(pub usize);
+pub(crate) struct PromptEstimate(pub usize);
 
 /// How many tokens a request costs beyond what the window accounted for.
 ///
@@ -76,7 +76,7 @@ pub struct PromptEstimate(pub usize);
 /// different models, but they share a window, and it is the window's arithmetic
 /// being corrected.
 #[derive(Component, Debug, Clone, Copy, Default)]
-pub struct PromptCalibration {
+pub(crate) struct PromptCalibration {
     /// The largest gap yet seen between what a request was charged and what the
     /// window believed it held.
     shortfall: usize,
@@ -85,7 +85,7 @@ pub struct PromptCalibration {
 impl PromptCalibration {
     /// Tokens to add to the window's estimate to get what will really be
     /// charged.
-    pub fn shortfall(&self) -> usize {
+    pub(crate) fn shortfall(&self) -> usize {
         self.shortfall
     }
 
@@ -101,7 +101,7 @@ impl PromptCalibration {
     ///
     /// Returns whether the correction moved, so the caller can say so once
     /// rather than on every call.
-    pub fn observe(&mut self, estimated: usize, reported: usize) -> bool {
+    pub(crate) fn observe(&mut self, estimated: usize, reported: usize) -> bool {
         // A provider that reported no usage at all is not evidence that the
         // request was free.
         if reported == 0 {

@@ -104,7 +104,7 @@ const MODELS_PRIME_TIMEOUT_SECS: u64 = 5;
 // ─── Entrypoint ───────────────────────────────────────────────────────────────
 
 /// Run `lev models`: show which provider/model pairs are reachable.
-pub async fn execute(args: ModelsArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: ModelsArgs) -> anyhow::Result<()> {
     match args.command {
         ModelsCommand::List(a) => list_with_registry(a, &build_provider_registry_from_config).await,
         ModelsCommand::Show(a) => show_with_registry(a, &build_provider_registry_from_config).await,

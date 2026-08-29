@@ -278,14 +278,12 @@ impl Dashboard {
                     title: run.title.clone(),
                     model: run.model.clone(),
                     parent_id: run.parent_run_id.clone(),
-                    depth: 0,
                     started_at: run.started_at,
                     last_progress_at: run.last_progress_at,
                     runtime_secs: run.active_runtime_secs(clock_now),
                     clock_now,
                     graph: load_stage_graph(&run.agent_path),
                     accepts_messages: true,
-                    taint_summary: vec![], // default; stage-level control via agent state
                 });
             }
         }

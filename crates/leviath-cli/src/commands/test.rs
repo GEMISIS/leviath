@@ -47,7 +47,7 @@ struct TestFile {
 }
 
 /// Run `lev test`: drive a blueprint's declared test cases.
-pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: TestArgs) -> anyhow::Result<()> {
     execute_with_registry(args, Box::new(build_registry_from_config)).await
 }
 

@@ -15,7 +15,7 @@ use crate::config::Config;
 
 /// Where an agent lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Source {
+pub(crate) enum Source {
     /// Under the agents directory (`~/.leviath/agents/<name>`).
     Installed,
     /// Under a directory named in the config's `agent_paths`.
@@ -28,7 +28,7 @@ pub enum Source {
 
 impl Source {
     /// The word the catalog shows.
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Source::Installed => "installed",
             Source::Configured => "configured",
@@ -40,7 +40,7 @@ impl Source {
 
 /// One agent in the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CatalogEntry {
+pub(crate) struct CatalogEntry {
     /// `[agent].name`.
     pub name: String,
     /// `[agent].version`.
@@ -67,13 +67,13 @@ impl CatalogEntry {
     /// Whether the entry can be deleted from here: only what lives under the
     /// agents directory. Configured and local agents are edited in place but
     /// belong to wherever they are.
-    pub fn deletable(&self) -> bool {
+    pub(crate) fn deletable(&self) -> bool {
         self.source == Source::Installed
     }
 }
 
 /// Every agent the builder can open, name-sorted.
-pub fn discover(agents_dir: &Path, cwd: &Path, config: &Config) -> Vec<CatalogEntry> {
+pub(crate) fn discover(agents_dir: &Path, cwd: &Path, config: &Config) -> Vec<CatalogEntry> {
     let report = build_list_report(agents_dir, cwd, config, ListFilter::All);
     let plan = plan_agent_actions(agents_dir);
     let mut entries: Vec<CatalogEntry> = report
@@ -143,12 +143,12 @@ pub fn discover(agents_dir: &Path, cwd: &Path, config: &Config) -> Vec<CatalogEn
 }
 
 /// The bundled agent of that name, when there is one.
-pub fn bundled(name: &str) -> Option<&'static BundledAgent> {
+pub(crate) fn bundled(name: &str) -> Option<&'static BundledAgent> {
     BUNDLED_AGENTS.iter().find(|a| a.name == name)
 }
 
 /// The embedded `agent.leviath` of a bundled agent.
-pub fn bundled_manifest(agent: &BundledAgent) -> &'static str {
+pub(crate) fn bundled_manifest(agent: &BundledAgent) -> &'static str {
     agent
         .files
         .iter()
@@ -159,7 +159,12 @@ pub fn bundled_manifest(agent: &BundledAgent) -> &'static str {
 
 /// Write an agent's manifest under the agents directory, creating its
 /// directory. Returns the directory.
-pub fn write_agent(agents_dir: &Path, name: &str, manifest: &str) -> std::io::Result<PathBuf> {
+#[cfg(test)]
+pub(crate) fn write_agent(
+    agents_dir: &Path,
+    name: &str,
+    manifest: &str,
+) -> std::io::Result<PathBuf> {
     let dir = agents_dir.join(name);
     std::fs::create_dir_all(&dir)?;
     leviath_sys::write_atomic(
@@ -172,7 +177,7 @@ pub fn write_agent(agents_dir: &Path, name: &str, manifest: &str) -> std::io::Re
 
 /// Copy the files of a bundled agent other than its manifest (its `tools/`
 /// scripts) into an agent's directory, for an agent cloned from it.
-pub fn copy_bundled_extras(
+pub(crate) fn copy_bundled_extras(
     agents_dir: &Path,
     name: &str,
     from: &BundledAgent,
@@ -194,13 +199,13 @@ pub fn copy_bundled_extras(
 /// Rename an installed agent: its directory under the agents directory, and
 /// the `name` in its manifest (comments and all else kept). Refuses a name
 /// that will not do or is taken; an unreadable manifest is left as it is.
-pub fn rename_agent(agents_dir: &Path, from: &str, to: &str) -> Result<PathBuf, String> {
+pub(crate) fn rename_agent(agents_dir: &Path, from: &str, to: &str) -> Result<PathBuf, String> {
     rename_agent_with(agents_dir, from, to, &mut |a, b| std::fs::rename(a, b))
 }
 
 /// [`rename_agent`] with the directory move injected, so a move the disk
 /// refuses can be exercised without a read-only filesystem.
-pub fn rename_agent_with(
+pub(crate) fn rename_agent_with(
     agents_dir: &Path,
     from: &str,
     to: &str,
@@ -234,12 +239,12 @@ pub fn rename_agent_with(
 }
 
 /// Delete an installed agent's directory.
-pub fn delete_agent(agents_dir: &Path, name: &str) -> std::io::Result<()> {
+pub(crate) fn delete_agent(agents_dir: &Path, name: &str) -> std::io::Result<()> {
     std::fs::remove_dir_all(agents_dir.join(name))
 }
 
 /// Put the embedded copy of a bundled agent back.
-pub fn reset_bundled(agents_dir: &Path, name: &str) -> Result<(), String> {
+pub(crate) fn reset_bundled(agents_dir: &Path, name: &str) -> Result<(), String> {
     let agent = bundled(name).ok_or_else(|| format!("{name} is not a bundled agent"))?;
     install_bundled(agent, agents_dir).map_err(|e| e.to_string())
 }

@@ -23,7 +23,7 @@ use std::path::Path;
 
 /// Whether one declared entry is live under the current config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GrantStatus {
+pub(crate) enum GrantStatus {
     /// The config grants it (itemized, or through the blanket override).
     Granted,
     /// Nothing in the config grants it; reads matching it will be refused.
@@ -36,7 +36,7 @@ pub enum GrantStatus {
 impl GrantStatus {
     /// How this verdict reads in a report. Kept with the type so the wording
     /// cannot drift from the meaning.
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Granted => "granted",
             Self::NotGranted => "NOT granted",
@@ -47,7 +47,7 @@ impl GrantStatus {
 
 /// One declared entry and its verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EntryStatus {
+pub(crate) struct EntryStatus {
     /// The entry exactly as the blueprint wrote it.
     pub raw: String,
     /// Whether the config grants it.
@@ -56,7 +56,7 @@ pub struct EntryStatus {
 
 /// Every `[read_paths]` entry a blueprint declares, with its grant verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GrantReport {
+pub(crate) struct GrantReport {
     /// The agent name, which is also the `[agent_read_paths.<name>]` key.
     pub agent: String,
     /// Whether `[security] allow_blueprint_read_paths` is on, in which case
@@ -76,7 +76,7 @@ pub struct GrantReport {
 /// `workdir` resolves relative entries, exactly as it does at spawn. Callers
 /// outside a run pass the current directory, which is what `lev run` defaults
 /// to.
-pub fn build(
+pub(crate) fn build(
     blueprint: &leviath_core::Blueprint,
     config: &Config,
     workdir: &Path,
@@ -157,12 +157,12 @@ fn entry_status(
 
 impl GrantReport {
     /// How many entries the blueprint declares.
-    pub fn declared(&self) -> usize {
+    pub(crate) fn declared(&self) -> usize {
         self.entries.len()
     }
 
     /// How many of them the config grants.
-    pub fn granted(&self) -> usize {
+    pub(crate) fn granted(&self) -> usize {
         self.entries
             .iter()
             .filter(|e| e.status == GrantStatus::Granted)
@@ -172,7 +172,7 @@ impl GrantReport {
     /// The entries that will be refused, in declaration order. Undetermined
     /// entries are left out: they may well work, and offering to grant one the
     /// user already granted would be worse than saying nothing.
-    pub fn ungranted(&self) -> Vec<&str> {
+    pub(crate) fn ungranted(&self) -> Vec<&str> {
         self.entries
             .iter()
             .filter(|e| e.status == GrantStatus::NotGranted)
@@ -181,18 +181,18 @@ impl GrantReport {
     }
 
     /// Whether anything is refused, which is what every surface warns about.
-    pub fn has_ungranted(&self) -> bool {
+    pub(crate) fn has_ungranted(&self) -> bool {
         !self.ungranted().is_empty()
     }
 
     /// `"3 declared, 1 granted"` - the one-line count for compact surfaces.
-    pub fn summary(&self) -> String {
+    pub(crate) fn summary(&self) -> String {
         format!("{} declared, {} granted", self.declared(), self.granted())
     }
 
     /// The config stanza that would grant everything currently refused, ready
     /// to paste. Empty when nothing is refused.
-    pub fn grant_stanza(&self) -> Vec<String> {
+    pub(crate) fn grant_stanza(&self) -> Vec<String> {
         let ungranted = self.ungranted();
         if ungranted.is_empty() {
             return Vec::new();
@@ -210,7 +210,7 @@ impl GrantReport {
 
     /// The one-line warning for surfaces that only have room for one, `None`
     /// when nothing is refused.
-    pub fn warning_line(&self) -> Option<String> {
+    pub(crate) fn warning_line(&self) -> Option<String> {
         self.has_ungranted().then(|| {
             format!(
                 "warning: agent '{}' declares [read_paths] your config does not grant ({}); \

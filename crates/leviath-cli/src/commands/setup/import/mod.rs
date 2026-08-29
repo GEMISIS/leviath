@@ -9,7 +9,7 @@
 //!
 //! Two halves, deliberately separated:
 //!
-//! * [`formats`] turns file *contents* into candidates. Pure, no filesystem, no
+//! * `formats` turns file *contents* into candidates. Pure, no filesystem, no
 //!   `#[cfg]` - every harness's format is testable on every platform, including
 //!   ones whose files could never exist there.
 //! * This module knows *where* those files live - the only platform-dependent
@@ -28,15 +28,15 @@
 //! Discovery never connects to a server, never runs a command, and never reads
 //! anything outside the specific files listed below.
 
-pub mod formats;
+pub(crate) mod formats;
 
 use std::path::{Path, PathBuf};
 
-pub use formats::Candidate;
+pub(crate) use formats::Candidate;
 
 /// How a source file's servers are laid out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Layout {
+pub(crate) enum Layout {
     /// A JSON object of servers under one top-level key.
     JsonObject(&'static str),
     /// Claude Code's `~/.claude.json`: global plus per-project scopes.
@@ -47,10 +47,9 @@ pub enum Layout {
 
 /// One harness Leviath knows how to read.
 #[derive(Debug, Clone)]
-pub struct Source {
-    /// Stable id, used in messages and as a dedup key.
-    pub id: &'static str,
-    /// Name to show the user.
+pub(crate) struct Source {
+    /// Name to show the user; distinct per source, so also its identity in
+    /// messages.
     pub display: &'static str,
     /// The file to read.
     pub path: PathBuf,
@@ -64,16 +63,17 @@ pub struct Source {
 
 /// The result of reading one source.
 #[derive(Debug, Clone)]
-pub struct Scan {
+pub(crate) struct Scan {
     /// Which harness was scanned.
     pub source: Source,
     /// Servers found, or the reason the file could not be read.
     pub result: Result<Vec<Candidate>, String>,
 }
 
+#[cfg(test)]
 impl Scan {
     /// Candidates found, or an empty slice when the file could not be read.
-    pub fn candidates(&self) -> &[Candidate] {
+    pub(crate) fn candidates(&self) -> &[Candidate] {
         self.result.as_deref().unwrap_or(&[])
     }
 }
@@ -144,7 +144,7 @@ fn default_xdg_config_root(_home: &Path, os_config: &Path) -> PathBuf {
 ///
 /// Ordering is the order the wizard shows them in: the harnesses most likely to
 /// be present first.
-pub fn known_sources(roots: &Roots) -> Vec<Source> {
+pub(crate) fn known_sources(roots: &Roots) -> Vec<Source> {
     let home = &roots.home;
     let os_config = &roots.os_config;
     let xdg = &roots.xdg_config;
@@ -152,84 +152,72 @@ pub fn known_sources(roots: &Roots) -> Vec<Source> {
 
     vec![
         Source {
-            id: "claude-code",
             display: "Claude Code",
             path: home.join(".claude.json"),
             layout: Layout::ClaudeCode,
             allows_comments: false,
         },
         Source {
-            id: "claude-code-project",
             display: "Claude Code (this directory)",
             path: cwd.join(".mcp.json"),
             layout: Layout::JsonObject("mcpServers"),
             allows_comments: false,
         },
         Source {
-            id: "claude-desktop",
             display: "Claude Desktop",
             path: claude_desktop_path(os_config),
             layout: Layout::JsonObject("mcpServers"),
             allows_comments: false,
         },
         Source {
-            id: "codex",
             display: "Codex",
             path: home.join(".codex").join("config.toml"),
             layout: Layout::CodexToml,
             allows_comments: false,
         },
         Source {
-            id: "opencode",
             display: "OpenCode",
             path: xdg.join("opencode").join("opencode.json"),
             layout: Layout::JsonObject("mcp"),
             allows_comments: false,
         },
         Source {
-            id: "opencode-home",
             display: "OpenCode (home)",
             path: home.join(".opencode.json"),
             layout: Layout::JsonObject("mcp"),
             allows_comments: false,
         },
         Source {
-            id: "gemini-cli",
             display: "Gemini CLI",
             path: home.join(".gemini").join("settings.json"),
             layout: Layout::JsonObject("mcpServers"),
             allows_comments: false,
         },
         Source {
-            id: "cursor",
             display: "Cursor",
             path: home.join(".cursor").join("mcp.json"),
             layout: Layout::JsonObject("mcpServers"),
             allows_comments: false,
         },
         Source {
-            id: "cursor-project",
             display: "Cursor (this directory)",
             path: cwd.join(".cursor").join("mcp.json"),
             layout: Layout::JsonObject("mcpServers"),
             allows_comments: false,
         },
         Source {
-            id: "vscode-project",
             display: "VS Code (this directory)",
             path: cwd.join(".vscode").join("mcp.json"),
             layout: Layout::JsonObject("servers"),
             allows_comments: true,
         },
         Source {
-            id: "vscode",
             display: "VS Code",
             path: vscode_user_path(os_config),
             layout: Layout::JsonObject("servers"),
             allows_comments: true,
         },
         Source {
-            id: "windsurf",
             display: "Windsurf",
             path: home
                 .join(".codeium")
@@ -239,7 +227,6 @@ pub fn known_sources(roots: &Roots) -> Vec<Source> {
             allows_comments: false,
         },
         Source {
-            id: "zed",
             display: "Zed",
             path: xdg.join("zed").join("settings.json"),
             layout: Layout::JsonObject("context_servers"),
@@ -291,7 +278,7 @@ fn parse(layout: Layout, contents: &str) -> anyhow::Result<Vec<Candidate>> {
 /// filter is `exists`, not `is_file`, for exactly that reason: a directory
 /// sitting where a config file belongs is a situation worth reporting, not one
 /// to silently pretend is an absent harness.
-pub fn scan(roots: &Roots) -> Vec<Scan> {
+pub(crate) fn scan(roots: &Roots) -> Vec<Scan> {
     known_sources(roots)
         .into_iter()
         .filter(|s| s.path.exists())
@@ -320,13 +307,13 @@ fn describe_parse_error(source: &Source, error: &anyhow::Error) -> String {
 }
 
 /// Whether `name` is already configured in Leviath.
-pub fn already_configured(existing: &[leviath_mcp::MCPServerConfig], name: &str) -> bool {
+pub(crate) fn already_configured(existing: &[leviath_mcp::MCPServerConfig], name: &str) -> bool {
     existing.iter().any(|s| s.name == name)
 }
 
 /// A name that does not collide with anything already configured, by appending
 /// `-2`, `-3`, … Used when the user chooses to keep both.
-pub fn dedup_name(existing: &[leviath_mcp::MCPServerConfig], name: &str) -> String {
+pub(crate) fn dedup_name(existing: &[leviath_mcp::MCPServerConfig], name: &str) -> String {
     let mut candidate = name.to_string();
     let mut suffix = 1;
     while already_configured(existing, &candidate) {
@@ -357,27 +344,23 @@ mod tests {
     // ─── known_sources ──────────────────────────────────────────────────────
 
     #[test]
-    fn every_known_source_has_a_distinct_id_and_a_nonempty_path() {
+    fn every_known_source_has_a_distinct_label_and_a_nonempty_path() {
         let dir = tempfile::tempdir().unwrap();
         let sources = known_sources(&roots_in(dir.path()));
 
         assert!(sources.len() >= 9, "expected the full harness table");
-        let mut ids: Vec<&str> = sources.iter().map(|s| s.id).collect();
-        ids.sort_unstable();
-        let total = ids.len();
-        ids.dedup();
-        assert_eq!(total, ids.len(), "duplicate source ids");
+        let mut labels: Vec<&str> = sources.iter().map(|s| s.display).collect();
+        labels.sort_unstable();
+        let total = labels.len();
+        labels.dedup();
+        assert_eq!(total, labels.len(), "duplicate source labels");
 
         for source in &sources {
-            assert!(
-                !source.display.is_empty(),
-                "source {} has no label",
-                source.id
-            );
+            assert!(!source.display.is_empty(), "a source has no label");
             assert!(
                 source.path.is_absolute(),
                 "source {} has a relative path",
-                source.id
+                source.display
             );
         }
     }
@@ -396,7 +379,7 @@ mod tests {
                     || source.path.starts_with(&roots.xdg_config)
                     || source.path.starts_with(&roots.cwd),
                 "source {} escaped the injected roots",
-                source.id
+                source.display
             );
         }
     }
@@ -410,24 +393,24 @@ mod tests {
         let roots = roots_in(dir.path());
         let sources = known_sources(&roots);
 
-        for id in ["zed", "opencode"] {
+        for label in ["Zed", "OpenCode"] {
             let source = sources
                 .iter()
-                .find(|s| s.id == id)
+                .find(|s| s.display == label)
                 .expect("source is in the table");
             assert!(
                 source.path.starts_with(&roots.xdg_config),
-                "{id} should read from the XDG root"
+                "{label} should read from the XDG root"
             );
         }
-        for id in ["claude-desktop", "vscode"] {
+        for label in ["Claude Desktop", "VS Code"] {
             let source = sources
                 .iter()
-                .find(|s| s.id == id)
+                .find(|s| s.display == label)
                 .expect("source is in the table");
             assert!(
                 source.path.starts_with(&roots.os_config),
-                "{id} should read from the OS config root"
+                "{label} should read from the OS config root"
             );
         }
     }
@@ -584,7 +567,7 @@ mod tests {
         let scans = scan(&roots);
 
         assert_eq!(scans.len(), 1);
-        assert_eq!(scans[0].source.id, "claude-code");
+        assert_eq!(scans[0].source.display, "Claude Code");
         assert!(scans[0].result.is_err());
         assert!(scans[0].candidates().is_empty());
     }

@@ -26,7 +26,7 @@
 
 pub(crate) mod flowgraph;
 pub(crate) mod keymap;
-pub mod theme;
+pub(crate) mod theme;
 pub(crate) mod widgets;
 
 use crossterm::event::Event;

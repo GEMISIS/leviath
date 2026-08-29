@@ -16,13 +16,13 @@ use super::{EditError, order};
 /// An `agent.leviath` manifest held as a document: comments, key order and
 /// formatting included.
 #[derive(Debug, Clone)]
-pub struct ManifestDoc {
+pub(crate) struct ManifestDoc {
     doc: DocumentMut,
 }
 
 /// The `[agent]` table as the editor shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentView {
+pub(crate) struct AgentView {
     /// `name`, or empty when the table has none.
     pub name: String,
     /// `version`, or empty.
@@ -40,7 +40,7 @@ pub struct AgentView {
 
 /// A stage's `mode`, as the editor shows and sets it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StageModeView {
+pub(crate) enum StageModeView {
     /// `autonomous`, or no `mode` at all.
     Autonomous,
     /// `interactive`.
@@ -58,7 +58,7 @@ pub enum StageModeView {
 
 impl StageModeView {
     /// The manifest spelling.
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         match self {
             StageModeView::Autonomous => "autonomous",
             StageModeView::Interactive => "interactive",
@@ -70,7 +70,7 @@ impl StageModeView {
     }
 
     /// From the manifest spelling.
-    pub fn parse(s: &str) -> Self {
+    pub(crate) fn parse(s: &str) -> Self {
         match s {
             "autonomous" => StageModeView::Autonomous,
             "interactive" => StageModeView::Interactive,
@@ -90,7 +90,7 @@ impl StageModeView {
     ];
 
     /// What the editor calls the mode.
-    pub fn label(&self) -> &str {
+    pub(crate) fn label(&self) -> &str {
         match self {
             StageModeView::Autonomous => "Works alone",
             StageModeView::Interactive => "Interactive",
@@ -104,7 +104,7 @@ impl StageModeView {
 
 /// Where a fan-out stage gets its workers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkerKind {
+pub(crate) enum WorkerKind {
     /// `worker_agent`: a separate installed blueprint.
     Agent,
     /// `worker_stage`: a stage of this blueprint.
@@ -115,7 +115,7 @@ pub enum WorkerKind {
 
 impl WorkerKind {
     /// The manifest key.
-    pub fn key(self) -> &'static str {
+    pub(crate) fn key(self) -> &'static str {
         match self {
             WorkerKind::Agent => "worker_agent",
             WorkerKind::Stage => "worker_stage",
@@ -127,7 +127,7 @@ impl WorkerKind {
 /// A stage's fan-out keys. Meaningful when its mode is `fan_out`; read
 /// regardless, so nothing is lost when a mode flips back and forth.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct FanOutView {
+pub(crate) struct FanOutView {
     /// Which of `worker_agent`/`worker_stage`/`worker_query` is written, and
     /// its value; the first found when several are.
     pub worker: Option<(WorkerKind, String)>,
@@ -143,7 +143,7 @@ pub struct FanOutView {
 
 /// One `[stages.<name>]` table as the editor shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StageView {
+pub(crate) struct StageView {
     /// The table key.
     pub name: String,
     /// `mode`.
@@ -177,7 +177,7 @@ pub struct StageView {
 
 /// When a path is taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EdgeKind {
+pub(crate) enum EdgeKind {
     /// A `hint = "..."` the model routes on (no `condition` key).
     Hint,
     /// `condition = "always"`.
@@ -207,7 +207,7 @@ impl EdgeKind {
     ];
 
     /// The `condition` spelling; `Hint` has none (it is a `hint` key).
-    pub fn condition(self) -> Option<&'static str> {
+    pub(crate) fn condition(self) -> Option<&'static str> {
         match self {
             EdgeKind::Hint => None,
             EdgeKind::Always => Some("always"),
@@ -221,12 +221,12 @@ impl EdgeKind {
 
     /// The `condition` spelling read back; `None` for one the editor does not
     /// know, which it then leaves alone.
-    pub fn from_condition(s: &str) -> Option<Self> {
+    pub(crate) fn from_condition(s: &str) -> Option<Self> {
         Self::CHOICES.into_iter().find(|k| k.condition() == Some(s))
     }
 
     /// What the editor calls the kind.
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             EdgeKind::Hint => "model decides (hint)",
             EdgeKind::Always => "always continue",
@@ -239,7 +239,7 @@ impl EdgeKind {
     }
 
     /// The short word the canvas puts on the edge.
-    pub fn short(self) -> &'static str {
+    pub(crate) fn short(self) -> &'static str {
         match self {
             EdgeKind::Hint => "hint",
             EdgeKind::Always => "always",
@@ -254,7 +254,7 @@ impl EdgeKind {
 
 /// How context crosses a path.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TransformKind {
+pub(crate) enum TransformKind {
     /// Carry everything: `transform` absent or `"direct"`.
     Direct,
     /// Keep only pinned regions.
@@ -277,7 +277,7 @@ impl TransformKind {
     ];
 
     /// The manifest spelling; `Direct` is written as absent.
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         match self {
             TransformKind::Direct => "direct",
             TransformKind::Clear => "clear",
@@ -288,7 +288,7 @@ impl TransformKind {
     }
 
     /// From the manifest spelling (absent reads as `Direct`).
-    pub fn parse(s: &str) -> Self {
+    pub(crate) fn parse(s: &str) -> Self {
         match s {
             "" | "direct" => TransformKind::Direct,
             "clear" => TransformKind::Clear,
@@ -299,7 +299,7 @@ impl TransformKind {
     }
 
     /// What the editor calls it.
-    pub fn label(&self) -> &str {
+    pub(crate) fn label(&self) -> &str {
         match self {
             TransformKind::Direct => "Carry everything",
             TransformKind::Clear => "Keep only pinned",
@@ -312,7 +312,7 @@ impl TransformKind {
 
 /// A path's `transform_config`, as typed lists.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct TransformRules {
+pub(crate) struct TransformRules {
     /// Regions carried as they are.
     pub carry: Vec<String>,
     /// Regions summarized.
@@ -328,7 +328,7 @@ pub struct TransformRules {
 
 /// One `[stages.<from>.transitions.<to>]` table as the editor shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EdgeView {
+pub(crate) struct EdgeView {
     /// The stage the path leaves.
     pub from: String,
     /// The stage it enters.
@@ -347,7 +347,7 @@ pub struct EdgeView {
 
 /// One region of a layout as the editor shows it.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RegionView {
+pub(crate) struct RegionView {
     /// The table key.
     pub name: String,
     /// `kind`, or empty.
@@ -388,7 +388,7 @@ pub struct RegionView {
 
 /// The layout a stage runs with.
 #[derive(Debug, Clone, PartialEq)]
-pub struct EffectiveRegions {
+pub(crate) struct EffectiveRegions {
     /// The regions, in document order.
     pub regions: Vec<RegionView>,
     /// `true` when they are the agent's shared regions, `false` when the
@@ -398,7 +398,7 @@ pub struct EffectiveRegions {
 
 /// A stage's `tool_routing`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ToolRouting {
+pub(crate) struct ToolRouting {
     /// `default_region`.
     pub default_region: Option<String>,
     /// `overrides`, tool to region, in document order.
@@ -408,7 +408,7 @@ pub struct ToolRouting {
 impl ManifestDoc {
     /// Read a manifest. Refuses text that is not TOML, has no `[agent]`
     /// table, or has no stage table: the editor needs those to stand on.
-    pub fn parse(text: &str) -> Result<Self, EditError> {
+    pub(crate) fn parse(text: &str) -> Result<Self, EditError> {
         let doc: DocumentMut = text
             .parse()
             .map_err(|e: toml_edit::TomlError| EditError::Toml(e.to_string()))?;
@@ -423,12 +423,12 @@ impl ManifestDoc {
     }
 
     /// The manifest text, exactly as it will be written.
-    pub fn to_toml(&self) -> String {
+    pub(crate) fn to_toml(&self) -> String {
         self.doc.to_string()
     }
 
     /// The manifest as the runtime reads it, or the runtime's parse error.
-    pub fn blueprint(&self) -> Result<Blueprint, String> {
+    pub(crate) fn blueprint(&self) -> Result<Blueprint, String> {
         parse_manifest(&self.to_toml()).map_err(|e| e.to_string())
     }
 
@@ -467,7 +467,7 @@ impl ManifestDoc {
     }
 
     /// The `[agent]` view.
-    pub fn agent(&self) -> AgentView {
+    pub(crate) fn agent(&self) -> AgentView {
         let agent = self.agent_table();
         let firsts: Vec<Option<String>> = self
             .stages()
@@ -492,17 +492,17 @@ impl ManifestDoc {
     }
 
     /// The stage names, in the order the file shows them.
-    pub fn stage_names(&self) -> Vec<String> {
+    pub(crate) fn stage_names(&self) -> Vec<String> {
         order::stage_order(&self.doc)
     }
 
     /// Whether a stage of that name exists.
-    pub fn has_stage(&self, name: &str) -> bool {
+    pub(crate) fn has_stage(&self, name: &str) -> bool {
         self.stage_item(name).is_some()
     }
 
     /// One stage's view.
-    pub fn stage(&self, name: &str) -> Option<StageView> {
+    pub(crate) fn stage(&self, name: &str) -> Option<StageView> {
         self.stage_item(name).map(|item| stage_view(name, item))
     }
 }
@@ -551,7 +551,7 @@ fn stage_view(name: &str, item: &Item) -> StageView {
 
 impl ManifestDoc {
     /// Every stage's view, in file order.
-    pub fn stages(&self) -> Vec<StageView> {
+    pub(crate) fn stages(&self) -> Vec<StageView> {
         self.stage_names()
             .iter()
             .filter_map(|n| self.stage(n))
@@ -561,7 +561,7 @@ impl ManifestDoc {
     /// Every path, grouped by the stage it leaves, in file order. A path
     /// whose `condition` the editor does not know is left out (and left
     /// alone).
-    pub fn edges(&self) -> Vec<EdgeView> {
+    pub(crate) fn edges(&self) -> Vec<EdgeView> {
         self.stage_names()
             .into_iter()
             .filter_map(|from| {
@@ -579,7 +579,7 @@ impl ManifestDoc {
     }
 
     /// One path's view.
-    pub fn edge(&self, from: &str, to: &str) -> Option<EdgeView> {
+    pub(crate) fn edge(&self, from: &str, to: &str) -> Option<EdgeView> {
         self.stage_item(from)
             .and_then(|item| child(item, "transitions"))
             .and_then(|transitions| transitions.get(to))
@@ -602,7 +602,7 @@ impl ManifestDoc {
 
     /// The regions of a scope, in document order; empty when the scope has
     /// no `regions` table.
-    pub fn regions(&self, stage: Option<&str>) -> Vec<RegionView> {
+    pub(crate) fn regions(&self, stage: Option<&str>) -> Vec<RegionView> {
         self.regions_item(stage)
             .map(|item| {
                 table_keys(item)
@@ -614,7 +614,7 @@ impl ManifestDoc {
     }
 
     /// One region's view.
-    pub fn region(&self, stage: Option<&str>, name: &str) -> Option<RegionView> {
+    pub(crate) fn region(&self, stage: Option<&str>, name: &str) -> Option<RegionView> {
         self.regions_item(stage)
             .and_then(|item| child(item, name))
             .map(|table| region_view(name, table))
@@ -622,7 +622,7 @@ impl ManifestDoc {
 
     /// The layout a stage runs with: its own when it declares one, the
     /// agent's otherwise. `None` asks for the agent's.
-    pub fn effective_regions(&self, stage: Option<&str>) -> EffectiveRegions {
+    pub(crate) fn effective_regions(&self, stage: Option<&str>) -> EffectiveRegions {
         match stage {
             Some(name) if self.regions_item(Some(name)).is_some() => EffectiveRegions {
                 regions: self.regions(Some(name)),
@@ -636,7 +636,7 @@ impl ManifestDoc {
     }
 
     /// A stage's tool routing; empty when it has none.
-    pub fn tool_routing(&self, stage: &str) -> ToolRouting {
+    pub(crate) fn tool_routing(&self, stage: &str) -> ToolRouting {
         let Some(routing) = self
             .stage_item(stage)
             .and_then(|i| child(i, "tool_routing"))
@@ -662,7 +662,7 @@ impl ManifestDoc {
 
     /// The stages whose tool routing (default or an override) lands in
     /// `region`: what deleting the region would break.
-    pub fn stages_routing_into(&self, region: &str) -> Vec<String> {
+    pub(crate) fn stages_routing_into(&self, region: &str) -> Vec<String> {
         self.stage_names()
             .into_iter()
             .filter(|s| {
@@ -674,7 +674,7 @@ impl ManifestDoc {
     }
 
     /// Every tool named by any stage, sorted and deduplicated.
-    pub fn known_tools(&self) -> Vec<String> {
+    pub(crate) fn known_tools(&self) -> Vec<String> {
         let mut tools: Vec<String> = self.stages().into_iter().flat_map(|s| s.tools).collect();
         tools.sort();
         tools.dedup();
@@ -682,7 +682,7 @@ impl ManifestDoc {
     }
 
     /// Every `provider/model` named by any stage, sorted and deduplicated.
-    pub fn known_models(&self) -> Vec<String> {
+    pub(crate) fn known_models(&self) -> Vec<String> {
         let mut models: Vec<String> = self.stages().into_iter().flat_map(|s| s.models).collect();
         models.sort();
         models.dedup();

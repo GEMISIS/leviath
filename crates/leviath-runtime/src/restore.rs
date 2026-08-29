@@ -27,7 +27,7 @@ use crate::pipeline::{StageCursor, StageInferences, StageSetups};
 /// How urgently a persisted run should be brought back on restart. Ordered so a
 /// higher value restores first (see [`triage_restores`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum RestorePriority {
+pub(crate) enum RestorePriority {
     /// Restorable, but can make no immediate progress: blocked on user input,
     /// done-but-interactive (awaiting optional follow-up), or a parent parked mid
     /// fan-out waiting on its children. Brought back after the actionable runs.
@@ -46,7 +46,10 @@ pub enum RestorePriority {
 /// its status: it can't progress until its children finish.
 ///
 /// [`Blocked`]: RestorePriority::Blocked
-pub fn classify_restore(status: &RunStatus, parked_on_fanout: bool) -> Option<RestorePriority> {
+pub(crate) fn classify_restore(
+    status: &RunStatus,
+    parked_on_fanout: bool,
+) -> Option<RestorePriority> {
     match status {
         RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled => None,
         _ if parked_on_fanout => Some(RestorePriority::Blocked),
@@ -59,15 +62,15 @@ pub fn classify_restore(status: &RunStatus, parked_on_fanout: bool) -> Option<Re
 
 /// Triage a set of persisted runs into the order they should be restored on
 /// restart: drop terminal runs, then rank the rest **actionable-first**
-/// ([`RestorePriority::Active`] before [`Blocked`]), breaking ties by most-recently
+/// (`RestorePriority::Active` before `Blocked`), breaking ties by most-recently
 /// updated. Each input is `(meta, parked_on_fanout)` where `parked_on_fanout` is
-/// whether the run has a `fanout.json` (see [`classify_restore`]); the returned
+/// whether the run has a `fanout.json` (see `classify_restore`); the returned
 /// [`RunMeta`]s are ready to reload in order.
 ///
 /// This lets a resource- or time-constrained caller restore only a prefix (the most
 /// actionable agents) and still make the most progress possible.
 ///
-/// [`Blocked`]: RestorePriority::Blocked
+/// `Blocked`: RestorePriority::Blocked
 pub fn triage_restores(candidates: Vec<(RunMeta, bool)>) -> Vec<RunMeta> {
     let mut ranked: Vec<(RestorePriority, RunMeta)> = candidates
         .into_iter()
@@ -363,7 +366,6 @@ mod tests {
             context_layout: None,
             context_hide: Vec::new(),
             system_prompt: None,
-            output: None,
         }
     }
 

@@ -16,7 +16,7 @@ use crate::bundled::BundledAgent;
 use crate::config::Config;
 
 /// Everything `lev setup` decided to do.
-pub struct SetupPlan {
+pub(crate) struct SetupPlan {
     /// The config to write, fully resolved. MCP imports are already merged into
     /// its `mcp_servers`.
     pub config: Config,
@@ -31,7 +31,7 @@ pub struct SetupPlan {
 
 /// What actually happened, for the closing summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Applied {
+pub(crate) struct Applied {
     /// The config file that was written.
     pub config_path: PathBuf,
     /// Blueprints installed, by name.
@@ -46,7 +46,7 @@ pub struct Applied {
 /// fails to install is reported as a warning rather than aborting, because a
 /// written config plus nine of ten agents is a far better place to leave
 /// someone than an abandoned run with nothing saved.
-pub fn apply(
+pub(crate) fn apply(
     plan: &SetupPlan,
     config_path: &Path,
     agents_dir: &Path,
@@ -86,7 +86,7 @@ pub fn apply(
 /// printed - the review screen is exactly the moment a shoulder-surfer is
 /// looking, and a key the user cannot read back is not a real loss when the
 /// wizard just verified it works.
-pub fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
+pub(crate) fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
     let after = &plan.config;
     let mut out = Vec::new();
 

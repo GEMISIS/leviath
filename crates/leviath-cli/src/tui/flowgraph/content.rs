@@ -23,7 +23,6 @@ pub(crate) enum RunPhase {
     Active,
     Waiting,
     Paused,
-    Idle,
     Stale,
     Complete,
     Error,
@@ -37,7 +36,7 @@ impl RunPhase {
             RunPhase::Waiting | RunPhase::Paused | RunPhase::Stale => C_WARN,
             RunPhase::Complete => C_SUCCESS,
             RunPhase::Error => C_ERROR,
-            RunPhase::Idle | RunPhase::Cancelled => C_DIM,
+            RunPhase::Cancelled => C_DIM,
         }
     }
 
@@ -45,7 +44,7 @@ impl RunPhase {
         match self {
             RunPhase::Active => SPINNER[(tick as usize) % SPINNER.len()],
             RunPhase::Waiting => GLYPH_WAITING,
-            RunPhase::Paused | RunPhase::Idle => GLYPH_PENDING,
+            RunPhase::Paused => GLYPH_PENDING,
             RunPhase::Stale | RunPhase::Error => GLYPH_ERROR,
             RunPhase::Complete => GLYPH_COMPLETE,
             RunPhase::Cancelled => "⊘",
@@ -75,7 +74,6 @@ impl RunPhase {
             RunPhase::Active => None,
             RunPhase::Waiting => Some("waiting"),
             RunPhase::Paused => Some("paused"),
-            RunPhase::Idle => Some("idle"),
             RunPhase::Stale => Some("stale"),
             RunPhase::Complete => Some("complete"),
             RunPhase::Error => Some("error"),
@@ -452,7 +450,6 @@ mod tests {
             ),
             (RunPhase::Waiting, GLYPH_WAITING, C_WARN, "waiting · iter 3"),
             (RunPhase::Paused, GLYPH_PENDING, C_WARN, "paused"),
-            (RunPhase::Idle, GLYPH_PENDING, C_DIM, "idle"),
             (RunPhase::Stale, GLYPH_ERROR, C_WARN, "stale"),
             (RunPhase::Complete, GLYPH_COMPLETE, C_SUCCESS, "complete"),
             (RunPhase::Error, GLYPH_ERROR, C_ERROR, "error"),

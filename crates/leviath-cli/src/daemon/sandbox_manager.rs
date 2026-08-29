@@ -45,7 +45,7 @@ struct LiveContainer {
 /// Owns an agent's sandboxes for its whole lifetime. Created at spawn, updated
 /// per stage via [`Self::set_stage`], torn down at reap via [`Self::destroy_all`].
 #[derive(Debug)]
-pub struct SandboxManager {
+pub(crate) struct SandboxManager {
     /// Live containers keyed by config signature; immutable after construction.
     containers: HashMap<u64, LiveContainer>,
     /// Per-stage-index resolved sandbox config; immutable after construction.
@@ -92,7 +92,7 @@ impl SandboxManager {
     /// case - the caller then attaches no executor and shell runs on the host).
     /// Returns `Err` when a required runtime is unavailable and that config's
     /// `on_unavailable` is `Error`.
-    pub fn build(
+    pub(crate) fn build(
         run_id: &str,
         by_index: Vec<ToolSandboxConfig>,
         workdir: &str,
@@ -208,7 +208,7 @@ impl SandboxManager {
 
     /// Point the shell tool at the sandbox for stage `index` (called by the tool
     /// service's `sync_stage` on every stage change).
-    pub fn set_stage(&self, index: usize) {
+    pub(crate) fn set_stage(&self, index: usize) {
         if let Some(cfg) = self.by_index.get(index) {
             *self.current.lock().unwrap_or_else(PoisonError::into_inner) = cfg.clone();
         }
@@ -216,7 +216,7 @@ impl SandboxManager {
 
     /// Force-remove every container this manager started (best-effort). Called
     /// once, at reap, before the agent entity is despawned.
-    pub fn destroy_all(&self) {
+    pub(crate) fn destroy_all(&self) {
         self.destroy_with(&real_run);
     }
 

@@ -198,7 +198,6 @@ fn setup() -> StageSetup {
         context_layout: None,
         context_hide: Vec::new(),
         system_prompt: None,
-        output: None,
     }
 }
 

@@ -650,7 +650,6 @@ impl Dashboard {
             && matches!(
                 agent.status,
                 AgentDisplayStatus::Active
-                    | AgentDisplayStatus::Idle
                     | AgentDisplayStatus::Stale
                     | AgentDisplayStatus::Waiting
             )
@@ -1115,14 +1114,12 @@ mod tests {
             title: None,
             model: None,
             parent_id: None,
-            depth: 0,
             started_at: 1000,
             last_progress_at: None,
             runtime_secs: 0,
             clock_now: 0,
             graph: None,
             accepts_messages: true,
-            taint_summary: vec![],
         }
     }
 
@@ -1895,11 +1892,7 @@ mod tests {
     /// command, and flips the row optimistically.
     #[test]
     fn pause_sends_command_for_each_pausable_state() {
-        for status in [
-            AgentDisplayStatus::Active,
-            AgentDisplayStatus::Idle,
-            AgentDisplayStatus::Stale,
-        ] {
+        for status in [AgentDisplayStatus::Active, AgentDisplayStatus::Stale] {
             let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
             let mut dash = Dashboard::new(cmd_tx);
             dash.agents.push(make_test_agent("run-1", status.clone()));
@@ -2199,7 +2192,6 @@ mod tests {
         for status in [
             AgentDisplayStatus::Active,
             AgentDisplayStatus::Waiting,
-            AgentDisplayStatus::Idle,
             AgentDisplayStatus::Stale,
         ] {
             let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();

@@ -468,7 +468,7 @@ impl LimitsConfig {
     /// request on it for the life of the daemon, since waiting for a full pool
     /// is backpressure the engine never fails. Deleting the key is how a limit
     /// is lifted.
-    pub fn inference_pools(&self) -> leviath_runtime::inference_pool::InferencePoolConfig {
+    pub(crate) fn inference_pools(&self) -> leviath_runtime::inference_pool::InferencePoolConfig {
         let mut config = leviath_runtime::inference_pool::InferencePoolConfig::new().with_default(
             self.max_concurrent_inferences
                 .map(|limit| usable_pool_limit(limit, "[limits] max_concurrent_inferences")),
@@ -495,7 +495,7 @@ impl LimitsConfig {
     }
 
     /// The write ceilings in effect, for the engine.
-    pub fn write_limits(&self) -> leviath_core::write_limits::WriteLimits {
+    pub(crate) fn write_limits(&self) -> leviath_core::write_limits::WriteLimits {
         leviath_core::write_limits::WriteLimits {
             per_call: self.max_tool_call_write_bytes,
             per_run: self.max_run_write_bytes,

@@ -5,17 +5,17 @@ use super::*;
 /// The agent's tool batch has been handed to the tool lane; it is waiting for
 /// the results (which the tool-collect system will apply).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AwaitingTools;
+pub(crate) struct AwaitingTools;
 
 /// Marker: this agent's advertised tools should be re-resolved before its next
 /// turn - mid-run dynamic tool discovery. Consumed by
 /// [`refresh_advertised_tools`], which asks the [`ToolService`] for the stage's
 /// fresh tool defs and writes them into the live [`StageInference`].
 #[derive(Component, Debug, Clone, Copy)]
-pub struct ToolsNeedRefresh;
+pub(crate) struct ToolsNeedRefresh;
 
 /// Marker: this agent opted into `dynamic_tools`. Only such agents
-/// are polled by [`poll_dynamic_tool_refresh`] for a pending tool re-scan, so the
+/// are polled by `poll_dynamic_tool_refresh` for a pending tool re-scan, so the
 /// default (static) agent pays nothing.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct DynamicTools;
@@ -66,7 +66,7 @@ pub trait ToolService: Send + Sync {
     }
 
     /// Whether `entity` (a `dynamic_tools` agent) has pending tool changes that
-    /// warrant a re-scan + re-advertise. Polled by [`poll_dynamic_tool_refresh`];
+    /// warrant a re-scan + re-advertise. Polled by `poll_dynamic_tool_refresh`;
     /// implementors return (and clear) a per-agent dirty flag. Default `false`.
     fn wants_refresh(&self, _entity: Entity) -> bool {
         false
@@ -75,12 +75,12 @@ pub trait ToolService: Send + Sync {
 
 /// The tool service, as a world resource.
 #[derive(Resource, Clone)]
-pub struct ToolServiceRes(pub Arc<dyn ToolService>);
+pub(crate) struct ToolServiceRes(pub Arc<dyn ToolService>);
 
 /// The job sender feeding the tool lane, as a world resource, paired with the
 /// lane's occupancy counters so dispatch can record what it queued.
 #[derive(Resource, Clone)]
-pub struct ToolStage {
+pub(crate) struct ToolStage {
     /// Where batches are handed to the lane.
     pub jobs: UnboundedSender<ToolJob>,
     /// Shared with the lane's workers; see [`crate::tool_bridge::ToolLaneStats`].
@@ -89,7 +89,7 @@ pub struct ToolStage {
 
 impl ToolStage {
     /// A stage wired to a real lane's counters.
-    pub fn new(
+    pub(crate) fn new(
         jobs: UnboundedSender<ToolJob>,
         stats: Arc<crate::tool_bridge::ToolLaneStats>,
     ) -> Self {
@@ -98,7 +98,8 @@ impl ToolStage {
 
     /// A stage with counters of its own, for callers that drive `dispatch_tools`
     /// without a lane behind it (tests read the channel directly).
-    pub fn detached(jobs: UnboundedSender<ToolJob>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn detached(jobs: UnboundedSender<ToolJob>) -> Self {
         Self::new(jobs, Arc::new(crate::tool_bridge::ToolLaneStats::new(1)))
     }
 }
@@ -108,7 +109,7 @@ impl ToolStage {
 /// [`collect_tools`] merges them with the lane results. Absent when a batch had
 /// no context tools.
 #[derive(Component, Debug, Clone, Default)]
-pub struct ContextToolResults(pub Vec<(String, String)>);
+pub(crate) struct ContextToolResults(pub Vec<(String, String)>);
 
 /// Merge context + lane tool results into one `(id, result)` list in the
 /// original tool-call order (Anthropic requires a `tool_result` per `tool_use`,
@@ -325,7 +326,7 @@ type DispatchToolsQuery = (
 /// event sink. Bundled as one `SystemParam` so a system's signature stays about
 /// what it *queries* rather than listing the six things that might be wired.
 #[derive(bevy_ecs::system::SystemParam)]
-pub struct DaemonServices<'w> {
+pub(crate) struct DaemonServices<'w> {
     /// The taint-gate policy, when one is configured.
     pub policy: Option<Res<'w, PolicyGate>>,
     /// Rhai rules the gate consults before blocking.
@@ -353,7 +354,7 @@ pub struct DaemonServices<'w> {
 /// with an ack the exec waits on, and a per-call [`ToolProgress`] journals each
 /// completion as a `ToolCallDone`. On a crash mid-batch, recovery replays the
 /// recorded results instead of re-running their side effects (issue #96).
-pub fn dispatch_tools(
+pub(crate) fn dispatch_tools(
     mut agents: Query<DispatchToolsQuery, With<ReadyForTools>>,
     service: Res<ToolServiceRes>,
     stage: Res<ToolStage>,

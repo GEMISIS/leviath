@@ -166,7 +166,7 @@ impl WorldHost {
     /// Served alongside every run listing, because "is this run stuck" and "is
     /// the daemon stuck" are answered by different numbers and an operator
     /// looking at one wants the other in the same breath.
-    pub fn health(&self) -> DaemonHealth {
+    pub(crate) fn health(&self) -> DaemonHealth {
         let snapshot = self.world.lane_snapshot();
         DaemonHealth {
             agents: snapshot.agents,
@@ -256,7 +256,8 @@ impl WorldHost {
     ///
     /// Exists so tests don't have to wait out the 30-second default; the daemon
     /// uses it as-is.
-    pub fn set_redrive_interval(&mut self, every: Duration) {
+    #[cfg(test)]
+    pub(crate) fn set_redrive_interval(&mut self, every: Duration) {
         self.redrive = every;
     }
 }

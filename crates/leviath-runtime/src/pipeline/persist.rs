@@ -72,7 +72,7 @@ pub struct PersistWatermark {
 impl PersistWatermark {
     /// Unix seconds when this agent last made progress (iteration, stage, or
     /// status changed). `None` before the first snapshot.
-    pub fn last_progress_at(&self) -> Option<i64> {
+    pub(crate) fn last_progress_at(&self) -> Option<i64> {
         self.last_progress_at
     }
 
@@ -104,7 +104,7 @@ impl PersistWatermark {
 /// The sending end of the persistence I/O lane (the receiving end is drained by
 /// `persistence_bridge::persistence_worker`).
 #[derive(Resource)]
-pub struct PersistenceStage(pub UnboundedSender<PersistMsg>);
+pub(crate) struct PersistenceStage(pub UnboundedSender<PersistMsg>);
 
 /// What `reflect_interaction_status` selects.
 ///
@@ -158,7 +158,7 @@ fn fold_broken_scripts(
 /// set it, and the clearing arm below would otherwise walk them back to `Active`
 /// the moment an unrelated prompt of theirs resolved, un-parking a run whose
 /// children are still going.
-pub fn reflect_interaction_status(
+pub(crate) fn reflect_interaction_status(
     hub: Option<Res<InteractionHub>>,
     mut agents: Query<
         ReflectInteractionStatusQuery,
@@ -330,7 +330,7 @@ type PersistenceQuery = (
 /// Coalescing lives here rather than in the lane: an agent whose digest has not
 /// changed since its last send is skipped, so a world full of idle runs costs
 /// nothing per tick.
-pub fn dispatch_persistence(
+pub(crate) fn dispatch_persistence(
     mut agents: Query<PersistenceQuery>,
     stage: Res<PersistenceStage>,
     hub: Option<Res<InteractionHub>>,

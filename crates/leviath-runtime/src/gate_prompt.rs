@@ -33,13 +33,13 @@ use crate::taint::GateResolution;
 
 /// Marks an agent holding its tool batch while `n` gate prompts are outstanding.
 #[derive(Component, Debug, Clone, Copy)]
-pub struct AwaitingGatePrompt(pub usize);
+pub(crate) struct AwaitingGatePrompt(pub usize);
 
 /// Per-agent record of resolved blocked calls, consumed by the tool-dispatch
 /// re-run: `approved` call ids execute, `denied` call ids get their stored
 /// `[blocked]` message. Removed once the batch is dispatched.
 #[derive(Component, Debug, Clone, Default)]
-pub struct GateResolved {
+pub(crate) struct GateResolved {
     /// Tool-call ids the user allowed (execute without re-checking the gate).
     pub approved: HashSet<String>,
     /// Tool-call ids the user denied, mapped to their block message.
@@ -47,7 +47,7 @@ pub struct GateResolved {
 }
 
 /// One resolved gate prompt, reported on the lane.
-pub struct GatePromptOutcome {
+pub(crate) struct GatePromptOutcome {
     /// The agent the call belongs to.
     pub entity: Entity,
     /// The blocked tool call's id.
@@ -64,7 +64,7 @@ pub struct GatePromptOutcome {
 
 /// The sending side of the gate-prompt lane + the handle/wake to drive the ask.
 #[derive(Resource)]
-pub struct GatePromptStage {
+pub(crate) struct GatePromptStage {
     /// Where resolved outcomes are reported.
     pub outcomes: UnboundedSender<GatePromptOutcome>,
     /// Wakes the tick loop when an outcome lands.
@@ -75,7 +75,7 @@ pub struct GatePromptStage {
 
 /// The receiving side of the gate-prompt lane, for the collect system.
 #[derive(Resource)]
-pub struct GatePromptResults(pub UnboundedReceiver<GatePromptOutcome>);
+pub(crate) struct GatePromptResults(pub UnboundedReceiver<GatePromptOutcome>);
 
 /// Map a multiple-choice answer to a resolution (default: `Deny`, per the
 /// gate's safe default when there is no answer).
@@ -117,7 +117,7 @@ fn build_gate_request(
 /// Held apart from the lane it reports on because these six answer "what is the
 /// user being asked about" and the other three answer "where does the answer
 /// go" - and only the first six ever appear in the prompt.
-pub struct GatedCall {
+pub(crate) struct GatedCall {
     /// The agent whose call is blocked.
     pub entity: Entity,
     /// That agent's run id, for the hub's per-agent backend.
@@ -132,7 +132,7 @@ pub struct GatedCall {
     pub clearance: TaintLevel,
 }
 
-pub async fn run_gate_prompt(call: GatedCall, lane: PromptLane<GatePromptOutcome>) {
+pub(crate) async fn run_gate_prompt(call: GatedCall, lane: PromptLane<GatePromptOutcome>) {
     let GatedCall {
         entity,
         agent_id,
@@ -162,7 +162,7 @@ pub async fn run_gate_prompt(call: GatedCall, lane: PromptLane<GatePromptOutcome
 
 /// Collect: apply each resolved gate prompt into the agent's [`GateResolved`],
 /// and once every outstanding prompt is in, re-arm the tool dispatch.
-pub fn collect_gate_prompt(
+pub(crate) fn collect_gate_prompt(
     mut results: ResMut<GatePromptResults>,
     mut agents: Query<(
         &crate::components::AgentState,

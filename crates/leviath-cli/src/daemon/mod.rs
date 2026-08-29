@@ -5,18 +5,18 @@
 //! to the built-in / MCP executors and the interaction hub.
 
 pub mod client;
-pub mod config_reload;
-pub mod fanout_spawner;
-pub mod gate_rules;
+pub(crate) mod config_reload;
+pub(crate) mod fanout_spawner;
+pub(crate) mod gate_rules;
 pub mod lifecycle;
 pub mod mcp_pool;
 pub mod readiness;
-pub mod recovery;
-pub mod sandbox_manager;
-pub mod script_host;
-pub mod seed_command;
-pub mod seed_tool;
+pub(crate) mod recovery;
+pub(crate) mod sandbox_manager;
+pub(crate) mod script_host;
+pub(crate) mod seed_command;
+pub(crate) mod seed_tool;
 pub mod setup;
-pub mod spawn;
-pub mod subagent;
-pub mod tool_service;
+pub(crate) mod spawn;
+pub(crate) mod subagent;
+pub(crate) mod tool_service;

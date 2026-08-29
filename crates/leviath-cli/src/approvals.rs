@@ -124,7 +124,7 @@ pub const DEFAULT_SAFE_SHELL: &[&str] = &[
 /// person asks the first time a run does something unprompted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SafeSource {
+pub(crate) enum SafeSource {
     /// [`DEFAULT_SAFE_SHELL`], or a built-in tool that never prompts.
     Default,
     /// The user's `[safe_commands]`.
@@ -202,7 +202,7 @@ pub struct AgentSafeCommands {
 ///
 /// An entry that is not a valid prefix is skipped with a warning rather than
 /// failing the spawn: a typo in a config file should cost one prompt, not a run.
-pub fn resolve_safe_keys(
+pub(crate) fn resolve_safe_keys(
     config: &SafeCommands,
     agent: Option<&AgentSafeCommands>,
     blueprint: Option<&leviath_core::blueprint::SafeCommandsConfig>,

@@ -30,7 +30,7 @@ use crate::daemon::tool_service::CliToolService;
 /// Everything [`build_agent`] needs, captured so a fan-out worker can be spawned
 /// from inside a world-system (which has no access to the daemon's context).
 #[derive(Clone)]
-pub struct DaemonFanOutSpawner {
+pub(crate) struct DaemonFanOutSpawner {
     /// Spawn-time config, read fresh per worker so a `config.toml` edit reaches
     /// fan-out workers too (shared with the daemon's main spawner).
     pub config: Arc<crate::daemon::config_reload::ConfigReloader>,

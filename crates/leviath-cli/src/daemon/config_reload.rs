@@ -49,7 +49,7 @@ impl ConfigReloader {
     /// [`Config::config_path`]). The file's current mtime is recorded so the
     /// first [`current`](Self::current) call does not reload a config that has
     /// not changed.
-    pub fn new(path: PathBuf, initial: Config) -> Self {
+    pub(crate) fn new(path: PathBuf, initial: Config) -> Self {
         let mtime = file_mtime(&path);
         Self {
             path: Some(path),
@@ -63,7 +63,8 @@ impl ConfigReloader {
     /// A reloader that never watches a file: [`current`](Self::current) always
     /// returns `config`. For contexts that hold a config snapshot but do not
     /// hot-reload (tests, and any caller that wants a fixed config).
-    pub fn fixed(config: Config) -> Self {
+    #[cfg(test)]
+    pub(crate) fn fixed(config: Config) -> Self {
         Self {
             path: None,
             cache: Mutex::new(Cached {
@@ -81,7 +82,7 @@ impl ConfigReloader {
     /// last good config, so a broken file degrades to "your last saved config"
     /// rather than a broken spawn. The stale mtime is retained, so the next
     /// successful save is picked up.
-    pub fn current(&self) -> Arc<Config> {
+    pub(crate) fn current(&self) -> Arc<Config> {
         let Some(path) = &self.path else {
             // A fixed reloader: nothing to watch.
             return self
