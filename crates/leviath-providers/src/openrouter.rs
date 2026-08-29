@@ -270,12 +270,63 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
     crate::capabilities::lookup(MODELS, model, FALLBACK_CAPABILITIES)
 }
 
+/// [`builtin_capabilities`], for the crate-level catalogue.
+pub(crate) fn table_capabilities(model: &str) -> ModelCapabilities {
+    builtin_capabilities(model)
+}
+
+/// A sample of the models the gateway fronts, named when its listing cannot
+/// be read, as `(id, display name)`. The listing is the real answer: it
+/// carried 398 models when measured, and this names two dozen.
+pub(crate) const CATALOG: &[(&str, &str)] = &[
+    ("x-ai/grok-4.6", "Grok 4.6"),
+    ("meta/muse-spark-1.2", "Muse Spark 1.2"),
+    ("anthropic/claude-opus-5", "Claude Opus 5 (via OpenRouter)"),
+    (
+        "anthropic/claude-sonnet-5",
+        "Claude Sonnet 5 (via OpenRouter)",
+    ),
+    ("google/gemini-3.5-flash", "Gemini 3.5 Flash"),
+    ("google/gemini-2.5-pro", "Gemini 2.5 Pro"),
+    ("google/gemini-2.5-flash", "Gemini 2.5 Flash"),
+    ("google/gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite"),
+    ("meta-llama/llama-4-maverick", "Llama 4 Maverick"),
+    ("meta-llama/llama-4-scout", "Llama 4 Scout"),
+    ("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro"),
+    ("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash"),
+    ("deepseek/deepseek-v3.2", "DeepSeek V3.2"),
+    ("deepseek/deepseek-r1-0528", "DeepSeek R1 (0528)"),
+    ("deepseek/deepseek-r1", "DeepSeek R1"),
+    ("mistralai/mistral-large-2512", "Mistral Large 3"),
+    ("mistralai/mistral-medium-3-5", "Mistral Medium 3.5"),
+    ("mistralai/mistral-small-2603", "Mistral Small 4"),
+    ("qwen/qwen3.6-plus", "Qwen 3.6 Plus"),
+    ("qwen/qwen3-max", "Qwen3 Max"),
+    ("qwen/qwen3-coder", "Qwen3 Coder 480B"),
+];
+
 /// What this build knows about the models OpenRouter routes to, most
 /// specific first.
 ///
 /// Rows for a single model (`llama-4-scout`, `deepseek-v4-pro`, the
 /// Anthropic models that refuse a temperature) sit above their family rows.
 pub(crate) const MODELS: &[Row] = &[
+    // xAI Grok.
+    Row {
+        matches: &[Match::Prefix("x-ai/grok-4")],
+        temperature: true,
+        tools: true,
+        context: 500_000,
+        output: 64_000,
+    },
+    // Meta Muse.
+    Row {
+        matches: &[Match::Prefix("meta/muse")],
+        temperature: true,
+        tools: true,
+        context: 1_048_576,
+        output: 64_000,
+    },
     // Google Gemini.
     Row {
         matches: &[Match::Prefix("google/gemini")],
@@ -1009,7 +1060,7 @@ mod tests {
     fn an_unlisted_model_lands_on_the_fallback() {
         // The reported models. OpenRouter fronts hundreds and this table names
         // a few dozen, so this is the ordinary case rather than the odd one.
-        for model in ["moonshotai/kimi-k3", "meta/muse-spark-1.2"] {
+        for model in ["moonshotai/kimi-k3", "sakana/fugu-ultra"] {
             assert_eq!(
                 builtin_capabilities(model).max_context_tokens,
                 FALLBACK_CAPABILITIES.max_context_tokens,
@@ -1030,7 +1081,7 @@ mod tests {
         );
         for _ in 0..3 {
             provider.capabilities("moonshotai/kimi-k3");
-            provider.capabilities("meta/muse-spark-1.2");
+            provider.capabilities("sakana/fugu-ultra");
         }
         let warned = &provider.warned_unknown;
         assert_eq!(warned.len(), 2, "one entry per model: {warned:?}");

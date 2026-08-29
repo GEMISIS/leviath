@@ -73,6 +73,30 @@ impl GeminiFamily {
 /// the page token is followed regardless.
 const NATIVE_PAGE_SIZE: usize = 200;
 
+/// What the family table says about `model`, for a caller with no provider
+/// in hand.
+pub(crate) fn table_capabilities(model: &str) -> ModelCapabilities {
+    let (max_context_tokens, max_output_tokens) = GeminiFamily::classify(model).limits();
+    ModelCapabilities {
+        supports_temperature: true,
+        supports_streaming: true,
+        supports_tools: true,
+        supports_system_prompt: true,
+        max_context_tokens,
+        max_output_tokens,
+        limits_source: LimitsSource::Builtin,
+    }
+}
+
+/// The models this build names when the listing cannot be read, as
+/// `(id, display name)`.
+pub(crate) const CATALOG: &[(&str, &str)] = &[
+    ("gemini-3.5-flash", "Gemini 3.5 Flash"),
+    ("gemini-3.1-pro-preview", "Gemini 3.1 Pro (preview)"),
+    ("gemini-3-flash", "Gemini 3 Flash"),
+    ("gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite"),
+];
+
 /// Google Gemini provider using the OpenAI-compatible endpoint.
 pub struct GeminiProvider {
     /// HTTP client
@@ -169,16 +193,7 @@ impl GeminiProvider {
     /// - gemini-3-flash (complex multimodal/agentic)
     /// - gemini-3.1-flash-lite (cost-efficient, high-volume)
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        let (max_context_tokens, max_output_tokens) = GeminiFamily::classify(model).limits();
-        ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens,
-            max_output_tokens,
-            limits_source: LimitsSource::Builtin,
-        }
+        table_capabilities(model)
     }
 
     /// Derive the native Gemini API base (`.../v1beta`) from the OpenAI-compatible

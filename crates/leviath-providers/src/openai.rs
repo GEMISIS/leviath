@@ -68,6 +68,20 @@ fn is_chat_model_id(model_key: &str) -> bool {
     model_key.starts_with("gpt") || reasoning
 }
 
+/// What [`MODELS`] says about `model`, for a caller with no provider in hand.
+pub(crate) fn table_capabilities(model: &str) -> ModelCapabilities {
+    crate::capabilities::lookup(MODELS, model, ModelCapabilities::default())
+}
+
+/// The models this build names when the listing cannot be read, as
+/// `(id, display name)`.
+pub(crate) const CATALOG: &[(&str, &str)] = &[
+    ("gpt-5.5", "GPT-5.5"),
+    ("gpt-5.4", "GPT-5.4"),
+    ("gpt-5.4-mini", "GPT-5.4 Mini"),
+    ("gpt-5.4-nano", "GPT-5.4 Nano"),
+];
+
 /// What this build knows about OpenAI's models, most specific first.
 ///
 /// `gpt-5.5` sits above the `gpt-5` family row because it is the one member
@@ -166,7 +180,7 @@ impl OpenAIProvider {
 
     /// Return built-in capability defaults for a model.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        crate::capabilities::lookup(MODELS, model, ModelCapabilities::default())
+        table_capabilities(model)
     }
 
     /// POST a chat-completions body, teaching the retry described on

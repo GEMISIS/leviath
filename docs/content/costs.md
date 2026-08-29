@@ -146,8 +146,12 @@ spent most of the run.
 > a fan-out badly: in the $236 run above, the top-level agent's own record said $15. Add up the
 > tree, following `children` in each `meta.json`.
 
-Rates for models with no published price come from `[model_capabilities]` in your config, which
-is also the only place a negotiated rate or a self-hosted model's cost can live:
+OpenRouter quotes every model's rate in its listing, so a run through it is priced from what the
+gateway said that day, and `lev models list` prints those rates beside each model. Anthropic, OpenAI
+and Google publish no rate through their APIs, so theirs are transcribed into this build and dated;
+`lev models show` says which kind it is printing. Rates for models with neither come from
+`[model_capabilities]` in your config, which is also the only place a negotiated rate or a
+self-hosted model's cost can live:
 
 ```toml
 [model_capabilities."my-model"]

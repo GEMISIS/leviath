@@ -92,6 +92,72 @@ pub(crate) fn lookup(table: &[Row], model: &str, fallback: ModelCapabilities) ->
         .map_or(fallback, Row::capabilities)
 }
 
+/// One model this build names outright, for a listing that cannot ask.
+///
+/// The tables above recognise a model by a pattern in its name and so cannot
+/// enumerate anything; a listing wants rows. Each provider names the handful
+/// of models worth showing when its listing cannot be reached, and resolves
+/// their capabilities through its own table, so a row here and an inference
+/// against the same id cannot disagree. This replaced a second, hand-kept
+/// table in the CLI whose numbers had drifted from these (#568).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogEntry {
+    /// The provider that serves it.
+    pub provider: &'static str,
+    /// The id a request names.
+    pub id: &'static str,
+    /// What the provider calls it.
+    pub display_name: &'static str,
+    /// What the provider's table says about it.
+    pub capabilities: ModelCapabilities,
+}
+
+/// Every model this build names outright, across the providers that name any.
+///
+/// Ollama names none: it serves whatever has been pulled, and nothing compiled
+/// in could say what that is. OpenRouter names a sample of the hundreds it
+/// fronts. The three closed catalogues (Anthropic, OpenAI, Google) name their
+/// current line-up, which is what the `unknown-model` lint checks a blueprint
+/// against when no listing has been read.
+pub fn builtin_catalog() -> Vec<CatalogEntry> {
+    let rows = |provider: &'static str,
+                catalog: &'static [(&'static str, &'static str)],
+                capabilities: fn(&str) -> ModelCapabilities| {
+        catalog.iter().map(move |(id, display_name)| CatalogEntry {
+            provider,
+            id,
+            display_name,
+            capabilities: capabilities(id),
+        })
+    };
+    rows(
+        "anthropic",
+        crate::anthropic::CATALOG,
+        crate::anthropic::table_capabilities,
+    )
+    .chain(rows(
+        "openai",
+        crate::openai::CATALOG,
+        crate::openai::table_capabilities,
+    ))
+    .chain(rows(
+        "google",
+        crate::gemini::CATALOG,
+        crate::gemini::table_capabilities,
+    ))
+    .chain(rows(
+        "openrouter",
+        crate::openrouter::CATALOG,
+        crate::openrouter::table_capabilities,
+    ))
+    .chain(rows(
+        "claude-code",
+        crate::claude_code::CATALOG,
+        crate::claude_code::table_capabilities,
+    ))
+    .collect()
+}
+
 /// Capabilities supported by a model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCapabilities {
@@ -264,6 +330,60 @@ impl From<ModelCapabilities> for ModelCapabilityOverride {
             cache_write_per_mtok: None,
             output_per_mtok: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    /// A catalogue id that fell through to its provider's fallback would be a
+    /// row whose numbers are a guess dressed as a fact, which is the drift
+    /// this catalogue replaced.
+    #[test]
+    fn every_catalogue_id_hits_a_real_row_of_its_providers_table() {
+        let catalog = builtin_catalog();
+        assert!(catalog.len() > 30);
+        let fallbacks = [
+            ("anthropic", ModelCapabilities::default()),
+            ("openai", ModelCapabilities::default()),
+            ("openrouter", crate::openrouter::FALLBACK_CAPABILITIES),
+        ];
+        let strays: Vec<&str> = catalog
+            .iter()
+            .filter(|e| {
+                fallbacks
+                    .iter()
+                    .any(|(p, f)| *p == e.provider && e.capabilities == *f)
+            })
+            .map(|e| e.id)
+            .collect();
+        assert!(strays.is_empty(), "on the fallback: {strays:?}");
+    }
+
+    #[test]
+    fn catalogue_ids_are_unique_per_provider_and_named() {
+        let catalog = builtin_catalog();
+        let mut seen = std::collections::HashSet::new();
+        for entry in &catalog {
+            assert!(seen.insert((entry.provider, entry.id)), "{:?}", entry.id);
+            assert!(!entry.display_name.is_empty(), "{}", entry.id);
+            assert!(
+                entry.capabilities.max_context_tokens > entry.capabilities.max_output_tokens,
+                "{}",
+                entry.id
+            );
+        }
+        for provider in ["anthropic", "openai", "google", "openrouter", "claude-code"] {
+            assert!(
+                catalog.iter().any(|e| e.provider == provider),
+                "{provider} names nothing"
+            );
+        }
+        assert!(
+            !catalog.iter().any(|e| e.provider == "ollama"),
+            "nothing compiled in can say what has been pulled"
+        );
     }
 }
 

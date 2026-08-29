@@ -676,25 +676,34 @@ max_output_tokens    = 4096
 ```
 
 `lev models show <model>` prints the values a run will actually use, with any correction already
-applied. `GET /api/models` carries the same numbers plus a `limits_source` of `api`, `builtin` or
+applied, and says whether they came from the provider's own listing or this build's table.
+`GET /api/models` carries the same numbers plus a `limits_source` of `api`, `builtin` or
 `override`, so a client can tell a figure the provider reported from one this build matched off the
 model's name. The two are not worth the same and they look identical once printed.
 
-### Where a window comes from
+### Where a model's capabilities come from
 
 Three sources, narrowest first:
 
 1. A `[model_capabilities]` entry, if you wrote one. Your number is the last word, which is how you
-   correct an API that is itself wrong.
-2. What the provider's own API reports, read once when the daemon starts, and again whenever
-   `GET /api/models` is asked. Which providers can answer, and from where:
+   correct an API that is itself wrong. One exception: a model that has refused a temperature is
+   never sent another, whatever an entry says, because the request was made and the answer was no.
+2. What the provider's own listing reports, read once when the daemon starts, again whenever
+   `GET /api/models` or `lev models` asks, and kept for the life of the process. No two listings
+   carry the same fields, so each provider reads what its own endpoint has and leaves the rest to
+   the table:
 
-   | provider | reads | notes |
-   |---|---|---|
-   | OpenRouter | `/models` | `context_length` and `top_provider.max_completion_tokens`. Fronts far more models than any compiled table can name |
-   | Google | `/v1beta/models` | `inputTokenLimit` and `outputTokenLimit`. Needs the native base URL; an OpenAI-compat one has no such listing |
-   | Ollama | `/api/ps`, then `/api/show` | See below |
-   | Anthropic, OpenAI | nothing | Neither `/models` reports token limits at all, so the compiled table is the only answer available |
+   | provider | reads | learns | cannot learn |
+   |---|---|---|---|
+   | OpenRouter | `/models` | both limits, whether the model takes a temperature and tools (`supported_parameters`), the price per token, whether the upstream bills a cache write (the signal for explicit cache markers), the release date | nothing it lists; a few entries carry no `supported_parameters` |
+   | Anthropic | `/v1/models`, every page | `max_input_tokens`, `max_tokens`, the display name, the release date | temperature: the listing has no such field, so the table says which models refuse one |
+   | OpenAI | `/v1/models` | the model ids, release and retirement dates | sizes, temperature and tools: the listing describes none of them |
+   | Google | `/v1beta/models`, every page | both limits, whether the model samples (`maxTemperature`); models without `generateContent` are dropped | tools, price, dates. Needs the native base URL; an OpenAI-compat one has no such listing |
+   | Ollama | `/api/ps`, then `/api/show` | the served window (see below), whether the model calls tools (`capabilities`) | temperature: every local model takes one |
+
+   Once a provider's listing has been read it is also the complete list of what that provider
+   serves, so `lev validate` refuses a model it does not carry (Ollama is the exception: `/api/tags`
+   is what has been pulled, not what Ollama can serve).
 
 3. The table compiled into this build, matched against the model's name, and for an OpenRouter model
    it does not name, a conservative 128,000 tokens.
@@ -716,7 +725,9 @@ if it fell back. Neither case raises an error. The agent evicts working material
 a worse model.
 
 A provider that cannot be reached at start-up costs nothing but the fallback: Leviath warns, keeps
-the compiled table, and starts. It warns once per model when a run does land on the fallback, naming
+the compiled table, and starts. Through OpenRouter, a model listed without `temperature` is not
+sent one once the listing has been read; the whole `gpt-5` line is listed that way, and `gpt-5.5`
+refuses one outright. It warns once per model when a run does land on the fallback, naming
 the line that fixes it.
 
 > [!NOTE]

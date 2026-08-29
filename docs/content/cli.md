@@ -366,12 +366,19 @@ it returns `false`.
 
 | Command | Flags |
 |---|---|
-| `lev models list` | `-p/--provider <NAME>`, `-r/--remote` (live from the provider APIs, slower), `-a/--all` (include providers with no credential here) |
-| `lev models show <MODEL>` | `-p/--provider <NAME>` (required for a remote lookup), `-r/--remote` |
+| `lev models list` | `-p/--provider <NAME>`, `--offline` (this build's table only, no network), `-a/--all` (include providers with no credential here), `--json` |
+| `lev models show <MODEL>` | `-p/--provider <NAME>` (ask only this provider), `--offline` |
+
+Both ask every configured provider for its own listing by default, waiting up to five seconds each,
+and print what the provider said: the columns include the release date and the input and output
+price per million tokens where the listing carries them, and a trailing line says how many rows
+came from a provider and how many from the table compiled into this build. A provider that could
+not be reached keeps its table rows, with a warning naming it. `--offline` skips the network and
+prints the table alone. `-r/--remote` is still accepted for older scripts and changes nothing.
 
 `--provider` naming a [Rhai script provider](/docs/rhai-providers) loads that script and calls its
-`list_models`, with or without `--remote`: a script names its own catalog at run time, so there is
-no built-in table to read it from. A `--provider` that names nothing at all - no configured
+`list_models`: a script names its own catalog at run time, so there is no built-in table to read it
+from. A `--provider` that names nothing at all - no configured
 provider, no row in the built-in table, no script of that name that loads - **exits non-zero**
 rather than printing an empty table, since there is nothing an empty table could be reporting.
 A provider the built-in table knows but this install has no credential for is still an empty table

@@ -111,29 +111,47 @@ impl ClaudeCodeProvider {
 
     /// Built-in capabilities for known Claude models.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        let max_output = if model.contains("opus") {
-            32_000
-        } else if model.contains("haiku") {
-            8_192
-        } else {
-            16_000
-        };
-
-        ModelCapabilities {
-            // The CLI exposes no temperature control.
-            supports_temperature: false,
-            // Streaming is not implemented: the runtime never calls
-            // `infer_stream`, and the trait's default wraps `infer`.
-            supports_streaming: false,
-            // Synthesized by the text protocol rather than native.
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 200_000 - INJECTION_RESERVE_TOKENS,
-            max_output_tokens: max_output,
-            limits_source: LimitsSource::Builtin,
-        }
+        table_capabilities(model)
     }
+}
 
+/// Built-in capabilities for known Claude models, for a caller with no
+/// provider in hand.
+pub(crate) fn table_capabilities(model: &str) -> ModelCapabilities {
+    let max_output = if model.contains("opus") {
+        32_000
+    } else if model.contains("haiku") {
+        8_192
+    } else {
+        16_000
+    };
+
+    ModelCapabilities {
+        // The CLI exposes no temperature control.
+        supports_temperature: false,
+        // Streaming is not implemented: the runtime never calls
+        // `infer_stream`, and the trait's default wraps `infer`.
+        supports_streaming: false,
+        // Synthesized by the text protocol rather than native.
+        supports_tools: true,
+        supports_system_prompt: true,
+        max_context_tokens: 200_000 - INJECTION_RESERVE_TOKENS,
+        max_output_tokens: max_output,
+        limits_source: LimitsSource::Builtin,
+    }
+}
+
+/// The models the CLI can be pointed at, as `(id, display name)`. There is
+/// no listing to ask.
+pub(crate) const CATALOG: &[(&str, &str)] = &[
+    ("claude-opus-5", "Claude Opus 5"),
+    ("claude-sonnet-5", "Claude Sonnet 5"),
+    ("claude-opus-4-8", "Claude Opus 4.8"),
+    ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+    ("claude-haiku-4-5", "Claude Haiku 4.5"),
+];
+
+impl ClaudeCodeProvider {
     /// The full system prompt: Leviath's assembled system blocks, plus the tool
     /// catalog and protocol when the stage has tools.
     ///
@@ -488,16 +506,9 @@ impl Provider for ClaudeCodeProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        let models = [
-            ("claude-opus-5", "Claude Opus 5"),
-            ("claude-sonnet-5", "Claude Sonnet 5"),
-            ("claude-opus-4-8", "Claude Opus 4.8"),
-            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
-            ("claude-haiku-4-5", "Claude Haiku 4.5"),
-        ];
-        Ok(models
-            .into_iter()
-            .map(|(id, display)| {
+        Ok(CATALOG
+            .iter()
+            .map(|&(id, display)| {
                 ModelInfo::new(id, "claude-code", self.builtin_capabilities(id))
                     .named(Some(display.to_string()))
             })

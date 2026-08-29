@@ -1114,6 +1114,16 @@ pub(super) struct ModelEntry {
     /// limits at all, and is a guess that can be wrong by a factor of two.
     pub(super) limits_source: String,
     pub(super) supports_tools: bool,
+    pub(super) supports_temperature: bool,
+    /// Whether the provider's own listing described this model, as opposed
+    /// to a row from the table compiled into this build.
+    pub(super) learned: bool,
+    /// When the provider released it, as Unix seconds, if its listing says.
+    pub(super) released: Option<i64>,
+    /// When the provider will withdraw it, as published, if its listing says.
+    pub(super) retires: Option<String>,
+    /// USD per million tokens, when the provider's listing quotes a rate.
+    pub(super) pricing: Option<leviath_providers::ModelPricing>,
 }
 
 #[cfg(test)]

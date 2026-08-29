@@ -103,8 +103,28 @@ impl ProviderRegistry {
                 targets.push((name.to_string(), provider));
             }
         }
+        // Side by side rather than one after another: each provider's answer
+        // is its own network call, and a listing command or a daemon start
+        // that waited for five of them in turn paid five timeouts in the
+        // worst case where one would do.
+        let mut in_flight = tokio::task::JoinSet::new();
         for (name, provider) in targets {
-            match tokio::time::timeout(timeout, provider.prime_capabilities()).await {
+            in_flight.spawn(async move {
+                let outcome = tokio::time::timeout(timeout, provider.prime_capabilities()).await;
+                (name, outcome)
+            });
+        }
+        while let Some(joined) = in_flight.join_next().await {
+            // A panic inside a provider's priming is that provider's fault
+            // and nobody else's; it is reported the way a failed read is.
+            let (name, outcome) = match joined {
+                Ok(pair) => pair,
+                Err(e) => {
+                    tracing::warn!(error = %e, "a provider's priming task did not finish");
+                    continue;
+                }
+            };
+            match outcome {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => tracing::warn!(
                     provider = %name,
@@ -289,6 +309,7 @@ mod tests {
         Ok,
         Fails,
         Hangs,
+        Panics,
     }
 
     struct StubProvider {
@@ -336,6 +357,7 @@ mod tests {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                     Ok(())
                 }
+                PrimeOutcome::Panics => panic!("a provider bug"),
             }
         }
 
@@ -351,6 +373,7 @@ mod tests {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                     Ok(())
                 }
+                PrimeOutcome::Panics => panic!("a provider bug"),
             }
         }
         async fn infer(
@@ -564,6 +587,36 @@ mod tests {
         reg.prime_capabilities(std::time::Duration::from_secs(5), &[])
             .await;
         assert_eq!(primed.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// Priming runs side by side now, so one provider's bug is caught at its
+    /// task boundary and reported; the others still prime and the daemon
+    /// still starts.
+    #[tokio::test]
+    async fn a_panicking_prime_is_reported_and_the_rest_still_prime() {
+        let mut reg = ProviderRegistry::new();
+        let (bug, _) = priming(PrimeOutcome::Panics);
+        let (good, good_calls) = priming(PrimeOutcome::Ok);
+        reg.register("bug".to_string(), bug);
+        reg.register("good".to_string(), good);
+        reg.prime_capabilities(std::time::Duration::from_secs(5), &[])
+            .await;
+        assert_eq!(good_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// Side by side, not one after another: two providers that each take the
+    /// whole timeout finish in one timeout, not two.
+    #[tokio::test]
+    async fn providers_prime_concurrently() {
+        let mut reg = ProviderRegistry::new();
+        let (a, _) = priming(PrimeOutcome::Hangs);
+        let (b, _) = priming(PrimeOutcome::Hangs);
+        reg.register("a".to_string(), a);
+        reg.register("b".to_string(), b);
+        let started = std::time::Instant::now();
+        reg.prime_capabilities(std::time::Duration::from_millis(200), &[])
+            .await;
+        assert!(started.elapsed() < std::time::Duration::from_millis(390));
     }
 
     /// A provider that cannot answer is a warning, not a failure: the daemon
