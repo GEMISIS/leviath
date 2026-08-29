@@ -7,7 +7,52 @@
 # `openrouter` or `litellm` when only one listed it, and `manual` for a row a
 # person wrote, which the refresh never overwrites.
 
-read_on = "2026-08-23"
+read_on = "2026-08-29"
+
+[[rate]]
+provider = "anthropic"
+prefix = "claude-3-7-sonnet-20250219"
+input = 3.0
+cache_read = 0.3
+cache_write = 3.75
+output = 15.0
+source = "litellm"
+
+[[rate]]
+provider = "anthropic"
+prefix = "claude-3-haiku"
+input = 0.25
+cache_read = 0.03
+cache_write = 0.3
+output = 1.25
+source = "openrouter"
+
+[[rate]]
+provider = "anthropic"
+prefix = "claude-3-opus-20240229"
+input = 15.0
+cache_read = 1.5
+cache_write = 18.75
+output = 75.0
+source = "litellm"
+
+[[rate]]
+provider = "anthropic"
+prefix = "claude-4-opus-20250514"
+input = 15.0
+cache_read = 1.5
+cache_write = 18.75
+output = 75.0
+source = "litellm"
+
+[[rate]]
+provider = "anthropic"
+prefix = "claude-4-sonnet-20250514"
+input = 3.0
+cache_read = 0.3
+cache_write = 3.75
+output = 15.0
+source = "litellm"
 
 [[rate]]
 provider = "anthropic"
@@ -25,6 +70,42 @@ input = 1.0
 cache_read = 0.1
 cache_write = 1.25
 output = 5.0
+source = "both"
+
+[[rate]]
+provider = "anthropic"
+prefix = "claude-mythos-5"
+input = 10.0
+cache_read = 1.0
+cache_write = 12.5
+output = 50.0
+source = "litellm"
+
+[[rate]]
+provider = "anthropic"
+prefix = "claude-mythos-preview"
+input = 10.0
+cache_read = 1.0
+cache_write = 12.5
+output = 50.0
+source = "litellm"
+
+[[rate]]
+provider = "anthropic"
+prefix = "claude-opus-4"
+input = 15.0
+cache_read = 1.5
+cache_write = 18.75
+output = 75.0
+source = "openrouter"
+
+[[rate]]
+provider = "anthropic"
+prefix = "claude-opus-4-5"
+input = 5.0
+cache_read = 0.5
+cache_write = 6.25
+output = 25.0
 source = "both"
 
 [[rate]]
@@ -47,6 +128,15 @@ source = "both"
 
 [[rate]]
 provider = "anthropic"
+prefix = "claude-opus-4-7-fast"
+input = 30.0
+cache_read = 3.0
+cache_write = 37.5
+output = 150.0
+source = "openrouter"
+
+[[rate]]
+provider = "anthropic"
 prefix = "claude-opus-4-8"
 input = 5.0
 cache_read = 0.5
@@ -56,12 +146,39 @@ source = "both"
 
 [[rate]]
 provider = "anthropic"
+prefix = "claude-opus-4-8-fast"
+input = 10.0
+cache_read = 1.0
+cache_write = 12.5
+output = 50.0
+source = "openrouter"
+
+[[rate]]
+provider = "anthropic"
 prefix = "claude-opus-5"
 input = 5.0
 cache_read = 0.5
 cache_write = 6.25
 output = 25.0
 source = "both"
+
+[[rate]]
+provider = "anthropic"
+prefix = "claude-opus-5-fast"
+input = 10.0
+cache_read = 1.0
+cache_write = 12.5
+output = 50.0
+source = "openrouter"
+
+[[rate]]
+provider = "anthropic"
+prefix = "claude-sonnet-4"
+input = 3.0
+cache_read = 0.3
+cache_write = 3.75
+output = 15.0
+source = "openrouter"
 
 [[rate]]
 provider = "anthropic"
@@ -83,12 +200,138 @@ source = "both"
 
 [[rate]]
 provider = "google"
+prefix = "gemini-2.0-flash"
+input = 0.1
+cache_read = 0.025
+cache_write = 0.1
+output = 0.4
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-2.0-flash-lite"
+input = 0.075
+cache_read = 0.01875
+cache_write = 0.075
+output = 0.3
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-2.5-computer-use-preview-10-2025"
+input = 1.25
+cache_read = 1.25
+cache_write = 1.25
+output = 10.0
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-2.5-flash"
+input = 0.3
+cache_read = 0.03
+cache_write = 0.3
+output = 2.5
+source = "both"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-2.5-flash-lite"
+input = 0.1
+cache_read = 0.01
+cache_write = 0.1
+output = 0.4
+source = "both"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-2.5-flash-native-audio-latest"
+input = 0.5
+cache_read = 0.5
+cache_write = 0.5
+output = 2.0
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-2.5-flash-native-audio-preview-09-2025"
+input = 0.5
+cache_read = 0.5
+cache_write = 0.5
+output = 2.0
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-2.5-flash-native-audio-preview-12-2025"
+input = 0.5
+cache_read = 0.5
+cache_write = 0.5
+output = 2.0
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-2.5-pro"
+input = 1.25
+cache_read = 0.125
+cache_write = 1.25
+output = 10.0
+source = "both"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-2.5-pro-preview-tts"
+input = 1.0
+cache_read = 0.125
+cache_write = 1.0
+output = 20.0
+source = "litellm"
+
+[[rate]]
+provider = "google"
 prefix = "gemini-3-flash"
 input = 0.5
 cache_read = 0.05
 cache_write = 0.5
 output = 3.0
 source = "manual"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-3-flash-preview"
+input = 0.5
+cache_read = 0.05
+cache_write = 0.5
+output = 3.0
+source = "both"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-3-pro-image"
+input = 2.0
+cache_read = 0.2
+cache_write = 2.0
+output = 12.0
+source = "openrouter"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-3-pro-preview"
+input = 2.0
+cache_read = 0.2
+cache_write = 2.0
+output = 12.0
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-3.1-flash-image"
+input = 0.5
+cache_read = 0.5
+cache_write = 0.5
+output = 3.0
+source = "openrouter"
 
 [[rate]]
 provider = "google"
@@ -101,12 +344,30 @@ source = "both"
 
 [[rate]]
 provider = "google"
+prefix = "gemini-3.1-flash-live-preview"
+input = 0.75
+cache_read = 0.75
+cache_write = 0.75
+output = 4.5
+source = "litellm"
+
+[[rate]]
+provider = "google"
 prefix = "gemini-3.1-pro"
 input = 2.0
 cache_read = 0.2
 cache_write = 2.0
 output = 12.0
 source = "manual"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-3.1-pro-preview"
+input = 2.0
+cache_read = 0.2
+cache_write = 2.0
+output = 12.0
+source = "both"
 
 [[rate]]
 provider = "google"
@@ -118,6 +379,465 @@ output = 9.0
 source = "both"
 
 [[rate]]
+provider = "google"
+prefix = "gemini-3.5-flash-lite"
+input = 0.3
+cache_read = 0.03
+cache_write = 0.3
+output = 2.5
+source = "both"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-3.5-live-translate-preview"
+input = 3.5
+cache_read = 3.5
+cache_write = 3.5
+output = 21.0
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-3.6-flash"
+input = 0.75
+cache_read = 0.075
+cache_write = 0.75
+output = 3.75
+source = "both"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-3.7-flash"
+input = 0.75
+cache_read = 0.075
+cache_write = 0.75
+output = 3.75
+source = "both"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-exp-1206"
+input = 0.3
+cache_read = 0.03
+cache_write = 0.3
+output = 2.5
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-flash-latest"
+input = 0.3
+cache_read = 0.03
+cache_write = 0.3
+output = 2.5
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-flash-lite-latest"
+input = 0.1
+cache_read = 0.01
+cache_write = 0.1
+output = 0.4
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-gemma-2-27b-it"
+input = 0.35
+cache_read = 0.35
+cache_write = 0.35
+output = 1.05
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-gemma-2-9b-it"
+input = 0.35
+cache_read = 0.35
+cache_write = 0.35
+output = 1.05
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-omni-flash-preview"
+input = 1.5
+cache_read = 1.5
+cache_write = 1.5
+output = 9.0
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-pro-latest"
+input = 1.25
+cache_read = 0.125
+cache_write = 1.25
+output = 10.0
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-robotics-er-1.5-preview"
+input = 0.3
+cache_read = 0.3
+cache_write = 0.3
+output = 2.5
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-robotics-er-1.6-preview"
+input = 1.0
+cache_read = 1.0
+cache_write = 1.0
+output = 5.0
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-robotics-er-2-preview"
+input = 2.0
+cache_read = 0.2
+cache_write = 2.0
+output = 10.0
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemini-robotics-er-2-streaming-preview"
+input = 2.0
+cache_read = 2.0
+cache_write = 2.0
+output = 10.0
+source = "litellm"
+
+[[rate]]
+provider = "google"
+prefix = "gemma-2-27b-it"
+input = 0.65
+cache_read = 0.65
+cache_write = 0.65
+output = 0.65
+source = "openrouter"
+
+[[rate]]
+provider = "google"
+prefix = "gemma-3-12b-it"
+input = 0.05
+cache_read = 0.05
+cache_write = 0.05
+output = 0.15
+source = "openrouter"
+
+[[rate]]
+provider = "google"
+prefix = "gemma-3-27b-it"
+input = 0.08
+cache_read = 0.04
+cache_write = 0.08
+output = 0.45
+source = "openrouter"
+
+[[rate]]
+provider = "google"
+prefix = "gemma-3-4b-it"
+input = 0.05
+cache_read = 0.05
+cache_write = 0.05
+output = 0.1
+source = "openrouter"
+
+[[rate]]
+provider = "google"
+prefix = "gemma-4-26b-a4b-it"
+input = 0.07
+cache_read = 0.07
+cache_write = 0.07
+output = 0.34
+source = "openrouter"
+
+[[rate]]
+provider = "google"
+prefix = "gemma-4-31b-it"
+input = 0.09
+cache_read = 0.05
+cache_write = 0.09
+output = 0.34
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "chat-latest"
+input = 5.0
+cache_read = 0.5
+cache_write = 5.0
+output = 30.0
+source = "litellm"
+
+[[rate]]
+provider = "openai"
+prefix = "chatgpt-4o-latest"
+input = 5.0
+cache_read = 5.0
+cache_write = 5.0
+output = 15.0
+source = "litellm"
+
+[[rate]]
+provider = "openai"
+prefix = "daybreak-blue-latest"
+input = 4.0
+cache_read = 0.4
+cache_write = 5.0
+output = 20.0
+source = "litellm"
+
+[[rate]]
+provider = "openai"
+prefix = "daybreak-red-latest"
+input = 12.5
+cache_read = 1.25
+cache_write = 15.625
+output = 75.0
+source = "litellm"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-3.5-turbo"
+input = 0.5
+cache_read = 0.5
+cache_write = 0.5
+output = 1.5
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-3.5-turbo-0613"
+input = 1.0
+cache_read = 1.0
+cache_write = 1.0
+output = 2.0
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-3.5-turbo-1106"
+input = 1.0
+cache_read = 1.0
+cache_write = 1.0
+output = 2.0
+source = "litellm"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-3.5-turbo-16k"
+input = 3.0
+cache_read = 3.0
+cache_write = 3.0
+output = 4.0
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-3.5-turbo-instruct"
+input = 1.5
+cache_read = 1.5
+cache_write = 1.5
+output = 2.0
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-4"
+input = 30.0
+cache_read = 30.0
+cache_write = 30.0
+output = 60.0
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-4-0125-preview"
+input = 10.0
+cache_read = 10.0
+cache_write = 10.0
+output = 30.0
+source = "litellm"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-4-1106-preview"
+input = 10.0
+cache_read = 10.0
+cache_write = 10.0
+output = 30.0
+source = "litellm"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-4-turbo"
+input = 10.0
+cache_read = 10.0
+cache_write = 10.0
+output = 30.0
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-4.1"
+input = 2.0
+cache_read = 0.5
+cache_write = 2.0
+output = 8.0
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-4.1-mini"
+input = 0.4
+cache_read = 0.1
+cache_write = 0.4
+output = 1.6
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-4.1-nano-2025-04-14"
+input = 0.1
+cache_read = 0.025
+cache_write = 0.1
+output = 0.4
+source = "litellm"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-4o"
+input = 2.5
+cache_read = 1.25
+cache_write = 2.5
+output = 10.0
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-4o-2024-05-13"
+input = 5.0
+cache_read = 5.0
+cache_write = 5.0
+output = 15.0
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-4o-mini"
+input = 0.15
+cache_read = 0.075
+cache_write = 0.15
+output = 0.6
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5"
+input = 1.25
+cache_read = 0.125
+cache_write = 1.25
+output = 10.0
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5-image"
+input = 10.0
+cache_read = 1.25
+cache_write = 10.0
+output = 10.0
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5-image-mini"
+input = 2.5
+cache_read = 0.25
+cache_write = 2.5
+output = 2.0
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5-mini"
+input = 0.25
+cache_read = 0.025
+cache_write = 0.25
+output = 2.0
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5-nano"
+input = 0.05
+cache_read = 0.005
+cache_write = 0.05
+output = 0.4
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5-pro"
+input = 15.0
+cache_read = 15.0
+cache_write = 15.0
+output = 120.0
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5.1-codex-mini"
+input = 0.25
+cache_read = 0.03
+cache_write = 0.25
+output = 2.0
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5.2"
+input = 1.75
+cache_read = 0.175
+cache_write = 1.75
+output = 14.0
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5.2-pro"
+input = 21.0
+cache_read = 21.0
+cache_write = 21.0
+output = 168.0
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5.3-chat-latest"
+input = 1.75
+cache_read = 0.175
+cache_write = 1.75
+output = 14.0
+source = "litellm"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5.3-codex"
+input = 1.75
+cache_read = 0.175
+cache_write = 1.75
+output = 14.0
+source = "openrouter"
+
+[[rate]]
 provider = "openai"
 prefix = "gpt-5.4"
 input = 2.5
@@ -125,6 +845,15 @@ cache_read = 0.25
 cache_write = 2.5
 output = 15.0
 source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5.4-image-2"
+input = 8.0
+cache_read = 2.0
+cache_write = 8.0
+output = 15.0
+source = "openrouter"
 
 [[rate]]
 provider = "openai"
@@ -146,9 +875,180 @@ source = "both"
 
 [[rate]]
 provider = "openai"
+prefix = "gpt-5.4-pro"
+input = 30.0
+cache_read = 30.0
+cache_write = 30.0
+output = 180.0
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
 prefix = "gpt-5.5"
 input = 5.0
 cache_read = 0.5
 cache_write = 5.0
 output = 30.0
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5.5-pro"
+input = 30.0
+cache_read = 30.0
+cache_write = 30.0
+output = 180.0
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5.6"
+input = 4.0
+cache_read = 0.4
+cache_write = 5.0
+output = 20.0
+source = "litellm"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5.6-cyber"
+input = 12.5
+cache_read = 1.25
+cache_write = 15.625
+output = 75.0
+source = "litellm"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5.6-luna"
+input = 0.2
+cache_read = 0.02
+cache_write = 0.25
+output = 1.2
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5.6-sol-pro"
+input = 2.0
+cache_read = 0.2
+cache_write = 2.5
+output = 10.0
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-5.6-terra"
+input = 2.0
+cache_read = 0.2
+cache_write = 2.5
+output = 12.0
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-audio"
+input = 2.5
+cache_read = 2.5
+cache_write = 2.5
+output = 10.0
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-audio-mini"
+input = 0.6
+cache_read = 0.6
+cache_write = 0.6
+output = 2.4
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-chat-latest"
+input = 5.0
+cache_read = 0.5
+cache_write = 5.0
+output = 30.0
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-oss-120b"
+input = 0.037
+cache_read = 0.037
+cache_write = 0.037
+output = 0.17
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-oss-20b"
+input = 0.03
+cache_read = 0.03
+cache_write = 0.03
+output = 0.13
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-oss-safeguard-20b"
+input = 0.075
+cache_read = 0.0375
+cache_write = 0.075
+output = 0.3
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "o1"
+input = 15.0
+cache_read = 7.5
+cache_write = 15.0
+output = 60.0
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "o1-pro"
+input = 150.0
+cache_read = 150.0
+cache_write = 150.0
+output = 600.0
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "o3"
+input = 2.0
+cache_read = 0.5
+cache_write = 2.0
+output = 8.0
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "o3-mini"
+input = 1.1
+cache_read = 0.55
+cache_write = 1.1
+output = 4.4
+source = "both"
+
+[[rate]]
+provider = "openai"
+prefix = "o3-pro"
+input = 20.0
+cache_read = 20.0
+cache_write = 20.0
+output = 80.0
+source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "o4-mini"
+input = 1.1
+cache_read = 0.275
+cache_write = 1.1
+output = 4.4
 source = "both"
