@@ -6,10 +6,11 @@ name: Prices (Weekly Monday)
 # When the file moves, this opens a PR and sets it to auto-merge, so the
 # required checks gate it exactly as they gate a person's PR.
 #
-# REQUIRED SECRET: `PRICES_PAT`, a fine-grained personal access token scoped to
-# this repository with `contents: write` (push the branch) and `pull requests:
-# write` (open the PR, enable auto-merge). It cannot be `GITHUB_TOKEN`: a PR
-# opened with that token gets no CI run on this repo, so it could never merge.
+# TOKEN: `PRICES_PAT` if set, else `RELEASE_TOKEN` (the release workflows'
+# token, which already has `contents: write` here). Whichever is used needs
+# `contents: write` (push the branch) and `pull requests: write` (open the
+# PR, enable auto-merge). It cannot be `GITHUB_TOKEN`: a PR opened with that
+# token gets no CI run on this repo, so it could never merge.
 #
 # Nothing in ci.yml runs `cargo xtask prices --check`. CI must not depend on
 # two third-party endpoints being up; this workflow is the only network path.
@@ -40,7 +41,7 @@ jobs:
         with:
           # The push below uses this identity, so the branch lands under the
           # PAT and the PR it opens triggers CI.
-          token: ${{ secrets.PRICES_PAT }}
+          token: ${{ secrets.PRICES_PAT || secrets.RELEASE_TOKEN }}
 
       - uses: ./.github/actions/rust-setup
         with:
@@ -75,7 +76,7 @@ jobs:
       - name: Open the PR
         if: steps.refresh.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${{ secrets.PRICES_PAT }}
+          GH_TOKEN: ${{ secrets.PRICES_PAT || secrets.RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           date="$(date -u +%Y-%m-%d)"
