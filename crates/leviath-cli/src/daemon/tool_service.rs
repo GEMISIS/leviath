@@ -529,19 +529,43 @@ pub(crate) async fn dispatch_tools(
                     &approval_keys,
                 );
                 let response = state.interaction.ask(req).await;
-                if response.approved.unwrap_or(false) {
-                    // Record a grant for each command the user just saw run. An
-                    // empty key list means this call is not reusable, so a
-                    // scoped approval degrades to "this once" - which is what
-                    // the option label they chose already told them.
-                    state.remember(response.scope, &approval_keys).await;
-                    charge_declared(&state, &tc);
-                    slots.push((tc.id.clone(), None));
-                    queued.push((slot, is_builtin, tc));
-                } else {
-                    let result = format!("[denied] User declined tool call '{}'.", tc.name);
-                    progress(&tc.id, &result);
-                    slots.push((tc.id.clone(), Some(result)));
+                match response.approved {
+                    Some(true) => {
+                        // Record a grant for each command the user just saw run.
+                        // An empty key list means this call is not reusable, so
+                        // a scoped approval degrades to "this once" - which is
+                        // what the option label they chose already told them.
+                        state.remember(response.scope, &approval_keys).await;
+                        charge_declared(&state, &tc);
+                        slots.push((tc.id.clone(), None));
+                        queued.push((slot, is_builtin, tc));
+                    }
+                    Some(false) => {
+                        let result = format!("[denied] User declined tool call '{}'.", tc.name);
+                        progress(&tc.id, &result);
+                        slots.push((tc.id.clone(), Some(result)));
+                    }
+                    // The hub's neutral answer: the prompt was cancelled or
+                    // nobody answered it before the interaction timeout. Saying
+                    // "declined" here blamed a person who never saw the prompt.
+                    None => {
+                        let secs = state.interaction.timeout_secs();
+                        tracing::warn!(
+                            tool = %tc.name,
+                            stage = %stage_name,
+                            timeout_secs = secs,
+                            "approval prompt expired unanswered; the call did not run"
+                        );
+                        let result = format!(
+                            "[denied] no one answered the approval prompt for '{}' before the \
+                             interaction timeout ({secs} s, `[limits] interaction_timeout_secs`); \
+                             the call did not run. Answer prompts in `lev dash`, raise the \
+                             timeout, or set this tool to \"allow\" for the stage.",
+                            tc.name
+                        );
+                        progress(&tc.id, &result);
+                        slots.push((tc.id.clone(), Some(result)));
+                    }
                 }
             }
             ToolPolicy::Allow => {
@@ -1391,6 +1415,38 @@ mod tests {
         )
         .await;
         assert!(out[0].1.contains("[denied]"));
+    }
+
+    /// A prompt nobody answered before `[limits] interaction_timeout_secs`
+    /// comes back as the hub's neutral response (`approved: None`). That is
+    /// not a decline, and the tool result must not say the user declined:
+    /// a six-hour deep-researcher run reported three "User declined" writes
+    /// that no one had seen, let alone refused.
+    #[tokio::test]
+    async fn an_unanswered_approval_says_so_instead_of_blaming_the_user() {
+        let hub = InteractionHub::new();
+        hub.set_timeout_secs(3600);
+        let mut ask = HashMap::new();
+        ask.insert("echo".to_string(), ToolPolicy::Ask);
+        let names: HashSet<String> = ["echo".to_string()].into_iter().collect();
+        let (state, _dir) =
+            script_state(&hub, &[("echo", "\"x\"")], names, no_script_fields().2, ask);
+        let out = dispatch_answering(
+            state,
+            vec![call("c1", "echo", serde_json::json!({}))],
+            |req| InteractionResponse::text(&req.id, ""),
+            hub,
+        )
+        .await;
+        let result = &out[0].1;
+        assert!(result.starts_with("[denied]"), "{result}");
+        assert!(!result.contains("declined"), "not a decline: {result}");
+        assert!(
+            result.contains("no one answered the approval prompt")
+                && result.contains("3600")
+                && result.contains("interaction_timeout_secs"),
+            "{result}"
+        );
     }
 
     #[tokio::test]

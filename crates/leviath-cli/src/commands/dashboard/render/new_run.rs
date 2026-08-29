@@ -243,25 +243,36 @@ impl Dashboard {
         );
     }
 
-    fn draw_new_run_help_bar(&self, frame: &mut Frame, area: Rect) {
-        let hint = match (self.new_run_file_ref, self.new_run_focus) {
+    /// The help bar's text for the current focus. Names the unattended
+    /// setting's state, not only its key: the title chip appears only when
+    /// it is on, so with it off nothing on the screen said so, and a warning
+    /// dialog declined by an Enter meant as "yes" left a person believing
+    /// the opposite of what the next run would do.
+    pub(in crate::commands::dashboard) fn new_run_help_bar_text(&self) -> String {
+        let unattended = match self.new_run_yolo {
+            true => "unattended: on",
+            false => "unattended: off",
+        };
+        match (self.new_run_file_ref, self.new_run_focus) {
             (true, _) => " ↑↓ choose · Enter/Tab insert · Esc dismiss ".to_string(),
-            (false, NewRunPane::Agents) => {
-                " ↑↓ select · type to filter · Tab write task · ^Y unattended · F1 help · Esc back "
-                    .to_string()
-            }
+            (false, NewRunPane::Agents) => format!(
+                " ↑↓ select · type to filter · Tab write task · ^Y {unattended} · F1 help · Esc back "
+            ),
             // The formatting chord is named on the pane that has the toolbar,
             // and only there: on the picker it would be a key that does
             // nothing.
             (false, NewRunPane::Task) => format!(
-                " ^Enter start · Enter newline · Tab Start button · @ file · {} bold · {MODE_CHORD} preview · ^Y unattended · F1 help · Esc back ",
+                " ^Enter start · Enter newline · Tab Start button · @ file · {} bold · {MODE_CHORD} preview · ^Y {unattended} · F1 help · Esc back ",
                 chord_label(MdAction::Bold)
             ),
-            (false, NewRunPane::Start) => {
-                " Enter/Space start the run · Shift+Tab task · Tab agents · ^Y unattended · F1 help · Esc back "
-                    .to_string()
-            }
-        };
+            (false, NewRunPane::Start) => format!(
+                " Enter/Space start the run · Shift+Tab task · Tab agents · ^Y {unattended} · F1 help · Esc back "
+            ),
+        }
+    }
+
+    fn draw_new_run_help_bar(&self, frame: &mut Frame, area: Rect) {
+        let hint = self.new_run_help_bar_text();
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(C_DIM)))),
             area,

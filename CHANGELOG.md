@@ -109,6 +109,17 @@ same list.
 
 ### Fixed
 
+- An approval prompt nobody answered before `[limits] interaction_timeout_secs`
+  was reported to the model as `User declined tool call`, as if a person had
+  refused it. A six-hour deep-researcher run lost all three of its report
+  writes that way with nobody at the dashboard. The result now says that no
+  one answered the prompt within the timeout, names the timeout, and says
+  how to change it; `lev timeline` labels that parked time as waiting on
+  children or prompts rather than children alone.
+- In the new-run screen, turning unattended back on re-asks the warning, and
+  its focus starts on "Keep asking me", so an Enter meant as "yes" declined
+  it with nothing but a log line to say so. The decline is now a toast, and
+  the help bar shows `unattended: on` or `off` rather than only the key.
 - Sums that a hostile number could overflow (pricing, stream byte counts, the
   rate limiter's window, region and layout sizes) saturate instead of aborting
   the daemon (#649).

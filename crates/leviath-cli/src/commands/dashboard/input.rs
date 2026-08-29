@@ -136,7 +136,18 @@ impl Dashboard {
         };
         match dialog.handle(key) {
             ConfirmOutcome::Pending => self.pending_confirm = Some((action, dialog)),
-            ConfirmOutcome::No => self.add_log("Cancelled".to_string()),
+            ConfirmOutcome::No => {
+                self.add_log("Cancelled".to_string());
+                // The dialog's safe default is "Keep asking me", so an Enter
+                // meant as "yes" lands here. Left to a log line, that put a
+                // six-hour run through three approval prompts nobody saw.
+                if matches!(action, ConfirmAction::EnableYolo) {
+                    self.toast(
+                        "Unattended stays off: runs will ask you (Ctrl-Y to try again)",
+                        ToastLevel::Info,
+                    );
+                }
+            }
             ConfirmOutcome::Yes => match action {
                 ConfirmAction::Kill { run_ids } => {
                     for run_id in &run_ids {

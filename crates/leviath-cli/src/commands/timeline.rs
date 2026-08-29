@@ -101,7 +101,8 @@ pub(crate) struct Totals {
     pub inference: i64,
     /// Seconds running tool batches.
     pub tools: i64,
-    /// Seconds parked waiting for children.
+    /// Seconds parked: waiting on children, or on a person to answer a
+    /// prompt (an approval, an `ask_user_*` tool, an interaction point).
     pub waiting: i64,
     /// Whatever is left: scheduling, persistence, gaps between records.
     pub other: i64,
@@ -321,7 +322,7 @@ fn same_large_reply(a: &CallSpan, b: &CallSpan) -> bool {
 fn print_run(run: &RunTimeline, with_calls: bool) {
     let t = &run.totals;
     println!(
-        "{} ({}, {}) wall {} = model calls {} + tools {} + waiting on children {} + other {}",
+        "{} ({}, {}) wall {} = model calls {} + tools {} + waiting on children or prompts {} + other {}",
         run.run_id,
         run.agent_name,
         run.status,
