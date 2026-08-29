@@ -5469,3 +5469,106 @@ b = { kind = "pinned", max_tokens = -1 }
 "#;
     let _ = parse_manifest(toml);
 }
+
+// ─── sandbox mount spellings ─────────────────────────────────────────────
+
+fn sandbox_manifest(table: &str) -> String {
+    format!(
+        "[agent]\nname = \"a\"\n\n[sandbox]\n{table}\n\n\
+         [stages.s]\nmodel = {{ provider = \"anthropic\", model = \"m\" }}\n"
+    )
+}
+
+#[test]
+fn sandbox_mounts_is_read_the_same_as_mount() {
+    let bp = parse_manifest(&sandbox_manifest("mounts = [\"/data\", \"/cache\"]")).unwrap();
+    assert_eq!(
+        bp.sandbox.unwrap().mounts,
+        vec!["/data".to_string(), "/cache".to_string()]
+    );
+}
+
+#[test]
+fn sandbox_accepts_both_spellings_when_they_agree() {
+    let bp = parse_manifest(&sandbox_manifest(
+        "mount = [\"/data\"]\nmounts = [\"/data\"]",
+    ))
+    .unwrap();
+    assert_eq!(bp.sandbox.unwrap().mounts, vec!["/data".to_string()]);
+}
+
+#[test]
+fn sandbox_refuses_both_spellings_when_they_differ() {
+    let err = parse_manifest(&sandbox_manifest(
+        "mount = [\"/data\"]\nmounts = [\"/other\"]",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("both `mount` and `mounts`"), "{err}");
+}
+
+// ─── the published schema and the parser name the same keys ─────────────
+
+/// The schema is what people validate against and the parser is what runs;
+/// a key in one and not the other is either a silently ignored setting or a
+/// validation failure for a working blueprint. Both directions, per table.
+#[test]
+fn the_published_schema_and_the_parser_agree_on_every_key() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../docs/schema/blueprint.schema.json"
+    ))
+    .expect("the schema is valid JSON");
+    let keys_at = |path: &[&str]| -> Vec<String> {
+        let mut node = &schema;
+        for step in path {
+            node = &node[step];
+        }
+        let mut keys: Vec<String> = node["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("no properties at {path:?}"))
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    };
+    let sorted = |list: &[&str]| -> Vec<String> {
+        let mut v: Vec<String> = list.iter().map(|s| s.to_string()).collect();
+        v.sort();
+        v
+    };
+    for (table, schema_path, parser) in [
+        ("stage", &["$defs", "stage"][..], super::stage::STAGE_KEYS),
+        (
+            "stage.context",
+            &["$defs", "stage", "properties", "context"][..],
+            super::stage::CONTEXT_KEYS,
+        ),
+        (
+            "stage.tool_routing",
+            &["$defs", "stage", "properties", "tool_routing"][..],
+            super::stage::TOOL_ROUTING_KEYS,
+        ),
+        (
+            "transition",
+            &["$defs", "transition"][..],
+            super::stage::EDGE_KEYS,
+        ),
+        (
+            "transition.gate",
+            &["$defs", "transition", "properties", "gate"][..],
+            super::stage::GATE_KEYS,
+        ),
+        (
+            "sandbox",
+            &["$defs", "sandbox"][..],
+            super::sections::SANDBOX_KEYS,
+        ),
+    ] {
+        assert_eq!(
+            keys_at(schema_path),
+            sorted(parser),
+            "keys of the {table} table"
+        );
+    }
+}

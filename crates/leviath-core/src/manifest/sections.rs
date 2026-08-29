@@ -166,6 +166,21 @@ pub(super) fn parse_security_config(security_table: &toml::value::Table) -> crat
     sc
 }
 
+/// Every key read off a `[sandbox]` table. Test-only: the parser above reads
+/// them one by one, and the schema guard in `tests.rs` holds the published
+/// schema to this list.
+#[cfg(test)]
+pub(super) const SANDBOX_KEYS: &[&str] = &[
+    "engine",
+    "image",
+    "kind",
+    "mount",
+    "mounts",
+    "network",
+    "on_unavailable",
+    "persist",
+];
+
 /// Parse a `[sandbox]` / `[stages.X.sandbox]` table into a `ToolSandboxConfig`.
 /// A present block with no `kind` means host passthrough; omit the block to
 /// inherit the broader (agent/global) sandbox. An unknown `kind` or
@@ -203,7 +218,20 @@ pub(super) fn parse_sandbox_config(
     if let Some(persist) = bool_of(table, "persist") {
         sc.persist = persist;
     }
-    if let Some(mounts) = array_of(table, "mount") {
+    // Both spellings: the published schema lists both, and `config.toml`'s own
+    // `[sandbox]` table (a different parser) documents `mounts`, so a blueprint
+    // author copying from there wrote a key that was silently ignored.
+    let listed = match (array_of(table, "mount"), array_of(table, "mounts")) {
+        (Some(a), Some(b)) if a != b => {
+            return Err(Error::Other(
+                "sandbox names both `mount` and `mounts` with different lists; keep one"
+                    .to_string(),
+            ));
+        }
+        (Some(a), _) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    };
+    if let Some(mounts) = listed {
         sc.mounts = mounts
             .iter()
             .filter_map(|m| m.as_str().map(str::to_string))
