@@ -13,6 +13,11 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `cargo xtask prices`: fetch two public price catalogues, rewrite the TOML
+# table the providers crate compiles in, and stamp the day it was read.
+reqwest = { workspace = true }
+toml = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
