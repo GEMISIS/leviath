@@ -291,6 +291,25 @@
         }
       }
     },
+    "serve": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What `lev serve` takes on at once and how long it gives each request. The `lev serve` flags of the same name win over these; `0` switches a limit off.",
+      "properties": {
+        "max_concurrent_requests": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 64,
+          "description": "Requests in flight at once before the next is answered 503. `0` disables the cap. Websocket routes are not counted."
+        },
+        "request_timeout_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 30,
+          "description": "Seconds a request may take before it is answered 408. `0` disables the deadline. Websocket routes are not timed."
+        }
+      }
+    },
     "webhook": {
       "type": "object",
       "additionalProperties": false,

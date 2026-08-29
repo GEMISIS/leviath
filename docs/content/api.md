@@ -53,10 +53,36 @@ a test, so a client generator or an agent can consume the contract directly.
   | `POST /api/models/probe` | 404, because nothing else is mounted on that path |
 - **`--workdir-root`** confines agent workdirs; **`--no-remote-yolo`** forbids `"yolo": true` and
   `"allow": [...]` on spawn, which are one lever rather than two.
+- **`--no-remote-seed-commands`** runs every spawn as if it carried `"no_seed_commands": true`, so
+  a blueprint's `seed = { command = ... }` regions, which execute at spawn before any approval
+  prompt, never run for a run that arrived over the API. `lev run` on the host is unaffected;
+  `[security] allow_seed_commands = false` is the machine-wide version.
 
 > [!CAUTION]
 > `lev serve` runs LLM-driven tools with whatever permissions the blueprint grants. Treat it as
 > trusted-network only unless hardened. See [Security](/docs/security).
+
+## Limits
+
+The server holds a bounded number of requests in flight and gives each one a deadline. Both have
+a default, both can be set in the config file or on the command line, and `0` switches either
+off. A flag wins over the config file, and the config file over the default.
+
+| Limit | Default | Flag | Config key | Over it |
+|---|---|---|---|---|
+| Requests in flight | 64 | `--max-concurrent-requests <N>` | `[serve] max_concurrent_requests` | 503 at once, not queued |
+| Seconds per request | 30 | `--request-timeout-secs <SECS>` | `[serve] request_timeout_secs` | 408, and the handler is dropped |
+
+Both answers carry the usual `{"error": "..."}` body. The websocket routes (`/ws` and
+`/ws/agents/{id}`) are outside both: a subscription is meant to stay open, and it is the only
+place the API streams, so every other route has built its whole body before the deadline could
+cut it. An unauthenticated request takes a slot while it is being refused, so a flood without a
+token is refused at the cap like any other.
+
+Neither limit is a ceiling on the runs behind the API. A spawn whose daemon takes a minute still
+spawns; the route answers as soon as the daemon has accepted it. `GET /api/config` reports the
+values in force under `limits.max_concurrent_requests` and `limits.request_timeout_secs`, so a
+client sees what this server resolved rather than the default it would guess.
 
 ## Reaching a Leviath on another machine
 

@@ -235,6 +235,21 @@ same list.
 
 ### Added
 
+- `lev serve` holds at most 64 requests in flight and gives each 30 seconds; the
+  65th is answered 503 at once and a request past its deadline 408, both in the
+  usual `{"error": ...}` shape. `--max-concurrent-requests` and
+  `--request-timeout-secs` set them for one server, `[serve]
+  max_concurrent_requests` and `request_timeout_secs` for every one, a flag wins
+  over the config file, and `0` switches a limit off. The websocket routes are
+  outside both, and `GET /api/config` reports the values in force under
+  `limits`. Before this the router had an auth layer, an optional CORS layer
+  and axum's 2 MiB body limit, and nothing bounded how many handlers a client
+  could hold open or for how long.
+- `lev serve --no-remote-seed-commands` treats every spawn as if it carried
+  `"no_seed_commands": true`, so a blueprint's `seed = { command = ... }`
+  regions never run for a run started over the API. `lev run` on the host is
+  as it was; `[security] allow_seed_commands = false` remains the
+  machine-wide switch.
 - `[model_providers.<name>] kind = "openai-compatible"` reaches any server that speaks
   OpenAI's chat API (llama.cpp, LM Studio, vLLM, BionicGPT, a gateway) natively, with no
   Rhai script: `base_url`, an optional `api_key`, `headers` and a `models` fallback for a

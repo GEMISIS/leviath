@@ -655,6 +655,9 @@ Start the [REST and WebSocket API](/docs/api).
 | `--allow-admin` | off | Mount the MCP administration and config-write routes |
 | `--workdir-root <PATH>` | unset | Restrict agent working directories to this root |
 | `--no-remote-yolo` | off | Refuse `"yolo": true` and `"allow": [...]` on spawn requests |
+| `--no-remote-seed-commands` | off | Treat every spawn as `"no_seed_commands": true`, so a blueprint's command seeds never run for a run started over the API |
+| `--max-concurrent-requests <N>` | `[serve]` key, else `64` | Requests in flight before the next is answered 503. `0` disables the cap. Websocket routes are not counted |
+| `--request-timeout-secs <SECS>` | `[serve]` key, else `30` | Seconds a request may take before it is answered 408. `0` disables the deadline. Websocket routes are not timed |
 | `--tls-cert <PATH>` | unset | PEM certificate chain. Serves HTTPS; needs `--tls-key` too |
 | `--tls-key <PATH>` | unset | PEM private key for `--tls-cert` |
 

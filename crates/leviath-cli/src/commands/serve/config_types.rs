@@ -240,12 +240,19 @@ pub(super) struct ApiLimits {
     /// How many distinct modified paths a run records before
     /// `modified_files_truncated` is set.
     pub(super) max_tracked_modified_files: usize,
+    /// Requests this server holds in flight before answering 503. `0` means
+    /// there is no cap. `--max-concurrent-requests` over `[serve]`.
+    pub(super) max_concurrent_requests: u64,
+    /// Seconds a request may take before this server answers 408. `0` means
+    /// there is no deadline. `--request-timeout-secs` over `[serve]`.
+    pub(super) request_timeout_secs: u64,
 }
 
 impl ApiLimits {
     /// Read from the constants the handlers actually use, so the two cannot
-    /// drift into disagreeing.
-    pub(super) fn current() -> Self {
+    /// drift into disagreeing. The request limits are the ones this server
+    /// resolved at start-up, for the same reason.
+    pub(super) fn current(requests: &super::request_limits::RequestLimits) -> Self {
         Self {
             max_limit: super::runs::MAX_LIMIT,
             max_ids: super::runs::MAX_IDS,
@@ -255,6 +262,8 @@ impl ApiLimits {
             search_log_tail_bytes: super::runs::SEARCH_LOG_TAIL_BYTES,
             max_history_limit: super::agents::HISTORY_MAX_LIMIT,
             max_tracked_modified_files: leviath_core::run_meta::MAX_TRACKED_MODIFIED_FILES,
+            max_concurrent_requests: requests.max_concurrent_requests,
+            request_timeout_secs: requests.request_timeout_secs,
         }
     }
 }

@@ -512,6 +512,9 @@ mod tests {
             no_remote_yolo: false,
             tls_cert: None,
             tls_key: None,
+            no_remote_seed_commands: false,
+            max_concurrent_requests: None,
+            request_timeout_secs: None,
         };
         let result = dispatch(Commands::Serve(args), &MockRisky).await;
         assert!(result.is_ok());

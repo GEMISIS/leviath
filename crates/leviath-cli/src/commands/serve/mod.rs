@@ -15,6 +15,7 @@ mod fs;
 mod interactions;
 mod mcp;
 mod polling;
+mod request_limits;
 mod runs;
 mod scripts;
 mod search;
@@ -281,6 +282,11 @@ async fn execute_with_shutdown(
     let cfg = Config::load()?;
     // Read before `cfg` moves into the shared state below.
     let allow_local_network = cfg.security.allow_local_network;
+    let request_limits = request_limits::RequestLimits::resolve(
+        args.max_concurrent_requests,
+        args.request_timeout_secs,
+        &cfg.serve,
+    );
     for warning in cfg.validate_keys() {
         tracing::warn!("{}", warning);
     }
@@ -302,6 +308,8 @@ async fn execute_with_shutdown(
         limits: Arc::new(ServeLimits {
             workdir_root: args.workdir_root.clone(),
             no_remote_yolo: args.no_remote_yolo,
+            no_remote_seed_commands: args.no_remote_seed_commands,
+            request_limits,
             allow_local_network,
         }),
     };
@@ -429,6 +437,14 @@ async fn execute_with_shutdown(
     // and a visitor who can load it already knows the port is open - so it adds
     // no version, no run counts, no endpoint list.
     let app = app.merge(Router::new().route("/", get(status_page)));
+    // The in-flight cap and the per-request deadline, over everything above
+    // including the status page and the auth check, so a refused request
+    // still took a slot while it was being refused. Only the websocket routes
+    // pass through untouched; see `request_limits`.
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        request_limits::Gate::new(request_limits),
+        request_limits::limit_requests,
+    ));
     // Applied by branching on the router rather than layering an `Option`:
     // `Option<CorsLayer>` is not a `Layer`, and a permissive-but-unused layer
     // would be exactly the default this change removes.
@@ -1355,6 +1371,9 @@ system_prompt = "Run"
             no_remote_yolo: false,
             tls_cert: None,
             tls_key: None,
+            no_remote_seed_commands: false,
+            max_concurrent_requests: None,
+            request_timeout_secs: None,
         };
         assert_eq!(args.port, 3000);
         assert_eq!(args.host, "127.0.0.1");
@@ -1455,6 +1474,9 @@ system_prompt = "Run"
                     no_remote_yolo: false,
                     tls_cert: None,
                     tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(serve_for_test(
@@ -1530,6 +1552,9 @@ system_prompt = "Run"
                 no_remote_yolo: false,
                 tls_cert: Some(cert),
                 tls_key: Some(key),
+                no_remote_seed_commands: false,
+                max_concurrent_requests: None,
+                request_timeout_secs: None,
             };
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
             let handle = tokio::spawn(serve_for_test(
@@ -1607,6 +1632,9 @@ system_prompt = "Run"
                     no_remote_yolo: false,
                     tls_cert: None,
                     tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
                 };
 
                 // One flag without the other.
@@ -1676,6 +1704,9 @@ system_prompt = "Run"
                     no_remote_yolo: false,
                     tls_cert: Some(cert),
                     tls_key: Some(key),
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
                 };
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -1725,6 +1756,9 @@ system_prompt = "Run"
                     no_remote_yolo: false,
                     tls_cert: None,
                     tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(serve_for_test(
@@ -1779,6 +1813,9 @@ system_prompt = "Run"
                     no_remote_yolo: false,
                     tls_cert: None,
                     tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(serve_for_test(
@@ -1815,6 +1852,9 @@ system_prompt = "Run"
                 no_remote_yolo: false,
                 tls_cert: None,
                 tls_key: None,
+                no_remote_seed_commands: false,
+                max_concurrent_requests: None,
+                request_timeout_secs: None,
             };
             let result = execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
             assert!(result.is_err());
@@ -1853,6 +1893,9 @@ system_prompt = "Run"
                     no_remote_yolo: false,
                     tls_cert: None,
                     tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
                 };
                 let result =
                     execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
@@ -1886,6 +1929,9 @@ system_prompt = "Run"
             no_remote_yolo: false,
                     tls_cert: None,
                     tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
         };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1940,6 +1986,9 @@ system_prompt = "Run"
                     no_remote_yolo: false,
                     tls_cert: None,
                     tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
                 };
                 let result =
                     execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
@@ -1978,6 +2027,9 @@ system_prompt = "Run"
                     no_remote_yolo: false,
                     tls_cert: None,
                     tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
                 };
                 let result =
                     execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
@@ -2007,6 +2059,9 @@ system_prompt = "Run"
                 no_remote_yolo: false,
                 tls_cert: None,
                 tls_key: None,
+                no_remote_seed_commands: false,
+                max_concurrent_requests: None,
+                request_timeout_secs: None,
             };
             let result = execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
             assert!(result.is_err(), "must refuse to start unauthenticated");
@@ -2031,6 +2086,9 @@ system_prompt = "Run"
                     no_remote_yolo: false,
                     tls_cert: None,
                     tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
                 };
 
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -2081,6 +2139,9 @@ system_prompt = "Run"
                     no_remote_yolo: false,
                     tls_cert: None,
                     tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
                 };
 
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -2128,6 +2189,9 @@ system_prompt = "Run"
                     no_remote_yolo: false,
                     tls_cert: None,
                     tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
                 }
             }
 
@@ -2197,6 +2261,9 @@ system_prompt = "Run"
                     no_remote_yolo: false,
                     tls_cert: None,
                     tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
                 };
                 let server = tokio::spawn(serve_for_test(
                     args,
@@ -2269,6 +2336,9 @@ system_prompt = "Run"
                         no_remote_yolo: false,
                         tls_cert: None,
                         tls_key: None,
+                        no_remote_seed_commands: false,
+                        max_concurrent_requests: None,
+                        request_timeout_secs: None,
                     };
                     let server = tokio::spawn(serve_for_test(
                         args,
@@ -2368,6 +2438,9 @@ system_prompt = "Run"
                     no_remote_yolo: false,
                     tls_cert: None,
                     tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
                 };
                 let server = tokio::spawn(serve_for_test(
                     args,
@@ -2422,6 +2495,9 @@ system_prompt = "Run"
                     no_remote_yolo: false,
                     tls_cert: None,
                     tls_key: None,
+                    no_remote_seed_commands: false,
+                    max_concurrent_requests: None,
+                    request_timeout_secs: None,
                 };
                 let server = tokio::spawn(serve_for_test(
                     args,
@@ -2466,6 +2542,161 @@ system_prompt = "Run"
                 let _ = server.await;
             }
         })
+        .await;
+    }
+
+    // ─── Request limits, through the real router ────────────────────────────
+
+    /// The `ServeArgs` every request-limit test starts from: a free port, the
+    /// test token, no TLS, nothing admin.
+    fn limits_args() -> ServeArgs {
+        ServeArgs {
+            port: 0,
+            host: "127.0.0.1".to_string(),
+            cors: None,
+            token: Some("test-token".to_string()),
+            allow_admin: false,
+            workdir_root: None,
+            no_remote_yolo: false,
+            tls_cert: None,
+            tls_key: None,
+            no_remote_seed_commands: false,
+            max_concurrent_requests: None,
+            request_timeout_secs: None,
+        }
+    }
+
+    /// Boot the real server with `args` and hand back its address and task.
+    async fn boot(args: ServeArgs) -> (SocketAddr, tokio::task::JoinHandle<anyhow::Result<()>>) {
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(serve_for_test(
+            args,
+            no_daemon_control(),
+            Box::pin(std::future::pending()),
+            Some(ready_tx),
+        ));
+        let addr = ready_rx
+            .await
+            .expect("server should report its bound address");
+        (addr, handle)
+    }
+
+    /// `GET /api/config` with the test token, as the raw response text.
+    async fn get_config_raw(addr: SocketAddr) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(
+                b"GET /api/config HTTP/1.1\r\nHost: localhost\r\n\
+                  Authorization: Bearer test-token\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).await.unwrap();
+        String::from_utf8_lossy(&resp).into_owned()
+    }
+
+    /// The limits `GET /api/config` reports are the ones in force: a typed
+    /// flag over the config file, and the config file over the default. The
+    /// timeout comes from the flag, the cap from `[serve]`, and neither is
+    /// the default.
+    #[tokio::test]
+    async fn request_limits_come_from_the_flag_then_the_config_then_the_default() {
+        crate::config::with_isolated_config_path_async(
+            "serve-mod-request-limits",
+            |_fake_dir| async move {
+                with_tracing(|| {});
+                std::fs::write(
+                    Config::config_path(),
+                    "[serve]\nmax_concurrent_requests = 8\nrequest_timeout_secs = 12\n",
+                )
+                .unwrap();
+                let (addr, handle) = boot(ServeArgs {
+                    request_timeout_secs: Some(3),
+                    ..limits_args()
+                })
+                .await;
+
+                let resp = get_config_raw(addr).await;
+                assert_response_ok(&resp);
+                let body = resp.split_once("\r\n\r\n").map(|(_, b)| b).unwrap();
+                let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(json["limits"]["max_concurrent_requests"], 8, "{json}");
+                assert_eq!(json["limits"]["request_timeout_secs"], 3, "{json}");
+
+                handle.abort();
+            },
+        )
+        .await;
+    }
+
+    /// No config file and no flag: the defaults, reported as such.
+    #[tokio::test]
+    async fn request_limits_default_to_64_in_flight_and_30_seconds() {
+        crate::config::with_isolated_config_path_async(
+            "serve-mod-request-limits-default",
+            |_fake_dir| async move {
+                with_tracing(|| {});
+                let (addr, handle) = boot(limits_args()).await;
+                let resp = get_config_raw(addr).await;
+                assert_response_ok(&resp);
+                let body = resp.split_once("\r\n\r\n").map(|(_, b)| b).unwrap();
+                let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(json["limits"]["max_concurrent_requests"], 64, "{json}");
+                assert_eq!(json["limits"]["request_timeout_secs"], 30, "{json}");
+                handle.abort();
+            },
+        )
+        .await;
+    }
+
+    /// A websocket is a request that never finishes, and it is meant not to:
+    /// with the deadline at one second and the cap at one, a subscription
+    /// is still answering after the deadline, and a request beside it is
+    /// still admitted.
+    #[tokio::test]
+    async fn the_websocket_outlives_the_deadline_and_holds_no_slot() {
+        crate::config::with_isolated_config_path_async(
+            "serve-mod-ws-outlives-timeout",
+            |_fake_dir| async move {
+                with_tracing(|| {});
+                let (addr, handle) = boot(ServeArgs {
+                    request_timeout_secs: Some(1),
+                    max_concurrent_requests: Some(1),
+                    ..limits_args()
+                })
+                .await;
+
+                let mut ws = crate::commands::serve::testutil::WsTestClient::connect(
+                    addr,
+                    "/ws?token=test-token",
+                )
+                .await;
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                // A ping is answered by the socket itself, so a pong proves the
+                // handler behind it is still running rather than dropped at
+                // the deadline.
+                ws.send_frame(0x9, b"still there?").await;
+                // The server greets a new subscriber with a text frame about
+                // the daemon link; the pong is whatever comes after that.
+                let payload = loop {
+                    let (opcode, payload) = ws.recv_frame().await;
+                    if opcode == 0xA {
+                        break payload;
+                    }
+                    assert_eq!(opcode, 0x1, "only text frames precede the pong");
+                };
+                assert_eq!(payload, b"still there?");
+
+                // The open socket is not one of the (one) slots.
+                let resp = get_config_raw(addr).await;
+                assert_response_ok(&resp);
+
+                ws.send_close().await;
+                handle.abort();
+            },
+        )
         .await;
     }
 }
