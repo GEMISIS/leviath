@@ -21,7 +21,7 @@ writes it into `~/.leviath/config.toml` for you, interactively or with
 | Google (Gemini) | `GOOGLE_API_KEY` | [aistudio.google.com](https://aistudio.google.com/app/apikey) |
 | OpenRouter | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) |
 | Ollama | `OLLAMA_HOST` (optional, local) | [ollama.com/download](https://ollama.com/download) |
-| Claude Code | none (subscription; terms caveat below) | see below |
+| Claude Code | none (subscription; terms caveat below; not in the wizard) | see below |
 
 The setup flag `--ollama-url` sets the same base URL that `OLLAMA_HOST` supplies.
 
@@ -412,7 +412,9 @@ Four measured caveats. The CLI adds about 130 tokens of its own context to **eve
 account email address and the current date included, and there is no flag to turn that off. There is
 no prompt caching. Each call is a separate subprocess. And it serves Anthropic models only.
 
-Enable it through `lev setup`, or directly:
+The setup wizard does not offer it. Turn it on with `lev setup --claude-code true`
+(and `--claude-code-effort <level>` if you want something other than the default), or write the
+keys yourself:
 
 ```toml
 [providers]
@@ -421,7 +423,6 @@ claude_code_binary  = "/usr/local/bin/claude"   # unset resolves `claude` on PAT
 claude_code_effort  = "medium"                  # low | medium | high | xhigh | max
 ```
 
-It is off unless you turn it on: the wizard never selects it for you, and saving with it selected
-first asks you to accept the terms risk on an explicit dialog. `claude_code_effort` is always sent
-explicitly: left to itself the CLI picks `high` with adaptive thinking, spending output tokens and
-latency Leviath never asked for.
+It is off unless you turn it on, and running the wizard later leaves these keys as they are.
+`claude_code_effort` is always sent explicitly: left to itself the CLI picks `high` with adaptive
+thinking, spending output tokens and latency Leviath never asked for.

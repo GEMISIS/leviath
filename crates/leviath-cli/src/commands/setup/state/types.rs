@@ -76,8 +76,6 @@ pub struct ProviderRow {
     /// The credential is already in the environment, under this variable, and
     /// is not being written to the config.
     pub from_env: Option<&'static str>,
-    /// Reasoning effort, for the Claude Code transport only.
-    pub effort: usize,
     /// What the last verification attempt concluded.
     pub outcome: Outcome,
     /// A verification is in flight.
@@ -89,11 +87,10 @@ impl ProviderRow {
     pub(crate) fn has_credential(&self) -> bool {
         match self.provider.credential {
             Credential::ApiKey => !self.value.is_empty() || self.from_env.is_some(),
-            // Ollama and the Claude Code transport need no key; selecting them
-            // is the whole configuration, so they are always checkable. An
-            // endpoint preset checks each of its entries, which decide for
-            // themselves.
-            Credential::BaseUrl | Credential::None | Credential::Endpoint => true,
+            // Ollama needs no key; selecting it is the whole configuration,
+            // so it is always checkable. An endpoint preset checks each of
+            // its entries, which decide for themselves.
+            Credential::BaseUrl | Credential::Endpoint => true,
         }
     }
 }
@@ -270,8 +267,6 @@ pub struct Edit {
 pub enum ConfirmPurpose {
     /// `q`/Ctrl-C with unsaved choices: quit and discard?
     QuitDiscard,
-    /// Saving with the Claude Code transport selected: accept the terms risk?
-    SaveTos,
     /// Leaving the Providers screen with nothing selected: continue anyway?
     NoProviders,
 }
@@ -282,22 +277,4 @@ pub struct PendingConfirm {
     /// What answering Yes would mean.
     pub purpose: ConfirmPurpose,
     pub(crate) dialog: crate::tui::widgets::confirm::Confirm,
-}
-
-// Reasoning effort is a property of a provider row, so it belongs beside the
-// row rather than with `[limits]` - which it shared a neighbourhood with only
-// because of where it happened to sit in the original file.
-/// Reasoning-effort levels for the Claude Code transport, from the provider
-/// rather than re-typed here.
-pub(crate) fn effort_options() -> &'static [&'static str] {
-    &leviath_providers::claude_code::EFFORT_LEVELS
-}
-
-/// Index of `effort` in [`effort_options`], defaulting to the provider default.
-pub(super) fn effort_index(effort: Option<&str>) -> usize {
-    let wanted = effort.unwrap_or(leviath_providers::claude_code::DEFAULT_EFFORT);
-    effort_options()
-        .iter()
-        .position(|e| *e == wanted)
-        .unwrap_or_default()
 }

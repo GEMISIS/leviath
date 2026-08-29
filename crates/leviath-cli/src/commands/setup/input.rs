@@ -129,10 +129,6 @@ impl Wizard {
                     self.should_quit = true;
                     Action::Continue
                 }
-                ConfirmPurpose::SaveTos => {
-                    self.claude_code_tos_accepted = true;
-                    Action::Save
-                }
                 ConfirmPurpose::NoProviders => {
                     self.next_step();
                     Action::Continue
@@ -190,7 +186,7 @@ impl Wizard {
     fn handle_nav_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('s') if ctrl => return self.try_save(),
+            KeyCode::Char('s') if ctrl => return Action::Save,
             KeyCode::Char('o') => self.open_signup_page(),
             KeyCode::Char('v') => self.verify_current(),
             KeyCode::PageUp => self.scroll_by(-Wizard::PAGE),
@@ -229,21 +225,12 @@ impl Wizard {
         }
     }
 
-    /// Save, unless the Claude Code terms still need confirming first.
-    fn try_save(&mut self) -> Action {
-        if self.needs_tos_confirmation() {
-            self.open_tos_confirm();
-            return Action::Continue;
-        }
-        Action::Save
-    }
-
     /// `Enter`: act on the focused row, or - only from the visible Continue
     /// button - move on.
     fn activate(&mut self) -> Action {
         if self.on_continue() {
             return match self.step {
-                Step::Review => self.try_save(),
+                Step::Review => Action::Save,
                 Step::Providers => {
                     self.forward_guarded();
                     Action::Continue
@@ -264,14 +251,9 @@ impl Wizard {
         match self.step {
             Step::Providers | Step::Agents | Step::Mcp => self.toggle(),
             Step::ProviderDetail => match self.detail_actions().get(self.cursor.wrapping_sub(1)) {
-                // Row 0 is the credential: it opens its editor, and the Claude
-                // Code row has nothing to type, so Enter cycles its effort.
-                // `wrapping_sub` turns that row into an index no action has.
-                None => {
-                    if !self.open_credential_editor() {
-                        self.adjust(1);
-                    }
-                }
+                // Row 0 is the credential: it opens its editor. `wrapping_sub`
+                // turns that row into an index no action has.
+                None => self.open_credential_editor(),
                 Some(DetailAction::OpenSignup) => self.open_signup_page(),
                 Some(DetailAction::Verify) => self.verify_current(),
             },
@@ -341,23 +323,19 @@ impl Wizard {
         self.open_picker(label, choice.0, choice.1);
     }
 
-    /// Open the credential editor for the provider on screen. Returns false
-    /// when this provider has nothing to type (Claude Code).
-    fn open_credential_editor(&mut self) -> bool {
+    /// Open the credential editor for the provider on screen. An endpoint
+    /// preset never gets here: `activate` sends it to its own form first.
+    fn open_credential_editor(&mut self) {
         let Some((index, credential, value)) = self.detail_row().map(|index| {
             let row = &self.providers[index];
             (index, row.provider.credential, row.value.clone())
         }) else {
-            return false;
+            return;
         };
-        if matches!(credential, Credential::None | Credential::Endpoint) {
-            return false;
-        }
         self.edit = Some(Edit {
             target: EditTarget::Credential(index),
             line: LineEdit::new(value, credential == Credential::ApiKey),
         });
-        true
     }
 
     /// Open the text editor for the selected field. Returns false for fields
@@ -393,12 +371,6 @@ impl Wizard {
                 } else if let Some(row) = self.providers.get_mut(self.cursor) {
                     row.selected = !row.selected;
                     self.dirty = true;
-                    // Deselecting the Claude Code transport withdraws the
-                    // terms acceptance so it must be re-confirmed if
-                    // re-enabled.
-                    if row.provider.id == "claude-code" && !row.selected {
-                        self.claude_code_tos_accepted = false;
-                    }
                 }
                 // The credential screen walks selected providers, so its
                 // position is only meaningful relative to the current
@@ -451,23 +423,10 @@ impl Wizard {
                 // everything else there is typed.
                 if let Some(index) = self.detail_row()
                     && self.is_endpoint_preset(index)
-                {
-                    if let Some(EndpointCursor::Field(entry, EndpointField::DefaultModel)) =
+                    && let Some(EndpointCursor::Field(entry, EndpointField::DefaultModel)) =
                         self.endpoint_cursor(index)
-                    {
-                        self.cycle_endpoint_model(entry, delta);
-                    }
-                    return;
-                }
-                // The effort selector is the only cyclable value here.
-                if let Some(index) = self.detail_row()
-                    && let Some(row) = self.providers.get_mut(index)
-                    && row.provider.credential == Credential::None
                 {
-                    let count = super::state::effort_options().len();
-                    let next = row.effort as isize + delta;
-                    row.effort = next.rem_euclid(count as isize) as usize;
-                    self.dirty = true;
+                    self.cycle_endpoint_model(entry, delta);
                 }
             }
             Step::Defaults | Step::Limits => {

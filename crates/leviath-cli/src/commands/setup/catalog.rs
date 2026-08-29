@@ -19,9 +19,6 @@ pub enum Credential {
     ApiKey,
     /// A base URL, with a working default.
     BaseUrl,
-    /// Nothing - the provider is enabled by selecting it. Claude Code
-    /// authenticates through its own CLI.
-    None,
     /// One or more `[model_providers.<name>]` endpoints of kind
     /// `openai-compatible`, each with a name, an address and an optional key.
     /// The row is a preset; the entries under it are the wizard's own.
@@ -103,20 +100,6 @@ pub(crate) fn providers() -> Vec<Provider> {
             hint: DEFAULT_OLLAMA_URL,
             env_var: Some("OLLAMA_HOST"),
             signup_url: Some("https://ollama.com/download"),
-            preset_url: None,
-        },
-        Provider {
-            id: "claude-code",
-            display: "Claude Code transport",
-            blurb: "Runs on your Claude subscription instead of an API key. \
-                    ⚠️ May conflict with Anthropic's terms for third-party \
-                    apps. The CLI adds ~130 tokens of its own context to every \
-                    call, including your account email. This cannot be \
-                    disabled.",
-            credential: Credential::None,
-            hint: "",
-            env_var: None,
-            signup_url: None,
             preset_url: None,
         },
         Provider {
@@ -216,17 +199,14 @@ pub(crate) fn set_credential(config: &mut Config, id: &str, value: Option<String
         "google" => config.providers.google_api_key = value,
         "openrouter" => config.openrouter_api_key = value,
         "ollama" => config.ollama_base_url = value,
-        // `claude-code` is a boolean, handled by the selection itself, and an
-        // unknown id has nowhere to go.
+        // An unknown id has nowhere to go.
         _ => {}
     }
 }
 
-/// Whether a provider counts as configured in this config: it has a credential,
-/// or it needs none and is switched on.
+/// Whether a provider counts as configured in this config: it has a credential.
 pub(crate) fn is_configured(config: &Config, id: &str) -> bool {
     match id {
-        "claude-code" => config.providers.claude_code_enabled,
         // An endpoint preset is "configured" when the file holds an endpoint
         // entry that sits under it.
         "llama-cpp" | "lm-studio" | "openai-compatible" => config
@@ -296,7 +276,6 @@ mod tests {
         let all = providers();
         assert!(all.iter().any(|p| p.credential == Credential::ApiKey));
         assert!(all.iter().any(|p| p.credential == Credential::BaseUrl));
-        assert!(all.iter().any(|p| p.credential == Credential::None));
         assert!(all.iter().any(|p| p.credential == Credential::Endpoint));
     }
 
@@ -365,19 +344,20 @@ mod tests {
     }
 
     #[test]
-    fn claude_code_states_its_privacy_cost_up_front() {
-        // Offered, never chosen for the user, and never without the caveat.
-        let all = providers();
-        let cc = all
-            .iter()
-            .find(|p| p.id == "claude-code")
-            .expect("the transport is offered");
-        assert!(cc.blurb.contains("email"));
-        assert!(cc.blurb.contains("cannot be disabled"));
-        // Enabling it is a terms decision as much as a privacy one.
-        assert!(cc.blurb.contains("terms"));
-        assert_eq!(cc.credential, Credential::None);
-        assert!(!Config::default().providers.claude_code_enabled);
+    fn the_claude_code_transport_is_not_offered() {
+        // It is configured from the config keys or `lev setup --claude-code`,
+        // never from the pick list, so the wizard has no row for it and does
+        // not count the flag as a configured provider of its own.
+        assert!(providers().iter().all(|p| p.id != "claude-code"));
+        assert!(
+            providers()
+                .iter()
+                .all(|p| !p.display.contains("Claude Code"))
+        );
+
+        let mut config = Config::default();
+        config.providers.claude_code_enabled = true;
+        assert!(!is_configured(&config, "claude-code"));
     }
 
     // ─── credential accessors ───────────────────────────────────────────────
@@ -387,7 +367,7 @@ mod tests {
         // Catches the top-level/`[providers]` split silently dropping a field.
         for p in providers()
             .iter()
-            .filter(|p| !matches!(p.credential, Credential::None | Credential::Endpoint))
+            .filter(|p| p.credential != Credential::Endpoint)
         {
             let mut config = Config::default();
             assert!(
@@ -422,18 +402,6 @@ mod tests {
 
         assert!(stored_credential(&config, "not-a-provider").is_none());
         assert!(!is_configured(&config, "not-a-provider"));
-    }
-
-    #[test]
-    fn claude_code_is_configured_by_its_flag_not_a_credential() {
-        let mut config = Config::default();
-        assert!(!is_configured(&config, "claude-code"));
-        // It has no credential slot, so writing one must not make it look on.
-        set_credential(&mut config, "claude-code", Some("x".to_string()));
-        assert!(!is_configured(&config, "claude-code"));
-
-        config.providers.claude_code_enabled = true;
-        assert!(is_configured(&config, "claude-code"));
     }
 
     // ─── redact ─────────────────────────────────────────────────────────────

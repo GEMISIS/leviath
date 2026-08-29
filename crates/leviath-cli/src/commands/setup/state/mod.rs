@@ -63,10 +63,6 @@ pub struct Wizard {
     /// The user has changed something since the wizard opened, so quitting
     /// silently would discard real choices.
     pub dirty: bool,
-    /// The user has acknowledged the Claude Code transport's terms risk. A
-    /// hard gate on saving: the transport cannot be written to the config
-    /// without it, and deselecting the transport withdraws it.
-    pub claude_code_tos_accepted: bool,
     /// The user asked to leave and the loop should stop.
     pub should_quit: bool,
     /// Set once the plan has been applied, so the loop knows to stop.
@@ -156,7 +152,6 @@ impl Wizard {
                     selected: catalog::is_configured(&base, provider.id) || from_env.is_some(),
                     value: stored.unwrap_or_default(),
                     from_env,
-                    effort: effort_index(base.providers.claude_code_effort.as_deref()),
                     outcome: Outcome::Skipped,
                     checking: false,
                     provider,
@@ -227,7 +222,6 @@ impl Wizard {
             show_help: false,
             confirm: None,
             dirty: false,
-            claude_code_tos_accepted: false,
             should_quit: false,
             finished: false,
             message: None,
@@ -275,21 +269,6 @@ impl Wizard {
     /// The provider row the credential screen is currently showing.
     pub(crate) fn detail_row(&self) -> Option<usize> {
         self.selected_providers().get(self.detail).copied()
-    }
-
-    /// Whether the Claude Code transport is one of the picked providers.
-    pub(crate) fn claude_code_selected(&self) -> bool {
-        self.providers
-            .iter()
-            .any(|r| r.selected && r.provider.id == "claude-code")
-    }
-
-    /// Whether saving must first ask the user to acknowledge Anthropic's
-    /// terms. Enabling the transport routes inference through a subscription
-    /// session, so the risk is confirmed once, explicitly, rather than being
-    /// buried in a paragraph nobody reads.
-    pub(crate) fn needs_tos_confirmation(&self) -> bool {
-        self.claude_code_selected() && !self.claude_code_tos_accepted
     }
 
     /// The fields the current step edits, if it edits fields.
@@ -935,31 +914,6 @@ impl Wizard {
         });
     }
 
-    /// Saving with the Claude Code transport selected: the terms risk is
-    /// confirmed once, explicitly, on a dialog with real buttons.
-    pub(crate) fn open_tos_confirm(&mut self) {
-        use ratatui::text::Line;
-        self.confirm = Some(PendingConfirm {
-            purpose: ConfirmPurpose::SaveTos,
-            dialog: crate::tui::widgets::confirm::Confirm::new(
-                "Claude Code terms of service",
-                vec![
-                    Line::from("Anthropic's terms prohibit third-party developers from offering"),
-                    Line::from("claude.ai subscription auth for their products without prior"),
-                    Line::from("approval. The Claude Code transport routes inference through"),
-                    Line::from("your subscription via the CLI's OAuth session."),
-                    Line::from(""),
-                    Line::from("For unambiguous compliance, use a direct Anthropic API key."),
-                    Line::from(""),
-                    Line::from("Accepting means you take responsibility for compliance."),
-                ],
-                "Accept and save",
-                "Cancel",
-            )
-            .danger(),
-        });
-    }
-
     /// Leaving the Providers screen with nothing selected: Leviath cannot run
     /// an agent without a provider, so this is almost always a slip.
     pub(crate) fn open_no_providers_confirm(&mut self) {
@@ -1030,7 +984,7 @@ impl Wizard {
         for row in &self.providers {
             match row.provider.credential {
                 // Written below, from the entries rather than the row.
-                Credential::None | Credential::Endpoint => {}
+                Credential::Endpoint => {}
                 _ if !row.selected => catalog::set_credential(&mut config, row.provider.id, None),
                 // An environment-supplied credential is left out of the file:
                 // the user put it in their environment on purpose, and
@@ -1047,18 +1001,11 @@ impl Wizard {
             }
         }
 
-        // The transport is always in the table, so this reads its row when
-        // selected rather than guarding a lookup that cannot miss.
-        let transport = self
-            .providers
-            .iter()
-            .find(|r| r.provider.id == "claude-code")
-            .filter(|r| r.selected);
-        config.providers.claude_code_enabled = transport.is_some();
-        if let Some(row) = transport {
-            config.providers.claude_code_effort =
-                Some(effort_options()[row.effort.min(effort_options().len() - 1)].to_string());
-        }
+        // The Claude Code transport has no row here. Its keys
+        // (`claude_code_enabled`, `claude_code_effort`, `claude_code_binary`)
+        // are set by hand or by `lev setup --claude-code`, and the clone of
+        // `base` above carries whatever the file already says through
+        // untouched.
 
         self.write_endpoints(&mut config);
 
@@ -2498,59 +2445,21 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn the_claude_code_transport_carries_its_effort_only_when_enabled() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut wizard = test_wizard(dir.path());
-        let index = wizard
-            .providers
-            .iter()
-            .position(|r| r.provider.id == "claude-code")
-            .expect("the transport is offered");
-
-        assert!(!wizard.build_config().providers.claude_code_enabled);
-
-        wizard.providers[index].selected = true;
-        wizard.providers[index].effort = effort_options().len() - 1;
-        let config = wizard.build_config();
-        assert!(config.providers.claude_code_enabled);
-        assert_eq!(
-            config.providers.claude_code_effort.as_deref(),
-            Some(*effort_options().last().expect("levels exist"))
-        );
-    }
-
-    #[test]
-    fn an_out_of_range_effort_index_clamps_rather_than_panicking() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut wizard = test_wizard(dir.path());
-        let index = wizard
-            .providers
-            .iter()
-            .position(|r| r.provider.id == "claude-code")
-            .expect("the transport is offered");
-        wizard.providers[index].selected = true;
-        wizard.providers[index].effort = 99;
-
-        let config = wizard.build_config();
-
-        assert_eq!(
-            config.providers.claude_code_effort.as_deref(),
-            Some(*effort_options().last().expect("levels exist"))
-        );
-    }
-
-    #[test]
-    fn the_stored_effort_selects_the_matching_option() {
+    fn an_enabled_claude_code_transport_survives_the_wizard_untouched() {
+        // The transport has no row, so the wizard must neither switch it off
+        // nor rewrite its effort: the config keys pass straight through.
         let dir = tempfile::tempdir().unwrap();
         let base = Config {
             providers: crate::config::ProviderConfig {
+                claude_code_enabled: true,
                 claude_code_effort: Some("max".to_string()),
+                claude_code_binary: Some("/opt/claude".into()),
                 ..Config::default().providers
             },
             ..Config::default()
         };
-        let wizard = Wizard::new(
-            base,
+        let mut wizard = Wizard::new(
+            base.clone(),
             &|_| None,
             Vec::new(),
             Vec::new(),
@@ -2558,21 +2467,26 @@ pub(super) mod tests {
             std::sync::Arc::new(|_| true),
             Default::default(),
         );
+        assert!(
+            wizard
+                .providers
+                .iter()
+                .all(|r| r.provider.id != "claude-code")
+        );
 
-        let index = wizard
-            .providers
-            .iter()
-            .position(|r| r.provider.id == "claude-code")
-            .expect("the transport is offered");
-        assert_eq!(effort_options()[wizard.providers[index].effort], "max");
-    }
+        // Touching other providers does not disturb it either.
+        wizard.providers[0].selected = true;
+        wizard.providers[0].value = "sk-ant-x".to_string();
+        let config = wizard.build_config();
 
-    #[test]
-    fn an_unrecognised_stored_effort_falls_back_to_the_first_level() {
-        assert_eq!(effort_index(Some("not-a-level")), 0);
+        assert!(config.providers.claude_code_enabled);
         assert_eq!(
-            effort_options()[effort_index(None)],
-            leviath_providers::claude_code::DEFAULT_EFFORT
+            config.providers.claude_code_effort,
+            base.providers.claude_code_effort
+        );
+        assert_eq!(
+            config.providers.claude_code_binary,
+            base.providers.claude_code_binary
         );
     }
 
