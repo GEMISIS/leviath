@@ -17,7 +17,7 @@
 //! Stage entry sets `ReadyToInfer`. A refreshed region has to be in place
 //! *before* the stage's first request is built, or the stage would run its first
 //! turn against the previous stage's values and the refresh would be pointless.
-//! So [`start_stage_seeds`] takes `ReadyToInfer` away and [`apply_stage_seeds`]
+//! So `start_stage_seeds` takes `ReadyToInfer` away and `apply_stage_seeds`
 //! puts it back - the same hold-and-release the interaction-point lane uses.
 //!
 //! A failed call leaves the region as it was rather than blanking it: the
@@ -34,7 +34,7 @@ use crate::pipeline::{AgentBlueprint, ReadyToInfer, StageJustEntered, ToolServic
 /// The lane answers with `(id, result)` pairs and has no notion of a region or
 /// a heading, so both travel with the id rather than being recovered from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SeedCallSite {
+pub(crate) struct SeedCallSite {
     /// The tool-call id the lane will answer under.
     pub id: String,
     /// The region this answer fills.
@@ -45,7 +45,7 @@ pub struct SeedCallSite {
 
 /// An agent whose stage-entry seed calls are out on the tool lane.
 #[derive(Component, Debug, Clone)]
-pub struct PendingStageSeeds {
+pub(crate) struct PendingStageSeeds {
     /// The dispatched calls, in order.
     pub sites: Vec<SeedCallSite>,
 }
@@ -54,7 +54,9 @@ pub struct PendingStageSeeds {
 /// calls.
 ///
 /// Pure over the blueprint so the selection is testable without a world.
-pub fn refreshing_regions(blueprint: &leviath_core::Blueprint) -> Vec<(&str, &[SeedToolCall])> {
+pub(crate) fn refreshing_regions(
+    blueprint: &leviath_core::Blueprint,
+) -> Vec<(&str, &[SeedToolCall])> {
     blueprint
         .context_layout
         .regions
@@ -74,7 +76,7 @@ pub fn refreshing_regions(blueprint: &leviath_core::Blueprint) -> Vec<(&str, &[S
 /// Ids are prefixed so they cannot collide with a provider-minted one, and
 /// numbered because one region can make several calls and the lane answers with
 /// a flat list.
-pub fn call_sites(regions: &[(&str, &[SeedToolCall])]) -> Vec<SeedCallSite> {
+pub(crate) fn call_sites(regions: &[(&str, &[SeedToolCall])]) -> Vec<SeedCallSite> {
     let mut sites = Vec::new();
     for (region, calls) in regions {
         for call in *calls {
@@ -105,7 +107,7 @@ type StageSeedQuery<'w, 's> = Query<
 ///
 /// Ordered with the other `StageJustEntered` systems, before `sync_tool_stages`
 /// consumes that marker.
-pub fn start_stage_seeds(
+pub(crate) fn start_stage_seeds(
     agents: StageSeedQuery,
     service: Res<ToolServiceRes>,
     stage: Res<ToolStage>,
@@ -155,7 +157,7 @@ pub fn start_stage_seeds(
 /// Pure over the sites and the results, so the grouping is testable without a
 /// lane. A region whose every call failed is absent from the result, which is
 /// what leaves its previous content in place.
-pub fn seeded_content(
+pub(crate) fn seeded_content(
     sites: &[SeedCallSite],
     results: &[(String, String)],
 ) -> Vec<(String, String)> {
@@ -183,7 +185,7 @@ pub fn seeded_content(
 }
 
 /// Apply a landed stage-entry seed batch and release the stage.
-pub fn apply_stage_seeds(
+pub(crate) fn apply_stage_seeds(
     entity: Entity,
     pending: &PendingStageSeeds,
     results: &[(String, String)],

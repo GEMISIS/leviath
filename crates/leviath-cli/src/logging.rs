@@ -6,7 +6,7 @@
 //! OTLP is only read later (by the daemon, after `Config::load`). Bridging
 //! that gap is what the reload slot is for: [`init`] installs the fmt layer
 //! plus an empty slot and parks the reload handle in a static;
-//! [`install_otel_layer`] fills the slot once the daemon has built its
+//! `install_otel_layer` fills the slot once the daemon has built its
 //! exporter. Everything stays on **stderr** - `lev agent-client` uses stdout
 //! as its JSON-RPC channel, and a stray log line there would corrupt the
 //! stream a host is parsing.
@@ -175,7 +175,7 @@ pub fn init(verbose: bool) {
 /// Fill the reload slot with the daemon's OTLP log-export layer. Returns
 /// whether the layer was installed - `false` when [`init`] hasn't run (a
 /// library consumer with its own subscriber) or the slot is gone.
-pub fn install_otel_layer(layer: leviath_telemetry::LogLayer) -> bool {
+pub(crate) fn install_otel_layer(layer: leviath_telemetry::LogLayer) -> bool {
     match OTEL_HANDLE.get() {
         Some(handle) => handle.reload(Some(layer)).is_ok(),
         None => false,

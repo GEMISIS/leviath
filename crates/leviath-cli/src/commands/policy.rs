@@ -54,7 +54,7 @@ pub struct PolicyTestArgs {
 }
 
 /// Run `lev policy`: inspect and edit the taint-gate rules.
-pub async fn execute(args: PolicyArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: PolicyArgs) -> anyhow::Result<()> {
     match args.command {
         PolicyCommand::List(_) => execute_list().await,
         PolicyCommand::Add(args) => execute_add(args).await,

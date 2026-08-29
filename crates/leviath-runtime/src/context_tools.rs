@@ -12,7 +12,7 @@ use leviath_core::RegionKind;
 use crate::components::ContextWindow;
 
 /// Whether a tool name is a context self-management tool this module handles.
-pub fn is_context_tool(name: &str) -> bool {
+pub(crate) fn is_context_tool(name: &str) -> bool {
     // `todo_*` are context tools by every property that matters here: they
     // write to a region, need no workspace, and are answered by this module
     // rather than the tool executor. Only the prefix differs, and it differs
@@ -75,7 +75,7 @@ fn checklist_region<'w>(
 /// Apply one `context_*` tool call to `window`, returning the result text the
 /// model sees. Unknown tools and missing arguments yield `[error] …` strings
 /// (never a hard failure - the model reads and adjusts).
-pub fn handle_context_tool(
+pub(crate) fn handle_context_tool(
     name: &str,
     args: &serde_json::Value,
     window: &mut ContextWindow,

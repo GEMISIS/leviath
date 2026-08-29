@@ -221,7 +221,7 @@ impl ProviderRegistry {
     ///
     /// Compared by [`crate::pipeline::model_key`], so a gateway's namespaced
     /// `openai/gpt-5.5` answers for a blueprint that wrote `gpt-5.5`.
-    pub fn refuses_model(&self, provider: &str, model: &str) -> bool {
+    pub(crate) fn refuses_model(&self, provider: &str, model: &str) -> bool {
         let Some(p) = self.get(provider) else {
             return false;
         };

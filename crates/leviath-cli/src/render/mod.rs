@@ -37,7 +37,7 @@ use crate::tui::theme::{C_ACCENT, C_CODE_BG, C_CODE_FG, C_DIM, C_MUTED, C_SUCCES
 /// Convert a markdown string to ratatui `Text` for rendering in a `Paragraph`.
 ///
 /// `width` is used to draw horizontal rules to the correct width.
-pub fn markdown_to_text(input: &str, width: u16) -> Text<'static> {
+pub(crate) fn markdown_to_text(input: &str, width: u16) -> Text<'static> {
     let mut renderer = Renderer::new(width);
     renderer.render(input);
     Text::from(renderer.lines)
@@ -286,7 +286,7 @@ impl Renderer {
         self.in_code_block = false;
     }
 
-    pub fn render(&mut self, input: &str) {
+    pub(crate) fn render(&mut self, input: &str) {
         let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
         let parser = Parser::new_ext(input, opts);
 

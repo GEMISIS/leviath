@@ -12,7 +12,7 @@ use bevy_ecs::prelude::Component;
 
 /// Configuration for repetition detection thresholds.
 #[derive(Debug, Clone)]
-pub struct RepetitionConfig {
+pub(crate) struct RepetitionConfig {
     /// Maximum times the same tool+args combo may repeat before a nudge.
     pub max_repeat_calls: usize,
     /// Maximum consecutive read-only calls (no productive calls in between).
@@ -34,7 +34,7 @@ impl Default for RepetitionConfig {
 /// Tracks tool call patterns and detects repetitive loops. A per-agent ECS
 /// component (seeded from the blueprint's repetition config at spawn).
 #[derive(Debug, Component)]
-pub struct RepetitionDetector {
+pub(crate) struct RepetitionDetector {
     config: RepetitionConfig,
     /// Counts keyed by (tool_name, args_hash).
     call_counts: HashMap<(String, u64), usize>,
@@ -89,7 +89,7 @@ fn is_productive(tool_name: &str) -> bool {
 
 impl RepetitionDetector {
     /// Create a new detector with the given configuration.
-    pub fn new(config: RepetitionConfig) -> Self {
+    pub(crate) fn new(config: RepetitionConfig) -> Self {
         Self {
             config,
             call_counts: HashMap::new(),
@@ -98,14 +98,17 @@ impl RepetitionDetector {
     }
 
     /// Create a detector with default thresholds.
-    pub fn with_defaults() -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_defaults() -> Self {
         Self::new(RepetitionConfig::default())
     }
 
     /// Build a detector from a blueprint's
     /// [`RepetitionDetectionConfig`](leviath_core::blueprint::RepetitionDetectionConfig),
     /// filling any unset field from the [`RepetitionConfig`] defaults.
-    pub fn from_detection_config(cfg: &leviath_core::blueprint::RepetitionDetectionConfig) -> Self {
+    pub(crate) fn from_detection_config(
+        cfg: &leviath_core::blueprint::RepetitionDetectionConfig,
+    ) -> Self {
         let d = RepetitionConfig::default();
         Self::new(RepetitionConfig {
             max_repeat_calls: cfg.max_repeat_calls.unwrap_or(d.max_repeat_calls),
@@ -118,7 +121,7 @@ impl RepetitionDetector {
     ///
     /// Returns `Some(nudge_message)` when the agent should be nudged to break
     /// out of a loop, `None` otherwise.
-    pub fn record_call(&mut self, tool_name: &str, tool_arguments: &str) -> Option<String> {
+    pub(crate) fn record_call(&mut self, tool_name: &str, tool_arguments: &str) -> Option<String> {
         if !self.config.enabled {
             return None;
         }

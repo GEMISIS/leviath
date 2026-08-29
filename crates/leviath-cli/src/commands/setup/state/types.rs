@@ -42,7 +42,7 @@ impl Step {
     ];
 
     /// Title shown in the header.
-    pub fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Step::Welcome => "Welcome",
             Step::Providers => "Providers",
@@ -56,7 +56,7 @@ impl Step {
     }
 
     /// Position in [`Self::ALL`].
-    pub fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         Self::ALL
             .iter()
             .position(|s| *s == self)
@@ -86,7 +86,7 @@ pub struct ProviderRow {
 
 impl ProviderRow {
     /// Whether this provider has something to verify.
-    pub fn has_credential(&self) -> bool {
+    pub(crate) fn has_credential(&self) -> bool {
         match self.provider.credential {
             Credential::ApiKey => !self.value.is_empty() || self.from_env.is_some(),
             // Ollama and the Claude Code transport need no key; selecting them
@@ -137,7 +137,7 @@ pub(crate) use crate::tui::widgets::picker::{Picker, PickerOption};
 /// for people who had read the footer. As rows they can be seen, moved onto
 /// with the arrows, and clicked; `o` and `v` still work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DetailAction {
+pub(crate) enum DetailAction {
     /// Open the provider's signup or key page in a browser.
     OpenSignup,
     /// Check the credential against the provider.
@@ -147,7 +147,7 @@ pub enum DetailAction {
 impl DetailAction {
     /// The button's text, which names the provider so the row says what it
     /// will do rather than what it is called.
-    pub fn label(self, provider: &str) -> String {
+    pub(crate) fn label(self, provider: &str) -> String {
         match self {
             Self::OpenSignup => format!("Open the {provider} key page"),
             Self::Verify => "Check this credential".to_string(),
@@ -185,7 +185,7 @@ pub enum FieldValue {
 
 impl FieldValue {
     /// How the value reads on screen.
-    pub fn display(&self) -> String {
+    pub(crate) fn display(&self) -> String {
         match self {
             Self::Number(None) => "(unset)".to_string(),
             Self::Number(Some(n)) => n.to_string(),
@@ -203,14 +203,15 @@ impl FieldValue {
     /// A no-op for the other kinds, which have no list to move within. Total
     /// rather than fallible because the caller that has a chosen index already
     /// knows which field it came from.
-    pub fn set_index(&mut self, next: usize) {
+    pub(crate) fn set_index(&mut self, next: usize) {
         if let Self::Choice { index, .. } = self {
             *index = next;
         }
     }
 
     /// The options of a choice field; empty for any other kind.
-    pub fn options(&self) -> &[String] {
+    #[cfg(test)]
+    pub(crate) fn options(&self) -> &[String] {
         match self {
             Self::Choice { options, .. } => options,
             Self::Number(_) | Self::Bool(_) => &[],
@@ -279,7 +280,7 @@ pub struct PendingConfirm {
 // because of where it happened to sit in the original file.
 /// Reasoning-effort levels for the Claude Code transport, from the provider
 /// rather than re-typed here.
-pub fn effort_options() -> &'static [&'static str] {
+pub(crate) fn effort_options() -> &'static [&'static str] {
     &leviath_providers::claude_code::EFFORT_LEVELS
 }
 

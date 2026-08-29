@@ -86,7 +86,7 @@ impl Default for CircuitPolicy {
 /// One provider's failure record. Absent from [`ProviderCircuits`] means
 /// healthy, so a success can simply drop the entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Circuit {
+pub(crate) struct Circuit {
     /// Provider-fatal failures since the last success.
     pub consecutive_failures: u32,
     /// When the circuit opened, if it is open. `None` while the count is still
@@ -123,7 +123,7 @@ impl CircuitPolicy {
     /// provider stated outright - takes the strict threshold. Those are the
     /// provider telling us about itself, which is exactly what the breaker is
     /// for.
-    pub fn threshold_for(&self, kind: Option<FailureKind>) -> u32 {
+    pub(crate) fn threshold_for(&self, kind: Option<FailureKind>) -> u32 {
         match kind {
             Some(k) if k.provider_was_reached() => self
                 .failures_before_open
@@ -143,7 +143,7 @@ impl ProviderCircuits {
     ///
     /// Returns `true` on the transition into the open state, so the caller can
     /// log and alert exactly once rather than on every subsequent failure.
-    pub fn record_failure(
+    pub(crate) fn record_failure(
         &mut self,
         provider: &str,
         reason: UnavailableReason,
@@ -172,7 +172,7 @@ impl ProviderCircuits {
     }
 
     /// Forget `provider`'s failures. Any success proves it is serving again.
-    pub fn record_success(&mut self, provider: &str) {
+    pub(crate) fn record_success(&mut self, provider: &str) {
         self.0.remove(provider);
     }
 
@@ -181,7 +181,7 @@ impl ProviderCircuits {
     /// The stall watchdog asks this to tell "out of credits" apart from the
     /// other ways a provider leaves service: the former pauses the run for a
     /// resume instead of failing it (issue #413).
-    pub fn last_reason(&self, provider: &str) -> Option<UnavailableReason> {
+    pub(crate) fn last_reason(&self, provider: &str) -> Option<UnavailableReason> {
         self.0.get(provider).map(|c| c.reason)
     }
 
@@ -190,7 +190,7 @@ impl ProviderCircuits {
     /// Called on an explicit resume: the operator is saying conditions have
     /// changed (most often a top-up after credits ran out), and holding the
     /// retry until a cooldown lapses would make the resume look ignored.
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.0.clear();
     }
 
@@ -198,7 +198,7 @@ impl ProviderCircuits {
     ///
     /// False once the cooldown has elapsed, which is what makes the next
     /// request a probe without needing a distinct half-open state.
-    pub fn is_open(&self, provider: &str, now: i64, policy: &CircuitPolicy) -> bool {
+    pub(crate) fn is_open(&self, provider: &str, now: i64, policy: &CircuitPolicy) -> bool {
         self.0
             .get(provider)
             .and_then(|c| c.opened_at)
@@ -207,7 +207,11 @@ impl ProviderCircuits {
 
     /// Every currently-open circuit, provider-sorted so the rendering is
     /// stable across ticks (a `HashMap` iteration order is not).
-    pub fn open_circuits(&self, now: i64, policy: &CircuitPolicy) -> Vec<ProviderCircuitState> {
+    pub(crate) fn open_circuits(
+        &self,
+        now: i64,
+        policy: &CircuitPolicy,
+    ) -> Vec<ProviderCircuitState> {
         let mut open: Vec<ProviderCircuitState> = self
             .0
             .iter()
@@ -239,7 +243,7 @@ impl ProviderCircuits {
 ///
 /// An agent with nowhere left to go is left alone, and dispatch parks it on
 /// [`super::StallReason::ProviderCircuitOpen`].
-pub fn rotate_open_circuits(
+pub(crate) fn rotate_open_circuits(
     mut agents: Query<(Entity, &AgentState, &mut StageInference), With<super::ReadyToInfer>>,
     circuits: Option<Res<ProviderCircuits>>,
     policy: Option<Res<CircuitPolicy>>,

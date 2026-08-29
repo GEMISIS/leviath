@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+#[cfg(test)]
 use leviath_mcp::MCPServerConfig;
 use tokio::sync::mpsc;
 
@@ -129,7 +130,7 @@ impl Wizard {
     /// the user had deliberately kept in their environment into
     /// `~/.leviath/config.toml`. Environment-supplied credentials are tracked
     /// separately in `env_only` and shown as such.
-    pub fn new(
+    pub(crate) fn new(
         base: Config,
         env_lookup: &dyn Fn(&str) -> Option<String>,
         candidates: Vec<(String, Candidate)>,
@@ -256,7 +257,7 @@ impl Wizard {
     // ── Rows and navigation ─────────────────────────────────────────────────
 
     /// Providers the user picked, in table order.
-    pub fn selected_providers(&self) -> Vec<usize> {
+    pub(crate) fn selected_providers(&self) -> Vec<usize> {
         self.providers
             .iter()
             .enumerate()
@@ -266,12 +267,12 @@ impl Wizard {
     }
 
     /// The provider row the credential screen is currently showing.
-    pub fn detail_row(&self) -> Option<usize> {
+    pub(crate) fn detail_row(&self) -> Option<usize> {
         self.selected_providers().get(self.detail).copied()
     }
 
     /// Whether the Claude Code transport is one of the picked providers.
-    pub fn claude_code_selected(&self) -> bool {
+    pub(crate) fn claude_code_selected(&self) -> bool {
         self.providers
             .iter()
             .any(|r| r.selected && r.provider.id == "claude-code")
@@ -281,12 +282,12 @@ impl Wizard {
     /// terms. Enabling the transport routes inference through a subscription
     /// session, so the risk is confirmed once, explicitly, rather than being
     /// buried in a paragraph nobody reads.
-    pub fn needs_tos_confirmation(&self) -> bool {
+    pub(crate) fn needs_tos_confirmation(&self) -> bool {
         self.claude_code_selected() && !self.claude_code_tos_accepted
     }
 
     /// The fields the current step edits, if it edits fields.
-    pub fn fields(&self) -> &[Field] {
+    pub(crate) fn fields(&self) -> &[Field] {
         match self.step {
             Step::Defaults => &self.defaults,
             Step::Limits => &self.limits,
@@ -307,7 +308,7 @@ impl Wizard {
     /// They exist as rows rather than as shortcut keys alone because that is
     /// how they become discoverable: a row can be seen, moved onto, and
     /// clicked, and `o` and `v` still work for anyone who knows them.
-    pub fn detail_actions(&self) -> Vec<DetailAction> {
+    pub(crate) fn detail_actions(&self) -> Vec<DetailAction> {
         let Some(index) = self.detail_row() else {
             return Vec::new();
         };
@@ -320,7 +321,7 @@ impl Wizard {
     }
 
     /// How many selectable rows the current step has.
-    pub fn row_count(&self) -> usize {
+    pub(crate) fn row_count(&self) -> usize {
         match self.step {
             Step::Welcome | Step::Review => 0,
             Step::Providers => self.providers.len(),
@@ -337,20 +338,20 @@ impl Wizard {
 
     /// How many cursor positions the current step has: its rows plus the
     /// Continue/action button that every step ends with.
-    pub fn nav_rows(&self) -> usize {
+    pub(crate) fn nav_rows(&self) -> usize {
         self.row_count() + 1
     }
 
     /// Whether the cursor sits on the step's Continue/action button (the
     /// virtual row after the last real one).
-    pub fn on_continue(&self) -> bool {
+    pub(crate) fn on_continue(&self) -> bool {
         self.cursor == self.row_count()
     }
 
     /// The label of the current step's Continue/action button. It carries
     /// state (selection counts, what screen is next) so advancing is never a
     /// surprise.
-    pub fn continue_label(&self) -> String {
+    pub(crate) fn continue_label(&self) -> String {
         match self.step {
             Step::Welcome => "Get started".to_string(),
             Step::Review => "Apply and finish".to_string(),
@@ -389,7 +390,7 @@ impl Wizard {
     }
 
     /// Move the selection, clamped to the step's rows plus its button.
-    pub fn move_cursor(&mut self, delta: isize) {
+    pub(crate) fn move_cursor(&mut self, delta: isize) {
         let count = self.nav_rows();
         let next = self.cursor as isize + delta;
         self.cursor = next.clamp(0, count as isize - 1) as usize;
@@ -405,7 +406,7 @@ impl Wizard {
     /// the renderer follow it, so the view and the cursor can never disagree
     /// about what the user is looking at. Welcome and Review have no rows, so
     /// there the offset moves on its own.
-    pub fn scroll_by(&mut self, rows: isize) {
+    pub(crate) fn scroll_by(&mut self, rows: isize) {
         if self.row_count() > 0 {
             self.move_cursor(rows);
             return;
@@ -414,7 +415,7 @@ impl Wizard {
     }
 
     /// Jump to the top of the current step.
-    pub fn scroll_home(&mut self) {
+    pub(crate) fn scroll_home(&mut self) {
         self.cursor = 0;
         self.scroll = 0;
     }
@@ -424,7 +425,7 @@ impl Wizard {
     /// The offset is set past any possible content and clamped when drawn,
     /// because the number of lines a step occupies depends on the window it is
     /// drawn into and is not known here.
-    pub fn scroll_end(&mut self) {
+    pub(crate) fn scroll_end(&mut self) {
         self.cursor = self.nav_rows().saturating_sub(1);
         self.scroll = usize::MAX;
     }
@@ -432,7 +433,7 @@ impl Wizard {
     /// Advance to the next step, skipping ones with nothing to show. Skipping
     /// the credential screen is announced rather than silent: it looks exactly
     /// like a bug when a screen the breadcrumb promises never appears.
-    pub fn next_step(&mut self) {
+    pub(crate) fn next_step(&mut self) {
         let mut index = self.step.index();
         while index + 1 < Step::ALL.len() {
             index += 1;
@@ -451,7 +452,7 @@ impl Wizard {
     }
 
     /// Go back a step, skipping empty ones. No-op on the first.
-    pub fn prev_step(&mut self) {
+    pub(crate) fn prev_step(&mut self) {
         let mut index = self.step.index();
         while index > 0 {
             index -= 1;
@@ -481,7 +482,7 @@ impl Wizard {
     }
 
     /// Switch to `step`, resetting per-step state.
-    pub fn enter(&mut self, step: Step) {
+    pub(crate) fn enter(&mut self, step: Step) {
         self.step = step;
         self.cursor = 0;
         self.scroll = 0;
@@ -495,7 +496,7 @@ impl Wizard {
 
     /// Within the credential screen, move to the next selected provider;
     /// returns false when there is no next one.
-    pub fn next_detail(&mut self) -> bool {
+    pub(crate) fn next_detail(&mut self) -> bool {
         if self.detail + 1 < self.selected_providers().len() {
             self.detail += 1;
             self.cursor = 0;
@@ -506,7 +507,7 @@ impl Wizard {
     }
 
     /// The reverse of [`Self::next_detail`].
-    pub fn prev_detail(&mut self) -> bool {
+    pub(crate) fn prev_detail(&mut self) -> bool {
         if self.detail > 0 {
             self.detail -= 1;
             self.cursor = 0;
@@ -523,7 +524,7 @@ impl Wizard {
     /// A provider with nothing to check is left alone rather than queued: a
     /// blank API key would fail with a message about the key rather than saying
     /// the obvious, that none was given.
-    pub fn request_verification(&mut self, index: usize) {
+    pub(crate) fn request_verification(&mut self, index: usize) {
         let Some(row) = self.providers.get_mut(index) else {
             return;
         };
@@ -566,14 +567,14 @@ impl Wizard {
     }
 
     /// Ask about every selected provider at once.
-    pub fn verify_all(&mut self) {
+    pub(crate) fn verify_all(&mut self) {
         for index in self.selected_providers() {
             self.request_verification(index);
         }
     }
 
     /// Take whatever the background verifier has answered.
-    pub fn drain_verifications(&mut self) {
+    pub(crate) fn drain_verifications(&mut self) {
         let mut landed = false;
         while let Ok(reply) = self.reply_rx.try_recv() {
             if let Some(row) = self
@@ -636,7 +637,7 @@ impl Wizard {
     }
 
     /// Every model id any provider reported, deduplicated, for the picker.
-    pub fn discovered_models(&self) -> Vec<String> {
+    pub(crate) fn discovered_models(&self) -> Vec<String> {
         let mut models: Vec<String> = self
             .providers
             .iter()
@@ -652,7 +653,7 @@ impl Wizard {
 
     /// Rebuild the Defaults screen. Called on entry, since both the provider
     /// list and the discovered models can change between visits.
-    pub fn rebuild_defaults(&mut self) {
+    pub(crate) fn rebuild_defaults(&mut self) {
         let chosen = self.current_default_provider();
         let providers: Vec<String> = self
             .selected_providers()
@@ -844,7 +845,7 @@ impl Wizard {
     /// inferences against it queue and thrash rather than going faster. Only
     /// applied while the field still holds the general default, so a number the
     /// user typed is never overwritten.
-    pub fn apply_provider_concurrency_default(&mut self) {
+    pub(crate) fn apply_provider_concurrency_default(&mut self) {
         let ollama = self.current_default_provider() == "ollama";
         let general = Config::default().limits.max_concurrent_inferences;
         let local = Some(catalog::OLLAMA_MAX_CONCURRENT_INFERENCES as u64);
@@ -867,7 +868,7 @@ impl Wizard {
     // ── Confirmations ───────────────────────────────────────────────────────
 
     /// `q`/Ctrl-C with unsaved choices: ask before discarding them.
-    pub fn open_quit_confirm(&mut self) {
+    pub(crate) fn open_quit_confirm(&mut self) {
         use ratatui::text::Line;
         self.confirm = Some(PendingConfirm {
             purpose: ConfirmPurpose::QuitDiscard,
@@ -884,7 +885,7 @@ impl Wizard {
 
     /// Saving with the Claude Code transport selected: the terms risk is
     /// confirmed once, explicitly, on a dialog with real buttons.
-    pub fn open_tos_confirm(&mut self) {
+    pub(crate) fn open_tos_confirm(&mut self) {
         use ratatui::text::Line;
         self.confirm = Some(PendingConfirm {
             purpose: ConfirmPurpose::SaveTos,
@@ -909,7 +910,7 @@ impl Wizard {
 
     /// Leaving the Providers screen with nothing selected: Leviath cannot run
     /// an agent without a provider, so this is almost always a slip.
-    pub fn open_no_providers_confirm(&mut self) {
+    pub(crate) fn open_no_providers_confirm(&mut self) {
         use ratatui::text::Line;
         self.confirm = Some(PendingConfirm {
             purpose: ConfirmPurpose::NoProviders,
@@ -927,7 +928,7 @@ impl Wizard {
     }
 
     /// Commit an edited text buffer into wherever it belongs.
-    pub fn commit_edit(&mut self) {
+    pub(crate) fn commit_edit(&mut self) {
         let Some(edit) = self.edit.take() else {
             return;
         };
@@ -968,7 +969,7 @@ impl Wizard {
     // ── Producing the plan ──────────────────────────────────────────────────
 
     /// Fold every choice into the config that will be written.
-    pub fn build_config(&self) -> Config {
+    pub(crate) fn build_config(&self) -> Config {
         let mut config = self.base.clone();
 
         for row in &self.providers {
@@ -1021,7 +1022,7 @@ impl Wizard {
     }
 
     /// The plan this wizard describes.
-    pub fn build_plan(&self) -> SetupPlan {
+    pub(crate) fn build_plan(&self) -> SetupPlan {
         SetupPlan {
             config: self.build_config(),
             agents: self
@@ -1061,7 +1062,7 @@ impl Wizard {
     }
 
     /// Lines for the review screen.
-    pub fn review_lines(&self) -> Vec<String> {
+    pub(crate) fn review_lines(&self) -> Vec<String> {
         let plan = self.build_plan();
         let changes = super::plan::changes(&self.base, &plan);
         if changes.is_empty() {
@@ -1073,7 +1074,7 @@ impl Wizard {
 
     /// MCP rows carrying a credential copied verbatim out of another tool's
     /// config, which importing would duplicate into `~/.leviath/config.toml`.
-    pub fn selected_inline_secrets(&self) -> Vec<String> {
+    pub(crate) fn selected_inline_secrets(&self) -> Vec<String> {
         self.mcp
             .iter()
             .filter(|r| r.selected && !r.candidate.inline_secrets.is_empty())
@@ -1084,7 +1085,9 @@ impl Wizard {
 
 /// Merge every scan into the flat `(source, candidate)` list the wizard takes,
 /// alongside the human-readable errors.
-pub fn candidates_from_scans(scans: Vec<import::Scan>) -> (Vec<(String, Candidate)>, Vec<String>) {
+pub(crate) fn candidates_from_scans(
+    scans: Vec<import::Scan>,
+) -> (Vec<(String, Candidate)>, Vec<String>) {
     let mut candidates = Vec::new();
     let mut errors = Vec::new();
     for scan in scans {
@@ -1100,9 +1103,9 @@ pub fn candidates_from_scans(scans: Vec<import::Scan>) -> (Vec<(String, Candidat
     (candidates, errors)
 }
 
-/// Build an [`MCPServerConfig`] list from selected rows. Exposed for tests and
-/// for any future non-terminal front-end.
-pub fn selected_servers(rows: &[McpRow]) -> Vec<MCPServerConfig> {
+/// Build an [`MCPServerConfig`] list from selected rows.
+#[cfg(test)]
+pub(crate) fn selected_servers(rows: &[McpRow]) -> Vec<MCPServerConfig> {
     rows.iter()
         .filter(|r| r.selected)
         .map(|r| {
@@ -2712,7 +2715,6 @@ pub(super) mod tests {
         let scans = vec![
             import::Scan {
                 source: import::Source {
-                    id: "a",
                     display: "Harness A",
                     path: std::path::PathBuf::from("/a"),
                     layout: import::Layout::ClaudeCode,
@@ -2722,7 +2724,6 @@ pub(super) mod tests {
             },
             import::Scan {
                 source: import::Source {
-                    id: "b",
                     display: "Harness B",
                     path: std::path::PathBuf::from("/b"),
                     layout: import::Layout::CodexToml,

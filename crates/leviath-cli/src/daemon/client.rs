@@ -14,7 +14,7 @@ use crate::commands::run::task::{read_region_value, resolve_task};
 use crate::runstate::new_run_id;
 
 /// Everything a spawn request needs from the agent's own files.
-pub struct AgentSource {
+pub(crate) struct AgentSource {
     /// The resolved `agent.leviath` path.
     pub manifest: std::path::PathBuf,
     /// The manifest's parent directory name, which the run id is minted from.
@@ -34,7 +34,7 @@ pub struct AgentSource {
 /// it is the same parser the daemon runs on the same file moments later, so a
 /// manifest that fails here would have failed there, and `parse manifest: <toml
 /// error>` before the daemon is contacted beats a spawn rejection after.
-pub fn load_agent_source(path: &str) -> anyhow::Result<AgentSource> {
+pub(crate) fn load_agent_source(path: &str) -> anyhow::Result<AgentSource> {
     let found = find_manifest(path)?;
     // Absolute, because this path is about to be handed to the daemon, which
     // has its own working directory. `lev run .` and `lev run ./demo` resolve
@@ -102,7 +102,7 @@ fn resolve_regions(
 /// Those callers always have a task in hand, so the probe is never actually
 /// consulted; passing this rather than a bare `|| false` states the reason at
 /// each call site.
-pub fn never_interactive() -> bool {
+pub(crate) fn never_interactive() -> bool {
     false
 }
 
@@ -141,7 +141,7 @@ pub struct LaunchRequest<'a> {
 /// resolve the `--<region>` flags, resolve the task, and mint a run id from the
 /// agent's directory name.
 ///
-/// `task` is what `--task` was given, if anything. Left off, [`resolve_task`]
+/// `task` is what `--task` was given, if anything. Left off, `resolve_task`
 /// opens the user's editor, which is why `stdin_is_terminal` is threaded
 /// through: the probe itself is real I/O and belongs to the binary, so callers
 /// inject it (tests pass a `fn` that always says no). None of that happens for a
@@ -318,7 +318,7 @@ fn held_checkpoint_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
 /// `spawned <id>` meant a caller had to match on prose; this is the same
 /// information in a shape that does not change when the sentence does.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SpawnedRun {
+pub(crate) struct SpawnedRun {
     /// The run id to poll with `lev ps --json` and stop with `lev cancel`.
     pub run_id: String,
     /// The manifest the run was resolved from.
@@ -332,7 +332,7 @@ pub struct SpawnedRun {
 /// Render a spawn outcome for printing: JSON when `json`, else the sentence.
 ///
 /// Split from [`send_spawn`] so both shapes are testable without a daemon.
-pub fn spawn_report(spawned: &SpawnedRun, json: bool) -> String {
+pub(crate) fn spawn_report(spawned: &SpawnedRun, json: bool) -> String {
     match json {
         // Four owned scalars with no map keys to reject, so this cannot fail.
         true => serde_json::to_string_pretty(spawned).expect("a spawn report serializes"),
@@ -344,7 +344,7 @@ pub fn spawn_report(spawned: &SpawnedRun, json: bool) -> String {
 /// `spawned <id>` sentence per line. The single-run report keeps its own
 /// object/sentence shape via [`spawn_report`], so existing `--json` callers
 /// parse exactly what they always did.
-pub fn batch_report(spawned: &[SpawnedRun], json: bool) -> String {
+pub(crate) fn batch_report(spawned: &[SpawnedRun], json: bool) -> String {
     match json {
         true => serde_json::to_string_pretty(spawned).expect("spawn reports serialize"),
         false => spawned
@@ -374,7 +374,7 @@ fn respawned_run_id(previous: &str) -> String {
 /// the new run id on success.
 ///
 /// Warnings go to stderr, so `--json` leaves stdout parseable on its own.
-pub async fn send_spawn(
+pub(crate) async fn send_spawn(
     client: &ControlClient,
     spawn_args: SpawnArgs,
     json: bool,
@@ -395,7 +395,7 @@ pub async fn send_spawn(
 /// accepts spawns as fast as they arrive. One invocation carrying the whole
 /// batch removes that bound without introducing any daemon-side cap.
 ///
-/// `count == 1` defers to [`send_spawn`], keeping today's single-run output
+/// `count == 1` defers to `send_spawn`, keeping today's single-run output
 /// shapes. A mid-batch failure stops the batch and says how many runs had
 /// already started - those runs keep running; `lev ps` lists them.
 pub async fn send_spawn_batch(

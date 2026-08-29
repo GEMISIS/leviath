@@ -9,7 +9,8 @@ use super::*;
 impl WorldHost {
     /// Subscribe to [`WorldEvent`]s. The HTTP/WS gateway uses this (via the
     /// control transport's `Subscribe`) to push updates instead of polling.
-    pub fn subscribe(&self) -> broadcast::Receiver<WorldEvent> {
+    #[cfg(test)]
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<WorldEvent> {
         self.events.subscribe()
     }
 

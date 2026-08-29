@@ -27,7 +27,7 @@
 //! the cores here are driven by unit tests against injected registries and a
 //! scripted control socket. The registry builder is a `&dyn Fn` rather than a
 //! generic for the coverage reason documented on
-//! [`crate::commands::models`]'s equivalent seam.
+//! `crate::commands::models`'s equivalent seam.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -133,7 +133,7 @@ const PROBE_EXPECTED: &str = "PONG";
 /// Whether a check proved what it set out to prove.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum CheckStatus {
+pub(crate) enum CheckStatus {
     /// The layer works.
     Ok,
     /// The layer works, in a degraded way the user should know about.
@@ -160,7 +160,7 @@ impl CheckStatus {
 
 /// One layer's verdict, with whatever detail makes it actionable.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct Check {
+pub(crate) struct Check {
     /// The layer's short name (`config`, `resolve`, `inference`, `daemon`).
     pub name: &'static str,
     /// Whether it passed.
@@ -217,7 +217,7 @@ impl Check {
 /// Pure: everything that varies between runs (timings, resolved names) is
 /// already baked into the `Check`s, so the same input always renders the same
 /// output and the tests can assert on it exactly.
-pub fn format_report(checks: &[Check]) -> String {
+pub(crate) fn format_report(checks: &[Check]) -> String {
     let name_width = checks.iter().map(|c| c.name.len()).max().unwrap_or(0);
     let status_width = checks
         .iter()
@@ -847,7 +847,7 @@ pub enum DaemonTarget<'a> {
 /// `+ Sync` on the builder so the returned future is `Send`: `lev serve`'s
 /// `GET /api/doctor` awaits these same checks inside an axum handler, which
 /// requires it. Every caller passes a plain `fn` item, which always is.
-pub async fn run_checks(
+pub(crate) async fn run_checks(
     args: &DoctorArgs,
     build_registry: &(
          dyn Fn(&Config) -> Result<ProviderRegistry, leviath_providers::ProviderError> + Sync
@@ -863,7 +863,7 @@ pub async fn run_checks(
 /// machine with no writable scratch space is a finding, not a panic, and the
 /// only way to prove that on every platform is to hand in a factory that
 /// refuses.
-pub async fn run_checks_with(
+pub(crate) async fn run_checks_with(
     args: &DoctorArgs,
     build_registry: &(
          dyn Fn(&Config) -> Result<ProviderRegistry, leviath_providers::ProviderError> + Sync

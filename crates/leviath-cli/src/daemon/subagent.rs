@@ -18,7 +18,7 @@ use crate::daemon::client::{never_interactive, resolve_spawn_args};
 /// host's [`SubAgentOp`] channel plus the spawning agent's identity and the
 /// context children inherit.
 #[derive(Clone)]
-pub struct SubAgentHandle {
+pub(crate) struct SubAgentHandle {
     /// Sender into the host's sub-agent op channel.
     pub sender: UnboundedSender<SubAgentOp>,
     /// The run id of the agent that owns this handle (the would-be parent).
@@ -51,13 +51,15 @@ pub struct SubAgentHandle {
 // The sub-agent tool-name list lives in `leviath-tools` (next to the tool
 // defs), shared with the runtime's crash-replay synthesis; re-exported here for
 // the existing dispatch-routing callers.
-pub use leviath_tools::{SUBAGENT_TOOLS, is_subagent_tool};
+#[cfg(test)]
+use leviath_tools::SUBAGENT_TOOLS;
+pub(crate) use leviath_tools::is_subagent_tool;
 
 /// How often `wait_for_agent` / `spawn_agent(wait=true)` polls the child.
 const WAIT_POLL: Duration = Duration::from_millis(500);
 
 /// Dispatch one sub-agent tool call, returning the textual result for the model.
-pub async fn handle(h: &SubAgentHandle, tc: &ToolCall) -> String {
+pub(crate) async fn handle(h: &SubAgentHandle, tc: &ToolCall) -> String {
     match tc.name.as_str() {
         "spawn_agent" => spawn(h, &tc.arguments).await,
         "check_agent" => check(h, str_arg(&tc.arguments, "agent_id")).await,

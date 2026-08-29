@@ -91,7 +91,7 @@ fn apply_modify(window: &mut ContextWindow, value: &serde_json::Value) -> Result
 ///
 /// Ordered before `sync_tool_stages` (which clears [`StageJustEntered`]) and
 /// therefore before the stage's first inference is built.
-pub fn run_stage_enter_hooks(
+pub(crate) fn run_stage_enter_hooks(
     mut agents: Query<(
         Entity,
         &StageJustEntered,
@@ -187,7 +187,7 @@ type BeforeInferenceHookQuery = (
 /// that system's per-agent body runs in parallel on the compute pool, where a
 /// panicking script would be attributed by different machinery. Sequential here
 /// costs a query pass and keeps script failures at the tick boundary.
-pub fn run_before_inference_hooks(
+pub(crate) fn run_before_inference_hooks(
     mut agents: Query<BeforeInferenceHookQuery, With<ReadyToInfer>>,
     mut commands: Commands,
 ) {
@@ -256,7 +256,7 @@ type AfterInferenceHookQuery = (
 /// a hook that could rewrite them would be a way around checks the operator
 /// configured. Steering tool calls is `on_tool_call`'s job, where the gate can
 /// see it.
-pub fn run_after_inference_hooks(
+pub(crate) fn run_after_inference_hooks(
     mut agents: Query<AfterInferenceHookQuery, With<ProcessResponse>>,
 ) {
     crate::tick_scope::clear();
@@ -382,7 +382,7 @@ type ToolCallHookQuery = (
 /// `ToolSensitivities` - it cannot mark its own calls approved. Its query says
 /// so, and a test asserts the gate state is untouched across a hook that
 /// rewrites everything.
-pub fn run_tool_call_hooks(mut agents: Query<ToolCallHookQuery, With<ReadyForTools>>) {
+pub(crate) fn run_tool_call_hooks(mut agents: Query<ToolCallHookQuery, With<ReadyForTools>>) {
     crate::tick_scope::clear();
     for (entity, cursor, bp, scripts, mut result, mut state) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
@@ -442,7 +442,7 @@ pub fn run_tool_call_hooks(mut agents: Query<ToolCallHookQuery, With<ReadyForToo
 /// agent is unloaded - so without this the hook would fire on each of them. The
 /// marker turns a state into a one-shot.
 #[derive(Component, Debug, Clone, Copy)]
-pub struct TerminalHookFired;
+pub(crate) struct TerminalHookFired;
 
 /// What `run_terminal_hooks` selects.
 ///
@@ -468,7 +468,7 @@ type TerminalHookQuery = (
 /// completion, the message for an error. `cancel` on a completion is a
 /// meaningful veto - the answer was not acceptable - and turns the run into an
 /// error carrying the reason.
-pub fn run_terminal_hooks(
+pub(crate) fn run_terminal_hooks(
     mut agents: Query<TerminalHookQuery, Without<TerminalHookFired>>,
     mut commands: Commands,
 ) {
@@ -584,7 +584,7 @@ type StageExitHookQuery = (
 /// The window is still the finishing stage's, so `modify` writes there. A
 /// `cancel` errors the run rather than blocking the transition: a stage that
 /// refuses to be left has nowhere to go, and wedging is worse than stopping.
-pub fn run_stage_exit_hooks(mut agents: Query<StageExitHookQuery, With<ResolveTransition>>) {
+pub(crate) fn run_stage_exit_hooks(mut agents: Query<StageExitHookQuery, With<ResolveTransition>>) {
     crate::tick_scope::clear();
     for (entity, cursor, bp, scripts, mut window, mut state) in agents.iter_mut() {
         crate::tick_scope::enter(entity);

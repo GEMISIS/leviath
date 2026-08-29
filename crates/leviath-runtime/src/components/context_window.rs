@@ -29,7 +29,7 @@ pub struct EvictionResult {
 /// parameters like temperature and max output tokens. When absent, defaults
 /// are used (temperature 0.7, max output 4096).
 #[derive(Component, Debug, Clone, Default)]
-pub struct InferenceConfig {
+pub(crate) struct InferenceConfig {
     /// Temperature override. If None, uses 0.7 (or 0.0 if model doesn't support it).
     pub temperature: Option<f32>,
     /// The stage's output cap (`parameters.max_output_tokens`), resolved
@@ -64,7 +64,7 @@ pub struct InferenceConfig {
 /// When present on an entity, tool results are routed to the specified region(s)
 /// instead of the default "conversation" region.
 #[derive(Component, Debug, Clone)]
-pub struct ToolResultRoutingComponent {
+pub(crate) struct ToolResultRoutingComponent {
     /// The routing configuration.
     pub routing: leviath_core::ToolResultRouting,
 }
@@ -136,7 +136,7 @@ pub struct ContextWindow {
     /// later stages still need the data. Omission now means "not assembled for
     /// this stage" and nothing else.
     ///
-    /// Reset on every stage entry by [`crate::context_setup::apply_layout`], so
+    /// Reset on every stage entry by `crate::context_setup::apply_layout`, so
     /// it describes the stage in front of it rather than accumulating.
     pub hidden: std::collections::HashSet<String>,
 }
@@ -279,7 +279,7 @@ impl ContextWindow {
     /// `on_write` hook and still gets `on_overflow` a chance to make room.
     /// Writing keys through a shortcut instead is how they came to be honoured
     /// on one region kind and dropped on the rest.
-    pub fn add_to_region_keyed(
+    pub(crate) fn add_to_region_keyed(
         &mut self,
         region_name: &str,
         key: Option<&str>,
@@ -301,7 +301,12 @@ impl ContextWindow {
     /// Returns `false` (no-op) if the region does not exist. Used to keep an
     /// authoritative document region (e.g. the plan) holding only its current
     /// version, so revisions build on it instead of accumulating stale copies.
-    pub fn replace_region(&mut self, region_name: &str, content: String, tokens: usize) -> bool {
+    pub(crate) fn replace_region(
+        &mut self,
+        region_name: &str,
+        content: String,
+        tokens: usize,
+    ) -> bool {
         // The replacement passes through on_write like any incoming entry - a
         // custom region's script sees (and may transform or refuse) it.
         let Some((content, tokens)) =
@@ -325,7 +330,7 @@ impl ContextWindow {
     /// Like [`add_to_region`](Self::add_to_region) but the entry carries an
     /// `EntryKind` so message roles are determined by type, not text-prefix
     /// parsing.
-    pub fn add_typed_entry(
+    pub(crate) fn add_typed_entry(
         &mut self,
         region_name: &str,
         kind: leviath_core::EntryKind,
@@ -376,12 +381,13 @@ impl ContextWindow {
     }
 
     /// Calculate current token usage across all regions.
-    pub fn calculate_tokens(&self) -> usize {
+    pub(crate) fn calculate_tokens(&self) -> usize {
         self.regions.iter().map(|r| r.current_tokens).sum()
     }
 
     /// Check if the context window needs eviction.
-    pub fn needs_eviction(&self, threshold: f32) -> bool {
+    #[cfg(test)]
+    pub(crate) fn needs_eviction(&self, threshold: f32) -> bool {
         let usage_ratio = self.current_tokens as f32 / self.max_tokens as f32;
         usage_ratio >= threshold
     }
@@ -889,7 +895,7 @@ impl ContextWindow {
     /// and [`add_tainted_to_region`](Self::add_tainted_to_region): the entry keeps
     /// its `EntryKind` (so turn-group eviction stays intact) while contributing
     /// the given taint level (so the taint gate sees sensitive tool output).
-    pub fn add_typed_tainted_to_region(
+    pub(crate) fn add_typed_tainted_to_region(
         &mut self,
         region_name: &str,
         kind: leviath_core::EntryKind,
@@ -922,7 +928,7 @@ impl ContextWindow {
     }
 
     /// Get a summary of taint levels across all regions (for dashboard/audit).
-    pub fn taint_summary(&self) -> Vec<(String, leviath_core::TaintLevel)> {
+    pub(crate) fn taint_summary(&self) -> Vec<(String, leviath_core::TaintLevel)> {
         self.regions
             .iter()
             .filter_map(|r| r.taint_level().map(|t| (r.name.clone(), t)))

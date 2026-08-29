@@ -5,7 +5,7 @@
 use super::*;
 
 /// A blueprint stage resolved to a concrete provider, model, and effective tool
-/// set - the per-stage input to [`spawn_agent`]. The caller (CLI / daemon) owns
+/// set - the per-stage input to `spawn_agent`. The caller (CLI / daemon) owns
 /// the model-selection policy (overrides, availability, user defaults) and tool
 /// filtering; the runtime just turns the result into agent data.
 #[derive(Debug)]
@@ -17,7 +17,7 @@ pub struct ResolvedStage {
     /// The effective tool set for this stage (already filtered).
     pub tools: Vec<Tool>,
     /// Where to go if `provider_name` turns out to be unusable, best first.
-    /// See [`crate::pipeline::resolve_stage_candidates`].
+    /// See `crate::pipeline::resolve_stage_candidates`.
     pub fallbacks: Vec<leviath_core::blueprint::ModelEntry>,
     /// The output shape resolved for this stage: the blueprint's default, the
     /// stage's override, and the launching caller's request, combined. Resolved
@@ -156,7 +156,6 @@ pub(crate) fn stage_setup_from(
         context_layout: stage.context_layout.clone(),
         context_hide: stage.context_hide.clone(),
         system_prompt,
-        output,
     }
 }
 
@@ -173,7 +172,8 @@ pub(crate) fn stage_setup_from(
 /// `global_hints` is the caller's global config toggle for each system-prompt
 /// hint; each is resolved per stage against the blueprint's agent-level and
 /// per-stage override of the same name.
-pub fn spawn_agent(
+#[cfg(test)]
+pub(crate) fn spawn_agent(
     world: &mut World,
     agent_id: String,
     blueprint: leviath_core::Blueprint,
@@ -227,13 +227,13 @@ pub struct SeededSpawn {
     >,
 }
 
-/// Like [`spawn_agent`], but seeds the context window from a name→content map
+/// Like `spawn_agent`, but seeds the context window from a name→content map
 /// (caller-input regions filled by the CLI/ACP/API, plus blueprint-resolved
 /// seeds) rather than a single task string. `spawn_agent` is the thin wrapper
 /// that seeds only the `task` key.
 ///
 /// `global_nudge` is the caller's config-level `[nudge]` defaults, captured on
-/// the agent as a [`crate::pipeline::response::GlobalNudge`] component; each
+/// the agent as a `crate::pipeline::response::GlobalNudge` component; each
 /// field is resolved per stage against the blueprint's agent-level and
 /// per-stage nudge settings when an empty response is handled.
 pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entity, String> {
@@ -488,7 +488,6 @@ mod stage_instructions_fit_tests {
             context_layout: None,
             context_hide: Vec::new(),
             system_prompt: Some(prompt),
-            output: None,
         };
         crate::pipeline::transition::apply_stage_context(&setup, &mut window)
             .expect("the prompt fits the region declared for it");
@@ -558,7 +557,6 @@ mod stage_instructions_fit_tests {
             context_layout: None,
             context_hide: Vec::new(),
             system_prompt: Some(prompt),
-            output: None,
         };
         crate::pipeline::transition::apply_stage_context(&setup, &mut window)
             .expect("the prompt no longer has to fit the caller's task region");
@@ -645,7 +643,6 @@ mod stage_instructions_fit_tests {
             context_layout: None,
             context_hide: Vec::new(),
             system_prompt: Some(prompt),
-            output: None,
         };
         let err = crate::pipeline::transition::apply_stage_context(&setup, &mut window)
             .expect_err("a prompt larger than the window cannot be housed");
@@ -725,7 +722,6 @@ mod stage_instructions_fit_tests {
             context_layout: Some(scoped),
             context_hide: Vec::new(),
             system_prompt: Some(prompt),
-            output: None,
         };
         crate::pipeline::transition::apply_stage_context(&setup, &mut window)
             .expect("the prompt fits the region declared for it");

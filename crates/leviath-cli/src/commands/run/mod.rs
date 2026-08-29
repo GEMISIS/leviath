@@ -6,19 +6,19 @@
 //! module keeps the manifest/session/tool-source helpers still shared across the
 //! CLI, and the `RunArgs` the binary wires into that path.
 
-pub mod manifest;
-pub mod session;
-pub mod task;
+pub(crate) mod manifest;
+pub(crate) mod session;
+pub(crate) mod task;
 
 use std::collections::HashMap;
 
 use clap::Args;
 
 // Re-export the provider-registry builders used by the daemon setup.
-pub use session::{
-    ProviderCreds, build_provider_registry, build_provider_registry_from_config,
-    build_provider_registry_from_config_probing, build_provider_registry_from_config_with,
-    provider_creds_from_config,
+#[cfg(test)]
+pub(crate) use session::build_provider_registry_from_config_probing;
+pub(crate) use session::{
+    build_provider_registry_from_config, build_provider_registry_from_config_with,
 };
 
 /// Arguments for `lev run`.

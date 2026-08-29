@@ -41,7 +41,7 @@ struct PendingEntry {
 
 /// A process-wide registry of open interactions, keyed by request id. Cheap to
 /// clone (shared `Arc`). Also a bevy [`Resource`] so the tick loop's
-/// [`reflect_interaction_status`](crate::pipeline::reflect_interaction_status)
+/// `reflect_interaction_status`
 /// system can mirror open requests into agent status.
 #[derive(Clone, Default, Resource)]
 pub struct InteractionHub {
@@ -72,7 +72,7 @@ impl InteractionHub {
 
     /// Attach the tick-loop wake handle so registry changes wake the driver.
     /// Idempotent: a second call is ignored (the handle is set once at startup).
-    pub fn attach_wake(&self, wake: Arc<Notify>) {
+    pub(crate) fn attach_wake(&self, wake: Arc<Notify>) {
         let _ = self.wake.set(wake);
     }
 
@@ -202,7 +202,7 @@ impl InteractionHub {
 
     /// Cancel an open request (its `submit` returns the neutral response).
     /// Returns `false` if no such request is open.
-    pub fn cancel(&self, request_id: &str) -> bool {
+    pub(crate) fn cancel(&self, request_id: &str) -> bool {
         // Dropping the entry drops its responder, waking `submit` with an error.
         let removed = leviath_core::sync::lock(&self.pending)
             .remove(request_id)
@@ -221,7 +221,7 @@ impl InteractionHub {
     /// cancelling a run left its `ask` future blocked forever, and the orphaned
     /// request kept being surfaced by `lev respond` and the dashboard for a run
     /// that no longer exists.
-    pub fn cancel_for_agent(&self, agent_id: &str) -> usize {
+    pub(crate) fn cancel_for_agent(&self, agent_id: &str) -> usize {
         // Dropping each entry drops its responder, waking `submit` with an error.
         let mut pending = leviath_core::sync::lock(&self.pending);
         let before = pending.len();
@@ -269,7 +269,7 @@ mod tests;
 /// same three things: the hub that owns the conversation, the channel the
 /// resolution is reported on, and the driver to wake once it is. Only the
 /// outcome type differs, so this is generic over it rather than written twice.
-pub struct PromptLane<T> {
+pub(crate) struct PromptLane<T> {
     /// The hub that owns the conversation with the user.
     pub hub: InteractionHub,
     /// The channel the resolution is reported on.

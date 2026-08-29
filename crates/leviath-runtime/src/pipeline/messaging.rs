@@ -6,14 +6,14 @@ use super::*;
 /// control API) send `AgentMessage`s here; the delivery system routes and
 /// delivers them.
 #[derive(Resource)]
-pub struct MessageIntake(pub UnboundedReceiver<AgentMessage>);
+pub(crate) struct MessageIntake(pub UnboundedReceiver<AgentMessage>);
 
 /// Message-delivery system: route inbound messages to their target agents'
 /// inboxes (by agent id), then deliver each inbox into the agent's context
 /// window - but only for agents whose current stage accepts messages; otherwise
 /// the messages wait in the inbox for a stage that does. Ported from
 /// `AgentEngine::process_messages` / `deliver_inbox_messages`.
-pub fn deliver_messages(
+pub(crate) fn deliver_messages(
     mut intake: ResMut<MessageIntake>,
     mut agents: Query<(Entity, &AgentState, &mut MessageInbox, &mut ContextWindow)>,
 ) {

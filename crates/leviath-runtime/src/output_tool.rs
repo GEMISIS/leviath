@@ -3,7 +3,7 @@
 //! Applied inline by the tool-dispatch pipeline system rather than on the async
 //! tool lane, for the same reason the `context_*` tools are: it writes to the
 //! live [`ContextWindow`] and to an ECS component, neither of which the lane can
-//! reach. [`handle_output_tool`] is the pure core that system calls.
+//! reach. `handle_output_tool` is the pure core that system calls.
 //!
 //! # What this does not do
 //!
@@ -73,7 +73,7 @@ fn routing_token<'a>(content: &str, stage_names: &'a [String]) -> Option<&'a str
 }
 
 /// Whether a tool name is the final-output tool this module handles.
-pub fn is_output_tool(name: &str) -> bool {
+pub(crate) fn is_output_tool(name: &str) -> bool {
     name == leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
 }
 
@@ -85,7 +85,7 @@ pub fn is_output_tool(name: &str) -> bool {
 /// going to notice. Adding the stage-name list as a seventh positional argument
 /// is what pushed this over the workspace's argument-count lint, which does not
 /// permit a suppression.
-pub struct OutputContext<'a> {
+pub(crate) struct OutputContext<'a> {
     /// The shape this stage asked for: format, schema, validator.
     pub spec: Option<&'a OutputSpec>,
     /// The agent's own Rhai validators, by script name.
@@ -108,7 +108,7 @@ pub struct OutputContext<'a> {
 /// `ctx.spec` is the shape resolved for this stage (agent, stage, and caller
 /// combined). `None` means no level asked for a particular shape, which is not
 /// an error - the stage still wanted an answer, just not a specific form.
-pub fn handle_output_tool(
+pub(crate) fn handle_output_tool(
     args: &serde_json::Value,
     ctx: &OutputContext<'_>,
     now: i64,

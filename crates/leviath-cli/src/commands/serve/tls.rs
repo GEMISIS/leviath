@@ -30,7 +30,7 @@ use anyhow::{Context, Result};
 /// makes "one flag without the other" unrepresentable rather than a check
 /// somebody has to remember.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TlsPaths {
+pub(crate) struct TlsPaths {
     /// PEM certificate chain, leaf first.
     pub cert: PathBuf,
     /// PEM private key for the leaf.
@@ -43,7 +43,7 @@ pub struct TlsPaths {
 /// HTTP. Falling back would start a server on the scheme the user did not ask
 /// for, and they would find out from a mixed-content error in a browser on
 /// another machine - which is the failure this whole feature exists to end.
-pub fn resolve(cert: Option<PathBuf>, key: Option<PathBuf>) -> Result<Option<TlsPaths>> {
+pub(crate) fn resolve(cert: Option<PathBuf>, key: Option<PathBuf>) -> Result<Option<TlsPaths>> {
     match (cert, key) {
         (Some(cert), Some(key)) => Ok(Some(TlsPaths { cert, key })),
         (None, None) => Ok(None),
@@ -61,7 +61,7 @@ pub fn resolve(cert: Option<PathBuf>, key: Option<PathBuf>) -> Result<Option<Tls
 /// Used for the startup banner, which matters more than it looks: the line it
 /// prints is the URL a user copies into the console, and a banner saying
 /// `http://` for an HTTPS server sends them to an endpoint that cannot work.
-pub fn scheme(tls: Option<&TlsPaths>) -> &'static str {
+pub(crate) fn scheme(tls: Option<&TlsPaths>) -> &'static str {
     match tls {
         Some(_) => "https",
         None => "http",
@@ -77,7 +77,7 @@ pub fn scheme(tls: Option<&TlsPaths>) -> &'static str {
 ///
 /// The error names the path, because "invalid certificate" without one is
 /// unactionable when two files were supplied.
-pub async fn load(paths: &TlsPaths) -> Result<axum_server::tls_rustls::RustlsConfig> {
+pub(crate) async fn load(paths: &TlsPaths) -> Result<axum_server::tls_rustls::RustlsConfig> {
     axum_server::tls_rustls::RustlsConfig::from_pem_file(&paths.cert, &paths.key)
         .await
         .with_context(|| {

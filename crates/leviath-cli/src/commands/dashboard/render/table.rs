@@ -591,7 +591,7 @@ impl Dashboard {
         };
         if matches!(
             status,
-            AgentDisplayStatus::Active | AgentDisplayStatus::Idle | AgentDisplayStatus::Stale
+            AgentDisplayStatus::Active | AgentDisplayStatus::Stale
         ) {
             spans.push(Span::styled(
                 "[p]",
@@ -721,14 +721,12 @@ mod tests {
             title: Some("My Test".to_string()),
             model: Some("claude-sonnet-4-20250514".to_string()),
             parent_id: None,
-            depth: 0,
             started_at: chrono::Utc::now().timestamp() - 60,
             last_progress_at: None,
             runtime_secs: 0,
             clock_now: 0,
             graph: None,
             accepts_messages: true,
-            taint_summary: vec![],
         }
     }
 

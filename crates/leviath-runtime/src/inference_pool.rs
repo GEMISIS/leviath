@@ -147,7 +147,7 @@ pub struct InferencePools {
 
 impl InferencePools {
     /// Build the pools from a configuration.
-    pub fn new(config: InferencePoolConfig) -> Self {
+    pub(crate) fn new(config: InferencePoolConfig) -> Self {
         Self {
             config,
             semaphores: Mutex::new(HashMap::new()),
@@ -170,7 +170,7 @@ impl InferencePools {
     /// site is the point: the obligation can't be forgotten by a new call site,
     /// and it covers the paths that don't report an outcome at all - notably a
     /// cancelled job, which frees its permit and returns with nothing to send.
-    pub fn with_wake(mut self, wake: Arc<Notify>) -> Self {
+    pub(crate) fn with_wake(mut self, wake: Arc<Notify>) -> Self {
         self.wake = Some(wake);
         self
     }
@@ -183,7 +183,8 @@ impl InferencePools {
     /// The provider's slot is taken first and the model's second, here and in
     /// [`try_acquire`](Self::try_acquire), so two callers can never each hold
     /// half of what the other is waiting for.
-    pub async fn acquire(&self, provider: &str, model: &str) -> InferencePermit {
+    #[cfg(test)]
+    pub(crate) async fn acquire(&self, provider: &str, model: &str) -> InferencePermit {
         // The semaphores are never closed (we never call `.close()`), so
         // `acquire_owned` only ever returns `Ok`; `expect_permit` documents and
         // enforces that invariant.
@@ -202,7 +203,7 @@ impl InferencePools {
     /// This is what the synchronous ECS inference-dispatch system calls: a
     /// system can't `.await`, so instead of blocking on a full pool it leaves
     /// the agent `ReadyToInfer` and retries on a later tick.
-    pub fn try_acquire(&self, provider: &str, model: &str) -> Option<InferencePermit> {
+    pub(crate) fn try_acquire(&self, provider: &str, model: &str) -> Option<InferencePermit> {
         // `try_acquire_owned` errors only on "no permits" (pool full) or
         // "closed" (never, since we never close) - both mean "no slot now".
         let provider_permit = match self.provider_semaphore_for(provider) {
@@ -247,7 +248,7 @@ impl InferencePools {
     ///
     /// This is what makes "the pool is full and has been for hours" observable
     /// rather than inferred.
-    pub fn occupancy(&self) -> Vec<PoolOccupancy> {
+    pub(crate) fn occupancy(&self) -> Vec<PoolOccupancy> {
         let map = leviath_core::sync::lock(&self.semaphores);
         let mut out: Vec<PoolOccupancy> = map
             .iter()
@@ -275,7 +276,7 @@ impl InferencePools {
     /// parked on a full provider pool sees every model pool with room in it,
     /// and "waiting on nothing" is the one shape this reporting exists to
     /// prevent.
-    pub fn provider_occupancy(&self) -> Vec<ProviderPoolOccupancy> {
+    pub(crate) fn provider_occupancy(&self) -> Vec<ProviderPoolOccupancy> {
         let map = leviath_core::sync::lock(&self.provider_semaphores);
         let mut out: Vec<ProviderPoolOccupancy> = map
             .iter()
@@ -329,7 +330,7 @@ pub struct PoolOccupancy {
 impl PoolOccupancy {
     /// Whether every slot in this pool is taken. An unbounded pool never is.
     #[must_use]
-    pub fn is_full(&self) -> bool {
+    pub(crate) fn is_full(&self) -> bool {
         self.cap.is_some_and(|cap| self.in_use >= cap)
     }
 }
@@ -358,7 +359,7 @@ pub struct ProviderPoolOccupancy {
 impl ProviderPoolOccupancy {
     /// Whether every slot in this pool is taken.
     #[must_use]
-    pub fn is_full(&self) -> bool {
+    pub(crate) fn is_full(&self) -> bool {
         self.in_use >= self.cap
     }
 }
@@ -385,7 +386,7 @@ pub(crate) fn expect_permit(
 /// frees the slot for the next waiting agent **and wakes the tick loop**, so the
 /// agents parked on a full pool are re-driven and can take it.
 #[derive(Debug)]
-pub struct InferencePermit {
+pub(crate) struct InferencePermit {
     /// `Option` purely so `Drop` can hand the slot back *before* it wakes the
     /// loop; a field would otherwise be dropped after the `Drop` body, and the
     /// woken tick could re-check the pool while this slot was still held.

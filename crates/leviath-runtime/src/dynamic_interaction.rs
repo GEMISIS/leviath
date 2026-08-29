@@ -22,7 +22,8 @@ use leviath_core::interaction::{response_approved, response_as_choice, response_
 
 /// Extract `(tool_name, taint, clearance)` from a blocked gate decision, or
 /// `None` if the decision isn't a block.
-pub fn gate_block_info(
+#[cfg(test)]
+pub(crate) fn gate_block_info(
     decision: &leviath_core::taint::GateDecision,
 ) -> Option<(String, leviath_core::TaintLevel, leviath_core::TaintLevel)> {
     match decision {
@@ -37,7 +38,8 @@ pub fn gate_block_info(
 }
 
 /// Build the approval-prompt arguments explaining why an outbound call was gated.
-pub fn gate_prompt_args(
+#[cfg(test)]
+pub(crate) fn gate_prompt_args(
     tool_name: &str,
     taint: leviath_core::TaintLevel,
     clearance: leviath_core::TaintLevel,
@@ -52,7 +54,8 @@ pub fn gate_prompt_args(
 }
 
 /// Map an approval outcome (approved, session-scope) to a gate resolution.
-pub fn map_gate_approval(approved: bool, session: bool) -> crate::taint::GateResolution {
+#[cfg(test)]
+pub(crate) fn map_gate_approval(approved: bool, session: bool) -> crate::taint::GateResolution {
     use crate::taint::GateResolution;
     match (approved, session) {
         (false, _) => GateResolution::Deny,
@@ -64,7 +67,8 @@ pub fn map_gate_approval(approved: bool, session: bool) -> crate::taint::GateRes
 /// Resolve a foreground taint-gate block by asking via `ask` (real stdin in
 /// production, a mock in tests) and mapping the response. Kept free of the
 /// blocking stdin call itself so the request-building + mapping are testable.
-pub fn resolve_gate_with_asker(
+#[cfg(test)]
+pub(crate) fn resolve_gate_with_asker(
     decision: &leviath_core::taint::GateDecision,
     stage_name: &str,
     ask: impl Fn(&InteractionRequest) -> InteractionResponse,
@@ -130,7 +134,7 @@ pub const UNATTENDED_NO_ANSWER: &str =
 /// left to decide. An edit submits the document unchanged, and a document put up
 /// for review is acknowledged without comment (a review is a `FreeText` request
 /// carrying a `body`; a question is one without).
-pub fn unattended_answer(req: &InteractionRequest) -> InteractionResponse {
+pub(crate) fn unattended_answer(req: &InteractionRequest) -> InteractionResponse {
     use leviath_core::interaction::InteractionKind;
     match req.kind {
         InteractionKind::Confirm | InteractionKind::ToolApproval => {
@@ -147,7 +151,7 @@ pub fn unattended_answer(req: &InteractionRequest) -> InteractionResponse {
 }
 
 /// An [`InteractionBackend`] for unattended runs: answers every request from
-/// [`unattended_answer`] instead of opening a prompt on the hub.
+/// `unattended_answer` instead of opening a prompt on the hub.
 pub struct UnattendedInteraction;
 
 #[async_trait]

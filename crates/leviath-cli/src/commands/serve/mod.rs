@@ -34,9 +34,10 @@ mod websocket;
 mod event_seam_tests;
 
 pub(crate) use config::list_model_ids;
-pub use events::ServerEvent;
+pub(crate) use events::ServerEvent;
+pub(crate) use types::AppState;
+pub use types::ServeArgs;
 use types::ServeLimits;
-pub use types::{AppState, ServeArgs};
 
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -12,7 +12,7 @@ use super::*;
 /// still running - the parent is held `Waiting` (`WaitingForChildren`) and
 /// resumes (re-inserting `ResolveTransition`, back to `Active`) once every child
 /// is terminal.
-pub fn gate_requires_children(world: &mut World) {
+pub(crate) fn gate_requires_children(world: &mut World) {
     crate::tick_scope::clear();
     use crate::components::SubAgentChildren;
 
@@ -92,7 +92,7 @@ pub(crate) const DEFAULT_REQUIRED_REENTRY_CAP: usize = 3;
 /// Counts how many times the current stage has been re-run to satisfy required
 /// context regions. Absent ⇒ 0; reset when a new stage is entered.
 #[derive(Component, Debug, Clone, Copy)]
-pub struct RequiredReentries(pub usize);
+pub(crate) struct RequiredReentries(pub usize);
 
 /// Required regions (from the stage's effective layout) still empty at stage end,
 /// as `(name, optional custom message)`. Empty when the stage has no
@@ -177,7 +177,7 @@ type ContextRegionQuery = (
 /// the stage's `max_revisits` (or a default cap), after which
 /// it proceeds with a warning. Skipped when the stage ended on an error / max-iter
 /// outcome (those transitions take precedence). Ported from the imperative gate.
-pub fn require_context_regions(
+pub(crate) fn require_context_regions(
     mut agents: Query<ContextRegionQuery, With<ResolveTransition>>,
     mut commands: Commands,
 ) {
@@ -252,7 +252,7 @@ pub fn require_context_regions(
 /// Counts how many times the current stage has been re-run for a final output
 /// it was required to produce. Absent ⇒ 0; reset when a new stage is entered.
 #[derive(Component, Debug, Clone, Copy)]
-pub struct OutputReentries(pub usize);
+pub(crate) struct OutputReentries(pub usize);
 
 /// The nudge a stage gets when it finishes without the output it owes.
 ///
@@ -296,7 +296,7 @@ type FinalOutputQuery = (
 /// output from anywhere. A blueprint whose worker stage submits and whose later
 /// summary stage also must would otherwise let the summary coast on the
 /// worker's answer.
-pub fn require_final_output(
+pub(crate) fn require_final_output(
     mut agents: Query<FinalOutputQuery, With<ResolveTransition>>,
     mut commands: Commands,
 ) {
@@ -369,7 +369,7 @@ const MISSING_FAN_OUT_NUDGE: &str = "This stage has not started its workers yet.
 
 /// Times this stage has been asked again to fan out.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct FanOutReentries(pub usize);
+pub(crate) struct FanOutReentries(pub usize);
 
 /// What [`require_fan_out`] selects.
 ///
@@ -400,7 +400,7 @@ type RequireFanOutQuery = (
 /// through with `splits_degraded` recorded, which is the same shape
 /// [`require_final_output`] uses for a missing answer: never strand a run over a
 /// thing the model would not do, and never let it pass for success either.
-pub fn require_fan_out(
+pub(crate) fn require_fan_out(
     mut agents: Query<RequireFanOutQuery, With<ResolveTransition>>,
     mut commands: Commands,
 ) {

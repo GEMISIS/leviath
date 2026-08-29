@@ -25,7 +25,7 @@ use crate::pipeline::{AgentBlueprint, CompactionSettings, InferenceStage, Provid
 /// Seed `child`'s context from `parent`'s per a declared blueprint transform.
 /// No-op unless both carry an [`AgentBlueprint`] with different names and a
 /// matching [`ContextTransform`](leviath_core::blueprint::ContextTransform) exists.
-pub fn apply_context_transforms(
+pub(crate) fn apply_context_transforms(
     world: &mut World,
     parent: crate::world::AgentId,
     child: crate::world::AgentId,
@@ -86,17 +86,17 @@ pub fn apply_context_transforms(
 /// summarization as `(child_region, raw_content)` pairs. The raw content is
 /// already in each region (a fallback); the summary replaces it once ready.
 #[derive(Component, Debug, Clone)]
-pub struct PendingContentSummary(pub Vec<(String, String)>);
+pub(crate) struct PendingContentSummary(pub Vec<(String, String)>);
 
 /// A child's content-summary job is in flight on the summary lane.
 #[derive(Component, Debug, Clone, Copy)]
-pub struct AwaitingContentSummary;
+pub(crate) struct AwaitingContentSummary;
 
 /// The receiving side of the content-summary lane, drained by
 /// [`collect_content_summary`]. (The sending side is
 /// `InferenceStage::content_summary_outcomes`.)
 #[derive(Resource)]
-pub struct ContentSummaryResults(pub UnboundedReceiver<CompactionOutcome>);
+pub(crate) struct ContentSummaryResults(pub UnboundedReceiver<CompactionOutcome>);
 
 /// Dispatch: for each child with queued [`PendingContentSummary`] regions, build
 /// one summarize request per region and run it on the summary lane. Mirrors
@@ -104,7 +104,7 @@ pub struct ContentSummaryResults(pub UnboundedReceiver<CompactionOutcome>);
 /// same worker + per-model pool. A child with no [`CompactionSettings`] or no
 /// registered provider can't summarize, so it keeps its raw content; a full pool
 /// just retries next tick.
-pub fn dispatch_content_summary(
+pub(crate) fn dispatch_content_summary(
     agents: Query<(
         Entity,
         &AgentState,
@@ -168,7 +168,7 @@ pub fn dispatch_content_summary(
 /// Collect: apply each completed content summary, replacing the child region's
 /// raw content with the summary. A provider error leaves the raw content in
 /// place (best-effort, like compaction).
-pub fn collect_content_summary(
+pub(crate) fn collect_content_summary(
     mut results: ResMut<ContentSummaryResults>,
     mut agents: Query<&mut ContextWindow, With<AwaitingContentSummary>>,
     mut commands: Commands,

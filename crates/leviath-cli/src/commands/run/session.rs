@@ -12,7 +12,7 @@ use leviath_runtime::ProviderRegistry;
 // existing call sites keep resolving. The `Config`-based translators
 // (`provider_creds_from_config` / `build_provider_registry_from_config`) stay
 // below because they need the CLI's `Config`.
-pub use leviath_runtime::provider_creds::{ProviderCreds, build_provider_registry};
+pub(crate) use leviath_runtime::provider_creds::ProviderCreds;
 
 /// The `options` spelling of a cache TTL, matching what the config accepts.
 ///
@@ -29,7 +29,7 @@ fn cache_ttl_key(ttl: leviath_providers::anthropic::CacheTtl) -> &'static str {
 /// present (it needs no key); the API-key providers are included only when their
 /// key is configured, and `claude-code` only when explicitly enabled. This is the
 /// sole point that reads provider settings out of `Config`.
-pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
+pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
     let caps = &config.model_capabilities;
     let timeout = config.request_timeout_secs;
     let mut creds = Vec::new();
@@ -143,7 +143,7 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
 /// a [`ScriptProviderLayer`](leviath_runtime::script_provider::ScriptProviderLayer)
 /// is then attached so Rhai *script providers* resolve lazily and
 /// hot-reload from `~/.leviath/providers/`.
-pub fn build_provider_registry_from_config(
+pub(crate) fn build_provider_registry_from_config(
     config: &Config,
 ) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
     build_provider_registry_from_config_with(
@@ -157,7 +157,7 @@ pub fn build_provider_registry_from_config(
 /// The seam that makes "this machine cannot build an HTTPS client" reachable
 /// from a test: reqwest will not fail to build one in any environment a test can
 /// arrange, so the failure has to be handed in.
-pub fn build_provider_registry_from_config_with(
+pub(crate) fn build_provider_registry_from_config_with(
     config: &Config,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
@@ -175,7 +175,7 @@ pub fn build_provider_registry_from_config_with(
 /// key, so a test that wants it registered has to say so: the address in a
 /// test config resolves nowhere, and whether the machine running the suite
 /// happens to have Ollama up is not something a test should depend on.
-pub fn build_provider_registry_from_config_probing(
+pub(crate) fn build_provider_registry_from_config_probing(
     config: &Config,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
     reachable: &dyn Fn(&str) -> bool,
@@ -199,7 +199,7 @@ pub fn build_provider_registry_from_config_probing(
 /// `[model_providers.<name>]` reaches the next provider load with no restart,
 /// matching the `.rhai` file's own hot-reload (issue #533). Short-lived
 /// processes keep the snapshot: there is nothing to reload inside one command.
-pub fn build_provider_registry_live(
+pub(crate) fn build_provider_registry_live(
     config: &Config,
     reloader: std::sync::Arc<crate::daemon::config_reload::ConfigReloader>,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
@@ -262,7 +262,7 @@ fn attach_script_layer(
 
 /// The [`ScriptProviderConfig`](leviath_runtime::script_provider::ScriptProviderConfig)
 /// a script-provider load reads out of `config`.
-pub fn script_provider_config(
+pub(crate) fn script_provider_config(
     config: &Config,
 ) -> leviath_runtime::script_provider::ScriptProviderConfig {
     leviath_runtime::script_provider::ScriptProviderConfig {
@@ -286,7 +286,7 @@ pub fn script_provider_config(
 /// requirement rather than an optimisation: the layer's cache compares its
 /// stored config by pointer, so deriving a fresh one per call would recompile
 /// every script on every lookup.
-pub fn script_provider_config_source(
+pub(crate) fn script_provider_config_source(
     reloader: std::sync::Arc<crate::daemon::config_reload::ConfigReloader>,
 ) -> Box<
     dyn Fn() -> std::sync::Arc<leviath_runtime::script_provider::ScriptProviderConfig>

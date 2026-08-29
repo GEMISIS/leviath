@@ -350,7 +350,6 @@ pub(super) fn run_phase(status: &AgentDisplayStatus) -> RunPhase {
             RunPhase::Complete
         }
         AgentDisplayStatus::Error(_) => RunPhase::Error,
-        AgentDisplayStatus::Idle => RunPhase::Idle,
         AgentDisplayStatus::Paused => RunPhase::Paused,
         AgentDisplayStatus::Cancelled => RunPhase::Cancelled,
         AgentDisplayStatus::Stale => RunPhase::Stale,
@@ -421,14 +420,12 @@ condition = "llm_choice"
             title: None,
             model: None,
             parent_id: None,
-            depth: 0,
             started_at: 1000,
             last_progress_at: None,
             runtime_secs: 0,
             clock_now: 0,
             graph: Some(stage_graph()),
             accepts_messages: true,
-            taint_summary: vec![],
         }
     }
 
@@ -799,11 +796,11 @@ condition = "llm_choice"
 
         // A run with no history, no ledger and no stage name: nothing current,
         // no workers, no transitions.
-        let mut bare = agent("run-9", AgentDisplayStatus::Idle);
+        let mut bare = agent("run-9", AgentDisplayStatus::Paused);
         bare.stage.clear();
         let live = dash.live_overlay_for(&bare);
         assert_eq!(live.current, None);
-        assert_eq!(live.run, Some(RunPhase::Idle));
+        assert_eq!(live.run, Some(RunPhase::Paused));
         assert_eq!(live.workers, None);
         assert!(live.taken.is_empty() && live.last_transition.is_none());
         assert!(live.stages.iter().all(|s| !s.entered && s.visits == 0));
@@ -820,7 +817,6 @@ condition = "llm_choice"
             (AgentDisplayStatus::Complete, RunPhase::Complete),
             (AgentDisplayStatus::CompleteInteractive, RunPhase::Complete),
             (AgentDisplayStatus::Error("boom".into()), RunPhase::Error),
-            (AgentDisplayStatus::Idle, RunPhase::Idle),
             (AgentDisplayStatus::Paused, RunPhase::Paused),
             (AgentDisplayStatus::Cancelled, RunPhase::Cancelled),
             (AgentDisplayStatus::Stale, RunPhase::Stale),

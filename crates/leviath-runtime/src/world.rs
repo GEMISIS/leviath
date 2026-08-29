@@ -95,7 +95,7 @@ fn tick_schedule() -> Schedule {
     schedule
 }
 
-/// What one [`PipelineWorld::tick`] did.
+/// What one `PipelineWorld::tick` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TickOutcome {
     /// Every system ran to completion.
@@ -108,7 +108,7 @@ pub enum TickOutcome {
     Unattributed,
 }
 
-/// How many agents are in each status. See [`PipelineWorld::lane_snapshot`].
+/// How many agents are in each status. See `PipelineWorld::lane_snapshot`.
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentCounts {
     /// Doing work, or ready to.
@@ -135,7 +135,7 @@ impl std::fmt::Display for AgentCounts {
 
 /// What the world is holding and what it is waiting on, at one instant.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LaneSnapshot {
+pub(crate) struct LaneSnapshot {
     /// Loaded agents by status.
     pub agents: AgentCounts,
     /// Inference-pool occupancy, one entry per model actually used.
@@ -159,7 +159,7 @@ impl LaneSnapshot {
     /// Whether some lane is at capacity with work queued behind it - the shape
     /// worth raising the log level for.
     #[must_use]
-    pub fn is_under_pressure(&self) -> bool {
+    pub(crate) fn is_under_pressure(&self) -> bool {
         self.tools_saturated
             || (self.agents.active > 0
                 && (self.inference.iter().any(|p| p.is_full())
@@ -174,7 +174,7 @@ impl LaneSnapshot {
     /// exactly the shape a provider cap produces, and it is unreadable unless
     /// the provider's own number is on the line.
     #[must_use]
-    pub fn inference_summary(&self) -> String {
+    pub(crate) fn inference_summary(&self) -> String {
         let models = self.inference.iter().map(ToString::to_string);
         let providers = self
             .inference_providers
@@ -193,7 +193,7 @@ impl LaneSnapshot {
 /// Only ever compared, never interpreted. A counter rather than a random value
 /// because a mismatch is easier to read in a test failure as `1 != 2`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct WorldId(u64);
+pub(crate) struct WorldId(u64);
 
 /// The identity of the world this resource lives in.
 ///
@@ -202,7 +202,7 @@ pub struct WorldId(u64);
 /// can still tell whether an [`AgentId`] belongs to it. Without this the check
 /// would only be possible on [`PipelineWorld`], which is not what a system has.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OwnWorldId(pub WorldId);
+pub(crate) struct OwnWorldId(pub WorldId);
 
 /// An agent, together with the world that spawned it.
 ///
@@ -215,7 +215,7 @@ pub struct OwnWorldId(pub WorldId);
 ///
 /// The provenance has to travel *with* the id, which is what this is. It cannot
 /// be built outside this module: the only sources are [`PipelineWorld::spawn_agent`]
-/// and [`PipelineWorld::spawn_from_blueprint`], so an id always names an agent
+/// and `PipelineWorld::spawn_from_blueprint`, so an id always names an agent
 /// in the world that minted it.
 ///
 /// A tag component on the agent was tried first and does not work: looking the
@@ -230,7 +230,7 @@ pub struct AgentId {
 impl AgentId {
     /// Scope a raw entity to the world it came out of.
     ///
-    /// The reverse of [`Self::resolve_in`], for a system holding a query result
+    /// The reverse of `Self::resolve_in`, for a system holding a query result
     /// that needs to call something taking an [`AgentId`]. Wrapping and then
     /// resolving inside the same world always round-trips; an id built this way
     /// in one world and resolved in another does not, which is the point.
@@ -256,7 +256,7 @@ impl AgentId {
     /// A world with no [`OwnWorldId`] resource (a bare test world assembled by
     /// hand) accepts any id: it never minted one, so there is nothing to
     /// disagree with.
-    pub fn resolve_in(self, world: &World) -> Option<Entity> {
+    pub(crate) fn resolve_in(self, world: &World) -> Option<Entity> {
         match world.get_resource::<OwnWorldId>() {
             Some(own) if own.0 != self.world => None,
             _ => Some(self.entity),
@@ -273,7 +273,8 @@ impl AgentId {
     }
 
     /// Which world minted this id.
-    pub fn world(self) -> WorldId {
+    #[cfg(test)]
+    pub(crate) fn world(self) -> WorldId {
         self.world
     }
 }
@@ -634,7 +635,7 @@ impl PipelineWorld {
 
     /// Install the shared interaction hub as a world resource and attach this
     /// world's wake handle to it, so opening/answering a prompt wakes the driver
-    /// and [`reflect_interaction_status`]
+    /// and `reflect_interaction_status`
     /// mirrors the change into agent status. Call once at startup, before
     /// serving. Without this, that system is a no-op (test worlds).
     pub fn insert_interaction_hub(&mut self, hub: crate::interaction_hub::InteractionHub) {
@@ -656,7 +657,8 @@ impl PipelineWorld {
     /// Spawn an agent from a blueprint + task + per-stage resolution (see
     /// [`crate::pipeline::spawn_agent`]) and wake the driver. Returns the new
     /// entity, or an error if the first stage's system prompt doesn't fit.
-    pub fn spawn_from_blueprint(
+    #[cfg(test)]
+    pub(crate) fn spawn_from_blueprint(
         &mut self,
         agent_id: String,
         blueprint: leviath_core::Blueprint,
@@ -681,7 +683,7 @@ impl PipelineWorld {
 
     /// Deliver a message to a running agent (routed to its inbox on the next
     /// tick) and wake the driver.
-    pub fn send_message(&self, msg: AgentMessage) -> Result<(), ProviderError> {
+    pub(crate) fn send_message(&self, msg: AgentMessage) -> Result<(), ProviderError> {
         self.msg_tx
             .send(msg)
             .map_err(|e| ProviderError::Other(format!("world message channel closed: {e}")))?;
@@ -691,16 +693,16 @@ impl PipelineWorld {
 
     /// A clone of the wake handle, so external producers (e.g. a control socket)
     /// can nudge the driver after mutating the world directly.
-    pub fn wake_handle(&self) -> Arc<Notify> {
+    pub(crate) fn wake_handle(&self) -> Arc<Notify> {
         self.wake.clone()
     }
 
     /// Request the [`Self::run`] loop to stop after its current fixed point.
-    pub fn shutdown(&self) {
+    pub(crate) fn shutdown(&self) {
         self.shutdown.notify_one();
     }
 
-    /// A clone of the shutdown handle, so a supervisor can stop a [`Self::run`]
+    /// A clone of the shutdown handle, so a supervisor can stop a `Self::run`
     /// loop that has taken ownership of the world on another task.
     pub fn shutdown_handle(&self) -> Arc<Notify> {
         self.shutdown.clone()
@@ -719,7 +721,7 @@ impl PipelineWorld {
     /// Call it after the serve loop has returned (the tokio runtime must still be
     /// alive for the worker to be scheduled). Idempotent: a second call is a no-op
     /// because the persistence resource is already removed and the task taken.
-    pub async fn flush_and_stop(&mut self) {
+    pub(crate) async fn flush_and_stop(&mut self) {
         // Idempotent - the serve loop has usually already returned on this signal.
         self.shutdown.notify_one();
         // Dispatch anything that settled between the last park and now (e.g. an
@@ -749,7 +751,7 @@ impl PipelineWorld {
     ///
     /// Empty when the breaker is not installed, so an embedded world that never
     /// inserted the resource simply reports nothing wrong (issue #201).
-    pub fn open_circuits(&self) -> Vec<crate::pipeline::ProviderCircuitState> {
+    pub(crate) fn open_circuits(&self) -> Vec<crate::pipeline::ProviderCircuitState> {
         let Some(circuits) = self
             .world
             .get_resource::<crate::pipeline::ProviderCircuits>()
@@ -766,7 +768,7 @@ impl PipelineWorld {
 
     /// This is the answer to "the daemon has been quiet for hours - is anything
     /// actually running?", which issue #189 had no way to ask.
-    pub fn lane_snapshot(&self) -> LaneSnapshot {
+    pub(crate) fn lane_snapshot(&self) -> LaneSnapshot {
         let mut agents = AgentCounts::default();
         for state in self
             .world
@@ -807,14 +809,14 @@ impl PipelineWorld {
     /// The relief valve: when the lane has stopped draining, handing out more
     /// capacity lets the queued batches through without cancelling anything.
     /// Returns how many were added.
-    pub fn relieve_tool_lane(&self, extra: usize) -> usize {
+    pub(crate) fn relieve_tool_lane(&self, extra: usize) -> usize {
         self.tool_lane.relieve(extra)
     }
 
     /// Reclaim up to `upto` idle permits from the tool lane (the relief valve's
     /// give-back half). Returns how many were reclaimed; never touches a permit
     /// a running batch holds.
-    pub fn narrow_tool_lane(&self, upto: usize) -> usize {
+    pub(crate) fn narrow_tool_lane(&self, upto: usize) -> usize {
         self.tool_lane.narrow(upto)
     }
 
@@ -849,7 +851,7 @@ impl PipelineWorld {
     /// stops being driven, its run is persisted as errored, and the host reaps
     /// it. Without that, the world would re-tick the same unchanged state on
     /// every wake and panic again indefinitely.
-    pub fn tick(&mut self) -> TickOutcome {
+    pub(crate) fn tick(&mut self) -> TickOutcome {
         let Err(panicked) = run_isolated(&mut self.schedule, &mut self.world) else {
             // A clean unwind doesn't mean a clean tick: work that ran on the
             // compute pool catches its own panics, since they can't unwind back
@@ -924,7 +926,7 @@ impl PipelineWorld {
 
     /// Drive the schedule until a tick changes nothing (quiescence). Public so a
     /// host loop can interleave control operations between quiescent points.
-    pub fn run_to_fixed_point(&mut self) {
+    pub(crate) fn run_to_fixed_point(&mut self) {
         let mut prev = self.fingerprint();
         let mut failures = 0;
         loop {
@@ -976,7 +978,7 @@ impl PipelineWorld {
 
     /// Run forever: drive to quiescence, then park until an async completion or
     /// an external `send_message`/`spawn_agent` wakes the driver. Returns when
-    /// [`Self::shutdown`] is signalled.
+    /// `shutdown` is signalled.
     pub async fn run(&mut self) {
         loop {
             self.run_to_fixed_point();
@@ -1274,7 +1276,6 @@ mod tests {
             context_layout: None,
             context_hide: Vec::new(),
             system_prompt: None,
-            output: None,
         }
     }
 

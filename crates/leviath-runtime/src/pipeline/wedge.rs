@@ -74,7 +74,7 @@ use super::*;
 /// original `since` while it keeps holding, and removes it the moment the agent
 /// becomes reachable again. There is nothing to go stale.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Wedged {
+pub(crate) struct Wedged {
     /// Unix seconds when the agent was first seen unreachable.
     pub since: i64,
 }
@@ -120,7 +120,7 @@ pub const DEFAULT_WEDGE_TIMEOUT_SECS: u64 = 0;
 /// `StageCursor`, `StageProgress`, `DynamicTools`, the auto-approve markers, and
 /// `DispatchStall` itself - are deliberately absent. Their presence says nothing
 /// about whether anything is going to run.
-pub type Unreachable = (
+pub(crate) type Unreachable = (
     (
         Without<ReadyToInfer>,
         Without<AwaitingInference>,
@@ -172,7 +172,7 @@ type WedgedRunQuery = (
 /// See the module documentation for why this is safe. In short: an agent matches
 /// [`Unreachable`] only in a state the rest of the pipeline guarantees it never
 /// leaves an agent in, so anything that matches is already lost.
-pub fn fail_wedged_runs(
+pub(crate) fn fail_wedged_runs(
     mut agents: Query<WedgedRunQuery, Unreachable>,
     timeout: Option<Res<WedgeTimeout>>,
     mut commands: Commands,

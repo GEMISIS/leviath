@@ -345,7 +345,7 @@ impl WorldHost {
     }
 
     /// Install the async hook awaited before each top-level `Spawn` (see
-    /// [`SpawnPreprocessor`]).
+    /// `SpawnPreprocessor`).
     pub fn set_spawn_preprocessor(&mut self, pp: SpawnPreprocessor) {
         self.spawn_preprocessor = Some(pp);
     }
@@ -356,7 +356,7 @@ impl WorldHost {
         self.reloader = Some(reloader);
     }
 
-    /// Install the [`ForceTerminator`] used to terminate a run on disk when the
+    /// Install the `ForceTerminator` used to terminate a run on disk when the
     /// world cannot hold it. Without one, a cancel that misses in the world and
     /// can't be reloaded just misses.
     pub fn set_force_terminator(&mut self, force_terminator: ForceTerminator) {
@@ -385,7 +385,8 @@ impl WorldHost {
     }
 
     /// A clone of the interaction hub, for building per-agent backends.
-    pub fn interactions(&self) -> InteractionHub {
+    #[cfg(test)]
+    pub(crate) fn interactions(&self) -> InteractionHub {
         self.interactions.clone()
     }
 
@@ -558,14 +559,14 @@ impl WorldHost {
     /// dirty agent's final snapshot reaches disk (see
     /// [`PipelineWorld::flush_and_stop`]). Invoked automatically when [`Self::serve`]
     /// returns; also exposed directly for callers that drive the world themselves.
-    pub async fn flush_and_stop(&mut self) {
+    pub(crate) async fn flush_and_stop(&mut self) {
         self.world.flush_and_stop().await;
     }
 
     /// Run the host: drive the world to quiescence, then park until an async
     /// result wakes it, a control op arrives, or shutdown is signalled. Returns
     /// when shutdown fires or the control channel closes - and before returning,
-    /// **flushes all queued persistence to disk** ([`Self::flush_and_stop`]) so a
+    /// **flushes all queued persistence to disk** (`Self::flush_and_stop`) so a
     /// clean daemon shutdown never loses a dirty agent's final snapshot.
     pub async fn serve(&mut self, mut control_rx: UnboundedReceiver<ControlOp>) {
         let wake = self.world.wake_handle();

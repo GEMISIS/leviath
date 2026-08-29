@@ -15,27 +15,27 @@
 //!
 //! ## Shape
 //!
-//! * [`state`] - what step we're on and what's been chosen. Pure data.
-//! * [`input`] - key handling.
-//! * [`render`] - drawing.
-//! * [`plan`] - the decisions as plain data, and the only code that writes.
-//! * [`catalog`] - which providers exist and how each is configured.
+//! * `state` - what step we're on and what's been chosen. Pure data.
+//! * `input` - key handling.
+//! * `render` - drawing.
+//! * `plan` - the decisions as plain data, and the only code that writes.
+//! * `catalog` - which providers exist and how each is configured.
 //! * [`import`] - MCP servers found in other tools.
 //! * [`verify`] - proving a credential works.
 //!
 //! The terminal is a *front-end*, not the feature: everything it collects lands
-//! in a [`plan::SetupPlan`], and `--non-interactive` builds the same struct
+//! in a `plan::SetupPlan`, and `--non-interactive` builds the same struct
 //! from flags. A future mobile or web host would be a third builder with
 //! nothing downstream changing - which is why none of the platform-shaped parts
 //! (scanning a home directory, taking over a TTY) are prescribed anywhere but
 //! here.
 
-pub mod catalog;
+pub(crate) mod catalog;
 pub mod import;
-pub mod input;
-pub mod plan;
-pub mod render;
-pub mod state;
+pub(crate) mod input;
+pub(crate) mod plan;
+pub(crate) mod render;
+pub(crate) mod state;
 pub mod verify;
 
 use std::path::{Path, PathBuf};
@@ -104,7 +104,7 @@ pub struct SetupArgs {
 
 /// Reads an environment variable. Injected so a test can hand the wizard a
 /// fixed environment instead of the developer's real one.
-pub type EnvLookup = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+pub(crate) type EnvLookup = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// Everything the wizard needs from the outside world, injected so tests point
 /// it at tempdirs and a fake environment instead of the developer's real home.
@@ -308,7 +308,7 @@ pub async fn verification_loop<V: ProviderVerifier>(
 /// Generic over the backend and event source so it runs against a
 /// `TestBackend` and canned keys; the real crossterm bindings live in the
 /// binary. Returns the plan to apply, or `None` if the user quit.
-pub async fn run_wizard_loop<B: ratatui::backend::Backend>(
+pub(crate) async fn run_wizard_loop<B: ratatui::backend::Backend>(
     wizard: &mut Wizard,
     terminal: &mut Terminal<B>,
     events: &mut impl EventSource,

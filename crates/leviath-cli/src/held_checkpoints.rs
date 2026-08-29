@@ -21,7 +21,7 @@ use leviath_core::blueprint::{StageMode, UnattendedPolicy};
 
 /// One thing in a blueprint that will still stop a `--yolo` run.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Held {
+pub(crate) struct Held {
     /// The stage it belongs to.
     pub stage: String,
     /// The interaction point's name, or the tool's.
@@ -29,7 +29,7 @@ pub struct Held {
 }
 
 /// Every interaction point declaring `unattended = "ask"`, in stage order.
-pub fn held_points(blueprint: &Blueprint) -> Vec<Held> {
+pub(crate) fn held_points(blueprint: &Blueprint) -> Vec<Held> {
     blueprint
         .stages
         .iter()
@@ -53,7 +53,7 @@ pub fn held_points(blueprint: &Blueprint) -> Vec<Held> {
 ///
 /// Canonicalised, because the runtime matches on the name the model calls and a
 /// manifest may write either spelling.
-pub fn held_tools(blueprint: &Blueprint) -> Vec<Held> {
+pub(crate) fn held_tools(blueprint: &Blueprint) -> Vec<Held> {
     blueprint
         .stages
         .iter()
@@ -87,7 +87,7 @@ fn human_timeout(secs: u64) -> String {
 /// The stderr block for a `--yolo` spawn. Empty when nothing holds.
 ///
 /// Pure, so the wording is testable without a daemon or a manifest on disk.
-pub fn preflight_lines(blueprint: &Blueprint, timeout_secs: u64) -> Vec<String> {
+pub(crate) fn preflight_lines(blueprint: &Blueprint, timeout_secs: u64) -> Vec<String> {
     let points = held_points(blueprint);
     let tools = held_tools(blueprint);
     if points.is_empty() && tools.is_empty() {

@@ -10,7 +10,7 @@ use super::tables::{
 
 /// What a custom transform does with one region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Rule {
+pub(crate) enum Rule {
     /// Carried as it is.
     Carry,
     /// Summarized.
@@ -21,7 +21,7 @@ pub enum Rule {
 
 impl Rule {
     /// The `transform_config` list the rule files a region under.
-    pub fn key(self) -> &'static str {
+    pub(crate) fn key(self) -> &'static str {
         match self {
             Rule::Carry => "carry",
             Rule::Compact => "compact",
@@ -33,7 +33,8 @@ impl Rule {
     pub const ALL: [Rule; 3] = [Rule::Carry, Rule::Compact, Rule::Clear];
 
     /// What the editor calls it.
-    pub fn label(self) -> &'static str {
+    #[cfg(test)]
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Rule::Carry => "Carry",
             Rule::Compact => "Summarize",
@@ -49,7 +50,7 @@ impl ManifestDoc {
     /// Add a path from one stage to another (or to itself: a self-loop) as a
     /// hint the model routes on. Both stages must exist; a path that already
     /// exists is left as it is.
-    pub fn add_edge(&mut self, from: &str, to: &str) -> Result<(), EditError> {
+    pub(crate) fn add_edge(&mut self, from: &str, to: &str) -> Result<(), EditError> {
         self.require_stage(from)?;
         self.require_stage(to)?;
         let transitions = self.transitions_mut(from)?;
@@ -76,7 +77,7 @@ impl ManifestDoc {
     }
 
     /// Delete a path.
-    pub fn delete_edge(&mut self, from: &str, to: &str) -> Result<(), EditError> {
+    pub(crate) fn delete_edge(&mut self, from: &str, to: &str) -> Result<(), EditError> {
         let stage = self
             .stage_item_mut(from)
             .ok_or_else(|| EditError::NoSuchStage(from.to_string()))?;
@@ -100,7 +101,12 @@ impl ManifestDoc {
     /// Set when a path is taken. `Hint` writes a `hint` (keeping the text
     /// already there, or an empty one) and drops `condition`; every other
     /// kind writes `condition` and drops `hint`.
-    pub fn set_edge_kind(&mut self, from: &str, to: &str, kind: EdgeKind) -> Result<(), EditError> {
+    pub(crate) fn set_edge_kind(
+        &mut self,
+        from: &str,
+        to: &str,
+        kind: EdgeKind,
+    ) -> Result<(), EditError> {
         let edge = self.edge_table_mut(from, to)?;
         match kind.condition() {
             None => {
@@ -118,7 +124,12 @@ impl ManifestDoc {
     }
 
     /// Set a path's hint text.
-    pub fn set_edge_hint(&mut self, from: &str, to: &str, hint: &str) -> Result<(), EditError> {
+    pub(crate) fn set_edge_hint(
+        &mut self,
+        from: &str,
+        to: &str,
+        hint: &str,
+    ) -> Result<(), EditError> {
         let edge = self.edge_table_mut(from, to)?;
         set_str(edge, "hint", hint);
         Ok(())
@@ -128,7 +139,12 @@ impl ManifestDoc {
     /// the smallest gate there is only when the path has none, so a richer
     /// gate an author wrote survives; turning it off deletes whatever gate
     /// is there.
-    pub fn set_edge_gate(&mut self, from: &str, to: &str, gated: bool) -> Result<(), EditError> {
+    pub(crate) fn set_edge_gate(
+        &mut self,
+        from: &str,
+        to: &str,
+        gated: bool,
+    ) -> Result<(), EditError> {
         let edge = self.edge_table_mut(from, to)?;
         if gated {
             if !edge.contains_key("gate") {
@@ -147,7 +163,7 @@ impl ManifestDoc {
     /// non-pinned region the leaving stage sees filed under `carry`; the
     /// config is otherwise left alone, so switching away and back costs
     /// nothing.
-    pub fn set_transform(
+    pub(crate) fn set_transform(
         &mut self,
         from: &str,
         to: &str,
@@ -189,7 +205,7 @@ impl ManifestDoc {
 
     /// File a region under exactly one of carry/compact/clear on a path,
     /// creating `transform_config` when missing; emptied lists are deleted.
-    pub fn set_transform_rule(
+    pub(crate) fn set_transform_rule(
         &mut self,
         from: &str,
         to: &str,
@@ -218,7 +234,7 @@ impl ManifestDoc {
 
     /// Set the custom transform's summarizing instructions; empty deletes
     /// them (and never creates the config just to hold nothing).
-    pub fn set_compact_prompt(
+    pub(crate) fn set_compact_prompt(
         &mut self,
         from: &str,
         to: &str,

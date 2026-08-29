@@ -5,12 +5,12 @@ use super::*;
 /// The response has been applied and is ready to be examined for tool calls (or
 /// completion) by the process-response system.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProcessResponse;
+pub(crate) struct ProcessResponse;
 
 /// The receiving end of the inference-outcomes channel, as a world resource for
 /// the collect system. (The sending end lives in [`InferenceStage`].)
 #[derive(Resource)]
-pub struct InferenceResults(pub UnboundedReceiver<InferenceOutcome>);
+pub(crate) struct InferenceResults(pub UnboundedReceiver<InferenceOutcome>);
 
 /// Convert a provider response into the stored `InferenceResult` component.
 /// (Ported from `AgentEngine::apply_inference_response`.)
@@ -30,7 +30,6 @@ pub(crate) fn to_inference_result(
             })
             .collect(),
         tokens_used: response.tokens_used.total_tokens,
-        timestamp: chrono::Utc::now().timestamp(),
         cut_off_at: (response.finish_reason == leviath_providers::FinishReason::TokenLimit)
             .then_some(response.tokens_used.completion_tokens),
     }
@@ -117,7 +116,7 @@ type InferenceQuery = (
 /// to `ProcessResponse`; an error marks the agent `Error`. An outcome for an
 /// agent that is no longer `AwaitingInference` (cancelled or despawned between
 /// dispatch and now) is dropped.
-pub fn collect_inference(
+pub(crate) fn collect_inference(
     mut results: ResMut<InferenceResults>,
     mut agents: Query<InferenceQuery, With<AwaitingInference>>,
     mut circuits: Option<ResMut<ProviderCircuits>>,
@@ -451,17 +450,17 @@ pub fn collect_inference(
 /// The response had tool calls; the agent is ready for the tool-dispatch system
 /// to run them (the calls live on its `InferenceResult`).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReadyForTools;
+pub(crate) struct ReadyForTools;
 
 /// The response had no tool calls; the agent is ready for the empty-response
 /// handler to decide finish vs. a "use your tools" nudge.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReadyForTransition;
+pub(crate) struct ReadyForTransition;
 
 /// The agent's current stage is complete; the transition system will resolve the
 /// next stage (or completion).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResolveTransition;
+pub(crate) struct ResolveTransition;
 
 /// How much bigger than its first call a stage's prompt may get before the run
 /// says so.
@@ -556,7 +555,7 @@ pub(crate) fn calibrate(
 
 /// Per-stage progress counters, reset when an agent enters a stage.
 #[derive(Component, Debug, Clone, Default)]
-pub struct StageProgress {
+pub(crate) struct StageProgress {
     /// Total tool calls the agent has made in this stage.
     pub total_tool_calls: usize,
     /// Consecutive text-only responses that were nudged toward tool use.
@@ -611,7 +610,7 @@ pub struct StageProgress {
 /// `error`/`max_iterations`/`stuck`-conditioned edge (e.g. → error_recovery)
 /// when the stage errored, hit its iteration cap, or stopped making progress.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
-pub enum StageOutcome {
+pub(crate) enum StageOutcome {
     /// The stage errored (carries the error message for the terminal case).
     Errored(String),
     /// The stage hit its `max_iterations` cap.
@@ -621,8 +620,8 @@ pub enum StageOutcome {
 }
 
 /// One [`StageRecord`](leviath_core::run_meta::StageRecord) per blueprint stage,
-/// seeded at spawn (names + `Pending`) and reconciled by [`dispatch_persistence`]
-/// (status + timestamps), with per-stage tokens accrued by [`collect_inference`].
+/// seeded at spawn (names + `Pending`) and reconciled by `dispatch_persistence`
+/// (status + timestamps), with per-stage tokens accrued by `collect_inference`.
 /// Serialized to `stages.json` so the dashboard / serve API can show every
 /// stage's real name and status - not just the active one (whose name is the only
 /// one carried in `meta.json`).
@@ -634,7 +633,7 @@ pub struct StageLedger(pub Vec<leviath_core::run_meta::StageRecord>);
 /// drains and clears, forwarding the lines to `stages/<idx>/output.log` (readable
 /// assistant output) and `stages/<idx>/logs.log` (tool + token + error events).
 #[derive(Component, Debug, Clone, Default)]
-pub struct StageIoBuffer {
+pub(crate) struct StageIoBuffer {
     /// Readable assistant output lines, each tagged with its stage index.
     pub output: Vec<(usize, String)>,
     /// Operational log lines (tool activity, token counts, errors), each tagged
@@ -657,7 +656,7 @@ type ProcessResponseQuery = (
 /// last inference asked for tools. Tool calls present ⇒ `ReadyForTools` (and the
 /// stage's running tool-call count is bumped); none ⇒ `ReadyForTransition`. Pure
 /// routing - no I/O.
-pub fn process_response(
+pub(crate) fn process_response(
     mut agents: Query<ProcessResponseQuery, With<ProcessResponse>>,
     mut commands: Commands,
 ) {
@@ -708,7 +707,7 @@ pub(crate) fn edited_path(call: &crate::components::ToolCall) -> Option<&str> {
 /// embedders); [`leviath_core::resolve_nudge`] then falls through to the
 /// built-in defaults.
 #[derive(Component, Debug, Clone, Default)]
-pub struct GlobalNudge(pub leviath_core::NudgeConfig);
+pub(crate) struct GlobalNudge(pub leviath_core::NudgeConfig);
 
 /// Whether this stage's deliverable *is* its text response.
 ///
@@ -755,7 +754,7 @@ type EmptyResponseQuery = (
 /// configured, a stage whose output is reviewed is never nudged - see
 /// `stage_output_is_reviewed` - but an explicit `enabled` at any level speaks
 /// for itself. The text supports `{stage}` and `{regions}` placeholders.
-pub fn handle_empty_response(
+pub(crate) fn handle_empty_response(
     mut agents: Query<EmptyResponseQuery, With<ReadyForTransition>>,
     mut commands: Commands,
 ) {

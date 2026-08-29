@@ -183,7 +183,7 @@ fn run(dir: Option<&Path>, json: bool) -> anyhow::Result<()> {
 }
 
 /// `lev tools` entry point.
-pub async fn execute(args: ToolsArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: ToolsArgs) -> anyhow::Result<()> {
     run(global_tools_dir().as_deref(), args.json)
 }
 

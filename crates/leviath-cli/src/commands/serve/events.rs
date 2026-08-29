@@ -12,7 +12,7 @@ use super::types::FinalOutputResp;
 /// Events broadcast to WebSocket subscribers.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum ServerEvent {
+pub(crate) enum ServerEvent {
     /// A run's spend passed a figure the operator asked to be told about.
     ///
     /// Sent once per threshold per run. The point is to arrive while the run is
@@ -284,7 +284,7 @@ impl ServerEvent {
     /// The run id this event belongs to, for per-run subscription filtering.
     /// Every event names one except the three about the machine rather than a
     /// run - [`DaemonLink`](Self::DaemonLink), and the two an update sends.
-    pub fn run_id(&self) -> &str {
+    pub(crate) fn run_id(&self) -> &str {
         match self {
             ServerEvent::AgentStatus { run_id, .. }
             | ServerEvent::RunRenamed { run_id, .. }
@@ -312,7 +312,7 @@ impl ServerEvent {
     /// a per-run subscriber has to know; an update happening on the machine is
     /// not about the run it is watching, and `/ws` is where a console watches
     /// for it.
-    pub fn is_for_run(&self, run_id: &str) -> bool {
+    pub(crate) fn is_for_run(&self, run_id: &str) -> bool {
         matches!(self, ServerEvent::DaemonLink { .. }) || self.run_id() == run_id
     }
 

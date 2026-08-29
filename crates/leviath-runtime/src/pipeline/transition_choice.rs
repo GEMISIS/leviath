@@ -8,13 +8,13 @@ use super::*;
 /// holds the choosable edges so the collect system can match the response back to
 /// one. (Ported from the async portion of `graph::prompt_llm_transition`.)
 #[derive(Component, Debug, Clone)]
-pub struct AwaitingTransitionResponse(pub Vec<leviath_core::blueprint::TransitionEdge>);
+pub(crate) struct AwaitingTransitionResponse(pub Vec<leviath_core::blueprint::TransitionEdge>);
 
 /// The receiving end of the transition-choice outcomes channel, as a world
 /// resource for the collect system. (The sending end lives in
 /// [`InferenceStage::transition_outcomes`].)
 #[derive(Resource)]
-pub struct TransitionResults(pub UnboundedReceiver<InferenceOutcome>);
+pub(crate) struct TransitionResults(pub UnboundedReceiver<InferenceOutcome>);
 
 /// Build the LLM prompt that asks which stage to run next. (Ported from the
 /// prompt-building portion of `graph::prompt_llm_transition`.)
@@ -210,7 +210,7 @@ pub(crate) fn routing_request(
 /// lane, and move it to `AwaitingTransitionResponse`. Provider-missing / pool-full
 /// leaves it choosing and retries next tick (same backpressure as
 /// [`dispatch_inference`]).
-pub fn dispatch_transition_choice(
+pub(crate) fn dispatch_transition_choice(
     mut agents: Query<TransitionChoiceQuery, With<AwaitingTransitionChoice>>,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,
@@ -342,7 +342,7 @@ type CollectTransitionChoiceQuery = (
 /// target stage (or completion), record the decision in context, and either enter
 /// the chosen stage (loop to `ReadyToInfer`) or mark the agent `Complete`. A
 /// provider error marks the agent `Error`.
-pub fn collect_transition_choice(
+pub(crate) fn collect_transition_choice(
     mut results: ResMut<TransitionResults>,
     mut agents: Query<CollectTransitionChoiceQuery>,
     sink: Option<Res<crate::host::WorldEventSink>>,

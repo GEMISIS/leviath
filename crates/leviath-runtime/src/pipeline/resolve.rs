@@ -86,7 +86,7 @@ pub fn model_key(model: &str) -> &str {
 }
 
 /// before, and `resolve_stages` rejects that unusable case with a clear error.
-pub fn resolve_stage_candidates(
+pub(crate) fn resolve_stage_candidates(
     model_cfg: &ModelConfig,
     model_override: Option<&str>,
     defaults: &ModelDefaults,
@@ -451,7 +451,7 @@ pub fn expand_connector_grants(
 /// Connector grants are expanded into `available` by
 /// [`expand_connector_grants`] before this sees it, so both callers apply one
 /// rule and this stays an exact-match filter.
-pub fn filter_tools_by_available(all: &[Tool], available: &[String]) -> Vec<Tool> {
+pub(crate) fn filter_tools_by_available(all: &[Tool], available: &[String]) -> Vec<Tool> {
     if available.is_empty() {
         return Vec::new();
     }
@@ -521,7 +521,7 @@ fn recover_unqualified<'a>(
 
 /// The stage's Layer-1 tool set for a run that may have nobody watching.
 ///
-/// Same filter as [`filter_tools_by_available`], then - for an unattended run -
+/// Same filter as `filter_tools_by_available`, then - for an unattended run -
 /// minus every tool whose only outcome is a prompt for a person
 /// ([`BLOCKING_INTERACTION_TOOLS`](crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS)),
 /// unless the stage named it in `required_tools`.

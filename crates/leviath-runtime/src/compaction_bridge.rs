@@ -24,7 +24,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::inference_pool::InferencePermit;
 
 /// A batch of per-region summarize requests for one agent.
-pub struct CompactionJob {
+pub(crate) struct CompactionJob {
     /// The agent whose context is being compacted.
     pub entity: Entity,
     /// The compaction provider (resolved for the compaction model).
@@ -42,7 +42,7 @@ pub struct CompactionJob {
 
 /// The completed result of a [`CompactionJob`]: the `(region_name, summary)`
 /// pairs, or the first provider error encountered.
-pub struct CompactionOutcome {
+pub(crate) struct CompactionOutcome {
     /// The agent the summaries belong to.
     pub entity: Entity,
     /// Per-region summaries, or the error compaction failed with.
@@ -72,7 +72,7 @@ pub struct CompactionOutcome {
 /// `RetryPolicy.job_timeout` bounds a dispatch-lane inference: the permit must
 /// be released within a fixed time even when the provider's own timer is
 /// missing (script providers) or defeated.
-pub async fn run_compaction_job(
+pub(crate) async fn run_compaction_job(
     job: CompactionJob,
     deadline: std::time::Duration,
     results: UnboundedSender<CompactionOutcome>,

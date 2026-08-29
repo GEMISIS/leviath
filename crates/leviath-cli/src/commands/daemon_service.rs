@@ -34,13 +34,13 @@ pub const LEGACY_SERVICE_LABELS: &[&str] = &["ai.sunforge.leviath"];
 /// written out at each of the six places it appears, because a bare
 /// `(String, Vec<String>)` says nothing about which of the two strings is the
 /// program.
-pub type SupervisorCommand = (String, Vec<String>);
+pub(crate) type SupervisorCommand = (String, Vec<String>);
 
 /// The cleanup a legacy label needs: the unit file it wrote and the
 /// `launchctl bootout` that deregisters it. Pure data - running the commands
 /// is the caller's subprocess I/O, same split as [`ServiceUnit`].
 #[cfg(target_os = "macos")]
-pub fn legacy_cleanup(config_home: &Path, uid: u32) -> Vec<(PathBuf, SupervisorCommand)> {
+pub(crate) fn legacy_cleanup(config_home: &Path, uid: u32) -> Vec<(PathBuf, SupervisorCommand)> {
     LEGACY_SERVICE_LABELS
         .iter()
         .map(|label| {
@@ -216,16 +216,13 @@ pub fn config_home(user_home: &Path) -> Result<PathBuf> {
 /// Refusing is right rather than escaping: systemd has no general quoting for
 /// this position, and no legitimate path contains a newline.
 ///
-/// Not `#[cfg(target_os = "linux")]` even though only the Linux path calls it:
-/// it is pure string logic, and gating it would mean the check could only be
-/// exercised on one platform's CI runner. A security control should be testable
-/// wherever the tests run.
-///
-/// `pub` (in an already-public module) rather than private-plus-`allow(dead_code)`:
-/// on a non-Linux build nothing calls it, and suppressing the warning would be
-/// hiding the fact rather than stating it. It is genuinely part of this module's
-/// surface - the systemd renderer's input contract.
-pub fn unit_safe(label: &str, value: &Path) -> Result<String> {
+/// Compiled for Linux, where the systemd path calls it, and for every
+/// platform's test build: it is pure string logic, and a security control
+/// should be testable wherever the tests run. On a non-Linux production build
+/// nothing calls it, and the gate states that rather than hiding it behind an
+/// `allow(dead_code)`.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn unit_safe(label: &str, value: &Path) -> Result<String> {
     let s = display(value);
     if s.contains('\n') || s.contains('\r') {
         anyhow::bail!(
@@ -238,9 +235,11 @@ pub fn unit_safe(label: &str, value: &Path) -> Result<String> {
 
 /// A systemd *user* unit (no root needed) with the same restart policy.
 ///
-/// Compiled on every platform (it is pure string assembly) so its tests run
-/// everywhere; only the caller that installs it is Linux-gated.
-pub fn systemd_unit(exe: &Path, home: &Path, log: &Path) -> Result<String> {
+/// Compiled for Linux and for every platform's test build (it is pure string
+/// assembly, so its tests run everywhere); only the caller that installs it
+/// is Linux-only.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn systemd_unit(exe: &Path, home: &Path, log: &Path) -> Result<String> {
     let exe = unit_safe("executable", exe)?;
     let home = unit_safe("LEVIATH_HOME", home)?;
     let log = unit_safe("log", log)?;
@@ -290,7 +289,7 @@ pub fn config_home(_user_home: &Path) -> Result<PathBuf> {
 // ── Platform-independent ─────────────────────────────────────────────────────
 
 /// Write `unit` to disk, creating its parent directory. Returns the path.
-pub fn install(unit: &ServiceUnit) -> Result<&Path> {
+pub(crate) fn install(unit: &ServiceUnit) -> Result<&Path> {
     if let Some(parent) = unit.path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
@@ -301,7 +300,7 @@ pub fn install(unit: &ServiceUnit) -> Result<&Path> {
 }
 
 /// Remove the unit file. Returns whether there was one to remove.
-pub fn uninstall(unit: &ServiceUnit) -> Result<bool> {
+pub(crate) fn uninstall(unit: &ServiceUnit) -> Result<bool> {
     match std::fs::remove_file(&unit.path) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -425,10 +424,9 @@ pub fn format_supervision(installed: bool, path: &Path) -> String {
 /// A path as a string, lossily - these are user home paths, valid UTF-8 in
 /// every case that matters, and a lossy rendering beats failing.
 ///
-/// Not gated to the platforms with a supervisor, even though only they build a
-/// unit file: `unit_safe` is unconditional (see its own note), and a helper it
-/// calls cannot be narrower than its caller. Gating it broke the Windows build
-/// outright.
+/// Gated like its callers: the launchd plist on macOS, `unit_safe` on Linux
+/// and in tests. Nothing on any other platform builds a unit file.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn display(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }

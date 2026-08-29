@@ -275,14 +275,12 @@ mod tests {
             title: Some("My Test".to_string()),
             model: None,
             parent_id: None,
-            depth: 0,
             started_at: chrono::Utc::now().timestamp() - 60,
             last_progress_at: None,
             runtime_secs: 0,
             clock_now: 0,
             graph: None,
             accepts_messages: true,
-            taint_summary: vec![],
         }
     }
 

@@ -45,7 +45,7 @@ use crate::tools::resolve_policy;
 /// sooner than the disk does. Erring that way is the point - the alternative is
 /// tracking per-path deltas, which a command writing to a path Leviath cannot
 /// name defeats anyway.
-pub struct WriteBudget {
+pub(crate) struct WriteBudget {
     limits: leviath_core::write_limits::WriteLimits,
     written: std::sync::atomic::AtomicU64,
     /// The filesystem probe, injected so a test can drive the disk-full arm
@@ -55,12 +55,12 @@ pub struct WriteBudget {
 
 impl WriteBudget {
     /// A budget over the real filesystem.
-    pub fn new(limits: leviath_core::write_limits::WriteLimits) -> Self {
+    pub(crate) fn new(limits: leviath_core::write_limits::WriteLimits) -> Self {
         Self::with_probe(limits, leviath_sys::disk::available_bytes)
     }
 
     /// A budget whose free-space probe is supplied.
-    pub fn with_probe(
+    pub(crate) fn with_probe(
         limits: leviath_core::write_limits::WriteLimits,
         available: fn(&std::path::Path) -> Option<u64>,
     ) -> Self {
@@ -75,7 +75,7 @@ impl WriteBudget {
     ///
     /// Does not record anything: a refused write must not spend the budget it
     /// was refused by, or one oversized call would exhaust the run.
-    pub fn check(
+    pub(crate) fn check(
         &self,
         workdir: &std::path::Path,
         bytes: u64,
@@ -89,13 +89,14 @@ impl WriteBudget {
     }
 
     /// Record bytes a call actually wrote.
-    pub fn record(&self, bytes: u64) {
+    pub(crate) fn record(&self, bytes: u64) {
         self.written
             .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// What this run has written so far.
-    pub fn written(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn written(&self) -> u64 {
         self.written.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
@@ -106,7 +107,7 @@ impl WriteBudget {
 /// (`stage_perms`/`stage_name`) are shared handles the host updates as the agent
 /// changes stage.
 #[derive(Clone)]
-pub struct AgentToolState {
+pub(crate) struct AgentToolState {
     /// The write ceilings in effect, and what this run has spent of them.
     ///
     /// Shared rather than copied because the running total has to survive
@@ -245,7 +246,7 @@ impl AgentToolState {
 
 /// Re-resolution inputs for a `dynamic_tools` agent - held so [`CliToolService`]
 /// can re-scan its `tools/` directories and re-filter its stage tool defs mid-run.
-pub struct DynamicToolCtx {
+pub(crate) struct DynamicToolCtx {
     /// `tools/` directories to re-scan (agent dir, run workdir, global), in order.
     pub scan_dirs: Vec<PathBuf>,
     /// Names reserved by built-in / sub-agent / MCP tools (collision-drop set).
@@ -396,7 +397,7 @@ fn charge_declared(state: &AgentToolState, tc: &ToolCall) {
 /// is reported through `progress` the moment it lands, not at batch end, so the
 /// run journal keeps each completed call's result even if the daemon dies before
 /// the batch finishes (issue #96).
-pub async fn dispatch_tools(
+pub(crate) async fn dispatch_tools(
     state: Arc<AgentToolState>,
     calls: Vec<ToolCall>,
     progress: ToolProgress,
@@ -587,26 +588,27 @@ pub async fn dispatch_tools(
 /// The shared-world tool service: maps entities to their [`AgentToolState`] and
 /// builds a per-call executor closure.
 #[derive(Default)]
-pub struct CliToolService {
+pub(crate) struct CliToolService {
     states: StdMutex<HashMap<Entity, Arc<AgentToolState>>>,
 }
 
 impl CliToolService {
     /// A fresh, empty service.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Register an agent's tool state (called when the agent is spawned).
-    pub fn register(&self, entity: Entity, state: Arc<AgentToolState>) {
+    pub(crate) fn register(&self, entity: Entity, state: Arc<AgentToolState>) {
         self.states
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(entity, state);
     }
 
-    /// Drop an agent's tool state (called when the agent is reaped).
-    pub fn unregister(&self, entity: Entity) {
+    /// Drop an agent's tool state.
+    #[cfg(test)]
+    pub(crate) fn unregister(&self, entity: Entity) {
         self.states
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -616,7 +618,7 @@ impl CliToolService {
     /// Remove an agent's tool state and return it, so the caller can run any
     /// teardown it holds (e.g. sandbox destruction) before it is dropped. Used
     /// by the daemon's reap hook.
-    pub fn take(&self, entity: Entity) -> Option<Arc<AgentToolState>> {
+    pub(crate) fn take(&self, entity: Entity) -> Option<Arc<AgentToolState>> {
         self.states
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -626,7 +628,7 @@ impl CliToolService {
     /// Reap an agent: drop its tool state (fixing the prior leak) and tear down
     /// its sandbox (destroying any containers it started). Called from the
     /// daemon's reap hook just before the entity is despawned.
-    pub fn reap(&self, entity: Entity) {
+    pub(crate) fn reap(&self, entity: Entity) {
         if let Some(state) = self.take(entity)
             && let Some(sandbox) = &state.sandbox
         {

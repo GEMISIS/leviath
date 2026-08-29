@@ -20,11 +20,11 @@ pub struct StageCursor {
 /// model, and tool definitions). The transition system swaps the agent's
 /// `StageInference` to the entry for its new stage by index.
 #[derive(Component, Debug, Clone)]
-pub struct StageInferences(pub Vec<StageInference>);
+pub(crate) struct StageInferences(pub Vec<StageInference>);
 
 /// How many times the agent has entered each stage (for `max_revisits`).
 #[derive(Component, Debug, Clone, Default)]
-pub struct VisitCounts(pub std::collections::HashMap<String, usize>);
+pub(crate) struct VisitCounts(pub std::collections::HashMap<String, usize>);
 
 /// Pre-resolved per-stage setup, applied by `enter_stage` when an agent enters
 /// a stage: inference parameters, tool-result routing, whether the stage accepts
@@ -33,7 +33,7 @@ pub struct VisitCounts(pub std::collections::HashMap<String, usize>);
 /// [`StageInferences`]) so stage entry stays synchronous and query-friendly.
 /// (Ported from the imperative loop's per-stage setup in the CLI executor.)
 #[derive(Clone)]
-pub struct StageSetup {
+pub(crate) struct StageSetup {
     /// Per-stage inference config (temperature / max output tokens).
     pub inference_config: InferenceConfig,
     /// Optional per-stage tool-result routing.
@@ -46,25 +46,17 @@ pub struct StageSetup {
     pub context_hide: Vec<String>,
     /// Optional stage instructions injected as pinned context on entry.
     pub system_prompt: Option<String>,
-    /// The output shape resolved for this stage (agent, stage, and the
-    /// launching caller's request combined), and whether the stage must produce
-    /// one. `None` means no level asked for a shape.
-    ///
-    /// Held here as well as on [`StageInference`] because the two use it for
-    /// different things: this copy is folded into the stage's system prompt, and
-    /// that copy is what validates a submission at dispatch.
-    pub output: Option<leviath_core::output::OutputSpec>,
 }
 
 /// Pre-resolved [`StageSetup`] for every stage of the agent's blueprint.
 #[derive(Component, Clone)]
-pub struct StageSetups(pub Vec<StageSetup>);
+pub(crate) struct StageSetups(pub Vec<StageSetup>);
 
 /// The stage completed with multiple candidate edges (or a single edge the stage
 /// may decline); an LLM must choose. Holds the choosable edges for the async
 /// transition-choice system.
 #[derive(Component, Debug, Clone)]
-pub struct AwaitingTransitionChoice(pub Vec<leviath_core::blueprint::TransitionEdge>);
+pub(crate) struct AwaitingTransitionChoice(pub Vec<leviath_core::blueprint::TransitionEdge>);
 
 /// The outcome of synchronously resolving a completed stage's transition.
 pub(crate) enum StageResolution {
@@ -227,7 +219,7 @@ pub(crate) fn resolve_transition_sync(
 /// its spawned sub-agents are terminal. Distinct from `FanOutWaiting` (which is
 /// the fan-out split/merge wait).
 #[derive(Component, Debug, Clone, Copy)]
-pub struct WaitingForChildren;
+pub(crate) struct WaitingForChildren;
 
 /// Whether an agent status is terminal (the run/child has finished).
 ///
@@ -281,7 +273,7 @@ pub(crate) fn hold_for_gate(
 /// Not for conditions that are terminal by nature (a cancel, a completed run).
 /// This is for "this stage could not go on", which is exactly what an
 /// `error` edge exists to answer.
-pub fn fail_stage(
+pub(crate) fn fail_stage(
     commands: &mut Commands,
     entity: Entity,
     state: &mut AgentState,
@@ -302,7 +294,7 @@ pub fn fail_stage(
 /// A no-op for an entity that has already despawned, matching the rest of the
 /// exclusive-system helpers: a run that went away mid-tick has nothing left to
 /// route.
-pub fn fail_stage_world(world: &mut World, entity: Entity, message: String) {
+pub(crate) fn fail_stage_world(world: &mut World, entity: Entity, message: String) {
     let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
         return;
     };
@@ -342,7 +334,7 @@ type ResolveTransitionQuery = (
 /// enter the new stage (swap its `StageInference`, reset stage progress, bump the
 /// visit count) and loop to `ReadyToInfer`. Multiple candidate edges ⇒ hand off
 /// to the async transition-choice system via `AwaitingTransitionChoice`.
-pub fn resolve_transition(
+pub(crate) fn resolve_transition(
     mut agents: Query<ResolveTransitionQuery, With<ResolveTransition>>,
     sink: Option<Res<crate::host::WorldEventSink>>,
     mut commands: Commands,
@@ -865,7 +857,7 @@ pub(crate) fn attach_stage_components(
 }
 
 /// Force an agent into the stage at `target_idx` via direct world access - the
-/// same effect as [`resolve_transition`]'s linear-`Next` arm, but callable from
+/// same effect as `resolve_transition`'s linear-`Next` arm, but callable from
 /// an exclusive system (e.g. the fan-out collector jumping to its `merge_stage`)
 /// or the daemon (spawning a fan-out worker directly at its worker stage) where no
 /// [`Commands`] queue is available. On a system-prompt overflow the agent is

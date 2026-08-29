@@ -15,8 +15,9 @@ use crate::config::{Config, ToolPolicy};
 ///
 /// Cheap to clone (all fields are `Arc`s). The `call` method dispatches
 /// to the appropriate executor.
-pub struct ToolRegistry {
+pub(crate) struct ToolRegistry {
     /// The built-in tools, over this agent's workdir.
+    #[cfg(test)]
     pub builtins: Arc<BuiltinTools>,
     /// The MCP executor, shared because connections are per-server rather than
     /// per-agent.
@@ -27,13 +28,14 @@ pub struct ToolRegistry {
     /// connector. A `Tool` carries no owner, so this is the only record of it
     /// once the defs are flattened into one list.
     pub mcp_tool_owners: leviath_runtime::pipeline::ToolOwners,
-    /// Which names dispatch to `builtins` rather than to MCP.
+    /// Which names dispatch to the built-ins rather than to MCP.
+    #[cfg(test)]
     pub builtin_names: HashSet<String>,
 }
 
 impl ToolRegistry {
     /// Build a registry, connecting MCP servers declared in config (non-fatal).
-    pub async fn build(workdir: PathBuf, config: &Config) -> Self {
+    pub(crate) async fn build(workdir: PathBuf, config: &Config) -> Self {
         let ctx = ToolContext::new(workdir);
         let builtins = Arc::new(BuiltinTools::new(ctx));
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
@@ -137,16 +139,19 @@ impl ToolRegistry {
         // so it cannot disagree with itself.
         let mcp_tool_owners = mcp_executor.tool_owners();
         Self {
+            #[cfg(test)]
             builtins,
             mcp: Arc::new(Mutex::new(mcp_executor)),
             mcp_tool_defs,
             mcp_tool_owners,
+            #[cfg(test)]
             builtin_names,
         }
     }
 
     /// All tool definitions to advertise to the LLM (built-ins + MCP + sub-agent).
-    pub fn all_tool_defs(&self) -> Vec<Tool> {
+    #[cfg(test)]
+    pub(crate) fn all_tool_defs(&self) -> Vec<Tool> {
         let mut tools = self.builtins.tool_defs();
         tools.extend(BuiltinTools::subagent_tool_defs());
         tools.extend_from_slice(&self.mcp_tool_defs);
@@ -154,7 +159,8 @@ impl ToolRegistry {
     }
 
     /// Shut down all MCP connections.
-    pub async fn shutdown(&self) {
+    #[cfg(test)]
+    pub(crate) async fn shutdown(&self) {
         let mut mcp = self.mcp.lock().await;
         // `shutdown_all` always returns `Ok(())` in the current `leviath_mcp`
         // implementation (errors inside each client are silently discarded).
@@ -218,7 +224,7 @@ pub(crate) async fn resolve_bearer(
 /// Default policy for a tool: read-only builtins are allowed, mutating ones ask,
 /// human-in-the-loop tools are always allowed, and anything else requires
 /// approval.
-pub fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPolicy {
+pub(crate) fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPolicy {
     // Matched on the canonical name, so the `shell` arm covers a call named
     // `bash` and vice versa.
     match leviath_tools::canonical_tool_name(tool_name) {
@@ -317,7 +323,7 @@ fn stricter(a: ToolPolicy, b: ToolPolicy) -> ToolPolicy {
 ///
 /// Takes a resolver rather than resolving `write_file` itself, so there is one
 /// place that knows the layering and this is not it.
-pub fn clamp_by_effect(
+pub(crate) fn clamp_by_effect(
     tool_name: &str,
     arguments: &serde_json::Value,
     policy: ToolPolicy,
@@ -357,7 +363,7 @@ pub fn clamp_by_effect(
 /// Windows is judged as the path `cmd.exe` will actually open, rather than the
 /// `C:Usersmeout.txt` a POSIX reading produces. That mismatch shipped once and
 /// CI caught it denying a write *inside* the workspace.
-pub fn escaping_write_refusal(
+pub(crate) fn escaping_write_refusal(
     tool_name: &str,
     arguments: &serde_json::Value,
     workdir: &std::path::Path,
@@ -400,7 +406,7 @@ pub fn escaping_write_refusal(
 /// redirect cannot be: the bytes go from the shell to the file without passing
 /// through Leviath, so `None` here means "unknown, measure afterwards" rather
 /// than "writes nothing".
-pub fn declared_write_bytes(tool_name: &str, arguments: &serde_json::Value) -> Option<u64> {
+pub(crate) fn declared_write_bytes(tool_name: &str, arguments: &serde_json::Value) -> Option<u64> {
     let field = match leviath_tools::canonical_tool_name(tool_name) {
         "write_file" => "content",
         "edit_file" => "new_str",
@@ -426,7 +432,7 @@ pub fn declared_write_bytes(tool_name: &str, arguments: &serde_json::Value) -> O
 /// The disk check applies to both, and to a shell call with any write target at
 /// all: a machine with no room left should not be handed a command that writes,
 /// whatever its size turns out to be.
-pub fn write_budget_refusal(
+pub(crate) fn write_budget_refusal(
     tool_name: &str,
     arguments: &serde_json::Value,
     workdir: &std::path::Path,
@@ -462,7 +468,7 @@ pub fn write_budget_refusal(
 /// A target that no longer exists, or was never created, contributes nothing: a
 /// command that failed should not spend the run's budget on a file it did not
 /// write.
-pub fn measured_write_bytes(
+pub(crate) fn measured_write_bytes(
     tool_name: &str,
     arguments: &serde_json::Value,
     workdir: &std::path::Path,
@@ -553,7 +559,7 @@ fn blueprint_loosenable(tool_name: &str) -> bool {
 /// a `Deny`: a denied tool stays denied under `--yolo`, matching the guarantee
 /// other agent runtimes make about their deny rules. To lift a `Deny`, edit the
 /// config that set it.
-pub fn resolve_policy(
+pub(crate) fn resolve_policy(
     tool_name: &str,
     is_builtin: bool,
     launch_overrides: &HashMap<String, ToolPolicy>,
@@ -609,7 +615,7 @@ pub fn resolve_policy(
 ///
 /// Non-shell tools keep keying on the tool name: their arguments do not widen
 /// what the tool can reach the way a command string does.
-pub fn session_approval_keys(tool_name: &str, arguments: &serde_json::Value) -> Vec<String> {
+pub(crate) fn session_approval_keys(tool_name: &str, arguments: &serde_json::Value) -> Vec<String> {
     if leviath_tools::canonical_tool_name(tool_name) != "shell" {
         return vec![tool_name.to_string()];
     }

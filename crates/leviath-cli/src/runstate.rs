@@ -32,18 +32,21 @@ use std::sync::Arc;
 mod dashboard_log;
 mod force;
 #[cfg(test)]
+pub(crate) use dashboard_log::append_dashboard_log;
+#[cfg(test)]
 use dashboard_log::*;
-pub use dashboard_log::{append_dashboard_log, append_dashboard_log_to, dashboard_log_path};
-pub use force::{ForceCancelOutcome, force_cancel, force_cancel_in, force_error_in};
+pub(crate) use dashboard_log::{append_dashboard_log_to, dashboard_log_path};
+pub(crate) use force::{ForceCancelOutcome, force_cancel, force_cancel_in, force_error_in};
 
 // The plain run-state data types (RunMeta, RunStatus, the snapshot structs, and
 // the per-stage records) live in `leviath_core::run_meta`. Re-exported here so
 // `crate::runstate::RunMeta` / `runstate::RunMeta` call sites across the cli
 // resolve. All on-disk IO for these types remains in this module.
-pub use leviath_core::run_meta::{
-    ContextSnapshot, RegionEntrySnapshot, RegionSnapshot, RunMeta, RunStatus, StageRecord,
-    StageRunStatus,
+pub(crate) use leviath_core::run_meta::{
+    ContextSnapshot, RunMeta, RunStatus, StageRecord, StageRunStatus,
 };
+#[cfg(test)]
+pub(crate) use leviath_core::run_meta::{RegionEntrySnapshot, RegionSnapshot};
 
 /// Atomically write a context snapshot for the run.
 ///
@@ -51,7 +54,7 @@ pub use leviath_core::run_meta::{
 /// which is the sole writer of a live run's on-disk state; this exists so a
 /// test can lay down a run directory to read back. See the module doc.
 #[cfg(test)]
-pub fn write_context_snapshot(run_id: &str, snap: &ContextSnapshot) -> anyhow::Result<()> {
+pub(crate) fn write_context_snapshot(run_id: &str, snap: &ContextSnapshot) -> anyhow::Result<()> {
     write_context_snapshot_to(&run_dir(run_id), snap)
 }
 
@@ -90,7 +93,7 @@ fn write_context_snapshot_to(dir: &std::path::Path, snap: &ContextSnapshot) -> a
 }
 
 /// Read the context snapshot for a run, if present.
-pub fn read_context_snapshot(run_id: &str) -> Option<ContextSnapshot> {
+pub(crate) fn read_context_snapshot(run_id: &str) -> Option<ContextSnapshot> {
     let path = run_dir(run_id).join(leviath_core::files::CONTEXT_FILE);
     let json = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&json).ok()
@@ -111,7 +114,7 @@ pub fn read_context_snapshot(run_id: &str) -> Option<ContextSnapshot> {
 /// granularity on some filesystems can miss two updates in the same instant -
 /// the length check catches most of those, and a same-length same-instant
 /// rewrite is indistinguishable anyway one tick later.
-pub struct StatCache<T> {
+pub(crate) struct StatCache<T> {
     entries: std::collections::HashMap<PathBuf, CacheEntry<T>>,
 }
 
@@ -137,7 +140,7 @@ impl<T> StatCache<T> {
     /// changed since the last call. `None` when the file is missing,
     /// unreadable, or `parse` rejects it - negative results are cached too, so
     /// a persistently-bad file costs one stat per tick, not one parse.
-    pub fn get_with(
+    pub(crate) fn get_with(
         &mut self,
         path: &Path,
         parse: impl FnOnce(&str) -> Option<T>,
@@ -154,7 +157,7 @@ impl<T> StatCache<T> {
     /// question. A caller that knows a file has settled (a finished run's
     /// record) asks it once a second instead, and a file it knows is live
     /// passes `Duration::ZERO` and is stat'ed every time, as before.
-    pub fn get_with_recheck(
+    pub(crate) fn get_with_recheck(
         &mut self,
         path: &Path,
         parse: impl FnOnce(&str) -> Option<T>,
@@ -196,13 +199,13 @@ impl<T> StatCache<T> {
     }
 
     /// The cached value for `path`, without asking the filesystem anything.
-    pub fn peek(&self, path: &Path) -> Option<Arc<T>> {
+    pub(crate) fn peek(&self, path: &Path) -> Option<Arc<T>> {
         self.entries.get(path).and_then(|entry| entry.value.clone())
     }
 
     /// Drop entries for files under runs that no longer exist, so a
     /// long-lived poller's cache stays bounded by the live run set.
-    pub fn retain_under(&mut self, keep: &std::collections::HashSet<PathBuf>) {
+    pub(crate) fn retain_under(&mut self, keep: &std::collections::HashSet<PathBuf>) {
         self.entries.retain(|path, _| {
             path.parent()
                 .is_some_and(|dir| keep.contains(&dir.to_path_buf()))
@@ -217,7 +220,7 @@ impl<T> StatCache<T> {
 /// (the history API, journal search highlights), prefer [`visit_run_archive`]:
 /// a mature run's journal is tens of MB, and parsing it whole per request was
 /// the API's single largest transient allocation.
-pub fn read_run_archive(run_id: &str) -> Option<Vec<leviath_core::run_archive::RunRecord>> {
+pub(crate) fn read_run_archive(run_id: &str) -> Option<Vec<leviath_core::run_archive::RunRecord>> {
     let path = run_dir(run_id).join(leviath_core::files::ARCHIVE_FILE);
     let bytes = std::fs::read(&path).ok()?;
     // Lenient, not strict: this reads an archive some other build may have
@@ -232,7 +235,7 @@ pub fn read_run_archive(run_id: &str) -> Option<Vec<leviath_core::run_archive::R
 /// materializing the archive. Same lenient tail handling as
 /// [`visit_run_archive`]. For consumers that inspect records rather than
 /// replayed points (journal search).
-pub fn visit_run_records(
+pub(crate) fn visit_run_records(
     run_id: &str,
     visit: &mut dyn FnMut(&leviath_core::run_archive::RunRecord) -> std::ops::ControlFlow<()>,
 ) -> Option<()> {
@@ -260,7 +263,7 @@ pub fn visit_run_records(
 /// walk with the points already visited.
 ///
 /// [`visit_points`]: leviath_core::run_archive::visit_points
-pub fn visit_run_archive(
+pub(crate) fn visit_run_archive(
     run_id: &str,
     visit: &mut dyn FnMut(leviath_core::run_archive::PointRef<'_>) -> std::ops::ControlFlow<()>,
 ) -> Option<()> {
@@ -285,7 +288,7 @@ pub fn visit_run_archive(
 /// consumer of a run's history inherits the fix instead of having to remember
 /// it. No caller needs the secret: the CLI printer, the dashboard, and the API
 /// all only display these points.
-pub fn context_history(run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
+pub(crate) fn context_history(run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
     read_run_archive(run_id)
         .map(|records| leviath_core::run_archive::replay_points(&records))
         .unwrap_or_default()
@@ -331,7 +334,7 @@ pub fn runs_dir() -> PathBuf {
 /// Returning a definitely-missing path rather than an `Option` keeps every
 /// caller's "no such run" branch as the single failure path, instead of adding a
 /// second one that all of them would have to handle identically.
-pub fn run_dir(run_id: &str) -> PathBuf {
+pub(crate) fn run_dir(run_id: &str) -> PathBuf {
     if !leviath_core::is_safe_path_component(run_id) {
         tracing::warn!(run_id = %run_id, "rejected an unsafe run id");
         return runs_dir().join("<invalid>");
@@ -367,7 +370,7 @@ const RUN_ID_ENTROPY_BITS: u32 = 48;
 /// agent named `café` mint `café-...`: the daemon created that directory
 /// happily, and then every CLI read of the run looked in `<invalid>` and found
 /// nothing. The minter has to satisfy the rule the readers enforce.
-pub fn new_run_id(agent_name: &str) -> String {
+pub(crate) fn new_run_id(agent_name: &str) -> String {
     use rand::RngExt as _;
     let entropy: u64 = rand::rng().random::<u64>() >> (u64::BITS - RUN_ID_ENTROPY_BITS);
     let safe_name = agent_name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-");
@@ -380,7 +383,8 @@ pub fn new_run_id(agent_name: &str) -> String {
 }
 
 /// Create the run directory and write initial metadata.
-pub fn create_run(meta: &RunMeta) -> anyhow::Result<()> {
+#[cfg(test)]
+pub(crate) fn create_run(meta: &RunMeta) -> anyhow::Result<()> {
     create_run_in(&run_dir(&meta.run_id), meta)
 }
 
@@ -399,7 +403,8 @@ pub(crate) fn create_run_in(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Re
 }
 
 /// Atomically write run metadata (write to tmp, then rename).
-pub fn write_meta(meta: &RunMeta) -> anyhow::Result<()> {
+#[cfg(test)]
+pub(crate) fn write_meta(meta: &RunMeta) -> anyhow::Result<()> {
     write_meta_to(&run_dir(&meta.run_id), meta)
 }
 
@@ -415,7 +420,7 @@ pub(crate) fn write_meta_to(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Re
 }
 
 /// Read run metadata for a given run ID.
-pub fn read_meta(run_id: &str) -> anyhow::Result<RunMeta> {
+pub(crate) fn read_meta(run_id: &str) -> anyhow::Result<RunMeta> {
     read_meta_from(&run_dir(run_id))
 }
 
@@ -425,7 +430,7 @@ pub fn read_meta(run_id: &str) -> anyhow::Result<RunMeta> {
 /// this fetches the bytes from the sidecar beside it. Returns `None` when the
 /// run produced no answer, or when the sidecar is missing (a run written by a
 /// build that stored the answer inline, or one whose directory was pruned).
-pub fn read_final_output(run_id: &str) -> Option<leviath_core::FinalOutput> {
+pub(crate) fn read_final_output(run_id: &str) -> Option<leviath_core::FinalOutput> {
     let meta = read_meta(run_id).ok()?;
     read_final_output_in(&run_dir(run_id), &meta)
 }
@@ -451,7 +456,7 @@ pub(crate) fn read_final_output_in(
 }
 
 /// Where a run's answer lives, beside its `meta.json`.
-pub fn final_output_path(dir: &std::path::Path) -> PathBuf {
+pub(crate) fn final_output_path(dir: &std::path::Path) -> PathBuf {
     dir.join(leviath_core::FINAL_OUTPUT_FILE)
 }
 
@@ -462,14 +467,14 @@ pub fn final_output_path(dir: &std::path::Path) -> PathBuf {
 ///
 /// Test-only; see [`write_context_snapshot`].
 #[cfg(test)]
-pub fn write_final_output(dir: &std::path::Path, content: &str) -> anyhow::Result<()> {
+pub(crate) fn write_final_output(dir: &std::path::Path, content: &str) -> anyhow::Result<()> {
     write_private_atomic(&final_output_path(dir), content)
 }
 
 /// Whether an on-disk run status means the run has finished and should be left
 /// alone. `Starting`/`Running`/`WaitingInput` are all "still going" as far as
 /// anything reading the runs dir is concerned.
-pub fn is_terminal_status(status: &RunStatus) -> bool {
+pub(crate) fn is_terminal_status(status: &RunStatus) -> bool {
     matches!(
         status,
         RunStatus::Complete
@@ -503,7 +508,7 @@ pub const STALE_AFTER_SECS: i64 = 300;
 ///
 /// One definition, shared by the dashboard's STALE badge and by `lev ps --all`,
 /// so what an operator sees and what a harness reconciles against cannot drift.
-pub fn looks_abandoned(
+pub(crate) fn looks_abandoned(
     meta: &RunMeta,
     live: Option<&std::collections::HashSet<String>>,
     now: i64,
@@ -552,7 +557,7 @@ fn list_runs_in_dir(dir: PathBuf) -> Vec<RunMeta> {
 
 /// List all runs, sorted by started_at descending (most recent first).
 /// Silently skips any runs whose metadata cannot be read.
-pub fn list_runs() -> Vec<RunMeta> {
+pub(crate) fn list_runs() -> Vec<RunMeta> {
     list_runs_in_dir(runs_dir())
 }
 
@@ -580,7 +585,7 @@ pub fn list_runs() -> Vec<RunMeta> {
 ///
 /// Cycle-safe: no run is queued twice, so metadata claiming an ancestor as a
 /// child ends the walk rather than looping forever.
-pub fn descendant_run_ids(root_id: &str) -> Vec<String> {
+pub(crate) fn descendant_run_ids(root_id: &str) -> Vec<String> {
     use std::collections::{HashMap, HashSet};
 
     let all = list_runs();
@@ -632,7 +637,7 @@ pub fn descendant_run_ids(root_id: &str) -> Vec<String> {
 /// One definition for the API route and the dashboard, so the two cannot
 /// disagree about what a delete covers. See [`descendant_run_ids`] for the
 /// ordering and for how the tree is read off disk.
-pub fn family_of(root_id: &str) -> Vec<String> {
+pub(crate) fn family_of(root_id: &str) -> Vec<String> {
     let mut ids = descendant_run_ids(root_id);
     ids.push(root_id.to_string());
     ids
@@ -641,7 +646,7 @@ pub fn family_of(root_id: &str) -> Vec<String> {
 /// [`list_runs`] through a [`StatCache`], for pollers: each `meta.json` is
 /// re-parsed only when its stat changes, and cache entries for deleted runs
 /// are dropped. Same ordering and skip-unreadable behavior as `list_runs`.
-pub fn list_runs_cached(cache: &mut StatCache<RunMeta>) -> Vec<Arc<RunMeta>> {
+pub(crate) fn list_runs_cached(cache: &mut StatCache<RunMeta>) -> Vec<Arc<RunMeta>> {
     let dir = runs_dir();
     let mut runs = Vec::new();
     let mut live_dirs = std::collections::HashSet::new();
@@ -673,7 +678,7 @@ pub fn list_runs_cached(cache: &mut StatCache<RunMeta>) -> Vec<Arc<RunMeta>> {
 /// not. A finished run's record changes only when someone renames or deletes
 /// it, and a second's lag on that is what buys a 750-run dashboard back two
 /// thirds of its idle CPU.
-pub fn settle_window(meta: &RunMeta) -> std::time::Duration {
+pub(crate) fn settle_window(meta: &RunMeta) -> std::time::Duration {
     match meta.status {
         RunStatus::Complete
         | RunStatus::CompleteInteractive
@@ -689,7 +694,8 @@ pub fn settle_window(meta: &RunMeta) -> std::time::Duration {
 const SETTLED_RECHECK: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// [`read_stages_index`] through a [`StatCache`], for pollers.
-pub fn read_stages_index_cached(
+#[cfg(test)]
+pub(crate) fn read_stages_index_cached(
     run_id: &str,
     cache: &mut StatCache<Vec<StageRecord>>,
 ) -> Vec<StageRecord> {
@@ -698,7 +704,7 @@ pub fn read_stages_index_cached(
 
 /// [`read_stages_index_cached`] with the poller's [`settle_window`] for the
 /// run, so a finished run's stage ledger is not stat'ed every tick either.
-pub fn read_stages_index_settled(
+pub(crate) fn read_stages_index_settled(
     run_id: &str,
     cache: &mut StatCache<Vec<StageRecord>>,
     recheck_after: std::time::Duration,
@@ -713,7 +719,7 @@ pub fn read_stages_index_settled(
 /// [`read_context_snapshot`] through a [`StatCache`], for pollers. The
 /// snapshot is shared, not cloned: a context window is the largest thing in a
 /// run dir, and handing out copies per tick is the churn this cache removes.
-pub fn read_context_snapshot_cached(
+pub(crate) fn read_context_snapshot_cached(
     run_id: &str,
     cache: &mut StatCache<ContextSnapshot>,
 ) -> Option<Arc<ContextSnapshot>> {
@@ -725,7 +731,7 @@ pub fn read_context_snapshot_cached(
 /// If the file is smaller than `max_bytes` the whole file is returned.
 /// Partial UTF-8 at the truncation boundary is handled by skipping to the
 /// first newline.  Returns an empty string on any I/O error.
-pub fn tail_file(path: &std::path::Path, max_bytes: u64) -> String {
+pub(crate) fn tail_file(path: &std::path::Path, max_bytes: u64) -> String {
     use std::io::{Read, Seek, SeekFrom};
 
     let mut file = match std::fs::File::open(path) {
@@ -761,7 +767,7 @@ pub fn tail_file(path: &std::path::Path, max_bytes: u64) -> String {
 // ─── Per-stage persistence ────────────────────────────────────────────────────
 
 /// Directory for per-stage files within a run.
-pub fn stage_dir(run_id: &str, stage_idx: usize) -> PathBuf {
+pub(crate) fn stage_dir(run_id: &str, stage_idx: usize) -> PathBuf {
     run_dir(run_id).join("stages").join(stage_idx.to_string())
 }
 
@@ -769,7 +775,7 @@ pub fn stage_dir(run_id: &str, stage_idx: usize) -> PathBuf {
 ///
 /// Test-only; see [`write_context_snapshot`].
 #[cfg(test)]
-pub fn write_stages_index(run_id: &str, stages: &[StageRecord]) -> anyhow::Result<()> {
+pub(crate) fn write_stages_index(run_id: &str, stages: &[StageRecord]) -> anyhow::Result<()> {
     write_stages_index_to(&run_dir(run_id), stages)
 }
 
@@ -781,7 +787,7 @@ fn write_stages_index_to(dir: &std::path::Path, stages: &[StageRecord]) -> anyho
 }
 
 /// Read the stages index for a run, or return an empty vec on any error.
-pub fn read_stages_index(run_id: &str) -> Vec<StageRecord> {
+pub(crate) fn read_stages_index(run_id: &str) -> Vec<StageRecord> {
     read_stages_index_from(&run_dir(run_id))
 }
 
@@ -789,7 +795,7 @@ pub fn read_stages_index(run_id: &str) -> Vec<StageRecord> {
 ///
 /// Restart recovery works from its configured runs directory rather than the
 /// home one, so it cannot resolve the path itself.
-pub fn read_stages_index_from(dir: &std::path::Path) -> Vec<StageRecord> {
+pub(crate) fn read_stages_index_from(dir: &std::path::Path) -> Vec<StageRecord> {
     let json = match std::fs::read_to_string(dir.join(leviath_core::files::STAGES_FILE)) {
         Ok(j) => j,
         Err(_) => return Vec::new(),
@@ -808,7 +814,7 @@ fn ensure_stage_dir(run_id: &str, stage_idx: usize) {
 ///
 /// Test-only; see [`write_context_snapshot`].
 #[cfg(test)]
-pub fn append_stage_output(run_id: &str, stage_idx: usize, text: &str) {
+pub(crate) fn append_stage_output(run_id: &str, stage_idx: usize, text: &str) {
     use std::io::Write;
     ensure_stage_dir(run_id, stage_idx);
     let path = stage_dir(run_id, stage_idx).join("output.log");
@@ -821,7 +827,7 @@ pub fn append_stage_output(run_id: &str, stage_idx: usize, text: &str) {
 ///
 /// Test-only; see [`write_context_snapshot`].
 #[cfg(test)]
-pub fn append_stage_log(run_id: &str, stage_idx: usize, text: &str) {
+pub(crate) fn append_stage_log(run_id: &str, stage_idx: usize, text: &str) {
     use std::io::Write;
     ensure_stage_dir(run_id, stage_idx);
     let path = stage_dir(run_id, stage_idx).join("logs.log");
@@ -834,7 +840,7 @@ pub fn append_stage_log(run_id: &str, stage_idx: usize, text: &str) {
 ///
 /// Test-only; see [`write_context_snapshot`].
 #[cfg(test)]
-pub fn write_stage_context(
+pub(crate) fn write_stage_context(
     run_id: &str,
     stage_idx: usize,
     snap: &ContextSnapshot,
@@ -844,25 +850,25 @@ pub fn write_stage_context(
 }
 
 /// Read the context snapshot for a specific stage, if present.
-pub fn read_stage_context(run_id: &str, stage_idx: usize) -> Option<ContextSnapshot> {
+pub(crate) fn read_stage_context(run_id: &str, stage_idx: usize) -> Option<ContextSnapshot> {
     let path = stage_dir(run_id, stage_idx).join(leviath_core::files::CONTEXT_FILE);
     let json = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&json).ok()
 }
 
 /// Read the last `max_bytes` of the readable output log for a specific stage.
-pub fn tail_stage_output(run_id: &str, stage_idx: usize, max_bytes: u64) -> String {
+pub(crate) fn tail_stage_output(run_id: &str, stage_idx: usize, max_bytes: u64) -> String {
     tail_file(&stage_dir(run_id, stage_idx).join("output.log"), max_bytes)
 }
 
 /// Read the last `max_bytes` of the operational log for a specific stage.
-pub fn tail_stage_log(run_id: &str, stage_idx: usize, max_bytes: u64) -> String {
+pub(crate) fn tail_stage_log(run_id: &str, stage_idx: usize, max_bytes: u64) -> String {
     tail_file(&stage_dir(run_id, stage_idx).join("logs.log"), max_bytes)
 }
 
 /// Which stage's logs to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StageSelector {
+pub(crate) enum StageSelector {
     /// The stage the run is on now - the last entry in `stages.json`. What a
     /// caller tailing a live run wants, and what `agent_result` already picked.
     Current,
@@ -874,7 +880,7 @@ pub enum StageSelector {
 
 /// Which of a stage's two logs to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogStream {
+pub(crate) enum LogStream {
     /// `output.log` - the assistant's readable output.
     Output,
     /// `logs.log` - operational lines: `[tool] …`, `[Tokens: …]`, `[error] …`.
@@ -897,7 +903,7 @@ pub enum LogStream {
 /// `max_bytes` applies to what is returned, so for [`StageSelector::All`] it
 /// bounds the joined text rather than each stage separately: "the last N bytes
 /// of what you asked for" holds whatever the selector was.
-pub fn tail_run_logs(
+pub(crate) fn tail_run_logs(
     run_id: &str,
     selector: StageSelector,
     stream: LogStream,

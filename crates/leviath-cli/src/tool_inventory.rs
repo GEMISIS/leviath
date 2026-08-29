@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 /// Where a tool comes from, which is the part that answers "will this work if I
 /// pick it".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolSource {
+pub(crate) enum ToolSource {
     /// Compiled into this build of Leviath. Available to every agent, always.
     Builtin,
     /// A sub-agent tool, offered to an agent that may spawn children.
@@ -34,7 +34,7 @@ pub enum ToolSource {
 
 impl ToolSource {
     /// The wire name for this source, as the REST API spells it.
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Builtin => "builtin",
             Self::Subagent => "subagent",
@@ -46,7 +46,7 @@ impl ToolSource {
 
 /// One tool an agent may name in `available_tools`.
 #[derive(Debug, Clone)]
-pub struct ToolEntry {
+pub(crate) struct ToolEntry {
     /// The name the model calls and a blueprint lists.
     pub name: String,
     /// Where the tool comes from.
@@ -59,7 +59,7 @@ pub struct ToolEntry {
 
 /// A `.rhai` file that was found but did not become a usable tool.
 #[derive(Debug, Clone)]
-pub struct SkippedScript {
+pub(crate) struct SkippedScript {
     /// The file that was passed over.
     pub path: PathBuf,
     /// Why, in the words the compiler or the shadowing rule used.
@@ -71,7 +71,7 @@ pub struct SkippedScript {
 /// The full tool inventory for one scope: an agent plus the global directory,
 /// or the global directory alone.
 #[derive(Debug, Clone, Default)]
-pub struct ToolInventory {
+pub(crate) struct ToolInventory {
     /// Every usable tool, built-ins first, then the agent's scripts, then the
     /// global ones.
     pub tools: Vec<ToolEntry>,
@@ -92,7 +92,7 @@ impl ToolInventory {
     /// [`skipped`](Self::skipped) rather than listed twice. That mirrors what
     /// the daemon does at spawn: the earlier directory wins and a core tool is
     /// never shadowed, so listing the loser as available would be a lie.
-    pub fn discover(agent_dir: Option<&Path>, agent_name: Option<&str>) -> Self {
+    pub(crate) fn discover(agent_dir: Option<&Path>, agent_name: Option<&str>) -> Self {
         let ctx_dir = agent_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         let builtins = leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(ctx_dir));
 
@@ -165,7 +165,7 @@ impl ToolInventory {
     }
 
     /// Just the names, which is all the lint needs to answer "is this a tool".
-    pub fn names(&self) -> HashSet<String> {
+    pub(crate) fn names(&self) -> HashSet<String> {
         self.tools.iter().map(|t| t.name.clone()).collect()
     }
 }

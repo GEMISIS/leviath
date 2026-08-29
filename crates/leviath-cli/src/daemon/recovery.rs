@@ -56,7 +56,7 @@ use crate::daemon::spawn::{SpawnDeps, build_agent_for_reload};
 /// Reload every non-terminal persisted run under `runs_dir`, returning the
 /// `(run_id, entity)` pairs for the host to map. Runs that fail to reload are
 /// skipped.
-pub fn reload_persisted_agents(
+pub(crate) fn reload_persisted_agents(
     world: &mut PipelineWorld,
     deps: SpawnDeps<'_>,
     runs_dir: &Path,
@@ -108,7 +108,7 @@ pub fn reload_persisted_agents(
 /// (blueprint + tool state + context/stage) and returns the new entity. `None`
 /// if there's no such resumable run. This is the host's reload-on-demand seam
 /// (an op targeting an unloaded run pages it in first).
-pub fn reload_run(
+pub(crate) fn reload_run(
     world: &mut PipelineWorld,
     deps: SpawnDeps<'_>,
     run_id: &str,

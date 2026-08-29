@@ -11,7 +11,7 @@ use super::{EditError, order, require_name};
 
 /// The free-text keys of a stage the editor writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StageText {
+pub(crate) enum StageText {
     /// `description`.
     Description,
     /// `system_prompt`.
@@ -32,7 +32,7 @@ impl StageText {
 
 /// One fan-out key of a stage. `None` deletes the key.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FanOutField {
+pub(crate) enum FanOutField {
     /// Which of `worker_agent`/`worker_stage`/`worker_query` is written, and
     /// its value; the other two are removed, because the runtime wants
     /// exactly one.
@@ -61,7 +61,7 @@ const FAN_OUT_KEYS: [&str; 9] = [
 
 impl ManifestDoc {
     /// Set `[agent].name`.
-    pub fn set_agent_name(&mut self, name: &str) -> Result<(), EditError> {
+    pub(crate) fn set_agent_name(&mut self, name: &str) -> Result<(), EditError> {
         require_name(name)?;
         let agent = self
             .doc_mut()
@@ -73,7 +73,7 @@ impl ManifestDoc {
     }
 
     /// Set `[agent].description`; empty deletes it.
-    pub fn set_description(&mut self, text: &str) {
+    pub(crate) fn set_description(&mut self, text: &str) {
         let agent = self
             .doc_mut()
             .get_mut("agent")
@@ -83,7 +83,7 @@ impl ManifestDoc {
     }
 
     /// Point `[agent].entry_stage` at `stage`, which must exist.
-    pub fn set_entry_stage(&mut self, stage: &str) -> Result<(), EditError> {
+    pub(crate) fn set_entry_stage(&mut self, stage: &str) -> Result<(), EditError> {
         self.require_stage(stage)?;
         let agent = self
             .doc_mut()
@@ -96,7 +96,7 @@ impl ManifestDoc {
 
     /// Make `model` (`provider/model`) the first model every stage tries,
     /// keeping the rest of each stage's chain behind it.
-    pub fn set_default_model(&mut self, model: &str) {
+    pub(crate) fn set_default_model(&mut self, model: &str) {
         for stage in self.stages() {
             let mut chain: Vec<String> = vec![model.to_string()];
             chain.extend(stage.models.into_iter().filter(|m| m != model));
@@ -107,7 +107,7 @@ impl ManifestDoc {
 
     /// Add a stage after `after` (or at the end): autonomous, twenty tries,
     /// nowhere to go yet.
-    pub fn add_stage(&mut self, name: &str, after: Option<&str>) -> Result<(), EditError> {
+    pub(crate) fn add_stage(&mut self, name: &str, after: Option<&str>) -> Result<(), EditError> {
         require_name(name)?;
         if self.stages_key_taken(name) {
             return Err(EditError::Taken(name.to_string()));
@@ -148,7 +148,7 @@ impl ManifestDoc {
 
     /// Rename a stage, rewriting every path into it, `entry_stage`, and any
     /// `worker_stage`/`merge_stage` naming it.
-    pub fn rename_stage(&mut self, from: &str, to: &str) -> Result<(), EditError> {
+    pub(crate) fn rename_stage(&mut self, from: &str, to: &str) -> Result<(), EditError> {
         if from == to {
             return Ok(());
         }
@@ -195,7 +195,7 @@ impl ManifestDoc {
 
     /// Delete a stage and every path into it. Refuses the last stage; deleting
     /// the entry stage points the entry at the first stage left.
-    pub fn delete_stage(&mut self, name: &str) -> Result<(), EditError> {
+    pub(crate) fn delete_stage(&mut self, name: &str) -> Result<(), EditError> {
         self.require_stage(name)?;
         let remaining: Vec<String> = self
             .stage_names()
@@ -232,7 +232,7 @@ impl ManifestDoc {
 
     /// Swap a stage with its neighbour in the file (`up` = towards the
     /// start). At either end nothing happens.
-    pub fn move_stage(&mut self, name: &str, up: bool) -> Result<(), EditError> {
+    pub(crate) fn move_stage(&mut self, name: &str, up: bool) -> Result<(), EditError> {
         self.require_stage(name)?;
         let names = self.stage_names();
         let index = names.iter().position(|n| n == name).expect("listed");
@@ -248,7 +248,11 @@ impl ManifestDoc {
     }
 
     /// Set a stage's `mode`. Leaving `fan_out` deletes the fan-out keys.
-    pub fn set_stage_mode(&mut self, name: &str, mode: &StageModeView) -> Result<(), EditError> {
+    pub(crate) fn set_stage_mode(
+        &mut self,
+        name: &str,
+        mode: &StageModeView,
+    ) -> Result<(), EditError> {
         let stage = self.stage_table_mut(name)?;
         set_str(stage, "mode", mode.as_str());
         if *mode != StageModeView::FanOut {
@@ -260,7 +264,7 @@ impl ManifestDoc {
     }
 
     /// Set one of a stage's text keys; empty deletes it.
-    pub fn set_stage_text(
+    pub(crate) fn set_stage_text(
         &mut self,
         name: &str,
         which: StageText,
@@ -272,7 +276,11 @@ impl ManifestDoc {
     }
 
     /// Set `max_iterations` (at least 1); `None` deletes it.
-    pub fn set_max_iterations(&mut self, name: &str, value: Option<u64>) -> Result<(), EditError> {
+    pub(crate) fn set_max_iterations(
+        &mut self,
+        name: &str,
+        value: Option<u64>,
+    ) -> Result<(), EditError> {
         let stage = self.stage_table_mut(name)?;
         match value {
             Some(n) => set_int(stage, "max_iterations", clamp_i64(n.max(1))),
@@ -284,7 +292,11 @@ impl ManifestDoc {
     }
 
     /// Set `max_revisits`; `None` deletes it.
-    pub fn set_max_revisits(&mut self, name: &str, value: Option<u64>) -> Result<(), EditError> {
+    pub(crate) fn set_max_revisits(
+        &mut self,
+        name: &str,
+        value: Option<u64>,
+    ) -> Result<(), EditError> {
         let stage = self.stage_table_mut(name)?;
         match value {
             Some(n) => set_int(stage, "max_revisits", clamp_i64(n)),
@@ -296,7 +308,11 @@ impl ManifestDoc {
     }
 
     /// Set `allow_complete`; `None` deletes it (the runtime's default).
-    pub fn set_allow_complete(&mut self, name: &str, value: Option<bool>) -> Result<(), EditError> {
+    pub(crate) fn set_allow_complete(
+        &mut self,
+        name: &str,
+        value: Option<bool>,
+    ) -> Result<(), EditError> {
         let stage = self.stage_table_mut(name)?;
         match value {
             Some(b) => set_bool(stage, "allow_complete", b),
@@ -310,7 +326,7 @@ impl ManifestDoc {
     /// Set a stage's model chain (`provider/model` each) as
     /// `model = { models = [...] }`, keeping any other key of an existing
     /// `model` table. An empty chain deletes `model`.
-    pub fn set_models(&mut self, name: &str, chain: &[String]) -> Result<(), EditError> {
+    pub(crate) fn set_models(&mut self, name: &str, chain: &[String]) -> Result<(), EditError> {
         let stage = self.stage_table_mut(name)?;
         if chain.is_empty() {
             stage.remove("model");
@@ -346,7 +362,7 @@ impl ManifestDoc {
     }
 
     /// Set `available_tools`; an empty list deletes it.
-    pub fn set_tools(&mut self, name: &str, tools: &[String]) -> Result<(), EditError> {
+    pub(crate) fn set_tools(&mut self, name: &str, tools: &[String]) -> Result<(), EditError> {
         let stage = self.stage_table_mut(name)?;
         if tools.is_empty() {
             stage.remove("available_tools");
@@ -357,7 +373,7 @@ impl ManifestDoc {
     }
 
     /// Set one fan-out key of a stage.
-    pub fn set_fan_out(&mut self, name: &str, field: FanOutField) -> Result<(), EditError> {
+    pub(crate) fn set_fan_out(&mut self, name: &str, field: FanOutField) -> Result<(), EditError> {
         let stage = self.stage_table_mut(name)?;
         match field {
             FanOutField::Worker(worker) => {

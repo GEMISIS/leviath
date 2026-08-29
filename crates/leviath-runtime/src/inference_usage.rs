@@ -25,7 +25,7 @@ use crate::pipeline::PersistenceStage;
 /// Passed as a struct rather than eight arguments because the four token counts
 /// are trivially transposable at a call site and the compiler would not catch
 /// it.
-pub struct CallUsage<'a> {
+pub(crate) struct CallUsage<'a> {
     /// Which kind of call this was.
     pub kind: InferenceKind,
     /// The stage the run was in; empty for the title call, which has none.
@@ -61,7 +61,7 @@ pub struct CallUsage<'a> {
 /// hold, and a stage name is the key the ledger is built on anyway. The title
 /// lane has no stage, passes an empty one, and so matches no record - which is
 /// correct: it is billed to the run, not to any stage of it.
-pub fn record_call(
+pub(crate) fn record_call(
     totals: Option<&mut TokenTotals>,
     ledger: Option<&mut crate::pipeline::StageLedger>,
     persist: Option<&PersistenceStage>,

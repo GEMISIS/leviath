@@ -17,7 +17,7 @@ use super::*;
 /// monomorphization; otherwise each distinct caller closure type gets its own
 /// copy of the `net`/`filelike` match arms, and coverage is attributed
 /// per-instantiation (each only exercises the arms that caller hits).
-pub fn resolve_script_permissions(
+pub(crate) fn resolve_script_permissions(
     perms: &ScriptToolPermissions,
     resolve_builtin: &dyn Fn(&str) -> ToolPolicy,
 ) -> ScriptAllow {
@@ -79,7 +79,7 @@ fn script_restrictiveness(p: ScriptPermission) -> u8 {
 ///
 /// Parsed CLI-side (these types live in the CLI config, not `leviath-core`),
 /// mirroring `parse_blueprint_mcp_servers`.
-pub fn effective_script_permissions(
+pub(crate) fn effective_script_permissions(
     global: &ScriptToolPermissions,
     manifest_toml: &str,
 ) -> ScriptToolPermissions {

@@ -166,7 +166,7 @@ fn print_agent(info: &AgentInfo) {
 }
 
 /// Run `lev list`: show the installed agents.
-pub async fn execute(args: ListArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: ListArgs) -> anyhow::Result<()> {
     // Propagate, don't default: a config that exists but doesn't parse would
     // silently list from the default `agent_paths`, hiding the user's own
     // agent directories with no hint why (a missing file loads as defaults).

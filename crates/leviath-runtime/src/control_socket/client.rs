@@ -33,7 +33,7 @@ pub const SPAWN_CONTROL_TIMEOUT_SECS: u64 = 300;
 /// The deadline for one control request. `LEVIATH_CONTROL_TIMEOUT_SECS`
 /// overrides it; `0` disables the deadline (for debugging a daemon that is
 /// legitimately slow). An unparseable value falls back to the default.
-pub fn request_timeout() -> std::time::Duration {
+pub(crate) fn request_timeout() -> std::time::Duration {
     let secs = std::env::var("LEVIATH_CONTROL_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
@@ -263,7 +263,8 @@ impl ControlClient {
     }
 
     /// Present `token` on every connection this client opens.
-    pub fn with_token(self, token: ControlToken) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_token(self, token: ControlToken) -> Self {
         leviath_core::sync::lock(&self.link).token = Some(token);
         self
     }
@@ -281,7 +282,7 @@ impl ControlClient {
 
     /// Record this process's build id, so a daemon on a different build can be
     /// told from one that merely restarted. Without it only the version is
-    /// compared - see [`DaemonIdentity::same_code_as`].
+    /// compared - see `DaemonIdentity::same_code_as`.
     pub fn with_build(mut self, build: impl Into<String>) -> Self {
         self.own.build = build.into();
         self
@@ -442,7 +443,7 @@ impl ControlClient {
     }
 
     /// Send one request and await its response. Errors if the daemon can't be
-    /// reached, does not answer within [`request_timeout`], the connection closes
+    /// reached, does not answer within `request_timeout`, the connection closes
     /// before a reply, or the reply doesn't parse.
     ///
     /// A daemon that is not there is waited for, when this client was given a

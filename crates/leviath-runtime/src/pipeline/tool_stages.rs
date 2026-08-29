@@ -7,7 +7,7 @@ use super::*;
 /// with [`StageJustEntered`] by the transition systems), so it can re-sync that
 /// agent's per-stage tool permissions, then clear the tag. Runs after the
 /// transition systems each tick.
-pub fn sync_tool_stages(
+pub(crate) fn sync_tool_stages(
     service: Res<ToolServiceRes>,
     entered: Query<(Entity, &StageJustEntered)>,
     mut commands: Commands,
@@ -27,7 +27,7 @@ pub fn sync_tool_stages(
 /// [`StageInferences`] catalog entry (so a later revisit of this stage keeps the
 /// updated set). Always consumes the marker. This is the mechanism behind
 /// mid-run dynamic tool discovery and lazily-listed MCP tools.
-pub fn refresh_advertised_tools(
+pub(crate) fn refresh_advertised_tools(
     service: Res<ToolServiceRes>,
     mut agents: Query<
         (
@@ -59,7 +59,7 @@ pub fn refresh_advertised_tools(
 /// service reports one, tag it [`ToolsNeedRefresh`] so [`refresh_advertised_tools`]
 /// re-advertises before its next turn. Only agents carrying [`DynamicTools`] are
 /// queried, so static agents (the default) cost nothing.
-pub fn poll_dynamic_tool_refresh(
+pub(crate) fn poll_dynamic_tool_refresh(
     service: Res<ToolServiceRes>,
     agents: Query<Entity, With<DynamicTools>>,
     mut commands: Commands,

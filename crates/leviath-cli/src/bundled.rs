@@ -35,7 +35,7 @@ pub enum AgentAction {
 
 impl AgentAction {
     /// Whether applying this action would change anything on disk.
-    pub fn is_change(&self) -> bool {
+    pub(crate) fn is_change(&self) -> bool {
         !matches!(self, Self::UpToDate)
     }
 
@@ -45,12 +45,12 @@ impl AgentAction {
     /// point of [`Self::Modified`]: reinstalling over a tree the user edited
     /// destroys their work, and `install_bundled` removes the destination
     /// first, so it destroys files they added too. Offered, never assumed.
-    pub fn preselect(&self) -> bool {
+    pub(crate) fn preselect(&self) -> bool {
         matches!(self, Self::Install | Self::Update { .. })
     }
 
     /// Short label for the wizard's blueprint list.
-    pub fn label(&self, to: &str) -> String {
+    pub(crate) fn label(&self, to: &str) -> String {
         match self {
             Self::Install => format!("install {to}"),
             Self::Update { from } => format!("update {from} → {to}"),
@@ -67,7 +67,7 @@ impl AgentAction {
 /// unparseable reads as *not installed*, so the wizard offers a clean reinstall
 /// instead of refusing to plan. An unreadable manifest is exactly the state a
 /// half-finished copy leaves behind.
-pub fn installed_version(agents_dir: &Path, name: &str) -> Option<String> {
+pub(crate) fn installed_version(agents_dir: &Path, name: &str) -> Option<String> {
     let manifest = std::fs::read_to_string(
         agents_dir
             .join(name)
@@ -133,7 +133,7 @@ fn installed_file_count(dir: &Path) -> usize {
 /// checkpoint policy while believing itself current. Nothing is hashed and
 /// nothing is stored: the bundled bytes are in the binary, so the files
 /// themselves are the comparison.
-pub fn plan_agent_actions(agents_dir: &Path) -> Vec<(&'static BundledAgent, AgentAction)> {
+pub(crate) fn plan_agent_actions(agents_dir: &Path) -> Vec<(&'static BundledAgent, AgentAction)> {
     BUNDLED_AGENTS
         .iter()
         .map(|agent| {
@@ -159,7 +159,7 @@ pub fn plan_agent_actions(agents_dir: &Path) -> Vec<(&'static BundledAgent, Agen
 /// Deliberately narrow. It fires only for a manifest that *is* the installed
 /// copy, under `agents_dir/<name>/`, so a blueprint of the user's own that
 /// happens to share a name with a bundled one is never nagged about.
-pub fn stale_install_note(
+pub(crate) fn stale_install_note(
     manifest_path: &Path,
     blueprint: &leviath_core::Blueprint,
     agents_dir: Option<&Path>,
@@ -192,7 +192,10 @@ pub fn stale_install_note(
 /// Narrow in the same way: the manifest must *be* the installed copy at
 /// `agents_dir/<name>/`, so a blueprint of the user's own is never blamed on a
 /// bundled one that shares its name.
-pub fn stale_install_hint(manifest_path: &Path, agents_dir: Option<&Path>) -> Option<String> {
+pub(crate) fn stale_install_hint(
+    manifest_path: &Path,
+    agents_dir: Option<&Path>,
+) -> Option<String> {
     let agents_dir = agents_dir?;
     let bundled = BUNDLED_AGENTS
         .iter()
@@ -221,7 +224,7 @@ pub fn stale_install_hint(manifest_path: &Path, agents_dir: Option<&Path>) -> Op
 /// Here rather than at each call site because both callers want the same
 /// "hint or nothing" shape and differ only in how they separate it from the
 /// error: `lev validate` prints a paragraph, the daemon writes one line.
-pub fn stale_install_suffix(
+pub(crate) fn stale_install_suffix(
     manifest_path: &Path,
     agents_dir: Option<&Path>,
     separator: &str,
@@ -237,7 +240,7 @@ pub fn stale_install_suffix(
 ///
 /// `None` when the home directory cannot be resolved, which
 /// [`stale_install_hint`] reads as "nowhere to check" and stays quiet about.
-pub fn real_agents_dir_opt() -> Option<std::path::PathBuf> {
+pub(crate) fn real_agents_dir_opt() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| crate::commands::setup::real_agents_dir(Some(&h)))
 }
 
@@ -248,7 +251,7 @@ pub fn real_agents_dir_opt() -> Option<std::path::PathBuf> {
 /// from an older version of the blueprint (a tool script that was dropped, say)
 /// would otherwise survive forever and keep being loaded. This mirrors what
 /// `lev add`'s directory install already does.
-pub fn install_bundled(agent: &BundledAgent, agents_dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn install_bundled(agent: &BundledAgent, agents_dir: &Path) -> anyhow::Result<()> {
     let dest = agents_dir.join(agent.name);
     if dest.exists() {
         std::fs::remove_dir_all(&dest)?;

@@ -2,9 +2,9 @@
 //!
 //! The dashboard displays, searches, and persists `RunMetadata.title`; this
 //! module is what fills it in. At spawn, the daemon marks an eligible run
-//! [`PendingTitle`] and hands it a [`TitleCandidates`] chain; [`dispatch_title`]
+//! [`PendingTitle`] and hands it a [`TitleCandidates`] chain; `dispatch_title`
 //! makes one cheap LLM call over the task prompt via the `title_bridge` worker,
-//! and [`collect_title`] sanitizes the reply into the metadata. Everything
+//! and `collect_title` sanitizes the reply into the metadata. Everything
 //! downstream (persistence, dashboard header, run search) already reads the
 //! field.
 //!
@@ -29,7 +29,7 @@
 //! landing on an unloaded run was dropped, reason and all. A run making two
 //! provider calls finishes well inside one title call, so it lost even a single
 //! 50ms retry. The host now holds a finished run resident while the title lane
-//! still has a live claim on it (see [`title_outstanding`]), the claim is
+//! still has a live claim on it (see `title_outstanding`), the claim is
 //! bounded by [`TITLE_JOB_BUDGET_SECS`] so nothing is held long, and the
 //! persistence lane treats a landed name as worth a write - without which the
 //! title reached the entity and never reached disk.
@@ -92,7 +92,7 @@ pub struct TitleCandidates(pub Vec<(String, String)>);
 /// [`TITLE_JOB_BUDGET_SECS`] past dispatch, which is also what bounds the job
 /// itself, so a call cannot outlive the entity that is waiting for it.
 #[derive(Component, Debug, Clone, Copy)]
-pub struct AwaitingTitle(pub i64);
+pub(crate) struct AwaitingTitle(pub i64);
 
 /// How long a run may still be owed its name, measured from when it started.
 ///
@@ -126,7 +126,7 @@ pub const TITLE_JOB_BUDGET_SECS: u64 = 60;
 /// Whether the title lane's claim on a run that started at `started_at` has run
 /// out. The one place the bound is applied, so the host's hold and
 /// [`expire_title_hold`]'s verdict cannot disagree about when it ends.
-pub fn title_hold_expired(started_at: i64, now: i64) -> bool {
+pub(crate) fn title_hold_expired(started_at: i64, now: i64) -> bool {
     now >= started_at.saturating_add(TITLE_HOLD_SECS)
 }
 
@@ -136,7 +136,7 @@ pub fn title_hold_expired(started_at: i64, now: i64) -> bool {
 /// `awaiting` is [`AwaitingTitle`]'s deadline when a call is in flight. The one
 /// place the two cases are distinguished, so the host's hold and
 /// [`expire_title_hold`]'s verdict cannot disagree.
-pub fn title_claim_live(awaiting: Option<i64>, started_at: i64, now: i64) -> bool {
+pub(crate) fn title_claim_live(awaiting: Option<i64>, started_at: i64, now: i64) -> bool {
     match awaiting {
         // A call already out is held to its own deadline, not the run's. The
         // job is bounded by the same number, so this waits exactly as long as
@@ -154,7 +154,7 @@ pub fn title_claim_live(awaiting: Option<i64>, started_at: i64, now: i64) -> boo
 /// The host asks this before unloading a finished run. Answered here rather
 /// than in the host because the markers and the bound are this module's, and a
 /// second copy of the rule is a second thing to keep in step.
-pub fn title_outstanding(world: &bevy_ecs::world::World, entity: Entity, now: i64) -> bool {
+pub(crate) fn title_outstanding(world: &bevy_ecs::world::World, entity: Entity, now: i64) -> bool {
     let awaiting = world.get::<AwaitingTitle>(entity);
     if awaiting.is_none() && world.get::<PendingTitle>(entity).is_none() {
         return false;
@@ -166,11 +166,11 @@ pub fn title_outstanding(world: &bevy_ecs::world::World, entity: Entity, now: i6
 
 /// The receiving end of the title-outcomes channel, as a world resource.
 #[derive(Resource)]
-pub struct TitleResults(pub UnboundedReceiver<TitleOutcome>);
+pub(crate) struct TitleResults(pub UnboundedReceiver<TitleOutcome>);
 
 /// The sending end, cloned into each spawned title job.
 #[derive(Resource)]
-pub struct TitleSink(pub UnboundedSender<TitleOutcome>);
+pub(crate) struct TitleSink(pub UnboundedSender<TitleOutcome>);
 
 /// Enough for a model that thinks before it answers to get past the thinking.
 ///
@@ -497,7 +497,7 @@ fn record_title_failure(meta: &mut RunMetadata, reason: String) {
 /// wired - and because the three of them together are one thing: how this host
 /// wants titles made.
 #[derive(bevy_ecs::system::SystemParam)]
-pub struct TitleServices<'w> {
+pub(crate) struct TitleServices<'w> {
     /// `[title]`, when the daemon installed it. Absent means no titling.
     pub settings: Option<Res<'w, TitleSettings>>,
     /// The operator's retry schedule, from `[limits]`.
@@ -535,7 +535,7 @@ type TitleQuery = (
 /// would stall the whole chain behind a name nothing answers to. Only two
 /// things drop the marker without a call: titling being switched off, and a
 /// chain with nothing callable left in it.
-pub fn dispatch_title(
+pub(crate) fn dispatch_title(
     mut agents: Query<TitleQuery, (With<PendingTitle>, Without<AwaitingTitle>)>,
     services: TitleServices,
     stage: Res<InferenceStage>,
@@ -649,7 +649,7 @@ type ExpireTitleQuery = (
 /// bug back. A finished one is different: the host is holding it in memory for
 /// this alone, so the wait has to end, and it ends saying why rather than
 /// leaving the silence this run's `title_error` exists to break.
-pub fn expire_title_hold(
+pub(crate) fn expire_title_hold(
     mut agents: Query<ExpireTitleQuery, TitleOwed>,
     services: TitleServices,
     mut commands: Commands,
@@ -705,7 +705,7 @@ type CollectTitleQuery = (
 /// paying for a second opinion on a prompt that is not in doubt. A call that
 /// *failed* says nothing about the title and everything about the route to it,
 /// which is exactly what the next candidate is for.
-pub fn collect_title(
+pub(crate) fn collect_title(
     mut results: ResMut<TitleResults>,
     mut agents: Query<CollectTitleQuery, With<AwaitingTitle>>,
     persist: Option<Res<crate::pipeline::PersistenceStage>>,

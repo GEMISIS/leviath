@@ -1478,12 +1478,7 @@ mode = "output"
         }
         // A run that is merely parked has not finished, and the pulse is what
         // says where it stopped.
-        for phase in [
-            RunPhase::Waiting,
-            RunPhase::Paused,
-            RunPhase::Idle,
-            RunPhase::Stale,
-        ] {
+        for phase in [RunPhase::Waiting, RunPhase::Paused, RunPhase::Stale] {
             let mut parked = next.clone();
             parked.run = Some(phase);
             v.apply_live(&parked);

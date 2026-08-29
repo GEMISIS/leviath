@@ -25,7 +25,7 @@ pub enum Channel {
 
 impl Channel {
     /// The name the install script and the docs use.
-    pub fn id(self) -> &'static str {
+    pub(crate) fn id(self) -> &'static str {
         match self {
             Self::Stable => "stable",
             Self::Beta => "beta",
@@ -35,7 +35,7 @@ impl Channel {
 
     /// The Homebrew formula and Scoop package for this channel. They share a
     /// naming scheme on purpose, so one function answers for both.
-    pub fn package(self) -> &'static str {
+    pub(crate) fn package(self) -> &'static str {
         match self {
             Self::Stable => "leviath",
             Self::Beta => "leviath-beta",
@@ -45,7 +45,7 @@ impl Channel {
 
     /// The channel a package name carries, or `None` for a name this build does
     /// not ship (someone's own formula, or one from a future channel).
-    pub fn from_package(name: &str) -> Option<Self> {
+    pub(crate) fn from_package(name: &str) -> Option<Self> {
         [Self::Stable, Self::Beta, Self::Alpha]
             .into_iter()
             .find(|c| c.package() == name)
@@ -56,7 +56,7 @@ impl Channel {
 
 /// How this copy of `lev` got onto the machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InstallMethod {
+pub(crate) enum InstallMethod {
     /// Homebrew, under the named formula.
     Homebrew {
         /// The formula, which is also what carries the channel.
@@ -84,7 +84,7 @@ pub enum InstallMethod {
 
 impl InstallMethod {
     /// The short name used in `--json`.
-    pub fn id(&self) -> &'static str {
+    pub(crate) fn id(&self) -> &'static str {
         match self {
             Self::Homebrew { .. } => "homebrew",
             Self::Scoop { .. } => "scoop",
@@ -99,7 +99,7 @@ impl InstallMethod {
     /// `cargo install leviath-cli` resolves crates.io, and each stable deploy
     /// publishes there from the same commit the binaries were built at, so a
     /// cargo install is a stable install by construction.
-    pub fn channel(&self) -> Option<Channel> {
+    pub(crate) fn channel(&self) -> Option<Channel> {
         match self {
             Self::Homebrew { formula } => Channel::from_package(formula),
             Self::Scoop { package } => Channel::from_package(package),
@@ -110,7 +110,7 @@ impl InstallMethod {
     }
 
     /// The one-line description the report opens with.
-    pub fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         let channel = match self.channel() {
             Some(c) => format!(", {} channel", c.id()),
             // A formula this build does not ship, or a path nothing claims.
@@ -194,7 +194,7 @@ pub(super) fn script_destinations(home: Option<&Path>) -> Vec<PathBuf> {
 /// answer `brew --prefix` gave (if it was asked and answered), and the channel
 /// the user named - so every arm is testable without a Homebrew, a Scoop or a
 /// second machine.
-pub fn detect(
+pub(crate) fn detect(
     exe: &Path,
     home: Option<&Path>,
     brew_prefix: Option<&Path>,
@@ -254,7 +254,7 @@ pub(super) fn is_ambiguous_prefix(prefix: &Path) -> bool {
 /// Cached: this used to run once per `lev update`, and now also answers an HTTP
 /// route, where spawning a process per request to learn a thing that cannot
 /// change under a running server would be a waste worth noticing.
-pub fn brew_prefix() -> Option<PathBuf> {
+pub(crate) fn brew_prefix() -> Option<PathBuf> {
     static CACHED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     CACHED
         .get_or_init(|| {

@@ -11,7 +11,7 @@ pub struct RemoveArgs {
 }
 
 /// Run `lev remove`: uninstall an agent.
-pub async fn execute(args: RemoveArgs) -> anyhow::Result<()> {
+pub(crate) async fn execute(args: RemoveArgs) -> anyhow::Result<()> {
     let installer = leviath_package::AgentInstaller::new();
     remove_agent(&installer, &args.name)
 }

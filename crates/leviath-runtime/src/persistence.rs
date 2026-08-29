@@ -117,10 +117,10 @@ pub struct TokenTotals {
 }
 
 /// Run-scoped productivity flags, mirrored into `meta.json` so an empty run can
-/// be recognized (and explained) from disk. Unlike [`StageProgress`], this is
+/// be recognized (and explained) from disk. Unlike `StageProgress`, this is
 /// never reset on a stage transition - it describes the whole run.
 ///
-/// [`StageProgress`]: crate::pipeline::StageProgress
+/// `StageProgress`: crate::pipeline::StageProgress
 #[derive(Component, Clone, Default, Debug, PartialEq)]
 pub struct RunOutcomeFlags(pub leviath_core::run_meta::RunFlags);
 
@@ -187,7 +187,8 @@ fn stage_can_modify(stage: &leviath_core::Stage) -> bool {
 
 impl TokenTotals {
     /// Add one inference response's usage to the running totals.
-    pub fn add_usage(&mut self, usage: &leviath_providers::TokenUsage) {
+    #[cfg(test)]
+    pub(crate) fn add_usage(&mut self, usage: &leviath_providers::TokenUsage) {
         self.add_usage_priced(usage, None);
     }
 
@@ -195,7 +196,7 @@ impl TokenTotals {
     ///
     /// `pricing` is the fallback: a call the provider priced itself is counted
     /// at that figure and these rates are never consulted.
-    pub fn add_usage_priced(
+    pub(crate) fn add_usage_priced(
         &mut self,
         usage: &leviath_providers::TokenUsage,
         pricing: Option<&leviath_providers::ModelPricing>,
@@ -221,7 +222,10 @@ impl TokenTotals {
 /// One definition, called by both `meta.json` and the run listing, so what an
 /// operator reads in `lev ps` and what a harness reads off disk cannot drift
 /// apart.
-pub fn is_empty_output(status: &AgentStatus, flags: &leviath_core::run_meta::RunFlags) -> bool {
+pub(crate) fn is_empty_output(
+    status: &AgentStatus,
+    flags: &leviath_core::run_meta::RunFlags,
+) -> bool {
     matches!(
         run_status_from(status),
         RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled
@@ -231,7 +235,7 @@ pub fn is_empty_output(status: &AgentStatus, flags: &leviath_core::run_meta::Run
 }
 
 /// Map an agent's ECS status to the on-disk [`RunStatus`].
-pub fn run_status_from(status: &AgentStatus) -> RunStatus {
+pub(crate) fn run_status_from(status: &AgentStatus) -> RunStatus {
     match status {
         AgentStatus::Idle | AgentStatus::Active => RunStatus::Running,
         AgentStatus::Paused => RunStatus::Paused,
@@ -245,7 +249,7 @@ pub fn run_status_from(status: &AgentStatus) -> RunStatus {
 /// The [`RunStatus`] behind an engine status *label*, or `None` for a word this
 /// build does not know.
 ///
-/// [`run_status_from`] is the authority and takes the status itself; this is
+/// `run_status_from` is the authority and takes the status itself; this is
 /// the same mapping for a caller holding only the word. The gateway is that
 /// caller: a [`WorldEvent`](crate::host::WorldEvent) crosses the control socket
 /// with its status already flattened to a label, and the gateway has to name
@@ -264,7 +268,7 @@ pub fn run_status_for_label(label: &str) -> Option<RunStatus> {
 /// Map an agent's ECS status to the on-disk per-stage [`StageRunStatus`] for the
 /// stage it is currently in. `Cancelled` has no stage-level equivalent, so it
 /// surfaces as `Error` (the stage stopped without completing).
-pub fn stage_status_from(status: &AgentStatus) -> StageRunStatus {
+pub(crate) fn stage_status_from(status: &AgentStatus) -> StageRunStatus {
     match status {
         // A paused agent's current stage is still mid-flight, not a new stage state.
         AgentStatus::Idle | AgentStatus::Active | AgentStatus::Paused => StageRunStatus::Active,
@@ -298,7 +302,7 @@ pub fn region_kind_str(kind: &RegionKind) -> &'static str {
 
 /// Build the full context snapshot (`context.json`) from a window. Pure over the
 /// window - no engine/entity. (Ported from the CLI's `build_context_snapshot`.)
-pub fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> ContextSnapshot {
+pub(crate) fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> ContextSnapshot {
     let regions = window
         .regions
         .iter()
@@ -343,7 +347,7 @@ pub fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> Conte
 /// Held apart from [`RunPosition`] because these are read off the entity while
 /// the position is stamped onto it: one is what the agent *is*, the other is
 /// where it has got to.
-pub struct RunMetaSources<'a> {
+pub(crate) struct RunMetaSources<'a> {
     /// The run's immutable metadata, fixed at spawn.
     pub md: &'a RunMetadata,
     /// The agent's live state.
@@ -360,7 +364,7 @@ pub struct RunMetaSources<'a> {
 }
 
 /// Where the run has got to, and when.
-pub struct RunPosition {
+pub(crate) struct RunPosition {
     /// Index of the stage the agent is in.
     pub stage_index: usize,
     /// The moment `updated_at` is stamped with.
@@ -391,7 +395,7 @@ pub struct RunPosition {
 /// the progress stamp where it was. Taken as a plain `Option` rather than the
 /// watermark it comes from so this stays a data mapper with no dependency on the
 /// persistence pipeline.
-pub fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> RunMeta {
+pub(crate) fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> RunMeta {
     let RunMetaSources {
         md,
         state,

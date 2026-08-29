@@ -72,7 +72,7 @@ pub fn visible_tool_env() -> Vec<String> {
 
 /// Path to the file where a running daemon records its build id
 /// (`<leviath-home>/.leviath/daemon.build`).
-pub fn build_marker_path() -> Option<std::path::PathBuf> {
+pub(crate) fn build_marker_path() -> Option<std::path::PathBuf> {
     leviath_core::paths::data_dir().map(|d| d.join("daemon.build"))
 }
 
@@ -129,7 +129,7 @@ const PROVIDER_PRIME_TIMEOUT_SECS: u64 = 10;
 
 /// [`setup_daemon_host`], with outbound-client construction injected so the
 /// start-up failure path is reachable from a test.
-pub async fn setup_daemon_host_with(
+pub(crate) async fn setup_daemon_host_with(
     config: Config,
     runs_dir: std::path::PathBuf,
     runtime: Handle,

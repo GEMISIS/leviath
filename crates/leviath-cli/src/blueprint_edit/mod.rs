@@ -28,8 +28,8 @@
 //!
 //! [`Blueprint`]: leviath_core::Blueprint
 
-pub mod catalog;
-pub mod check;
+pub(crate) mod catalog;
+pub(crate) mod check;
 mod doc;
 mod edges;
 mod layout_store;
@@ -37,21 +37,22 @@ mod order;
 mod regions;
 mod stages;
 mod tables;
-pub mod templates;
+pub(crate) mod templates;
 
-pub use doc::{
-    AgentView, EdgeKind, EdgeView, EffectiveRegions, FanOutView, ManifestDoc, RegionView,
-    StageModeView, StageView, ToolRouting, TransformKind, TransformRules, WorkerKind,
+pub(crate) use doc::{
+    EdgeKind, EdgeView, ManifestDoc, RegionView, StageModeView, TransformKind, WorkerKind,
 };
-pub use edges::Rule;
-pub use layout_store::{LayoutStore, Positions};
-pub use regions::{RegionField, RegionScope, RegionValue};
-pub use stages::{FanOutField, StageText};
+#[cfg(test)]
+pub(crate) use doc::{FanOutView, ToolRouting};
+pub(crate) use edges::Rule;
+pub(crate) use layout_store::{LayoutStore, Positions};
+pub(crate) use regions::{RegionField, RegionScope, RegionValue};
+pub(crate) use stages::{FanOutField, StageText};
 
 /// Why an edit was refused. The document is untouched whenever one of these
 /// comes back.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum EditError {
+pub(crate) enum EditError {
     /// The text is not TOML.
     #[error("not valid TOML: {0}")]
     Toml(String),
@@ -90,7 +91,7 @@ pub enum EditError {
 
 /// Whether `name` can be a stage, region or agent name: the charset the
 /// runtime accepts, and what The Lair's editor enforces.
-pub fn is_valid_name(name: &str) -> bool {
+pub(crate) fn is_valid_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .chars()

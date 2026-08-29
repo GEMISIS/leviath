@@ -43,7 +43,7 @@ pub enum Outcome {
 
 impl Outcome {
     /// A short status line for the provider card.
-    pub fn summary(&self) -> String {
+    pub(crate) fn summary(&self) -> String {
         match self {
             Self::Skipped => "not checked".to_string(),
             Self::Reachable { models } if models.len() == 1 => "1 model".to_string(),
@@ -53,7 +53,7 @@ impl Outcome {
     }
 
     /// Model ids to offer in the default-model picker.
-    pub fn models(&self) -> &[String] {
+    pub(crate) fn models(&self) -> &[String] {
         match self {
             Self::Reachable { models } => models,
             Self::Skipped | Self::Failed { .. } => &[],
@@ -61,7 +61,7 @@ impl Outcome {
     }
 
     /// Whether this outcome should be drawn as a problem.
-    pub fn is_failure(&self) -> bool {
+    pub(crate) fn is_failure(&self) -> bool {
         matches!(self, Self::Failed { .. })
     }
 }
@@ -97,13 +97,13 @@ impl ProviderVerifier for SkipVerifier {
 /// [`Outcome`] is exercised without a network call: a registry built from
 /// credentials for a provider name nothing recognises is empty, which drives
 /// the `None` arm, and every other arm is the provider's own I/O.
-pub async fn verify_via_registry(creds: &ProviderCreds) -> Outcome {
+pub(crate) async fn verify_via_registry(creds: &ProviderCreds) -> Outcome {
     verify_via_registry_with(creds, &leviath_providers::provider::build_http_client).await
 }
 
 /// [`verify_via_registry`], with client construction injected so the
 /// "no usable HTTPS client" outcome is reachable from a test.
-pub async fn verify_via_registry_with(
+pub(crate) async fn verify_via_registry_with(
     creds: &ProviderCreds,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> Outcome {

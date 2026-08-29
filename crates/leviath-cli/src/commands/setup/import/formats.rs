@@ -122,7 +122,7 @@ fn is_disabled(entry: &serde_json::Map<String, serde_json::Value>) -> bool {
 /// fallback alongside a hosted endpoint), and [`MCPServerConfig::resolve`]
 /// rejects an entry that sets both without an explicit transport, so exactly
 /// one is kept and the transport is stated outright.
-pub fn parse_json_entry(name: &str, value: &serde_json::Value) -> Option<Candidate> {
+pub(crate) fn parse_json_entry(name: &str, value: &serde_json::Value) -> Option<Candidate> {
     let entry = value.as_object()?;
     if is_disabled(entry) {
         return None;
@@ -215,7 +215,7 @@ fn parse_json_map(map: Option<&serde_json::Value>) -> Vec<Candidate> {
 /// Covers `.mcp.json`, Claude Desktop, Cursor, Windsurf, and Gemini CLI
 /// (`mcpServers`), VS Code (`servers`), OpenCode (`mcp`), and Zed
 /// (`context_servers`) - the key is the only thing that differs.
-pub fn parse_json_object(contents: &str, key: &str) -> anyhow::Result<Vec<Candidate>> {
+pub(crate) fn parse_json_object(contents: &str, key: &str) -> anyhow::Result<Vec<Candidate>> {
     let root: serde_json::Value = serde_json::from_str(contents)?;
     Ok(parse_json_map(root.get(key)))
 }
@@ -226,7 +226,7 @@ pub fn parse_json_object(contents: &str, key: &str) -> anyhow::Result<Vec<Candid
 /// Both are offered. A server configured for one repo is still a server the
 /// user set up and may want globally, and the project path rides along as the
 /// candidate's scope so the wizard can say where each came from.
-pub fn parse_claude_code(contents: &str) -> anyhow::Result<Vec<Candidate>> {
+pub(crate) fn parse_claude_code(contents: &str) -> anyhow::Result<Vec<Candidate>> {
     let root: serde_json::Value = serde_json::from_str(contents)?;
     let mut out = parse_json_map(root.get("mcpServers"));
 
@@ -248,7 +248,7 @@ pub fn parse_claude_code(contents: &str) -> anyhow::Result<Vec<Candidate>> {
 /// table. Reuses the JSON entry parser by converting the TOML table through
 /// `serde_json::Value` - the field names are identical, and one tolerant entry
 /// parser beats two that must be kept in step.
-pub fn parse_codex(contents: &str) -> anyhow::Result<Vec<Candidate>> {
+pub(crate) fn parse_codex(contents: &str) -> anyhow::Result<Vec<Candidate>> {
     // Deserialize the TOML straight into a `serde_json::Value` rather than
     // parsing to `toml::Value` and converting: the conversion step's error arm
     // cannot happen for anything TOML can produce, and an error arm that cannot

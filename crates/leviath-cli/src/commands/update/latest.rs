@@ -55,7 +55,7 @@ fn tag_for(channel: Channel) -> &'static str {
 /// nothing to show - and a client that renders `null` honestly as "can't tell"
 /// is already the behaviour the site falls back to for pre-release channels.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LatestCheck {
+pub(crate) struct LatestCheck {
     /// Newest version on this copy's channel, without a leading `v`.
     pub latest: Option<String>,
     /// Whether `latest` is newer than the running build.
@@ -70,7 +70,7 @@ impl LatestCheck {
     ///
     /// An unchecked cache is stale by definition, which is what makes the first
     /// request kick off a refresh instead of waiting for a timer.
-    pub fn is_stale(&self, now: u64, ttl: u64) -> bool {
+    pub(crate) fn is_stale(&self, now: u64, ttl: u64) -> bool {
         match self.checked_at {
             Some(at) => now.saturating_sub(at) >= ttl,
             None => true,
@@ -85,7 +85,7 @@ impl LatestCheck {
 /// question is never worth surfacing an error for, because the honest rendering
 /// of "the update check failed" and of "the update check has not run" are the
 /// same sentence.
-pub type ReleaseFetcher = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+pub(crate) type ReleaseFetcher = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
 
 /// Ask GitHub what the newest release on `channel` is, and compare it to
 /// `running`.
@@ -93,7 +93,7 @@ pub type ReleaseFetcher = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sy
 /// `running` is the version this binary reports, so the comparison is against
 /// the copy actually being asked about rather than against whatever the caller
 /// last saw.
-pub fn check_with(
+pub(crate) fn check_with(
     channel: Channel,
     running: &str,
     fetch: &ReleaseFetcher,
@@ -173,7 +173,7 @@ fn is_newer(latest: &str, running: &str) -> bool {
 /// 0 rather than an error because the only thing this stamps is "how fresh is
 /// this answer", and a machine whose clock is that wrong has a bigger problem
 /// than a stale update prompt.
-pub fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -189,7 +189,7 @@ pub fn now_secs() -> u64 {
 ///
 /// GitHub refuses a request with no `User-Agent`, so it carries one naming the
 /// program doing the asking, which is what their guidance asks for.
-pub fn fetch_release(url: &str) -> Result<String, String> {
+pub(crate) fn fetch_release(url: &str) -> Result<String, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
         .user_agent(concat!("leviath/", env!("CARGO_PKG_VERSION")))

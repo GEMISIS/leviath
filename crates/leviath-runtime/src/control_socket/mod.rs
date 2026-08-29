@@ -12,8 +12,8 @@
 //!
 //! Each platform module exposes the same small surface - [`ControlId`],
 //! [`control_id`], [`bind_control_listener`], [`ControlListener::accept`],
-//! [`connect`], and [`is_daemon_running`] - over which the shared
-//! [`handle_connection`] (generic over any `AsyncRead + AsyncWrite`) and
+//! `connect`, and [`is_daemon_running`] - over which the shared
+//! `handle_connection` (generic over any `AsyncRead + AsyncWrite`) and
 //! [`ControlClient`] operate. It is the default, always-on management channel
 //! (the opt-in HTTP API that `lev serve` toggles is a separate surface).
 
@@ -29,27 +29,31 @@ use crate::host::{ControlOp, DaemonHealth, RunListEntry, SpawnArgs, WorldEvent};
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
 mod client;
-pub use client::{
-    CodeMismatch, ControlClient, DEFAULT_CONTROL_TIMEOUT_SECS, LinkStatus, RESTART_GRACE,
-    SPAWN_CONTROL_TIMEOUT_SECS, WorldEventStream, request_timeout,
-};
+pub use client::{ControlClient, RESTART_GRACE, WorldEventStream};
 #[cfg(test)]
-use client::{is_transient, timeout_for};
+use client::{
+    DEFAULT_CONTROL_TIMEOUT_SECS, LinkStatus, SPAWN_CONTROL_TIMEOUT_SECS, is_transient,
+    request_timeout, timeout_for,
+};
 
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
+pub(crate) use unix::{ClientStream, connect};
+#[cfg(unix)]
 pub use unix::{
-    ClientStream, ControlId, ControlListener, ServerStream, bind_control_listener, connect,
-    control_id, control_id_from_str, is_daemon_running,
+    ControlId, ControlListener, ServerStream, bind_control_listener, control_id,
+    control_id_from_str, is_daemon_running,
 };
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
+pub(crate) use windows::{ClientStream, connect};
+#[cfg(windows)]
 pub use windows::{
-    ClientStream, ControlId, ControlListener, ServerStream, bind_control_listener, connect,
-    control_id, control_id_from_str, is_daemon_running,
+    ControlId, ControlListener, ServerStream, bind_control_listener, control_id,
+    control_id_from_str, is_daemon_running,
 };
 
 /// Prefix on every response that means "you are not authenticated".
@@ -112,7 +116,7 @@ impl std::fmt::Debug for ControlToken {
 
 impl ControlToken {
     /// The token file beside the control socket.
-    pub fn path(dir: &Path) -> PathBuf {
+    pub(crate) fn path(dir: &Path) -> PathBuf {
         dir.join("control.token")
     }
 
@@ -123,7 +127,7 @@ impl ControlToken {
     /// the only recovery was `pkill`, and the advice to "restart it" was advice
     /// that could not work: `restart` stops before it starts, and the stop was
     /// the part that failed.
-    pub fn pid_path(dir: &Path) -> PathBuf {
+    pub(crate) fn pid_path(dir: &Path) -> PathBuf {
         dir.join("daemon.pid")
     }
 
@@ -163,7 +167,7 @@ impl ControlToken {
     }
 
     /// Read the token a running daemon wrote.
-    pub fn load(dir: &Path) -> std::io::Result<Self> {
+    pub(crate) fn load(dir: &Path) -> std::io::Result<Self> {
         let token = std::fs::read_to_string(Self::path(dir))?;
         Ok(Self(token.trim().to_string()))
     }
@@ -173,12 +177,12 @@ impl ControlToken {
     /// Constant time because the comparison is against a secret and the caller
     /// controls the input: a byte-at-a-time early return leaks the prefix, and
     /// a local attacker can retry without limit.
-    pub fn matches(&self, presented: &str) -> bool {
+    pub(crate) fn matches(&self, presented: &str) -> bool {
         leviath_core::constant_time_eq(&self.0, presented)
     }
 
     /// The token itself, for a client that is about to present it.
-    pub fn expose(&self) -> &str {
+    pub(crate) fn expose(&self) -> &str {
         &self.0
     }
 }
@@ -269,7 +273,7 @@ impl ControlRequest {
     /// of the same run does nothing - are still excluded, because their
     /// second reply says `ok: false`, and the caller would report a cancel
     /// that worked as "no such run".
-    pub fn is_read_only(&self) -> bool {
+    pub(crate) fn is_read_only(&self) -> bool {
         matches!(
             self,
             Self::Authenticate { .. }
@@ -417,7 +421,7 @@ impl DaemonIdentity {
     /// The build to record when a process does not say. Named rather than a
     /// literal because [`same_code_as`](Self::same_code_as) must recognise it:
     /// an unknown build is compared as "could be the same", never as the word.
-    pub fn unknown_build() -> String {
+    pub(crate) fn unknown_build() -> String {
         "unknown".to_string()
     }
 
@@ -426,7 +430,7 @@ impl DaemonIdentity {
     /// Versions must match. Builds must match too when both are known; a side
     /// that does not know its build cannot contradict the other, so it does
     /// not.
-    pub fn same_code_as(&self, other: &Self) -> bool {
+    pub(crate) fn same_code_as(&self, other: &Self) -> bool {
         let unknown = Self::unknown_build();
         self.version == other.version
             && (self.build == unknown || other.build == unknown || self.build == other.build)
@@ -603,7 +607,8 @@ where
 /// Generic over the stream so the same logic serves a Unix socket or a Windows
 /// named pipe. The accept loop that produces the streams (and owns the socket's
 /// lifecycle) lives with the daemon; this is the reusable per-connection half.
-pub async fn handle_connection<S>(
+#[cfg(test)]
+pub(crate) async fn handle_connection<S>(
     stream: S,
     op_tx: UnboundedSender<ControlOp>,
     events: broadcast::Sender<WorldEvent>,
@@ -622,7 +627,7 @@ where
     .await
 }
 
-/// [`handle_connection`], introducing the daemon as `identity` to a client that
+/// `handle_connection`, introducing the daemon as `identity` to a client that
 /// asks. The `lev daemon` binary passes its build id here; the plain form is
 /// for embedders and tests, which have no build id to give.
 pub async fn handle_connection_as<S>(

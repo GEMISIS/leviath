@@ -20,7 +20,7 @@ impl WorldHost {
     /// request of their own, so both also carry [`AwaitingInteraction`]; asking
     /// the specific markers first is what keeps them from all reporting as a
     /// generic prompt.
-    pub fn wait_reason(&self, agent: crate::world::AgentId) -> Option<WaitReason> {
+    pub(crate) fn wait_reason(&self, agent: crate::world::AgentId) -> Option<WaitReason> {
         let world = self.world.world();
         // An id from another world names a different agent here, which would
         // report that one's wait reason as this run's.

@@ -5,7 +5,7 @@
 
 use super::*;
 
-/// How often (in per-stage iterations) [`check_workspace_health`] stats the
+/// How often (in per-stage iterations) `check_workspace_health` stats the
 /// agent's working directory. One `metadata` call every few iterations is far
 /// cheaper than the tool failures it replaces.
 pub const WORKSPACE_CHECK_INTERVAL: usize = 5;
@@ -30,7 +30,7 @@ type WorkspaceHealthQuery = (
 /// runs - with no way back. Nothing can recreate a deleted checkout from inside
 /// the agent, so this stops immediately with a message that names the real
 /// problem, instead of routing to error recovery to flail more cheaply.
-pub fn check_workspace_health(
+pub(crate) fn check_workspace_health(
     mut agents: Query<WorkspaceHealthQuery, With<ReadyToInfer>>,
     mut commands: Commands,
 ) {
@@ -84,7 +84,7 @@ type MaxIterationQuery = (
 /// count has reached the stage's `max_iterations`, end the stage (routing to a
 /// `max_iterations` edge if one exists, else a normal transition) instead of
 /// running another inference. Ported from the imperative `run_autonomous` cap.
-pub fn enforce_max_iterations(
+pub(crate) fn enforce_max_iterations(
     mut agents: Query<MaxIterationQuery, With<ReadyToInfer>>,
     mut commands: Commands,
 ) {
@@ -319,7 +319,7 @@ type StuckStageQuery = (
 /// spent its `max_revisits` - an exhausted escape hatch must leave the agent
 /// working the stage normally (its `max_iterations` is still the hard cap) rather
 /// than kick it out down an unrelated edge.
-pub fn detect_stuck_stage(
+pub(crate) fn detect_stuck_stage(
     mut agents: Query<StuckStageQuery, With<ReadyToInfer>>,
     mut commands: Commands,
 ) {

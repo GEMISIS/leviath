@@ -6,13 +6,11 @@
 
 use std::path::{Path, PathBuf};
 
-pub use leviath_core::manifest::parse_manifest;
-
 /// Resolve an agent argument to the `agent.leviath` file it names.
 ///
 /// Accepts the file itself, a directory containing one, or an installed
 /// agent's name.
-pub fn find_manifest(path: &str) -> anyhow::Result<PathBuf> {
+pub(crate) fn find_manifest(path: &str) -> anyhow::Result<PathBuf> {
     let p = Path::new(path);
 
     // 1. Explicit agent.leviath file

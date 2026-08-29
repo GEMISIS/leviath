@@ -21,7 +21,7 @@ const ERROR_ACCESS_DENIED: i32 = 5;
 pub type ControlId = String;
 
 /// The client end of a control connection.
-pub type ClientStream = NamedPipeClient;
+pub(crate) type ClientStream = NamedPipeClient;
 
 /// The server end of an accepted control connection.
 pub type ServerStream = NamedPipeServer;
@@ -113,7 +113,7 @@ pub fn bind_control_listener(id: &str) -> std::io::Result<ControlListener> {
 }
 
 /// Connect to the daemon's control pipe named `id`.
-pub async fn connect(id: &str) -> std::io::Result<ClientStream> {
+pub(crate) async fn connect(id: &str) -> std::io::Result<ClientStream> {
     // `open` is synchronous; the returned client is async for I/O.
     ClientOptions::new().open(id)
 }

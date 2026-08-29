@@ -295,13 +295,13 @@ pub(crate) fn retry_policy_for(
 /// request already handed to the async lanes ran to completion, holding its
 /// inference-pool permit or tool-lane capacity the whole time.
 #[derive(Component, Default, Debug)]
-pub struct InFlightWork(pub Vec<crate::cancel::CancelToken>);
+pub(crate) struct InFlightWork(pub Vec<crate::cancel::CancelToken>);
 
 /// Stop the in-flight work of every agent that has reached a terminal state, and
 /// drop the handles. Runs before the dispatch systems each tick, so a cancel
 /// takes effect on the very next tick rather than whenever the provider or tool
 /// happens to answer.
-pub fn abort_terminal_work(
+pub(crate) fn abort_terminal_work(
     agents: Query<(Entity, &AgentState, &InFlightWork)>,
     mut commands: Commands,
 ) {
@@ -356,20 +356,20 @@ type InferenceQuery = (
 /// works at: one run's blocks, in one order. Absent before the first request,
 /// which is exactly when there is nothing to invalidate.
 #[derive(bevy_ecs::component::Component, Debug, Clone, Copy)]
-pub struct SystemPrefixHash(pub u64);
+pub(crate) struct SystemPrefixHash(pub u64);
 
 /// The previous request's per-block system digests, kept on the agent so the
 /// next assembly can tell which blocks held still and place cache breakpoints
 /// only where the entry is readable back (issue #474).
 #[derive(Component, Debug, Clone, Default)]
-pub struct SystemBlockHashes(pub Vec<u64>);
+pub(crate) struct SystemBlockHashes(pub Vec<u64>);
 
 /// Inference-dispatch system: for every `ReadyToInfer` agent, resolve its
 /// provider and, **if a per-model permit is free**, build the request, spawn the
 /// inference job, and move it to `AwaitingInference`. If its provider is missing
 /// or no slot is free, it stays `ReadyToInfer` and is retried on a later tick -
 /// no blocking, no wasted task.
-pub fn dispatch_inference(
+pub(crate) fn dispatch_inference(
     agents: Query<InferenceQuery, With<ReadyToInfer>>,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,

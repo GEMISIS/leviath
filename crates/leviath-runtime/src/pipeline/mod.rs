@@ -33,49 +33,135 @@ use crate::tool_bridge::{BoxedToolExec, ToolJob, ToolOutcome};
 
 // Sections of the former single-file pipeline, one per concern.
 mod gate_check;
+pub(crate) use gate_check::gate_blocks;
 mod transition;
-pub(crate) use gate_check::*;
-pub use transition::*;
+#[cfg(test)]
+pub(crate) use transition::find_conditioned_edge;
+pub use transition::{AgentBlueprint, StageCursor, force_transition, is_terminal_status};
+pub(crate) use transition::{
+    AwaitingTransitionChoice, StageEntry, StageInferences, StageSetup, StageSetups, VisitCounts,
+    WaitingForChildren, apply_stage_context, attach_stage_components, emit_stage_transition,
+    enter_stage, fail_stage, fail_stage_world, find_conditioned_edge_ref, hold_for_gate,
+    region_digest, resolve_transition,
+};
 mod hooks;
-pub use hooks::*;
+#[cfg(test)]
+pub(crate) use hooks::TerminalHookFired;
+pub(crate) use hooks::{
+    run_after_inference_hooks, run_before_inference_hooks, run_stage_enter_hooks,
+    run_stage_exit_hooks, run_terminal_hooks, run_tool_call_hooks,
+};
 mod convergence;
-pub use convergence::*;
+pub(crate) use convergence::track_stage_progress;
 mod watchdog;
-pub use watchdog::*;
+pub use watchdog::WORKSPACE_CHECK_INTERVAL;
+#[cfg(test)]
+pub(crate) use watchdog::{StuckMetrics, detect_stuck, hottest_edit, note_stuck};
+pub(crate) use watchdog::{
+    check_workspace_health, detect_stuck_stage, enforce_max_iterations, note_error,
+    note_max_iterations, note_unusable_split,
+};
 mod requirements;
-pub use requirements::*;
+#[cfg(test)]
+pub(crate) use requirements::{DEFAULT_REQUIRED_REENTRY_CAP, unmet_required_regions};
+pub(crate) use requirements::{
+    FanOutReentries, GateDecision, OutputReentries, RequiredReentries, gate_requires_children,
+    require_context_regions, require_fan_out, require_final_output,
+};
 mod spawn;
-pub use spawn::*;
+#[cfg(test)]
+pub(crate) use spawn::spawn_agent;
+#[cfg(test)]
+pub(crate) use spawn::{DEFAULT_CONTEXT_WINDOW_TOKENS, stage_setup_from};
+pub use spawn::{ResolvedStage, SeededSpawn, spawn_agent_seeded};
 mod transition_choice;
-pub use transition_choice::*;
+pub(crate) use transition_choice::{
+    AwaitingTransitionResponse, TransitionResults, collect_transition_choice,
+    dispatch_transition_choice,
+};
+#[cfg(test)]
+pub(crate) use transition_choice::{build_transition_prompt, match_transition_choice};
 mod tool_stages;
-pub use tool_stages::*;
+pub(crate) use tool_stages::{
+    poll_dynamic_tool_refresh, refresh_advertised_tools, sync_tool_stages,
+};
 mod messaging;
-pub use messaging::*;
+pub(crate) use messaging::{MessageIntake, deliver_messages};
 mod persist;
-pub use persist::*;
+pub use persist::PersistWatermark;
+#[cfg(test)]
+pub(crate) use persist::{
+    BROADCAST_LOG_LINE_MAX_BYTES, PERSIST_HEARTBEAT_SECS, reconcile_stage_ledger,
+};
+pub(crate) use persist::{PersistenceStage, dispatch_persistence, reflect_interaction_status};
 mod compaction;
-pub use compaction::*;
+pub(crate) use compaction::{
+    AwaitingCompaction, CompactionResults, PendingEdgeCompact, apply_edge_transform,
+    collect_compaction, compaction_request, dispatch_compaction, dispatch_edge_compact,
+};
+pub use compaction::{CompactionSettings, is_stage_specific};
 mod tool_results;
-pub use tool_results::*;
+pub(crate) use tool_results::{
+    ToolResults, apply_one_tool_result, apply_tool_results, collect_tools,
+};
+#[cfg(test)]
+pub(crate) use tool_results::{
+    annotate_path_errors, apply_file_tracking, stage_modifying_tools, truncate_file,
+};
 mod gate;
-pub use gate::*;
+pub(crate) use gate::taint_block_message;
+pub use gate::{GateScriptRules, PolicyGate, ToolSensitivities};
 mod tools;
-pub use tools::*;
+pub(crate) use tools::{
+    AwaitingTools, ContextToolResults, ToolServiceRes, ToolStage, ToolsNeedRefresh,
+    call_had_no_effect, dispatch_tools, merge_in_call_order, one_line,
+};
+pub use tools::{DynamicTools, ToolProgress, ToolService, noop_progress};
+#[cfg(test)]
+pub(crate) use tools::{barrier_then, cut_off_arguments_refusal, invalid_args_refusal};
 mod response;
-pub use response::*;
+pub use response::StageLedger;
+#[cfg(test)]
+pub(crate) use response::{GlobalNudge, MAX_CUT_OFF_NUDGES, edited_path, to_inference_result};
+pub(crate) use response::{
+    InferenceResults, ProcessResponse, ReadyForTools, ReadyForTransition, ResolveTransition,
+    StageIoBuffer, StageOutcome, StageProgress, collect_inference, handle_empty_response,
+    inject_system_nudge, process_response,
+};
 mod inference;
-pub use inference::*;
+#[cfg(test)]
+pub(crate) use inference::{
+    BATCH_TOOL_HINT, WINDOWS_SHELL_HINT, build_request, hint_blocks, shell_guidance_for,
+};
+pub(crate) use inference::{
+    InFlightWork, abort_terminal_work, dispatch_inference, retry_policy_for, track_in_flight,
+};
 mod resolve;
-pub use resolve::*;
+pub use resolve::{
+    ModelDefaults, ToolCatalog, ToolOwners, bare_default_model, expand_connector_grants,
+    filter_tools_for_stage, model_key, providers_tried, resolve_stage_model, resolve_stages,
+};
 mod stall;
-pub use stall::*;
+pub use stall::{DEFAULT_STALL_TIMEOUT_SECS, PausedForSetup, StallTimeout};
+pub(crate) use stall::{
+    DispatchStall, HeldInference, HeldLane, StallClock, StallReason, fail_stalled_dispatch,
+    note_stall,
+};
 mod wedge;
-pub use wedge::*;
+#[cfg(test)]
+pub(crate) use wedge::Wedged;
+pub(crate) use wedge::fail_wedged_runs;
+pub use wedge::{DEFAULT_WEDGE_TIMEOUT_SECS, WedgeTimeout};
 mod circuit;
-pub use circuit::*;
+pub(crate) use circuit::rotate_open_circuits;
+pub use circuit::{
+    CircuitPolicy, DEFAULT_CIRCUIT_COOLDOWN_SECS, DEFAULT_FAILURES_BEFORE_OPEN,
+    ProviderCircuitState, ProviderCircuits, SLOW_FAILURE_MULTIPLIER,
+};
 mod calibration;
-pub use calibration::*;
+pub(crate) use calibration::{
+    PromptCalibration, PromptEstimate, calibrated_tokens, needs_eviction_calibrated,
+};
 
 // ─── Phase marker components (an agent is in exactly one) ────────────────────
 //
@@ -92,14 +178,14 @@ pub struct ReadyToInfer;
 /// Inference has been dispatched to the pool; the agent is waiting for its
 /// result (which the inference-collect system will apply).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AwaitingInference;
+pub(crate) struct AwaitingInference;
 
 /// Transient tag: the agent just entered a stage (index + name). The
 /// [`sync_tool_stages`] system reads it to notify the [`ToolService`] of the
 /// stage change, then removes it. Carries the data so the tool service need not
 /// query the world.
 #[derive(Component, Debug, Clone)]
-pub struct StageJustEntered {
+pub(crate) struct StageJustEntered {
     /// The new stage's index.
     pub index: usize,
     /// The new stage's name.
@@ -171,7 +257,7 @@ impl Default for InferenceRetryTuning {
 /// channel to report outcomes on, the tick wake handle, and a runtime handle to
 /// spawn the (bounded, per-request) worker tasks onto.
 #[derive(Resource, Clone)]
-pub struct InferenceStage {
+pub(crate) struct InferenceStage {
     /// Per-model concurrency pools.
     pub pools: Arc<InferencePools>,
     /// Where completed inferences are reported.

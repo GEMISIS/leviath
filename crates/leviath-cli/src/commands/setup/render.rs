@@ -36,7 +36,7 @@ const MIN_WIDTH: u16 = 24;
 const MIN_HEIGHT: u16 = 6;
 
 /// Draw one frame.
-pub fn draw(frame: &mut Frame, wizard: &Wizard) {
+pub(crate) fn draw(frame: &mut Frame, wizard: &Wizard) {
     let area = frame.area();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         frame.render_widget(
@@ -237,7 +237,7 @@ fn draw_body(frame: &mut Frame, area: Rect, wizard: &Wizard) {
 /// A stored layout would make drawing a state change, and the wizard's one
 /// rule is that a render never moves anything; rebuilding costs a screenful of
 /// lines on a click, which is not a cost worth trading that rule for.
-pub fn row_at(area: Rect, wizard: &Wizard, column: u16, row: u16) -> Option<usize> {
+pub(crate) fn row_at(area: Rect, wizard: &Wizard, column: u16, row: u16) -> Option<usize> {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         return None;
     }

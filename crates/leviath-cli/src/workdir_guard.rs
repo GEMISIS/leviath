@@ -20,12 +20,12 @@
 //! with a warning rather than being refused; breaking every unattended
 //! caller to enforce a prompt would trade one failure mode for a worse one.
 //!
-//! The decision is a pure function over paths ([`assess`]) so it can be tested
+//! The decision is a pure function over paths (`assess`) so it can be tested
 //! without a filesystem or a terminal; asking the question is the caller's.
 
 /// What to do about a run's workdir.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkdirVerdict {
+pub(crate) enum WorkdirVerdict {
     /// Nothing alarming, or the user has already said they work here.
     Proceed,
     /// Worth confirming. Carries what to tell the user.
@@ -35,7 +35,7 @@ pub enum WorkdirVerdict {
 /// Why a workdir was questioned. Separate from the message so the caller can
 /// render it as a prompt, a refusal, or a log line without re-deriving it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkdirConcern {
+pub(crate) enum WorkdirConcern {
     /// The workdir is the user's home directory itself.
     HomeDirectory,
     /// The workdir is a filesystem root.
@@ -44,7 +44,7 @@ pub enum WorkdirConcern {
 
 impl WorkdirConcern {
     /// One line saying what is alarming about it.
-    pub fn headline(&self) -> &'static str {
+    pub(crate) fn headline(&self) -> &'static str {
         match self {
             Self::HomeDirectory => "That is your home directory.",
             Self::FilesystemRoot => "That is a filesystem root.",
@@ -52,7 +52,7 @@ impl WorkdirConcern {
     }
 
     /// What an agent could do there, concretely rather than in the abstract.
-    pub fn detail(&self) -> &'static str {
+    pub(crate) fn detail(&self) -> &'static str {
         match self {
             Self::HomeDirectory => {
                 "An agent's file tools are confined to its workdir, so this run could read \
@@ -78,7 +78,7 @@ impl WorkdirConcern {
 /// canonical by construction. This deliberately does not touch the filesystem:
 /// the check runs on every `lev run`, and a stat storm on the startup path
 /// would be a poor trade for catching a symlinked home.
-pub fn assess(
+pub(crate) fn assess(
     workdir: &std::path::Path,
     home: Option<&std::path::Path>,
     allowed: &[String],
@@ -119,7 +119,10 @@ fn is_within(path: &std::path::Path, base: &std::path::Path) -> bool {
 /// it goes to stderr on every such run, names the directory, and says how to
 /// silence it. Someone reading the log afterwards should be able to find the
 /// moment an agent was pointed at a home directory.
-pub fn non_interactive_warning(workdir: &std::path::Path, concern: &WorkdirConcern) -> String {
+pub(crate) fn non_interactive_warning(
+    workdir: &std::path::Path,
+    concern: &WorkdirConcern,
+) -> String {
     format!(
         "warning: running in '{}'. {} {}\n\
          Proceeding without confirmation - there is no terminal to ask on. Silence this by \
@@ -144,7 +147,7 @@ pub fn non_interactive_warning(workdir: &std::path::Path, concern: &WorkdirConce
 /// Returns whether to proceed. Anything that is not an explicit yes is a no:
 /// Esc, `n`, a closed event source, or a draw that fails. A confirmation that
 /// defaults to yes on an error is not a confirmation.
-pub async fn confirm_core<S: crate::tui::TerminalSetup, E: crate::tui::EventSource>(
+pub(crate) async fn confirm_core<S: crate::tui::TerminalSetup, E: crate::tui::EventSource>(
     workdir: &std::path::Path,
     concern: &WorkdirConcern,
     setup: &mut S,
@@ -207,7 +210,7 @@ pub async fn confirm_core<S: crate::tui::TerminalSetup, E: crate::tui::EventSour
 ///
 /// Returns whether the run may proceed. `interactive` is whether there is a
 /// terminal to ask on - when there is not (CI, a pipe, `--yolo`), the run
-/// proceeds with [`non_interactive_warning`] on stderr rather than being
+/// proceeds with `non_interactive_warning` on stderr rather than being
 /// refused, because refusing would break every unattended caller.
 pub async fn check<S: crate::tui::TerminalSetup, E: crate::tui::EventSource>(
     workdir: &std::path::Path,

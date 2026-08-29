@@ -2,8 +2,8 @@
 //!
 //! # One engine, two entry points
 //!
-//! Both start at [`begin_fan_out`], which parks the parent in [`FanOutWaiting`].
-//! [`fan_out_collect`] then starts one worker per item - bounded by
+//! Both start at `begin_fan_out`, which parks the parent in [`FanOutWaiting`].
+//! `fan_out_collect` then starts one worker per item - bounded by
 //! `max_workers` - through the daemon-installed [`FanOutSpawner`], tracks them
 //! as the parent's `SubAgentChildren`, and once every worker is terminal applies
 //! the failure policy and builds the consolidated report.
@@ -12,8 +12,8 @@
 //! [`FanOutOrigin`] records:
 //!
 //! - **The [`FAN_OUT_TOOL`] tool**, callable from any stage that grants it. The
-//!   dispatcher reads the call ([`parse_fan_out_call`]), hands it over as
-//!   [`PendingFanOut`], and [`start_pending_fan_outs`] begins it. The report
+//!   dispatcher reads the call (`parse_fan_out_call`), hands it over as
+//!   `PendingFanOut`, and `start_pending_fan_outs` begins it. The report
 //!   comes back as that call's tool result, routed by the stage's
 //!   `tool_routing` like any other, and the agent carries on where it was.
 //! - **A `mode = "fan_out"` stage** (see
@@ -55,7 +55,7 @@ const DEFAULT_FANOUT_DEPTH: usize = 3;
 /// Starts one worker for a fan-out work item. The implementor resolves the
 /// worker's blueprint (per `config`'s `worker_stage` / `worker_agent` /
 /// `worker_query`), spawns it into `world` seeded with the work item, and returns
-/// the child entity. Parent/child linking is done by [`fan_out_collect`], not the
+/// the child entity. Parent/child linking is done by `fan_out_collect`, not the
 /// spawner.
 pub trait FanOutSpawner: Send + Sync {
     /// Spawn one worker under `parent` for the given work item, or `Err` with a
@@ -160,18 +160,19 @@ impl FanOutWaiting {
     ///
     /// Surfaced by `lev ps` so "waiting" on a fan-out parent reads as progress
     /// against a known denominator rather than an unexplained stall.
-    pub fn outstanding(&self) -> usize {
+    pub(crate) fn outstanding(&self) -> usize {
         self.active.len() + self.pending.len()
     }
 
     /// Whether this parent's fan-out is paused (see the field).
-    pub fn is_paused(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_paused(&self) -> bool {
         self.paused
     }
 
     /// Latch or release the fan-out. Returns whether this changed anything, so
     /// a caller can tell a real pause from a repeat.
-    pub fn set_paused(&mut self, paused: bool) -> bool {
+    pub(crate) fn set_paused(&mut self, paused: bool) -> bool {
         let changed = self.paused != paused;
         self.paused = paused;
         changed
@@ -237,7 +238,7 @@ pub fn restore_fan_out_waiting(
 /// different questions: "has this entry fanned out yet" gates the nudge, and
 /// "what did the last round cover" is what the next round is told.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct FannedOut;
+pub(crate) struct FannedOut;
 
 /// The ids a fan-out stage's last split handed out, so a later split of the same
 /// stage can be told what has already been researched.
@@ -245,7 +246,7 @@ pub struct FannedOut;
 /// Set on every successful split and read only on a re-entry. Absent means this
 /// stage has not split before.
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
-pub struct PreviousWorkItems(pub Vec<String>);
+pub(crate) struct PreviousWorkItems(pub Vec<String>);
 
 /// How many previous work-item ids the re-entry framing lists before it stops.
 ///
@@ -280,7 +281,7 @@ type FrameSplitRoundQuery = (
 /// that an empty list is a real answer to it. The stage's own `split_prompt` is
 /// unchanged, and a first entry is not touched at all - no framing, no extra
 /// tokens, no behaviour change for the run that splits once.
-pub fn frame_split_round(
+pub(crate) fn frame_split_round(
     mut agents: Query<FrameSplitRoundQuery, With<crate::pipeline::StageJustEntered>>,
 ) {
     crate::tick_scope::clear();
@@ -353,7 +354,7 @@ pub struct WorkItem {
 
 /// A `fan_out` call the dispatcher has read but not yet started.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FanOutRequest {
+pub(crate) struct FanOutRequest {
     /// The agent to run for every item, when the caller named one. `None` inside
     /// a fan-out stage, whose blueprint names the worker instead.
     pub agent: Option<String>,
@@ -364,7 +365,7 @@ pub struct FanOutRequest {
 }
 
 /// Whether a tool call is the fan-out tool.
-pub fn is_fan_out_tool(name: &str) -> bool {
+pub(crate) fn is_fan_out_tool(name: &str) -> bool {
     name == leviath_core::blueprint::FAN_OUT_TOOL
 }
 
@@ -374,7 +375,7 @@ pub fn is_fan_out_tool(name: &str) -> bool {
 /// schema the provider enforced, so a shape that does not fit is a real mistake
 /// and the model is told so rather than guessed at. The refusal is an `[error]`
 /// tool result, which the model corrects on its next turn like any other.
-pub fn parse_fan_out_call(arguments: &serde_json::Value) -> Result<FanOutRequest, String> {
+pub(crate) fn parse_fan_out_call(arguments: &serde_json::Value) -> Result<FanOutRequest, String> {
     let object = arguments
         .as_object()
         .ok_or_else(|| "fan_out arguments must be an object".to_string())?;
@@ -467,7 +468,7 @@ fn blueprint_fan_out_max_items(world: &World, entity: Entity) -> Option<usize> {
 /// names its worker in the call. Either way the result is one `FanOutConfig`, so
 /// everything downstream - the cap, the failure policy, the report - is the same
 /// code for both entry points.
-pub fn config_for(request: &FanOutRequest, stage: Option<&FanOutConfig>) -> FanOutConfig {
+pub(crate) fn config_for(request: &FanOutRequest, stage: Option<&FanOutConfig>) -> FanOutConfig {
     let mut config = stage.cloned().unwrap_or_else(|| FanOutConfig {
         worker_agent: None,
         worker_stage: None,
@@ -500,7 +501,7 @@ pub fn config_for(request: &FanOutRequest, stage: Option<&FanOutConfig>) -> FanO
 /// the worker blueprint through the injected spawner - and `dispatch_tools` is
 /// an ordinary system. The same shape the interaction and gate-prompt lanes use.
 #[derive(Component, Debug, Clone)]
-pub struct PendingFanOut {
+pub(crate) struct PendingFanOut {
     /// The tool call whose result this fan-out will be.
     pub call_id: String,
     /// What the model asked for.
@@ -511,7 +512,7 @@ pub struct PendingFanOut {
 ///
 /// Ordered before [`fan_out_collect`], so a fan-out started here has its workers
 /// launched on the same tick rather than a tick later.
-pub fn start_pending_fan_outs(world: &mut World) {
+pub(crate) fn start_pending_fan_outs(world: &mut World) {
     crate::tick_scope::clear();
     let pending: Vec<(Entity, PendingFanOut)> = {
         let mut q = world.query::<(Entity, &PendingFanOut)>();
@@ -587,7 +588,7 @@ pub fn start_pending_fan_outs(world: &mut World) {
 /// nothing pending, the collector finds nothing running, and it finishes on the
 /// next tick with an empty report. That is what "there is nothing to hand out"
 /// has to do, and making it a separate path is how it would drift.
-pub fn begin_fan_out(
+pub(crate) fn begin_fan_out(
     world: &mut World,
     parent: Entity,
     config: FanOutConfig,
@@ -638,7 +639,7 @@ pub fn begin_fan_out(
 /// finished workers, start pending ones up to `max_workers`, and once none remain
 /// running apply the failure policy, inject the consolidated report, and
 /// transition to the merge stage (or resolve the stage's own transition).
-pub fn fan_out_collect(world: &mut World) {
+pub(crate) fn fan_out_collect(world: &mut World) {
     crate::tick_scope::clear();
     let parents: Vec<Entity> = {
         let mut q = world.query_filtered::<Entity, With<FanOutWaiting>>();
@@ -741,7 +742,7 @@ pub fn fan_out_collect(world: &mut World) {
 /// A fan-out worker whose terminal result the parent has already consumed.
 /// Set by [`fan_out_collect`]; consumed by [`slim_merged_workers`].
 #[derive(Component)]
-pub struct MergedWorker;
+pub(crate) struct MergedWorker;
 
 /// Drop a merged worker's heavy components once its terminal snapshot has
 /// reached the persistence lane.
@@ -752,7 +753,7 @@ pub struct MergedWorker;
 /// holds the slim back until the terminal state is on its way to disk (so
 /// nothing readable is lost - the entity's remaining metadata still identifies
 /// the run, and its full final state is in the run dir).
-pub fn slim_merged_workers(
+pub(crate) fn slim_merged_workers(
     workers: Query<(Entity, &crate::pipeline::PersistWatermark), With<MergedWorker>>,
     mut commands: Commands,
 ) {
@@ -1182,7 +1183,6 @@ mod tests {
             context_layout: None,
             context_hide: Vec::new(),
             system_prompt: None,
-            output: None,
         }
     }
 
@@ -1237,7 +1237,6 @@ mod tests {
                     response: response.to_string(),
                     tool_calls: vec![],
                     tokens_used: 0,
-                    timestamp: 0,
                     cut_off_at: None,
                 },
                 ProcessResponse,
@@ -1327,7 +1326,6 @@ mod tests {
             response: content.to_string(),
             tool_calls: vec![],
             tokens_used: 0,
-            timestamp: 0,
             cut_off_at: None,
         });
     }
@@ -2642,7 +2640,6 @@ mod tests {
                     response: "Let me run the tests one more time.".to_string(),
                     tool_calls: vec![],
                     tokens_used: 0,
-                    timestamp: 0,
                     cut_off_at: None,
                 },
                 crate::persistence::FinalOutput(leviath_core::output::FinalOutput::new(
@@ -2674,7 +2671,6 @@ mod tests {
                     response: "the old behaviour".to_string(),
                     tool_calls: vec![],
                     tokens_used: 0,
-                    timestamp: 0,
                     cut_off_at: None,
                 },
             ))
@@ -2812,7 +2808,6 @@ mod tests {
                     response: "done text".to_string(),
                     tool_calls: vec![],
                     tokens_used: 0,
-                    timestamp: 0,
                     cut_off_at: None,
                 },
             ))

@@ -40,13 +40,13 @@ impl CancelToken {
     }
 
     /// Fire the signal, waking every waiter. Idempotent.
-    pub fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         self.inner.cancelled.store(true, Ordering::SeqCst);
         self.inner.notify.notify_waiters();
     }
 
     /// Whether this token has already fired.
-    pub fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.inner.cancelled.load(Ordering::SeqCst)
     }
 
@@ -56,7 +56,7 @@ impl CancelToken {
     /// only wakes waiters registered at the time it runs, so checking first and
     /// waiting second would lose a cancel that landed in between - and the job
     /// would then run to completion despite having been cancelled.
-    pub async fn cancelled(&self) {
+    pub(crate) async fn cancelled(&self) {
         let notified = self.inner.notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
