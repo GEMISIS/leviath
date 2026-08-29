@@ -1829,8 +1829,6 @@ some_custom_thing = \"forwarded to the script\"
         let limits = LimitsConfig::default();
         assert_eq!(limits.max_concurrent_inferences, Some(8));
         assert_eq!(limits.default_max_iterations, Some(50));
-        // Exact token counting is opt-in, off by default.
-        assert!(!limits.exact_token_counting);
         // Relief is on by default: ten 30-second cycles of a full lane going
         // nowhere before the daemon widens it.
         assert_eq!(limits.dead_cycles_before_relief, 10);
@@ -1968,18 +1966,24 @@ some_custom_thing = \"forwarded to the script\"
         assert_eq!(tuned.limits.inference_retry_base_ms, 2000);
     }
 
+    /// `[limits] exact_token_counting` was removed when the guard it switched
+    /// on became unconditional. A config that still sets it is reported the
+    /// way any stale key is - named, at its path, and ignored - and still
+    /// loads with the rest of its `[limits]` intact.
     #[test]
-    fn exact_token_counting_parses_when_set() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
+    fn a_config_that_still_sets_exact_token_counting_is_warned_about() {
         let body = format!(
-            "{}\n[limits]\nexact_token_counting = true\n",
+            "{}\n[limits]\nexact_token_counting = true\nmax_concurrent_tools = 3\n",
             config_toml_without_limits()
         );
+        let unknown = Config::unknown_config_keys(&body);
+        assert_eq!(unknown, vec!["limits.exact_token_counting".to_string()]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
         std::fs::write(&path, body).unwrap();
         let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
-        assert!(config.limits.exact_token_counting);
-        // The other fields still fall back to their per-field defaults.
+        assert_eq!(config.limits.max_concurrent_tools, 3);
         assert_eq!(config.limits.max_concurrent_inferences, Some(8));
     }
 
@@ -3445,7 +3449,6 @@ enabled = false
                 notify_spend_usd: Vec::new(),
                 max_agents_per_run: 0,
                 default_max_iterations: Some(99),
-                exact_token_counting: false,
                 stream_inference: true,
                 script_shell_timeout_secs: 45,
                 script_http_timeout_secs: 15,

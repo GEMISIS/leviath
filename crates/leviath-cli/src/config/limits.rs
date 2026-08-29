@@ -120,16 +120,6 @@ pub struct LimitsConfig {
     #[serde(default = "default_default_max_iterations")]
     pub default_max_iterations: Option<usize>,
 
-    /// Opt-in exact pre-inference token budgeting. When `true`, each agent
-    /// inference is preceded by an exact token count of the assembled request
-    /// (via the provider's `count_tokens`, which uses a remote endpoint for
-    /// Anthropic/Gemini and a local heuristic otherwise) and is rejected before
-    /// sending if it would exceed the model's context window. Off by default:
-    /// normal budgeting uses cheap local estimates, and this adds a network
-    /// round-trip per inference for providers with a remote count endpoint.
-    #[serde(default)]
-    pub exact_token_counting: bool,
-
     /// Whether a model that can stream is asked to. Defaults to `true`.
     ///
     /// It makes no difference to what an agent sees: the chunks are folded back
@@ -523,7 +513,6 @@ impl Default for LimitsConfig {
             // No ceiling, which is what every install has today.
             max_agents_per_run: 0,
             default_max_iterations: default_default_max_iterations(),
-            exact_token_counting: false,
             stream_inference: default_stream_inference(),
             script_shell_timeout_secs: default_script_shell_timeout_secs(),
             script_http_timeout_secs: default_script_http_timeout_secs(),

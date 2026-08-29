@@ -172,7 +172,7 @@ once at startup rather than per run:
   `[security] allow_local_network` (the outbound-network policy).
 - The `[limits]` the world itself is built with: `stall_timeout_secs`, `wedge_timeout_secs`,
   `dead_cycles_before_relief`, `max_concurrent_inferences`, `max_concurrent_tools`,
-  `exact_token_counting`, `provider_failures_before_open`, `provider_circuit_cooldown_secs`,
+  `provider_failures_before_open`, `provider_circuit_cooldown_secs`,
   `interaction_timeout_secs`, and `finished_retention_secs`.
 
 `[providers] fallback_order` is not one of them. It is per-run policy, so it reloads like everything

@@ -52,6 +52,17 @@ same list.
   `leviath-net::client_builder`, fourteen injected seams in `leviath-sys` and
   `leviath-agent-client::JsonRpcMessage::is_notification` are no longer public
   (#675).
+- `[limits] exact_token_counting` is gone, and the guard it switched
+  on is always on. Every inference lane (the stage's own call, the routing call,
+  compaction, titling) now measures its request with the provider's tokenizer
+  before sending it whenever the calibrated estimate plus the reply budget is
+  at or above half the model's window, refuses one that would overflow, and
+  feeds the count back into the estimate. A request under that line is sent
+  unmeasured, so a short turn pays nothing. A config that still sets the key
+  gets the unknown-key warning and loads with the rest of its `[limits]`. The
+  count calls on Anthropic and Gemini now reuse a pooled connection and go
+  through the provider's rate limiter; OpenAI's local tiktoken count moves off
+  the async threads above 256 KB.
 
 ### Fixed
 

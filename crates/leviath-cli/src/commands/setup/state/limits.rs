@@ -26,11 +26,6 @@ pub(super) fn limits_fields(config: &Config) -> Vec<Field> {
             value: FieldValue::Number(config.limits.default_max_iterations.map(|n| n as u64)),
         },
         Field {
-            label: "Exact token counting",
-            help: "Ask the provider for real token counts instead of estimating. Slower.",
-            value: FieldValue::Bool(config.limits.exact_token_counting),
-        },
-        Field {
             label: "Batch tool-call hint",
             help: "Nudge models to request several tools in one turn.",
             value: FieldValue::Bool(config.batch_tool_hint),
@@ -123,34 +118,33 @@ pub(super) fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
             (2, FieldValue::Number(n)) => {
                 config.limits.default_max_iterations = n.map(|n| n as usize)
             }
-            (3, FieldValue::Bool(b)) => config.limits.exact_token_counting = *b,
-            (4, FieldValue::Bool(b)) => config.batch_tool_hint = *b,
-            (5, FieldValue::Bool(b)) => config.shell_hint = *b,
+            (3, FieldValue::Bool(b)) => config.batch_tool_hint = *b,
+            (4, FieldValue::Bool(b)) => config.shell_hint = *b,
             // Unset means "leave the watchdog at its default", not "disable it";
             // disabling is an explicit 0.
-            (6, FieldValue::Number(n)) => {
+            (5, FieldValue::Number(n)) => {
                 config.limits.stall_timeout_secs =
                     n.unwrap_or(Config::default().limits.stall_timeout_secs)
             }
             // Same rule: unset keeps the default, 0 is an explicit "never".
-            (7, FieldValue::Number(n)) => {
+            (6, FieldValue::Number(n)) => {
                 config.limits.dead_cycles_before_relief = n
                     .map(|n| n as u32)
                     .unwrap_or(Config::default().limits.dead_cycles_before_relief)
             }
             // And again: unset keeps the default, 0 means keep nothing.
-            (8, FieldValue::Number(n)) => {
+            (7, FieldValue::Number(n)) => {
                 config.limits.finished_retention_secs =
                     n.unwrap_or(Config::default().limits.finished_retention_secs)
             }
             // Same rule once more, and here the default is itself 0 (off).
-            (9, FieldValue::Number(n)) => {
+            (8, FieldValue::Number(n)) => {
                 config.limits.wedge_timeout_secs =
                     n.unwrap_or(Config::default().limits.wedge_timeout_secs)
             }
             // Same rule again: unset keeps the default hour, 0 is an explicit
             // "wait for a person however long it takes".
-            (10, FieldValue::Number(n)) => {
+            (9, FieldValue::Number(n)) => {
                 config.limits.interaction_timeout_secs =
                     n.unwrap_or(Config::default().limits.interaction_timeout_secs)
             }
@@ -159,8 +153,8 @@ pub(super) fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
             // the only two settings whose absence is a real choice a user makes
             // - deleting the line is how you say "let it write" - so unset
             // stores `None` rather than reinstating a number they just removed.
-            (11, FieldValue::Number(n)) => config.limits.max_tool_call_write_bytes = *n,
-            (12, FieldValue::Number(n)) => config.limits.max_run_write_bytes = *n,
+            (10, FieldValue::Number(n)) => config.limits.max_tool_call_write_bytes = *n,
+            (11, FieldValue::Number(n)) => config.limits.max_run_write_bytes = *n,
             _ => {}
         }
     }

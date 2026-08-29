@@ -122,10 +122,6 @@
           "minimum": 1,
           "default": 50
         },
-        "exact_token_counting": {
-          "type": "boolean",
-          "default": false
-        },
         "stream_inference": {
           "type": "boolean",
           "default": true,

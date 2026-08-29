@@ -272,9 +272,9 @@ pub fn dispatch_transition_choice(
             provider,
             request,
             permit,
-            // Routing responses are tiny (≤256 tokens) and always fit; skip the
-            // extra count call for them.
-            exact_token_counting: false,
+            // The routing request is the stage's own request plus one question,
+            // so it is guarded the way the stage's is, from the same correction.
+            calibration: calibration.copied(),
             // And buffered for the same reason: a stage name is one short
             // answer that arrives in one piece. Streaming exists here to keep a
             // long silent generation from being mistaken for a dead socket, and

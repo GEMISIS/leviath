@@ -935,6 +935,29 @@ fn check_source_accepts_a_provider_and_returns_its_annotations() {
     assert_eq!(meta.default_model.as_deref(), Some("mock-1"));
 }
 
+/// The optional `count_tokens` is reported, and reported by its full shape:
+/// a function of that name with the wrong arity is one the loader will never
+/// call, and saying "yes" about it would send an operator looking elsewhere
+/// for why their counts are estimates.
+#[test]
+fn inspect_source_reports_whether_the_script_counts_tokens() {
+    let without = inspect_source("mock.rhai", GOOD_PROVIDER).expect("a usable provider");
+    assert!(!without.counts_tokens);
+    assert_eq!(without.meta.provider.as_deref(), Some("mock"));
+
+    let counting = format!("{GOOD_PROVIDER}\nfn count_tokens(state, text, model) {{ 7 }}");
+    let with = inspect_source("mock.rhai", &counting).expect("a usable provider");
+    assert!(with.counts_tokens);
+    assert!(format!("{with:?}").contains("counts_tokens: true"));
+
+    let wrong_arity = format!("{GOOD_PROVIDER}\nfn count_tokens(text) {{ 7 }}");
+    let wrong = inspect_source("mock.rhai", &wrong_arity).expect("a usable provider");
+    assert!(
+        !wrong.counts_tokens,
+        "a one-parameter count_tokens is not the contract"
+    );
+}
+
 #[test]
 fn check_source_reports_a_syntax_error() {
     let message = refusal(check_source("mock.rhai", "fn inference( { oops").unwrap_err());

@@ -376,6 +376,36 @@ The three optional functions each carry their own shape. `stream(state, request,
 it). `list_models(state)` returns an array of
 `{ id, display_name, max_context_tokens, max_output_tokens }`.
 
+### Counting tokens remotely
+
+`count_tokens` is what the [context-window guard](/docs/context#requests-are-measured-before-they-are-sent)
+calls before a large request goes out: once the runtime's estimate of a request plus its reply
+budget reaches half the model's window, it asks the script for the real figure and refuses a
+request that would not fit. Small turns never reach it. The example above answers with the byte
+heuristic, which is the right answer for an API with no counting endpoint. For one that has such an
+endpoint, ask it, and fall back to the heuristic if the call fails - the count is guarding a
+request, and a failed count must not become a failed request:
+
+```rhai
+fn count_tokens(state, text, model) {
+    // The shape of Anthropic's /messages/count_tokens; other APIs differ in
+    // the path and the field name, not the idea.
+    try {
+        let resp = parse_json(http_post(
+            `${state.base_url}/messages/count_tokens`,
+            to_json(#{ model: model, messages: [#{ role: "user", content: text }] }),
+            auth_headers(state),
+        ));
+        resp.input_tokens
+    } catch {
+        count_tokens_heuristic(text, "anthropic")
+    }
+}
+```
+
+`lev validate` says whether each script provider on the machine defines `count_tokens`, so you can
+tell a provider the guard measures exactly from one it measures with the estimate.
+
 ## Testing it
 
 To adapt this to another OpenAI-compatible API, change the metadata block, the default `base_url` and

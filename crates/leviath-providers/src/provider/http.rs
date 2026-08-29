@@ -177,6 +177,43 @@ pub fn build_http1_client(
     outbound_builder(timeout_secs).http1_only().build()
 }
 
+/// How many idle connections the side-call client keeps per host.
+///
+/// Two, not one: a count call can be in flight for one lane while another
+/// lane's finishes, and a pool of one would open a fresh connection for the
+/// second every time they overlap.
+const SIDE_CALL_POOL_IDLE_PER_HOST: usize = 2;
+
+/// How long an idle side-call connection is kept before it is closed.
+const SIDE_CALL_POOL_IDLE_SECS: u64 = 30;
+
+/// The client for a provider's small, frequent side calls - the token count
+/// the window guard makes before a large request goes out.
+///
+/// The inference client above deliberately never reuses a connection, because
+/// a *large* request over a reused connection to `api.anthropic.com` stalls
+/// (see [`build_http_client`]). A count call is the opposite shape: a few
+/// kilobytes, answered in milliseconds, and made before every request that is
+/// big enough to be worth measuring. Paying a TLS handshake for each of those
+/// was most of what the call cost, so this one keeps a couple of idle
+/// connections per host for half a minute and reuses them.
+///
+/// One per process rather than one per provider, because the pool is keyed by
+/// host anyway and a provider has no reason to hold its own copy. Built on
+/// first use; the same builder options as the inference client otherwise, so
+/// the origin-confined redirect policy that keeps the API keys at home applies
+/// here too.
+pub fn side_call_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        outbound_builder(Some(SIDE_CALL_TIMEOUT_SECS))
+            .pool_max_idle_per_host(SIDE_CALL_POOL_IDLE_PER_HOST)
+            .pool_idle_timeout(std::time::Duration::from_secs(SIDE_CALL_POOL_IDLE_SECS))
+            .build()
+            .expect("the side-call client builds from fixed options, like the inference client")
+    })
+}
+
 /// The builder both outbound clients share.
 fn outbound_builder(timeout_secs: Option<u64>) -> reqwest::ClientBuilder {
     reqwest::Client::builder()

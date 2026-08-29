@@ -140,7 +140,6 @@ It is read per run, so a change takes effect on the next `lev run` with no resta
 max_concurrent_inferences = 8    # in-flight requests per model without its own pool entry
 max_concurrent_tools      = 8    # agents whose tool batches may run at once, daemon-wide
 default_max_iterations    = 50   # fallback cap for a stage that sets none
-exact_token_counting      = false
 stream_inference          = true # ask a model that can stream to stream
 script_shell_timeout_secs = 60
 mcp_idle_disconnect_secs  = 60   # disconnect an MCP server no agent has used for this long
@@ -168,7 +167,6 @@ cerebras = 1                     # every model this provider serves, together
 | `max_concurrent_inferences` | `8` | The [inference pool](/docs/engine#inference-pools) cap, per model |
 | `max_concurrent_tools` | `8` | Size of the shared tool worker pool. Clamped to at least 1 |
 | `default_max_iterations` | `50` | A stage's own `max_iterations` always wins |
-| `exact_token_counting` | `false` | Count each request exactly before sending it. See below |
 | `stream_inference` | `true` | Ask a model that can stream to stream. See below |
 | `script_shell_timeout_secs` | `60` | Cap on a Rhai script tool's `shell()` host call |
 | `mcp_idle_disconnect_secs` | `60` | Disconnect an [MCP server](/docs/mcp) no agent has used for this long. It reconnects on next use |
@@ -188,11 +186,7 @@ cerebras = 1                     # every model this provider serves, together
 | `notify_spend_usd` | empty | Dollar figures to be told about while a run is still going. See below |
 | `max_agents_per_run` | `0` | Most agents one run may create, sub-agents included. `0` is no ceiling. See below |
 
-Twelve of those need more than a table cell.
-
-**`exact_token_counting`** measures each assembled request before sending it and refuses one that
-would overflow the window. On providers with a remote counting endpoint that costs a network round
-trip per inference, so it is off by default.
+Eleven of those need more than a table cell.
 
 **`stream_inference`** asks a model that can stream to stream. It changes nothing an agent sees:
 the chunks are folded back into one finished turn before anything reads it, because half a sentence

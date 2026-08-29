@@ -500,7 +500,7 @@ pub fn dispatch_inference(
                     provider,
                     request,
                     permit,
-                    exact_token_counting: stage.exact_token_counting,
+                    calibration: calibration.copied(),
                     stream,
                 };
                 let cancel = crate::cancel::CancelToken::new();

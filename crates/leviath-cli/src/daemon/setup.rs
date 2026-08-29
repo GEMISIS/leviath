@@ -287,8 +287,6 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         Some(parts.runs_dir.clone()),
         parts.runtime,
     );
-    // Opt-in accurate pre-inference budget guard (off by default).
-    world.set_exact_token_counting(parts.config.limits.exact_token_counting);
     // Streamed inference (on by default), so a long generation keeps bytes
     // moving instead of holding a socket that looks idle to everything between
     // here and the provider.

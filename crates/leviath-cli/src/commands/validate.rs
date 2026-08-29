@@ -736,8 +736,25 @@ fn print_global_script_report_in(
                 // the verdict here is the verdict the daemon would reach: it
                 // compiles against the hardened engine and requires the entry
                 // points a provider cannot run without.
-                if let Err(e) = leviath_providers::rhai_provider::check_source(name, &source) {
-                    println!("  ⚠ Warning: script provider '{name}' will not load: {e}");
+                match leviath_providers::rhai_provider::inspect_source(name, &source) {
+                    Err(e) => {
+                        println!("  ⚠ Warning: script provider '{name}' will not load: {e}");
+                    }
+                    // Said either way, because the difference is invisible at
+                    // run time: a script with no `count_tokens` is guarded by
+                    // the byte estimate, which can only refuse an overflow the
+                    // estimate already sees.
+                    Ok(report) if report.counts_tokens => {
+                        println!(
+                            "  script provider '{name}' counts tokens itself (fn count_tokens)"
+                        );
+                    }
+                    Ok(_) => {
+                        println!(
+                            "  script provider '{name}' has no fn count_tokens; the context-window \
+                             guard measures its requests with the byte estimate"
+                        );
+                    }
                 }
             }
         }
@@ -1951,6 +1968,14 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         )
         .expect("writes");
         std::fs::write(providers.join("broken.rhai"), "fn initialize(c) { ((( }").expect("writes");
+        // And one that counts its own tokens, so both report lines are printed.
+        std::fs::write(
+            providers.join("counting.rhai"),
+            "fn initialize(config) { #{} }\n\
+             fn inference(state, request) { #{ content: \"ok\" } }\n\
+             fn count_tokens(state, text, model) { 7 }",
+        )
+        .expect("writes");
 
         // A global tool that will not load, so the skipped-tool arm runs too.
         std::fs::write(tools.join("bad.rhai"), "no directive\nlet").expect("writes");

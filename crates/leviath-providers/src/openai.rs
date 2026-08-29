@@ -353,8 +353,18 @@ impl Provider for OpenAIProvider {
     }
 
     async fn count_tokens(&self, text: &str, model: &str) -> usize {
-        // tiktoken is exact for OpenAI models and runs locally - no network call.
-        crate::tokenizer::count_tokens(text, model)
+        // tiktoken is exact for OpenAI models and runs locally - no network
+        // call. Local is not free, though: BPE over a megabyte of prompt is
+        // tens of milliseconds of CPU, and this runs on the runtime's worker
+        // threads, where that long a stretch without a yield stalls every
+        // other lane. Above the threshold it moves to a blocking thread.
+        if text.len() <= TIKTOKEN_INLINE_BYTES {
+            return crate::tokenizer::count_tokens(text, model);
+        }
+        let (text, model) = (text.to_string(), model.to_string());
+        tokio::task::spawn_blocking(move || crate::tokenizer::count_tokens(&text, &model))
+            .await
+            .expect("tiktoken does not panic on any input")
     }
 
     fn max_context_tokens(&self, model: &str) -> usize {
@@ -471,6 +481,13 @@ impl Provider for OpenAIProvider {
             .collect())
     }
 }
+
+/// The largest text tiktoken is run on inline, on the async thread that asked.
+///
+/// Below this the encode finishes in well under a millisecond and a thread
+/// hop would cost more than it saves; above it the count is a real stretch of
+/// CPU and goes to a blocking thread.
+const TIKTOKEN_INLINE_BYTES: usize = 256 * 1024;
 
 impl OpenAIProvider {
     /// GET `/models`, as the endpoint answers it.
@@ -920,6 +937,24 @@ mod tests {
         );
         let tokens = provider.count_tokens("", "gpt-5.4-mini").await;
         assert_eq!(tokens, 0);
+    }
+
+    /// A prompt above the inline threshold is counted on a blocking thread and
+    /// comes back with the same answer the inline path gives: the hop changes
+    /// where the CPU is spent, never the count.
+    #[tokio::test]
+    async fn a_large_prompt_is_counted_off_the_async_threads() {
+        let provider = OpenAIProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
+        let text = "word ".repeat(TIKTOKEN_INLINE_BYTES / 5 + 1_000);
+        assert!(text.len() > TIKTOKEN_INLINE_BYTES);
+        let tokens = provider.count_tokens(&text, "gpt-5.4-mini").await;
+        assert_eq!(
+            tokens,
+            crate::tokenizer::count_tokens(&text, "gpt-5.4-mini")
+        );
     }
 
     #[test]

@@ -168,12 +168,12 @@ pub struct InferenceJob {
     /// The per-model pool permit, held for the whole request and released when
     /// the job finishes.
     pub permit: InferencePermit,
-    /// When set, count the assembled request's tokens exactly (via the
-    /// provider's `count_tokens`, which uses a remote endpoint where available)
-    /// before calling `infer`, and fail early if it would exceed the model's
-    /// context window. Off by default - the runtime's cheap `len/4` estimates
-    /// drive normal budgeting; this is the opt-in accurate guard.
-    pub exact_token_counting: bool,
+    /// What earlier calls taught the window about its own estimate, so the
+    /// pre-flight guard ([`guard_context_window`]) decides whether to measure
+    /// this request from the corrected figure rather than the raw one. `None`
+    /// before anything was measured, or for a lane that has no window of its
+    /// own to correct.
+    pub calibration: Option<crate::pipeline::PromptCalibration>,
     /// Ask the provider to stream this answer and fold the chunks back into one
     /// response, rather than waiting for the whole thing at once.
     ///
@@ -188,6 +188,63 @@ pub struct InferenceJob {
     /// Set from `[limits] stream_inference` and off for a model whose provider
     /// does not advertise streaming.
     pub stream: bool,
+}
+
+/// The share of the model's window below which a request goes out unmeasured.
+///
+/// The guard costs a provider round trip on Anthropic and Gemini, so it is only
+/// paid where it can change the answer. A request whose corrected estimate plus
+/// its reply budget sits under half the window cannot overflow it however far
+/// the estimate is off - the estimator has never been measured drifting by
+/// anything like a factor of two - and is sent as it is. Everything above the
+/// line is counted with the provider's own tokenizer before it is sent.
+pub const COUNT_ABOVE_WINDOW_FRACTION: usize = 2;
+
+/// Measure a request against the model's context window before it is sent.
+///
+/// Returns `Ok(None)` when the request was small enough to skip the count,
+/// `Ok(Some(used))` with the provider's exact prompt count when it was measured
+/// and fits, and `Err(TokenLimitExceeded)` when it was measured and would
+/// overflow. Every inference lane - the stage's own call, the routing call,
+/// compaction and titling - goes through this one function, so a window is
+/// guarded the same way whichever lane assembled the request.
+///
+/// A provider that reports no window for the model (`max_context_tokens` of
+/// zero) cannot be guarded, and is not: refusing everything on the strength of
+/// a number nobody supplied would be worse than sending it.
+///
+/// The count is the provider's (`count_tokens`): a remote endpoint on
+/// Anthropic and Gemini, tiktoken on OpenAI, a script's own `count_tokens` on
+/// a Rhai provider, and the byte heuristic elsewhere - so on a heuristic-only
+/// provider the "exact" figure is the same estimate, and the guard reduces to
+/// the overflow check.
+pub async fn guard_context_window(
+    provider: &dyn Provider,
+    request: &InferenceRequest,
+    calibration: Option<&crate::pipeline::PromptCalibration>,
+) -> Result<Option<usize>, ProviderError> {
+    let max = provider.max_context_tokens(&request.model);
+    if max == 0 {
+        return Ok(None);
+    }
+    let text = flatten_request_text(request);
+    let estimate =
+        crate::pipeline::calibrated_tokens(leviath_core::estimate_tokens(&text), calibration);
+    if estimate.saturating_add(request.max_tokens) < max / COUNT_ABOVE_WINDOW_FRACTION {
+        return Ok(None);
+    }
+    let used = provider.count_tokens(&text, &request.model).await;
+    if used.saturating_add(request.max_tokens) > max {
+        return Err(ProviderError::TokenLimitExceeded { used, max });
+    }
+    tracing::debug!(
+        model = %request.model,
+        estimated = estimate,
+        counted = used,
+        window = max,
+        "request measured before sending"
+    );
+    Ok(Some(used))
 }
 
 /// Flatten a request into the text whose tokens we count for the budget guard:
@@ -311,30 +368,10 @@ pub async fn run_inference_job(
         provider,
         request,
         permit,
-        exact_token_counting,
+        calibration,
         stream,
     } = job;
     let started = std::time::Instant::now();
-    // Opt-in accurate pre-flight budget guard: count the assembled request
-    // exactly (remote endpoint where the provider has one, heuristic otherwise)
-    // and refuse a request that would overflow the model's context window,
-    // rather than sending it and letting the provider reject it after the fact.
-    if exact_token_counting {
-        let text = flatten_request_text(&request);
-        let used = provider.count_tokens(&text, &request.model).await;
-        let max = provider.max_context_tokens(&request.model);
-        if used.saturating_add(request.max_tokens) > max {
-            drop(permit);
-            let _ = results.send(InferenceOutcome {
-                entity,
-                result: Err(ProviderError::TokenLimitExceeded { used, max }),
-                latency: started.elapsed(),
-                pricing: provider.pricing(&request.model),
-            });
-            wake.notify_one();
-            return;
-        }
-    }
     // Retry transient failures (connection reset, timeout, 429, 5xx) with
     // exponential backoff, holding the permit across the backoff; a permanent
     // error fails immediately. `backoff_after` decides each wait: a capacity
@@ -347,6 +384,12 @@ pub async fn run_inference_job(
     // copy. It used to be cloned per attempt, which doubled the live footprint
     // of every in-flight request for the whole (possibly minutes-long) call.
     let attempts = async {
+        // The pre-flight guard, inside the cancel and the job timeout with the
+        // call it protects: a count that hangs is bounded by the same deadline
+        // the request is, and a cancelled run does not wait for one. Before the
+        // loop rather than in it, because a refusal here is a fact about the
+        // request and a retry would only restate it.
+        guard_context_window(provider.as_ref(), &request, calibration.as_ref()).await?;
         let mut attempt = 1u32;
         let mut spent = Duration::ZERO;
         loop {
@@ -499,7 +542,7 @@ mod tests {
             provider,
             request: test_request(),
             permit: pools.try_acquire("p", "m").expect("free pool"),
-            exact_token_counting: false,
+            calibration: None,
             stream: false,
         }
     }
@@ -527,7 +570,7 @@ mod tests {
             provider,
             request: test_request(),
             permit,
-            exact_token_counting: false,
+            calibration: None,
             stream: false,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -580,7 +623,7 @@ mod tests {
             provider,
             request: test_request(),
             permit,
-            exact_token_counting: false,
+            calibration: None,
             stream: false,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -667,10 +710,26 @@ mod tests {
     }
 
     /// A provider with a fixed `count_tokens` result and context window, used to
-    /// drive the opt-in pre-inference budget guard. `infer` always succeeds.
+    /// drive the pre-flight window guard. `infer` always succeeds, and every
+    /// count call is tallied so a test can say whether the guard paid for one.
     struct Counter {
         count: usize,
         max: usize,
+        counts: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Counter {
+        fn new(count: usize, max: usize) -> Self {
+            Self {
+                count,
+                max,
+                counts: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn count_calls(&self) -> usize {
+            self.counts.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
 
     #[async_trait::async_trait]
@@ -682,6 +741,8 @@ mod tests {
             Ok(response("ok"))
         }
         async fn count_tokens(&self, _text: &str, _model: &str) -> usize {
+            self.counts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.count
         }
         fn max_context_tokens(&self, _model: &str) -> usize {
@@ -695,17 +756,34 @@ mod tests {
         }
     }
 
-    fn counting_job(provider: Arc<dyn Provider>, exact: bool) -> InferenceJob {
+    /// A job whose request carries `prompt_bytes` of user text, so the guard's
+    /// own estimate (`bytes / 4`) is under the test's control.
+    fn counting_job(
+        provider: Arc<dyn Provider>,
+        prompt_bytes: usize,
+        calibration: Option<crate::pipeline::PromptCalibration>,
+    ) -> InferenceJob {
         let pools = InferencePools::new(InferencePoolConfig::new());
         InferenceJob {
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
             provider,
-            request: test_request(), // max_tokens: 100
+            request: sized_request(prompt_bytes), // max_tokens: 100
             permit: pools.try_acquire("p", "m").expect("free pool"),
-            exact_token_counting: exact,
+            calibration,
             stream: false,
         }
+    }
+
+    /// [`test_request`] with one user message of `bytes` ASCII bytes.
+    fn sized_request(bytes: usize) -> InferenceRequest {
+        let mut request = test_request();
+        request.messages.push(leviath_providers::Message {
+            role: "user".to_string(),
+            content: "x".repeat(bytes).into(),
+            cache_breakpoint: false,
+        });
+        request
     }
 
     #[test]
@@ -742,16 +820,73 @@ mod tests {
         assert!(text.contains("object"));
     }
 
+    /// The guard is always on now, with one cheap escape: a request whose
+    /// estimate plus its reply budget is under half the window is sent without
+    /// asking the provider, and one at or above the line is measured first.
+    /// Both against a window of 1,000 and a reply budget of 100: 400 bytes
+    /// estimate at 100 tokens (200 all told, under the line), 1,600 bytes at
+    /// 400 (500, on it).
+    #[tokio::test]
+    async fn a_large_prompt_is_counted_and_a_small_one_is_not() {
+        let small = Arc::new(Counter::new(10, 1000));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_inference_job(
+            counting_job(small.clone(), 400, None),
+            tx,
+            Arc::new(Notify::new()),
+            RetryPolicy::default(),
+            crate::cancel::CancelToken::new(),
+        )
+        .await;
+        let outcome = rx.try_recv().expect("outcome sent");
+        assert_eq!(outcome.result.expect("sent unmeasured").content, "ok");
+        assert_eq!(small.count_calls(), 0, "a small turn pays nothing");
+
+        let large = Arc::new(Counter::new(800, 1000));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_inference_job(
+            counting_job(large.clone(), 1_600, None),
+            tx,
+            Arc::new(Notify::new()),
+            RetryPolicy::default(),
+            crate::cancel::CancelToken::new(),
+        )
+        .await;
+        let outcome = rx.try_recv().expect("outcome sent");
+        // count(800) + max_tokens(100) = 900 <= 1000: measured, and it fits.
+        assert_eq!(outcome.result.expect("measured and sent").content, "ok");
+        assert_eq!(large.count_calls(), 1, "one count call, no more");
+    }
+
+    /// The guard's estimate is the calibrated one. A request the raw estimate
+    /// would wave through (200 of a 1,000 window) is measured once earlier
+    /// calls have shown the provider charging 400 more than the window
+    /// believes - which is exactly the run that is about to overflow.
+    #[tokio::test]
+    async fn the_calibration_can_push_a_request_over_the_counting_line() {
+        let mut calibration = crate::pipeline::PromptCalibration::default();
+        calibration.observe(1_000, 1_400);
+        let provider = Arc::new(Counter::new(10, 1000));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_inference_job(
+            counting_job(provider.clone(), 400, Some(calibration)),
+            tx,
+            Arc::new(Notify::new()),
+            RetryPolicy::default(),
+            crate::cancel::CancelToken::new(),
+        )
+        .await;
+        assert!(rx.try_recv().expect("outcome sent").result.is_ok());
+        assert_eq!(provider.count_calls(), 1);
+    }
+
     #[tokio::test]
     async fn guard_rejects_request_over_context_window() {
         // count(950) + max_tokens(100) = 1050 > context(1000) ⇒ rejected pre-flight.
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let provider = Arc::new(Counter {
-            count: 950,
-            max: 1000,
-        });
+        let provider = Arc::new(Counter::new(950, 1000));
         run_inference_job(
-            counting_job(provider, true),
+            counting_job(provider, 1_600, None),
             tx,
             Arc::new(Notify::new()),
             RetryPolicy::default(),
@@ -765,54 +900,56 @@ mod tests {
         assert_eq!(err.to_string(), "Token limit exceeded: 950 > 1000");
     }
 
+    /// A refusal is a fact about the request, not the network: it is reported
+    /// once, and the retry schedule never sees it.
     #[tokio::test]
-    async fn guard_allows_request_within_context_window() {
-        // count(800) + 100 = 900 ≤ 1000 ⇒ proceeds to infer.
+    async fn a_refused_request_is_not_retried() {
+        let provider = Arc::new(Counter::new(950, 1000));
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let provider = Arc::new(Counter {
-            count: 800,
-            max: 1000,
-        });
         run_inference_job(
-            counting_job(provider, true),
+            counting_job(provider.clone(), 1_600, None),
             tx,
             Arc::new(Notify::new()),
-            RetryPolicy::default(),
+            no_delay(5),
             crate::cancel::CancelToken::new(),
         )
         .await;
-        let outcome = rx.try_recv().expect("outcome sent");
-        assert_eq!(outcome.result.expect("should succeed").content, "ok");
+        assert!(rx.try_recv().expect("outcome sent").result.is_err());
+        assert_eq!(provider.count_calls(), 1, "measured once, refused once");
+    }
+
+    /// A provider that reports no window for the model cannot be guarded and
+    /// is not: the request goes out unmeasured rather than being refused on a
+    /// number nobody supplied.
+    #[tokio::test]
+    async fn an_unknown_window_is_never_guarded() {
+        let provider = Arc::new(Counter::new(1_000_000, 0));
+        let verdict = guard_context_window(provider.as_ref(), &sized_request(1_600), None)
+            .await
+            .expect("nothing to measure against");
+        assert_eq!(verdict, None);
+        assert_eq!(provider.count_calls(), 0);
+    }
+
+    /// What the guard hands back when it did measure: the provider's count, so
+    /// a caller can feed it into the calibration.
+    #[tokio::test]
+    async fn a_measured_request_reports_its_count() {
+        let provider = Arc::new(Counter::new(800, 1000));
+        let verdict = guard_context_window(provider.as_ref(), &sized_request(1_600), None)
+            .await
+            .expect("fits");
+        assert_eq!(verdict, Some(800));
     }
 
     #[tokio::test]
     async fn counter_provider_metadata_is_exercised() {
         // Keep the Counter mock's non-`infer` trait methods measured.
-        let p = Counter { count: 5, max: 10 };
+        let p = Counter::new(5, 10);
         assert_eq!(p.name(), "counter");
         assert_eq!(p.max_context_tokens("m"), 10);
         assert_eq!(p.count_tokens("t", "m").await, 5);
         assert!(p.capabilities("m").supports_streaming);
-    }
-
-    #[tokio::test]
-    async fn guard_off_skips_the_count_and_proceeds() {
-        // Even wildly over budget, with the flag off the guard never runs.
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let provider = Arc::new(Counter {
-            count: 1_000_000,
-            max: 1000,
-        });
-        run_inference_job(
-            counting_job(provider, false),
-            tx,
-            Arc::new(Notify::new()),
-            RetryPolicy::default(),
-            crate::cancel::CancelToken::new(),
-        )
-        .await;
-        let outcome = rx.try_recv().expect("outcome sent");
-        assert_eq!(outcome.result.expect("should succeed").content, "ok");
     }
 
     #[tokio::test]
@@ -953,7 +1090,7 @@ mod tests {
             }),
             request: test_request(),
             permit: pools.try_acquire("p", "m").expect("free pool"),
-            exact_token_counting: false,
+            calibration: None,
             stream: true,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -988,7 +1125,7 @@ mod tests {
             }),
             request: test_request(),
             permit: pools.try_acquire("p", "m").expect("free pool"),
-            exact_token_counting: false,
+            calibration: None,
             stream: false,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();

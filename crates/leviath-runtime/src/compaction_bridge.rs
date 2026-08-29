@@ -91,7 +91,17 @@ pub async fn run_compaction_job(
     let mut usage = Vec::new();
     let mut result = Ok(());
     for (region, request) in requests {
-        match tokio::time::timeout(deadline, provider.infer(&request)).await {
+        // Guarded before it is sent, like every other lane's request, and
+        // inside the same deadline so a count that hangs cannot hold the slot
+        // past it. No calibration: that corrects the agent's own window on
+        // the agent's own model, and this request goes to the compaction
+        // model, whose framing it has never measured.
+        let call = async {
+            crate::inference_bridge::guard_context_window(provider.as_ref(), &request, None)
+                .await?;
+            provider.infer(&request).await
+        };
+        match tokio::time::timeout(deadline, call).await {
             Ok(Ok(response)) => {
                 usage.push(response.tokens_used);
                 summaries.push((region, response.content));
@@ -328,5 +338,86 @@ mod tests {
         assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 100_000);
         let _ = p.capabilities("m");
+    }
+
+    /// A provider with a 1,000-token window that counts every request at 950,
+    /// and records whether `infer` was ever reached.
+    struct Narrow {
+        inferred: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Narrow {
+        async fn infer(
+            &self,
+            _req: &InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            self.inferred
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(InferenceResponse {
+                content: "summary".to_string(),
+                tool_calls: vec![],
+                tokens_used: TokenUsage::new(1, 0, 0, 1),
+                finish_reason: FinishReason::Complete,
+            })
+        }
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+            950
+        }
+        fn max_context_tokens(&self, _m: &str) -> usize {
+            1_000
+        }
+        fn name(&self) -> &str {
+            "narrow"
+        }
+        fn capabilities(&self, _m: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+    }
+
+    /// The compaction lane is guarded like the stage lane: a summarize request
+    /// that would overflow the compaction model's window is refused before it
+    /// is sent, and the batch fails with the refusal rather than the provider's
+    /// own rejection after the round trip.
+    #[tokio::test]
+    async fn the_compaction_lane_refuses_an_overflowing_request() {
+        let provider = Arc::new(Narrow {
+            inferred: std::sync::atomic::AtomicBool::new(false),
+        });
+        assert_eq!(provider.name(), "narrow");
+        let _ = provider.capabilities("m");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut job = job(provider.clone(), vec!["a"]);
+        // 2,000 bytes of region text: estimated at 500, plus the 100-token
+        // reply budget, is over half the 1,000 window, so it is measured.
+        job.requests[0].1.messages.push(leviath_providers::Message {
+            role: "user".to_string(),
+            content: "x".repeat(2_000).into(),
+            cache_breakpoint: false,
+        });
+        run_compaction_job(
+            job,
+            std::time::Duration::from_secs(60),
+            tx,
+            Arc::new(Notify::new()),
+        )
+        .await;
+
+        let outcome = rx.try_recv().unwrap();
+        let err = outcome.result.expect_err("950 + 100 does not fit in 1,000");
+        assert_eq!(err.to_string(), "Token limit exceeded: 950 > 1000");
+        assert!(
+            !provider.inferred.load(std::sync::atomic::Ordering::SeqCst),
+            "refused before the call, not after it"
+        );
+        assert!(
+            outcome.usage.is_empty(),
+            "nothing ran, so nothing was billed"
+        );
+        // The provider would have answered had the request reached it, so the
+        // refusal above is the guard's doing and not the mock's.
+        let answered = provider.infer(&request()).await.expect("the mock answers");
+        assert_eq!(answered.content, "summary");
+        assert!(provider.inferred.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

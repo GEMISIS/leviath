@@ -190,10 +190,6 @@ pub struct InferenceStage {
     pub wake: Arc<Notify>,
     /// Runtime the worker tasks are spawned onto.
     pub runtime: Handle,
-    /// Opt-in: perform an exact pre-inference token count and reject requests
-    /// that would overflow the model's context window (see
-    /// `InferenceJob::exact_token_counting`). Off by default.
-    pub exact_token_counting: bool,
     /// Whether a model that can stream is called that way. On by default; see
     /// `InferenceJob::stream`.
     pub stream_inference: bool,
