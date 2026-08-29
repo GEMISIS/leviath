@@ -445,6 +445,40 @@ mod tests {
         );
     }
 
+    /// The `[f] final` chip switches to the Final view through the same
+    /// path as the other chips.
+    #[test]
+    fn clicking_the_final_chip_opens_the_final_view() {
+        crate::runstate::with_isolated_runs_dir(
+            "clicking_the_final_chip_opens_the_final_view",
+            |_d| {
+                let mut dash = make_test_dashboard();
+                let mut agent = make_test_agent("run-final-chip");
+                agent.stages = (0..3)
+                    .map(|i| crate::runstate::StageRecord::new(format!("stage{i}"), i))
+                    .collect();
+                crate::commands::dashboard::test_support::seed_run_with_final_output(
+                    "run-final-chip",
+                    "stage2",
+                    "the answer",
+                );
+                dash.agents.push(agent);
+                dash.update_display_indices();
+                dash.detail_view = true;
+                draw(&mut dash, 120, 24);
+
+                let chip = dash
+                    .click_targets
+                    .iter()
+                    .find(|(_, t)| *t == ClickTarget::ContentMode(StageContentMode::FinalOutput))
+                    .map(|(r, _)| *r)
+                    .expect("the final chip is in the title");
+                press_and_release(&mut dash, chip.x + 1, chip.y);
+                assert_eq!(dash.stage_content_mode, StageContentMode::FinalOutput);
+            },
+        );
+    }
+
     /// The new-run screen's Start button starts the run with a click, the
     /// way Enter on it does: the whole point of the button is a terminal
     /// where Ctrl+Enter cannot be told from Enter.

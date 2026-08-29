@@ -159,6 +159,13 @@ same list.
   reaches it, Enter or Space or a click presses it) for terminals without the
   kitty keyboard protocol, where Ctrl+Enter arrives as a plain Enter. The
   dashboard asks the terminal for that protocol when it offers it.
+- `lev dash`'s detail view has a Final pane (`f`, or the `[f] final` chip),
+  shown once the run has submitted an answer. It reads the answer through the
+  same function `GET /api/agents/{id}/result` serves it from, so the two
+  cannot differ; the Output pane keeps showing what the stage wrote along the
+  way, which for a model that chatted one answer and submitted another is
+  different text.
+
 
 ## 0.5.5 - 2026-08-27
 

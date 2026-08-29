@@ -16,6 +16,35 @@ pub(crate) fn make_test_dashboard() -> Dashboard {
     Dashboard::new(cmd_tx)
 }
 
+/// Seed a run under the current runs dir whose answer arrived through
+/// `submit_output`: the `final_output` descriptor in `meta.json` plus the
+/// sidecar beside it, submitted by `stage` under the `markdown` format, with
+/// no `output.log` anywhere. Callers run inside
+/// `runstate::with_isolated_runs_dir`, so the home runs dir is never touched.
+pub(crate) fn seed_run_with_final_output(run_id: &str, stage: &str, content: &str) {
+    use crate::runstate;
+    // A stale directory from an earlier panicked test must not leak in.
+    let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+    let answer = leviath_core::output::FinalOutput::new(
+        content,
+        Some("markdown".to_string()),
+        stage.to_string(),
+        42,
+    );
+    let mut meta = runstate::RunMeta::new(
+        run_id.to_string(),
+        "agent".to_string(),
+        "/p".to_string(),
+        "task".to_string(),
+        None,
+        "/tmp".to_string(),
+        1,
+    );
+    meta.final_output = Some(answer.descriptor());
+    runstate::create_run(&meta).unwrap();
+    runstate::write_final_output(&runstate::run_dir(run_id), &answer.content).unwrap();
+}
+
 /// Every cell of a rendered frame, concatenated row by row.
 ///
 /// The cheapest honest assertion a render test can make: that the thing the

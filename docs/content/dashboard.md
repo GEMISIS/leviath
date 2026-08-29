@@ -38,8 +38,9 @@ panel and answer. `lev respond` does the same from the shell.
   and context-window occupancy live in the detail view.
 - **Detail view**: the run's path as a band under the header (the flat stage tabs
   on a short terminal), a context-window visualization, and content panes for **Output**,
-  **Logs**, and **Context** (JSON). Markdown is rendered. `t` swaps the band to the whole
-  blueprint, and `g` opens the blueprint full screen.
+  **Logs**, **Context** (JSON) and, once the run has submitted an answer, **Final**: the
+  answer exactly as `GET /api/agents/{id}/result` serves it. Markdown is rendered. `t` swaps
+  the band to the whole blueprint, and `g` opens the blueprint full screen.
 - **Interactions**: answer an agent's question (free-text, edit, multiple-choice, tool-approval, or
   confirm) or send it a mid-run message.
 - **Agents**: the catalog of agents this machine can run (`a`), and an editor that builds one on
@@ -185,6 +186,8 @@ for a run whose blueprint could not be read, the flat tab strip stays.
 | `PgUp` / `PgDn` | Scroll ten lines |
 | `Home` / `End` (or `b` / `e`) | Jump to the beginning / end |
 | `l` / `o` / `c` | Switch the pane to Logs / Output / Context |
+| `f` | Switch the pane to Final: the answer the run submitted, the same bytes `lev result` and the HTTP API return. The `[f] final` chip and the key are there only while the run has one; Output shows what the stage wrote along the way, which can differ |
+
 | `g` | Open the stage graph explorer |
 | `t` | Swap the band between the run's path and the whole blueprint |
 | `R` | Re-snake the path, undoing boxes you moved by hand |

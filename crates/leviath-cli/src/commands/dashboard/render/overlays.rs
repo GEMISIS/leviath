@@ -339,6 +339,7 @@ fn detail_sections() -> Vec<HelpSection> {
                 ("← →", "switch stage tab"),
                 ("1-9", "jump to a stage by number"),
                 ("l / o / c", "logs / output / context"),
+                ("f", "the submitted answer, when the run has one"),
                 ("↑ ↓ / k j", "scroll a line"),
                 ("pgup / pgdn", "scroll ten lines"),
                 ("home / end (b / e)", "top / bottom"),
