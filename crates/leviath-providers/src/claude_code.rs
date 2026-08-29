@@ -6,7 +6,7 @@
 //! The CLI is driven as a *relay*, not as an agent: its own tools, settings
 //! files, MCP servers and slash commands are all switched off, Leviath's
 //! assembled system blocks become the entire system prompt, and tool calling
-//! rides the text protocol in [`crate::text_tools`]. Leviath keeps ownership of
+//! rides the text protocol in `text_tools`. Leviath keeps ownership of
 //! the context window, the tool loop, and the iteration count.
 //!
 //! **Flags that matter, and why:**

@@ -14,19 +14,19 @@ pub mod anthropic;
 pub mod capabilities;
 pub mod claude_code;
 #[cfg(feature = "debug-http")]
-pub mod debug_http;
+pub(crate) mod debug_http;
 pub mod failure;
 pub mod gemini;
 pub mod learned;
 pub mod ollama;
 pub mod openai;
-pub mod openai_compat;
+pub(crate) mod openai_compat;
 pub mod openrouter;
 pub mod pricing;
 pub mod provider;
 pub mod rate_limit;
 pub mod rhai_provider;
-pub mod text_tools;
+pub(crate) mod text_tools;
 pub mod tokenizer;
 
 #[cfg(test)]

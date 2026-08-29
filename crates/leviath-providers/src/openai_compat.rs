@@ -3312,7 +3312,10 @@ mod tests {
         // branch, including the `if let Some(limiter)` reset_backoff call.
         let url = spawn_ok_server().await;
         let client = reqwest::Client::new();
-        let limiter = crate::rate_limit::RateLimiter::with_defaults();
+        let limiter = crate::rate_limit::RateLimiter::new(&crate::provider::RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 100_000,
+        });
         let body = serde_json::json!({ "model": "x" });
         let resp = send_chat_request(
             &client,

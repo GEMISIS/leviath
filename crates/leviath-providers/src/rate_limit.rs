@@ -56,20 +56,6 @@ impl RateLimiter {
         }
     }
 
-    /// Create a rate limiter with default limits.
-    pub fn with_defaults() -> Self {
-        Self {
-            rpm_limit: 60,
-            tpm_limit: 100_000,
-            window: Duration::from_secs(60),
-            state: Arc::new(Mutex::new(RateLimiterState {
-                request_timestamps: VecDeque::new(),
-                token_counts: VecDeque::new(),
-                consecutive_429s: 0,
-            })),
-        }
-    }
-
     /// Wait until we are allowed to make a request, then record it.
     ///
     /// This may sleep if we are at or near the rate limit.
@@ -227,8 +213,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_defaults_has_sensible_values() {
-        let limiter = RateLimiter::with_defaults();
+    async fn a_fresh_limiter_admits_the_first_request() {
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 100_000,
+        });
         // Should be able to acquire at least once
         limiter.acquire().await.unwrap();
     }
@@ -446,8 +435,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_defaults_rpm_and_tpm() {
-        let limiter = RateLimiter::with_defaults();
+    async fn new_copies_rpm_and_tpm_from_the_config() {
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 100_000,
+        });
         assert_eq!(limiter.rpm_limit, 60);
         assert_eq!(limiter.tpm_limit, 100_000);
     }
