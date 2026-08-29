@@ -1,6 +1,6 @@
 //! Pure utility functions used across the dashboard.
 
-use leviath_core::truncate_at_boundary;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Format a Unix timestamp as a relative time string ("just now", "2m ago", "1h ago").
 pub(super) fn relative_time(ts: i64) -> String {
@@ -34,15 +34,61 @@ pub(super) fn relative_time(ts: i64) -> String {
     }
 }
 
+/// Fit `s` into `max` terminal columns, ending in an ellipsis when it had to
+/// be cut. The ellipsis is part of the budget, so the result never draws wider
+/// than `max`.
+///
+/// Measured in display columns, not bytes: a run title full of em dashes or
+/// emoji used to be cut at a third of the room it was given, and a wide
+/// character counts for the two cells it occupies.
 pub(super) fn truncate(s: &str, max: usize) -> String {
     let s = s.trim();
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        // Cut on a char boundary so multi-byte content (em-dashes, emoji in run
-        // titles) shortens instead of panicking.
-        format!("{}…", truncate_at_boundary(s, max))
+    if s.width() <= max {
+        return s.to_string();
     }
+    if max == 0 {
+        return String::new();
+    }
+    let keep = max - 1;
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w > keep {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
+/// The fewest columns a shrinkable part keeps before the next one is touched.
+pub(super) const FIT_FLOOR: usize = 8;
+
+/// Fit a line made of `parts` into `width` columns.
+///
+/// Returned unchanged when the whole line fits. Otherwise the parts named in
+/// `shrink_order` (least important first) are cut with [`truncate`], each down
+/// to [`FIT_FLOOR`] columns before the next one is touched, and the walk stops
+/// as soon as the line fits. Parts not named never change, so a caller decides
+/// exactly what gives way and in what order. When every shrinkable part sits
+/// at the floor and the line is still too long, what remains is left to the
+/// widget to clip.
+pub(super) fn fit_parts(parts: &[String], width: usize, shrink_order: &[usize]) -> Vec<String> {
+    let mut out: Vec<String> = parts.to_vec();
+    for &idx in shrink_order {
+        let total: usize = out.iter().map(|p| p.width()).sum();
+        if total <= width {
+            break;
+        }
+        let excess = total - width;
+        let current = out[idx].width();
+        let target = current.saturating_sub(excess).max(FIT_FLOOR.min(current));
+        out[idx] = truncate(&out[idx], target);
+    }
+    out
 }
 
 /// Format a token count in compact style: ≥1000 → "21k", else raw.
@@ -137,7 +183,8 @@ mod tests {
     #[test]
     fn test_truncate_long() {
         let result = truncate("hello world", 5);
-        assert_eq!(result, "hello…");
+        assert_eq!(result, "hell…");
+        assert_eq!(result.width(), 5);
     }
 
     #[test]
@@ -201,39 +248,124 @@ mod tests {
     #[test]
     fn test_truncate_unicode() {
         let result = truncate("abcdef", 3);
-        assert_eq!(result, "abc…");
+        assert_eq!(result, "ab…");
     }
 
     #[test]
-    fn test_truncate_multibyte_char_boundary() {
-        // Em-dash (–) is 3 bytes (U+2013, bytes E2 80 93).
-        // Slicing at a byte index inside the em-dash must not panic.
+    fn test_truncate_multibyte_counts_columns_not_bytes() {
+        // The en dash is 3 bytes but one column. Byte counting cut this line
+        // at "Research the histo" when asked for 22; column counting keeps
+        // 21 characters plus the ellipsis.
         let s = "Research the history – covering all topics";
-        // "Research the history " is 21 bytes, then "–" is bytes 21..24.
-        // Truncating at max=22 would land inside the em-dash without the fix.
-        let result = truncate(s, 22);
-        assert!(!result.is_empty());
-        assert!(result.ends_with('…'));
-        // Should back up to byte 21 (the space before the em-dash)
-        assert_eq!(result, "Research the history …");
-
-        // Also test truncating right at the start of the em-dash
-        let result2 = truncate(s, 21);
-        assert_eq!(result2, "Research the history …");
-
-        // And right after the em-dash
-        let result3 = truncate(s, 24);
-        assert_eq!(result3, "Research the history –…");
+        assert_eq!(truncate(s, 22), "Research the history …");
+        assert_eq!(truncate(s, 21), "Research the history…");
+        assert_eq!(truncate(s, 24), "Research the history – …");
+        assert_eq!(truncate(s, 24).width(), 24);
     }
 
     #[test]
-    fn test_truncate_emoji() {
-        // Emoji like 🔥 is 4 bytes. Truncating in the middle must not panic.
+    fn test_truncate_emoji_is_two_columns() {
+        // 🔥 is 4 bytes and 2 columns. The budget is spent in columns: with 7
+        // there is room for "Hello " (6) but not the 2-wide emoji, and with 9
+        // the emoji fits and the ellipsis follows it.
         let s = "Hello 🔥 world";
-        let result = truncate(s, 7); // lands inside the emoji (bytes 6..10)
-        assert!(!result.is_empty());
-        assert!(result.ends_with('…'));
-        assert_eq!(result, "Hello …");
+        assert_eq!(truncate(s, 7), "Hello …");
+        assert_eq!(truncate(s, 9), "Hello 🔥…");
+        assert_eq!(truncate(s, 9).width(), 9);
+        // Wholly multi-byte text: 13 columns wide, cut to 6.
+        assert_eq!(truncate(&"…".repeat(13), 6), "…".repeat(6));
+    }
+
+    #[test]
+    fn test_truncate_zero_width_is_empty() {
+        // No room for even the ellipsis: draw nothing rather than one column
+        // more than was offered.
+        assert_eq!(truncate("hello", 0), "");
+        assert_eq!(truncate("", 0), "");
+    }
+
+    #[test]
+    fn test_truncate_one_column_is_the_ellipsis() {
+        assert_eq!(truncate("hello", 1), "…");
+    }
+
+    fn parts(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn fit_parts_leaves_a_fitting_line_alone() {
+        let p = parts(&[
+            "dir ",
+            "~/projects/leviath",
+            " · ",
+            "openrouter/z-ai/glm-5.3",
+        ]);
+        assert_eq!(fit_parts(&p, 80, &[3, 1]), p);
+        // Exactly full is still fitting.
+        let total: usize = p.iter().map(|s| s.width()).sum();
+        assert_eq!(fit_parts(&p, total, &[3, 1]), p);
+    }
+
+    #[test]
+    fn fit_parts_shrinks_the_first_named_part_only_when_it_is_enough() {
+        let p = parts(&[
+            "dir ",
+            "~/projects/leviath",
+            " · ",
+            "openrouter/z-ai/glm-5.3",
+        ]);
+        // 4 + 18 + 3 + 23 = 48; ten columns over, so the model loses ten.
+        let out = fit_parts(&p, 38, &[3, 1]);
+        assert_eq!(out[0], "dir ");
+        assert_eq!(out[1], "~/projects/leviath");
+        assert_eq!(out[2], " · ");
+        assert_eq!(out[3], "openrouter/z…");
+        assert_eq!(out.iter().map(|s| s.width()).sum::<usize>(), 38);
+    }
+
+    #[test]
+    fn fit_parts_moves_to_the_second_part_after_the_first_hits_the_floor() {
+        let p = parts(&[
+            "dir ",
+            "~/projects/leviath",
+            " · ",
+            "openrouter/z-ai/glm-5.3",
+        ]);
+        // 48 wide, 28 asked: the model can only give 15 (down to 8), so the
+        // workdir gives the remaining 5.
+        let out = fit_parts(&p, 28, &[3, 1]);
+        assert_eq!(out[3], "openrou…");
+        assert_eq!(out[3].width(), FIT_FLOOR);
+        assert_eq!(out[1], "~/projects/l…");
+        assert_eq!(out.iter().map(|s| s.width()).sum::<usize>(), 28);
+    }
+
+    #[test]
+    fn fit_parts_stops_at_the_floor_and_never_touches_unnamed_parts() {
+        let p = parts(&[
+            "dir ",
+            "~/projects/leviath",
+            " · ",
+            "openrouter/z-ai/glm-5.3",
+        ]);
+        // Far too narrow: both named parts sit at the floor, the fixed parts
+        // are intact, and the line is simply still too long.
+        let out = fit_parts(&p, 10, &[3, 1]);
+        assert_eq!(out[0], "dir ");
+        assert_eq!(out[2], " · ");
+        assert_eq!(out[1].width(), FIT_FLOOR);
+        assert_eq!(out[3].width(), FIT_FLOOR);
+    }
+
+    #[test]
+    fn fit_parts_floor_does_not_grow_a_part_shorter_than_it() {
+        // A part already narrower than the floor is left as it is rather than
+        // padded, and the excess moves on to the next named part.
+        let p = parts(&["ab", "0123456789abcdef"]);
+        let out = fit_parts(&p, 12, &[0, 1]);
+        assert_eq!(out[0], "ab");
+        assert_eq!(out[1], "012345678…");
     }
 
     // OSC52 encoding and the /dev/tty write path now live in `leviath_sys::tty`
