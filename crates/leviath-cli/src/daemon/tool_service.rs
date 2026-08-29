@@ -298,8 +298,17 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
         mark_dirty_on_tool_write(state, tc);
         result
     } else {
-        let mut mcp = state.mcp.lock().await;
-        super::seed_tool::mcp_text(mcp.execute(&tc.name, tc.arguments.clone()).await)
+        // Route under the executor lock, call without it: the lock is what
+        // used to serialise every MCP call in a batch behind the slowest
+        // server. The client's own lock keeps calls to one server in order.
+        let routed = state.mcp.lock().await.route(&tc.name);
+        super::seed_tool::mcp_text(match routed {
+            Ok((client, original)) => {
+                leviath_mcp::ToolExecutor::call_routed(&client, &original, tc.arguments.clone())
+                    .await
+            }
+            Err(e) => Err(e),
+        })
     }
 }
 
@@ -2885,6 +2894,64 @@ for line in sys.stdin:
             &std::collections::HashSet::new(),
         );
         executor
+    }
+
+    /// Two servers in one batch, one of them slow: the batch is as long as the
+    /// slow call, not the sum. The executor lock is released between routing
+    /// and the call, so the fast server's calls run while the slow one waits.
+    #[tokio::test]
+    async fn a_batch_across_two_mcp_servers_is_as_slow_as_its_slowest_call() {
+        let slow_stub = MCP_STUB_SUCCESS.replace(
+            "    elif method == \"tools/call\":\n",
+            "    elif method == \"tools/call\":\n        import time; time.sleep(1.5)\n",
+        );
+        let mut executor = mcp_with_stub(MCP_STUB_SUCCESS).await;
+        // Two slow servers: two 1.5 s calls that can only overlap when the lock
+        // is per server. One slow call beside fast ones takes ~1.5 s whether
+        // the calls serialise or not, and proves nothing.
+        for name in ["slow", "slow2"] {
+            let mut slow =
+                leviath_mcp::MCPClient::spawn("python3", &["-c", &slow_stub], &HashMap::new())
+                    .await
+                    .expect("spawn slow stub");
+            slow.connect().await.expect("connect");
+            slow.list_tools().await.expect("list_tools");
+            let _ = executor.add_client_advertised(
+                name.to_string(),
+                slow,
+                &std::collections::HashSet::new(),
+            );
+        }
+        let hub = InteractionHub::new();
+        let mut allow = HashMap::new();
+        for tool in [
+            "stub__stub_mcp_tool",
+            "slow__stub_mcp_tool",
+            "slow2__stub_mcp_tool",
+        ] {
+            allow.insert(tool.to_string(), ToolPolicy::Allow);
+        }
+        let state = state_with(&hub, executor, allow);
+        let calls: Vec<ToolCall> = [
+            "slow__stub_mcp_tool",
+            "slow2__stub_mcp_tool",
+            "stub__stub_mcp_tool",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, tool)| call(&format!("c{i}"), tool, serde_json::json!({})))
+        .collect();
+        let started = std::time::Instant::now();
+        let out = dispatch_tools(state, calls, noop_progress()).await;
+        let elapsed = started.elapsed();
+        assert_eq!(out.len(), 3);
+        for (_, text) in &out {
+            assert_eq!(text, "ok result");
+        }
+        assert!(
+            elapsed < std::time::Duration::from_millis(2500),
+            "the batch took {elapsed:?}; the two slow servers ran one after the other"
+        );
     }
 
     #[tokio::test]

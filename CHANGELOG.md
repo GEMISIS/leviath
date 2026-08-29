@@ -84,6 +84,12 @@ same list.
 
 ### Changed
 
+- MCP tool calls in one batch no longer wait on each other across servers.
+  The executor held one lock around every call, so a batch naming a slow
+  server and a fast one ran the fast one after the slow one finished. Each
+  server now has its own lock: calls to different servers overlap, calls to
+  the same server still run one at a time in order, and the agent still
+  receives the whole batch at once before its next turn.
 - `lev dash` stats only what can change on each poll tick and keeps parsed run
   records instead of re-reading them: 34% less CPU with 750 runs, 42% while
   scrolling (#673).
