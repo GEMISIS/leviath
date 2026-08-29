@@ -194,6 +194,17 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // offered the kind anyway would put an editor in front of a 400.
     "scripts.providers",
     "config.gateways",
+    // `kind`, `header_names` and `models` on each gateway `GET /api/config`
+    // reports, and `kind`, `headers` and `models` on what `PUT /api/config`
+    // accepts: a gateway can be an OpenAI-compatible endpoint rather than a
+    // script. Announced so a console can offer the kind field, and can tell
+    // a daemon that would ignore it from one that writes it.
+    "config.gateways.kinds",
+    // `POST /api/models/probe`: ask an OpenAI-compatible server what it
+    // serves before a gateway for it is written. Admin only, like the write
+    // it precedes; announced whether or not this daemon mounts it, the same
+    // narrower claim `scripts.write` makes.
+    "models.probe",
     // `POST /api/fs/dirs`. The browser cannot open a native OS dialog onto the
     // serving machine, so the console's folder picker has to offer its own
     // "New Folder" - and one console serves every daemon version, so it needs
@@ -286,9 +297,20 @@ pub(super) struct GatewayInfo {
     pub(super) base_url: Option<String>,
     /// Whether a key is configured for it.
     pub(super) has_api_key: bool,
+    /// What backs it: `script` or `openai-compatible`.
+    pub(super) kind: String,
     /// The Rhai provider script backing it, when the entry names one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) script: Option<String>,
+    /// The names of the extra headers an endpoint sends, without their
+    /// values, for the reason `extra_keys` gives: a header is where a
+    /// second credential goes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) header_names: Vec<String>,
+    /// The model ids an endpoint falls back to when its server will not
+    /// list them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) models: Vec<String>,
     /// The names of any extra keys the entry carries, without their values.
     ///
     /// `extra` is forwarded verbatim into the script's `initialize`, so people
@@ -315,6 +337,39 @@ pub(super) struct GatewayWrite {
     /// Absent leaves the existing script name.
     #[serde(default)]
     pub(super) script: Option<String>,
+    /// `script` or `openai-compatible`. Absent leaves the existing kind, and
+    /// an entry created without one is a script, as in the file.
+    #[serde(default)]
+    pub(super) kind: Option<String>,
+    /// Extra headers for an endpoint, replacing the existing set when
+    /// present. Absent leaves them as they were.
+    #[serde(default)]
+    pub(super) headers: Option<std::collections::BTreeMap<String, String>>,
+    /// The fallback model ids for an endpoint, replacing the existing list
+    /// when present.
+    #[serde(default)]
+    pub(super) models: Option<Vec<String>>,
+}
+
+/// Body of `POST /api/models/probe` (admin-only): ask an OpenAI-compatible
+/// server what it serves, before a gateway for it is written.
+#[derive(Debug, Deserialize)]
+pub(super) struct ProbeModelsReq {
+    /// Where the server listens, including any path prefix.
+    pub(super) base_url: String,
+    /// Sent as a bearer token when present.
+    #[serde(default)]
+    pub(super) api_key: Option<String>,
+    /// Extra headers on the request.
+    #[serde(default)]
+    pub(super) headers: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// Answer of `POST /api/models/probe`.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct ProbeModelsResp {
+    /// The ids the server listed, sorted.
+    pub(super) models: Vec<String>,
 }
 
 /// Body of `POST /api/config/validate` — a format-only key check (no network,

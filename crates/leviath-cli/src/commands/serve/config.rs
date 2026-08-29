@@ -20,7 +20,11 @@ fn gateways_of(c: &Config) -> Vec<GatewayInfo> {
             name: name.clone(),
             base_url: p.base_url.clone(),
             has_api_key: p.api_key.is_some(),
+            kind: p.kind().as_str().to_string(),
             script: p.script.clone(),
+            // Names only, for the reason `extra_keys` below gives.
+            header_names: p.headers.iter().flatten().map(|(k, _)| k.clone()).collect(),
+            models: p.models.clone().unwrap_or_default(),
             // Names only. See `GatewayInfo::extra_keys`: these values are
             // forwarded into a script and routinely hold credentials.
             extra_keys: {
@@ -99,7 +103,27 @@ pub(super) async fn put_config(
     // changing, so a console can edit a base URL without knowing the key or
     // sending it back through the browser.
     for gateway in req.gateways.unwrap_or_default() {
+        // Read before the entry is created, so a bad kind leaves the config
+        // exactly as it was rather than with a half-made entry.
+        let kind = match gateway.kind.as_deref() {
+            None => None,
+            Some(text) => Some(
+                crate::config::ModelProviderKind::parse(text).ok_or_else(|| {
+                    err(
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "gateway '{}': unknown kind '{text}'; use \"script\" or \
+                             \"openai-compatible\"",
+                            gateway.name
+                        ),
+                    )
+                })?,
+            ),
+        };
         let entry = config.model_providers.entry(gateway.name).or_default();
+        if let Some(v) = kind {
+            entry.kind = Some(v);
+        }
         if let Some(v) = gateway.base_url {
             entry.base_url = Some(v);
         }
@@ -109,11 +133,24 @@ pub(super) async fn put_config(
         if let Some(v) = gateway.script {
             entry.script = Some(v);
         }
+        if let Some(v) = gateway.headers {
+            entry.headers = Some(v);
+        }
+        if let Some(v) = gateway.models {
+            entry.models = Some(v);
+        }
     }
     // Removals run last, so one request that both edits and deletes cannot
     // depend on which half was applied first.
     for name in req.remove_gateways.unwrap_or_default() {
         config.model_providers.remove(&name);
+    }
+    // The same check the loader makes, made before the write: a file this
+    // would refuse to read back is not a file worth saving.
+    for (name, provider) in &config.model_providers {
+        provider
+            .validate(name)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
     }
 
     config.save_to_path_public(path).map_err(|e| {
@@ -124,6 +161,60 @@ pub(super) async fn put_config(
     })?;
     Ok(Json(redact(&config)))
 }
+
+/// `POST /api/models/probe` (admin-only): what an OpenAI-compatible server
+/// at `base_url` says it serves, so a console can show the list and let a
+/// person pick a default before the gateway is written.
+///
+/// Admin-gated with the write it precedes: it makes the serving host open a
+/// connection to any address the caller names, which is the same category of
+/// act as `POST /api/mcp/servers/{name}/test`.
+pub(super) async fn probe_models(
+    Json(req): Json<ProbeModelsReq>,
+) -> Result<Json<ProbeModelsResp>, ApiError> {
+    probe_models_with(req, &leviath_providers::provider::build_http_client).await
+}
+
+/// [`probe_models`], with client construction injected so the "no usable
+/// HTTPS client" answer is reachable from a test.
+pub(super) async fn probe_models_with(
+    req: ProbeModelsReq,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> Result<Json<ProbeModelsResp>, ApiError> {
+    let (valid, message) = validate_base_url(&req.base_url);
+    if !valid {
+        return Err(err(StatusCode::BAD_REQUEST, message.unwrap_or_default()));
+    }
+    // The same provider a written gateway would get, built the same way, so
+    // the probe cannot succeed where the gateway then fails.
+    let mut creds = leviath_runtime::provider_creds::ProviderCreds::openai_compatible(
+        "probe",
+        req.base_url.trim(),
+        req.api_key.filter(|k| !k.trim().is_empty()),
+        req.headers.into_iter().flatten().collect(),
+        None,
+        Vec::new(),
+    );
+    creds.request_timeout_secs = Some(PROBE_TIMEOUT_SECS);
+    let registry = leviath_runtime::provider_creds::build_provider_registry_with(
+        std::slice::from_ref(&creds),
+        build_client,
+    )
+    .map_err(|e| err(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    // Registered unconditionally under the name above: an endpoint cred
+    // needs neither a key nor a reachable port to register.
+    let provider = registry.get("probe").expect("an endpoint cred registers");
+    let models = provider
+        .list_models()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let mut ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
+    ids.sort();
+    Ok(Json(ProbeModelsResp { models: ids }))
+}
+
+/// How long the probe waits on the server. A person is watching a form.
+const PROBE_TIMEOUT_SECS: u64 = 10;
 
 /// Format-only validation of a provider key (no network call, no persistence).
 fn validate_key_format(provider: &str, key: &str) -> (bool, Option<String>) {
@@ -1048,6 +1139,157 @@ mod tests {
         assert!(!saved.model_providers.contains_key("other"));
     }
 
+    /// An endpoint gateway round-trips its kind, headers and models, an
+    /// unsent field is left alone, and the two refusals name the gateway.
+    #[tokio::test]
+    async fn put_config_writes_an_endpoint_gateway_and_refuses_a_broken_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+        let state = || state_with_config_path(path.clone());
+
+        let resp = put_config_request(
+            state(),
+            r#"{"gateways":[{"name":"llama","kind":"openai-compatible","base_url":"http://localhost:8080/v1","headers":{"X-Org":"r"},"models":["llama-3"]}]}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["gateways"][0]["kind"], "openai-compatible");
+        assert_eq!(
+            json["gateways"][0]["header_names"],
+            serde_json::json!(["X-Org"])
+        );
+        assert_eq!(
+            json["gateways"][0]["models"],
+            serde_json::json!(["llama-3"])
+        );
+        assert!(!String::from_utf8_lossy(&body).contains("\"r\""), "{json}");
+        let saved = Config::load_from_path_public(&path).unwrap();
+        let entry = &saved.model_providers["llama"];
+        assert!(entry.is_endpoint());
+        assert_eq!(
+            entry.header_pairs(),
+            vec![("X-Org".to_string(), "r".to_string())]
+        );
+
+        // Edit only the URL: the headers and models survive.
+        let resp = put_config_request(
+            state(),
+            r#"{"gateways":[{"name":"llama","base_url":"http://localhost:8081/v1"}]}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let saved = Config::load_from_path_public(&path).unwrap();
+        let entry = &saved.model_providers["llama"];
+        assert_eq!(entry.base_url.as_deref(), Some("http://localhost:8081/v1"));
+        assert!(entry.headers.is_some());
+        assert_eq!(entry.models.as_deref().map(|m| m.len()), Some(1));
+
+        // An unknown kind is refused before anything is touched.
+        let resp =
+            put_config_request(state(), r#"{"gateways":[{"name":"llama","kind":"vllm"}]}"#).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("unknown kind 'vllm'"));
+
+        // An endpoint with no address is refused and not written.
+        let resp = put_config_request(
+            state(),
+            r#"{"gateways":[{"name":"bare","kind":"openai-compatible"}]}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("[model_providers.bare]"));
+        let saved = Config::load_from_path_public(&path).unwrap();
+        assert!(!saved.model_providers.contains_key("bare"));
+
+        // A script entry keeps reporting itself as one.
+        let resp = put_config_request(
+            state(),
+            r#"{"gateways":[{"name":"groq","kind":"script","script":"groq.rhai"}]}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let saved = Config::load_from_path_public(&path).unwrap();
+        assert!(!saved.model_providers["groq"].is_endpoint());
+    }
+
+    async fn probe(body: serde_json::Value) -> (axum::http::StatusCode, serde_json::Value) {
+        let app = Router::new().route("/api/models/probe", axum::routing::post(probe_models));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/models/probe")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// The probe lists what the server lists, sorted, sending the key and
+    /// headers it was given; a refusal comes back as a 502 with the server's
+    /// words, and a URL with no scheme never leaves the process.
+    #[tokio::test]
+    async fn the_probe_lists_a_servers_models_or_relays_its_refusal() {
+        let listing = br#"{"data":[{"id":"zeta"},{"id":"alpha"}]}"#;
+        let url = leviath_testkit::spawn_mock_server(200, "OK", listing).await;
+        let (status, json) = probe(serde_json::json!({
+            "base_url": url,
+            "api_key": "k",
+            "headers": {"X-Org": "r"},
+        }))
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(json["models"], serde_json::json!(["alpha", "zeta"]));
+
+        let url = leviath_testkit::spawn_mock_server(404, "Not Found", b"no such route").await;
+        let (status, json) = probe(serde_json::json!({ "base_url": url, "api_key": " " })).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
+        assert!(
+            json["error"].as_str().unwrap().contains("no such route"),
+            "{json}"
+        );
+
+        let (status, json) = probe(serde_json::json!({ "base_url": "localhost:8080" })).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            json["error"].as_str().unwrap().contains("http://"),
+            "{json}"
+        );
+    }
+
+    /// A machine that cannot build an HTTPS client cannot probe, and says so
+    /// as a gateway failure rather than a panic.
+    #[tokio::test]
+    async fn the_probe_reports_a_client_that_will_not_build() {
+        let failing: leviath_providers::provider::HttpClientFactory<'_> =
+            &|_| Err(leviath_providers::provider::malformed_url_error());
+        let result = probe_models_with(
+            ProbeModelsReq {
+                base_url: "http://127.0.0.1:1/v1".to_string(),
+                api_key: None,
+                headers: None,
+            },
+            failing,
+        )
+        .await;
+        let (status, _) = result.expect_err("fails");
+        assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
+    }
+
     /// The response a write returns reports the gateway the same redacted way
     /// a read does, so a form can render straight from it.
     #[tokio::test]
@@ -1139,18 +1381,40 @@ mod tests {
             },
         );
 
+        config.model_providers.insert(
+            "llama".to_string(),
+            crate::config::ModelProviderConfig {
+                kind: Some(crate::config::ModelProviderKind::OpenaiCompatible),
+                base_url: Some("http://localhost:8080/v1".to_string()),
+                headers: Some(
+                    [("X-Api-Key".to_string(), "header-secret-value".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                models: Some(vec!["llama-3".to_string()]),
+                ..Default::default()
+            },
+        );
+
         let redacted = redact(&config);
         let gateway = &redacted.gateways[0];
         assert_eq!(gateway.name, "groq");
+        assert_eq!(gateway.kind, "script");
         assert_eq!(gateway.base_url.as_deref(), Some("https://api.groq.com"));
         assert!(gateway.has_api_key);
         assert_eq!(gateway.extra_keys, vec!["signing_secret".to_string()]);
+        let endpoint = &redacted.gateways[1];
+        assert_eq!(endpoint.kind, "openai-compatible");
+        assert_eq!(endpoint.header_names, vec!["X-Api-Key".to_string()]);
+        assert_eq!(endpoint.models, vec!["llama-3".to_string()]);
+        assert!(!endpoint.has_api_key);
 
         // The whole serialized document, because a leak anywhere in it is a
         // leak: a field added later would otherwise carry the value silently.
         let json = serde_json::to_string(&redacted).expect("serializes");
         assert!(!json.contains("sk-secret-value"), "{json}");
         assert!(!json.contains("hunter2"), "{json}");
+        assert!(!json.contains("header-secret-value"), "{json}");
     }
 
     /// Name-sorted, because the config holds gateways in a `HashMap` and a

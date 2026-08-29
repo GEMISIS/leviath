@@ -911,7 +911,9 @@ than that feature, not broken.
 | `scripts.read` | The `GET` half of the scripts routes |
 | `scripts.write` | That this build serves the write half. Whether *this* daemon mounts it is `--allow-admin`, which you find out by calling one and reading the status |
 | `scripts.providers` | `provider` as a fifth script `kind`, the machine's drop-in model providers |
-| `config.gateways` | `gateways` on `GET /api/config`, the script-backed providers this machine has |
+| `config.gateways` | `gateways` on `GET /api/config`, the custom providers this machine has |
+| `config.gateways.kinds` | `kind`, `header_names` and `models` on each gateway, and `kind`, `headers` and `models` accepted by `PUT /api/config`: a gateway can be an OpenAI-compatible endpoint rather than a script |
+| `models.probe` | `POST /api/models/probe`, which asks an OpenAI-compatible server what it serves before a gateway for it is written; admin only |
 | `fs.mkdir` | `POST /api/fs/dirs`, so a folder picker can offer "New Folder" rather than one that 404s |
 
 ## Live updates over WebSocket

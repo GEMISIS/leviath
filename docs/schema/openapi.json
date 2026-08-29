@@ -1262,6 +1262,26 @@
         }
       }
     },
+    "/api/models/probe": {
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "summary": "Ask an OpenAI-compatible server what models it serves",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed. Body: `base_url` (required), `api_key`, `headers`. Answers `{\"models\": [ids]}`, or 502 carrying the server's own error text, or 400 for a base URL with no scheme.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "502": {
+            "$ref": "#/components/responses/BadGateway"
+          }
+        }
+      }
+    },
     "/ws": {
       "get": {
         "tags": [
