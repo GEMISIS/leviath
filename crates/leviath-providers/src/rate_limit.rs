@@ -21,6 +21,9 @@ pub struct RateLimiter {
 
     /// Tokens per minute limit
     tpm_limit: u32,
+    /// The sliding window both limits count over. A minute in production;
+    /// tests inject a short one so a wait can be observed in real time.
+    window: Duration,
 
     /// Current window state
     state: Arc<Mutex<RateLimiterState>>,
@@ -35,9 +38,16 @@ struct RateLimiterState {
 impl RateLimiter {
     /// Create a new rate limiter with the given configuration.
     pub fn new(config: &RateLimitConfig) -> Self {
+        Self::with_window(config, Duration::from_secs(60))
+    }
+
+    /// A limiter counting over `window` instead of a minute; the tests use
+    /// a few hundred milliseconds so the wait paths run in real time.
+    fn with_window(config: &RateLimitConfig, window: Duration) -> Self {
         Self {
             rpm_limit: config.requests_per_minute,
             tpm_limit: config.tokens_per_minute,
+            window,
             state: Arc::new(Mutex::new(RateLimiterState {
                 request_timestamps: VecDeque::new(),
                 token_counts: VecDeque::new(),
@@ -51,6 +61,7 @@ impl RateLimiter {
         Self {
             rpm_limit: 60,
             tpm_limit: 100_000,
+            window: Duration::from_secs(60),
             state: Arc::new(Mutex::new(RateLimiterState {
                 request_timestamps: VecDeque::new(),
                 token_counts: VecDeque::new(),
@@ -63,7 +74,7 @@ impl RateLimiter {
     ///
     /// This may sleep if we are at or near the rate limit.
     pub async fn acquire(&self) -> Result<(), ProviderError> {
-        let window = Duration::from_secs(60);
+        let window = self.window;
 
         loop {
             let now = Instant::now();
@@ -90,20 +101,38 @@ impl RateLimiter {
             }
 
             let current_rpm = state.request_timestamps.len() as u32;
+            let current_tpm: usize = state.token_counts.iter().map(|(_, t)| t).sum();
+            let rpm_ok = current_rpm < self.rpm_limit;
+            // A zero `tokens_per_minute` is no token limit at all, the way a
+            // provider without a `[rate_limits]` table has none.
+            let tpm_ok = self.tpm_limit == 0 || current_tpm < self.tpm_limit as usize;
 
-            if current_rpm < self.rpm_limit {
+            if rpm_ok && tpm_ok {
                 state.request_timestamps.push_back(now);
                 return Ok(());
             }
 
-            // Calculate how long to wait
-            let oldest = state.request_timestamps.front().copied().unwrap_or(now);
-            let wait = (oldest + window).saturating_duration_since(now) + Duration::from_millis(50);
+            // Wait until whichever window is full has let its oldest entry out.
+            // The tokens a request spent are recorded after it answers, so the
+            // token window lags the request window by one call; that is the
+            // right side to err on, since the provider counts them the same way.
+            let mut until = now;
+            if !rpm_ok {
+                let oldest = state.request_timestamps.front().copied().unwrap_or(now);
+                until = until.max(oldest + window);
+            }
+            if !tpm_ok {
+                let oldest = state.token_counts.front().map(|(t, _)| *t).unwrap_or(now);
+                until = until.max(oldest + window);
+            }
+            let wait = until.saturating_duration_since(now) + Duration::from_millis(50);
 
             drop(state);
             tracing::debug!(
                 wait_ms = wait.as_millis(),
-                "Rate limiter: waiting for RPM capacity"
+                requests = current_rpm,
+                tokens = current_tpm,
+                "Rate limiter: waiting for capacity"
             );
             tokio::time::sleep(wait).await;
         }
@@ -118,7 +147,7 @@ impl RateLimiter {
     /// Check current TPM usage against limit.
     pub async fn check_tpm(&self) -> bool {
         let now = Instant::now();
-        let window = Duration::from_secs(60);
+        let window = self.window;
         let mut state = self.state.lock().await;
 
         // Prune old entries; see `acquire` for why this is not `now - window`.
@@ -202,6 +231,84 @@ mod tests {
         let limiter = RateLimiter::with_defaults();
         // Should be able to acquire at least once
         limiter.acquire().await.unwrap();
+    }
+
+    /// A limiter over a short window, so a wait is observable in real time.
+    fn short_window(rpm: u32, tpm: u32) -> Arc<RateLimiter> {
+        Arc::new(RateLimiter::with_window(
+            &RateLimitConfig {
+                requests_per_minute: rpm,
+                tokens_per_minute: tpm,
+            },
+            Duration::from_millis(400),
+        ))
+    }
+
+    /// `tokens_per_minute` throttles: with the window's token budget spent, the
+    /// next `acquire` waits for the oldest spend to leave the window.
+    #[tokio::test]
+    async fn acquire_waits_for_tpm_capacity() {
+        let limiter = short_window(60, 100);
+        limiter.record_tokens(100).await;
+        let started = Instant::now();
+        let waiting = {
+            let limiter = limiter.clone();
+            tokio::spawn(async move { limiter.acquire().await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !waiting.is_finished(),
+            "held while the window's tokens are spent"
+        );
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("released once the window turned over")
+            .expect("the task completes")
+            .expect("acquire succeeds");
+        assert!(
+            started.elapsed() >= Duration::from_millis(350),
+            "waited for the window"
+        );
+    }
+
+    /// A zero `tokens_per_minute` means no token limit; only requests count.
+    #[tokio::test]
+    async fn a_zero_tokens_per_minute_is_no_token_limit() {
+        let limiter = short_window(60, 0);
+        limiter.record_tokens(1_000_000).await;
+        let started = Instant::now();
+        limiter.acquire().await.expect("nothing to wait for");
+        assert!(started.elapsed() < Duration::from_millis(300), "no wait");
+    }
+
+    /// Both windows full: the wait is for the later of the two to open.
+    #[tokio::test]
+    async fn acquire_waits_for_the_later_of_both_windows() {
+        let limiter = short_window(1, 10);
+        limiter
+            .acquire()
+            .await
+            .expect("the first request goes through");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The token spend lands 200 ms after the request, so its window opens
+        // 200 ms later than the request window does.
+        limiter.record_tokens(10).await;
+        let started = Instant::now();
+        let waiting = {
+            let limiter = limiter.clone();
+            tokio::spawn(async move { limiter.acquire().await })
+        };
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("released once both windows turned over")
+            .expect("the task completes")
+            .expect("acquire succeeds");
+        // Request window alone would have opened ~200 ms in; the token window
+        // holds it to ~400 ms.
+        assert!(
+            started.elapsed() >= Duration::from_millis(350),
+            "held by the token window"
+        );
     }
 
     #[tokio::test]

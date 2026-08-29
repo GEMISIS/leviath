@@ -10,7 +10,7 @@ task = { kind = "pinned", max_tokens = 2000, required = true, seed = "task" }
 [stages.main]
 mode = "autonomous"
 description = "Do whatever the mock provider asks, then finish"
-model = { models = [{ provider = "openai", model = "mock-1" }] }
+model = { models = [{ provider = "openai", model = "gpt-mock" }] }
 available_tools = ["shell", "write_file", "read_file", "current_time"]
 max_iterations = 4
 system_prompt = """

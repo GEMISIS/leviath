@@ -12,7 +12,7 @@ the agent. The tool call is returned until `messages` carries a `role: "tool"`
 entry, then the reply is plain text and the run completes.
 
 Routes:
-    GET  /v1/models          two models, "mock-1" and "claude-mock"
+    GET  /v1/models          two models, "gpt-mock" and "claude-mock"
     POST /v1/chat/completions  JSON or SSE, depending on `stream`
     POST /v1/messages        the Anthropic shape of the same answer (JSON only;
                              point the harness at it with `stream_inference = false`)
@@ -103,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
         # Both providers read `data[].id`; the Anthropic one only routes to a
         # model its listing carried, so the Claude-shaped id has to be here.
         return self._json({"object": "list", "data": [
-            {"id": "mock-1", "object": "model"},
+            {"id": "gpt-mock", "object": "model"},
             {"id": "claude-mock", "object": "model", "display_name": "Claude Mock"},
         ], "has_more": False})
 
@@ -134,7 +134,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             message = {"role": "assistant", "content": "done"}
             finish = "stop"
-        self._json({"id": "c1", "object": "chat.completion", "model": "mock-1", "usage": USAGE,
+        self._json({"id": "c1", "object": "chat.completion", "model": "gpt-mock", "usage": USAGE,
                     "choices": [{"index": 0, "finish_reason": finish, "message": message}]})
 
     def _anthropic(self, req):
@@ -152,7 +152,7 @@ class Handler(BaseHTTPRequestHandler):
             content = [{"type": "text", "text": "done"}]
             stop = "end_turn"
         self._json({"id": "msg_1", "type": "message", "role": "assistant",
-                    "model": req.get("model", "mock-1"), "content": content,
+                    "model": req.get("model", "gpt-mock"), "content": content,
                     "stop_reason": stop,
                     "usage": {"input_tokens": 12, "output_tokens": 3}})
 
@@ -164,11 +164,11 @@ class Handler(BaseHTTPRequestHandler):
             delta = {"role": "assistant", "content": "done"}
             finish = "stop"
         chunks = [
-            {"id": "c1", "object": "chat.completion.chunk", "model": "mock-1",
+            {"id": "c1", "object": "chat.completion.chunk", "model": "gpt-mock",
              "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
-            {"id": "c1", "object": "chat.completion.chunk", "model": "mock-1",
+            {"id": "c1", "object": "chat.completion.chunk", "model": "gpt-mock",
              "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]},
-            {"id": "c1", "object": "chat.completion.chunk", "model": "mock-1", "choices": [], "usage": USAGE},
+            {"id": "c1", "object": "chat.completion.chunk", "model": "gpt-mock", "choices": [], "usage": USAGE},
         ]
         body = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
         body = body.encode()

@@ -89,8 +89,11 @@ same list.
   scrolling (#673).
 - The release binary is 1.7 MB smaller: the tiktoken vocabularies no
   supported model uses are no longer linked (#672).
-- `[rate_limits] tokens_per_minute` is documented as parsed but not enforced
-  (#651). Wiring it up is planned.
+- `[rate_limits.<provider>] tokens_per_minute` is enforced. It was parsed and
+  recorded but nothing waited on it (#651 documented that); now a call waits
+  when the tokens reported back over the last minute have reached the cap,
+  the same way it already waited on `requests_per_minute`. `0` means no token
+  limit.
 - Every CodeQL finding is resolved in code (17 alerts, none dismissed) and the
   scan is a required check. `CONTRIBUTING.md` has the recipe for running the
   same queries locally (#679).
