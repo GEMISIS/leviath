@@ -152,7 +152,16 @@ same list.
   change; the refactors carry 100% coverage on Linux, macOS and Windows
   (#653-#663, #674).
 
+### Added
+
+- In `lev dash`'s new-run screen, Enter now breaks the line in the task box
+  and Ctrl+Enter starts the run. A Start button sits under the editor (Tab
+  reaches it, Enter or Space or a click presses it) for terminals without the
+  kitty keyboard protocol, where Ctrl+Enter arrives as a plain Enter. The
+  dashboard asks the terminal for that protocol when it offers it.
+
 ## 0.5.5 - 2026-08-27
+
 
 - Fixed: a stage whose model can answer at nearly the width of its own context
   window could be rejected outright for asking. The reply budget was everything

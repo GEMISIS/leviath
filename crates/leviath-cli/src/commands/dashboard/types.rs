@@ -185,6 +185,8 @@ pub(super) enum ClickTarget {
     ContentMode(StageContentMode),
     /// A row of the Context view's tree, by interactive-row index.
     ContextRow(usize),
+    /// The new-run screen's Start button.
+    NewRunStart,
 }
 
 /// Cursor + expansion state of the structured Context view.
@@ -534,11 +536,16 @@ pub(super) struct McpContext {
     pub(super) connect_timeout: std::time::Duration,
 }
 
-/// Which pane of the new-run screen holds keyboard focus (Tab toggles).
+/// Which part of the new-run screen holds keyboard focus. Tab walks
+/// Agents, Task, Start and round again; Shift+Tab walks it backwards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NewRunPane {
     Agents,
     Task,
+    /// The Start button under the task editor: Enter or Space on it starts
+    /// the run, which is how a terminal without the kitty keyboard protocol
+    /// (where Ctrl+Enter is indistinguishable from Enter) submits.
+    Start,
 }
 
 /// One runnable agent offered by the new-run screen.

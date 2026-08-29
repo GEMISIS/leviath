@@ -13,7 +13,10 @@ use std::io;
 
 use clap::Parser;
 use crossterm::ExecutableCommand;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -852,6 +855,7 @@ struct CrosstermSetup {
 /// Restore the terminal from raw mode / alternate screen / mouse capture.
 /// Safe to call redundantly: every step is a no-op when already released.
 fn restore_terminal() {
+    io::stdout().execute(PopKeyboardEnhancementFlags).ok();
     io::stdout().execute(DisableMouseCapture).ok();
     disable_raw_mode().ok();
     io::stdout().execute(LeaveAlternateScreen).ok();
@@ -895,6 +899,20 @@ impl TerminalSetup for CrosstermSetup {
     fn enable(&mut self) -> anyhow::Result<()> {
         install_terminal_restore_panic_hook();
         enable_raw_mode().map_err(anyhow::Error::from)?;
+        // The kitty keyboard protocol is what lets Ctrl+Enter (start the run
+        // from the new-run task) arrive as anything other than Enter. Asked
+        // for only where the terminal says it can, and popped again in
+        // `restore_terminal`.
+        if matches!(
+            crossterm::terminal::supports_keyboard_enhancement(),
+            Ok(true)
+        ) {
+            io::stdout()
+                .execute(PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+                ))
+                .map_err(anyhow::Error::from)?;
+        }
         io::stdout()
             .execute(EnterAlternateScreen)
             .map_err(anyhow::Error::from)?;

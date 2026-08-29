@@ -433,10 +433,17 @@ fn new_run_sections() -> Vec<HelpSection> {
         HelpSection {
             title: "New run: task",
             entries: vec![
-                ("enter", "start the run"),
-                ("alt+enter", "insert a newline"),
+                (
+                    "ctrl+enter",
+                    "start the run (needs the kitty keyboard protocol)",
+                ),
+                ("enter", "insert a newline; so does alt+enter"),
                 ("@", "reference a file from the working directory"),
-                ("tab / esc", "back to the agent list"),
+                (
+                    "tab",
+                    "the Start button: enter or space there starts the run",
+                ),
+                ("shift-tab / esc", "back to the agent list"),
             ],
         },
         HelpSection {
