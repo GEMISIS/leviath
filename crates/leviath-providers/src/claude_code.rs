@@ -497,11 +497,9 @@ impl Provider for ClaudeCodeProvider {
         ];
         Ok(models
             .into_iter()
-            .map(|(id, display)| ModelInfo {
-                id: id.to_string(),
-                display_name: Some(display.to_string()),
-                provider: "claude-code".to_string(),
-                capabilities: self.builtin_capabilities(id),
+            .map(|(id, display)| {
+                ModelInfo::new(id, "claude-code", self.builtin_capabilities(id))
+                    .named(Some(display.to_string()))
             })
             .collect())
     }

@@ -3,6 +3,7 @@
 //! Ollama provides local LLM execution via NDJSON streaming.
 
 use crate::capabilities::{Match, Row};
+use crate::learned::{LearnedModel, LearnedModels};
 use crate::provider::{
     FinishReason, InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities,
     ModelCapabilityOverride, ModelInfo, Provider, ProviderError, Result, StreamChunk, TokenUsage,
@@ -22,11 +23,12 @@ pub struct OllamaProvider {
 
     /// Per-model capability overrides
     capability_overrides: HashMap<String, ModelCapabilityOverride>,
-    /// Effective serving window per model, learned from the server at start-up
-    /// by [`Provider::prime_capabilities`]. Empty until then, and empty for good
+    /// What the server says about each pulled model - its effective serving
+    /// window and whether it calls tools - learned at start-up by
+    /// [`Provider::prime_capabilities`]. Empty until then, and empty for good
     /// if the server could not be reached - in which case the compiled table
     /// stays in charge.
-    api_windows: std::sync::Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    learned: LearnedModels,
     /// Models already warned about, so a guessed window is announced once per
     /// model rather than once per inference.
     warned_guessed: crate::provider::ModelMemo,
@@ -240,7 +242,7 @@ impl OllamaProvider {
             client,
             base_url: "http://localhost:11434".to_string(),
             capability_overrides: HashMap::new(),
-            api_windows: Default::default(),
+            learned: Default::default(),
             warned_guessed: Default::default(),
         }
     }
@@ -254,7 +256,7 @@ impl OllamaProvider {
             client,
             base_url,
             capability_overrides: HashMap::new(),
-            api_windows: Default::default(),
+            learned: Default::default(),
             warned_guessed: Default::default(),
         }
     }
@@ -272,28 +274,8 @@ impl OllamaProvider {
             client,
             base_url,
             capability_overrides: overrides,
-            api_windows: Default::default(),
+            learned: Default::default(),
             warned_guessed: Default::default(),
-        }
-    }
-
-    /// Replace the window with what the server actually serves, when start-up
-    /// managed to ask.
-    ///
-    /// Only the window. The rest of `ModelCapabilities` is about how a request
-    /// must be *shaped* - whether tools work, whether temperature is accepted -
-    /// and `/api/show` describes what a model is, not the quirks of talking to
-    /// it. Taking the size from the live answer and the shape from the compiled
-    /// table gives each the question it can answer.
-    fn api_corrected(&self, model: &str, base: ModelCapabilities) -> ModelCapabilities {
-        let windows = leviath_core::sync::lock(&self.api_windows);
-        match windows.get(model) {
-            Some(&max_context_tokens) => ModelCapabilities {
-                max_context_tokens,
-                limits_source: LimitsSource::Api,
-                ..base
-            },
-            None => base,
         }
     }
 
@@ -307,7 +289,7 @@ impl OllamaProvider {
     /// simply whether the server told us, and anything else is worth
     /// announcing.
     fn warn_if_guessed(&self, model: &str, resolved: &ModelCapabilities) {
-        if leviath_core::sync::lock(&self.api_windows).contains_key(model) {
+        if self.learned.contains(model) {
             return;
         }
         if !self.warned_guessed.insert(model) {
@@ -463,7 +445,16 @@ impl OllamaProvider {
         }
     }
 
-    async fn learn_model_windows(&self) -> Result<HashMap<String, usize>> {
+    /// What the server says about every pulled model.
+    ///
+    /// What the two endpoints fill: the window, from `/api/ps` for a loaded
+    /// model and `/api/show` otherwise, and whether the model calls tools,
+    /// from the `capabilities` array `/api/show` carries. `/api/show` is
+    /// asked for every model, loaded or not, because the window is the only
+    /// thing `/api/ps` outranks it on. Neither says anything about
+    /// temperature (every local model takes one, so the table's answer
+    /// stands), price, or dates.
+    async fn learn_models(&self) -> Result<HashMap<String, LearnedModel>> {
         let names = self.installed_model_names().await?;
 
         // What is loaded right now, and at what size. `/api/ps` reports the
@@ -481,14 +472,10 @@ impl OllamaProvider {
         // called yet is absent and falls through to `num_ctx` below, so this
         // helps most on the machine that is actually using Ollama - which is the
         // machine whose budgets are about to be resolved against the answer.
-        let mut windows = self.loaded_windows().await;
+        let loaded = self.loaded_windows().await;
 
+        let mut learned = HashMap::with_capacity(names.len());
         for name in names {
-            // `/api/ps` already answered for this one, from the runner rather
-            // than from configuration. Nothing in `/api/show` outranks that.
-            if windows.contains_key(&name) {
-                continue;
-            }
             let show = crate::provider::apply_request_timeout(
                 self.client
                     .post(format!("{}/api/show", self.base_url))
@@ -500,18 +487,41 @@ impl OllamaProvider {
             .map_err(|e| ProviderError::transport("reading an Ollama model", &e))?;
             let show = crate::provider::check_http_response(show, None).await?;
             let show: serde_json::Value = crate::provider::decode_json(show).await?;
-            if let Some(window) = effective_window(&show) {
-                windows.insert(name, window);
-            }
+            // `/api/ps` answered from the runner rather than from
+            // configuration, and nothing in `/api/show` outranks that.
+            let window = loaded
+                .get(&name)
+                .copied()
+                .or_else(|| effective_window(&show));
+            learned.insert(
+                name,
+                LearnedModel {
+                    max_context_tokens: window,
+                    supports_tools: calls_tools(&show),
+                    ..Default::default()
+                },
+            );
         }
-        Ok(windows)
+        Ok(learned)
     }
 
     /// Return built-in capability defaults for a model based on its name pattern.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
         crate::capabilities::lookup(MODELS, model, FALLBACK_CAPABILITIES)
     }
+}
 
+/// Whether `/api/show` says this model calls tools.
+///
+/// Recent servers report a `capabilities` array (`completion`, `tools`,
+/// `vision`, `thinking`, ...); `None` when the answer has no such array, which
+/// an older server's does not, so the compiled table keeps its guess.
+fn calls_tools(show: &serde_json::Value) -> Option<bool> {
+    let capabilities = show.get("capabilities")?.as_array()?;
+    Some(capabilities.iter().any(|c| c.as_str() == Some("tools")))
+}
+
+impl OllamaProvider {
     /// Build request body for the Ollama API.
     fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
         // System blocks prepended + tool_use/tool_result history converted to
@@ -717,7 +727,9 @@ impl Provider for OllamaProvider {
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // Three answers, narrowest first: what the user wrote, what the server
         // says, what this build was compiled with.
-        let base = self.api_corrected(model, self.builtin_capabilities(model));
+        let base = self
+            .learned
+            .corrected(model, self.builtin_capabilities(model));
         // Merged, not swapped: an entry names only what it corrects. An
         // explicit override is an answer, so it silences the warning too.
         match self.capability_overrides.get(model) {
@@ -757,12 +769,12 @@ impl Provider for OllamaProvider {
         // loaded model reports through `/api/ps` the window the runner really
         // allocated, where a cold one leaves only what its Modelfile pins and,
         // failing that, a guess from its name.
-        let windows = self.learn_model_windows().await?;
-        let learned = windows.len();
-        *leviath_core::sync::lock(&self.api_windows) = windows;
+        let learned = self.learn_models().await?;
+        let count = learned.len();
+        self.learned.replace(learned);
         tracing::debug!(
             warmed = wanted.len(),
-            models = learned,
+            models = count,
             "warmed Ollama models and re-read their windows"
         );
         Ok(())
@@ -778,10 +790,10 @@ impl Provider for OllamaProvider {
     // unchecked, which is the honest answer.
 
     async fn prime_capabilities(&self) -> Result<()> {
-        let windows = self.learn_model_windows().await?;
-        let count = windows.len();
-        *leviath_core::sync::lock(&self.api_windows) = windows;
-        tracing::debug!(models = count, "learned Ollama model windows");
+        let learned = self.learn_models().await?;
+        let count = learned.len();
+        self.learned.replace(learned);
+        tracing::debug!(models = count, "learned Ollama model windows and tools");
         Ok(())
     }
 
@@ -810,12 +822,11 @@ impl Provider for OllamaProvider {
                     .filter_map(|entry| {
                         let id = entry.get("name")?.as_str()?.to_string();
                         let capabilities = self.capabilities(&id);
-                        Some(ModelInfo {
-                            display_name: Some(id.clone()),
-                            provider: "ollama".into(),
-                            capabilities,
-                            id,
-                        })
+                        let learned = self.learned.contains(&id);
+                        let mut info =
+                            ModelInfo::new(id.clone(), "ollama", capabilities).named(Some(id));
+                        info.learned = learned;
+                        Some(info)
                     })
                     .collect()
             })
@@ -3181,6 +3192,7 @@ mod tests {
             (200, "OK", br#"{"done":true,"done_reason":"load"}"#.to_vec()),
             (200, "OK", tags_body(&["qwen3.8:latest"])),
             (200, "OK", ps_body(&[("qwen3.8:latest", 262_144)])),
+            (200, "OK", show_body(None)),
         ])
         .await;
         let provider = OllamaProvider::with_base_url(
@@ -3262,6 +3274,7 @@ mod tests {
             (200, "OK", br#"{"done":true,"done_reason":"load"}"#.to_vec()),
             (200, "OK", tags_body(&["local:latest"])),
             (200, "OK", ps_body(&[("local:latest", 8_192)])),
+            (200, "OK", show_body(None)),
         ])
         .await;
         let provider = OllamaProvider::with_base_url(
@@ -3345,16 +3358,15 @@ mod tests {
     }
 
     /// What the runner has loaded is not re-derived from the Modelfile. A model
-    /// `/api/ps` answered for is skipped entirely when the prime walks the tag
-    /// list, so `/api/show` is not even asked about it.
+    /// `/api/ps` answered for keeps that window whatever `/api/show` says its
+    /// `num_ctx` is; `/api/show` is still asked, because it is the only
+    /// endpoint that says whether the model calls tools.
     #[tokio::test]
-    async fn a_model_already_answered_by_ps_is_not_asked_about_again() {
-        // Only two responses: the tag list and the `ps` answer. A third request
-        // would find nothing to serve, so this failing to skip shows up as an
-        // error rather than as a wrong number.
+    async fn a_window_the_runner_reported_outranks_the_modelfile() {
         let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
             (200, "OK", tags_body(&["warm:latest"])),
             (200, "OK", ps_body(&[("warm:latest", 262_144)])),
+            (200, "OK", show_body_with_tools(Some(4_096), Some(true))),
         ])
         .await;
         let provider = OllamaProvider::with_base_url(
@@ -3364,11 +3376,70 @@ mod tests {
 
         provider.prime_capabilities().await.expect("primes");
 
+        let caps = provider.capabilities("warm:latest");
         assert_eq!(
-            provider.capabilities("warm:latest").max_context_tokens,
-            262_144,
-            "the window the runner allocated"
+            caps.max_context_tokens, 262_144,
+            "the window the runner allocated, not the Modelfile's 4096"
         );
+        assert!(
+            caps.supports_tools,
+            "and the tools flag `/api/show` carried"
+        );
+    }
+
+    /// The three shapes `/api/show` comes in: a recent server's array, an
+    /// older server's silence, and a field of the wrong shape, which is read
+    /// as silence rather than trusted.
+    #[test]
+    fn calls_tools_reads_the_capabilities_array_and_nothing_else() {
+        assert_eq!(
+            calls_tools(&serde_json::json!({ "capabilities": ["completion", "tools"] })),
+            Some(true)
+        );
+        assert_eq!(
+            calls_tools(&serde_json::json!({ "capabilities": ["completion"] })),
+            Some(false)
+        );
+        assert_eq!(calls_tools(&serde_json::json!({ "parameters": "" })), None);
+        assert_eq!(
+            calls_tools(&serde_json::json!({ "capabilities": "tools" })),
+            None
+        );
+    }
+
+    /// `/api/show` on a recent server says outright whether a model calls
+    /// tools, and that outranks the compiled table's guess from the name in
+    /// both directions. An older server without the array leaves the table's
+    /// answer in place.
+    #[tokio::test]
+    async fn the_tools_flag_comes_from_the_server_when_it_says() {
+        let (url, _bodies) = leviath_testkit::spawn_mock_sequence(vec![
+            (
+                200,
+                "OK",
+                tags_body(&["deepseek-r1:8b", "gemma3:4b", "mistral:7b"]),
+            ),
+            (200, "OK", ps_body(&[])),
+            // Sorted walk: deepseek-r1 (table says no tools) reports tools.
+            (200, "OK", show_body_with_tools(None, Some(true))),
+            // gemma3 (table says no tools): an older server, no array.
+            (200, "OK", show_body_with_tools(None, None)),
+            // mistral (table says tools): the server says no.
+            (200, "OK", show_body_with_tools(None, Some(false))),
+        ])
+        .await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        );
+        assert!(!provider.capabilities("deepseek-r1:8b").supports_tools);
+        assert!(provider.capabilities("mistral:7b").supports_tools);
+
+        provider.prime_capabilities().await.expect("primes");
+
+        assert!(provider.capabilities("deepseek-r1:8b").supports_tools);
+        assert!(!provider.capabilities("gemma3:4b").supports_tools);
+        assert!(!provider.capabilities("mistral:7b").supports_tools);
     }
 
     /// The endpoint is an improvement, not a dependency: a server that will not
@@ -3451,17 +3522,28 @@ mod tests {
     // ─── priming ────────────────────────────────────────────────────────────
 
     fn show_body(num_ctx: Option<u32>) -> Vec<u8> {
+        show_body_with_tools(num_ctx, None)
+    }
+
+    /// An `/api/show` answer, with the `capabilities` array a recent server
+    /// carries when `tools` is `Some`, and without it when `None`.
+    fn show_body_with_tools(num_ctx: Option<u32>, tools: Option<bool>) -> Vec<u8> {
         let parameters = match num_ctx {
             Some(n) => {
                 format!("temperature                    1\nnum_ctx                        {n}")
             }
             None => "temperature                    1".to_string(),
         };
-        serde_json::to_vec(&serde_json::json!({
+        let mut body = serde_json::json!({
             "parameters": parameters,
             "model_info": { "qwen35.context_length": 262144 }
-        }))
-        .expect("serializes")
+        });
+        match tools {
+            Some(true) => body["capabilities"] = serde_json::json!(["completion", "tools"]),
+            Some(false) => body["capabilities"] = serde_json::json!(["completion"]),
+            None => {}
+        }
+        serde_json::to_vec(&body).expect("serializes")
     }
 
     /// An `/api/ps` answer naming the loaded models and their served windows.

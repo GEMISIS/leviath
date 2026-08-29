@@ -1,5 +1,6 @@
 //! Google Gemini provider implementation (via OpenAI-compatible endpoint).
 
+use crate::learned::{LearnedModel, LearnedModels};
 use crate::openai_compat::{
     build_openai_request_body, openai_sse_stream, parse_openai_response, send_chat_request,
 };
@@ -66,6 +67,12 @@ impl GeminiFamily {
     }
 }
 
+/// How many entries one native listing page asks for.
+///
+/// The endpoint served 53 models in a single page at this size when measured;
+/// the page token is followed regardless.
+const NATIVE_PAGE_SIZE: usize = 200;
+
 /// Google Gemini provider using the OpenAI-compatible endpoint.
 pub struct GeminiProvider {
     /// HTTP client
@@ -80,16 +87,17 @@ pub struct GeminiProvider {
     /// Rate limiter
     rate_limiter: Option<RateLimiter>,
 
-    /// Per-model limits as the native API reported them, filled by
-    /// [`Provider::prime_capabilities`].
+    /// What the native `/v1beta/models` listing said about each model, filled
+    /// by [`Provider::prime_capabilities`].
     ///
-    /// The listing has always read these - `inputTokenLimit` and
-    /// `outputTokenLimit` off `/v1beta/models` - and only ever handed them to
-    /// the model picker. The runtime sizes percentage region budgets through
-    /// the sync `capabilities()` path, which could not await a fetch and so
-    /// answered from a table of family defaults matched off the model's name.
-    /// The authoritative numbers were being fetched and thrown away.
-    api_limits: std::sync::Arc<std::sync::Mutex<HashMap<String, (usize, usize)>>>,
+    /// The listing has always read the two limits - `inputTokenLimit` and
+    /// `outputTokenLimit` - and only ever handed them to the model picker. The
+    /// runtime sizes percentage region budgets through the sync
+    /// `capabilities()` path, which could not await a fetch and so answered
+    /// from a table of family defaults matched off the model's name. The
+    /// authoritative numbers were being fetched and thrown away, and so was
+    /// `maxTemperature`, which says whether a model samples at all.
+    learned: LearnedModels,
 
     /// Per-model capability overrides
     capability_overrides: HashMap<String, ModelCapabilityOverride>,
@@ -103,7 +111,7 @@ impl GeminiProvider {
             api_key,
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
             rate_limiter: None,
-            api_limits: Default::default(),
+            learned: Default::default(),
             capability_overrides: HashMap::new(),
         }
     }
@@ -121,7 +129,7 @@ impl GeminiProvider {
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
             capability_overrides: overrides,
-            api_limits: Default::default(),
+            learned: Default::default(),
         }
     }
 
@@ -170,25 +178,6 @@ impl GeminiProvider {
             max_context_tokens,
             max_output_tokens,
             limits_source: LimitsSource::Builtin,
-        }
-    }
-
-    /// `base` with the token limits the API reported, when it has reported any.
-    ///
-    /// Only the two sizes. The rest of `ModelCapabilities` is about how a
-    /// request must be shaped - whether tools work, whether temperature is
-    /// accepted - and the listing describes what a model is, not the quirks of
-    /// talking to it. Same split as the Ollama provider makes, for the same
-    /// reason: each source answers the question it can answer.
-    fn api_corrected(&self, model: &str, base: ModelCapabilities) -> ModelCapabilities {
-        match leviath_core::sync::lock(&self.api_limits).get(model) {
-            Some(&(max_context_tokens, max_output_tokens)) => ModelCapabilities {
-                max_context_tokens,
-                max_output_tokens,
-                limits_source: LimitsSource::Api,
-                ..base
-            },
-            None => base,
         }
     }
 
@@ -352,7 +341,9 @@ impl Provider for GeminiProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
-        let base = self.api_corrected(model, self.builtin_capabilities(model));
+        let base = self
+            .learned
+            .corrected(model, self.builtin_capabilities(model));
         // Merged, not swapped: an entry names only what it corrects.
         match self.capability_overrides.get(model) {
             Some(o) => o.apply_to(base),
@@ -360,55 +351,112 @@ impl Provider for GeminiProvider {
         }
     }
 
-    /// Learn every model's real token limits from the native listing.
+    /// Every id the native listing named, once primed.
     ///
-    /// Reuses `list_models` rather than fetching separately: it already asks the
-    /// one endpoint that answers this, and a second request shaped slightly
-    /// differently is how the runtime and the model picker come to disagree
-    /// about the same model.
+    /// Chat models only: `parse_native_entry` keeps an entry only when it
+    /// serves `generateContent`, so the embeddings and video models the
+    /// listing also carries are never published as something a stage could
+    /// run on.
+    fn served_catalog(&self) -> Option<Vec<String>> {
+        self.learned.catalog()
+    }
+
+    /// Read the native `/v1beta/models` listing into `Self::learned`.
+    ///
+    /// What the listing fills, measured against the live endpoint: the
+    /// display name, both limits (`inputTokenLimit`, `outputTokenLimit`) and
+    /// whether the model samples (`maxTemperature`, absent on embeddings and
+    /// video models). It says nothing about tools, so tools are recorded as
+    /// taken by every chat model, an assumption grounded in every
+    /// `generateContent` model taking them; and nothing about price or dates.
+    /// `thinking`, `topP` and `topK` are present and ignored. See
+    /// `parse_native_entry`.
     ///
     /// A compat base URL has no native listing, so nothing is learned and the
     /// family defaults stay in charge - the same outcome as an unreachable API,
     /// and reported the same way by `limits_source`.
     async fn prime_capabilities(&self) -> Result<()> {
-        let models = self.list_models().await?;
-        let learned: HashMap<String, (usize, usize)> = models
-            .into_iter()
-            // Only what the API actually reported. `list_models_native` starts
-            // each entry from the family defaults, so an entry the listing said
-            // nothing about would otherwise be stored as if it had - relabelling
-            // a guess as authoritative, which is worse than the guess.
-            .filter(|m| m.capabilities.limits_source == LimitsSource::Api)
-            .map(|m| {
-                (
-                    m.id,
-                    (
-                        m.capabilities.max_context_tokens,
-                        m.capabilities.max_output_tokens,
-                    ),
-                )
-            })
-            .collect();
+        let Some(native) = self.native_base() else {
+            return Ok(());
+        };
+        let learned = self.fetch_native_catalog(&native).await?;
         let count = learned.len();
-        *leviath_core::sync::lock(&self.api_limits) = learned;
-        tracing::debug!(models = count, "learned Gemini model token limits");
+        self.learned.replace(learned);
+        tracing::debug!(models = count, "learned Gemini model capabilities");
         Ok(())
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         // Prefer the native `/v1beta/models` listing: unlike the OpenAI-compat
-        // `/models`, it returns real per-model `inputTokenLimit`/`outputTokenLimit`.
-        // Fall back to the compat listing (with builtin caps) when the base URL
-        // isn't the standard `.../openai` form.
-        match self.native_base() {
-            Some(native) => self.list_models_native(&native).await,
-            None => self.list_models_compat().await,
+        // `/models`, it returns real per-model limits and flags, and it is
+        // answered from the primed store so it cannot disagree with what an
+        // inference is told. Fall back to the compat listing (with builtin
+        // caps) when the base URL isn't the standard `.../openai` form.
+        if self.native_base().is_none() {
+            return self.list_models_compat().await;
         }
+        if self.learned.is_empty() {
+            self.prime_capabilities().await?;
+        }
+        Ok(self
+            .learned
+            .to_model_infos("google", |id| self.capabilities(id)))
     }
 }
 
+/// One native listing entry as a [`LearnedModel`], or `None` for a model a
+/// stage cannot run on.
+///
+/// `name` is like `models/gemini-3.5-flash`; the id drops the prefix. An
+/// entry whose `supportedGenerationMethods` leaves out `generateContent` is
+/// not a chat model (embeddings, video, `aqa`) and is dropped rather than
+/// listed with limits a stage could never use. An entry with no such array
+/// is kept: absent is "did not say", and the live listing always says.
+fn parse_native_entry(item: &serde_json::Value) -> Option<(String, LearnedModel)> {
+    let name = item.get("name")?.as_str()?;
+    let id = name.strip_prefix("models/").unwrap_or(name).to_string();
+    if let Some(methods) = item
+        .get("supportedGenerationMethods")
+        .and_then(|v| v.as_array())
+        && !methods
+            .iter()
+            .any(|m| m.as_str() == Some("generateContent"))
+    {
+        return None;
+    }
+    let size = |key: &str| item.get(key).and_then(|v| v.as_u64()).map(|n| n as usize);
+    // `maxTemperature` is the listing's own word on sampling: a chat model
+    // that takes a temperature publishes its ceiling, and one that does not
+    // publishes zero. Measured, every chat model carried the field, so an
+    // entry without it is one the listing did not describe.
+    let samples = item
+        .get("maxTemperature")
+        .and_then(|v| v.as_f64())
+        .map(|t| t > 0.0);
+    Some((
+        id,
+        LearnedModel {
+            display_name: item
+                .get("displayName")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            max_context_tokens: size("inputTokenLimit"),
+            max_output_tokens: size("outputTokenLimit"),
+            supports_temperature: samples,
+            supports_tools: Some(true),
+            // The native API caches through `createCachedContent`, not
+            // through markers on a chat request, so this signal has no
+            // meaning here.
+            explicit_cache_control: None,
+            pricing: None,
+            released: None,
+            retires: None,
+        },
+    ))
+}
+
 impl GeminiProvider {
-    /// GET a models listing and return the array under `field`.
+    /// GET a models listing and return its body.
     ///
     /// The native and OpenAI-compatible listings differ in the auth header
     /// they take and the key the array sits under, and in nothing else about
@@ -417,8 +465,7 @@ impl GeminiProvider {
         &self,
         url: String,
         auth: (&str, String),
-        field: &str,
-    ) -> Result<Vec<serde_json::Value>> {
+    ) -> Result<serde_json::Value> {
         let response = crate::provider::apply_request_timeout(
             self.client.get(url).header(auth.0, auth.1),
             Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
@@ -427,7 +474,11 @@ impl GeminiProvider {
         .await
         .map_err(|e| ProviderError::transport("listing models", &e))?;
         let response = crate::provider::check_http_response(response, None).await?;
-        let body: serde_json::Value = crate::provider::decode_json(response).await?;
+        crate::provider::decode_json(response).await
+    }
+
+    /// The array under `field`, or the error a listing without one is.
+    fn listing_array(body: &serde_json::Value, field: &str) -> Result<Vec<serde_json::Value>> {
         body.get(field)
             .and_then(|d| d.as_array())
             .cloned()
@@ -436,72 +487,54 @@ impl GeminiProvider {
             })
     }
 
-    /// Native `/v1beta/models` listing with authoritative per-model token limits.
-    async fn list_models_native(&self, native_base: &str) -> Result<Vec<ModelInfo>> {
-        let models = self
-            .fetch_model_listing(
-                format!("{}/models", native_base),
-                ("x-goog-api-key", self.api_key.clone()),
-                "models",
-            )
-            .await?
-            .iter()
-            .filter_map(|item| {
-                // `name` is like "models/gemini-3.5-flash"; the id drops the prefix.
-                let name = item.get("name")?.as_str()?;
-                let id = match name.strip_prefix("models/") {
-                    Some(rest) => rest.to_string(),
-                    None => name.to_string(),
-                };
-                // Start from the family defaults, then override with the API's
-                // authoritative limits where present.
-                let mut capabilities = self.capabilities(&id);
-                // `limits_source` moves only when the listing supplied a limit,
-                // so an entry that carried neither stays labelled as the guess
-                // it is.
-                if let Some(ctx) = item.get("inputTokenLimit").and_then(|v| v.as_u64()) {
-                    capabilities.max_context_tokens = ctx as usize;
-                    capabilities.limits_source = LimitsSource::Api;
-                }
-                if let Some(out) = item.get("outputTokenLimit").and_then(|v| v.as_u64()) {
-                    capabilities.max_output_tokens = out as usize;
-                    capabilities.limits_source = LimitsSource::Api;
-                }
-                Some(ModelInfo {
-                    id,
-                    display_name: item
-                        .get("displayName")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    provider: "google".into(),
-                    capabilities,
-                })
-            })
-            .collect();
-
-        Ok(models)
+    /// Every page of the native `/v1beta/models` listing, parsed.
+    ///
+    /// Paginated through `nextPageToken`: the endpoint answered 53 entries in
+    /// one page at `pageSize=200` when measured, but it documents the token and
+    /// a listing that stopped at page one would silently truncate the day it
+    /// is needed.
+    async fn fetch_native_catalog(
+        &self,
+        native_base: &str,
+    ) -> Result<HashMap<String, LearnedModel>> {
+        let mut learned = HashMap::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut url = format!("{}/models?pageSize={}", native_base, NATIVE_PAGE_SIZE);
+            if let Some(token) = &page_token {
+                url.push_str("&pageToken=");
+                url.push_str(token);
+            }
+            let body = self
+                .fetch_model_listing(url, ("x-goog-api-key", self.api_key.clone()))
+                .await?;
+            learned.extend(
+                Self::listing_array(&body, "models")?
+                    .iter()
+                    .filter_map(parse_native_entry),
+            );
+            match body.get("nextPageToken").and_then(|v| v.as_str()) {
+                Some(token) if !token.is_empty() => page_token = Some(token.to_string()),
+                _ => return Ok(learned),
+            }
+        }
     }
 
     /// OpenAI-compat `/models` listing (no per-model token limits) used only when
     /// the configured base URL isn't the standard native-derivable form.
     async fn list_models_compat(&self) -> Result<Vec<ModelInfo>> {
-        let models = self
+        let body = self
             .fetch_model_listing(
                 format!("{}/models", self.base_url),
                 ("Authorization", format!("Bearer {}", self.api_key)),
-                "data",
             )
-            .await?
+            .await?;
+        let models = Self::listing_array(&body, "data")?
             .iter()
             .filter_map(|item| {
                 let id = item.get("id")?.as_str()?.to_string();
                 let capabilities = self.capabilities(&id);
-                Some(ModelInfo {
-                    id: id.clone(),
-                    display_name: None,
-                    provider: "google".into(),
-                    capabilities,
-                })
+                Some(ModelInfo::new(id, "google", capabilities))
             })
             .collect();
 
@@ -853,7 +886,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: "http://127.0.0.1:19997".to_string(),
             rate_limiter: None,
-            api_limits: Default::default(),
+            learned: Default::default(),
             capability_overrides: HashMap::new(),
         }
     }
@@ -881,7 +914,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: format!("{}/openai", base),
             rate_limiter: None,
-            api_limits: Default::default(),
+            learned: Default::default(),
             capability_overrides: HashMap::new(),
         };
         let tokens = provider.count_tokens("anything", "gemini-3.5-flash").await;
@@ -896,7 +929,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: format!("{}/openai", base),
             rate_limiter: None,
-            api_limits: Default::default(),
+            learned: Default::default(),
             capability_overrides: HashMap::new(),
         };
         // 8 chars / 4 = 2 (heuristic fallback)
@@ -913,7 +946,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: "http://127.0.0.1:19997/openai".to_string(),
             rate_limiter: None,
-            api_limits: Default::default(),
+            learned: Default::default(),
             capability_overrides: HashMap::new(),
         };
         let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
@@ -928,7 +961,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: format!("{}/openai", base),
             rate_limiter: None,
-            api_limits: Default::default(),
+            learned: Default::default(),
             capability_overrides: HashMap::new(),
         };
         let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
@@ -943,7 +976,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: format!("{}/openai", base),
             rate_limiter: None,
-            api_limits: Default::default(),
+            learned: Default::default(),
             capability_overrides: HashMap::new(),
         };
         let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
@@ -1239,7 +1272,7 @@ mod tests {
             api_key: "test-key".to_string(),
             base_url: format!("{}/openai", base),
             rate_limiter: None,
-            api_limits: Default::default(),
+            learned: Default::default(),
             capability_overrides: HashMap::new(),
         }
     }
@@ -1294,7 +1327,7 @@ mod tests {
             api_key: "test-key".to_string(),
             base_url: "http://127.0.0.1:19997/openai".to_string(),
             rate_limiter: None,
-            api_limits: Default::default(),
+            learned: Default::default(),
             capability_overrides: HashMap::new(),
         };
         let err = provider.list_models().await.unwrap_err();
@@ -1433,6 +1466,110 @@ mod tests {
         assert!(
             provider.serves_model("not-a-real-model-xyz").is_none(),
             "a model nobody has"
+        );
+    }
+}
+
+#[cfg(test)]
+mod learned_tests {
+    use super::*;
+    use leviath_testkit::spawn_mock_sequence;
+
+    fn native_provider_at(base: &str) -> GeminiProvider {
+        GeminiProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        )
+        .with_base_url(Some(format!("{base}/openai")))
+    }
+
+    /// The native listing pages through `nextPageToken`, carries embeddings
+    /// and video models beside the chat models, and says per model whether
+    /// it samples (`maxTemperature`). All three are read.
+    #[tokio::test]
+    async fn priming_follows_the_page_token_and_keeps_chat_models_only() {
+        let page_one = br#"{"models":[
+            {"name":"models/gemini-3.7-flash","displayName":"Gemini 3.7 Flash",
+             "inputTokenLimit":1048576,"outputTokenLimit":65536,"maxTemperature":2,
+             "supportedGenerationMethods":["generateContent","countTokens"]}
+        ],"nextPageToken":"page-two"}"#;
+        let page_two = br#"{"models":[
+            {"name":"models/gemini-embedding-2","inputTokenLimit":8192,
+             "supportedGenerationMethods":["embedContent"]},
+            {"name":"models/gemini-fixed","inputTokenLimit":32768,"maxTemperature":0,
+             "supportedGenerationMethods":["generateContent"]},
+            {"name":"models/gemini-quiet","supportedGenerationMethods":["generateContent"]}
+        ]}"#;
+        let (url, _bodies) = spawn_mock_sequence(vec![
+            (200, "OK", page_one.to_vec()),
+            (200, "OK", page_two.to_vec()),
+        ])
+        .await;
+        let provider = native_provider_at(&url);
+        assert_eq!(provider.served_catalog(), None, "unprimed: cannot say");
+
+        provider.prime_capabilities().await.expect("primes");
+
+        let mut catalog = provider.served_catalog().expect("primed");
+        catalog.sort();
+        assert_eq!(
+            catalog,
+            ["gemini-3.7-flash", "gemini-fixed", "gemini-quiet"],
+            "the embedding model is not something a stage can run on"
+        );
+
+        let flash = provider.capabilities("gemini-3.7-flash");
+        assert!(flash.supports_temperature);
+        assert_eq!(flash.max_context_tokens, 1_048_576);
+        assert_eq!(flash.limits_source, LimitsSource::Api);
+
+        let fixed = provider.capabilities("gemini-fixed");
+        assert!(
+            !fixed.supports_temperature,
+            "a ceiling of zero is no sampling"
+        );
+        assert_eq!(fixed.max_context_tokens, 32_768);
+
+        let quiet = provider.capabilities("gemini-quiet");
+        assert!(
+            quiet.supports_temperature,
+            "no `maxTemperature` is the listing not saying, so the table's answer stands"
+        );
+        assert_eq!(quiet.limits_source, LimitsSource::Builtin);
+    }
+
+    /// A compat base URL has no native listing: priming learns nothing and
+    /// says so with `None`, and the listing still answers from the compat
+    /// endpoint.
+    #[tokio::test]
+    async fn a_compat_base_learns_nothing() {
+        let body = br#"{"data":[{"id":"gemini-3.5-flash"}]}"#;
+        let (url, _bodies) = spawn_mock_sequence(vec![(200, "OK", body.to_vec())]).await;
+        let provider = GeminiProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+        )
+        .with_base_url(Some(url));
+
+        provider.prime_capabilities().await.expect("nothing to do");
+        assert_eq!(provider.served_catalog(), None);
+
+        let listed = provider.list_models().await.expect("compat listing");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "gemini-3.5-flash");
+        assert!(!listed[0].learned);
+    }
+
+    /// An empty page token ends the walk the same way a missing one does.
+    #[tokio::test]
+    async fn an_empty_page_token_is_the_last_page() {
+        let body = br#"{"models":[{"name":"models/gemini-3.5-flash"}],"nextPageToken":""}"#;
+        let (url, _bodies) = spawn_mock_sequence(vec![(200, "OK", body.to_vec())]).await;
+        let provider = native_provider_at(&url);
+        provider.prime_capabilities().await.expect("one page");
+        assert_eq!(
+            provider.served_catalog(),
+            Some(vec!["gemini-3.5-flash".to_string()])
         );
     }
 }

@@ -534,11 +534,9 @@ async fn list_with_registry(
     // Start with the built-in table, indexed by model_id for easy overriding.
     let mut entries: Vec<ModelInfo> = builtin_table()
         .into_iter()
-        .map(|e| ModelInfo {
-            id: e.model_id.to_string(),
-            display_name: Some(e.display_name.to_string()),
-            provider: e.provider.to_string(),
-            capabilities: e.caps,
+        .map(|e| {
+            ModelInfo::new(e.model_id.to_string(), e.provider.to_string(), e.caps)
+                .named(Some(e.display_name.to_string()))
         })
         .collect();
 
@@ -1507,11 +1505,9 @@ mod tests {
         let table = builtin_table();
         let infos: Vec<ModelInfo> = table
             .into_iter()
-            .map(|e| ModelInfo {
-                id: e.model_id.to_string(),
-                display_name: Some(e.display_name.to_string()),
-                provider: e.provider.to_string(),
-                capabilities: e.caps,
+            .map(|e| {
+                ModelInfo::new(e.model_id.to_string(), e.provider.to_string(), e.caps)
+                    .named(Some(e.display_name.to_string()))
             })
             .collect();
 
@@ -1855,12 +1851,12 @@ mod tests {
                     all: false,
                     json: false,
                 };
-                let new_model = ModelInfo {
-                    id: "mock-brand-new-model".to_string(),
-                    display_name: Some("Mock Brand New Model".to_string()),
-                    provider: "mock".to_string(),
-                    capabilities: ModelCapabilities::default(),
-                };
+                let new_model = ModelInfo::new(
+                    "mock-brand-new-model".to_string(),
+                    "mock".to_string(),
+                    ModelCapabilities::default(),
+                )
+                .named(Some("Mock Brand New Model".to_string()));
                 let result =
                     list_with_registry(args, &mock_registry("mock", vec![new_model], false)).await;
                 assert!(result.is_ok());
@@ -1884,12 +1880,12 @@ mod tests {
                     all: false,
                     json: false,
                 };
-                let new_model = ModelInfo {
-                    id: "mock-brand-new-model".to_string(),
-                    display_name: Some("Mock Brand New Model".to_string()),
-                    provider: "mock".to_string(),
-                    capabilities: ModelCapabilities::default(),
-                };
+                let new_model = ModelInfo::new(
+                    "mock-brand-new-model".to_string(),
+                    "mock".to_string(),
+                    ModelCapabilities::default(),
+                )
+                .named(Some("Mock Brand New Model".to_string()));
                 let result =
                     list_with_registry(args, &mock_registry("mock", vec![new_model], false)).await;
                 assert!(result.is_ok());
@@ -1910,12 +1906,9 @@ mod tests {
                     all: false,
                     json: false,
                 };
-                let overriding_model = ModelInfo {
-                    id: known_id,
-                    display_name: Some("Overridden".to_string()),
-                    provider: "mock".to_string(),
-                    capabilities: ModelCapabilities::default(),
-                };
+                let overriding_model =
+                    ModelInfo::new(known_id, "mock".to_string(), ModelCapabilities::default())
+                        .named(Some("Overridden".to_string()));
                 let result =
                     list_with_registry(args, &mock_registry("mock", vec![overriding_model], false))
                         .await;
@@ -1958,12 +1951,14 @@ mod tests {
         crate::config::with_isolated_config_path_async(
             "models-list_remote_override",
             |_fake_dir| async move {
-                let remote = vec![ModelInfo {
-                    id: "claude-sonnet-5".to_string(),
-                    display_name: Some("Claude Sonnet 5 (remote)".to_string()),
-                    provider: "anthropic".to_string(),
-                    capabilities: leviath_providers::ModelCapabilities::default(),
-                }];
+                let remote = vec![
+                    ModelInfo::new(
+                        "claude-sonnet-5".to_string(),
+                        "anthropic".to_string(),
+                        leviath_providers::ModelCapabilities::default(),
+                    )
+                    .named(Some("Claude Sonnet 5 (remote)".to_string())),
+                ];
                 let args = ListArgs {
                     remote: true,
                     provider: None,
@@ -2323,12 +2318,12 @@ mod tests {
                     remote: true,
                     provider: Some("mock".to_string()),
                 };
-                let remote_model = ModelInfo {
-                    id: "mock-remote-model".to_string(),
-                    display_name: Some("Mock Remote Model".to_string()),
-                    provider: "mock".to_string(),
-                    capabilities: ModelCapabilities::default(),
-                };
+                let remote_model = ModelInfo::new(
+                    "mock-remote-model".to_string(),
+                    "mock".to_string(),
+                    ModelCapabilities::default(),
+                )
+                .named(Some("Mock Remote Model".to_string()));
                 let result =
                     show_with_registry(args, &mock_registry("mock", vec![remote_model], false))
                         .await;
