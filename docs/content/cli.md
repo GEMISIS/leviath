@@ -371,8 +371,10 @@ it returns `false`.
 
 Both ask every configured provider for its own listing by default, waiting up to five seconds each,
 and print what the provider said: the columns include the release date and the input and output
-price per million tokens where the listing carries them, and a trailing line says how many rows
-came from a provider and how many from the table compiled into this build. A provider that could
+price per million tokens where the listing or the build's price table carries them (`n/a` where
+neither does), and a trailing line says how many rows came from a provider and how many from the
+table compiled into this build. `lev models show` names where a table row's rate came from and the
+day the table was read; see [where the prices come from](/docs/costs#where-the-prices-come-from). A provider that could
 not be reached keeps its table rows, with a warning naming it. `--offline` skips the network and
 prints the table alone. `-r/--remote` is still accepted for older scripts and changes nothing.
 

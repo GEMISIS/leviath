@@ -146,12 +146,28 @@ spent most of the run.
 > a fan-out badly: in the $236 run above, the top-level agent's own record said $15. Add up the
 > tree, following `children` in each `meta.json`.
 
-OpenRouter quotes every model's rate in its listing, so a run through it is priced from what the
-gateway said that day, and `lev models list` prints those rates beside each model. Anthropic, OpenAI
-and Google publish no rate through their APIs, so theirs are transcribed into this build and dated;
-`lev models show` says which kind it is printing. Rates for models with neither come from
-`[model_capabilities]` in your config, which is also the only place a negotiated rate or a
-self-hosted model's cost can live:
+## Where the prices come from
+
+A computed cost is a reconstruction from list prices, not an invoice. The provider's bill is the
+figure that counts; this one exists so a run can be compared with the last one and a runaway
+noticed before the bill arrives. Where a figure comes from decides how far to trust it:
+
+| provider | source | live or table | coverage |
+|---|---|---|---|
+| OpenRouter | its own catalogue, plus the real cost each call reports | live | every model it serves; `cost_is_exact` is true for these |
+| OpenAI, Anthropic, Google | the vendor list prices as carried by OpenRouter's catalogue, cross-checked against LiteLLM's table | table, refreshed weekly by an automated PR | current families; a model the table has no row for is `n/a` |
+| Ollama | free by design | neither | every model; a self-hosted cost belongs in the override below |
+| Rhai script providers, OpenAI-compatible endpoints | the script's `list_models`, or a `[model_capabilities]` override | whichever the script gives | unpriced unless one of those says otherwise |
+
+`lev models list` prints each model's input and output rate, or `n/a` where nothing prices it;
+`lev models show` names the source of a table row and the day the table was read. The table is
+compiled into the build, so a build cannot notice a repricing between refreshes, and a refresh is
+the deterministic `cargo xtask prices`: it writes a row only where the two sources agree within 5%,
+keeps a disagreement as it was and prints it, and refuses a move it does not believe.
+
+A negotiated rate never appears on a public page, so it belongs in the per-model override in your
+config, which wins over every table row and is also the only place a self-hosted model's cost can
+live:
 
 ```toml
 [model_capabilities."my-model"]
