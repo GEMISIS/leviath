@@ -1,0 +1,59 @@
+{
+  "taken_at": "2026-08-29T08:44:58+00:00",
+  "commit": "fc28a627",
+  "branch_head": "fc28a627",
+  "machine": "Darwin 25.6.0 arm64",
+  "notes": [
+    "fake-runs corpus: 750 copies of one 28 KB probe run (small context.json); regenerate from a longer run for the dashboard PRs",
+    "dashboard: 30 s over a 200x50 pty, keys jjj, release binary",
+    "serve: 100 sequential requests per route, one connection each, corpus of 750 runs",
+    "drive: 32 probe runs against mock.py with a current_time tool call, --yolo",
+    "mock_completions is cumulative for the mock process and includes the daemon's own warm-up calls",
+    "taken after the cleanup train (#644-#693): dashboard CPU 4.12 -> 2.53 s is #673; binary 33.3 -> 31.7 MB is #672",
+    "drive wall clock is noisy at this size: four samples 1.45, 1.64, 1.67, 1.70 s (daemon CPU 0.35-0.45 s); the 2026-08-27 figure was one sample of 1.42 s",
+    "mock_completions is 96 here against 198 before: mock.py's model is gpt-mock since #688 and the daemon's warm-up calls changed; not comparable across the two files"
+  ],
+  "binary": {
+    "binary": "target/release/lev",
+    "bytes": 31740752,
+    "packages": 494,
+    "const_bytes": "7129760",
+    "r50k_vocab": "absent"
+  },
+  "dashboard_750_runs_30s": {
+    "cpu_seconds": 2.5317,
+    "max_rss_bytes": 22609920,
+    "bytes_written": 18524,
+    "repaints": 1,
+    "seconds": 30.0,
+    "frame1_sha256": "35db8fa102780a266844cf264ac3c2b6599d2141a60e11a668fdad37b8938ea0",
+    "exit_status": 0
+  },
+  "serve_750_runs": {
+    "/api/runs?limit=50": {
+      "p50_ms": 8.96,
+      "p99_ms": 9.64,
+      "max_ms": 18.85,
+      "body_bytes": 57534
+    },
+    "/api/agents/tree": {
+      "p50_ms": 9.4,
+      "p99_ms": 10.1,
+      "max_ms": 10.96,
+      "body_bytes": 151501
+    },
+    "/api/agents": {
+      "p50_ms": 12.03,
+      "p99_ms": 13.38,
+      "max_ms": 14.27,
+      "body_bytes": 852568
+    }
+  },
+  "daemon_drive_32_runs": {
+    "runs": 32,
+    "finished": 32,
+    "wall_seconds": 1.7,
+    "mock_completions": 96,
+    "daemon_cpu_seconds": 0.45
+  }
+}
