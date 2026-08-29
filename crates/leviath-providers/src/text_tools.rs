@@ -21,7 +21,8 @@
 use crate::provider::{ContentBlock, Message, MessageContent, Tool};
 
 /// Info string of the fenced block carrying tool calls.
-pub const FENCE_TAG: &str = "leviath-tool-calls";
+#[cfg(test)]
+pub(crate) const FENCE_TAG: &str = "leviath-tool-calls";
 
 /// The opening fence, as it appears in text.
 const FENCE_OPEN: &str = "```leviath-tool-calls";

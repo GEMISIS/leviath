@@ -540,7 +540,7 @@ pub struct SystemBlock {
 /// the same `f32`, so `0.7f32` prints "0.7". Parsing that as `f64` gets the
 /// number the blueprint author actually wrote, without imposing a fixed
 /// precision on someone who wanted `0.125`.
-pub fn json_number(value: f32) -> serde_json::Value {
+pub(crate) fn json_number(value: f32) -> serde_json::Value {
     // `f32::Display` always produces a decimal that parses back, including for
     // the non-finite values, so the fallback is the same number rather than a
     // branch nothing reaches.
@@ -934,7 +934,7 @@ pub trait Provider: Send + Sync {
 ///
 /// Used by both the OpenAI and OpenRouter providers which share the same
 /// Chat Completions API response schema.
-pub fn parse_openai_finish_reason(reason: &str) -> FinishReason {
+pub(crate) fn parse_openai_finish_reason(reason: &str) -> FinishReason {
     match reason {
         "stop" => FinishReason::Complete,
         "tool_calls" => FinishReason::ToolCall,
@@ -959,7 +959,7 @@ pub fn parse_openai_finish_reason(reason: &str) -> FinishReason {
 /// off the same way, five times in a row, before the stage gave up. A string
 /// where an object should be fails schema validation, and the runtime reads
 /// the string shape as "this call was cut off" and says so back to the model.
-pub fn parse_tool_arguments(raw: &str) -> serde_json::Value {
+pub(crate) fn parse_tool_arguments(raw: &str) -> serde_json::Value {
     let raw = raw.trim();
     if raw.is_empty() {
         return serde_json::Value::Object(serde_json::Map::new());
@@ -1023,7 +1023,7 @@ pub(crate) fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u
 /// - On 2xx: returns `Ok(response)` so the caller can read the body.
 ///
 /// Pass the full `reqwest::Response`; it is returned back on success.
-pub async fn check_http_response(
+pub(crate) async fn check_http_response(
     response: reqwest::Response,
     limiter: Option<&crate::rate_limit::RateLimiter>,
 ) -> Result<reqwest::Response> {
@@ -1086,7 +1086,9 @@ pub async fn check_http_response(
 /// because a dead socket was being reported as malformed JSON. The streaming
 /// path already drew this line correctly (see `openai_compat::stream_chat`);
 /// this is the buffered path drawing the same one.
-pub async fn decode_json<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> Result<T> {
+pub(crate) async fn decode_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T> {
     let bytes = response
         .bytes()
         .await

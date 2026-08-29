@@ -63,6 +63,12 @@ same list.
   count calls on Anthropic and Gemini now reuse a pooled connection and go
   through the provider's rate limiter; OpenAI's local tiktoken count moves off
   the async threads above 256 KB.
+- For embedders of `leviath-providers`: `RateLimiter::with_defaults` is
+  removed (build one with `RateLimiter::new(&RateLimitConfig { .. })`). The
+  `openai_compat`, `text_tools` and `debug_http` modules, and
+  `provider::{json_number, parse_tool_arguments, parse_openai_finish_reason,
+  check_http_response, decode_json}` are crate-private;
+  `tokenizer::approximate_count` is private (`count_tokens` still reaches it).
 
 ### Fixed
 

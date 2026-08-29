@@ -85,7 +85,7 @@ fn approximate_count_gemini(text: &str) -> usize {
 ///
 /// Uses the common heuristic of ~4 characters per token, which is reasonably
 /// accurate for English text with GPT-style tokenizers.
-pub fn approximate_count(text: &str) -> usize {
+fn approximate_count(text: &str) -> usize {
     leviath_core::estimate_tokens(text)
 }
 
