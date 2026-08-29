@@ -132,8 +132,16 @@ impl Dashboard {
             .unwrap_or_default();
 
         let total_tok_part = if agent.tokens_in > 0 || agent.tokens_out > 0 {
-            let cache_part = if agent.cached_tokens > 0 && agent.tokens_in > 0 {
-                let pct = (agent.cached_tokens as f64 / agent.tokens_in as f64) * 100.0;
+            // `tokens_in` is the fresh input only: every provider is
+            // normalised to Anthropic's convention, where cache reads are a
+            // separate count and not part of it (see
+            // `TokenUsage::prompt_tokens`). The share of the prompt served
+            // from cache is therefore reads over fresh plus reads, which
+            // cannot pass 100%; over fresh alone it read 164% on a run that
+            // was mostly cache hits.
+            let cache_part = if agent.cached_tokens > 0 {
+                let prompt = agent.tokens_in.saturating_add(agent.cached_tokens);
+                let pct = (agent.cached_tokens as f64 / prompt as f64) * 100.0;
                 format!("  cache {:.0}%", pct)
             } else {
                 String::new()
@@ -602,6 +610,28 @@ mod tests {
         rendered_buffer(&terminal)
     }
 
+    /// The defect: a run that is mostly served from cache showed a cache
+    /// figure over 100%. Every provider is normalised so that `tokens_in` is
+    /// the FRESH input only (see `TokenUsage::prompt_tokens`), so dividing
+    /// the cache reads by it is not a share of anything. The numbers are a
+    /// real researcher run's `meta.json`: 555,075 fresh, 909,343 cached,
+    /// which the strip showed as `cache 164%`.
+    #[test]
+    fn render_info_strip_cache_share_is_a_share_of_the_whole_prompt() {
+        let mut agent = wide_agent();
+        agent.tokens_in = 555_075;
+        agent.tokens_out = 58_267;
+        agent.cached_tokens = 909_343;
+        let buf = info_strip_at(200, &agent);
+        assert!(buf.contains("total 555k↑ 58k↓  cache 62%"), "{buf}");
+        assert!(!buf.contains("164%"), "{buf}");
+        // Everything cached is the ceiling, not a division by zero.
+        agent.tokens_in = 0;
+        agent.cached_tokens = 4_000;
+        let buf = info_strip_at(200, &agent);
+        assert!(buf.contains("total 0↑ 58k↓  cache 100%"), "{buf}");
+    }
+
     /// The defect: the model was cut to 24 characters on a 200-column
     /// terminal with most of the row empty.
     #[test]
@@ -609,7 +639,7 @@ mod tests {
         let buf = info_strip_at(200, &wide_agent());
         assert!(buf.contains(LONG_MODEL), "{buf}");
         assert!(buf.contains(LONG_WORKDIR), "{buf}");
-        assert!(buf.contains("total 1M↑ 25k↓  cache 41%"), "{buf}");
+        assert!(buf.contains("total 1M↑ 25k↓  cache 29%"), "{buf}");
         assert!(!buf.contains('…'), "{buf}");
     }
 
@@ -618,7 +648,7 @@ mod tests {
     #[test]
     fn render_info_strip_narrow_shrinks_model_before_workdir_and_keeps_tokens() {
         let buf = info_strip_at(70, &wide_agent());
-        assert!(buf.contains("total 1M↑ 25k↓  cache 41%"), "{buf}");
+        assert!(buf.contains("total 1M↑ 25k↓  cache 29%"), "{buf}");
         assert!(!buf.contains(LONG_MODEL), "{buf}");
         assert!(!buf.contains(LONG_WORKDIR), "{buf}");
         // The model sits at the floor (seven characters and the ellipsis).
@@ -636,14 +666,14 @@ mod tests {
         // the workdir 19 columns.
         let buf = info_strip_at(60, &wide_agent());
         assert!(
-            buf.contains("dir   /srv/projects/ai/p…  ·  total 1M↑ 25k↓  cache 41%"),
+            buf.contains("dir   /srv/projects/ai/p…  ·  total 1M↑ 25k↓  cache 29%"),
             "{buf}"
         );
         assert!(!buf.contains("openro"), "{buf}");
         // The mid case, where the model at its floor would have fitted the
         // arithmetic of the parts but not the row: 50 wide drops it too.
         let buf = info_strip_at(50, &wide_agent());
-        assert!(buf.contains("total 1M↑ 25k↓  cache 41%"), "{buf}");
+        assert!(buf.contains("total 1M↑ 25k↓  cache 29%"), "{buf}");
         assert!(!buf.contains("openro"), "{buf}");
     }
 

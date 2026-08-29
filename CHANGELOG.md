@@ -109,6 +109,13 @@ same list.
 
 ### Fixed
 
+- The dashboard's run detail strip could show a cache figure over 100%, such
+  as `cache 152%`, on a run that was mostly served from the provider's cache.
+  The prompt count every provider is normalised to is the fresh input only,
+  with cache reads counted separately, and the strip divided the reads by
+  that fresh figure. It now shows the share of the whole prompt (fresh plus
+  cached) that came from cache, so the figure cannot pass 100%. Stored counts
+  and the API are unchanged.
 - The dashboard cut text to fixed character counts whatever the terminal
   width: the detail view's model name stopped at 24 characters and its
   working directory at 42 with most of a 200-column row empty, the header
