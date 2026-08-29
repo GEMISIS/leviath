@@ -101,12 +101,15 @@ pub struct Config {
     #[serde(default)]
     pub model_capabilities: HashMap<String, ModelCapabilityOverride>,
 
-    /// Optional overrides for Rhai *script providers*. Key is the
-    /// provider name an agent references (e.g. `"groq"`). A script activates by
-    /// being referenced + its `.rhai` file existing in the providers dir; an
-    /// entry here only supplies overrides (an API key not read from env, a
-    /// `base_url`, a `rate_limit`, a differently-named `script`, or extra keys
-    /// forwarded to the script's `initialize`).
+    /// Custom providers, keyed by the name an agent references (e.g. `"groq"`).
+    ///
+    /// Without a `kind` an entry is overrides for a Rhai *script provider*: a
+    /// script activates by being referenced + its `.rhai` file existing in the
+    /// providers dir, and the entry only supplies overrides (an API key not
+    /// read from env, a `base_url`, a `rate_limit`, a differently-named
+    /// `script`, or extra keys forwarded to the script's `initialize`). With
+    /// `kind = "openai-compatible"` it is a native provider for the server at
+    /// `base_url`, with no script at all.
     #[serde(default)]
     pub model_providers: HashMap<String, ModelProviderConfig>,
 
@@ -624,6 +627,11 @@ impl Config {
             // fail loudly and immediately.
             for server in &c.mcp_servers {
                 server.validate()?;
+            }
+            // An endpoint with no address is the same kind of mistake, and is
+            // named against its table for the same reason.
+            for (name, provider) in &c.model_providers {
+                provider.validate(name)?;
             }
 
             let path_display = path.display();
@@ -2582,6 +2590,7 @@ google_api_key = "AIza-existing"
                 ),
                 ("region".to_string(), toml::Value::String("eu".to_string())),
             ]),
+            ..Default::default()
         };
         let rendered = format!("{gateway:?}");
         assert!(!rendered.contains("SECRET-VALUE"), "key leaked: {rendered}");
@@ -2596,6 +2605,165 @@ google_api_key = "AIza-existing"
 
         let bare = format!("{:?}", ModelProviderConfig::default());
         assert!(bare.contains("api_key: \"<unset>\""), "{bare}");
+        assert!(bare.contains("kind: Script"), "{bare}");
+    }
+
+    /// An endpoint's headers are where its second credential goes, so the
+    /// debug line names them and never prints them.
+    #[test]
+    fn an_endpoints_header_values_never_reach_the_debug_line() {
+        let endpoint = ModelProviderConfig {
+            kind: Some(ModelProviderKind::OpenaiCompatible),
+            base_url: Some("http://localhost:8080/v1".to_string()),
+            headers: Some(
+                [("X-Api-Key".to_string(), "hdr-SECRET-VALUE".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+            models: Some(vec!["llama-3".to_string()]),
+            ..Default::default()
+        };
+        let rendered = format!("{endpoint:?}");
+        assert!(
+            !rendered.contains("SECRET-VALUE"),
+            "header leaked: {rendered}"
+        );
+        assert!(rendered.contains("kind: OpenaiCompatible"), "{rendered}");
+        assert!(
+            rendered.contains("header_names: [\"X-Api-Key\"]"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("llama-3"), "{rendered}");
+    }
+
+    /// The kind is spelled the way the file spells it, both ways.
+    #[test]
+    fn a_model_provider_kind_round_trips_through_its_spelling() {
+        for kind in [
+            ModelProviderKind::Script,
+            ModelProviderKind::OpenaiCompatible,
+        ] {
+            assert_eq!(ModelProviderKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(ModelProviderKind::parse("vllm"), None);
+        assert_eq!(
+            ModelProviderConfig::default().kind(),
+            ModelProviderKind::Script
+        );
+        assert!(!ModelProviderConfig::default().is_endpoint());
+    }
+
+    /// The headers reach a provider constructor as an ordered list.
+    #[test]
+    fn header_pairs_are_listed_in_name_order_and_empty_when_unset() {
+        assert!(ModelProviderConfig::default().header_pairs().is_empty());
+        let endpoint = ModelProviderConfig {
+            headers: Some(
+                [
+                    ("X-Org".to_string(), "research".to_string()),
+                    ("Authorization".to_string(), "Bearer t".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            endpoint.header_pairs(),
+            vec![
+                ("Authorization".to_string(), "Bearer t".to_string()),
+                ("X-Org".to_string(), "research".to_string()),
+            ]
+        );
+    }
+
+    /// An endpoint entry parses with every field, and a script entry written
+    /// before `kind` existed still reads as a script.
+    #[test]
+    fn an_endpoint_entry_parses_and_an_old_entry_is_still_a_script() {
+        let content = "\
+[model_providers.llama-cpp]
+kind = \"openai-compatible\"
+base_url = \"http://localhost:8080/v1\"
+models = [\"llama-3\"]
+
+[model_providers.llama-cpp.headers]
+X-Org = \"research\"
+
+[model_providers.groq]
+script = \"groq.rhai\"
+";
+        let config: Config = toml::from_str(content).expect("parses");
+        let llama = &config.model_providers["llama-cpp"];
+        assert!(llama.is_endpoint());
+        assert_eq!(llama.base_url.as_deref(), Some("http://localhost:8080/v1"));
+        assert_eq!(llama.models.as_deref(), Some(&["llama-3".to_string()][..]));
+        assert_eq!(
+            llama.header_pairs(),
+            vec![("X-Org".to_string(), "research".to_string())]
+        );
+        // The endpoint's own keys are read, not swept into `extra`.
+        assert!(llama.extra.is_empty(), "{:?}", llama.extra);
+        assert!(!config.model_providers["groq"].is_endpoint());
+        assert!(
+            Config::unknown_config_keys(content).is_empty(),
+            "every key here is read"
+        );
+
+        // Written back, the script entry carries no `kind` line: a config
+        // that never mentioned it is not rewritten to.
+        let written = toml::to_string_pretty(&config).expect("serializes");
+        assert!(
+            written.contains("kind = \"openai-compatible\""),
+            "{written}"
+        );
+        assert_eq!(written.matches("kind = ").count(), 1, "{written}");
+    }
+
+    /// The two load-time refusals: an endpoint with nowhere to send a request,
+    /// and a kind nothing implements. Both name the entry.
+    #[test]
+    fn an_endpoint_without_a_base_url_or_with_an_unknown_kind_fails_the_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        std::fs::write(
+            &path,
+            "[model_providers.mock]\nkind = \"openai-compatible\"\napi_key = \"k\"\n",
+        )
+        .unwrap();
+        let err = Config::load_from_path(&path).unwrap_err().to_string();
+        assert!(err.contains("[model_providers.mock]"), "{err}");
+        assert!(err.contains("base_url"), "{err}");
+
+        // A blank address is no address.
+        std::fs::write(
+            &path,
+            "[model_providers.mock]\nkind = \"openai-compatible\"\nbase_url = \"  \"\n",
+        )
+        .unwrap();
+        assert!(Config::load_from_path(&path).is_err());
+
+        std::fs::write(
+            &path,
+            "[model_providers.mock]\nkind = \"vllm\"\nbase_url = \"http://h\"\n",
+        )
+        .unwrap();
+        let err = Config::load_from_path(&path).unwrap_err().to_string();
+        assert!(err.contains("unknown variant"), "{err}");
+        assert!(err.contains("openai-compatible"), "{err}");
+
+        // A script entry with no base URL was always fine and still is.
+        std::fs::write(&path, "[model_providers.groq]\nscript = \"groq.rhai\"\n").unwrap();
+        assert!(Config::load_from_path(&path).is_ok());
+        // So is a well-formed endpoint.
+        std::fs::write(
+            &path,
+            "[model_providers.mock]\nkind = \"openai-compatible\"\nbase_url = \"http://h/v1\"\n",
+        )
+        .unwrap();
+        let loaded = Config::load_from_path(&path).expect("loads");
+        assert!(loaded.model_providers["mock"].is_endpoint());
     }
 
     /// Unix-only: the assertion is about POSIX mode bits, which Windows does

@@ -107,6 +107,48 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
         options: std::collections::HashMap::new(),
     });
 
+    // Every `[model_providers.<name>]` entry that is an endpoint rather than a
+    // script. Registered natively, under its own name, so it needs no `.rhai`
+    // on disk and answers `lev models list` like the built-ins do. The script
+    // layer below never sees these: `script_provider_config` filters them.
+    let mut endpoints: Vec<(&String, &crate::config::ModelProviderConfig)> = config
+        .model_providers
+        .iter()
+        .filter(|(_, mp)| mp.is_endpoint())
+        .collect();
+    // Name order, so the registry is built the same way from one config
+    // whatever the map's iteration order was.
+    endpoints.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, mp) in endpoints {
+        // Validated at load, so an endpoint without an address is not a
+        // config this function is handed; one built by hand is skipped rather
+        // than registered pointing nowhere.
+        let Some(base_url) = mp
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+        else {
+            continue;
+        };
+        let mut cred = ProviderCreds::openai_compatible(
+            name.clone(),
+            base_url,
+            mp.api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .map(str::to_string),
+            mp.header_pairs(),
+            mp.models.clone(),
+            mp.serves.clone().unwrap_or_default(),
+        );
+        cred.model_capabilities = caps.clone();
+        cred.request_timeout_secs = timeout;
+        cred.rate_limit = mp.rate_limit.clone();
+        creds.push(cred);
+    }
+
     // Claude Code needs no API key, but it is opt-in rather than always-on: the
     // CLI puts the user's account email address into every call and that cannot
     // be turned off. Leaving it unregistered is also how it stays out of an
@@ -266,9 +308,14 @@ pub(crate) fn script_provider_config(
     config: &Config,
 ) -> leviath_runtime::script_provider::ScriptProviderConfig {
     leviath_runtime::script_provider::ScriptProviderConfig {
+        // An endpoint entry is a native provider (see
+        // `provider_creds_from_config`), not a script waiting for a `.rhai`;
+        // handing it to the layer would have it look for one and log that it
+        // is missing.
         overrides: config
             .model_providers
             .iter()
+            .filter(|(_, mp)| !mp.is_endpoint())
             .map(|(name, mp)| (name.clone(), script_provider_spec(mp)))
             .collect(),
         default_caps: config.model_capabilities.clone(),
@@ -575,6 +622,7 @@ mod tests {
             }),
             serves: None,
             extra,
+            ..Default::default()
         };
         let spec = script_provider_spec(&mp);
         assert_eq!(spec.script.as_deref(), Some("groq"));
@@ -582,6 +630,103 @@ mod tests {
         assert_eq!(spec.init_config["base_url"], "http://api");
         assert_eq!(spec.init_config["api_key"], "k");
         assert_eq!(spec.init_config["region"], "us");
+    }
+
+    /// An endpoint entry becomes a native cred under its own name, with the
+    /// entry's rate limit, and never a script override.
+    #[test]
+    fn an_endpoint_entry_becomes_a_native_cred_and_not_a_script_override() {
+        let mut config = Config::default();
+        config.model_providers.insert(
+            "zeta".to_string(),
+            crate::config::ModelProviderConfig {
+                kind: Some(crate::config::ModelProviderKind::OpenaiCompatible),
+                base_url: Some(" http://localhost:8080/v1 ".to_string()),
+                api_key: Some("  ".to_string()),
+                headers: Some(
+                    [("X-Org".to_string(), "r".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                models: Some(vec!["llama-3".to_string()]),
+                serves: Some(vec!["llama".to_string()]),
+                rate_limit: Some(leviath_providers::RateLimitConfig {
+                    requests_per_minute: 5,
+                    tokens_per_minute: 500,
+                }),
+                ..Default::default()
+            },
+        );
+        config.model_providers.insert(
+            "alpha".to_string(),
+            crate::config::ModelProviderConfig {
+                kind: Some(crate::config::ModelProviderKind::OpenaiCompatible),
+                base_url: Some("http://localhost:1234/v1".to_string()),
+                api_key: Some("lm-key".to_string()),
+                ..Default::default()
+            },
+        );
+        // Written by hand with no address: skipped, not registered pointing
+        // nowhere. (A loaded config cannot hold one; `validate` refuses it.)
+        config.model_providers.insert(
+            "broken".to_string(),
+            crate::config::ModelProviderConfig {
+                kind: Some(crate::config::ModelProviderKind::OpenaiCompatible),
+                ..Default::default()
+            },
+        );
+        config.model_providers.insert(
+            "groq".to_string(),
+            crate::config::ModelProviderConfig {
+                script: Some("groq.rhai".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let creds = provider_creds_from_config(&config);
+        let names: Vec<&str> = creds
+            .iter()
+            .filter(|c| c.options.contains_key("kind"))
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, ["alpha", "zeta"], "name order, no broken entry");
+
+        let zeta = creds.iter().find(|c| c.name == "zeta").expect("zeta");
+        let spec =
+            leviath_runtime::provider_creds::EndpointSpec::from_creds(zeta).expect("an endpoint");
+        assert_eq!(spec.base_url, "http://localhost:8080/v1", "trimmed");
+        assert_eq!(zeta.api_key, None, "a blank key is no key");
+        assert_eq!(spec.headers, vec![("X-Org".to_string(), "r".to_string())]);
+        assert_eq!(spec.models, Some(vec!["llama-3".to_string()]));
+        assert_eq!(spec.serves, vec!["llama".to_string()]);
+        assert_eq!(
+            zeta.rate_limit.as_ref().map(|r| r.requests_per_minute),
+            Some(5)
+        );
+        let alpha = creds.iter().find(|c| c.name == "alpha").expect("alpha");
+        assert_eq!(alpha.api_key.as_deref(), Some("lm-key"));
+
+        // The script layer sees only the script entry.
+        let scripts = script_provider_config(&config);
+        assert!(scripts.overrides.contains_key("groq"));
+        assert!(!scripts.overrides.contains_key("zeta"));
+        assert!(!scripts.overrides.contains_key("alpha"));
+
+        // And the registry has the endpoints natively, with no providers dir
+        // in sight.
+        let registry = build_provider_registry_from_config_probing(
+            &config,
+            &leviath_providers::provider::build_http_client,
+            &|_| false,
+        )
+        .expect("an HTTPS client builds in tests");
+        assert!(registry.has("zeta"));
+        assert!(registry.has("alpha"));
+        assert!(!registry.has("broken"));
+        assert_eq!(
+            registry.get("zeta").expect("native").served_catalog(),
+            Some(vec!["llama-3".to_string()])
+        );
     }
 
     #[test]
