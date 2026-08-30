@@ -177,8 +177,9 @@ file. Two details are deliberate:
   tried immediately instead of sitting out the rest of the old key's cooldown.
 
 Some changes do still need `lev daemon restart`. They set up connections and process-wide state
-once at startup rather than per run: `[[mcp_servers]]` (live MCP connections), `[observability]`
-(the telemetry pipeline), and `[security] allow_local_network` (the outbound-network policy).
+once at startup rather than per run:
+
+- `[[mcp_servers]]` (live MCP connections) and `[observability]` (the telemetry pipeline).
 - The `[limits]` the world itself is built with: `stall_timeout_secs`, `wedge_timeout_secs`,
   `dead_cycles_before_relief`, `max_concurrent_inferences`, `max_concurrent_tools`,
   `provider_failures_before_open`, `provider_circuit_cooldown_secs`,
@@ -186,6 +187,14 @@ once at startup rather than per run: `[[mcp_servers]]` (live MCP connections), `
 
 `[providers] fallback_order` is not one of them. It is per-run policy, so it reloads like everything
 else and a new fallback provider applies on the next `lev run`.
+
+Neither is the outbound-network policy. `[security] allow_local_network` and the two script-HTTP
+limits, `script_http_timeout_secs` and `script_http_max_per_host`, are copied into process-wide
+state because the shared HTTP client has no handle on your config by the time a script tool calls
+through it. That copy is now refreshed on every reload, so all three follow the file. It matters
+most in the direction nobody tests: turning `allow_local_network` **off** used to stop a script
+naming a loopback URL at once, while a redirect from a permitted URL down to loopback carried on
+being followed until you restarted the daemon.
 
 ## Control surface
 

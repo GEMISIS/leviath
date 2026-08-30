@@ -136,24 +136,24 @@ pub(crate) async fn setup_daemon_host_with(
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> anyhow::Result<WorldHost> {
     // Apply the machine-wide outbound-network policy before anything can fetch.
-    // It lives in a process-wide atomic because the shared blocking HTTP client's
-    // redirect policy has no per-agent context to consult; see
-    // `script_host::set_local_network_allowed`.
-    crate::daemon::script_host::set_local_network_allowed(config.security.allow_local_network);
-    // Same mirror, same reason: the shared blocking client has no handle on the
-    // config by the time a script tool calls through it.
-    crate::daemon::script_host::set_script_http_max_per_host(
-        config.limits.script_http_max_per_host,
-    );
-    crate::daemon::script_host::set_script_http_timeout(config.limits.script_http_timeout_secs);
+    // These live in process-wide atomics because the shared blocking HTTP
+    // client's redirect policy and per-host gate have no per-agent context to
+    // consult; see `script_host::mirror_process_policy`.
+    crate::daemon::script_host::mirror_process_policy(&config);
     // Built before the registry, and shared with it: a script provider's
     // `[model_providers.<name>]` table is read through this, so editing it
     // takes effect on the next load exactly as editing the `.rhai` beside it
     // already did (issue #533).
-    let reloader = Arc::new(crate::daemon::config_reload::ConfigReloader::new(
-        Config::config_path(),
-        config.clone(),
-    ));
+    //
+    // The same mirror is re-applied on every reload. Without that, the three
+    // atomics were the config the daemon *booted* with for the rest of its
+    // life, while the per-agent `allow_local_network` check next to them read
+    // the reloaded file - so tightening the switch refused the URL a script
+    // named and went on following a redirect to loopback.
+    let reloader = Arc::new(
+        crate::daemon::config_reload::ConfigReloader::new(Config::config_path(), config.clone())
+            .with_reload_hook(Box::new(crate::daemon::script_host::mirror_process_policy)),
+    );
     let providers = crate::commands::run::session::build_provider_registry_live(
         &config,
         reloader.clone(),

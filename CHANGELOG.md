@@ -321,6 +321,16 @@ same list.
   writes a timeout into a fresh config. A config with `interaction_timeout_secs
   = 0` keeps working (it means unset). The tool result for a prompt that closed
   without an answer only mentions a timeout when one is configured.
+- `[security] allow_local_network`, `[limits] script_http_timeout_secs` and
+  `[limits] script_http_max_per_host` follow `config.toml` instead of being
+  whatever the daemon booted with. All three are copied into process-wide state
+  because the shared HTTP client the script tools go through has no handle on
+  the config, and the copy was written once at start-up. The per-agent
+  `allow_local_network` check next to it already read the reloaded file, so the
+  two halves disagreed in the direction that matters: turning the switch off
+  refused the URL a script named, and went on following a redirect from a
+  permitted URL down to loopback until the daemon was restarted.
+
 - A `[model_providers.<name>]` entry with `kind = "openai-compatible"` no
   longer loads with a key the endpoint does not read; the error names the
   entry, the keys, and the ones it does read. Unrecognised keys on a script

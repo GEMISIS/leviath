@@ -163,3 +163,17 @@ pub(crate) fn set_local_network_allowed(allow: bool) {
 pub(super) fn local_network_allowed() -> bool {
     ALLOW_LOCAL_REDIRECTS.load(std::sync::atomic::Ordering::Relaxed)
 }
+
+/// Mirror the process-wide slice of `config` into the three atomics above.
+///
+/// Called at daemon start-up and again on every `config.toml` reload. The
+/// reload half is the security-relevant one. The per-agent check for
+/// `[security] allow_local_network` reads the reloaded config already, so a
+/// user who *tightened* the switch had the URL a script names refused while a
+/// redirect from a permitted URL to loopback was still followed - for as long
+/// as the daemon lived. Policy has to be able to travel down, not only up.
+pub(crate) fn mirror_process_policy(config: &crate::config::Config) {
+    set_local_network_allowed(config.security.allow_local_network);
+    set_script_http_max_per_host(config.limits.script_http_max_per_host);
+    set_script_http_timeout(config.limits.script_http_timeout_secs);
+}

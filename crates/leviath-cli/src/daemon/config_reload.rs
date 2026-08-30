@@ -15,10 +15,16 @@
 //!
 //! Provider credentials are rebuilt from the same reloaded config by the
 //! `provider_reload` module beside this one, so a key added or removed here
-//! reaches the next run too. What is still established once at boot is MCP
-//! connections, the outbound-network policy and the telemetry sink: those hold
-//! live connections and process-wide state, and adding an MCP server still
-//! needs a daemon restart; see `daemon.md`.
+//! reaches the next run too. Settings that live somewhere other than the
+//! spawn-time config follow it through [`ConfigReloader::with_reload_hook`]: a
+//! caller registers what to re-apply, and it runs on each successful reload.
+//! The daemon uses it for the process-wide network policy, which is mirrored
+//! into atomics the shared blocking HTTP client reads
+//! (`script_host::mirror_process_policy`).
+//!
+//! What is still established once at boot is MCP connections and the telemetry
+//! sink: those hold live connections and process-wide state, and adding an MCP
+//! server still needs a daemon restart; see `daemon.md`.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -35,6 +41,10 @@ struct Cached {
     config: Arc<Config>,
 }
 
+/// What to re-apply when `config.toml` reloads, for settings that live
+/// outside the config an agent reads at spawn.
+pub(crate) type ReloadHook = Box<dyn Fn(&Config) + Send + Sync>;
+
 /// Serves the freshest spawn-time [`Config`], reloading `config.toml` when it
 /// changes on disk.
 pub struct ConfigReloader {
@@ -42,6 +52,13 @@ pub struct ConfigReloader {
     /// `None` for a [`fixed`](Self::fixed) reloader that never watches a file.
     path: Option<PathBuf>,
     cache: Mutex<Cached>,
+    /// Run on each *successful* reload, with the config just loaded. `None`
+    /// for a caller with nothing outside the config to keep in step - which is
+    /// every caller but the daemon, and is why this is opt-in rather than
+    /// wired in here: the hook the daemon installs writes process-wide
+    /// atomics, and a test that stood up a host would otherwise write them
+    /// too, under every other test in the binary.
+    on_reload: Option<ReloadHook>,
 }
 
 impl ConfigReloader {
@@ -57,7 +74,18 @@ impl ConfigReloader {
                 mtime,
                 config: Arc::new(initial),
             }),
+            on_reload: None,
         }
+    }
+
+    /// Run `hook` with the new config every time this reloader picks up a
+    /// change, so a setting that has been copied somewhere else - a
+    /// process-wide atomic, a live resource - follows the file down as well as
+    /// up. Not called for the config the reloader was constructed with: that
+    /// one the caller already has, and applies itself.
+    pub(crate) fn with_reload_hook(mut self, hook: ReloadHook) -> Self {
+        self.on_reload = Some(hook);
+        self
     }
 
     /// A reloader that never watches a file: [`current`](Self::current) always
@@ -71,6 +99,7 @@ impl ConfigReloader {
                 mtime: None,
                 config: Arc::new(config),
             }),
+            on_reload: None,
         }
     }
 
@@ -109,6 +138,13 @@ impl ConfigReloader {
                 let config = Arc::new(config);
                 cached.mtime = mtime;
                 cached.config = config.clone();
+                // Under the cache lock on purpose: the hook re-applies settings
+                // that have been copied elsewhere, and two threads reloading at
+                // once must not install their configs in one order and their
+                // side effects in the other.
+                if let Some(hook) = &self.on_reload {
+                    hook(&config);
+                }
                 tracing::info!(path = %displayed, "reloaded config after an on-disk change");
                 config
             }
@@ -253,6 +289,54 @@ mod tests {
             vec!["~/good".to_string()],
             "a broken file must not break the spawn - keep the last good config"
         );
+    }
+
+    /// A setting the daemon has copied somewhere else - the process-wide
+    /// network atomics - has to follow the file, and the reloader is where
+    /// that is noticed. The hook fires once per successful reload: on every
+    /// read it would be pointless work, on none of them `allow_local_network`
+    /// would stay at its boot value for the daemon's life, and on a broken
+    /// save it would re-apply a policy parsed out of half a file.
+    #[test]
+    fn the_reload_hook_runs_once_per_good_save_and_never_on_a_bad_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write(&path, &empty_config());
+        let seen: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        let reloader = ConfigReloader::new(path.clone(), Config::default()).with_reload_hook(
+            Box::new(move |config| {
+                recorder
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(config.security.allow_local_network);
+            }),
+        );
+        let recorded = || seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
+
+        // The config it was built with is the caller's own; no hook for it.
+        let _ = reloader.current();
+        assert!(recorded().is_empty());
+
+        let mut tightened = Config::default();
+        tightened.security.allow_local_network = true;
+        write(&path, &toml::to_string(&tightened).unwrap());
+        bump_mtime(&path);
+        let _ = reloader.current();
+        // Read again with the file unchanged: still one call.
+        let _ = reloader.current();
+        assert_eq!(
+            recorded(),
+            vec![true],
+            "the hook runs once per change, with the config that changed"
+        );
+
+        // A half-saved edit keeps the last good config, so it keeps the last
+        // good side effects too.
+        write(&path, "not : : toml");
+        bump_mtime(&path);
+        let _ = reloader.current();
+        assert_eq!(recorded(), vec![true], "a broken save applies nothing");
     }
 
     #[test]
