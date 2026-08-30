@@ -157,6 +157,25 @@ If a save leaves the file briefly unparseable, which happens while you are halfw
 edit, the daemon keeps serving the last version that worked. It reloads on your next clean save, so
 an in-progress edit never breaks a spawn.
 
+That is the right behaviour and it used to be invisible, which made it the wrong experience: a typo
+you did not spot meant every edit after it silently did nothing, and the only record was one line in
+`daemon.log`. So a config that will not load is now a state Leviath reports rather than a fact it
+keeps to itself:
+
+- `lev run` prints one line before the run starts, naming the file, where in it the problem is, and
+  that this run is on the last config that loaded.
+- `lev ps` puts the same fact under the run table.
+- `lev doctor` fails its `config` check with the line and column, or with the key for a value that
+  parsed and was then refused.
+- `lev dash` keeps a warning across the top of the screen for as long as the file is broken. It
+  clears itself when the file parses again.
+- `GET /api/config` carries a `config_error` object, and `/ws` sends a `config_health` frame each
+  time the answer changes. See [the API reference](/docs/api#when-the-config-file-will-not-load).
+
+The file is re-read once per save, not once per run: a broken file that nobody has touched since
+costs one `stat` and produces one log line, rather than a re-read and a fresh warning on every
+spawn. Fix the file and everything above clears on its own, with nothing restarted.
+
 `[model_providers.<name>]` reloads too, as of this release. A script provider's own `.rhai` file
 has always been re-read on each use, so a table beside it that needed a restart made two halves of
 one feature disagree in silence - setting a `base_url` and watching it do nothing looked exactly
