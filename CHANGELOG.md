@@ -150,6 +150,12 @@ same list.
   cut at 10 or 12 columns however wide the strip was, and the kill and delete
   dialogs cut the run id and title at 20 to 24 characters before the widget
   had a chance to wrap them. Each is now sized from the area it draws into.
+- `POST /api/models/probe` declared a 10 s timeout on the endpoint it built
+  for the form, but the model listing stamped the 30 s side-call default on
+  its own request, and a per-request timeout beats the client's, so a
+  server that never answered kept the form waiting 30 s. The entry's
+  `request_timeout_secs` now bounds the listing too, with the 30 s default
+  only for an entry that set none.
 - The dashboard's run detail strip could show a cache figure over 100%, such
   as `cache 152%`, on a run that was mostly served from the provider's cache.
   The prompt count every provider is normalised to is the fresh input only,
