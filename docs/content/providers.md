@@ -50,6 +50,13 @@ lev models list --all                        # every provider, even unconfigured
 ```
 
 > [!NOTE]
+> `lev models list` and `GET /api/models` both build their answer from `config.toml` as it stands
+> when you ask, so what they show is **what your next run can use**, not what a run already under
+> way is using. A daemon that started before your last edit may not have picked a new provider up
+> yet, so a provider can appear in the listing a moment before a run can reach it. If a run is
+> refused a provider the listing offers, the daemon is behind: start a new run, or restart it.
+
+> [!NOTE]
 > `lev models list` asks each provider for its own listing and shows that; the table compiled into
 > this build is shown only for a provider that could not be reached, or with `--offline`. The table
 > is a convenience, not the catalog. A model absent from it is not necessarily invalid: with no

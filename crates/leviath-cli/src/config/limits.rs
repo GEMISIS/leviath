@@ -150,6 +150,9 @@ pub struct LimitsConfig {
     pub script_shell_timeout_secs: u64,
 
     /// Seconds a script tool's HTTP request may take. Defaults to `30`.
+    ///
+    /// Reloaded with `config.toml`, through the process-wide mirror the shared
+    /// blocking HTTP client reads, so a change bounds the next request.
     #[serde(default = "default_script_http_timeout_secs")]
     pub script_http_timeout_secs: u64,
 
@@ -160,6 +163,9 @@ pub struct LimitsConfig {
     /// fan-out multiplies that by the worker count, so one run could open nearly
     /// two hundred simultaneous connections to a single origin. Batching is
     /// untouched by this; only the requests that share a host stagger.
+    ///
+    /// Reloaded with `config.toml`, through the process-wide mirror the shared
+    /// blocking HTTP client reads, so a change bounds the next request.
     #[serde(default = "default_script_http_max_per_host")]
     pub script_http_max_per_host: usize,
 
@@ -381,6 +387,10 @@ pub struct LimitsConfig {
     /// A run that reaches the ceiling stops widening and finishes on what it
     /// has. It is not failed: the work already done is worth keeping, and the
     /// merge still runs on the workers that did start.
+    ///
+    /// Reloaded with `config.toml`. The budget resource is consulted at every
+    /// fan-out, so a ceiling lowered mid-run stops the next split rather than
+    /// waiting for the next run.
     #[serde(default)]
     pub max_agents_per_run: usize,
 
@@ -401,6 +411,9 @@ pub struct LimitsConfig {
     ///
     /// A run whose models have no published price reports what it could price
     /// and says the figure is not exact, rather than reporting a confident zero.
+    ///
+    /// Reloaded with `config.toml`, and read on each event pass, so a figure
+    /// you add is watched for on the runs already going.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notify_spend_usd: Vec<f64>,
 
@@ -616,5 +629,88 @@ impl Default for WebhookConfig {
             max_delay_ms: default_webhook_max_delay_ms(),
             timeout_secs: default_webhook_timeout_secs(),
         }
+    }
+}
+
+#[cfg(test)]
+mod restart_list_tests {
+    /// Every `[limits]` field the daemon docs name as needing a restart, so the
+    /// two halves of the same claim cannot drift apart.
+    ///
+    /// The list in `daemon.md` had gone stale before, in both directions: it
+    /// named nine fields while ten more were boot-only and unmentioned, and it
+    /// went on naming fields after they were made to reload. Either shape is
+    /// the worst kind of list - complete enough to be trusted, wrong enough to
+    /// mislead. One field is left on it.
+    const RESTART_LIST: &[&str] = &["mcp_idle_disconnect_secs"];
+
+    /// The restart section of the daemon docs page, read from the repo rather
+    /// than from a copy. Only that section counts: a field mentioned elsewhere
+    /// on the page is not a claim about restarting.
+    fn restart_section() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("docs")
+            .join("content")
+            .join("daemon.md");
+        let doc = std::fs::read_to_string(path).expect("the daemon docs page ships with the repo");
+        let after = doc
+            .split_once("Some changes do still need `lev daemon restart`")
+            .expect("the restart section is what this test is about")
+            .1;
+        after
+            .split_once("\n#")
+            .expect("the restart section is followed by another heading")
+            .0
+            .to_string()
+    }
+
+    #[test]
+    fn every_boot_only_limit_is_named_in_the_daemon_docs() {
+        let section = restart_section();
+        let missing: Vec<&str> = RESTART_LIST
+            .iter()
+            .copied()
+            .filter(|field| !section.contains(field))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these [limits] are read once at daemon start but the restart list does not say \
+             so: {missing:?}. Either name them there, or make them reload."
+        );
+    }
+
+    #[test]
+    fn every_boot_only_limit_says_so_on_its_own_field() {
+        // The doc comment is what someone editing config.toml through an editor
+        // that reads the schema sees, so it has to agree with the page.
+        let source = include_str!("limits.rs");
+        let missing: Vec<&str> = RESTART_LIST
+            .iter()
+            .copied()
+            .filter(|field| {
+                // The doc comment is the run of lines immediately above the
+                // field, which is the last block before the blank line above
+                // it. Split on the declaration rather than slicing by byte
+                // offset: this file is ASCII today, and a test has no reason to
+                // assume that stays true. A field this list names that no
+                // longer exists falls out of the same expression as a miss,
+                // which is a drift of its own and reported the same way.
+                !source
+                    .split_once(&format!("pub {field}:"))
+                    .is_some_and(|(before, _)| {
+                        before
+                            .rsplit("\n\n")
+                            .next()
+                            .is_some_and(|block| block.contains("Read once at daemon start"))
+                    })
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these [limits] are on the restart list but their doc comments do not say they are \
+             read once at daemon start: {missing:?}"
+        );
     }
 }
