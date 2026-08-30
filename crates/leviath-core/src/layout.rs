@@ -12,12 +12,11 @@ use serde::{Deserialize, Serialize};
 /// The region a stage's `system_prompt` is written into, when a blueprint
 /// declares one by this name.
 ///
-/// Stage instructions have always been pinned context - that is why they read
-/// as instruction rather than history - but the region holding them was chosen
-/// by accident: whichever pinned region happened to be declared first. That
-/// region then carried the prompt's tokens in the stage ledger under its own
-/// name, could not be sized or scoped, and sat wherever it sat in the cached
-/// prefix (#366).
+/// Stage instructions are pinned context - that is why they read as
+/// instruction rather than history - and a region of their own is what lets
+/// the stage ledger bill the prompt's tokens under a name that says what they
+/// are, sizes them, and places them in the cached prefix on purpose rather
+/// than wherever the first pinned region happens to sit.
 ///
 /// Declaring a region by this name gives the prompt a handle:
 ///
@@ -26,8 +25,8 @@ use serde::{Deserialize, Serialize};
 /// stage_instructions = { kind = "pinned", budget = "3%" }
 /// ```
 ///
-/// A blueprint that declares nothing by this name keeps the old behaviour
-/// exactly, so this costs no existing agent anything.
+/// A blueprint that declares nothing by this name still gets one: the runtime
+/// adds it at spawn, sized to the widest stage prompt the blueprint carries.
 pub const STAGE_INSTRUCTIONS_REGION: &str = "stage_instructions";
 
 /// How a region's token ceiling is expressed before it is resolved against a
@@ -602,9 +601,9 @@ pub struct RegionDefinition {
     pub max_tokens: usize,
 
     /// How this region's ceiling is expressed. Defaults (via [`Self::new`]) to
-    /// [`BudgetSpec::Absolute`] holding `max_tokens`, so a region built the old
-    /// way behaves exactly as before. A percentage budget is resolved against the
-    /// model context window at window-build time.
+    /// [`BudgetSpec::Absolute`] holding `max_tokens`, so a region that names a
+    /// token count directly gets an absolute ceiling. A percentage budget is
+    /// resolved against the model context window at window-build time.
     #[serde(default)]
     pub budget: BudgetSpec,
 
@@ -639,9 +638,9 @@ pub struct RegionDefinition {
     /// `transform = "compact"` reads as "summarize the transcript on the way
     /// out" and means "summarize every region that is not pinned", which
     /// includes the ones holding the run's results. Figures that survive a
-    /// paraphrase are no longer figures: a `results` region carrying computed
-    /// values was rewritten into prose before the stage that reports them saw
-    /// it (#369).
+    /// paraphrase are no longer figures: without this, a `results` region
+    /// carrying computed values is rewritten into prose before the stage that
+    /// reports them ever sees it.
     ///
     /// Setting this false protects the region wherever it is used, rather than
     /// at each of the N edges that might touch it. `clear` still applies - this
@@ -1264,8 +1263,8 @@ mod tests {
     }
 
     /// `validate` sums every region's ceiling to warn when they exceed the
-    /// budget. Two saturated ceilings used to overflow that sum and abort
-    /// instead of warning.
+    /// budget. Two saturated ceilings must warn rather than overflow that sum
+    /// and abort.
     #[test]
     fn validate_does_not_abort_when_region_ceilings_sum_past_usize_max() {
         let layout = ContextLayout::new(

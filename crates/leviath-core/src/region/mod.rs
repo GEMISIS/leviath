@@ -431,7 +431,7 @@ pub struct Region {
     ///
     /// Carried from the region's declaration so the transform can consult it
     /// without the layout: `transform = "compact"` summarizes by region *kind*,
-    /// and kind cannot tell a transcript from a table of results (#369).
+    /// and kind cannot tell a transcript from a table of results.
     #[serde(default = "crate::default_true")]
     pub summarizable: bool,
 
@@ -3321,8 +3321,8 @@ mod tests {
         assert_eq!(region.current_tokens, 0);
     }
 
-    /// Keys used to be a HashMap-only idea at the tool layer. The region API
-    /// never cared, so an entry on any kind can carry one - which is what makes
+    /// Keys read as a HashMap-only idea at the tool layer, but the region API
+    /// does not care: an entry on any kind can carry one, which is what makes
     /// `context_delete` work on a sources region.
     #[test]
     fn a_keyed_entry_can_be_added_to_any_region_kind_and_found_again() {
@@ -3491,9 +3491,9 @@ mod tests {
         );
     }
 
-    /// A `max_items` of `usize::MAX` is what a negative manifest value used to
-    /// resolve to. The bulk-eviction check added `overflow` to it on the first
-    /// write and aborted the daemon mid-run.
+    /// A `max_items` of `usize::MAX` is what a saturating manifest value
+    /// resolves to. The bulk-eviction check adds `overflow` to it on the first
+    /// write, which must not overflow and abort the daemon mid-run.
     #[test]
     fn a_saturated_window_does_not_abort_on_its_first_write() {
         let mut region = Region::new(

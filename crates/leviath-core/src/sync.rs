@@ -1,11 +1,11 @@
 //! Taking a lock without a panic path.
 //!
 //! `std::sync::Mutex::lock` returns a `Result` because a thread that panics
-//! while holding the guard *poisons* it, and every later locker is told so. The
-//! workspace used to answer that with `.expect("...")` at 21 sites, which turns
-//! one unrelated panic into a daemon-wide cascade: the first failure poisons a
-//! telemetry mutex, and the next observation - on a healthy run, in a different
-//! subsystem - aborts the process.
+//! while holding the guard *poisons* it, and every later locker is told so.
+//! Answering that with `.expect("...")` turns one unrelated panic into a
+//! daemon-wide cascade: the first failure poisons a telemetry mutex, and the
+//! next observation - on a healthy run, in a different subsystem - aborts the
+//! process.
 //!
 //! # Why recovering is sound here, and would not be everywhere
 //!

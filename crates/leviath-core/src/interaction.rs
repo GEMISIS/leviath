@@ -264,9 +264,9 @@ impl InteractionRequest {
     /// `grant_keys` is what a `Stage` or `Run` approval would be remembered
     /// under, and it goes in the option labels rather than in `body` because
     /// the dashboard renders only `prompt` and `options` for this kind. Naming
-    /// it matters: the old wording offered "Allow for this session" on calls
-    /// the dispatcher then silently degraded to once, so the user chose a grant
-    /// they did not get.
+    /// it matters: a label promising more than the dispatcher will remember -
+    /// "Allow for this session" on a call it degrades to once - has the user
+    /// choose a grant they do not get.
     ///
     /// The options are fixed-position - every client maps an index to a scope
     /// through [`approval_choice`] - so the wording varies and the length does

@@ -184,7 +184,7 @@ pub struct TransitionGate {
     /// says this and does not: it is one of several *alternative* ways to
     /// satisfy [`Self::require_modifications`], so
     /// `{ require_modifications = true, region = "plan" }` is met by writing
-    /// any file anywhere while `plan` stays empty (#371). That is the right
+    /// any file anywhere while `plan` stays empty. That is the right
     /// shape for what `region` is for - a restart-durable stand-in for
     /// per-stage counters, which do not survive a daemon restart - and the
     /// wrong shape for "this stage does not leave without writing X". This key
@@ -194,7 +194,7 @@ pub struct TransitionGate {
     /// blocking: `lev validate` refuses a gate naming a region no stage
     /// declares, so reaching that at runtime means a layout moved underneath
     /// the edge, and stranding a run over it would be worse than the missing
-    /// check. Saying nothing is what made the old behaviour hard to find.
+    /// check. The warning is what keeps the skipped check findable.
     #[serde(default)]
     pub require_regions: Vec<String>,
     /// Checklist region that must have no open items before this edge is taken.

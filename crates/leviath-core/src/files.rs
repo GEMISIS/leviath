@@ -2,9 +2,8 @@
 //!
 //! One place for each name. The persistence lane writes these files, the
 //! CLI's run state reader, the recovery scan, the dashboard and the HTTP API
-//! read them back, and each of them used to spell the name out where it was
-//! used. A name that lives in one constant cannot be misspelled in one reader
-//! and quietly never match again.
+//! read them back. A name that lives in one constant cannot be misspelled in
+//! one reader and quietly never match again.
 
 /// The run's metadata: status, timings, totals. Written by the persistence
 /// lane on every change and read by everything that lists runs.

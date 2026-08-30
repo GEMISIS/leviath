@@ -1,15 +1,14 @@
 //! Deciding whether an agent may write, and how much.
 //!
 //! Three questions, deliberately answered separately because they are not the
-//! same kind of thing (issue #252):
+//! same kind of thing:
 //!
 //! 1. **Will this fill the disk?** Always asked, not configurable away. A run
 //!    that filled `C:` took the machine down with it, and every other process
 //!    on it. Nobody wants that outcome, so nothing offers it.
 //! 2. **Is one call writing an absurd amount?** Off unless configured. The
-//!    reported incident was a single shell call appending in a loop until the
-//!    60-second timeout - about 14 GB - and a per-call ceiling is what would
-//!    have caught it.
+//!    shape it catches is a single shell call appending in a loop until the
+//!    60-second timeout, about 14 GB.
 //! 3. **Is the whole run writing an absurd amount?** Also off unless
 //!    configured. Three calls of 12-14 GB each is the shape 2 alone misses.
 //!

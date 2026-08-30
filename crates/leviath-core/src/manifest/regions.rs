@@ -80,9 +80,10 @@ pub(super) fn parse_region_layout(
                         EvictionStrategy::Compact { compact_count }
                     }
                     Some("per_item") | None => EvictionStrategy::PerItem,
-                    // Unknown used to mean per_item, so `strategy = "per-item"`
-                    // or a mistyped `compact` left the region evicting one
-                    // entry at a time with no sign the setting was read.
+                    // Refused rather than folded into per_item: `strategy =
+                    // "per-item"` or a mistyped `compact` would leave the
+                    // region evicting one entry at a time with no sign the
+                    // setting was read.
                     Some(other) => {
                         return Err(Error::Other(format!(
                             "region '{region_name}': strategy \"{other}\" is not \
@@ -143,10 +144,10 @@ pub(super) fn parse_region_layout(
                 RegionKind::Custom { script, persistent }
             }
             unknown => {
-                // A typo'd kind used to silently become Temporary - for a
-                // custom region that would mean the script never runs, with
-                // no signal anywhere. Fail at load instead; `lev validate`
-                // surfaces this immediately.
+                // Refused rather than folded into Temporary: for a custom
+                // region that would mean the script never runs, with no
+                // signal anywhere. Failing at load lets `lev validate`
+                // surface it immediately.
                 return Err(Error::Other(format!(
                     "region '{region_name}': unknown kind \"{unknown}\" (valid kinds: \
                      pinned, sliding_window, temporary, compacting, clearable, \

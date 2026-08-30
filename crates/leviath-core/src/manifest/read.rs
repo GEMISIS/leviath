@@ -1,12 +1,10 @@
 //! Reading one typed field off a TOML value.
 //!
 //! The manifest parser asks "the string under this key, if there is one"
-//! well over a hundred times, and every ask used to be the same
-//! `v.get(key).and_then(|v| v.as_str())` spelled out in place. These are
-//! that ask, once per type, so a site reads as what it wants rather than how
-//! it gets it. Each returns `None` both for an absent key and for a value of
-//! the wrong type, exactly as the inline form did; a caller that wants to
-//! tell those apart still looks at the value itself.
+//! well over a hundred times. These are that ask, once per type, so a site
+//! reads as what it wants rather than how it gets it. Each returns `None`
+//! both for an absent key and for a value of the wrong type; a caller that
+//! wants to tell those apart still looks at the value itself.
 
 use crate::error::{Error, Result};
 
@@ -55,12 +53,10 @@ pub(super) fn int_of(v: &impl Fields, key: &str) -> Option<i64> {
 /// The count under `key`: a non-negative integer, if the key is present and
 /// holds an integer at all. `where_` names the table for the error.
 ///
-/// Every count a manifest carries used to go through `as usize`, so
-/// `max_items = -1` became the largest possible cap and read at a glance as
-/// "no limit", the opposite of what was written; a few keys dropped the value
-/// instead. Either way nothing said so. A negative is refused here, naming
-/// the key and the value, so the file fails to load rather than loading
-/// looser than it reads.
+/// A negative is refused here, naming the key and the value, so the file
+/// fails to load rather than loading looser than it reads: `as usize` would
+/// turn `max_items = -1` into the largest possible cap, which reads at a
+/// glance as "no limit" and is the opposite of what was written.
 pub(super) fn count_of(v: &impl Fields, where_: &str, key: &str) -> Result<Option<usize>> {
     match int_of(v, key) {
         None => Ok(None),

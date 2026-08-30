@@ -374,7 +374,7 @@ pub struct InteractionPoint {
 /// Each field names a `.rhai` file, resolved relative to the blueprint
 /// directory exactly as a custom region's script is. Every hook is optional and
 /// an agent that declares none pays nothing - no file is read and no engine is
-/// built (issue #260).
+/// built.
 ///
 /// The hook a script implements is the function it defines, named for the
 /// field: a file given as `on_stage_enter` must define `fn on_stage_enter(ctx)`.
@@ -483,7 +483,7 @@ pub struct Stage {
     ///
     /// An unattended run - `lev run --yolo`, or a child of one - drops every
     /// blocking human tool from the stage's advertised set, because a call to
-    /// one can only park the agent until the daemon dies (issue #204). Naming a
+    /// one can only park the agent until the daemon dies. Naming a
     /// tool here says this stage genuinely needs a person and the run should
     /// wait for one anyway, for as long as it takes; set `[limits]
     /// interaction_timeout_secs` to bound that wait.

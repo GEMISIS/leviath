@@ -338,9 +338,9 @@ impl Blueprint {
     /// Its own `[context.regions]` when it declares one, the blueprint's
     /// otherwise, plus the regions the runtime carries visible whatever a stage
     /// says. Narrower than [`known_region_names`](Self::known_region_names),
-    /// which asks only whether a name exists somewhere - the difference is the
-    /// whole of #370: a region another stage declares exists, and is still not
-    /// readable from here.
+    /// which asks only whether a name exists somewhere - the difference being
+    /// that a region another stage declares exists, and is still not readable
+    /// from here.
     fn regions_visible_to<'a>(&'a self, stage: &'a Stage) -> std::collections::HashSet<&'a str> {
         let layout = stage
             .context_layout
@@ -359,11 +359,11 @@ impl Blueprint {
 
     /// Refuse a region name that exists nowhere in the blueprint.
     ///
-    /// Routing and gates are addressed by name, and a name that matches nothing
-    /// used to be accepted in silence: the routed tool result went to the
-    /// default region and the gate held nothing back, both looking exactly like
-    /// a working config (#362). A gate that silently never fires is the
-    /// expensive case - it reads as the model behaving well.
+    /// Routing and gates are addressed by name, and a name that matches
+    /// nothing, accepted in silence, sends the routed tool result to the
+    /// default region and leaves the gate holding nothing back - both looking
+    /// exactly like a working config. A gate that silently never fires is the
+    /// expensive case: it reads as the model behaving well.
     fn validate_region_references(&self) -> std::result::Result<(), ValidationError> {
         let known = self.known_region_names();
         let checklists: std::collections::HashSet<&str> = self
@@ -411,8 +411,8 @@ impl Blueprint {
                 // region from its own `[context.regions]` hides it, so a result
                 // routed there is written somewhere the stage cannot read - and
                 // the pointer left in `conversation` tells the model to go read
-                // it. There is no reading of a blueprint where that was
-                // intended (#370).
+                // it. There is no reading of a blueprint where that is
+                // intended.
                 let visible = self.regions_visible_to(stage);
                 let dead_drop = |key: &str, region: &str| ValidationError::Stage {
                     stage: stage.name.clone(),
@@ -688,13 +688,11 @@ impl Blueprint {
                         return true;
                     }
                 }
-                // No target reaches a terminal stage. This used to fall back to
-                // "all targets are exhaustible, so the stage will eventually
-                // have zero available edges" and call THAT a terminal path -
-                // but running out of edges mid-graph is now a run *error*
-                // (StageResolution::DeadEnd in the runtime), not a completion,
-                // so certifying it here validated blueprints that could never
-                // finish successfully.
+                // No target reaches a terminal stage. Exhausting a stage's
+                // edges is not a terminal path: running out of edges mid-graph
+                // is a run *error* (StageResolution::DeadEnd in the runtime),
+                // not a completion, so certifying it here would validate
+                // blueprints that can never finish successfully.
                 false
             }
         }
@@ -1384,11 +1382,10 @@ criteria = { kind = "pinned", max_tokens = 10, seed = "criteria" }"#,
         );
         stage.transitions = Some(transitions);
         let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
-        // Must FAIL now: this used to pass on the theory that the self-loop
-        // exhausts its max_revisits and "leaving zero edges" counts as
-        // terminal - but running out of edges mid-graph is a run error
-        // (StageResolution::DeadEnd), so a blueprint whose only ending is
-        // exhaustion can never finish successfully.
+        // Must fail: a self-loop exhausting its max_revisits leaves zero
+        // edges, which is a run error (StageResolution::DeadEnd) and not a
+        // terminal path, so a blueprint whose only ending is exhaustion can
+        // never finish successfully.
         let err = bp
             .validate()
             .expect_err("an exhaustion-only graph is invalid");
@@ -1519,7 +1516,7 @@ criteria = { kind = "pinned", max_tokens = 10, seed = "criteria" }"#,
         assert_ne!(InteractionStyle::FreeText, InteractionStyle::MultipleChoice);
     }
 
-    // ─── stuck detection (#106) ─────────────────────────────────────────────
+    // ─── stuck detection ────────────────────────────────────────────────────
 
     #[test]
     fn stuck_config_is_armed_only_when_a_threshold_is_set() {

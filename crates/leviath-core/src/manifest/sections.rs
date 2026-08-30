@@ -80,9 +80,9 @@ pub(super) fn parse_safe_commands(
 /// Flatten `[tool_permissions]` into the `tool_perm:<tool>` metadata keys the
 /// permission layer reads.
 ///
-/// This used to drop a value it could not read and say "the value's meaning is
-/// validated where it is resolved". It was not: resolution maps anything it
-/// does not recognise to `ask`, so a misspelled `deny` became a prompt.
+/// A value that cannot be read is refused here rather than left to
+/// resolution: resolution maps anything it does not recognise to `ask`, so a
+/// misspelled `deny` would become a prompt.
 pub(super) fn tool_permission_metadata(
     table: &toml::value::Table,
 ) -> Result<Vec<(String, serde_json::Value)>> {
@@ -168,8 +168,8 @@ pub(super) fn parse_security_config(security_table: &toml::value::Table) -> crat
 }
 
 /// Every key read off a `[sandbox]` table. Anything else is refused: a
-/// misspelled `netwrok = false` used to be ignored, leaving the sandbox
-/// looser than the file said. The schema guard in `tests.rs` holds the
+/// misspelled `netwrok = false` would otherwise be ignored, leaving the
+/// sandbox looser than the file said. The schema guard in `tests.rs` holds the
 /// published schema to this list.
 pub(super) const SANDBOX_KEYS: &[&str] = &[
     "engine",

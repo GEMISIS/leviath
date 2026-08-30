@@ -202,8 +202,8 @@ impl TelemetryEvent {
 /// Deliberately not a [`TelemetryEvent`]: every variant of that enum belongs to
 /// one run, and this belongs to none of them. The distinction is the point. A
 /// daemon whose lanes are full and whose runs have all stopped moving emits no
-/// per-run telemetry at all, precisely because nothing is happening, so the
-/// silence that issue #191 reported was indistinguishable from an idle night.
+/// per-run telemetry at all, precisely because nothing is happening, so that
+/// silence is indistinguishable from an idle night without this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LaneHealth {
     /// Agents doing work, or ready to.
@@ -229,7 +229,7 @@ pub struct LaneHealth {
 ///
 /// Daemon-wide for the same reason as `LaneHealth`: a provider out of credits
 /// belongs to no single run, and the runs it kills emit nothing useful because
-/// they die before doing anything (issue #201).
+/// they die before doing anything.
 ///
 /// `reason` is the label rather than the runtime's own enum: this crate sits
 /// below `leviath-providers`, so the type that names it is not in scope here.
