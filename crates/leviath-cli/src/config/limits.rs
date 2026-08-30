@@ -90,7 +90,7 @@ fn default_inference_retry_base_ms() -> u64 {
 /// Both fields default to a bounded value so a fresh install can't accidentally
 /// run unbounded inference concurrency or an unbounded agent loop. Set a field
 /// explicitly in `[limits]` to raise or lower it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LimitsConfig {
     /// Global fallback cap on concurrent inference requests for any model
     /// without its own entry in `max_concurrent_inferences_by_model`. Defaults
@@ -100,6 +100,10 @@ pub struct LimitsConfig {
     /// their in-flight calls occupies a blocking-pool thread, and the daemon's
     /// runtime provisions 2048 of those. Pools above 2048 only run that wide
     /// for HTTP providers, whose calls are fully async.
+    ///
+    /// Reloaded with `config.toml`. A raised limit is usable at once; a
+    /// lowered one takes back the slots nobody is holding and narrows as
+    /// the requests in flight finish, so nothing running is cancelled.
     #[serde(default = "default_max_concurrent_inferences")]
     pub max_concurrent_inferences: Option<usize>,
 
@@ -107,6 +111,9 @@ pub struct LimitsConfig {
     /// tool batches may run concurrently across the whole daemon (the tool-lane
     /// counterpart of `max_concurrent_inferences`). Defaults to `8`. Clamped to at
     /// least 1.
+    ///
+    /// Reloaded with `config.toml`. Widening is immediate; narrowing waits for
+    /// the batches already running to finish rather than interrupting them.
     #[serde(default = "default_max_concurrent_tools")]
     pub max_concurrent_tools: usize,
 
@@ -130,7 +137,9 @@ pub struct LimitsConfig {
     /// stays as it was. A provider that does not advertise streaming for the
     /// model in hand is called the old way regardless.
     ///
-    /// Read once at daemon start, so a change needs a daemon restart.
+    /// Reloaded with `config.toml`: the next inference any run makes uses
+    /// the new setting, and one already on the wire finishes the way it
+    /// started.
     #[serde(default = "default_stream_inference")]
     pub stream_inference: bool,
 
@@ -163,7 +172,8 @@ pub struct LimitsConfig {
     /// matter how long it takes. Defaults to `60`; `0` disables the watchdog and
     /// restores the old behaviour of waiting indefinitely.
     ///
-    /// Read once at daemon start, so a change needs a daemon restart.
+    /// Reloaded with `config.toml`, and read on every pass, so a change
+    /// reaches the runs already going as well as the next one.
     #[serde(default = "default_stall_timeout_secs")]
     pub stall_timeout_secs: u64,
 
@@ -178,7 +188,8 @@ pub struct LimitsConfig {
     /// `0` turns relief off. Detection and reporting stay on either way, so
     /// `lev ps` and the metrics still show the streak.
     ///
-    /// Read once at daemon start, so a change needs a daemon restart.
+    /// Reloaded with `config.toml`; read once per safety re-drive, so a
+    /// change applies from the next one.
     #[serde(default = "default_dead_cycles_before_relief")]
     pub dead_cycles_before_relief: u32,
 
@@ -195,7 +206,8 @@ pub struct LimitsConfig {
     /// old behaviour. The record lives in memory, so a restart clears it
     /// whatever this is set to.
     ///
-    /// Read once at daemon start, so a change needs a daemon restart.
+    /// Reloaded with `config.toml`; read on every prune, so shortening the
+    /// window drops the rows that have already outlived it.
     #[serde(default = "default_finished_retention_secs")]
     pub finished_retention_secs: u64,
     /// How long (seconds) a per-agent MCP server may sit with zero live runs
@@ -227,7 +239,8 @@ pub struct LimitsConfig {
     /// whether it is happening to you, since it says so in the log and in the
     /// run's error.
     ///
-    /// Read once at daemon start, so a change needs a daemon restart.
+    /// Reloaded with `config.toml`, and read on every pass, so a change
+    /// reaches the runs already going as well as the next one.
     #[serde(default = "default_wedge_timeout_secs")]
     pub wedge_timeout_secs: u64,
     /// How many consecutive provider-fatal failures (out of credits, rejected
@@ -240,7 +253,8 @@ pub struct LimitsConfig {
     ///
     /// `0` disables the breaker, leaving per-run failover on its own.
     ///
-    /// Read once at daemon start, so a change needs a daemon restart.
+    /// Reloaded with `config.toml`, and read on every pass, so a change
+    /// reaches the runs already going as well as the next one.
     #[serde(default = "default_provider_failures_before_open")]
     pub provider_failures_before_open: u32,
 
@@ -251,7 +265,8 @@ pub struct LimitsConfig {
     /// the provider straight back into service, or fails and restarts the wait,
     /// so topping up an account brings the factory back with no restart.
     ///
-    /// Read once at daemon start, so a change needs a daemon restart.
+    /// Reloaded with `config.toml`, and read on every pass, so a change
+    /// reaches the runs already going as well as the next one.
     #[serde(default = "default_provider_circuit_cooldown_secs")]
     pub provider_circuit_cooldown_secs: u64,
     /// How long (seconds) a prompt may go unanswered before the daemon resolves
@@ -277,7 +292,8 @@ pub struct LimitsConfig {
     /// "expire at once", so a config that spelled the wait that way keeps
     /// working.
     ///
-    /// Read once at daemon start, so a change needs a daemon restart.
+    /// Reloaded with `config.toml`; read when a prompt opens, so a prompt
+    /// already waiting keeps the deadline it opened with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interaction_timeout_secs: Option<u64>,
 
@@ -298,7 +314,8 @@ pub struct LimitsConfig {
     /// key exists (issue #417). Whatever this is set to, the retries of one
     /// request may sleep at most five minutes in total.
     ///
-    /// Read once at daemon start, so a change needs a daemon restart.
+    /// Reloaded with `config.toml`; read when a request is dispatched, so
+    /// a change applies to the next attempt any run makes.
     #[serde(default = "default_inference_retry_attempts")]
     pub inference_retry_attempts: u32,
 
@@ -311,7 +328,8 @@ pub struct LimitsConfig {
     /// this to wait out an outage is the wrong lever and only delays ordinary
     /// failures.
     ///
-    /// Read once at daemon start, so a change needs a daemon restart.
+    /// Reloaded with `config.toml`; read when a request is dispatched, so
+    /// a change applies to the next attempt any run makes.
     #[serde(default = "default_inference_retry_base_ms")]
     pub inference_retry_base_ms: u64,
 
@@ -406,7 +424,9 @@ pub struct LimitsConfig {
     ///
     /// A `BTreeMap` so the file this is written back to keeps its order.
     ///
-    /// Read once at daemon start, so a change needs a daemon restart.
+    /// Reloaded with `config.toml`. A raised limit is usable at once; a
+    /// lowered one takes back the slots nobody is holding and narrows as
+    /// the requests in flight finish, so nothing running is cancelled.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub max_concurrent_inferences_by_model: BTreeMap<String, usize>,
 
@@ -431,7 +451,9 @@ pub struct LimitsConfig {
     /// is deliberately not applied per provider: it is a per-model number, and
     /// applying it twice would tighten every install that never asked for it.
     ///
-    /// Read once at daemon start, so a change needs a daemon restart.
+    /// Reloaded with `config.toml`. A raised limit is usable at once; a
+    /// lowered one takes back the slots nobody is holding and narrows as
+    /// the requests in flight finish, so nothing running is cancelled.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub max_concurrent_inferences_by_provider: BTreeMap<String, usize>,
 }

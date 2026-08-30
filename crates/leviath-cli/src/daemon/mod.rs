@@ -9,6 +9,7 @@ pub(crate) mod config_reload;
 pub(crate) mod fanout_spawner;
 pub(crate) mod gate_rules;
 pub mod lifecycle;
+pub mod live_limits;
 pub mod mcp_pool;
 pub mod mcp_reload;
 pub(crate) mod policy_reload;
