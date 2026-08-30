@@ -83,6 +83,9 @@ pub struct EndpointProvider {
     warned_unknown: crate::provider::ModelMemo,
     /// What `GET /models` said, once priming has read it.
     learned: LearnedModels,
+    /// The entry's `request_timeout_secs`, which bounds the side calls this
+    /// provider makes on its own (the model listing) as well as inference.
+    request_timeout_secs: Option<u64>,
 }
 
 impl EndpointProvider {
@@ -112,7 +115,28 @@ impl EndpointProvider {
             temperature_unsupported: Default::default(),
             warned_unknown: Default::default(),
             learned: Default::default(),
+            request_timeout_secs: None,
         }
+    }
+
+    /// Bound the provider's own side calls by the entry's timeout.
+    ///
+    /// The inference path takes its deadline from each request; the model
+    /// listing has no request to take one from, so it used the side-call
+    /// default even when the entry set a shorter one. Reqwest's per-request
+    /// timeout wins over the client's, so a client built with the entry's
+    /// timeout was not enough on its own: the probe route's 10 s waited the
+    /// full 30 s.
+    pub fn with_request_timeout(mut self, secs: Option<u64>) -> Self {
+        self.request_timeout_secs = secs;
+        self
+    }
+
+    /// The deadline on the model listing: the entry's own, or the side-call
+    /// default when the entry set none.
+    fn listing_timeout_secs(&self) -> Option<u64> {
+        self.request_timeout_secs
+            .or(Some(crate::provider::SIDE_CALL_TIMEOUT_SECS))
     }
 
     /// Merge `[model_capabilities]` entries onto what the server reports.
@@ -228,7 +252,7 @@ impl EndpointProvider {
     async fn fetch_models_json(&self) -> Result<serde_json::Value> {
         let mut builder = crate::provider::apply_request_timeout(
             self.client.get(format!("{}/models", self.base_url)),
-            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
+            self.listing_timeout_secs(),
         );
         for (name, value) in self.request_headers() {
             builder = builder.header(name, value);
@@ -449,6 +473,7 @@ mod tests {
     use super::*;
     use crate::test_support::always_on_tracing_guard;
     use leviath_testkit::{spawn_mock_sequence, spawn_mock_server};
+    use std::time::Duration;
 
     fn client() -> reqwest::Client {
         crate::provider::build_http_client(None).expect("a test client builds")
@@ -639,6 +664,47 @@ mod tests {
         // it did not size it.
         provider.capabilities("gpt-mock");
         assert!(provider.warned_unknown.is_empty());
+    }
+
+    /// The entry's timeout bounds the listing. It used to stamp the 30 s
+    /// side-call default on the request, which beats any client-level timeout,
+    /// so a 1 s entry against a server that never answers waited 30 s.
+    #[tokio::test]
+    async fn the_listing_is_bounded_by_the_entry_timeout_not_the_side_call_default() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port is available");
+        let addr = listener
+            .local_addr()
+            .expect("a bound listener has an address");
+        // Accept every connection and hold it open without answering.
+        let hold = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (socket, _) = listener.accept().await.expect("accept");
+                held.push(socket);
+            }
+        });
+        let provider = provider_at(&format!("http://{addr}/v1")).with_request_timeout(Some(1));
+        let started = std::time::Instant::now();
+        let result = provider.list_models().await;
+        let waited = started.elapsed();
+        hold.abort();
+        assert!(result.is_err(), "a server that never answers is an error");
+        // Well under the 30 s the side-call default would have waited, with
+        // room for a slow runner.
+        assert!(waited < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn an_entry_without_a_timeout_keeps_the_side_call_default_on_the_listing() {
+        let plain = provider_at("http://h/v1");
+        assert_eq!(
+            plain.listing_timeout_secs(),
+            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS)
+        );
+        let bounded = provider_at("http://h/v1").with_request_timeout(Some(7));
+        assert_eq!(bounded.listing_timeout_secs(), Some(7));
     }
 
     #[tokio::test]

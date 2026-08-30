@@ -361,6 +361,7 @@ pub fn build_provider_registry_probing(
                     )
                     .with_overrides(caps)
                     .with_rate_limit(c.rate_limit.as_ref())
+                    .with_request_timeout(timeout)
                     .with_models(endpoint.models)
                     .with_serves(endpoint.serves),
                 ),
