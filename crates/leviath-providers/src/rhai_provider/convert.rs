@@ -72,6 +72,7 @@ pub fn parse_inference_dynamic(value: Dynamic) -> Result<InferenceResponse> {
         tool_calls: parse_tool_calls(&json),
         tokens_used: parse_usage(json.get("tokens_used")),
         finish_reason: finish_reason_from_str(json.get("finish_reason").and_then(|v| v.as_str())),
+        reasoning: None,
     })
 }
 
@@ -124,6 +125,10 @@ pub fn chunk_from_dynamic(value: Dynamic) -> Result<StreamChunk> {
             .get("finish_reason")
             .and_then(|v| v.as_str())
             .map(|s| finish_reason_from_str(Some(s))),
+        // A script provider speaks whatever wire format it likes; there is no
+        // opaque reasoning item to carry, and inventing one from a script's
+        // JSON would let a script forge another provider's token.
+        reasoning: None,
     })
 }
 

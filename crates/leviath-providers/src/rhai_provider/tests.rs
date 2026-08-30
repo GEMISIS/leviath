@@ -897,6 +897,7 @@ fn a_script_sees_each_system_block_region_and_volatility() {
             role: "user".to_string(),
             content: "hello".into(),
             cache_breakpoint: false,
+            reasoning: None,
         }],
         model: "m".to_string(),
         max_tokens: 16,

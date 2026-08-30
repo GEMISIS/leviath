@@ -562,6 +562,7 @@ mod tests {
                     reported_cost_usd: None,
                 },
                 finish_reason: FinishReason::Complete,
+                reasoning: None,
             })
         }
         async fn count_tokens(&self, _t: &str, _m: &str) -> usize {

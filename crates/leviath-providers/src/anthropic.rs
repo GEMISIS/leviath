@@ -795,6 +795,7 @@ impl AnthropicProvider {
                 completion_tokens,
             ),
             finish_reason: Self::parse_stop_reason(stop_reason),
+            reasoning: None,
         })
     }
 }
@@ -1096,6 +1097,7 @@ mod tests {
                 role: "assistant".to_string(),
                 content,
                 cache_breakpoint: true,
+                reasoning: None,
             }],
             model: "claude-sonnet-5".to_string(),
             max_tokens: 100,
@@ -1367,6 +1369,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
@@ -1402,6 +1405,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
@@ -1701,11 +1705,13 @@ mod tests {
                     role: "user".to_string(),
                     content: "Hello".into(),
                     cache_breakpoint: true,
+                    reasoning: None,
                 },
                 crate::provider::Message {
                     role: "user".to_string(),
                     content: "World".into(),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
             ],
             model: "claude-sonnet-4-6".to_string(),
@@ -1751,6 +1757,7 @@ mod tests {
                 role: "user".to_string(),
                 content: format!("Message {}", i).into(),
                 cache_breakpoint: true,
+                reasoning: None,
             })
             .collect();
         // Add a system message
@@ -1760,6 +1767,7 @@ mod tests {
                 role: "system".to_string(),
                 content: "System".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             },
         );
 
@@ -1966,6 +1974,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "go".into(),
                 cache_breakpoint: true,
+                reasoning: None,
             }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
@@ -2028,6 +2037,7 @@ mod tests {
                 role: "user".to_string(),
                 content: format!("m{i}").into(),
                 cache_breakpoint: true,
+                reasoning: None,
             })
             .collect();
         let request = InferenceRequest {
@@ -2091,6 +2101,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
@@ -2545,6 +2556,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Use the tool".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
@@ -2577,6 +2589,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "claude-opus-4-8".to_string(),
             max_tokens: 1024,
@@ -2603,6 +2616,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
@@ -2641,6 +2655,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
@@ -2668,6 +2683,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
@@ -2700,6 +2716,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
@@ -2732,6 +2749,7 @@ mod tests {
                     text: "block text".to_string(),
                 }]),
                 cache_breakpoint: true,
+                reasoning: None,
             }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
@@ -2931,6 +2949,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 100,
@@ -2966,6 +2985,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 100,
@@ -3089,6 +3109,7 @@ mod tests {
                 role: "user".to_string(),
                 content: format!("Message {}", i).into(),
                 cache_breakpoint: true,
+                reasoning: None,
             })
             .collect();
 
@@ -3180,6 +3201,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 100,
@@ -3625,6 +3647,7 @@ mod tests {
                 role: "system".to_string(),
                 content: "be brief".to_string().into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 16,

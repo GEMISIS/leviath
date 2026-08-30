@@ -385,6 +385,7 @@ mod tests {
             role: role.to_string(),
             content: body.into(),
             cache_breakpoint: false,
+            reasoning: None,
         }
     }
 
@@ -425,6 +426,7 @@ mod tests {
                 },
             ]),
             cache_breakpoint: false,
+            reasoning: None,
         };
         let out = flatten_messages(&[msg]);
         assert!(out.starts_with("Assistant: Reading it."));
@@ -449,6 +451,7 @@ mod tests {
                 thought_signature: None,
             }]),
             cache_breakpoint: false,
+            reasoning: None,
         };
         let out = flatten_messages(&[msg]);
         assert!(out.starts_with("Assistant: ```leviath-tool-calls"));
@@ -471,6 +474,7 @@ mod tests {
                 },
             ]),
             cache_breakpoint: false,
+            reasoning: None,
         };
         let out = flatten_messages(&[msg]);
         assert!(out.contains("[tool_result cc_call_1]\nfile body\n[/tool_result]"));
@@ -490,6 +494,7 @@ mod tests {
                 },
             ]),
             cache_breakpoint: false,
+            reasoning: None,
         };
         assert_eq!(flatten_messages(&[msg]), "Assistant: one\ntwo");
     }
@@ -500,6 +505,7 @@ mod tests {
             role: "assistant".to_string(),
             content: MessageContent::Blocks(vec![]),
             cache_breakpoint: false,
+            reasoning: None,
         };
         assert_eq!(flatten_messages(&[msg]), "");
     }
@@ -520,6 +526,7 @@ mod tests {
                     thought_signature: None,
                 }]),
                 cache_breakpoint: false,
+                reasoning: None,
             },
             Message {
                 role: "user".to_string(),
@@ -529,6 +536,7 @@ mod tests {
                     is_error: false,
                 }]),
                 cache_breakpoint: false,
+                reasoning: None,
             },
         ];
         let out = flatten_messages(&convo);

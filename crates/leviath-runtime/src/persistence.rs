@@ -329,6 +329,7 @@ pub(crate) fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -
                         .as_ref()
                         .and_then(|t| t.entry_taint(i))
                         .unwrap_or_default(),
+                    reasoning: e.reasoning.clone(),
                 })
                 .collect(),
         })

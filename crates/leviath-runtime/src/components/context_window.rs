@@ -345,6 +345,34 @@ impl ContextWindow {
         })
     }
 
+    /// [`add_typed_entry`](Self::add_typed_entry) for a turn that carries an
+    /// opaque provider token to replay.
+    ///
+    /// A separate method rather than a parameter on the shared one: only the
+    /// two writers that record an assistant turn have such a token, and the
+    /// other twenty callers would carry a `None` that means nothing to them.
+    pub(crate) fn add_assistant_turn(
+        &mut self,
+        region_name: &str,
+        kind: leviath_core::EntryKind,
+        content: String,
+        tokens: usize,
+        reasoning: Option<String>,
+    ) -> leviath_core::Result<()> {
+        let Some((content, tokens)) = self.on_write_outcome(region_name, content, tokens, &kind)
+        else {
+            return Ok(());
+        };
+        self.write_to_region(region_name, tokens, &mut |region, tokens| {
+            region.add_typed_entry_with_reasoning(
+                content.clone(),
+                tokens,
+                kind.clone(),
+                reasoning.clone(),
+            )
+        })
+    }
+
     /// Shared tail of every region write: run the insert, give a custom
     /// region's `on_overflow` one shot at freeing room when the budget
     /// rejects it, and recount the window. A `&mut dyn FnMut` (not generic)
@@ -493,6 +521,7 @@ impl ContextWindow {
                                     &mut pending_tool_results,
                                 )),
                                 cache_breakpoint: false,
+                                reasoning: None,
                             });
                         }
 
@@ -502,6 +531,7 @@ impl ContextWindow {
                                     role: "user".to_string(),
                                     content: entry.content.clone().into(),
                                     cache_breakpoint: false,
+                                    reasoning: None,
                                 });
                             }
                             EntryKind::AssistantTurn { tool_calls } => {
@@ -510,6 +540,7 @@ impl ContextWindow {
                                         role: "assistant".to_string(),
                                         content: entry.content.clone().into(),
                                         cache_breakpoint: false,
+                                        reasoning: entry.reasoning.clone(),
                                     });
                                 } else {
                                     let mut blocks = Vec::new();
@@ -530,6 +561,7 @@ impl ContextWindow {
                                         role: "assistant".to_string(),
                                         content: leviath_providers::MessageContent::Blocks(blocks),
                                         cache_breakpoint: false,
+                                        reasoning: entry.reasoning.clone(),
                                     });
                                 }
                             }
@@ -554,18 +586,21 @@ impl ContextWindow {
                                         role: "assistant".to_string(),
                                         content: rest.to_string().into(),
                                         cache_breakpoint: false,
+                                        reasoning: None,
                                     });
                                 } else if let Some(rest) = trimmed.strip_prefix("User: ") {
                                     messages.push(leviath_providers::Message {
                                         role: "user".to_string(),
                                         content: rest.to_string().into(),
                                         cache_breakpoint: false,
+                                        reasoning: None,
                                     });
                                 } else {
                                     messages.push(leviath_providers::Message {
                                         role: "user".to_string(),
                                         content: entry.content.clone().into(),
                                         cache_breakpoint: false,
+                                        reasoning: None,
                                     });
                                 }
                             }
@@ -580,6 +615,7 @@ impl ContextWindow {
                                 &mut pending_tool_results,
                             )),
                             cache_breakpoint: false,
+                            reasoning: None,
                         });
                     }
                 }
@@ -768,6 +804,10 @@ impl ContextWindow {
                                 role: msg.role.clone(),
                                 content: leviath_providers::MessageContent::Blocks(filtered),
                                 cache_breakpoint: msg.cache_breakpoint,
+                                // Carried, not dropped. Stripping an orphaned
+                                // tool block does not make the turn's opaque
+                                // reasoning token any less the turn's.
+                                reasoning: msg.reasoning.clone(),
                             })
                         }
                     } else {
@@ -837,6 +877,7 @@ impl ContextWindow {
                 role: "user".to_string(),
                 content: "Begin.".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             });
         }
 
@@ -851,6 +892,7 @@ impl ContextWindow {
                 role: "user".to_string(),
                 content: "Continue.".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             });
         }
 
@@ -1145,6 +1187,107 @@ mod tests {
                 CacheHint::RecentlyChanged,
                 CacheHint::Never,
             ]
+        );
+    }
+
+    #[test]
+    fn an_assistant_turns_reasoning_blob_survives_into_the_assembled_message() {
+        // A stateless backend keeps no server-side thread, so the chain of
+        // thought lives only in this blob. If assembly drops it the run still
+        // works and quietly pays to re-derive its reasoning every turn.
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::default(),
+            },
+            10_000,
+        ));
+        window
+            .add_assistant_turn(
+                "conversation",
+                leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
+                "the answer".to_string(),
+                10,
+                Some("sealed-blob".to_string()),
+            )
+            .expect("the write fits");
+
+        let assembled = window.assemble();
+        let turn = assembled
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("the assistant turn");
+        assert_eq!(turn.reasoning.as_deref(), Some("sealed-blob"));
+    }
+
+    #[test]
+    fn a_turn_with_tool_calls_carries_its_reasoning_blob_too() {
+        // The other arm of the assembly match: a turn that called tools takes
+        // the block-content path and must not lose the blob on the way.
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::default(),
+            },
+            10_000,
+        ));
+        window
+            .add_assistant_turn(
+                "conversation",
+                leviath_core::EntryKind::AssistantTurn {
+                    tool_calls: vec![leviath_core::SerializedToolCall {
+                        id: "call_1".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({}),
+                        thought_signature: None,
+                    }],
+                },
+                "looking".to_string(),
+                10,
+                Some("sealed-blob".to_string()),
+            )
+            .expect("the write fits");
+
+        let assembled = window.assemble();
+        let turn = assembled
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("the assistant turn");
+        assert_eq!(turn.reasoning.as_deref(), Some("sealed-blob"));
+    }
+
+    #[test]
+    fn a_turn_from_a_provider_with_no_reasoning_carries_none() {
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::default(),
+            },
+            10_000,
+        ));
+        window
+            .add_assistant_turn(
+                "conversation",
+                leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
+                "plain".to_string(),
+                10,
+                None,
+            )
+            .expect("the write fits");
+        assert!(
+            window
+                .assemble()
+                .messages
+                .iter()
+                .all(|m| m.reasoning.is_none())
         );
     }
 

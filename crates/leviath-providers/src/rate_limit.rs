@@ -572,6 +572,7 @@ mod tests {
             tool_calls: vec![],
             tokens: Some(TokenUsage::new(total, 0, 0, 0)),
             finish_reason: None,
+            reasoning: None,
         }
     }
 
@@ -581,6 +582,7 @@ mod tests {
             tool_calls: vec![],
             tokens: None,
             finish_reason: None,
+            reasoning: None,
         }
     }
 

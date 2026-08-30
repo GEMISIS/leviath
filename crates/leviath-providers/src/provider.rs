@@ -596,6 +596,18 @@ pub struct Message {
     /// mark everything up to and including this message as cacheable.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cache_breakpoint: bool,
+
+    /// An opaque provider token carried with an assistant turn, to be replayed
+    /// by the provider that issued it.
+    ///
+    /// **Never serialized.** This is one provider's field riding in shared
+    /// history, and history is replayed to whichever provider runs the next
+    /// stage - routinely a different one, since models are chosen per stage.
+    /// A provider that wants it emits it deliberately, exactly as
+    /// `openai_compat` does for [`ContentBlock::ToolUse::thought_signature`];
+    /// the alternative is a stage handoff that dies on an unknown key.
+    #[serde(default, skip_serializing)]
+    pub reasoning: Option<String>,
 }
 
 /// A tool that can be called by the model.
@@ -625,6 +637,16 @@ pub struct InferenceResponse {
 
     /// Whether the response was complete or truncated
     pub finish_reason: FinishReason,
+
+    /// An opaque provider token to replay with this turn, when the provider
+    /// issued one.
+    ///
+    /// A stateless backend keeps no server-side thread, so the model's chain of
+    /// thought survives into the next turn only if the same sealed blob is
+    /// handed back. Stored on the assistant turn and replayed by the provider
+    /// that produced it, never by another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 // `TokenUsage` lives in `crate::pricing` alongside the rates it is priced
@@ -696,6 +718,10 @@ pub struct StreamChunk {
 
     /// Finish reason (only on final chunk)
     pub finish_reason: Option<FinishReason>,
+
+    /// See [`InferenceResponse::reasoning`]. Arrives on whichever chunk
+    /// carries the provider's reasoning item, not necessarily the last.
+    pub reasoning: Option<String>,
 }
 
 /// A partial tool call update from streaming.
@@ -779,6 +805,7 @@ pub trait Provider: Send + Sync {
                 .collect(),
             tokens: Some(response.tokens_used),
             finish_reason: Some(response.finish_reason),
+            reasoning: None,
         };
         Ok(Box::pin(stream_once::once(Ok(chunk))))
     }
@@ -1967,6 +1994,7 @@ mod tests {
             role: "user".into(),
             content: "hello".into(),
             cache_breakpoint: false,
+            reasoning: None,
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert!(json.get("cache_breakpoint").is_none());
@@ -1978,6 +2006,7 @@ mod tests {
             role: "system".into(),
             content: "you are helpful".into(),
             cache_breakpoint: true,
+            reasoning: None,
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["cache_breakpoint"], true);
@@ -1991,6 +2020,7 @@ mod tests {
                 role: "user".into(),
                 content: "hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "gpt-4".into(),
             max_tokens: 100,
@@ -2095,6 +2125,7 @@ mod tests {
                     reported_cost_usd: None,
                 },
                 finish_reason: FinishReason::Complete,
+                reasoning: None,
             })
         }
 

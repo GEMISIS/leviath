@@ -1249,6 +1249,7 @@ mod tests {
                 reported_cost_usd: None,
             },
             finish_reason: FinishReason::Complete,
+            reasoning: None,
         }
     }
 
@@ -2771,6 +2772,7 @@ mod tests {
                     metadata: None,
                     key: None,
                     taint: Default::default(),
+                    reasoning: None,
                 }],
                 description: None,
             }],

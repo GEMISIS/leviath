@@ -178,6 +178,7 @@ mod tests {
                         reported_cost_usd: None,
                     },
                     finish_reason: FinishReason::Complete,
+                    reasoning: None,
                 }),
                 Some(Err(m)) => Err(ProviderError::Other(m)),
                 None => Err(ProviderError::Other("exhausted".to_string())),
@@ -359,6 +360,7 @@ mod tests {
                 tool_calls: vec![],
                 tokens_used: TokenUsage::new(1, 0, 0, 1),
                 finish_reason: FinishReason::Complete,
+                reasoning: None,
             })
         }
         async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
@@ -394,6 +396,7 @@ mod tests {
             role: "user".to_string(),
             content: "x".repeat(2_000).into(),
             cache_breakpoint: false,
+            reasoning: None,
         });
         run_compaction_job(
             job,

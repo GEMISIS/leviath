@@ -2047,6 +2047,7 @@ condition = "error"
                     metadata: None,
                     key: None,
                     taint: Default::default(),
+                    reasoning: None,
                 }],
                 description: None,
             }],
@@ -2346,6 +2347,7 @@ transform = "clear"
                     metadata: None,
                     key: None,
                     taint: Default::default(),
+                    reasoning: None,
                 }],
                 description: None,
             }],
@@ -2439,6 +2441,7 @@ transform = "clear"
                 metadata: None,
                 key: None,
                 taint: Default::default(),
+                reasoning: None,
             })
             .collect();
         agent.context_snapshot = Some(std::sync::Arc::new(runstate::ContextSnapshot {
@@ -2788,6 +2791,7 @@ transform = "clear"
             metadata: None,
             key: None,
             taint: Default::default(),
+            reasoning: None,
         };
         let mut agent = make_test_agent(id, AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(runstate::ContextSnapshot {

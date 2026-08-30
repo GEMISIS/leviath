@@ -32,6 +32,7 @@ impl Provider for Cfg {
                 reported_cost_usd: None,
             },
             finish_reason: leviath_providers::FinishReason::Complete,
+            reasoning: None,
         })
     }
     async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
@@ -859,6 +860,7 @@ fn resp(text: &str) -> leviath_providers::InferenceResponse {
             reported_cost_usd: None,
         },
         finish_reason: leviath_providers::FinishReason::Complete,
+        reasoning: None,
     }
 }
 
@@ -3597,6 +3599,7 @@ fn infer_result_only(with_tools: bool) -> crate::components::InferenceResult {
         },
         tokens_used: 0,
         cut_off_at: None,
+        reasoning: None,
     }
 }
 
@@ -3673,6 +3676,7 @@ fn process_response_counts_edits_by_path() {
                 ],
                 tokens_used: 0,
                 cut_off_at: None,
+                reasoning: None,
             },
             StageProgress::default(),
             ProcessResponse,
@@ -4729,6 +4733,7 @@ fn infer_with(
             tool_calls: calls,
             tokens_used: 0,
             cut_off_at: None,
+            reasoning: None,
         },
     )
 }
@@ -5448,6 +5453,7 @@ async fn a_refused_submission_leaves_an_earlier_answer_alone() {
                 ],
                 tokens_used: 0,
                 cut_off_at: None,
+                reasoning: None,
             },
             output_window(),
             ReadyForTools,
@@ -5761,6 +5767,7 @@ async fn dispatch_tools_refuses_arguments_that_fail_the_advertised_schema() {
         ],
         tokens_used: 0,
         cut_off_at: None,
+        reasoning: None,
     };
     let e = world
         .spawn((
@@ -5805,6 +5812,7 @@ async fn dispatch_tools_skips_validation_when_the_schema_does_not_compile() {
         tool_calls: vec![fcall("c1", "typod", serde_json::json!({"whatever": true}))],
         tokens_used: 0,
         cut_off_at: None,
+        reasoning: None,
     };
     let e = world
         .spawn((
@@ -5850,6 +5858,7 @@ async fn dispatch_tools_validates_through_a_tool_alias() {
         tool_calls: vec![fcall("c1", canonical, serde_json::json!({}))],
         tokens_used: 0,
         cut_off_at: None,
+        reasoning: None,
     };
     let e = world
         .spawn((
@@ -5902,6 +5911,7 @@ async fn dispatch_tools_validates_an_mcp_style_schema() {
         ],
         tokens_used: 0,
         cut_off_at: None,
+        reasoning: None,
     };
     let e = world
         .spawn((
@@ -6503,6 +6513,7 @@ fn routed_result(
         &[("c1".to_string(), text.to_string())],
         Some(routing),
         None,
+        None,
     );
     // Whichever region it was routed to, the entry text is what matters here.
     ["results", "conversation", "tool_results"]
@@ -6561,6 +6572,7 @@ fn apply_adds_assistant_turn_and_result_to_conversation() {
         &[("c1".to_string(), "result".to_string())],
         None,
         None,
+        None,
     );
     assert!(w.get_region("conversation").unwrap().current_tokens > 0);
 }
@@ -6592,6 +6604,7 @@ fn thought_signature_survives_the_full_context_round_trip() {
         "resp",
         &[call],
         &[("c1".to_string(), "result".to_string())],
+        None,
         None,
         None,
     );
@@ -6629,6 +6642,7 @@ fn apply_falls_back_when_region_missing() {
         &[("c1".to_string(), "long result".to_string())],
         None,
         None,
+        None,
     );
 }
 
@@ -6642,6 +6656,7 @@ fn apply_routes_to_override_region() {
         &[tc("c1", "read")],
         &[("c1".to_string(), "x".to_string())],
         Some(&r),
+        None,
         None,
     );
     assert!(w.get_region("special").unwrap().current_tokens > 0);
@@ -6660,6 +6675,7 @@ fn routing_away_pointer_previews_and_truncates_long_results() {
         &[tc("c1", "read_file")],
         &[("c1".to_string(), long.clone())],
         Some(&r),
+        None,
         None,
     );
     let conv_txt: String = w
@@ -6720,6 +6736,7 @@ fn routing_away_keeps_pair_in_conversation_and_text_in_region() {
         &[tc("c1", "read_file")],
         &[("c1".to_string(), "FULL FILE BODY".to_string())],
         Some(&r),
+        None,
         None,
     );
 
@@ -6786,6 +6803,7 @@ fn routing_override_matches_bash_alias_to_shell() {
         &[("c1".to_string(), "All tests passed".to_string())],
         Some(&r),
         None,
+        None,
     );
     assert!(
         w.get_region("test_results")
@@ -6808,6 +6826,7 @@ fn apply_default_region_when_no_override() {
         &[("c1".to_string(), "x".to_string())],
         Some(&r),
         None,
+        None,
     );
     assert!(w.get_region("dflt").unwrap().current_tokens > 0);
 }
@@ -6823,6 +6842,7 @@ fn apply_routes_to_scratch_when_not_persist() {
         &[("c1".to_string(), "x".to_string())],
         Some(&r),
         None,
+        None,
     );
     assert!(w.get_region("scratch").unwrap().current_tokens > 0);
 }
@@ -6837,6 +6857,7 @@ fn apply_not_persist_without_scratch_uses_base_region() {
         &[tc("c1", "read")],
         &[("c1".to_string(), "x".to_string())],
         Some(&r),
+        None,
         None,
     );
     assert!(w.get_region("conversation").unwrap().current_tokens > 0);
@@ -6854,6 +6875,7 @@ fn apply_truncates_per_max_result_tokens() {
         &[("c1".to_string(), long)],
         Some(&r),
         None,
+        None,
     );
     // Truncated, so the stored result is far smaller than 100 chars.
     assert!(w.get_region("conversation").unwrap().current_tokens < 25);
@@ -6869,6 +6891,7 @@ fn apply_no_truncation_when_result_under_max() {
         &[tc("c1", "read")],
         &[("c1".to_string(), "short".to_string())], // 5 chars - under budget
         Some(&r),
+        None,
         None,
     );
     assert!(w.get_region("conversation").unwrap().current_tokens > 0);
@@ -6886,6 +6909,7 @@ fn apply_tags_taint_when_sensitivities_present() {
         &[("c1".to_string(), "x".to_string())],
         None,
         Some(&sens),
+        None,
     );
     assert!(w.get_region("conversation").unwrap().current_tokens > 0);
 }
@@ -6907,6 +6931,7 @@ fn apply_truncates_to_available_when_region_nearly_full() {
         "r",
         &[tc("c1", "read")],
         &[("c1".to_string(), big)],
+        None,
         None,
         None,
     );
@@ -6934,6 +6959,7 @@ fn collect_tools_applies_and_loops_back_to_infer() {
                 tool_calls: vec![tc("c1", "read")],
                 tokens_used: 0,
                 cut_off_at: None,
+                reasoning: None,
             },
             AwaitingTools,
         ))
@@ -13307,6 +13333,7 @@ fn collect_tools_records_one_activity_per_call_with_error_detection() {
                 tool_calls: vec![tc("c1", "read_file"), tc("c2", "write_file")],
                 tokens_used: 0,
                 cut_off_at: None,
+                reasoning: None,
             },
             AwaitingTools,
             crate::telemetry::StageActivity::default(),
@@ -14708,6 +14735,7 @@ fn spawn_after(world: &mut World, src: &str) -> Entity {
                 tool_calls: vec![],
                 tokens_used: 7,
                 cut_off_at: None,
+                reasoning: None,
             },
             hook_scripts(src, &["after_inference"]),
         ))
@@ -14985,6 +15013,7 @@ fn after_inference_sees_tool_call_names_but_cannot_change_them() {
                 }],
                 tokens_used: 0,
                 cut_off_at: None,
+                reasoning: None,
             },
             hook_scripts(
                 r#"fn after_inference(ctx) { #{ action: "modify", value: ctx.tool_calls[0] } }"#,
@@ -15020,6 +15049,7 @@ fn after_inference_skips_an_out_of_range_stage() {
                 tool_calls: vec![],
                 tokens_used: 0,
                 cut_off_at: None,
+                reasoning: None,
             },
             hook_scripts(
                 r#"fn after_inference(ctx) { #{ action: "cancel" } }"#,
@@ -15049,6 +15079,7 @@ fn after_inference_skips_a_stage_that_declared_none() {
                 tool_calls: vec![],
                 tokens_used: 0,
                 cut_off_at: None,
+                reasoning: None,
             },
             hook_scripts(
                 r#"fn after_inference(ctx) { #{ action: "cancel" } }"#,
@@ -15107,6 +15138,7 @@ fn spawn_tool_hooked(
                 tool_calls: calls,
                 tokens_used: 0,
                 cut_off_at: None,
+                reasoning: None,
             },
             hook_scripts(src, &["on_tool_call"]),
         ))
@@ -15192,6 +15224,7 @@ fn on_tool_call_cannot_mark_its_own_calls_approved() {
                 tool_calls: vec![call("shell", serde_json::json!({"command": "ls"}))],
                 tokens_used: 0,
                 cut_off_at: None,
+                reasoning: None,
             },
             crate::taint::TaintGate::new(leviath_core::taint::SecurityConfig::default()),
             hook_scripts(
@@ -15392,6 +15425,7 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
                 tool_calls: vec![call("shell", serde_json::json!({}))],
                 tokens_used: 0,
                 cut_off_at: None,
+                reasoning: None,
             },
             hook_scripts(
                 r#"fn on_tool_call(ctx) { #{ action: "cancel" } }"#,
@@ -15414,6 +15448,7 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
                 tool_calls: vec![call("shell", serde_json::json!({}))],
                 tokens_used: 0,
                 cut_off_at: None,
+                reasoning: None,
             },
             hook_scripts(
                 r#"fn on_tool_call(ctx) { #{ action: "cancel" } }"#,
@@ -16144,6 +16179,7 @@ fn a_pointer_to_a_visible_region_says_it_is_already_in_the_prompt() {
         &results,
         Some(&routed_to("data_preview")),
         None,
+        None,
     );
     let conversation = window.get_region("conversation").expect("conversation");
     let text: String = conversation
@@ -16191,6 +16227,7 @@ fn a_pointer_says_when_the_region_could_not_take_the_whole_result() {
         &calls,
         &results,
         Some(&routed_to("data_preview")),
+        None,
         None,
     );
     let conversation = window.get_region("conversation").expect("conversation");
@@ -16310,6 +16347,7 @@ fn a_partly_stored_result_reports_what_was_dropped() {
         &calls,
         &results,
         Some(&routed_to("data_preview")),
+        None,
         None,
     );
     let conversation = window.get_region("conversation").expect("conversation");
@@ -16432,6 +16470,7 @@ fn a_pointer_to_a_hidden_region_says_it_cannot_be_read_here() {
         &calls,
         &results,
         Some(&routed_to("data_preview")),
+        None,
         None,
     );
     let conversation = window.get_region("conversation").expect("conversation");
@@ -17277,6 +17316,7 @@ async fn dispatch_tools_refuses_a_call_whose_arguments_were_cut_off() {
         )],
         tokens_used: 0,
         cut_off_at: Some(24_000),
+        reasoning: None,
     };
     let e = world
         .spawn((

@@ -128,6 +128,7 @@ pub(crate) fn apply_tool_results(
     tool_results: &[(String, String)],
     routing: Option<&leviath_core::blueprint::ToolResultRouting>,
     sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
+    reasoning: Option<String>,
 ) {
     let response_tokens = leviath_core::estimate_tokens(response_content);
     let serialized: Vec<leviath_core::SerializedToolCall> = tool_calls
@@ -139,13 +140,14 @@ pub(crate) fn apply_tool_results(
             thought_signature: tc.thought_signature.clone(),
         })
         .collect();
-    let _ = window.add_typed_entry(
+    let _ = window.add_assistant_turn(
         "conversation",
         leviath_core::EntryKind::AssistantTurn {
             tool_calls: serialized,
         },
         response_content.to_string(),
         response_tokens,
+        reasoning,
     );
 
     for (tool_call_id, result) in tool_results {
@@ -714,6 +716,7 @@ pub(crate) fn collect_tools(
             &merged,
             routing.map(|c| &c.routing),
             sensitivities.map(|s| &s.0),
+            infer.reasoning.clone(),
         );
         // Repetition detection: record each call and inject a `[System]` nudge
         // when the agent is looping (same tool+args, or a long read-only streak).

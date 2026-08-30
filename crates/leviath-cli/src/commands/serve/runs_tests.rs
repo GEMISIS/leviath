@@ -995,6 +995,7 @@ fn plant_journal(run_id: &str, content: &str, secret: Option<&str>) {
                         metadata: None,
                         key: None,
                         taint: leviath_core::taint::TaintLevel::default(),
+                        reasoning: None,
                     }],
                     description: None,
                 }],
@@ -1072,6 +1073,7 @@ fn plant_rich_journal(run_id: &str) {
             metadata: None,
             key: None,
             taint: leviath_core::taint::TaintLevel::default(),
+            reasoning: None,
         }
     }
     fn region(name: &str, content: &str) -> RegionSnapshot {
@@ -1291,6 +1293,7 @@ async fn a_context_search_names_the_region_that_matched() {
                         metadata: None,
                         key: None,
                         taint: leviath_core::taint::TaintLevel::default(),
+                        reasoning: None,
                     }],
                     description: None,
                 }],
@@ -1451,6 +1454,7 @@ async fn deep_sources_that_read_files_and_find_nothing_are_quiet() {
                         metadata: None,
                         key: None,
                         taint: leviath_core::taint::TaintLevel::default(),
+                        reasoning: None,
                     }],
                     description: None,
                 }],

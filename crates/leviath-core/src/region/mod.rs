@@ -583,6 +583,7 @@ impl Region {
             metadata,
             kind,
             key: key.map(str::to_string),
+            reasoning: None,
         });
         self.current_tokens += tokens;
 
@@ -717,6 +718,22 @@ impl Region {
         tokens: usize,
         kind: EntryKind,
     ) -> crate::error::Result<()> {
+        self.add_typed_entry_with_reasoning(content, tokens, kind, None)
+    }
+
+    /// [`add_typed_entry`](Self::add_typed_entry), carrying the opaque provider
+    /// token this turn has to be replayed with.
+    ///
+    /// See [`RegionEntry::reasoning`]. Attached after the push rather than
+    /// threaded through `push_entry`, which has a dozen callers that have no
+    /// such token and no reason to grow a parameter for one.
+    pub fn add_typed_entry_with_reasoning(
+        &mut self,
+        content: String,
+        tokens: usize,
+        kind: EntryKind,
+        reasoning: Option<String>,
+    ) -> crate::error::Result<()> {
         self.push_entry(
             content,
             tokens,
@@ -724,7 +741,15 @@ impl Region {
             kind,
             crate::taint::TaintLevel::Public,
             None,
-        )
+        )?;
+        // On success the entry just written is the last one: `push_entry` may
+        // have evicted to make room, but it appends what it accepted.
+        if reasoning.is_some()
+            && let Some(entry) = self.content.last_mut()
+        {
+            entry.reasoning = reasoning;
+        }
+        Ok(())
     }
 
     /// Carry an already-accepted entry into this region verbatim, preserving
@@ -815,6 +840,7 @@ impl Region {
             metadata: None,
             kind: EntryKind::default(),
             key: Some(key.to_string()),
+            reasoning: None,
         });
         self.current_tokens += tokens;
         Ok(())
@@ -923,6 +949,26 @@ pub struct RegionEntry {
     /// Optional key for HashMap regions. When set, upsert semantics apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+
+    /// An opaque provider token that has to be replayed with this turn.
+    ///
+    /// A stateless backend keeps no server-side thread, so the model's chain of
+    /// thought only survives into the next turn if the client hands the same
+    /// sealed blob back. The ChatGPT Codex endpoint is one such backend: it
+    /// requires `store: false` and returns a `reasoning` item whose
+    /// `encrypted_content` must be replayed verbatim.
+    ///
+    /// It lives on the entry rather than inside [`EntryKind::AssistantTurn`]
+    /// because the cardinality is per turn, not per call: a turn with two tool
+    /// calls still has one reasoning item, and a turn with none still has one.
+    /// [`SerializedToolCall::thought_signature`] is the same idea at the other
+    /// cardinality, and the two do not substitute for each other.
+    ///
+    /// Never serialized onto a request by a provider that did not ask for it.
+    /// One provider's opaque token in shared history is replayed to whichever
+    /// provider runs the next stage, and an unknown key is a hard rejection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// Validation schema for a region's content.
@@ -939,6 +985,67 @@ mod tests {
     /// What that cost was paid one region over: a full region refused the write,
     /// and the tool-result caller degraded the result to a truncation or to
     /// `[result omitted]` while still telling the model it had been stored.
+    #[test]
+    fn an_opaque_reasoning_token_rides_along_with_the_entry_it_belongs_to() {
+        let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 100);
+        region
+            .add_typed_entry_with_reasoning(
+                "the answer".to_string(),
+                10,
+                EntryKind::AssistantTurn { tool_calls: vec![] },
+                Some("sealed-blob".to_string()),
+            )
+            .unwrap();
+        assert_eq!(region.content[0].reasoning.as_deref(), Some("sealed-blob"));
+    }
+
+    #[test]
+    fn an_entry_written_without_one_carries_none() {
+        let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 100);
+        region.add_entry("plain".to_string(), 10).unwrap();
+        assert_eq!(region.content[0].reasoning, None);
+    }
+
+    #[test]
+    fn a_rejected_write_attaches_nothing() {
+        // The blob is attached to "the entry just written", so a write that
+        // never happened must not decorate whatever was last there.
+        let mut region = Region::new("conv".to_string(), RegionKind::Pinned, 10);
+        region.add_entry("first".to_string(), 10).unwrap();
+        let refused = region.add_typed_entry_with_reasoning(
+            "second".to_string(),
+            10,
+            EntryKind::AssistantTurn { tool_calls: vec![] },
+            Some("sealed-blob".to_string()),
+        );
+        assert!(refused.is_err(), "the region had no room");
+        assert!(region.content.iter().all(|e| e.reasoning.is_none()));
+    }
+
+    #[test]
+    fn a_reasoning_token_survives_a_serde_round_trip() {
+        // It has to outlive a restart: a run reloaded without it silently pays
+        // to re-derive its chain of thought every turn.
+        let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 100);
+        region
+            .add_typed_entry_with_reasoning(
+                "x".to_string(),
+                1,
+                EntryKind::AssistantTurn { tool_calls: vec![] },
+                Some("sealed-blob".to_string()),
+            )
+            .unwrap();
+        let json = serde_json::to_string(&region.content[0]).unwrap();
+        let back: RegionEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.reasoning.as_deref(), Some("sealed-blob"));
+
+        // And an entry written before the field existed still loads.
+        let older: RegionEntry =
+            serde_json::from_str(r#"{"content":"x","tokens":1,"timestamp":0,"metadata":null}"#)
+                .unwrap();
+        assert_eq!(older.reasoning, None);
+    }
+
     #[test]
     fn an_evicting_region_rolls_the_oldest_off_to_admit_a_write() {
         let mut region = Region::new("findings".to_string(), RegionKind::Temporary, 100);
@@ -2947,6 +3054,7 @@ mod tests {
             metadata: None,
             kind: EntryKind::default(),
             key: None,
+            reasoning: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("key"));
@@ -2961,6 +3069,7 @@ mod tests {
             metadata: None,
             kind: EntryKind::default(),
             key: Some("mykey".to_string()),
+            reasoning: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("mykey"));
@@ -3194,6 +3303,7 @@ mod tests {
             metadata: None,
             kind: EntryKind::default(),
             key: Some("mykey".to_string()),
+            reasoning: None,
         };
         let json = serde_json::to_string(&entry_with_key).unwrap();
         let deserialized: RegionEntry = serde_json::from_str(&json).unwrap();
@@ -3209,6 +3319,7 @@ mod tests {
             metadata: None,
             kind: EntryKind::default(),
             key: None,
+            reasoning: None,
         };
         let json = serde_json::to_string(&entry_no_key).unwrap();
         assert!(!json.contains("\"key\""));

@@ -904,6 +904,7 @@ mod tests {
             tool_calls: vec![],
             tokens_used: 0,
             cut_off_at: None,
+            reasoning: None,
         }
     }
 

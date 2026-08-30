@@ -87,6 +87,7 @@ fn text(content: &str) -> InferenceResponse {
             reported_cost_usd: None,
         },
         finish_reason: FinishReason::Complete,
+        reasoning: None,
     }
 }
 

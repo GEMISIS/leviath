@@ -402,6 +402,7 @@ fn message_from_json(value: &serde_json::Value) -> Result<leviath_providers::Mes
             role: "assistant".to_string(),
             content: leviath_providers::MessageContent::Blocks(blocks),
             cache_breakpoint: false,
+            reasoning: None,
         });
     }
 
@@ -438,6 +439,7 @@ fn message_from_json(value: &serde_json::Value) -> Result<leviath_providers::Mes
             role: "user".to_string(),
             content: leviath_providers::MessageContent::Blocks(blocks),
             cache_breakpoint: false,
+            reasoning: None,
         });
     }
 
@@ -447,6 +449,7 @@ fn message_from_json(value: &serde_json::Value) -> Result<leviath_providers::Mes
         role: role.to_string(),
         content: content.into(),
         cache_breakpoint: false,
+        reasoning: None,
     })
 }
 

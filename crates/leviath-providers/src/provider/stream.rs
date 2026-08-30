@@ -249,6 +249,9 @@ pub async fn collect_stream(
         std::collections::BTreeMap::new();
     let mut tokens = TokenUsage::new(0, 0, 0, 0);
     let mut finish_reason = None;
+    // Whichever chunk carried the provider's reasoning item, which is not
+    // necessarily the last one.
+    let mut reasoning = None;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -275,6 +278,9 @@ pub async fn collect_stream(
         if let Some(reason) = chunk.finish_reason {
             finish_reason = Some(reason);
         }
+        if chunk.reasoning.is_some() {
+            reasoning = chunk.reasoning;
+        }
     }
 
     let Some(finish_reason) = finish_reason else {
@@ -290,6 +296,7 @@ pub async fn collect_stream(
         tool_calls: calls.into_values().map(PartialToolCall::finish).collect(),
         tokens_used: tokens,
         finish_reason,
+        reasoning,
     })
 }
 
@@ -353,6 +360,7 @@ mod tests {
             tool_calls: Vec::new(),
             tokens: None,
             finish_reason: None,
+            reasoning: None,
         }
     }
 
@@ -490,6 +498,7 @@ mod tests {
                 }],
                 tokens: None,
                 finish_reason: None,
+                reasoning: None,
             },
             // The rest of the arguments, and nothing else: an argument fragment
             // is not valid JSON on its own, which is why they are buffered as
@@ -505,12 +514,14 @@ mod tests {
                 }],
                 tokens: None,
                 finish_reason: None,
+                reasoning: None,
             },
             StreamChunk {
                 delta: String::new(),
                 tool_calls: Vec::new(),
                 tokens: None,
                 finish_reason: Some(FinishReason::ToolCall),
+                reasoning: None,
             },
         ]);
 
@@ -547,12 +558,14 @@ mod tests {
                 }],
                 tokens: None,
                 finish_reason: None,
+                reasoning: None,
             },
             StreamChunk {
                 delta: String::new(),
                 tool_calls: Vec::new(),
                 tokens: None,
                 finish_reason: Some(FinishReason::TokenLimit),
+                reasoning: None,
             },
         ]);
 
@@ -579,12 +592,14 @@ mod tests {
                 tool_calls: Vec::new(),
                 tokens: Some(TokenUsage::new(100, 20, 5, 0)),
                 finish_reason: None,
+                reasoning: None,
             },
             StreamChunk {
                 delta: String::new(),
                 tool_calls: Vec::new(),
                 tokens: Some(TokenUsage::new(0, 0, 0, 42).with_reported_cost(Some(0.25))),
                 finish_reason: Some(FinishReason::Complete),
+                reasoning: None,
             },
         ]);
 

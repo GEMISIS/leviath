@@ -1406,6 +1406,7 @@ mod tests {
                 metadata: None,
                 key: None,
                 taint: Default::default(),
+                reasoning: None,
             }],
             description: None,
         };
@@ -2658,6 +2659,7 @@ mod tests {
                             metadata: None,
                             key: None,
                             taint: Default::default(),
+                            reasoning: None,
                         },
                         RegionEntrySnapshot {
                             content: "Additional instruction".into(),
@@ -2666,6 +2668,7 @@ mod tests {
                             metadata: Some(serde_json::json!({"source": "user"})),
                             key: None,
                             taint: Default::default(),
+                            reasoning: None,
                         },
                     ],
                     description: None,
@@ -2700,6 +2703,7 @@ mod tests {
             metadata: None,
             key: None,
             taint: Default::default(),
+            reasoning: None,
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert!(json.get("metadata").is_none());

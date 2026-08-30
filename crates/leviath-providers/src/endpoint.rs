@@ -490,6 +490,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: model.to_string(),
             max_tokens: 100,

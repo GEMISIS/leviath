@@ -63,6 +63,7 @@ impl Provider for AnswersOnce {
                 reported_cost_usd: None,
             },
             finish_reason: FinishReason::Stop,
+            reasoning: None,
         })
     }
 

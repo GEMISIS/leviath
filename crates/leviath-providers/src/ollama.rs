@@ -643,6 +643,7 @@ impl OllamaProvider {
                 reported_cost_usd: None,
             },
             finish_reason,
+            reasoning: None,
         })
     }
 }
@@ -893,6 +894,7 @@ fn ollama_chunk(json: &serde_json::Value) -> StreamChunk {
             tool_calls: Vec::new(),
             tokens: None,
             finish_reason: None,
+            reasoning: None,
         };
     }
 
@@ -948,6 +950,7 @@ fn ollama_chunk(json: &serde_json::Value) -> StreamChunk {
             reported_cost_usd: None,
         }),
         finish_reason: Some(finish_reason),
+        reasoning: None,
     }
 }
 
@@ -975,6 +978,7 @@ fn ollama_flush(buffer: &mut String) -> Option<StreamChunk> {
         tool_calls: Vec::new(),
         tokens: None,
         finish_reason: Some(FinishReason::Complete),
+        reasoning: None,
     })
 }
 
@@ -1349,6 +1353,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "qwen3.8".to_string(),
             max_tokens: 64,
@@ -1371,11 +1376,13 @@ mod tests {
                     role: "system".to_string(),
                     content: "Be helpful".into(),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 crate::provider::Message {
                     role: "user".to_string(),
                     content: "Hello".into(),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
             ],
             model: "llama3-8b".to_string(),
@@ -1406,6 +1413,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "llama3-8b".to_string(),
             max_tokens: 512,
@@ -1436,6 +1444,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "llama3-8b".to_string(),
             max_tokens: 512,
@@ -1472,6 +1481,7 @@ mod tests {
                         },
                     ]),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 crate::provider::Message {
                     role: "user".to_string(),
@@ -1483,6 +1493,7 @@ mod tests {
                         },
                     ]),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
             ],
             model: "llama3-8b".to_string(),
@@ -1523,6 +1534,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Search".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "llama3-8b".to_string(),
             max_tokens: 512,
@@ -1674,6 +1686,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "llama3-8b".to_string(),
             max_tokens: 100,
@@ -1699,6 +1712,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "deepseek-r1:latest".to_string(),
             max_tokens: 100,
@@ -1727,16 +1741,19 @@ mod tests {
                     role: "system".to_string(),
                     content: "You are helpful.".into(),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 crate::provider::Message {
                     role: "user".to_string(),
                     content: "Hello".into(),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 crate::provider::Message {
                     role: "assistant".to_string(),
                     content: "Hi there".into(),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
             ],
             model: "mistral-7b".to_string(),
@@ -1766,6 +1783,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Do things".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "llama3-8b".to_string(),
             max_tokens: 512,
@@ -1890,6 +1908,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "llama3-8b".to_string(),
             max_tokens: 100,
@@ -1916,6 +1935,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "llama3-8b".to_string(),
             max_tokens: 100,
@@ -2436,6 +2456,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "no-temp-model".to_string(),
             max_tokens: 50,
@@ -2458,6 +2479,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "hi".into(),
                 cache_breakpoint: false,
+                reasoning: None,
             }],
             model: "llama3-8b".to_string(),
             max_tokens: 50,
@@ -2589,6 +2611,7 @@ mod tests {
                 },
             ]),
             cache_breakpoint: false,
+            reasoning: None,
         }];
         request.tools = vec![crate::provider::Tool {
             name: "read_files".to_string(),
@@ -2957,6 +2980,7 @@ mod tests {
                         },
                     ]),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 crate::provider::Message {
                     role: "assistant".to_string(),
@@ -2969,6 +2993,7 @@ mod tests {
                         },
                     ]),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
                 crate::provider::Message {
                     role: "user".to_string(),
@@ -2980,6 +3005,7 @@ mod tests {
                         },
                     ]),
                     cache_breakpoint: false,
+                    reasoning: None,
                 },
             ],
             model: "qwen3.8-32k".to_string(),
