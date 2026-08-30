@@ -77,6 +77,7 @@ the detail view).
 | `Enter` | Open detail view |
 | `←` / `→` | Fold / unfold the selected run's sub-agents. On a run that has none, `←` moves up to its parent and `→` down to its first worker |
 | `n` | Start a run: pick an agent, write the task, press Enter |
+| `a` | Your agents: the catalog and the editor |
 | `Tab` / `Shift-Tab` | Focus the log panel (keys below) |
 | `/` | Filter runs by name or status |
 | `s` | Cycle the sort: start time (default), recent activity, or status groups |
@@ -149,7 +150,7 @@ rather than back into the form.
 | `Tab` / `Enter` | Move from the agent list to the task |
 | `Ctrl+Enter` (in the task) | Start the run. Only a terminal with the kitty keyboard protocol (kitty, WezTerm, Ghostty, foot, recent Alacritty) can tell Ctrl+Enter from Enter; elsewhere it inserts a newline, and the Start button is the way to submit |
 | `Enter` / `Alt+Enter` | Newline |
-| `Tab` (in the task) | Move to the Start button under the editor. `Enter` or `Space` there starts the run, as does a click on it; `Tab` again returns to the agent list, `Shift+Tab` to the task |
+| `Tab` (in the task) | Move to the Start button under the editor. `Enter` or `Space` there starts the run, as does a click on it; `Tab` or `Esc` returns to the agent list, `Shift+Tab` to the task |
 | `@` | Reference a file from the working directory: `↑` / `↓` choose a path, `Enter` or `Tab` inserts it, `Backspace` over the `@` ends the reference, `Esc` dismisses the list and keeps what you typed |
 | `Ctrl-Y` | Run unattended, so the agent approves its own tool calls |
 | `F1` | Help. `?` types a question mark here |
@@ -187,7 +188,6 @@ for a run whose blueprint could not be read, the flat tab strip stays.
 | `Home` / `End` (or `b` / `e`) | Jump to the beginning / end |
 | `l` / `o` / `c` | Switch the pane to Logs / Output / Context |
 | `f` | Switch the pane to Final: the answer the run submitted, the same bytes `lev result` and the HTTP API return. The `[f] final` chip and the key are there only while the run has one; Output shows what the stage wrote along the way, which can differ |
-
 | `g` | Open the stage graph explorer |
 | `t` | Swap the band between the run's path and the whole blueprint |
 | `R` | Re-snake the path, undoing boxes you moved by hand |

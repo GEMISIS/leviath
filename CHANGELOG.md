@@ -133,6 +133,23 @@ same list.
   or a dash cut at a socket boundary took the whole chunk around it with no
   error. The incomplete bytes are now carried into the next chunk, and bytes
   that could never be UTF-8 are marked with U+FFFD rather than dropped.
+- The dashboard's help said things its keys no longer do. The bottom bar
+  gave an in-place edit "[Enter] confirm" while Enter broke the line, the
+  Questions section of `?` offered `Space` to tick a "don't ask again" box
+  that #708 removed, and the detail view's help left out `t` (the band's
+  two pictures) and `R` (snake the path again). The docs page's Detail view
+  table was split in two by a blank line, its main-list table had no row
+  for `a`, and the Start button's `Esc` was undocumented.
+- A toast for work still in flight ("Starting…", "Logging in…", "Testing…")
+  wore the same green check as one for work that had finished, and starting
+  a run unattended was a green check while arming the toggle was a warning.
+  In-flight toasts now have their own glyph, and an unattended start is the
+  warning restated.
+- Three dashboard widths were fixed numbers with the frame in hand: a toast
+  was always 40 columns (off the right edge under 41), a stage tab's name was
+  cut at 10 or 12 columns however wide the strip was, and the kill and delete
+  dialogs cut the run id and title at 20 to 24 characters before the widget
+  had a chance to wrap them. Each is now sized from the area it draws into.
 - The dashboard's run detail strip could show a cache figure over 100%, such
   as `cache 152%`, on a run that was mostly served from the provider's cache.
   The prompt count every provider is normalised to is the fresh input only,

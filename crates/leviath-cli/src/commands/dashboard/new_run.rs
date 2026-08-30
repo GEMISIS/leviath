@@ -176,11 +176,13 @@ impl Dashboard {
             workdir: self.new_run_ctx.workdir.display().to_string(),
             yolo: self.new_run_yolo,
         });
-        let how = match self.new_run_yolo {
-            true => " unattended",
-            false => "",
+        // An unattended start is the warning the toggle gave, restated at the
+        // moment it takes effect; an attended one is work in flight, not done.
+        let (how, level) = match self.new_run_yolo {
+            true => (" unattended", ToastLevel::Warning),
+            false => ("", ToastLevel::Progress),
         };
-        self.toast(format!("Starting '{}'{how}…", agent.name), ToastLevel::Info);
+        self.toast(format!("Starting '{}'{how}…", agent.name), level);
         self.add_log(format!("run requested: {}", agent.name));
         // Recorded on the launch rather than on the selection: moving the
         // cursor down the list to read a blueprint's preview is not a choice
@@ -397,8 +399,8 @@ impl Dashboard {
     /// Ctrl+Enter reaches the program only under the kitty keyboard protocol;
     /// a terminal without it sends Ctrl+Enter as a plain Enter, which is a
     /// newline here. That is what the Start button under the editor is for.
-    /// The response pane's editor keeps Enter as send: a reply is one line
-    /// far more often than a task is.
+    /// The response box in the detail view works the same way since #708,
+    /// with a Send button in place of Start.
     fn handle_new_run_task_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
         match key.code {
@@ -1642,5 +1644,32 @@ mod tests {
             .expect("a run was sent");
         assert!(cmd.yolo, "the run carries what the screen was set to");
         assert_eq!(cmd.task, "do the thing");
+        // The toast restates the warning the toggle gave, not a green check.
+        let start = dash
+            .toasts
+            .iter()
+            .find(|t| t.message.starts_with("Starting"))
+            .expect("a start toast");
+        assert!(start.message.contains("unattended"), "{}", start.message);
+        assert_eq!(start.level, ToastLevel::Warning);
+    }
+
+    /// An attended start is work in flight: its toast says so rather than
+    /// wearing the check of a run that has started.
+    #[test]
+    fn an_attended_start_toasts_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(&dir.path().join("agents/alpha"), "alpha", "first");
+        let mut dash = dash_at(dir.path());
+        dash.open_new_run_screen();
+        dash.new_run_task.area_mut().insert_str("do the thing");
+        dash.submit_new_run();
+        let start = dash
+            .toasts
+            .iter()
+            .find(|t| t.message.starts_with("Starting"))
+            .expect("a start toast");
+        assert!(!start.message.contains("unattended"), "{}", start.message);
+        assert_eq!(start.level, ToastLevel::Progress);
     }
 }

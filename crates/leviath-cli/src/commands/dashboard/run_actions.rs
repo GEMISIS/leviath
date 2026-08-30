@@ -1,7 +1,6 @@
 //! Killing and deleting runs from the dashboard: the confirmations, and
 //! what runs when they are answered.
 
-use super::helpers::truncate;
 use super::state::Dashboard;
 use super::types::*;
 use crate::runstate;
@@ -41,15 +40,16 @@ impl Dashboard {
             return;
         }
         let run_id = agent.id.clone();
+        // The whole name and id: the dialog wraps its body to its popup, so
+        // nothing here needs to guess how wide the terminal is.
         let name = agent
             .title
             .clone()
-            .unwrap_or_else(|| truncate(&agent.blueprint_name, 24));
+            .unwrap_or_else(|| agent.blueprint_name.clone());
         let dialog = Confirm::new(
             "Kill run?",
             vec![Line::from(format!(
-                "Cancel '{name}' ({})? Its state stays on disk.",
-                truncate(&run_id, 20)
+                "Cancel '{name}' ({run_id})? Its state stays on disk."
             ))],
             "Kill",
             "Cancel",
@@ -94,10 +94,7 @@ impl Dashboard {
             return;
         };
         let run_id = agent.id.clone();
-        let body = format!(
-            "Delete '{}' and all of its on-disk state? This is permanent.",
-            truncate(&run_id, 24)
-        );
+        let body = format!("Delete '{run_id}' and all of its on-disk state? This is permanent.");
         let lines = self.delete_lines(body, std::slice::from_ref(&run_id));
         let dialog = Confirm::new("Delete run?", lines, "Delete", "Cancel").danger();
         self.pending_confirm = Some((

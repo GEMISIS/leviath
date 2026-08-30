@@ -438,22 +438,25 @@ impl Dashboard {
                 ]),
                 // The response box since #708: Enter breaks the line and
                 // Ctrl+Enter sends, with the Send button for a terminal
-                // that cannot tell the two apart.
-                Some(InteractionKind::FreeText) | None => Line::from(vec![
-                    Span::styled(
-                        "[^Enter]",
-                        Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(" send  "),
-                    Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" newline  "),
-                    Span::styled("[Tab]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" Send button  "),
-                    Span::styled("[PgUp/PgDn]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" scroll document  "),
-                    Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" cancel"),
-                ]),
+                // that cannot tell the two apart. An in-place edit is the
+                // same box with a Save button, so it takes the same bar.
+                Some(InteractionKind::FreeText) | Some(InteractionKind::EditText) | None => {
+                    Line::from(vec![
+                        Span::styled(
+                            "[^Enter]",
+                            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" send  "),
+                        Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(" newline  "),
+                        Span::styled("[Tab]", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(" Send button  "),
+                        Span::styled("[PgUp/PgDn]", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(" scroll document  "),
+                        Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(" cancel"),
+                    ])
+                }
                 _ => Line::from(vec![
                     Span::styled(
                         "[↑↓]",
@@ -1845,5 +1848,44 @@ mod tests {
             "{wide}"
         );
         assert!(wide.contains("breaker opened"), "{wide}");
+    }
+
+    /// An in-place edit is the response box with a Save button, and takes
+    /// the same keys; the bar used to give it the choice list's "[Enter]
+    /// confirm" while Enter broke the line.
+    #[test]
+    fn draw_help_bar_input_mode_edit_text() {
+        let backend = TestBackend::new(120, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-edit", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(interaction::InteractionRequest {
+            id: "req-e".to_string(),
+            kind: interaction::InteractionKind::EditText,
+            prompt: "Edit this".to_string(),
+            options: vec![],
+            tool_name: None,
+            tool_arguments: None,
+            required: true,
+            stage_name: "main".to_string(),
+            body: Some("draft".to_string()),
+            body_format: interaction::BodyFormat::Plain,
+        });
+        agent.waiting_prompt = Some("Edit this".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 1);
+                dash.draw_help_bar(f, area);
+            })
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("[^Enter] send"), "{buf}");
+        assert!(buf.contains("[Enter] newline"), "{buf}");
+        assert!(buf.contains("[Tab] Send button"), "{buf}");
+        assert!(!buf.contains("[Enter] confirm"), "{buf}");
     }
 }

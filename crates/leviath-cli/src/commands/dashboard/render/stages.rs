@@ -12,6 +12,25 @@ use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::*;
 use crate::runstate::StageRunStatus;
 
+/// The most a stage name may take on the flat strip, and the least it gets.
+const STAGE_LABEL_MAX_W: usize = 32;
+const STAGE_LABEL_MIN_W: usize = 10;
+/// What a tab costs besides its name: the status glyph and its space, the
+/// live marker, a duration such as ` 12m 34s`, the `Tabs` padding and the
+/// divider to the next tab.
+const STAGE_TAB_OVERHEAD: usize = 16;
+
+/// How many columns each stage name may take on a strip whose inside is
+/// `inner_width` wide and holds `tabs` tabs. Wide strips show a long name
+/// whole; a crowded one falls back to the old fixed width, which the strip
+/// clips the same way it always did.
+fn stage_label_width(inner_width: u16, tabs: usize) -> usize {
+    let per_tab = usize::from(inner_width) / tabs.max(1);
+    per_tab
+        .saturating_sub(STAGE_TAB_OVERHEAD)
+        .clamp(STAGE_LABEL_MIN_W, STAGE_LABEL_MAX_W)
+}
+
 impl Dashboard {
     pub(in crate::commands::dashboard) fn render_stage_tabs(
         &mut self,
@@ -33,6 +52,12 @@ impl Dashboard {
     }
 
     fn draw_linear_tabs(&mut self, frame: &mut Frame, tabs_area: Rect, agent: &DashboardAgent) {
+        let tab_count = if agent.stages.is_empty() {
+            agent.num_stages.max(1)
+        } else {
+            agent.stages.len()
+        };
+        let label_w = stage_label_width(tabs_area.width.saturating_sub(2), tab_count);
         // Build tab titles with status glyphs
         let tab_titles: Vec<Line> = if agent.stages.is_empty() {
             // Fallback: synthesize stage names from RunMeta info
@@ -66,7 +91,7 @@ impl Dashboard {
                         Span::styled(format!("{} ", GLYPH_PENDING), Style::default().fg(C_DIM))
                     };
                     let stage_label = if i == agent.stage_index {
-                        truncate(&agent.stage, 12)
+                        truncate(&agent.stage, label_w)
                     } else {
                         format!("stage {}", i + 1)
                     };
@@ -99,7 +124,7 @@ impl Dashboard {
                 .stages
                 .iter()
                 .enumerate()
-                .map(|(i, s)| self.build_stage_tab_title(i, s, agent))
+                .map(|(i, s)| self.build_stage_tab_title(i, s, agent, label_w))
                 .collect()
         };
 
@@ -164,6 +189,7 @@ impl Dashboard {
         i: usize,
         s: &crate::runstate::StageRecord,
         agent: &DashboardAgent,
+        label_w: usize,
     ) -> Line<'static> {
         use leviath_core::duration::precise;
 
@@ -204,7 +230,7 @@ impl Dashboard {
                     return Line::from(vec![
                         Span::styled(format!("{} ", spin), Style::default().fg(C_ACTIVE)),
                         Span::styled(
-                            truncate(&s.name, 10),
+                            truncate(&s.name, label_w),
                             Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled("*", Style::default().fg(C_WARN)),
@@ -236,7 +262,7 @@ impl Dashboard {
         };
         Line::from(vec![
             Span::styled(format!("{} ", glyph), glyph_style),
-            Span::styled(truncate(&s.name, 10), label_style),
+            Span::styled(truncate(&s.name, label_w), label_style),
             Span::styled(dur_str, Style::default().fg(C_DIM)),
         ])
     }
@@ -482,7 +508,7 @@ mod tests {
         let mut record = make_stage_record("plan", StageRunStatus::Complete);
         record.started_at = Some(0);
         record.ended_at = Some(125); // 2m5s
-        let line = dash.build_stage_tab_title(0, &record, &agent);
+        let line = dash.build_stage_tab_title(0, &record, &agent, 10);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("2m5s"));
     }
@@ -503,7 +529,7 @@ mod tests {
             banked_secs: 40,
             since: None,
         });
-        let line = dash.build_stage_tab_title(0, &record, &agent);
+        let line = dash.build_stage_tab_title(0, &record, &agent, 10);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("40s"), "{text}");
     }
@@ -513,7 +539,7 @@ mod tests {
         let dash = make_test_dashboard();
         let agent = make_test_agent("run-t", AgentDisplayStatus::Active);
         let record = make_stage_record("plan", StageRunStatus::Complete);
-        let line = dash.build_stage_tab_title(0, &record, &agent);
+        let line = dash.build_stage_tab_title(0, &record, &agent, 10);
         assert!(!line.spans.is_empty());
     }
 
@@ -522,7 +548,7 @@ mod tests {
         let dash = make_test_dashboard();
         let agent = make_test_agent("run-t2", AgentDisplayStatus::Active);
         let record = make_stage_record("implement", StageRunStatus::Active);
-        let line = dash.build_stage_tab_title(0, &record, &agent);
+        let line = dash.build_stage_tab_title(0, &record, &agent, 10);
         assert!(!line.spans.is_empty());
     }
 
@@ -531,7 +557,7 @@ mod tests {
         let dash = make_test_dashboard();
         let agent = make_test_agent("run-t3", AgentDisplayStatus::Complete);
         let record = make_stage_record("implement", StageRunStatus::Active);
-        let line = dash.build_stage_tab_title(0, &record, &agent);
+        let line = dash.build_stage_tab_title(0, &record, &agent, 10);
         assert!(!line.spans.is_empty());
     }
 
@@ -552,7 +578,7 @@ mod tests {
         // on_stage_result was never called for an Interactive/InteractivePoints
         // stage.
         let stale_plan = make_stage_record("plan", StageRunStatus::Active);
-        let line = dash.build_stage_tab_title(0, &stale_plan, &agent);
+        let line = dash.build_stage_tab_title(0, &stale_plan, &agent, 10);
 
         let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(rendered.contains(GLYPH_COMPLETE));
@@ -563,8 +589,59 @@ mod tests {
 
         // The actually-live tab (index == agent.stage_index) should still spin.
         let live_implement = make_stage_record("implement", StageRunStatus::Active);
-        let live_line = dash.build_stage_tab_title(1, &live_implement, &agent);
+        let live_line = dash.build_stage_tab_title(1, &live_implement, &agent, 10);
         let live_rendered: String = live_line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(SPINNER.iter().any(|spin| live_rendered.contains(spin)));
+    }
+
+    /// A wide strip shows a long stage name whole; a crowded one falls back
+    /// to the old fixed width rather than to nothing.
+    #[test]
+    fn a_stage_name_gets_the_room_the_strip_has() {
+        // 118 inside columns across three tabs: 39 each, 23 for the name.
+        assert_eq!(stage_label_width(118, 3), 23);
+        // Never below the width the strip always used, never above the cap.
+        assert_eq!(stage_label_width(30, 6), STAGE_LABEL_MIN_W);
+        assert_eq!(stage_label_width(0, 0), STAGE_LABEL_MIN_W);
+        assert_eq!(stage_label_width(400, 1), STAGE_LABEL_MAX_W);
+    }
+
+    #[test]
+    fn a_long_stage_name_is_whole_on_a_wide_strip_and_cut_on_a_narrow_one() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-long", AgentDisplayStatus::Active);
+        let long = "gather-the-evidence-carefully";
+        agent.stages = vec![
+            make_stage_record("plan", StageRunStatus::Complete),
+            make_stage_record(long, StageRunStatus::Active),
+        ];
+        agent.num_stages = 2;
+        agent.stage_index = 1;
+        agent.stage = long.to_string();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
+        terminal
+            .draw(|f| dash.draw_linear_tabs(f, Rect::new(0, 0, 120, 3), &agent))
+            .unwrap();
+        let wide = rendered_buffer(&terminal);
+        assert!(wide.contains(long), "the name fits at 120 columns: {wide}");
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        terminal
+            .draw(|f| dash.draw_linear_tabs(f, Rect::new(0, 0, 40, 3), &agent))
+            .unwrap();
+        let narrow = rendered_buffer(&terminal);
+        assert!(!narrow.contains(long), "{narrow}");
+        assert!(narrow.contains("gather-th"), "cut, not dropped: {narrow}");
+
+        // The fallback strip, for a run with no stage records, takes the
+        // same width for the live stage's name.
+        agent.stages.clear();
+        let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
+        terminal
+            .draw(|f| dash.draw_linear_tabs(f, Rect::new(0, 0, 120, 3), &agent))
+            .unwrap();
+        let fallback = rendered_buffer(&terminal);
+        assert!(fallback.contains(long), "{fallback}");
     }
 }
