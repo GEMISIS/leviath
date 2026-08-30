@@ -303,6 +303,8 @@ pub struct PipelineWorld {
 /// Agent status control: read a status, set one, and pause/resume/cancel.
 /// Split out to keep this file inside the workspace structure limit.
 mod control;
+/// Swapping the provider registry for one built from a newer config.
+mod providers;
 
 impl PipelineWorld {
     /// Build a world: wire the pool/bridge resources, register the providers and

@@ -725,7 +725,7 @@ pub struct ToolCallDelta {
 }
 
 /// Rate limit configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RateLimitConfig {
     /// Maximum requests per minute
     pub requests_per_minute: u32,

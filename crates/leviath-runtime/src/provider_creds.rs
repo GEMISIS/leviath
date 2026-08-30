@@ -14,7 +14,9 @@ use std::sync::Arc;
 /// depending on the CLI's `Config`/`ProviderConfig` types. Build one per
 /// provider that should be registered.
 /// `Debug` is hand-written (below) so `api_key` cannot be printed.
-#[derive(Clone)]
+/// `PartialEq` is what lets the daemon tell whether a config edit changed a
+/// provider at all, key included, without printing one.
+#[derive(Clone, PartialEq)]
 pub struct ProviderCreds {
     /// Provider identifier: `anthropic` | `openai` | `google` | `openrouter` |
     /// `ollama` | `claude-code`. Selects which provider is instantiated.

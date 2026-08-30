@@ -194,6 +194,14 @@ impl ProviderCircuits {
         self.0.clear();
     }
 
+    /// Drop everything recorded against one provider. For a provider whose
+    /// credentials just changed: the failures that opened its circuit were
+    /// the old key's, and holding the new key out of service for the rest
+    /// of the cooldown would make a fixed key look still broken.
+    pub fn forget(&mut self, provider: &str) {
+        self.0.remove(provider);
+    }
+
     /// Whether `provider` should be skipped right now.
     ///
     /// False once the cooldown has elapsed, which is what makes the next

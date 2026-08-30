@@ -651,7 +651,8 @@ pub fn resolve_stages(
             if !registry.has(&head.provider) {
                 return Err(format!(
                     "stage '{}' has no usable provider (tried: {}). Configure one \
-                     with `lev setup`, or add it to config.toml and restart the daemon.",
+                     with `lev setup`, or add it to config.toml; the next run \
+                     picks it up, with no daemon restart.",
                     stage.name,
                     providers_tried(&stage.model, model_override, defaults)
                 ));

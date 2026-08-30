@@ -15,6 +15,14 @@ use std::sync::Arc;
 #[derive(Clone, Default)]
 pub struct ProviderRegistry {
     providers: HashMap<String, Arc<dyn Provider>>,
+    /// Providers a previous registry had that this one was built without: a
+    /// key the user removed with `lev setup`, an endpoint entry deleted from
+    /// `config.toml`. A run already mid-stage on one keeps calling it through
+    /// [`get`](Self::get), so its stage finishes on the provider it started
+    /// on; nothing new resolves to it, because [`has`](Self::has),
+    /// [`native_providers`](Self::native_providers) and
+    /// [`resolvable_names`](Self::resolvable_names) leave it out.
+    retired: HashMap<String, Arc<dyn Provider>>,
     /// Lazy, hot-reloading resolver for `.rhai` script providers. Shared across
     /// registry clones (one compile cache daemon-wide).
     script_layer: Option<Arc<ScriptProviderLayer>>,
@@ -45,7 +53,40 @@ impl ProviderRegistry {
         if let Some(p) = self.providers.get(name) {
             return Some(p.clone());
         }
+        if let Some(p) = self.retired.get(name) {
+            return Some(p.clone());
+        }
         self.script_layer.as_ref()?.get_or_load(name)
+    }
+
+    /// The script layer this registry loads `.rhai` providers through, if any.
+    /// A rebuilt registry takes the old one's layer rather than compiling a
+    /// new one, so the scripts it already loaded stay loaded.
+    pub fn script_layer(&self) -> Option<Arc<ScriptProviderLayer>> {
+        self.script_layer.clone()
+    }
+
+    /// Carry forward, as retired, every native provider `previous` had that
+    /// this registry does not. Runs that are mid-stage on one of them finish
+    /// that stage on it; no new resolution reaches it. A provider this
+    /// registry registers again under the same name is live, not retired,
+    /// whatever `previous` held.
+    pub fn retiring_from(mut self, previous: &ProviderRegistry) -> Self {
+        for (name, provider) in previous.providers.iter().chain(previous.retired.iter()) {
+            if !self.providers.contains_key(name) {
+                self.retired
+                    .entry(name.clone())
+                    .or_insert_with(|| provider.clone());
+            }
+        }
+        self
+    }
+
+    /// The names of the retired providers, sorted; for logs and tests.
+    pub fn retired_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.retired.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Let every registered provider learn what its own API says about its
