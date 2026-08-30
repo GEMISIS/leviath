@@ -180,7 +180,7 @@ impl AgentWorldBuilder {
     ///
     /// Call it once per target, best first. This is what keeps a blueprint
     /// that names exactly one model running when that provider runs out of
-    /// credits (issue #201).
+    /// credits.
     pub fn fallback_model(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
         self.defaults
             .fallback_order
@@ -407,9 +407,9 @@ impl AgentWorld {
     /// the world does not know the run).
     ///
     /// The counterpart to [`status`](Self::status): that says whether a run is
-    /// done, this says what it concluded. An embedder that only watched
-    /// [`EventStream`] for a `Completed` event used to have no way to read a
-    /// result except by scraping the log stream.
+    /// done, this says what it concluded. An embedder watching [`EventStream`]
+    /// for a `Completed` event has no other way to read a result short of
+    /// scraping the log stream.
     pub async fn result(&self, id: &RunId) -> Option<leviath_core::output::FinalOutput> {
         self.ask(|reply| ControlOp::Result {
             run_id: id.0.clone(),
@@ -1054,7 +1054,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
     }
 
     /// The failover chain is ordered and additive, and setting a default model
-    /// afterwards must not wipe it (issue #201).
+    /// afterwards must not wipe it.
     #[test]
     fn fallback_models_accumulate_in_order_beside_the_default() {
         let builder = AgentWorldBuilder::new()

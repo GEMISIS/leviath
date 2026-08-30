@@ -280,12 +280,11 @@ pub(crate) fn stage_status_from(status: &AgentStatus) -> StageRunStatus {
 
 /// The stringified region kind used in snapshots and by the blueprint API.
 ///
-/// One word per kind, and it is the word the blueprint's own TOML uses. It used
-/// to be a third spelling of its own - `sliding` for a `sliding_window`,
-/// `history` for a `compact_history` - which meant a console reading a context
-/// snapshot and a console reading a blueprint disagreed about what the same
-/// region was. Snapshots written by an older build still carry the old two
-/// words, so a reader that renders kinds should accept both.
+/// One word per kind, and it is the word the blueprint's own TOML uses, so a
+/// console reading a context snapshot and a console reading a blueprint agree
+/// about what the same region is. Snapshots written by an older build carry a
+/// third spelling for two of them - `sliding` for a `sliding_window`, `history`
+/// for a `compact_history` - so a reader that renders kinds should accept both.
 pub fn region_kind_str(kind: &RegionKind) -> &'static str {
     match kind {
         RegionKind::Pinned => "pinned",
@@ -569,7 +568,7 @@ mod tests {
         // A blueprint with no stages at all offers nothing.
         assert!(no_output_tools(vec![]));
         // Read-only, and the sub-agent tools a router would use: nothing the
-        // framework tracks as a file change. This is the issue #192 case.
+        // framework tracks as a file change.
         assert!(no_output_tools(vec![stage_with(
             &["read_file", "spawn_agent", "context_write"],
             None
@@ -965,7 +964,7 @@ mod tests {
         assert!(!running.flags.empty_output);
         assert_eq!(running.flags.gates_forced, 2);
 
-        // Finished with nothing written: that is the #107 signature.
+        // Finished with nothing written: the empty-output signature.
         for status in [
             AgentStatus::Complete,
             AgentStatus::Cancelled,
@@ -1019,7 +1018,7 @@ mod tests {
         assert_eq!(meta.flags.modified_files, vec!["src/a.rs".to_string()]);
 
         // Finished having written nothing, with nothing to write *with*: the
-        // framework has no basis to call this empty, so it doesn't (issue #192).
+        // framework has no basis to call this empty, so it doesn't.
         let mut incapable = RunOutcomeFlags::default();
         incapable.0.no_output_tools = true;
         let meta = build_run_meta(

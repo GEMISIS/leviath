@@ -288,7 +288,7 @@ fn completion_empty_output(flags: Option<crate::persistence::RunOutcomeFlags>) -
 }
 
 /// Whether a finished run produced anything rides along with the completion,
-/// so a collector can chart the rate rather than only find it on disk (#192).
+/// so a collector can chart the rate rather than only find it on disk.
 #[test]
 fn a_completion_reports_whether_the_run_produced_anything() {
     // No flags component at all: nothing to report, so no verdict is invented.

@@ -72,14 +72,13 @@ pub struct PendingTitle;
 /// `collect_title` re-arms [`PendingTitle`] so the next one is tried. Empty
 /// means every candidate has been spent.
 ///
-/// This exists because the title call used to have exactly one shot at exactly
-/// one provider - the head of the run's own chain - while the stage lane behind
-/// it retried and then failed over across the blueprint's whole model list. So
-/// an account that was over its limit on one gateway produced runs whose stages
-/// all completed (they failed over) and whose names never appeared (the title
-/// call took the 403 and gave up). The chain is the same one stage inference
-/// walks, for the same reason: the run has a name to generate and several ways
-/// to generate it.
+/// A chain rather than one shot at the head of the run's own chain. The stage
+/// lane retries and then fails over across the blueprint's whole model list, so
+/// an account over its limit on one gateway would otherwise produce runs whose
+/// stages all completed and whose names never appeared, the title call having
+/// taken the 403 and given up. The chain here is the one stage inference walks,
+/// for the same reason: the run has a name to generate and several ways to
+/// generate it.
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct TitleCandidates(pub Vec<(String, String)>);
 
@@ -98,10 +97,10 @@ pub(crate) struct AwaitingTitle(pub i64);
 ///
 /// A terminal run is unloaded from memory a pass after it finishes, and a title
 /// landing on an unloaded run is dropped - reason and all. A run that ends
-/// quickly therefore used to race its own title and usually win: a probe making
-/// two provider calls lost even a single 50ms retry. So the host holds a
-/// finished run resident while the title lane still has a live claim on it, and
-/// this is how long that claim lasts.
+/// quickly therefore races its own title and wins: a probe making two provider
+/// calls beats even a single 50ms retry. So the host holds a finished run
+/// resident while the title lane still has a live claim on it, and this is how
+/// long that claim lasts.
 ///
 /// Measured from the run's *start* rather than from the moment it finished, so
 /// the bound cannot be stretched by a run that ends early: whatever happens, a
@@ -335,16 +334,13 @@ fn sanitize_title(raw: &str) -> String {
     // the display cap, and reasoning does not.
     //
     // A reply with no line that fits has no title in it, so this returns
-    // nothing and the run keeps showing its task text. It used to fall back to
-    // the first line *truncated*, which is how a run came to be titled "We
-    // need to generate a short title for the user's request. The user wants to
-    // buil" - one unbroken paragraph of reasoning, cut at exactly the display
-    // cap. Truncating prose does not make it a title; it only hides that this
-    // failed.
+    // nothing and the run keeps showing its task text. Falling back to the
+    // first line *truncated* is not an option: truncating prose does not make
+    // it a title, it only hides that this failed.
     let stripped = strip_reasoning(raw);
     // Compared in bytes, which is what the cap is in. Counting chars here and
-    // cutting bytes afterwards meant a title of 80 CJK characters passed the
-    // check and was then sliced mid-title.
+    // cutting bytes afterwards lets a title of 80 CJK characters pass the check
+    // and then be sliced mid-title.
     stripped
         .lines()
         .map(strip_control_tokens)
@@ -475,11 +471,10 @@ fn strip_reasoning(raw: &str) -> String {
 
 /// Record why this run has no name, on the run itself.
 ///
-/// The reason used to go to `tracing::debug!` alone, in a daemon whose
-/// stdout is `/dev/null` - so "titling failed" and "titling never ran" looked
-/// identical from outside, which is how a broken title call survived a whole
-/// day of runs unnoticed. It is a `warn!` *and* a field on the run now: the log
-/// is for whoever is watching, the field is for everyone who was not.
+/// A `warn!` *and* a field on the run. The daemon's stdout is `/dev/null`, so a
+/// reason that reaches only the log leaves "titling failed" and "titling never
+/// ran" identical from outside: the log is for whoever is watching, the field is
+/// for everyone who was not.
 fn record_title_failure(meta: &mut RunMetadata, reason: String) {
     tracing::warn!(
         run_id = %meta.run_id,
@@ -1965,9 +1960,9 @@ mod tests {
         let req = title_request(&long_task, "openai", "gpt-5-mini");
         assert_eq!(req.model, "gpt-5-mini");
         assert_eq!(req.max_tokens, TITLE_MAX_TOKENS);
-        // One message, the task. This used to assert two, pinning the shape
-        // that Anthropic rejects - the test agreed with the code and both were
-        // wrong, which is how titling shipped broken for the default provider.
+        // One message, the task. The instruction rides in a system block, not
+        // a second message, because Anthropic rejects any role but user and
+        // assistant in `messages`.
         assert_eq!(req.messages.len(), 1);
         let expected: leviath_providers::MessageContent =
             leviath_core::truncate_at_boundary(&long_task, TITLE_TASK_BUDGET)
@@ -2014,10 +2009,9 @@ mod tests {
     ///
     /// Anthropic's Messages API accepts only `user` and `assistant` roles in
     /// `messages` and rejects anything else with a 400, and it is the default
-    /// provider for every blueprint Leviath ships. So the old shape meant no
-    /// run ever got a title, and nothing said so: a failed title is
-    /// deliberately not worth interrupting a run for, and the reason reached
-    /// only a debug log in a daemon whose output goes to /dev/null.
+    /// provider for every blueprint Leviath ships. Getting this wrong costs
+    /// every run its name quietly: a failed title is deliberately not worth
+    /// interrupting a run for.
     #[test]
     fn the_title_request_carries_its_instruction_as_a_system_block() {
         let request = title_request("tidy the kitchen", "anthropic", "claude-sonnet-4-6");
@@ -2065,11 +2059,10 @@ mod tests {
         assert_eq!(sanitize_title(&brim), brim);
     }
 
-    /// The bug this module was rewritten for. A reasoning model that never
-    /// reaches its answer returns one unbroken paragraph of working-out, so
-    /// there is no short line to prefer - and the old code fell back to the
-    /// first line *truncated*, which is how a run came to be titled with the
-    /// model's own thinking, cut at exactly the display cap.
+    /// A reasoning model that never reaches its answer returns one unbroken
+    /// paragraph of working-out, so there is no short line to prefer. Falling
+    /// back to the first line *truncated* would title the run with the model's
+    /// own thinking, cut at exactly the display cap.
     ///
     /// Truncating prose does not make it a title. Nothing is stored, and the
     /// run keeps showing the task the user typed.
@@ -2081,9 +2074,8 @@ mod tests {
         assert!(leaked.len() > TITLE_MAX_LEN);
         assert_eq!(sanitize_title(leaked), "");
 
-        // What the old fallback made of it, and what a dashboard displayed:
-        // the same prose cut at exactly the cap, which is why the stored title
-        // was 80 bytes to the byte. Nothing here is allowed to produce it.
+        // What a truncating fallback makes of it: the same prose cut at
+        // exactly the cap. Nothing here is allowed to produce it.
         let truncated = leviath_core::truncate_at_boundary(leaked, TITLE_MAX_LEN);
         assert_eq!(
             truncated,
@@ -2107,13 +2099,13 @@ mod tests {
         assert_eq!(sanitize_title(&short), short);
     }
 
-    /// The three chips from issue #587, verbatim as they were reported from a
-    /// live console, each proving one hole the display cap could not see.
+    /// Three replies verbatim from a live console, each one a hole the display
+    /// cap cannot see.
     ///
     /// All three are short, single-line, and free of reasoning tags, so the
-    /// earlier fix - "reasoning is longer than a title" - had nothing to say
-    /// about any of them. They were stored, and shown to a user as the names
-    /// of their runs.
+    /// "reasoning is longer than a title" rule has nothing to say about any of
+    /// them. Without a separate check they are stored and shown to a user as
+    /// the names of their runs.
     #[test]
     fn sanitize_refuses_the_three_replies_that_were_shown_to_a_user() {
         // A chat-template control token, cut short exactly as it appeared.
@@ -2214,10 +2206,9 @@ mod tests {
         assert_eq!(sanitize_title("<reasoning>no closing tag here"), "");
     }
 
-    /// The title call bills like any other and used to be counted like none:
-    /// its outcome channel carried the reply the collector wanted and dropped
-    /// the usage nobody read, so a run's reported spend was short by one call
-    /// it had definitely made.
+    /// The title call bills like any other, so its usage has to ride the
+    /// outcome channel beside the reply the collector wants. Dropping it leaves
+    /// a run's reported spend short by one call it definitely made.
     #[test]
     fn a_title_call_is_counted_against_the_run_that_paid_for_it() {
         let mut world = World::new();

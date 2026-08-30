@@ -62,9 +62,9 @@ use crate::tool_bridge::ToolLane;
 /// that: `enforce_max_iterations` swaps `ReadyToInfer` for `ResolveTransition` in
 /// the first chained group, and `resolve_transition` enters the next stage and
 /// re-arms `ReadyToInfer` in the second - one tick, a whole stage transition, and
-/// every count identical either side of it. The driver read that as quiescence
-/// and parked on an agent that no dispatch system had yet seen in its new stage,
-/// leaving the 30s re-drive to start the next stage (issue #197).
+/// every count identical either side of it. A driver reading that as quiescence
+/// parks on an agent no dispatch system has yet seen in its new stage, leaving
+/// the 30s re-drive to start the next stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Fingerprint {
     /// How many agents hold each phase marker.
@@ -368,7 +368,7 @@ impl PipelineWorld {
         world.insert_resource(InferenceStage {
             // The wake goes into the pools, not just the bridges: freeing a slot
             // has to re-drive dispatch, or the agents parked on a full pool never
-            // learn that capacity came back (issue #189).
+            // learn that capacity came back.
             pools: Arc::new(InferencePools::new(pool_config).with_wake(wake.clone())),
             outcomes: inf_tx,
             transition_outcomes: trans_tx,
@@ -494,9 +494,9 @@ impl PipelineWorld {
                 // Nested for the 20-system `.chain()` limit, as the pairs
                 // below are. `require_fan_out` is the same shape for a fan_out
                 // stage trying to leave without having started any workers:
-                // starting them is the whole job of the stage, and a merge stage
-                // running on nothing used to be indistinguishable from one
-                // running on a genuinely empty fan-out.
+                // starting them is the whole job of the stage, and a merge
+                // stage running on nothing is otherwise indistinguishable from
+                // one running on a genuinely empty fan-out.
                 (require_final_output, require_fan_out),
                 // Intercept a would-be transition for an interactive-points stage
                 // (e.g. plan_approval) and drive the interaction-point lane.
@@ -830,7 +830,7 @@ impl PipelineWorld {
     /// Providers currently taken out of service by their circuit breaker.
     ///
     /// Empty when the breaker is not installed, so an embedded world that never
-    /// inserted the resource simply reports nothing wrong (issue #201).
+    /// inserted the resource simply reports nothing wrong.
     pub(crate) fn open_circuits(&self) -> Vec<crate::pipeline::ProviderCircuitState> {
         let Some(circuits) = self
             .world
@@ -846,8 +846,8 @@ impl PipelineWorld {
         circuits.open_circuits(chrono::Utc::now().timestamp(), &policy)
     }
 
-    /// This is the answer to "the daemon has been quiet for hours - is anything
-    /// actually running?", which issue #189 had no way to ask.
+    /// The answer to "the daemon has been quiet for hours - is anything
+    /// actually running?", which no per-run view can give.
     pub(crate) fn lane_snapshot(&self) -> LaneSnapshot {
         let mut agents = AgentCounts::default();
         for state in self
@@ -1115,17 +1115,11 @@ fn run_isolated(schedule: &mut Schedule, world: &mut World) -> Result<(), TickPa
 /// system up to and including the offending one marked done, so the **next**
 /// tick silently skips them and only runs the tail of the chain - a partial
 /// tick that would, among other things, keep `dispatch_persistence` from ever
-/// seeing an agent we just failed. Swapping the executor kind and back is the
-/// public API for forcing a rebuild.
-///
-/// One call suffices on bevy_ecs 0.19: `set_executor` takes an executor
+/// seeing an agent we just failed. Replacing the executor outright is the
+/// public API for forcing that rebuild: `set_executor` takes an executor
 /// *instance* and unconditionally replaces `schedule.executor` with it (clearing
 /// `executor_initialized` too), so the fresh `SingleThreadedExecutor` arrives
 /// with an empty `completed_systems`.
-///
-/// On 0.15 this had to set two different *kinds* and swap back, because
-/// `set_executor_kind` was a no-op when the kind was unchanged - and
-/// `SimpleExecutor`, the other kind it used, no longer exists.
 fn reset_executor(schedule: &mut Schedule) {
     schedule.set_executor(bevy_ecs::schedule::SingleThreadedExecutor::new());
 }
@@ -1527,7 +1521,7 @@ mod tests {
         // pool, where the thread-local scope can't reach the driver thread that
         // catches unwinds. Those bodies run under `run_agent_parallel`, which
         // catches on the pool thread and marks the agent instead - this proves
-        // the marker makes it back and fails the right run (issue #109).
+        // the marker makes it back and fails the right run.
         fn boom_in_parallel(
             agents: Query<(Entity, &AgentState)>,
             par_commands: bevy_ecs::system::ParallelCommands,
@@ -1570,11 +1564,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_panicking_system_fails_its_agent_instead_of_looping_forever() {
-        // Before issue #109 was fixed, a panicking system was swallowed
-        // anonymously: nothing changed, so the very next wake re-ticked the same
-        // state and panicked again, forever, while every other agent stalled.
-        // Now the agent in scope is failed, which takes it out of the dispatch
-        // systems (they only act on `Active` agents) and lets the world settle.
+        // A panicking system swallowed anonymously changes nothing, so the
+        // very next wake re-ticks the same state and panics again, forever,
+        // while every other agent stalls. Failing the agent in scope takes it
+        // out of the dispatch systems (they only act on `Active` agents) and
+        // lets the world settle.
         static VICTIM: std::sync::Mutex<Option<Entity>> = std::sync::Mutex::new(None);
         static PANICS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -1636,12 +1630,12 @@ mod tests {
 
     #[tokio::test]
     async fn an_agent_whose_provider_is_missing_wedges_at_iteration_zero() {
-        // Issue #190. The registry has no `script` provider, so
-        // `dispatch_inference` declines and leaves the agent `ReadyToInfer`.
-        // Nothing about the world changed, so the fixed point is reached
-        // immediately and nothing is in flight to wake the driver - the agent
-        // used to sit `Active` at iteration 0 for ever, which on disk reads as
-        // a `running` run with no tokens and a frozen `updated_at`.
+        // The registry has no `script` provider, so `dispatch_inference`
+        // declines and leaves the agent `ReadyToInfer`. Nothing about the world
+        // changed, so the fixed point is reached immediately and nothing is in
+        // flight to wake the driver - unnoticed, the agent sits `Active` at
+        // iteration 0 for ever, which on disk reads as a `running` run with no
+        // tokens and a frozen `updated_at`.
         let mut world = build_world(ProviderRegistry::new());
         let e = spawn(&mut world);
 
@@ -1691,7 +1685,7 @@ mod tests {
         );
     }
 
-    /// Issue #202, end to end through the real schedule: an agent stripped of
+    /// End to end through the real schedule: an agent stripped of
     /// every phase marker is unreachable, and the watchdog registered in the
     /// chain above fails it rather than leaving it `running` for ever.
     ///
@@ -1765,7 +1759,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_nudge_max_bounds_the_loop_end_to_end() {
-        // `[agent.nudge] max = 1` (issue #127): the second text-only response
+        // `[agent.nudge] max = 1`: the second text-only response
         // is final, so a two-response script finishes where the default cap
         // would have demanded four. A third scripted response left unconsumed
         // would keep the driver looping past run_until_idle's budget.
@@ -2100,9 +2094,9 @@ mod tests {
 
     #[tokio::test]
     async fn resume_resets_the_provider_circuits() {
-        // Issue #413: a run paused on exhausted credits comes back through an
-        // explicit resume. If the breaker kept its state, the retry would sit
-        // out the rest of the cooldown and the resume would look ignored.
+        // A run paused on exhausted credits comes back through an explicit
+        // resume. If the breaker kept its state, the retry would sit out the
+        // rest of the cooldown and the resume would look ignored.
         let mut world = build_world(registry_with(vec![text("t1")]));
         let e = spawn(&mut world);
         assert!(world.pause(e));
@@ -2127,7 +2121,7 @@ mod tests {
         assert!(world.open_circuits().is_empty());
     }
 
-    /// #576: a cancelled agent is stopped, not finished, so an explicit resume
+    /// A cancelled agent is stopped, not finished, so an explicit resume
     /// puts it back to work. Nothing else does: it stays stopped until asked.
     #[tokio::test]
     async fn resume_restarts_a_cancelled_agent() {
@@ -2360,8 +2354,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_panicked_agent_is_recorded_as_errored_on_disk() {
-        // The reported symptom in issue #109: a crashed run stayed `"running"`
-        // in meta.json forever. `dispatch_persistence` is the *last* system in
+        // A crashed run must not be left `"running"` in meta.json forever.
+        // `dispatch_persistence` is the *last* system in
         // the chain, so the tick that panics never reaches it - which is exactly
         // why `run_to_fixed_point` keeps driving after failing the agent.
         fn boom_on_active_agent(agents: Query<(Entity, &AgentState)>) {
@@ -2478,7 +2472,7 @@ mod tests {
     async fn persists_interaction_point_when_a_live_agent_blocks() {
         // Drive a real agent through inference → transition → the interaction-point
         // lane until it blocks awaiting approval, and assert the daemon wrote the
-        // `interactions.json` sidecar - the issue #38 persist side, end-to-end
+        // `interactions.json` sidecar - the persist side, end-to-end
         // through the live lane (a tool call first, then a text "plan", so the stage
         // transitions into the interaction point rather than looping on nudges).
         let dir = tempfile::tempdir().unwrap();
@@ -2988,13 +2982,13 @@ mod tests {
         assert_eq!(b.agent_status(in_b), before);
     }
 
-    /// The hazard [`AgentId`] exists for, now closed.
+    /// The hazard [`AgentId`] exists for.
     ///
     /// The raw entities still collide - that is a property of bevy, not
     /// something this can change - but an [`AgentId`] carries the world that
-    /// minted it, so the collision no longer means the two name the same agent.
-    /// Before this, `b.pause(a_entity)` paused B's own agent while the caller
-    /// believed it had paused A's, silently.
+    /// minted it, so a collision does not mean the two name the same agent.
+    /// Without that, `b.pause(a_entity)` pauses B's own agent while the caller
+    /// believes it has paused A's, silently.
     #[tokio::test]
     async fn a_foreign_agent_id_is_refused_rather_than_naming_the_wrong_agent() {
         let mut a = build_world(ProviderRegistry::new());

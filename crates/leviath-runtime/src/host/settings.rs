@@ -3,14 +3,13 @@
 //! Three of the numbers [`WorldHost`] runs on come from `config.toml` and are
 //! not world resources: how many dead cycles buy the tool lane some relief, how
 //! long a finished run stays in the listing, and the spend figures worth an
-//! event. They used to be plain fields, which meant the only way to change one
-//! was to restart the daemon - the host is reachable from its own serve loop
-//! and nowhere else, while a config reload happens on the spawn path, which is
-//! handed the world and not the host.
+//! event. Plain fields on the host cannot carry them: the host is reachable
+//! from its own serve loop and nowhere else, while a config reload happens on
+//! the spawn path, which is handed the world and not the host.
 //!
-//! Putting them behind a shared handle is what closes that gap. The host reads
-//! through it, a clone of it goes to whatever watches `config.toml`, and a
-//! change lands without either side having to reach the other.
+//! The shared handle bridges the two. The host reads through it, a clone goes
+//! to whatever watches `config.toml`, and a change lands without either side
+//! having to reach the other.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

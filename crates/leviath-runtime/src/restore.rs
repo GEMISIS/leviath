@@ -14,7 +14,7 @@
 //! reconstructs its assistant turn in the window first - real journaled results
 //! for calls that completed, a verify-first [`INTERRUPTED_TOOL_RESULT`] for calls
 //! that didn't - so the re-issued inference sees exactly what already ran and
-//! completed side effects never run twice (issue #96).
+//! completed side effects never run twice.
 
 use bevy_ecs::prelude::*;
 use leviath_core::region::RegionEntry;
@@ -205,12 +205,11 @@ pub fn restore_agent(
 /// [`StageLedger`](crate::pipeline::StageLedger) **by stage name**.
 ///
 /// Nothing else rebuilds this. `spawn_agent` seeds one all-zero record per
-/// blueprint stage, so without this a reloaded run came back with no tokens, no
+/// blueprint stage, so without this a reloaded run comes back with no tokens, no
 /// `entered` flags and no timestamps against any stage - and since the persist
-/// tick writes the whole ledger, the next one wrote those zeros over the real
-/// `stages.json`. The run-level totals in `meta.json` survived that, so the run
-/// looked healthy while `lev stages` and the stages API served zeroed records
-/// (issue #415).
+/// tick writes the whole ledger, the next one writes those zeros over the real
+/// `stages.json`. The run-level totals in `meta.json` survive that, so the run
+/// looks healthy while `lev stages` and the stages API serve zeroed records.
 ///
 /// The seeded shape wins: a persisted record whose stage the blueprint no longer
 /// has is dropped, and a stage with no persisted record keeps its zeroed one.
@@ -282,7 +281,7 @@ fn interrupted_result(tool_name: &str, children: &[String]) -> String {
 /// finished, [`INTERRUPTED_TOOL_RESULT`] for calls that didn't. The turn is
 /// always fully paired, so the request assembler's orphan sanitizer keeps it,
 /// and the re-issued inference sees precisely what already ran instead of
-/// blindly re-executing the whole batch (issue #96).
+/// blindly re-executing the whole batch.
 ///
 /// Call after [`restore_agent`], which swaps the restored stage's
 /// `ToolResultRoutingComponent` in - the routing and per-tool sensitivities are
@@ -510,10 +509,10 @@ mod tests {
         assert_eq!(taint.entry_taint(1), Some(TaintLevel::Public));
     }
 
-    /// The per-stage ledger was the one piece of persisted state nothing
-    /// rebuilt, so a reloaded run came back with every stage at zero - and
-    /// because the persist tick rewrites `stages.json` whole, the next one
-    /// wrote those zeros over the run's real history (issue #415).
+    /// The per-stage ledger has to be rebuilt on restore. Without it a
+    /// reloaded run comes back with every stage at zero, and because the
+    /// persist tick rewrites `stages.json` whole, the next one writes those
+    /// zeros over the run's real history.
     /// The raised output cap survives a restart through the ledger: the
     /// per-stage counters are rebuilt from zero, and this is the one that must
     /// not be.
@@ -656,7 +655,7 @@ mod tests {
         assert!(world.get::<ReadyToInfer>(entity).is_some());
     }
 
-    // ── pending-batch replay (#96) ──
+    // ── pending-batch replay ──
 
     fn pending_call(
         id: &str,

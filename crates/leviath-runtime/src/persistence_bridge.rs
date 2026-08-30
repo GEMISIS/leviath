@@ -64,7 +64,7 @@ pub(crate) enum PersistMsg {
     Snapshot(Box<PersistJob>),
     /// Append one journal record to `<runs_dir>/<run_id>/run.lvr` - how a tool
     /// batch's dispatch and per-call completions reach the archive between
-    /// snapshots (issue #96).
+    /// snapshots.
     Append {
         /// The run id (its directory name under the runs dir).
         run_id: String,
@@ -79,8 +79,8 @@ pub(crate) enum PersistMsg {
     },
     /// Buffered per-stage output/log lines with nothing else to report. The
     /// dispatch system sends this instead of a full [`PersistMsg::Snapshot`]
-    /// when lines were buffered but the run's watermark did not move - tool
-    /// activity between iterations used to force a whole-window snapshot
+    /// when lines were buffered but the run's watermark did not move, so tool
+    /// activity between iterations does not force a whole-window snapshot
     /// (context deep-clone, meta/context rewrite, archive record) per batch of
     /// log lines, several times per iteration.
     StageLines {
@@ -132,7 +132,7 @@ pub(crate) async fn persistence_worker(
     // This lives here rather than with the sender because the sender cannot
     // know whether a job it built was written: the coalescing below drops
     // superseded snapshots, and a watermark advanced on the dropped one leaves
-    // the descriptor in `meta.json` with no sidecar beside it (issue #276).
+    // the descriptor in `meta.json` with no sidecar beside it.
     // Here the skip is decided after that, so it reflects what is on disk.
     let mut last_output: std::collections::HashMap<String, (i64, usize)> =
         std::collections::HashMap::new();
@@ -427,7 +427,7 @@ struct WriteOutcome {
     /// landed is unrecoverable: every later diff is then relative to a state no
     /// reader can reconstruct, so the folded archive drifts from the run for
     /// the rest of its life - while `context.json`, written whole each time,
-    /// stays correct. One swallowed append error was enough (issue #455).
+    /// stays correct. One swallowed append error is enough.
     archived: bool,
 }
 
@@ -473,7 +473,7 @@ async fn write_snapshot(
     // heartbeat does not rewrite an unchanged quarter-megabyte file every
     // thirty seconds. The check is here rather than at the sender because only
     // the lane knows a job survived coalescing to be written at all - deciding
-    // it earlier is what left descriptors without sidecars (issue #276).
+    // it earlier is what leaves descriptors without sidecars.
     let submitted = job
         .meta
         .final_output
@@ -735,13 +735,13 @@ mod tests {
         }
     }
 
-    /// The whole loop, end to end, for issue #276: two snapshots for one run in
-    /// a single batch, both describing and carrying the answer.
+    /// The whole loop, end to end: two snapshots for one run in a single batch,
+    /// both describing and carrying the answer.
     ///
-    /// The first is dropped as superseded - which is exactly the coalescing that
-    /// used to lose the bytes, because the sender had already marked them sent.
-    /// The surviving snapshot must still produce the sidecar, and the second
-    /// batch (a heartbeat re-sending the same answer) must not rewrite it.
+    /// The first is dropped as superseded, and that coalescing loses the bytes
+    /// if the sender has already marked them sent. The surviving snapshot must
+    /// still produce the sidecar, and the second batch (a heartbeat re-sending
+    /// the same answer) must not rewrite it.
     #[tokio::test]
     async fn worker_writes_the_sidecar_even_when_the_first_snapshot_is_coalesced_away() {
         let dir = tempfile::tempdir().unwrap();
@@ -926,13 +926,14 @@ mod tests {
         assert_eq!(written, "metric,value\nrows,2\n");
     }
 
-    /// The regression for issue #276: a descriptor must never reach `meta.json`
-    /// without its sidecar landing too.
+    /// A descriptor must never reach `meta.json` without its sidecar landing
+    /// too.
     ///
-    /// The failure was not in either write - it was in deciding *earlier* than
-    /// the write whether the bytes were needed. The sender advanced a watermark
-    /// when it built the job; the lane then dropped that job as superseded and
-    /// wrote a later one, which described the answer and carried nothing. Here
+    /// The hazard is not in either write, it is in deciding *earlier* than the
+    /// write whether the bytes are needed. A sender that advances a watermark
+    /// when it builds the job loses them when the lane drops that job as
+    /// superseded and writes a later one, which describes the answer and
+    /// carries nothing. Here
     /// the second job is written with `written_output: None` - the honest state
     /// after the first was dropped - and must still produce the sidecar.
     #[tokio::test]
@@ -1441,9 +1442,10 @@ mod tests {
         // The run establishes its directory the ordinary way. The lane handles
         // messages in order and an append carries an ack, so an acked append
         // sent after the snapshot is a barrier: when it answers, the snapshot
-        // is entirely on disk. This used to poll for `meta.json` alone, and
-        // `remove_dir_all` below then raced the lane still writing the rest
-        // of the snapshot beside it - `DirectoryNotEmpty` on a macOS runner.
+        // is entirely on disk. Polling for `meta.json` alone is not enough:
+        // `remove_dir_all` below then races the lane still writing the rest of
+        // the snapshot beside it, which is `DirectoryNotEmpty` on a macOS
+        // runner.
         tx.send(PersistMsg::Snapshot(Box::new(job("run-1"))))
             .unwrap();
         let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
@@ -1465,7 +1467,8 @@ mod tests {
         std::fs::remove_dir_all(&run_dir).unwrap();
 
         // Every later message for it is dropped - a snapshot, a journal append,
-        // and a batch of stage lines, since all three used to make directories.
+        // and a batch of stage lines, since all three would otherwise create
+        // the directory again.
         tx.send(PersistMsg::Snapshot(Box::new(job("run-1"))))
             .unwrap();
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
@@ -1870,7 +1873,7 @@ mod tests {
     /// Advancing that digest for a record that never landed is unrecoverable:
     /// every later delta is then relative to a state no reader can rebuild, so
     /// the folded archive drifts from the run for the rest of its life while
-    /// `context.json` - written whole each time - stays correct (issue #455).
+    /// `context.json` - written whole each time - stays correct.
     ///
     /// A directory where `run.lvr` should be is the cheapest real append
     /// failure: the open fails, the rest of the write still succeeds.
@@ -1961,10 +1964,10 @@ mod tests {
     /// A run's terminal transition is recorded as an event, not left to be
     /// inferred by diffing metadata between records.
     ///
-    /// Issue #456 asked for this from the post-mortem side: the journals of 31
-    /// runs that died on an empty account carried no statement of when or to
-    /// what, so working it out meant correlating daemon logs that a harness
-    /// had sent to /dev/null.
+    /// The post-mortem side is what needs it: without the record, a journal
+    /// carries no statement of when a run went terminal or to what, so working
+    /// it out means correlating daemon logs a harness may have sent to
+    /// /dev/null.
     #[tokio::test]
     async fn a_change_of_status_is_journalled_as_its_own_record() {
         let dir = tempfile::tempdir().unwrap();

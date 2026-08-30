@@ -29,7 +29,7 @@ fn a_poisoned_registry_still_serves_every_other_agent() {
     // `pending` holds *every* agent's open prompt, so a panic while holding
     // it must not poison it: a poisoned registry makes
     // `pending()`/`answer()`/`cancel()` panic for all agents and the
-    // dashboard (issue #109).
+    // dashboard.
     let hub = InteractionHub::new();
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {})); // silence the deliberate panic
@@ -69,8 +69,8 @@ async fn ask_is_answered_through_the_hub() {
 ///
 /// The answer can arrive from another agent's tool call, and on a lane with
 /// no room left that call is queued behind the batch that is waiting for it.
-/// That is the shape that froze whole factories in issue #191: everything
-/// looked `waiting`, nothing was failed, and nothing ever moved again.
+/// That is the shape that freezes a whole daemon: everything looks `waiting`,
+/// nothing is failed, and nothing moves again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_batch_waiting_on_a_prompt_does_not_hold_the_tool_lane() {
     use crate::tool_bridge::{ToolJob, ToolLane, ToolLaneStats};
@@ -220,9 +220,9 @@ async fn cancel_wakes_submit_with_neutral_response() {
 
 #[tokio::test(start_paused = true)]
 async fn a_prompt_nobody_answers_is_released_when_the_deadline_passes() {
-    // The zombie in issue #204: six runs sat in `WaitingInput` for hours
-    // because nothing ever aged the request out. Now the hub resolves it
-    // itself and the agent goes back to work.
+    // With no deadline, a prompt nobody answers keeps its run in `WaitingInput`
+    // for ever. With one, the hub resolves the request itself and the agent
+    // goes back to work.
     let hub = InteractionHub::new();
     hub.set_timeout_secs(Some(60));
     let backend = hub.backend_for("agent-a");
@@ -264,9 +264,8 @@ async fn a_deadline_changes_nothing_for_a_prompt_that_is_answered() {
 }
 
 /// With no deadline set, a prompt waits for a person however long that takes.
-/// The clock is paused and advanced well past the hour that used to be the
-/// default, and the prompt is still open; the answer that then arrives is the
-/// one the caller gets.
+/// The clock is paused and advanced a full day, and the prompt is still open;
+/// the answer that then arrives is the one the caller gets.
 #[tokio::test(start_paused = true)]
 async fn with_no_deadline_a_prompt_waits_for_a_person_however_long_it_takes() {
     let hub = InteractionHub::new();
@@ -304,8 +303,8 @@ async fn a_zero_deadline_waits_for_a_person_however_long_it_takes() {
     assert_eq!(asking.await.unwrap().value.as_deref(), Some("here I am"));
 }
 
-/// A configured deadline still fires when it says: two seconds means two
-/// seconds, not the hour it used to default to and not for ever.
+/// A configured deadline fires when it says: two seconds means two seconds,
+/// not longer and not for ever.
 #[tokio::test(start_paused = true)]
 async fn a_two_second_deadline_fires_at_two_seconds() {
     let hub = InteractionHub::new();

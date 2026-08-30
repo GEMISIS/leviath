@@ -95,11 +95,11 @@ pub(crate) fn hint_blocks(
 ///
 /// Providers reject a request whose completion budget is below one - OpenAI
 /// with `Invalid 'max_completion_tokens': integer below minimum value`,
-/// Anthropic likewise - and the runtime derived that budget by subtracting the
-/// prompt from the window with no floor under it. On a tight pinned window a
-/// prompt that reached the ceiling drove it to zero and the request went out
-/// anyway. A 400 does not read as transient, so the retry loop resent the same
-/// doomed request until the run died (issue #495).
+/// Anthropic likewise - and the budget is derived by subtracting the prompt
+/// from the window. With no floor under it, a tight pinned window whose prompt
+/// reaches the ceiling drives it to zero and the request goes out anyway. A 400
+/// does not read as transient, so the retry loop resends the same doomed
+/// request until the run dies.
 ///
 /// Deliberately one, and not something roomier. The budget is also capped at
 /// what the window has left, because a provider rejects `prompt + completion`
@@ -146,7 +146,7 @@ pub(crate) struct PriorCalls {
     /// Per-block digests, empty before the first request.
     pub(crate) block_hashes: Vec<u64>,
     /// How far the estimate ran under what the provider charged, or `None`
-    /// before anything was measured (issue #485).
+    /// before anything was measured.
     pub(crate) calibration: Option<crate::pipeline::PromptCalibration>,
     /// A reply in this stage was cut off at the output cap, so the cap goes
     /// out at the model's maximum instead of the stage's setting.
@@ -360,7 +360,7 @@ pub(crate) struct SystemPrefixHash(pub u64);
 
 /// The previous request's per-block system digests, kept on the agent so the
 /// next assembly can tell which blocks held still and place cache breakpoints
-/// only where the entry is readable back (issue #474).
+/// only where the entry is readable back.
 #[derive(Component, Debug, Clone, Default)]
 pub(crate) struct SystemBlockHashes(pub Vec<u64>);
 
@@ -387,7 +387,7 @@ pub(crate) fn dispatch_inference(
     // the thread-local `tick_scope` can't carry an entity back to the catcher.
     // Each agent's share runs under `run_agent_parallel`, which catches there -
     // where the entity is known - and marks that agent for `tick` to fail
-    // (issue #109). Clearing the thread-local keeps a panic in the fan-out
+    // Clearing the thread-local keeps a panic in the fan-out
     // machinery *itself* unattributed rather than blamed on whichever agent a
     // previous system left recorded.
     crate::tick_scope::clear();
@@ -417,7 +417,7 @@ pub(crate) fn dispatch_inference(
                 }
                 // Every decline below records why and since when, so the
                 // watchdog can tell a run that is waiting from one that is
-                // waiting for something that will never happen (issue #190).
+                // waiting for something that will never happen.
                 let stall = |reason| {
                     let noted = note_stall(stalled, reason, now);
                     par_commands.command_scope(|mut commands| {
@@ -428,7 +428,7 @@ pub(crate) fn dispatch_inference(
                 // provider still standing. Reaching a tripped one here means
                 // every candidate is out of service, so park rather than send
                 // a request that is going to fail the same way as the last
-                // three (issue #201). The stall watchdog ends the wait.
+                // three. The stall watchdog ends the wait.
                 if circuits.is_some_and(|c| c.is_open(&si.provider_name, now, &circuit_policy)) {
                     tracing::debug!(
                         provider = %si.provider_name,
@@ -484,13 +484,13 @@ pub(crate) fn dispatch_inference(
                     // What the window believes this call will cost. The response
                     // says what it really cost, and the two together are the
                     // only measurement of the estimator's drift the runtime
-                    // gets (issue #485).
+                    // gets.
                     commands
                         .entity(entity)
                         .insert(crate::pipeline::PromptEstimate(window.current_tokens));
                 });
                 // A provider that does not advertise streaming for this model
-                // is called the old way whatever the config says: `infer_stream`
+                // is called non-streaming whatever the config says: `infer_stream`
                 // has a default that buffers and then emits one chunk, so
                 // asking anyway would pay for the fold and gain nothing.
                 let stream =

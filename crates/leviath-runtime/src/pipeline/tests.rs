@@ -596,7 +596,7 @@ async fn dispatch_moves_agent_to_awaiting_and_runs_the_job() {
 
 /// The daemon's `[limits]` retry schedule reaches a dispatched job. A world
 /// that never inserts the resource takes the built-in one, which every other
-/// dispatch test here exercises (issue #417).
+/// dispatch test here exercises.
 #[tokio::test]
 async fn dispatch_uses_the_configured_retry_schedule() {
     let (mut world, mut rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
@@ -757,8 +757,8 @@ impl StageInference {
 }
 
 /// A provider whose `infer` panics, standing in for any bug that kills a lane
-/// task before it can report - the case that used to leave the agent waiting on
-/// an outcome that would never arrive (issue #190).
+/// task before it can report - the case that would otherwise leave the agent
+/// waiting on an outcome that never arrives.
 struct Exploding;
 #[async_trait::async_trait]
 impl Provider for Exploding {
@@ -910,8 +910,8 @@ fn collect_applies_ok_and_advances_to_process_response() {
 
 /// An agent paused mid-inference must not be advanced by the response landing.
 ///
-/// This is the half of the bug that looked like a spontaneous resume: the run
-/// still read `paused` while its tool calls ran and its stage moved on.
+/// Letting it through looks like a spontaneous resume: the run still reads
+/// `paused` while its tool calls run and its stage moves on.
 #[test]
 fn collect_holds_a_success_that_lands_on_a_paused_agent() {
     let (mut world, tx) = world_with_results();
@@ -956,9 +956,9 @@ fn collect_holds_a_success_that_lands_on_a_paused_agent() {
     );
 }
 
-/// The half that actually destroyed runs: a failure landing on a paused agent
-/// used to overwrite `Paused` with `Error`, ending a run with dozens of
-/// iterations of completed work behind it.
+/// A failure landing on a paused agent must not overwrite `Paused` with
+/// `Error`, which would end a run with dozens of iterations of completed work
+/// behind it.
 #[test]
 fn collect_holds_a_failure_that_lands_on_a_paused_agent() {
     let (mut world, tx) = world_with_results();
@@ -1108,7 +1108,7 @@ fn collect_marks_error_on_failure() {
     );
 }
 
-// ── provider failover on an unusable provider (issue #201) ──
+// ── provider failover on an unusable provider ───────────────
 
 /// A stage on `dead/model-a` with one place left to go.
 fn stage_with_fallback() -> StageInference {
@@ -1202,7 +1202,7 @@ fn failover_is_recorded_in_the_stage_log() {
 fn an_exhausted_fallback_list_pauses_on_credits_instead_of_dying() {
     // Last provider standing and the account is out of credits: that is an
     // account state, not a defect in the run, so the run pauses for a
-    // `lev resume` instead of ending (issue #413). The retry stays staged.
+    // `lev resume` instead of ending. The retry stays staged.
     let (mut world, tx) = world_with_results();
     let mut si = stage_with_fallback();
     si.fallbacks.clear();
@@ -1255,11 +1255,12 @@ fn an_exhausted_fallback_list_pauses_on_credits_instead_of_dying() {
 /// error is more useful than patience keeps getting one.
 /// An empty account parks an unattended run too.
 ///
-/// It used to fail, and that cost a benchmark round 31 runs (issue #456). The
-/// error also arrived as three different terminal shapes depending on where it
-/// landed - the worst being a run that died on its output stage and recorded
-/// "never called submit_output", which names the wrong cause entirely. Parking
-/// at the point of failure collapses all three into one answer.
+/// Failing it throws away work a top-up would recover: one benchmark round
+/// lost 31 runs that way. The error also arrives as three different terminal
+/// shapes depending on where it lands - the worst being a run that dies on its
+/// output stage and records "never called submit_output", which names the wrong
+/// cause entirely. Parking at the point of failure collapses all three into one
+/// answer.
 #[test]
 fn an_unattended_run_out_of_credits_parks_instead_of_losing_its_work() {
     let (mut world, tx) = world_with_results();
@@ -1411,7 +1412,7 @@ fn an_ordinary_error_does_not_burn_a_fallback() {
 #[test]
 fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
     // Failing over rescues *this* run. The breaker is what stops the next ten
-    // runs each rediscovering the same dead account (issue #201).
+    // runs each rediscovering the same dead account.
     let (mut world, tx) = world_with_results();
     let policy = CircuitPolicy {
         failures_before_open: 2,
@@ -1644,7 +1645,7 @@ fn an_unusable_provider_without_a_stage_component_still_terminates() {
     // `StageInference` is optional on the query, so the failover branch has to
     // cope with its absence rather than assuming one is attached. A dead key
     // rather than dead credits, because exhausted credits pause instead of
-    // terminating (issue #413).
+    // terminating.
     let (mut world, tx) = world_with_results();
     let e = world.spawn((agent_state(), AwaitingInference)).id();
     tx.send(InferenceOutcome {
@@ -1664,7 +1665,7 @@ fn an_unusable_provider_without_a_stage_component_still_terminates() {
     assert!(world.get::<ResolveTransition>(e).is_some());
 }
 
-// ── stage-io persistence (#1) ──
+// ── stage-io persistence ───────
 
 fn ledger2() -> StageLedger {
     StageLedger(vec![
@@ -1753,7 +1754,7 @@ fn reconcile_stage_ledger_keeps_the_clock_running_while_held_for_children() {
     assert_eq!(led.0[0].active_runtime_secs(400), 300);
 }
 
-// ─── A stage that never ran says so (#372) ───────────────────────────────────
+// ─── A stage that never ran says so ──────────────────────────────────────────
 
 fn three_stage_ledger() -> StageLedger {
     StageLedger(vec![
@@ -1764,10 +1765,10 @@ fn three_stage_ledger() -> StageLedger {
 }
 
 /// A graph reaches its stages in whatever order its edges describe, so a branch
-/// the run went past without taking is not "finished". It used to be recorded
-/// `Complete` with an empty `region_tokens`, and because that map is a
-/// snapshot, an empty one in the middle made the *next* real stage look like it
-/// had written every region from nothing.
+/// the run went past without taking is not "finished". Recording it `Complete`
+/// with an empty `region_tokens` makes the *next* real stage look like it wrote
+/// every region from nothing, because that map is a snapshot rather than a
+/// per-stage delta.
 #[test]
 fn a_stage_the_run_never_entered_is_skipped_not_complete() {
     use leviath_core::run_meta::StageRunStatus;
@@ -1902,7 +1903,7 @@ fn collect_inference_buffers_output_token_line_and_stage_tokens() {
     assert_eq!(led.0[1].cached_tokens, 2);
 }
 
-// ─── requests the runtime must never build (issue #495) ──────────────
+// ─── requests the runtime must never build ───────────────────────────
 
 /// A prompt that reaches the window leaves nothing to answer with, and the
 /// derived completion budget went to zero. Providers reject that outright
@@ -2000,7 +2001,7 @@ fn the_completion_budget_stays_inside_what_the_window_has_left() {
     );
 }
 
-// ─── estimator calibration (issue #485) ───
+// ─── estimator calibration ────────────────
 //
 // The arithmetic is unit-tested in `pipeline::calibration`. What these cover is
 // the wiring, which is the half that can silently do nothing: whether dispatch
@@ -2385,10 +2386,10 @@ fn collect_tools_buffers_one_tool_log_line_per_call() {
 /// A title arriving after the run's last move still reaches disk.
 ///
 /// The watermark tracks iteration, stage and status - none of which a title
-/// touches - so a name that landed late used to sit in memory until the next
-/// heartbeat, which a finished run is unloaded before reaching. The name was
-/// simply lost, which is what made the retry and failover behind it pointless
-/// for any run that ended quickly.
+/// touches - so without a check of its own a name that lands late sits in
+/// memory until the next heartbeat, which a finished run is unloaded before
+/// reaching. The name is lost, and the retry and failover behind it bought
+/// nothing for any run that ended quickly.
 #[test]
 fn a_title_that_lands_after_the_last_move_still_reaches_disk() {
     let (mut world, mut rx) = world_with_persistence();
@@ -2437,7 +2438,7 @@ fn a_title_that_lands_after_the_last_move_still_reaches_disk() {
 
 /// A title is not the agent moving, so it must not advance the progress stamp
 /// `lev ps` ages its rows against - that stamp is the one thing separating a
-/// slow run from a wedged one (issue #184).
+/// slow run from a wedged one.
 #[test]
 fn a_landed_title_is_a_write_but_not_progress() {
     let (mut world, mut rx) = world_with_persistence();
@@ -2499,9 +2500,9 @@ fn dispatch_persistence_emits_stage_index_and_drains_io_buffer() {
 }
 
 /// The persist tick rewrites `stages.json` whole, so what the reload leaves in
-/// the ledger is what lands on disk. A reload that left the spawn-seeded zeros
-/// there did not merely lose the run's stage history, it erased the copy that
-/// was still on disk (issue #415).
+/// the ledger is what lands on disk. A reload that leaves the spawn-seeded
+/// zeros there does not merely lose the run's stage history, it erases the copy
+/// still on disk.
 #[test]
 fn a_restored_ledger_reaches_the_persist_tick_instead_of_the_seeded_zeros() {
     let (mut world, mut rx) = world_with_persistence();
@@ -2548,17 +2549,17 @@ fn a_restored_ledger_reaches_the_persist_tick_instead_of_the_seeded_zeros() {
 
 /// Every snapshot carries the answer's bytes whenever the agent holds them.
 ///
-/// It used to send them once and rely on a sender-side watermark thereafter.
-/// That watermark advanced when the job was *built*, but the persistence lane
+/// Sending them once and relying on a sender-side watermark does not work: the
+/// watermark advances when the job is *built*, but the persistence lane
 /// coalesces queued snapshots per run and keeps only the newest - so a run that
-/// finished inside one persistence window had the job carrying the body dropped
-/// as superseded, while every later job still wrote `meta.json`'s descriptor.
-/// The two halves then disagreed for good, and `read_final_output` reads that as
-/// "no answer" (issue #276).
+/// finishes inside one persistence window has the job carrying the body dropped
+/// as superseded, while every later job still writes `meta.json`'s descriptor.
+/// The two halves then disagree for good, and `read_final_output` reads that as
+/// "no answer".
 ///
 /// Not writing the same quarter-megabyte file on every heartbeat is still worth
-/// doing; it now happens in the lane, past the coalescing, where whether a job
-/// was written is a fact rather than an assumption.
+/// doing; it happens in the lane, past the coalescing, where whether a job was
+/// written is a fact rather than an assumption.
 /// The reason a run is parked reaches `meta.json` through the real system, not
 /// just through the mapper.
 ///
@@ -2716,9 +2717,10 @@ fn dispatch_persistence_always_carries_the_answer_for_the_lane_to_judge() {
     );
 
     // A second tick carries the same answer again. Backdating the watermark
-    // makes the heartbeat due, which is the tick that previously sent nothing.
+    // makes the heartbeat due, which is the tick a sender-side watermark would
+    // let through empty.
     //
-    // This is the assertion that pins the bug: if this snapshot were the one to
+    // This is the assertion that matters: if this snapshot were the one to
     // survive coalescing and it carried no body, the descriptor below would
     // reach `meta.json` with no sidecar beside it.
     world
@@ -3804,7 +3806,7 @@ fn empty_response_nudges_and_loops_back_when_text_only() {
 
 #[test]
 fn empty_response_respects_a_stage_that_disables_its_nudge() {
-    // The issue-#127 shape: the stage knows its deliverable is text and says so.
+    // The stage knows its deliverable is text and says so.
     let mut bp = nudge_bp(false);
     bp.0.stages[0].nudge = Some(leviath_core::NudgeConfig {
         enabled: Some(false),
@@ -4286,7 +4288,7 @@ async fn dispatch_tools_enqueues_runnable_job_and_advances() {
     assert_eq!(results, vec![("t".to_string(), "ran n".to_string())]);
 }
 
-// ── batch journaling at dispatch (#96) ──
+// ── batch journaling at dispatch ────────
 
 /// A tool service whose executor reports each call through `progress` before
 /// returning - the shape the CLI executor has.
@@ -4452,12 +4454,12 @@ async fn dispatch_all_inline_batch_is_not_journaled() {
 
 /// A batch of only inline-resolved calls still says what it did.
 ///
-/// It returns before `collect_tools`, which is where every other batch gets its
-/// `[tool]` lines, so it used to leave no trace a person could read: nothing in
-/// `logs.log`, nothing in the journal, and yet `meta.tool_calls` counted it. A
-/// run could report 45 tool calls beside a stage log holding none of them,
-/// which is how an empty activity panel read as a dropped-log bug rather than
-/// as the model having only written to its own context (issues #589, #595).
+/// It returns before `collect_tools`, which is where every other batch gets
+/// its `[tool]` lines, so without a log of its own it leaves no trace a person
+/// can read: nothing in `logs.log`, nothing in the journal, and yet
+/// `meta.tool_calls` counts it. A run then reports 45 tool calls beside a stage
+/// log holding none of them, and an empty activity panel reads as a dropped-log
+/// bug rather than as the model having only written to its own context.
 #[tokio::test]
 async fn dispatch_logs_an_all_inline_batch_it_would_otherwise_swallow() {
     let (jtx, _jrx) = mpsc::unbounded_channel();
@@ -4740,10 +4742,10 @@ fn a_fan_out_call_is_read_inline_and_never_reaches_the_lane() {
 /// rest of the batch lands normally.
 ///
 /// `merge_in_call_order` fills a call with no entry in `context_results` with an
-/// empty string, so the fan-out call used to get a placeholder here and the real
-/// report from `finish_tool_fan_out` later - two `tool_result` blocks under one
-/// id. Anthropic rejects the next request with "each tool_use must have a single
-/// result", which killed a live run after its workers had already spawned.
+/// empty string, so a placeholder written here plus the real report from
+/// `finish_tool_fan_out` later would be two `tool_result` blocks under one id.
+/// Anthropic rejects the next request with "each tool_use must have a single
+/// result", killing the run after its workers have already spawned.
 #[test]
 fn parking_on_a_fan_out_writes_no_result_for_it_yet() {
     let (mut world, _jrx) = world_with_lane();
@@ -5890,8 +5892,8 @@ fn invalid_args_refusal_without_a_def_or_constraint_is_none() {
 }
 
 /// Every refusal prefix dispatch can produce reads as "this never happened".
-/// `[blocked]` was missing until issue #155's pass, so a taint-blocked write
-/// counted as a modification.
+/// Miss one - `[blocked]`, say - and a taint-blocked write counts as a
+/// modification.
 #[test]
 fn call_had_no_effect_covers_every_refusal_prefix() {
     assert!(call_had_no_effect("[error] boom"));
@@ -6006,10 +6008,10 @@ fn tainted_output_window() -> ContextWindow {
     w
 }
 
-/// `submit_output` was applied inline before the gate ran, so its
-/// classification was never consulted in a live run: reclassifying it as
-/// outbound gated nothing. The gate now runs first. Headless, the block is
-/// the model's tool result and no answer is recorded.
+/// The gate runs before `submit_output` is applied. Apply it inline first and
+/// its outbound classification is never consulted, so the gate holds back
+/// nothing. Headless, the block is the model's tool result and no answer is
+/// recorded.
 #[tokio::test]
 async fn dispatch_tools_gates_a_submission_over_tainted_context() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
@@ -7722,10 +7724,10 @@ fn enter_stage_swaps_context_layout() {
 
     let w = world.get::<ContextWindow>(e).unwrap();
     assert!(w.get_region("scratch").is_some(), "the stage's own region");
-    // The region the stage did not declare is HELD, not dropped. It used to be
-    // deleted, which made a per-stage layout unusable for narrowing a view in a
-    // pipeline whose later stages still need the data: re-declaring it
-    // downstream brought it back empty.
+    // The region the stage did not declare is HELD, not dropped. Deleting it
+    // would make a per-stage layout unusable for narrowing a view in a pipeline
+    // whose later stages still need the data: re-declaring it downstream would
+    // bring it back empty.
     assert!(
         w.get_region("sys").is_some(),
         "an omitted region must survive the stage it is not shown to"
@@ -8233,8 +8235,8 @@ fn retry_policy_for_overrides_job_timeout_when_set() {
 
 /// The `[limits]` retry schedule reaches the policy, and reaches only the two
 /// numbers it owns: the capacity backoff and the total-backoff ceiling are the
-/// runtime's own bound on a provider outage and are not an operator's to raise
-/// (issue #417).
+/// runtime's own bound on a provider outage and are not an operator's to
+/// raise.
 #[test]
 fn retry_policy_for_takes_the_configured_schedule() {
     let default = crate::inference_bridge::RetryPolicy::default();
@@ -8949,7 +8951,7 @@ fn enforce_max_iterations_caps_at_the_limit() {
         &StageOutcome::MaxIterations
     );
     // The run records it: a stage that ran out of iterations is one way a
-    // run ends up with nothing to show (issue #107).
+    // run ends up with nothing to show.
     assert_eq!(
         world
             .get::<crate::persistence::RunOutcomeFlags>(e)
@@ -9021,7 +9023,7 @@ fn enforce_max_iterations_below_limit_or_unlimited_or_paused_is_noop() {
     }
 }
 
-// ── stuck detection (#106) ──────────────────────────────────────────────
+// ── stuck detection ─────────────────────────────────────────────────────
 
 fn stuck_cfg(
     iterations: Option<usize>,
@@ -9731,7 +9733,7 @@ fn resolve_transition_resumes_the_stage_when_the_stuck_edge_is_gone() {
     assert!(world.get::<StageOutcome>(e).is_none());
 }
 
-// ── required-region gating (#5) ──
+// ── required-region gating ───────
 
 fn required_bp(tools: &[&str], custom_msg: Option<&str>) -> AgentBlueprint {
     let region =
@@ -9948,7 +9950,7 @@ fn require_context_regions_proceeds_when_met_capped_or_errored() {
     }
 }
 
-// ── transition gates: require_region_updated (#343) ──
+// ── transition gates: require_region_updated ─────────
 
 /// A gate that watches a region for change rather than for content.
 fn change_gate(region: &str) -> leviath_core::blueprint::TransitionGate {
@@ -10101,7 +10103,7 @@ fn only_watched_regions_get_a_baseline() {
     assert!(crate::pipeline::transition::watched_region_digests(&missing, &w).is_empty());
 }
 
-// ── the runaway-context warning (#347) ──
+// ── the runaway-context warning ─────────
 
 fn ledger_record() -> leviath_core::run_meta::StageRecord {
     leviath_core::run_meta::StageRecord::new("profile".to_string(), 0)
@@ -10153,7 +10155,7 @@ fn a_zero_baseline_cannot_run_away() {
     assert!(!rec.runaway_warned);
 }
 
-// ── transition gates: require_no_open_items (#342) ──
+// ── transition gates: require_no_open_items ─────────
 
 /// A window whose checklist holds `open` open items and `done` closed ones.
 fn checklist_window(open: usize, done: usize) -> ContextWindow {
@@ -10376,7 +10378,7 @@ fn the_checklist_path_holds_together() {
     assert!(region.render_checklist().contains("0 open, 3 done"));
 }
 
-// ── transition gates: require_modifications (#107) ──
+// ── transition gates: require_modifications ─────────
 
 fn gate(region: Option<&str>, message: Option<&str>) -> leviath_core::blueprint::TransitionGate {
     leviath_core::blueprint::TransitionGate {
@@ -10675,7 +10677,7 @@ fn resolve_transition_skips_the_gate_on_an_error_edge() {
     assert_eq!(world.get::<StageProgress>(e).unwrap().gate_reentries, 0);
 }
 
-// ── file tracking (#6) ──
+// ── file tracking ───────
 
 fn ftc(
     reads: bool,
@@ -10867,7 +10869,7 @@ fn collect_tools_applies_file_tracking_from_blueprint() {
     );
 }
 
-// ── modification accounting (#107) ──
+// ── modification accounting ─────────
 
 /// Drive `collect_tools` over one batch of `(tool, result)` pairs against a
 /// stage whose outgoing edge names `extra_tools` as modifying, returning the
@@ -10956,8 +10958,8 @@ fn collect_tools_counts_successful_writes_and_their_paths() {
 fn collect_tools_separates_failed_denied_and_non_modifying_calls() {
     let (progress, flags) = count_modifications(
         &[
-            // Read-only work through the shell is exactly what #107 is about:
-            // it must not read as a modification.
+            // Read-only work through the shell must not read as a
+            // modification.
             ("shell", serde_json::json!({"command": "cat a.rs"}), "…"),
             (
                 "write_file",
@@ -11127,7 +11129,7 @@ fn stage_modifying_tools_defaults_without_a_blueprint_or_stage() {
     );
 }
 
-// ── workspace health (#107) ──
+// ── workspace health ─────────
 
 fn run_workspace_check(world: &mut World) {
     let mut s = Schedule::default();
@@ -11221,7 +11223,7 @@ fn workspace_check_is_a_no_op_when_healthy_off_interval_or_inactive() {
     }
 }
 
-// ── repetition detection (#8) ──
+// ── repetition detection ───────
 
 #[test]
 fn collect_tools_injects_repetition_nudge_when_looping() {
@@ -11266,7 +11268,7 @@ fn collect_tools_injects_repetition_nudge_when_looping() {
     );
 }
 
-// ── requires_children gate (#7) ──
+// ── requires_children gate ───────
 
 use crate::components::SubAgentChildren;
 
@@ -11452,9 +11454,9 @@ fn collect_compaction_stores_summary_and_clears_source() {
 }
 
 /// A summary with nothing in it is a compaction that failed, not one that found
-/// nothing worth keeping. Storing it traded the region's real contents for a
-/// blank, and the blank later reached a provider as a zero-length turn - which
-/// is a 400 no retry clears (issue #495).
+/// nothing worth keeping. Storing it trades the region's real contents for a
+/// blank, and the blank later reaches a provider as a zero-length turn - which
+/// is a 400 no retry clears.
 #[test]
 fn collect_compaction_keeps_the_region_when_the_summary_is_empty() {
     for summary in ["", "   \n\t "] {
@@ -11545,9 +11547,9 @@ fn compaction_calls_are_counted_one_record_per_region() {
 /// And it lands on the stage that paid for it, not only on the run.
 ///
 /// A summarize call sees a whole region, so a stage that compacts twice can
-/// spend more on summarizing its context than on the work - and the stage
-/// ledger, which exists to answer "which stage cost me that", counted only the
-/// stage's own turns. It answered for the cheap half of the bill (#630).
+/// spend more on summarizing its context than on the work. A stage ledger that
+/// counted only the stage's own turns would answer "which stage cost me that"
+/// for the cheap half of the bill.
 #[test]
 fn a_compaction_call_is_billed_to_the_stage_that_needed_it() {
     let (mut world, tx) = world_with_compaction_results();
@@ -11864,10 +11866,10 @@ async fn reflect_flips_active_to_waiting_and_back_when_prompt_clears() {
 }
 
 /// Time spent waiting on a person is not time the agent spent stuck. An
-/// implement stage with `stuck_after_minutes = 15` whose operator took an hour
-/// to answer a write approval used to trip its stuck edge on the very next tick
-/// after the answer, because the stage clock kept running through the wait.
-/// The wait is now credited back to the clock when the prompt resolves.
+/// implement stage with `stuck_after_minutes = 15` whose operator takes an
+/// hour to answer a write approval would trip its stuck edge on the very next
+/// tick if the stage clock kept running through the wait, so the wait is
+/// credited back to the clock when the prompt resolves.
 #[tokio::test]
 async fn reflect_keeps_a_wait_on_a_person_off_the_stage_clock() {
     let hub = InteractionHub::new();
@@ -12123,7 +12125,7 @@ fn persistence_rewrites_when_status_changes() {
 /// `last_progress_at` is what `lev ps` ages its rows against, so it must move
 /// only when the agent does. `updated_at` cannot serve: the heartbeat advances
 /// it on a run that is doing nothing at all, which is exactly how a wedged run
-/// gets mistaken for a busy one (issue #184).
+/// gets mistaken for a busy one.
 #[test]
 fn last_progress_at_tracks_progress_and_not_the_heartbeat() {
     let (mut world, mut rx) = world_with_persistence();
@@ -12543,10 +12545,10 @@ fn run_collect_transition(world: &mut World) {
 /// question, and the move to the next stage cuts the visit rather than
 /// backdating the answer into it.
 ///
-/// One routing call fires at every boundary of every branching run, and the
-/// stage ledger counted none of them. Attributing it to the stage being entered
-/// would be worse than leaving it out: the run had not started that stage's work
-/// when it paid for the question (#630).
+/// One routing call fires at every boundary of every branching run, so a stage
+/// ledger that skips them is missing real money. Attributing it to the stage
+/// being entered would be worse than leaving it out: the run has not started
+/// that stage's work when it pays for the question.
 #[test]
 fn a_routing_call_is_billed_to_the_stage_it_leaves_and_cuts_the_visit() {
     let (mut world, tx) = world_with_transition_results();
@@ -12680,10 +12682,10 @@ fn collect_choice_holds_an_outcome_that_lands_on_a_paused_agent() {
 /// A network that is down at a stage boundary parks the run, exactly as it does
 /// one call earlier on the stage's own inference.
 ///
-/// These two lanes used to disagree. The same failure, a second apart, either
-/// paused the run for a `lev resume` or killed it and threw away every stage it
-/// had finished - decided by nothing more than which call happened to be in
-/// flight when the network went.
+/// The two lanes must not disagree. Let them and the same failure, a second
+/// apart, either pauses the run for a `lev resume` or kills it and throws away
+/// every stage it had finished - decided by nothing more than which call
+/// happened to be in flight when the network went.
 #[test]
 fn collect_choice_parks_a_run_the_provider_could_not_be_reached_for() {
     let (mut world, tx) = world_with_transition_results();
@@ -13513,10 +13515,9 @@ fn stage_setup_from_folds_a_required_output_into_the_system_prompt() {
     assert!(prompt.contains("{\"root\": {}}"), "{prompt}");
 }
 
-/// Issue #282. The stage's own prompt and the resolved spec are both just text
-/// to a model, so the spec has to come last *and* say it governs. Ordering on
-/// its own is what the reported build already did, and a strong stage prompt
-/// still won on some models.
+/// The stage's own prompt and the resolved spec are both just text to a model,
+/// so the spec has to come last *and* say it governs. Ordering on its own is
+/// not enough: a strong stage prompt still wins on some models.
 #[test]
 fn a_required_outputs_shape_comes_after_the_stage_prompt_and_outranks_it() {
     let spec = leviath_core::output::OutputSpec {
@@ -14179,7 +14180,7 @@ fn entering_a_stage_clears_the_output_reentry_count() {
     assert!(world.get::<OutputReentries>(e).is_none());
 }
 
-// ─── on_stage_enter (issue #260) ─────────────────────────────────────────────
+// ─── on_stage_enter ──────────────────────────────────────────────────────────
 
 fn hook_scripts(src: &str, wanted: &[&str]) -> crate::components::StageHookScripts {
     let compiled = leviath_scripting::stage_hook::compile("h.rhai", src, wanted)
@@ -14540,7 +14541,7 @@ fn a_refusal_without_a_reason_still_says_it_was_refused() {
     assert!(message.contains("no reason given"), "{message}");
 }
 
-// ─── before_inference / after_inference (issue #260) ─────────────────────────
+// ─── before_inference / after_inference ──────────────────────────────────────
 
 fn stage_hooked(
     field: impl FnOnce(&mut leviath_core::blueprint::StageHooks, String),
@@ -14962,7 +14963,7 @@ fn an_inference_hook_refusing_without_a_reason_still_says_what_it_refused() {
     assert!(msg.contains("no reason given"), "{msg}");
 }
 
-// ─── on_tool_call (issue #260) ───────────────────────────────────────────────
+// ─── on_tool_call ────────────────────────────────────────────────────────────
 
 fn call(name: &str, args: serde_json::Value) -> crate::components::ToolCall {
     crate::components::ToolCall {
@@ -15308,7 +15309,7 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
     assert!(status_message(&world, undeclared).is_none());
 }
 
-// ─── on_completion / on_error (issue #260) ───────────────────────────────────
+// ─── on_completion / on_error ────────────────────────────────────────────────
 
 fn run_terminal(world: &mut World) {
     let mut schedule = Schedule::default();
@@ -15620,7 +15621,7 @@ fn on_completion_rewriting_a_missing_answer_is_refused() {
     );
 }
 
-// ─── on_stage_exit (issue #260) ──────────────────────────────────────────────
+// ─── on_stage_exit ───────────────────────────────────────────────────────────
 
 fn spawn_exiting(world: &mut World, src: &str) -> Entity {
     world
@@ -15770,7 +15771,7 @@ fn on_stage_exit_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
     assert!(status_message(&world, undeclared).is_none());
 }
 
-// ─── Stage instructions get a region of their own (#366) ─────────────────────
+// ─── Stage instructions get a region of their own ────────────────────────────
 
 /// Build a window whose pinned regions are `names`, in that order.
 fn instructions_window(names: &[&str]) -> ContextWindow {
@@ -15808,9 +15809,9 @@ fn stage_instructions_still_land_in_the_first_pinned_region_by_default() {
     );
 }
 
-/// Declared, it goes there instead - so its tokens stop being charged to
-/// whichever region an author happened to declare first, which is what made the
-/// per-region numbers in the stage ledger untrustworthy.
+/// Declared, it goes there instead - so its tokens are not charged to whichever
+/// region an author happened to declare first, which would make the per-region
+/// numbers in the stage ledger untrustworthy.
 #[test]
 fn a_declared_stage_instructions_region_receives_the_prompt() {
     let mut window = instructions_window(&["task", "stage_instructions"]);
@@ -15840,7 +15841,8 @@ fn a_declared_stage_instructions_region_receives_the_prompt() {
 /// everything behind it on every transition.
 #[test]
 fn stage_instructions_render_after_every_other_pinned_block() {
-    // Declared *first*, which is the arrangement that used to poison the prefix.
+    // Declared *first*, the arrangement that poisons the prefix if declaration
+    // order decides render order.
     let mut window = instructions_window(&["stage_instructions", "task", "notes"]);
     window
         .add_to_region("task", "the task".to_string(), 2)
@@ -15963,7 +15965,7 @@ fn stage_instructions_survive_a_stage_layout_that_does_not_declare_them() {
     );
 }
 
-// ─── The pointer tells the truth about a region the stage cannot see (#370) ──
+// ─── The pointer tells the truth about a region the stage cannot see ─────────
 
 /// Build a window with `regions` plus `conversation`, hiding `hidden`.
 fn routed_window(regions: &[&str], hidden: &[&str]) -> ContextWindow {
@@ -16009,11 +16011,11 @@ fn one_read_call() -> (Vec<crate::components::ToolCall>, Vec<(String, String)>) 
 /// The pointer that reaches the model when the region *is* visible: it is
 /// already in the prompt, so say where, and do not ask for a tool call.
 ///
-/// This used to read "read that region for the full result", which is an
-/// instruction with nothing behind it - the region renders into the system
-/// prompt, and the stages that route mostly do not grant `context_read`. What
-/// models did instead was aim `read_file` at the region name, and across 152
-/// local runs that was 90 of 168 failed `read_file` calls.
+/// "Read that region for the full result" would be an instruction with nothing
+/// behind it - the region renders into the system prompt, and the stages that
+/// route mostly do not grant `context_read`. Models aim `read_file` at the
+/// region name instead: across 152 local runs that was 90 of 168 failed
+/// `read_file` calls.
 #[test]
 fn a_pointer_to_a_visible_region_says_it_is_already_in_the_prompt() {
     let mut window = routed_window(&["data_preview"], &[]);
@@ -16341,7 +16343,7 @@ fn a_pointer_to_a_hidden_region_says_it_cannot_be_read_here() {
     );
 }
 
-// ─── A gate that can actually require a region (#371) ────────────────────────
+// ─── A gate that can actually require a region ───────────────────────────────
 
 /// A gate that asks only for regions, so these tests isolate the new condition
 /// from `require_modifications`. The two together are covered separately.
@@ -16371,10 +16373,9 @@ fn gate_window(regions: &[&str], filled: &[&str]) -> ContextWindow {
     window
 }
 
-/// The heart of #371: `require_modifications` with `region` is satisfied by any
-/// write anywhere, so the named region can still be empty. `require_regions` is
-/// the conjunction that was missing - it holds whatever else the gate is happy
-/// about.
+/// `require_modifications` with `region` is satisfied by any write anywhere, so
+/// the named region can still be empty. `require_regions` is the conjunction
+/// that closes that: it holds whatever else the gate is happy about.
 #[test]
 fn require_regions_blocks_even_when_the_stage_wrote_files() {
     let stage = writing_stage("plan", Vec::new());
@@ -16524,9 +16525,9 @@ fn require_regions_and_require_modifications_must_both_hold() {
 
 /// Giving up on a required region is recorded, not just logged.
 ///
-/// A log line cannot be read after the fact, so a run whose agent wrote its
-/// plan and one where we asked twice and moved on both finished `complete` and
-/// nothing downstream could tell them apart (#371).
+/// A log line cannot be read after the fact, so without the record a run whose
+/// agent wrote its plan and one where the runtime asked twice and moved on both
+/// finish `complete` with nothing downstream able to tell them apart.
 #[test]
 fn abandoning_a_required_region_is_recorded_in_the_run() {
     let mut world = World::new();
@@ -16644,7 +16645,7 @@ fn a_region_abandoned_twice_is_listed_once() {
     );
 }
 
-// ─── A deliverable region survives a bare compact (#369) ─────────────────────
+// ─── A deliverable region survives a bare compact ────────────────────────────
 
 /// A window with a transcript and a results region, both non-pinned.
 fn compact_window(results_summarizable: bool) -> ContextWindow {
@@ -17201,9 +17202,9 @@ fn cut_off_arguments_refusal_quotes_the_tail() {
     );
 }
 
-/// An accepted text-only reply stays in the conversation. It used to vanish,
-/// so a gate that bounced the stage back was talking to a model with no
-/// memory of its own draft.
+/// An accepted text-only reply stays in the conversation. Drop it and a gate
+/// that bounces the stage back is talking to a model with no memory of its own
+/// draft.
 #[test]
 fn empty_response_keeps_the_reply_it_accepts() {
     let mut world = World::new();
@@ -17388,7 +17389,7 @@ fn routing_request_shares_the_stage_prefix_and_forbids_tool_use() {
         serde_json::json!({ "tool_choice": { "type": "none" } })
     );
 
-    // A provider this cannot vouch for gets the old shape: no tools at all.
+    // A provider this cannot vouch for gets no tools at all.
     si.provider_name = "cfg".to_string();
     let routing = routing_request(&w, None, &si, &p, "analyze", 3, PriorCalls::default());
     assert!(routing.tools.is_empty());

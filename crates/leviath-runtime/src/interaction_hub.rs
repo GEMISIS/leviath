@@ -17,7 +17,7 @@
 //! person answers it or the run is cancelled, however long that takes. An
 //! operator who wants an unattended run to release its slot instead sets
 //! `[limits] interaction_timeout_secs`, and [`InteractionHub::set_timeout_secs`]
-//! puts that deadline on the wait (issue #204).
+//! puts that deadline on the wait.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -132,8 +132,8 @@ impl InteractionHub {
         // The lock is released before awaiting; answer()/cancel() can run.
         //
         // Off the tool lane, because there is no bound on how long a person
-        // takes: a batch that held lane capacity through a prompt was capacity
-        // no other agent's tools could use (issue #191). Callers that are not
+        // takes: a batch that holds lane capacity through a prompt is capacity
+        // no other agent's tools can use. Callers that are not
         // tool batches - the gate-prompt and interaction-point lanes - have no
         // ticket, and for them this is a plain await.
         let Some(deadline) = self.timeout() else {

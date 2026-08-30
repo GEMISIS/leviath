@@ -1,4 +1,4 @@
-//! Running a stage's script hooks (issue #260).
+//! Running a stage's script hooks.
 //!
 //! The contract lives in [`leviath_scripting::stage_hook`]; this module is the
 //! pipeline half - when each hook fires, what the script is shown, and what

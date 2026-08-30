@@ -48,24 +48,23 @@ pub struct PersistWatermark {
     ///
     /// `last_written_at` cannot answer that: the heartbeat advances it whether
     /// or not anything happened, which is the whole point of the heartbeat and
-    /// exactly why `meta.json`'s `updated_at` is not evidence of progress. Issue
-    /// #184 was reported on the strength of a fresh `updated_at`, so this is the
-    /// timestamp `lev ps` ages its rows against.
+    /// exactly why `meta.json`'s `updated_at` is not evidence of progress: a
+    /// wedged run keeps a fresh one. This is the timestamp `lev ps` ages its
+    /// rows against.
     last_progress_at: Option<i64>,
     /// The taint audit already on disk, as `(stage index, event count)`.
     ///
     /// The audit file is only rewritten when the gate recorded a new event.
-    /// Without it every snapshot re-serialized the whole (append-only) log,
-    /// an O(events) allocation per tick that grew with the run.
+    /// Without it every snapshot re-serializes the whole (append-only) log,
+    /// an O(events) allocation per tick that grows with the run.
     last_taint: Option<(usize, usize)>,
     /// The run's `(title, title_error)` as of the last snapshot.
     ///
     /// A title arrives on its own schedule: it is generated beside the run's
     /// first turn and can land after the run's last move, changing nothing
-    /// [`Self::last`] tracks. Without this it would sit in memory until the
-    /// next heartbeat - which a finished run is unloaded before reaching, so
-    /// the name was simply lost. Compared by reference below; only a write
-    /// clones.
+    /// [`Self::last`] tracks. Without this it sits in memory until the next
+    /// heartbeat, which a finished run is unloaded before reaching, and the
+    /// name is lost. Compared by reference below; only a write clones.
     last_title: Option<(Option<String>, Option<String>)>,
 }
 
@@ -232,13 +231,13 @@ fn credit_wait_to_stage_clock(progress: &mut StageProgress, now: i64) {
 /// [`Skipped`](leviath_core::run_meta::StageRunStatus::Skipped) once the run is
 /// over.
 ///
-/// Position used to stand in for "has run", which is only true of a linear
+/// Position cannot stand in for "has run": that only holds for a linear
 /// blueprint. A graph reaches its stages in whatever order its edges describe,
-/// so every branch the run went past without taking was filed as `Complete`
+/// so a branch the run went past without taking would be filed as `Complete`
 /// with an empty `region_tokens` - and since that map holds the high-water mark
 /// each region reached rather than what the stage itself added, an empty one in
-/// the middle of the sequence made the next real stage appear to have written
-/// every region from nothing (#372).
+/// the middle of the sequence makes the next real stage look like it wrote
+/// every region from nothing.
 ///
 /// `started_at`/`ended_at` are stamped once and never overwritten, so repeated
 /// calls are idempotent.
@@ -461,7 +460,7 @@ pub(crate) fn dispatch_persistence(
         let watermark_changed = watermark.last.as_ref() != Some(&current);
         // Deliberately *not* folded into `current`: a title is not the agent
         // moving, so it must not advance `last_progress_at` and make a wedged
-        // run look alive (issue #184). It only earns a write.
+        // run look alive. It only earns a write.
         let title_now = (md.title.as_deref(), md.title_error.as_deref());
         let title_changed = watermark
             .last_title
@@ -583,7 +582,7 @@ pub(crate) fn dispatch_persistence(
             .map(|w| serde_json::to_string(&w.to_state()).expect("FanOutState always serializes"));
         // An agent parked at a stage-boundary interaction point: persist the open
         // point (cursor/round + the reviewed document) so a restart re-presents the
-        // same prompt rather than dropping it and re-inferring (issue #38). The
+        // same prompt rather than dropping it and re-inferring. The
         // document comes from the open request in the hub - which is present by the
         // time `reflect_interaction_status` (running just before this system) has
         // flipped the agent to `Waiting`. If the request isn't registered yet, skip
@@ -604,21 +603,20 @@ pub(crate) fn dispatch_persistence(
         // Always carry the answer's bytes when the agent holds them; the
         // persistence lane decides whether they still need writing.
         //
-        // This used to be skipped here, keyed on a watermark advanced when the
-        // job was *built*. That assumed every job it built would be written,
-        // and the lane explicitly does not promise that: it coalesces queued
-        // snapshots per run and keeps only the newest. A run that finished
-        // inside one persistence window therefore had the job carrying the body
-        // dropped as superseded, while every later job carried `None` and still
-        // rewrote `meta.json` with the descriptor - leaving the descriptor and
-        // the sidecar permanently disagreeing, which `read_final_output` reads
-        // as "no answer" (issue #276).
+        // Skipping here on a watermark advanced when the job is *built* would
+        // assume every job built gets written, and the lane does not promise
+        // that: it coalesces queued snapshots per run and keeps only the
+        // newest. A run that finishes inside one persistence window would have
+        // the job carrying the body dropped as superseded, while every later
+        // job carries `None` and still rewrites `meta.json` with the
+        // descriptor - leaving the descriptor and the sidecar permanently
+        // disagreeing, which `read_final_output` reads as "no answer".
         //
-        // The skip itself was worth keeping - it stops a heartbeat rewriting a
-        // quarter-megabyte file every thirty seconds - so it moved to the lane,
-        // past the coalescing, where "did this get written" is a fact rather
-        // than an assumption. The cost here is one clone of the answer per
-        // snapshot, on a path that already deep-clones the whole context window.
+        // The skip lives in the lane instead, past the coalescing, where "did
+        // this get written" is a fact rather than an assumption; it stops a
+        // heartbeat rewriting a quarter-megabyte file every thirty seconds.
+        // The cost here is one clone of the answer per snapshot, on a path
+        // that already deep-clones the whole context window.
         let final_output_body = final_output.map(|o| o.0.content.clone());
         let _ = stage.0.send(PersistMsg::Snapshot(Box::new(PersistJob {
             run_id: md.run_id.clone(),

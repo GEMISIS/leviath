@@ -262,13 +262,12 @@ pub(crate) fn hold_for_gate(
 /// [`resolve_transition`], which follows the stage's `error`-conditioned edge
 /// when one has revisits left.
 ///
-/// Writing the status on its own is what several call sites used to do, and it
-/// silently discards the recovery the author declared. A `deep-researcher` run
-/// died that way with an `error_recovery` stage sitting unused in its graph and
-/// three stages still pending: a fan-out split that would not parse set
-/// `AgentStatus::Error` directly, and nothing ever consulted the edge. The
-/// distinction is invisible at the call site - both spellings "fail the run" -
-/// so the fix is one helper rather than a rule to remember.
+/// Writing the status on its own silently discards the recovery the author
+/// declared: setting `AgentStatus::Error` directly ends the run with the
+/// stage's `error_recovery` target sitting unused in the graph and every stage
+/// behind it still pending, because nothing ever consults the edge. The
+/// distinction is invisible at the call site - both spellings read as "fail the
+/// run" - so it lives in one helper rather than in a rule to remember.
 ///
 /// Not for conditions that are terminal by nature (a cancel, a completed run).
 /// This is for "this stage could not go on", which is exactly what an
@@ -426,10 +425,10 @@ pub(crate) fn resolve_transition(
         // A dead end resolves like a stage error: down the `error` edge when one
         // has budget left (this is what finally makes `error_recovery` reachable
         // for exhaustion, not just for provider failures), and otherwise the run
-        // FAILS. It used to resolve as `Terminal`, so a wide-researcher whose
-        // deep_dive ran `compare` out of revisits reported `complete` from the
-        // middle of its graph with the output stage still pending and nothing
-        // produced - success indistinguishable from the run that worked.
+        // FAILS. Resolving it as `Terminal` instead would report `complete`
+        // from the middle of a graph, with the output stage still pending and
+        // nothing produced - success indistinguishable from the run that
+        // worked.
         let resolution = match resolution {
             StageResolution::DeadEnd => {
                 let message = format!(
@@ -738,7 +737,7 @@ pub(crate) fn emit_stage_transition(
 /// rewrites the head of the prefix and invalidates everything behind it. Last
 /// means the bytes in front stay identical across a transition.
 ///
-/// Otherwise the historical target: the first pinned region, or `conversation`
+/// Otherwise the fallback target: the first pinned region, or `conversation`
 /// when a layout declares no pinned region at all.
 ///
 /// [`STAGE_INSTRUCTIONS_REGION`]: leviath_core::layout::STAGE_INSTRUCTIONS_REGION
@@ -770,10 +769,10 @@ pub(crate) fn apply_stage_context(
 ) -> Result<(), String> {
     // The hidden set describes the stage being entered and nothing else. A
     // stage with a layout of its own gets exactly what that layout leaves
-    // out; a stage without one carries everything (it used to inherit the
-    // previous stage's hidden set, so a stage after a narrowed one lost
-    // regions it never asked to lose); and `hide` then removes what this
-    // stage's own instructions never read.
+    // out; a stage without one carries everything (inheriting the previous
+    // stage's hidden set would cost a stage following a narrowed one regions
+    // it never asked to lose); and `hide` then removes what this stage's own
+    // instructions never read.
     match &setup.context_layout {
         Some(layout) => crate::context_setup::apply_layout(window, layout),
         None => window.hidden.clear(),

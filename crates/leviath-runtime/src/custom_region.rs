@@ -876,7 +876,7 @@ mod tests {
         let (_, messages) = render(&region, Some(&script(src)), false);
         // Asserted on the block rather than on its serialized form: the field
         // is deliberately never serialized, because it is one provider's and
-        // history is replayed to whichever provider runs next (issue #575).
+        // history is replayed to whichever provider runs next.
         // `openai_compat` re-attaches it by hand for the providers that want it.
         assert_eq!(
             tool_signature(&messages[0].content).as_deref(),

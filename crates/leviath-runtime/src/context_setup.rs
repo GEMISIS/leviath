@@ -15,7 +15,7 @@ use crate::ContextWindow;
 /// Initialize a [`ContextWindow`] from a blueprint and seed its regions from a
 /// name→content map. Adds each layout region plus the infra
 /// `tool_results`/`conversation` regions, then fills each seed whose key matches
-/// a declared region. The `task` key gets the legacy fallback: if there is no
+/// a declared region. The `task` key gets a fallback of its own: if there is no
 /// region literally named `task`, it seeds the first pinned region instead.
 /// Pure over the window (no engine/entity), so both the imperative engine and
 /// the ECS pipeline's spawner can share it.
@@ -71,7 +71,7 @@ pub(crate) fn init_window_seeded(
     }
 
     for (name, content) in seeds {
-        // The task key keeps its legacy fallback: prefer a region named "task",
+        // The task key has a fallback of its own: prefer a region named "task",
         // else the first pinned region. Every other key targets its region by
         // exact name (unknown names are already rejected upstream, so ignore
         // them here to keep this pure/infallible).
@@ -144,9 +144,9 @@ fn task_region_name(blueprint: &Blueprint) -> Option<String> {
         .map(|r| r.name.clone())
 }
 
-/// Initialize a [`ContextWindow`] seeding only the task text - the thin
-/// back-compat wrapper over `init_window_seeded` used by callers that carry a
-/// single task string (the imperative engine and existing tests).
+/// Initialize a [`ContextWindow`] seeding only the task text - the one-seed
+/// convenience over `init_window_seeded`, for callers that carry a single task
+/// string.
 pub fn init_window(window: &mut ContextWindow, blueprint: &Blueprint, task: &str) {
     let seeds = HashMap::from([("task".to_string(), task.to_string())]);
     init_window_seeded(window, blueprint, &seeds);
@@ -180,8 +180,8 @@ pub(crate) fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
             for entry in &existing.content {
                 let _ = new_region.carry_entry(entry.clone());
             }
-            // The region-level taint state carries wholesale too; the rebuild
-            // used to silently reset it.
+            // The region-level taint state carries wholesale too: rebuilding
+            // instead of carrying silently resets it.
             new_region.taint = existing.taint.clone();
         }
 
@@ -499,7 +499,7 @@ mod tests {
     #[test]
     fn init_window_seeded_task_key_falls_back_to_first_pinned() {
         // No region literally named "task": the "task" seed key still lands in
-        // the first pinned region (legacy fallback), while a named key does not.
+        // the first pinned region (the task fallback), while a named key does not.
         let bp = blueprint_with(vec![RegionDefinition::new(
             "system".to_string(),
             RegionKind::Pinned,
@@ -677,9 +677,9 @@ mod tests {
 
     #[test]
     fn apply_layout_preserves_entry_kinds_and_taint_across_swap() {
-        // Regression: the carry used to rebuild entries via `add_entry`, which
-        // stamped every carried entry `EntryKind::Text` (destroying tool_use/
-        // tool_result pairing) and silently reset region-level taint.
+        // The carry must not rebuild entries via `add_entry`: that stamps
+        // every carried entry `EntryKind::Text`, destroying tool_use/
+        // tool_result pairing, and silently resets region-level taint.
         let bp = blueprint_with(vec![RegionDefinition::new(
             "task".to_string(),
             RegionKind::Pinned,

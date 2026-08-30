@@ -406,10 +406,10 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
 
 #[cfg(test)]
 mod stage_instructions_fit_tests {
-    //! The reported spawn failure, reproduced end to end.
+    //! A stage prompt bigger than the first pinned region, spawned end to end.
 
-    /// A layout shaped like the reported blueprint: a small `task` region and a
-    /// dedicated `stage_instructions` region with room for a stage prompt.
+    /// A small `task` region beside a dedicated `stage_instructions` region
+    /// with room for a stage prompt.
     fn layout(window: usize) -> leviath_core::layout::ContextLayout {
         use leviath_core::layout::{BudgetSpec, ContextLayout, RegionDefinition};
         let pct = |p: f64| BudgetSpec::Percent {
@@ -501,21 +501,20 @@ mod stage_instructions_fit_tests {
         );
     }
 
-    /// The reported failure itself: a blueprint that declares no
-    /// `stage_instructions` region at all.
+    /// A blueprint that declares no `stage_instructions` region at all.
     ///
-    /// Its prompt went to `task` - the first pinned region, sized for a sentence
-    /// from the caller - and on a small window the spawn died with
-    /// `stage system prompt does not fit region 'task'`. The workaround was to
-    /// floor every task region with a `min_tokens` sized for the largest stage
-    /// prompt, coupling an unrelated region to prompt lengths.
+    /// Without one the prompt goes to `task` - the first pinned region, sized
+    /// for a sentence from the caller - and on a small window the spawn dies
+    /// with `stage system prompt does not fit region 'task'`. The alternative
+    /// is flooring every task region with a `min_tokens` sized for the largest
+    /// stage prompt, coupling an unrelated region to prompt lengths.
     #[test]
     fn a_blueprint_that_declares_no_region_still_gets_one() {
         use leviath_core::layout::{BudgetSpec, ContextLayout, RegionDefinition};
         let window_tokens = 128_000;
         let prompt = big_prompt();
 
-        // Only `task`, at 2% - exactly the reported declaration.
+        // Only `task`, at 2% - a region sized for a sentence from the caller.
         let mut task =
             RegionDefinition::new("task".to_string(), leviath_core::RegionKind::Pinned, 0);
         task.budget = BudgetSpec::Percent {

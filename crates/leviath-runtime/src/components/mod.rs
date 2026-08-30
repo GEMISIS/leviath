@@ -188,7 +188,7 @@ pub enum AgentStatus {
 impl AgentStatus {
     /// The short, stable lowercase word for this status.
     ///
-    /// One table, because three used to drift independently: `lev ps`, the
+    /// One table, because three readers otherwise drift apart: `lev ps`, the
     /// [`WorldEvent`](crate::host::WorldEvent) stream (and through it the REST
     /// WebSocket), and the `check_agent` tool result the model reads. The
     /// strings are part of the daemon's wire contract, so they are fixed here
@@ -260,7 +260,7 @@ mod context_window;
 pub use context_window::*;
 
 /// Compiled stage-hook scripts for an agent, keyed by the script path the
-/// blueprint wrote (issue #260).
+/// blueprint wrote.
 ///
 /// Populated once at spawn by the CLI, which resolves blueprint-dir-relative
 /// paths and compile-checks the files - the same lifecycle
@@ -2668,11 +2668,11 @@ mod tests {
 
     // ─── the conversation ends the request (issue #486) ──────────────────
 
-    /// A custom region is the only kind that can render into the conversation,
-    /// and it used to render at whatever position its author declared it - so
-    /// one declared after the conversation put its contents behind the last
-    /// user turn. With a document corpus in that region, the thing sitting in
-    /// the position the model weighs most heavily stopped being the dialogue.
+    /// A custom region is the only kind that can render into the conversation.
+    /// Rendering it at whatever position its author declared puts a region
+    /// declared after the conversation behind the last user turn, so with a
+    /// document corpus in it the thing sitting where the model weighs most
+    /// heavily is no longer the dialogue.
     #[test]
     fn a_custom_region_declared_after_the_conversation_still_renders_before_it() {
         let mut window = ContextWindow::new(100_000);

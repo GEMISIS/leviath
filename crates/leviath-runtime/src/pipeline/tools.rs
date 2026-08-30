@@ -23,7 +23,7 @@ pub struct DynamicTools;
 /// Reports one tool call's result the moment it resolves, from inside the
 /// executor - `(tool_call_id, result)`. Dispatch builds one per batch to journal
 /// each completion as a `ToolCallDone` record, so a crash mid-batch loses only
-/// the calls that genuinely never finished (issue #96). Implementors that don't
+/// the calls that genuinely never finished. Implementors that don't
 /// journal get a no-op.
 pub type ToolProgress = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
@@ -149,10 +149,9 @@ pub(crate) fn merge_in_call_order(
 /// gate stopped it) all mean the same thing to anything reasoning about what
 /// the agent *did*: file tracking must not record a write that was not
 /// written, and the modification counters behind a transition gate must not
-/// count it as work. Separate prefix lists are exactly how a new prefix gets
-/// missed - `[unavailable]` was, when dispatch began refusing unoffered tools
-/// and both call sites still listed only two, and `[blocked]` was again, so a
-/// taint-blocked write counted as a modification until issue #155's pass.
+/// count it as work. One predicate, one list: keep the prefixes in two places
+/// and adding a fourth means a call site still testing three, which files a
+/// blocked write as a modification.
 pub(crate) fn call_had_no_effect(result: &str) -> bool {
     result.starts_with("[error]")
         || result.starts_with("[denied]")
@@ -353,7 +352,7 @@ pub(crate) struct DaemonServices<'w> {
 /// (inline results pre-filled, lane calls pending) goes to the persistence lane
 /// with an ack the exec waits on, and a per-call [`ToolProgress`] journals each
 /// completion as a `ToolCallDone`. On a crash mid-batch, recovery replays the
-/// recorded results instead of re-running their side effects (issue #96).
+/// recorded results instead of re-running their side effects.
 pub(crate) fn dispatch_tools(
     mut agents: Query<DispatchToolsQuery, With<ReadyForTools>>,
     service: Res<ToolServiceRes>,
@@ -591,9 +590,9 @@ pub(crate) fn dispatch_tools(
             // After the gate, not before it with the other inline tools: the
             // submitted answer leaves the machine (`GET /api/agents/{id}/result`,
             // the dashboard), so `submit_output` is classified outbound, and a
-            // classification the gate never sees gates nothing. It used to be
-            // applied above the gate, which is what let a Private region reach a
-            // remote reader with no prompt however it was classified.
+            // classification the gate never sees gates nothing. Applied above
+            // the gate, a Private region reaches a remote reader with no
+            // prompt however it was classified.
             if crate::output_tool::is_output_tool(&c.name) {
                 let stage_names: Vec<String> = blueprint
                     .map(|bp| bp.0.stages.iter().map(|s| s.name.clone()).collect())
@@ -726,15 +725,14 @@ pub(crate) fn dispatch_tools(
             // Nothing async to run - apply the context results now and loop back.
             let merged = merge_in_call_order(&result.tool_calls, &context_results);
             // Log the calls here, because this batch never reaches
-            // `collect_tools` - the usual writer of `[tool]` lines - and so
-            // left no trace anywhere a person can read. A batch of only
-            // inline-resolved calls (context tools, a refusal, a gate denial)
-            // still counts towards `meta.tool_calls`, so a run could report
-            // tool calls next to a stage log that recorded none of them, which
-            // is exactly how an empty activity panel came to look like a
-            // dropped-log bug (issues #589, #595). A mixed batch is already
-            // covered: `collect_tools` zips over every call, inline ones
-            // included.
+            // `collect_tools` - the usual writer of `[tool]` lines - and would
+            // otherwise leave no trace anywhere a person can read. A batch of
+            // only inline-resolved calls (context tools, a refusal, a gate
+            // denial) still counts towards `meta.tool_calls`, so without this
+            // a run reports tool calls next to a stage log that recorded none
+            // of them, and an empty activity panel reads as a dropped-log bug.
+            // A mixed batch is already covered: `collect_tools` zips over
+            // every call, inline ones included.
             if let Some(buffer) = io_buffer.as_deref_mut() {
                 let idx = cursor.map_or(0, |c| c.index);
                 for (call, (_id, tool_result)) in result.tool_calls.iter().zip(merged.iter()) {

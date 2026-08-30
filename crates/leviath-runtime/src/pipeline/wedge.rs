@@ -11,16 +11,16 @@
 //! That is not hypothetical. `PipelineWorld` already logs "a pipeline system
 //! panicked outside any agent's scope; the daemon survived (an agent may be
 //! wedged - cancel it via `lev cancel <run-id>`)": the runtime knows it can
-//! strand a run and asks a person to clean up. Issue #202 is what happens when
-//! the "person" is an unattended harness. It counted the run as occupying a slot
-//! for ever, and its factory ran down to zero free slots over a few hours.
+//! strand a run and asks a person to clean up. When the "person" is an
+//! unattended harness nobody ever does: the run occupies a slot for ever, and a
+//! factory runs down to zero free slots over a few hours.
 //!
 //! ## Why this cannot produce a false positive
 //!
 //! The trigger is structural, not temporal. It is not "this run looks old" -
-//! that is the shape of the misdiagnosis in issues #184, #189, #190 and #197,
-//! where a fresh `updated_at`, a bare `waiting`, and a `pid` field each got read
-//! as evidence they were never able to give. It is "the pipeline's own
+//! that is the shape of every misdiagnosis in this area, where a fresh
+//! `updated_at`, a bare `waiting`, or a `pid` field gets read as evidence it
+//! was never able to give. It is "the pipeline's own
 //! invariants say this state cannot exist", and the timeout only absorbs the
 //! transient windows inside a tick.
 //!
@@ -36,15 +36,15 @@
 //!   fifteen-minute call is never a candidate.
 //! - A full inference pool leaves the agent `ReadyToInfer` with a
 //!   [`DispatchStall`](super::DispatchStall). That is backpressure working as
-//!   designed, and issue #190's watchdog already declines to fail it.
+//!   designed, and the stall watchdog already declines to fail it.
 //! - A tool batch holds `AwaitingTools` and is deliberately unbounded: it may
 //!   park off-lane on a tool approval, an `ask_user`, or a `wait_for_agent` that
 //!   ends only when some other run does. Any clock-based rule would have to
 //!   guess a bound here. This one does not have to.
 //! - A run blocked on a person holds an interaction marker and is left entirely
-//!   alone. That is issue #204's territory, and deliberately so: killing a run
-//!   somebody is about to answer is a worse failure than leaking a slot, and two
-//!   timeouts racing over one status is how #184 happened.
+//!   alone, and deliberately so: killing a run somebody is about to answer is a
+//!   worse failure than leaking a slot, and two timeouts racing over one status
+//!   is how a run's status ends up lying about what happened to it.
 //! - `Paused` is skipped before the clock is even read, and loses any record it
 //!   was carrying, so resuming never finds a run the watchdog had started
 //!   counting.

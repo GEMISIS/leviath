@@ -136,11 +136,10 @@ impl std::fmt::Debug for SpawnArgs {
 /// `control-socket` feature while this type does not, and an intra-doc link
 /// into a module that may not be compiled fails the docs build.
 ///
-/// `lev ps` used to be a run id and a status word, which is why issue #184
-/// happened: `waiting` on its own says nothing about whether a person is needed,
-/// and there was no way to tell a run that had moved a second ago from one that
-/// had been stopped for an hour. Everything here is read straight off the live
-/// world, so it is the daemon's own view, not a re-read of `meta.json`.
+/// A run id and a status word are not enough: `waiting` on its own says nothing
+/// about whether a person is needed, and gives no way to tell a run that moved a
+/// second ago from one stopped for an hour. Everything here is read straight off
+/// the live world, so it is the daemon's own view, not a re-read of `meta.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunListEntry {
     /// The run id (`lev ps`'s first column, and what `lev kill` takes).
@@ -199,11 +198,10 @@ pub struct RunListEntry {
     /// Whether this run finished having modified nothing, when its blueprint
     /// gave it a way to. Only ever true for a run that has stopped.
     ///
-    /// The flag itself is as old as issue #107, but nothing ever showed it: it
-    /// went into `meta.json` and was read back only on restart, so a run that
-    /// finished with no work to show for it looked exactly like one that
-    /// succeeded. Defaulted for the same reason as `unattended` - an older
-    /// daemon simply omits it.
+    /// Carried on the row rather than left in `meta.json`, which is read back
+    /// only on restart: a run that finished with no work to show for it
+    /// otherwise looks exactly like one that succeeded. Defaulted for the same
+    /// reason as `unattended` - an older daemon simply omits it.
     #[serde(default)]
     pub empty_output: bool,
     /// Fan-outs this run degraded: a `fan_out` stage that transitioned without
@@ -256,9 +254,9 @@ pub struct RunListing {
 /// The daemon's own health, alongside the run listing.
 ///
 /// A per-run view answers "what is this run doing"; this answers "is the daemon
-/// getting anywhere at all". They are different questions, and issue #191 was
-/// only visible in the second: every individual run looked fine, and the factory
-/// as a whole had not moved in hours.
+/// getting anywhere at all". They are different questions, and a wedge is only
+/// visible in the second: every individual run looks fine while the daemon as a
+/// whole has not moved in hours.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct DaemonHealth {
     /// Loaded agents by status.
@@ -289,7 +287,7 @@ pub struct DaemonHealth {
     /// Providers currently out of service, and when each is probed again.
     ///
     /// Empty on a healthy daemon. `#[serde(default)]` so an older client still
-    /// parses a newer daemon's response (issue #201).
+    /// parses a newer daemon's response.
     #[serde(default)]
     pub providers_down: Vec<crate::pipeline::ProviderCircuitState>,
 }
@@ -414,11 +412,9 @@ pub enum SubAgentOp {
 /// What a parent learns when it checks on a child: what the child is doing, and
 /// what it has handed back.
 ///
-/// The two used to be one thing - the status alone - which is why
-/// `wait_for_agent`, whose schema has always promised "return its final result",
-/// returned `"Sub-agent 'x' finished with status: Complete"` and nothing else. A
-/// parent had no way to receive a child's work except by agreeing on a file path
-/// out of band.
+/// Both halves, not the status alone. `wait_for_agent`'s schema promises to
+/// return the child's final result, and a status word leaves a parent no way to
+/// receive a child's work except by agreeing on a file path out of band.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubAgentReport {
     /// What the child is doing now.

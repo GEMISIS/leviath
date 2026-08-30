@@ -22,8 +22,7 @@
 //!   point. Directive/edit loops are bounded by [`MAX_REVISION_ROUNDS`].
 //!
 //! The routing is deterministic (code); only the input capture is a user
-//! interaction - faithfully porting the deleted imperative
-//! `run_interactive_points_stage`.
+//! interaction.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -152,7 +151,7 @@ pub(crate) struct InteractionPointStage {
 #[derive(Resource)]
 pub(crate) struct InteractionPointResults(pub UnboundedReceiver<InteractionPointOutcome>);
 
-// ─── Pure routing helpers (ported from the deleted imperative stage loop) ─────
+// ─── Pure routing helpers ─────────────────────────────────────────────────────
 
 /// Normalize an option label for matching: fold Unicode dashes to ASCII `-` and
 /// collapse whitespace, so `"Revise - I'll…"` matches regardless of dash style.
@@ -1210,7 +1209,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_auto_approves_an_unattended_run_without_asking() {
         // `--yolo` means nobody is watching, so a stage-boundary checkpoint must
-        // resolve itself rather than park the run on the hub forever (#107).
+        // resolve itself rather than park the run on the hub forever.
         let hub = InteractionHub::new();
         let (tx, mut rx) = unbounded_channel();
         let mut world = World::new();
@@ -1959,7 +1958,7 @@ mod tests {
         );
     }
 
-    // ── restore (restart persistence, issue #38) ──
+    // ── restore (restart persistence) ──
 
     #[test]
     fn interaction_point_state_round_trips() {

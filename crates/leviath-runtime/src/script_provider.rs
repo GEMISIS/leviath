@@ -15,11 +15,10 @@
 //! - a broken script → not resolved (logged), so selection falls through.
 //!
 //! The `[model_providers.<name>]` table that feeds a script's `initialize` is
-//! read the same way, through a [`ScriptProviderConfig`] source the layer calls
-//! on every lookup rather than a copy taken at boot. It used to be a copy, so
-//! editing a provider's `base_url` did nothing until `lev daemon restart` while
-//! editing the script beside it took effect immediately - two halves of one
-//! feature disagreeing, silently (issue #533).
+//! read the same way: through a [`ScriptProviderConfig`] source the layer calls
+//! on every lookup, never a copy taken at boot. Both halves have to be live or
+//! the feature disagrees with itself: a changed `base_url` would wait for a
+//! daemon restart while a changed script beside it took effect at once.
 //!
 //! [`ProviderRegistry`]: crate::ProviderRegistry
 
@@ -70,9 +69,9 @@ pub struct ScriptProviderConfig {
 /// A cached, compiled script provider, plus what it was built from.
 ///
 /// Both halves matter. The mtime catches an edited script; the config catches
-/// an edited `[model_providers]` entry, which used to leave a stale provider
-/// cached under an unchanged file (issue #533). Compared by pointer, so a
-/// source that returns the same `Arc` while nothing has changed costs nothing.
+/// an edited `[model_providers]` entry, which leaves the script file's mtime
+/// untouched. Compared by pointer, so a source that returns the same `Arc`
+/// while nothing has changed costs nothing.
 struct Cached {
     mtime: SystemTime,
     config: Arc<ScriptProviderConfig>,
@@ -417,10 +416,10 @@ mod tests {
         ScriptProviderLayer::new(dir, HashMap::new(), HashMap::new(), None, Vec::new())
     }
 
-    /// The half of the feature that was frozen: the script file hot-reloads,
-    /// but its `[model_providers.<name>]` table was captured at boot, so
-    /// changing a `base_url` did nothing until a daemon restart - silently,
-    /// with the run using the old value (issue #533).
+    /// The half of the feature that is easy to freeze: the script file
+    /// hot-reloads on its own mtime, but its `[model_providers.<name>]` table
+    /// has no mtime anyone watches, so it has to be re-read per lookup or a
+    /// changed `base_url` waits, silently, for a daemon restart.
     ///
     /// The script here reports its `base_url` as a model id, so what the
     /// provider was initialized with is directly observable.
@@ -479,15 +478,14 @@ mod tests {
     }
 
     /// A machine whose `default_provider` is a script provider can win an open
-    /// route, which is the whole of issue #598.
+    /// route.
     ///
-    /// The failing shape: a local box serves one fast model, every bundled
-    /// blueprint names that model with no provider, and the run goes remote
-    /// anyway. `native_providers` does not enumerate script providers - they
-    /// are compiled on demand - so the open route was offered to every built-in
-    /// and never to the one the user had actually chosen. Setting
-    /// `default_provider` changed nothing, because there was no route it was
-    /// eligible to win.
+    /// The shape that makes this delicate: `native_providers` does not
+    /// enumerate script providers, since they are compiled on demand, so an
+    /// open route is offered to every built-in and to no script unless the
+    /// named default is reached explicitly. Without that, a local box serving
+    /// the one fast model every bundled blueprint asks for by bare id never
+    /// gets the route, and setting `default_provider` changes nothing.
     #[tokio::test]
     async fn a_script_provider_named_as_default_can_answer_what_it_serves() {
         let dir = tempfile::tempdir().unwrap();
