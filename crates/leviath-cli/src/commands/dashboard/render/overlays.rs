@@ -346,6 +346,10 @@ fn detail_sections() -> Vec<HelpSection> {
                 ("/", "search; n / N step through matches"),
                 ("y", "copy this pane to the clipboard"),
                 ("i", "respond, or send a message to a running agent run"),
+                (
+                    "enter on Deny with feedback",
+                    "open a box for what the run should do instead; ^Enter or the Send button sends it with the deny, esc goes back to the prompt",
+                ),
                 ("g", "the stage graph explorer"),
                 (", / .", "older / newer context point; opens Context"),
                 ("x", "kill the run (asks first)"),

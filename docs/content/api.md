@@ -200,7 +200,7 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/agents/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + token roll-ups |
 | `POST /api/agents/{id}/pause` · `/resume` | Pause a run · resume it |
 | `POST /api/agents/{id}/message` | Steer a running agent |
-| `GET/POST /api/agents/{id}/interaction` | Read / answer a pending question |
+| `GET/POST /api/agents/{id}/interaction` | Read / answer a pending question. See [below](#answering-a-question) |
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation. The listing is paginated and takes `q`; the detail carries the manifest, the regions and the [fan-out limits](#fan-out-limits) |
 | `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key |
 | `GET /api/models` | Enumerate models, with each one's token limits and where they came from. An OpenAI-compatible gateway's detected models are listed under the gateway's name |
@@ -214,6 +214,28 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/fs/dirs?path=&hidden=` | One directory level of subdirectory names, for a folder picker. Absolute paths only, fenced by `--workdir-root`; `hidden=true` includes dot-prefixed names |
 | `POST /api/fs/dirs` | Make one directory: `{"path": "<absolute parent>", "name": "<one segment>"}` → `201 {"path", "parent"}`. The same fence as the `GET`; `409` if it already exists. Announced as `fs.mkdir` |
 | `GET /ws` · `GET /ws/agents/{id}` | Live event stream (all agents / one run) |
+
+### Answering a question
+
+`GET /api/agents/{id}/interaction` is the request the run is parked on: its `id`, `kind`, `prompt`
+and `options`, plus `tool_name` and `tool_arguments` on a tool approval. `POST` the answer with
+the request's id as `request_id` and one of `value` (free text, an edited document), `choice_index`
+(a multiple choice, zero-based), or `approved` with an optional `scope` (`once`, `stage` or
+`session`) for a tool approval or a confirm. It answers `202` once the daemon has it and `404`
+when nothing with that id is open.
+
+A deny may carry `feedback`, a string the model reads as part of the tool result for the refused
+call, so its next turn is a redirect rather than a guess:
+
+```json
+{"request_id": "approve-call_1", "approved": false, "feedback": "use git log, not git show"}
+```
+
+The model sees `[denied] User declined tool call 'bash'. Feedback: use git log, not git show`.
+Without `feedback` the result is the plain `[denied] User declined tool call 'bash'.` it always was.
+`feedback` beside `approved: true` is a `400`, because there is nothing to redirect. The same text
+is what the tool approval's fifth option, "Deny with feedback", collects in the dashboard, and
+what `lev respond <id> --deny --feedback "..."` sends. Announced as `interaction.feedback`.
 
 On `/logs`, `stage` takes a stage index or `all`, and defaults to the current stage. `stream` is
 either `output`, the assistant's own text, or `logs`, which carries tool calls, token counts and
@@ -965,6 +987,7 @@ than that feature, not broken.
 | `config.gateways.kinds` | `kind`, `header_names` and `models` on each gateway, and `kind`, `headers` and `models` accepted by `PUT /api/config`: a gateway can be an OpenAI-compatible endpoint rather than a script |
 | `models.probe` | `POST /api/models/probe`, which asks an OpenAI-compatible server what it serves before a gateway for it is written; admin only |
 | `fs.mkdir` | `POST /api/fs/dirs`, so a folder picker can offer "New Folder" rather than one that 404s |
+| `interaction.feedback` | `feedback` beside `approved: false` on `POST /api/agents/{id}/interaction`, and the "Deny with feedback" option on a tool approval. An older daemon drops the field without a word, so a console should only offer the box where this is announced. See [answering a question](#answering-a-question) |
 
 ## Live updates over WebSocket
 

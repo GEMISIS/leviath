@@ -4,6 +4,7 @@ mod agents;
 mod click;
 mod construct;
 mod context_tree;
+mod deny_feedback;
 mod detail_band;
 mod explorer;
 mod graph;

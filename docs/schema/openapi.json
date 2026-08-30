@@ -923,7 +923,8 @@
           "200": {
             "$ref": "#/components/responses/Ok"
           }
-        }
+        },
+        "description": "Body: `request_id` (the open request's id) plus one of `value`, `choice_index`, or `approved` with an optional `scope` (`once`, `stage`, `session`). A deny (`approved: false`) may carry `feedback`, a string the model reads inside the tool result for the refused call: `[denied] User declined tool call '<tool>'. Feedback: <text>`. `feedback` beside `approved: true` is a 400. 202 once the daemon holds the answer, 404 when nothing with that id is open. Announced as `interaction.feedback`."
       }
     },
     "/api/mcp/servers": {

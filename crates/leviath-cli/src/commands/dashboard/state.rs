@@ -26,6 +26,10 @@ pub(crate) struct Dashboard {
     /// Whether Tab has moved the keys from the response box to the Send
     /// button under it. Enter there sends; Enter in the box breaks the line.
     pub(super) response_focus_send: bool,
+    /// The response box is open under a tool-approval prompt to collect the
+    /// text for a "Deny with feedback": the answer it sends is a deny, and
+    /// Esc goes back to the prompt rather than out of input mode.
+    pub(super) deny_feedback_open: bool,
     /// True when the full-screen detail view is open for the selected agent
     pub(super) detail_view: bool,
     pub(super) cmd_tx: mpsc::UnboundedSender<DaemonCommand>,

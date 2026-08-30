@@ -211,6 +211,12 @@ or `Space` sends, as does a click on it. `PgUp` / `PgDn` scroll the document abo
 document edit takes the same keys, with a Save button in place of Send. Single-line boxes (a
 rename, a filter, a server URL) still submit on `Enter`.
 
+A tool approval is a list of choices: `↑` / `↓` pick one and `Enter` answers. Its last row, "Deny
+with feedback", opens the same response box instead of answering, for the line or two that tells
+the run what to do instead of the call. `Ctrl+Enter` or the Send button sends it with the deny, and
+`Esc` goes back to the choices with nothing sent. The text reaches the model inside the refused
+call's tool result; see [Human-in-the-loop](/docs/interaction#tool-approval).
+
 Destructive keys always confirm on a dialog with real buttons: `←`/`→` pick an answer, `Enter`
 activates it, and a stray keypress does nothing. The safe answer holds focus to start.
 

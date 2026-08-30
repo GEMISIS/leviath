@@ -420,6 +420,7 @@ mod tests {
             choice: None,
             approve: false,
             deny: false,
+            feedback: None,
             session: false,
             stage: false,
             json: false,

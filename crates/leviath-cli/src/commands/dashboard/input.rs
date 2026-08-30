@@ -303,7 +303,11 @@ impl Dashboard {
         };
     }
 
-    fn handle_input_mode_key(&mut self, key_code: KeyCode, key: crossterm::event::KeyEvent) {
+    pub(super) fn handle_input_mode_key(
+        &mut self,
+        key_code: KeyCode,
+        key: crossterm::event::KeyEvent,
+    ) {
         use interaction::InteractionKind;
         let kind = self
             .selected_agent()
@@ -322,15 +326,19 @@ impl Dashboard {
             self.remember_md_mode(outcome);
             return;
         }
+        // The feedback box under an approval prompt is the response box with
+        // a different destination, so it takes the response box's keys.
+        if self.deny_feedback_open {
+            self.handle_response_box_key(key);
+            return;
+        }
         match &kind {
             Some(InteractionKind::FreeText) | Some(InteractionKind::EditText) | None => {
                 self.handle_response_box_key(key);
             }
             _ => match key_code {
                 KeyCode::Esc => self.close_input_box(),
-                KeyCode::Enter => {
-                    self.submit_input();
-                }
+                KeyCode::Enter => self.confirm_choice(),
                 KeyCode::Up => {
                     if self.choice_selected > 0 {
                         self.choice_selected -= 1;
@@ -366,7 +374,7 @@ impl Dashboard {
             match key.code {
                 KeyCode::Enter | KeyCode::Char(' ') => self.submit_input(),
                 KeyCode::Tab | KeyCode::BackTab => self.response_focus_send = false,
-                KeyCode::Esc => self.close_input_box(),
+                KeyCode::Esc => self.cancel_response_box(),
                 _ => {}
             }
             return;
@@ -376,7 +384,7 @@ impl Dashboard {
                 self.submit_input();
             }
             KeyCode::Tab => self.response_focus_send = true,
-            KeyCode::Esc => self.close_input_box(),
+            KeyCode::Esc => self.cancel_response_box(),
             KeyCode::PageUp if self.has_scrollable_document() => self.scroll_by(10),
             KeyCode::PageDown if self.has_scrollable_document() => self.scroll_by(-10),
             _ => {
@@ -391,6 +399,7 @@ impl Dashboard {
     pub(super) fn close_input_box(&mut self) {
         self.input_mode = false;
         self.response_focus_send = false;
+        self.deny_feedback_open = false;
         self.input_textarea = MarkdownEdit::default();
         self.choice_selected = 0;
     }
@@ -1042,6 +1051,9 @@ impl Dashboard {
                     let label = r.options.get(idx).cloned().unwrap_or(idx.to_string());
                     let d = truncate(&label, 40);
                     (InteractionResponse::choice(&r.id, idx), d)
+                }
+                InteractionKind::ToolApproval if self.deny_feedback_open => {
+                    self.deny_feedback_response(&r.id)
                 }
                 InteractionKind::ToolApproval => {
                     let idx = self.choice_selected;
