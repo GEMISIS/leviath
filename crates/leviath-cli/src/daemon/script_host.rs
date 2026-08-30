@@ -28,9 +28,11 @@ use crate::daemon::sandbox_manager::SandboxManager;
 
 mod http_limits;
 mod permissions;
+pub(crate) use http_limits::mirror_process_policy;
 use http_limits::*;
 #[cfg(test)]
 pub(crate) use http_limits::{REDIRECT_MIRROR, lock_redirect_mirror};
+#[cfg(test)]
 pub(crate) use http_limits::{
     set_local_network_allowed, set_script_http_max_per_host, set_script_http_timeout,
 };
@@ -1708,6 +1710,76 @@ mod tests {
         .await
         .unwrap();
         let err = out.expect_err("a redirect to loopback must not be followed");
+        assert!(err.contains("refused to follow redirect"), "got: {err}");
+    }
+
+    /// `[security] allow_local_network` has to travel **down** as well as up.
+    ///
+    /// The per-agent check reads the reloaded config, so tightening the switch
+    /// stopped a script naming a loopback URL straight away - but the redirect
+    /// policy is a process-wide mirror that was written once at daemon
+    /// start-up, so a permitted URL bouncing to loopback went on being
+    /// followed until the daemon was restarted. Loosening it worked (the
+    /// mirror defaults to the *safe* value, so boot could only widen it),
+    /// which is exactly why nobody noticed. Drives the real
+    /// `mirror_process_policy` in both directions over one live redirect.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_redirect_policy_follows_the_config_down_as_well_as_up() {
+        use axum::Router;
+        use axum::response::Redirect;
+        use axum::routing::get;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(
+                "/bounce",
+                get(move || async move { Redirect::temporary(&format!("http://{addr}/ok")) }),
+            )
+            .route("/ok", get(|| async { "ARRIVED" }));
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+
+        let mut permissive = crate::config::Config::default();
+        permissive.security.allow_local_network = true;
+        let strict = crate::config::Config::default();
+        assert!(
+            !strict.security.allow_local_network,
+            "the default is the closed one, which is what makes this a tightening"
+        );
+
+        // Both process-wide statics this writes have their own test lock; the
+        // guard covers the whole request, as in the tests above.
+        let guard = REDIRECT_MIRROR.lock().await;
+        let (opened, closed) = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            let _limits = lock_http_limits();
+            let previous = local_network_allowed();
+            let previous_max = HTTP_MAX_PER_HOST.load(std::sync::atomic::Ordering::Relaxed);
+            let previous_timeout = HTTP_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed);
+            let url = format!("http://{addr}/bounce");
+
+            mirror_process_policy(&permissive);
+            let opened = RealScriptIo.http_get(&url, BTreeMap::new());
+            // The tightening a user saves: same process, same client, no restart.
+            mirror_process_policy(&strict);
+            let closed = RealScriptIo.http_get(&url, BTreeMap::new());
+
+            set_local_network_allowed(previous);
+            set_script_http_max_per_host(previous_max);
+            set_script_http_timeout(previous_timeout);
+            (opened, closed)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            opened.expect("a permitted hop is followed"),
+            "ARRIVED",
+            "the loosened config has to reach the client, or the tightening below proves nothing"
+        );
+        let err = closed.expect_err("the tightened config must stop the same hop");
         assert!(err.contains("refused to follow redirect"), "got: {err}");
     }
 
