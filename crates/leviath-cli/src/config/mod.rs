@@ -1485,7 +1485,10 @@ some_custom_thing = \"forwarded to the script\"
         // A couple of spot checks that the values landed where the schema says,
         // rather than being silently dropped into nothing.
         assert_eq!(parsed.default_provider, "anthropic");
-        assert_eq!(parsed.limits.interaction_timeout_secs, 3600);
+        assert_eq!(
+            parsed.limits.interaction_timeout_secs, None,
+            "the example only shows the timeout commented out"
+        );
         assert_eq!(parsed.mcp_servers.len(), 2);
     }
 
@@ -2077,9 +2080,9 @@ some_custom_thing = \"forwarded to the script\"
         // A finished run stays listed for five minutes, so a scheduler polling
         // about once a minute still learns how it ended.
         assert_eq!(limits.finished_retention_secs, 300);
-        // An unanswered prompt releases after an hour rather than holding its
-        // run's slot until the daemon restarts (issue #204).
-        assert_eq!(limits.interaction_timeout_secs, 3600);
+        // A prompt waits for a person until answered; only an operator who
+        // sets a timeout gets one.
+        assert_eq!(limits.interaction_timeout_secs, None);
         // And the top-level Config carries the same defaults.
         assert_eq!(Config::default().limits.max_concurrent_inferences, Some(8));
     }
@@ -2144,8 +2147,9 @@ some_custom_thing = \"forwarded to the script\"
         );
     }
 
-    /// A config written before the field existed still gets the hour, and an
-    /// explicit `0` still means "wait for a person however long it takes".
+    /// A config that never mentions the field waits for a person; an explicit
+    /// `0` (how "wait for ever" used to be spelled) parses as `Some(0)`, which
+    /// the hub reads the same way; a number is a deadline.
     #[test]
     fn interaction_timeout_defaults_and_parses() {
         let dir = tempfile::tempdir().unwrap();
@@ -2159,13 +2163,24 @@ some_custom_thing = \"forwarded to the script\"
             "{}\n[limits]\nmax_concurrent_tools = 4\n",
             config_toml_without_limits()
         ));
-        assert_eq!(old.limits.interaction_timeout_secs, 3600);
+        assert_eq!(old.limits.interaction_timeout_secs, None);
 
         let disabled = load(format!(
             "{}\n[limits]\ninteraction_timeout_secs = 0\n",
             config_toml_without_limits()
         ));
-        assert_eq!(disabled.limits.interaction_timeout_secs, 0);
+        assert_eq!(disabled.limits.interaction_timeout_secs, Some(0));
+
+        let bounded = load(format!(
+            "{}\n[limits]\ninteraction_timeout_secs = 900\n",
+            config_toml_without_limits()
+        ));
+        assert_eq!(bounded.limits.interaction_timeout_secs, Some(900));
+
+        // Written back, an unset timeout stays unset: the default is not
+        // spelled out as a number the user then has to delete.
+        let written = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!written.contains("interaction_timeout_secs"), "{written}");
     }
 
     /// The retry schedule is the shipped one unless someone says otherwise, so
@@ -3898,7 +3913,7 @@ enabled = false
                 wedge_timeout_secs: 420,
                 provider_failures_before_open: 5,
                 provider_circuit_cooldown_secs: 120,
-                interaction_timeout_secs: 120,
+                interaction_timeout_secs: Some(120),
                 inference_retry_attempts: 6,
                 inference_retry_base_ms: 250,
                 max_concurrent_inferences_by_model: std::collections::BTreeMap::from([(

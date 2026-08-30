@@ -2622,6 +2622,37 @@ pub(super) mod tests {
         );
     }
 
+    /// `lev setup` writes no interaction timeout unless the user types one.
+    /// The field is offered blank; blank stays unset (the run waits for a
+    /// person), and the written config carries no line for it, so a fresh
+    /// install is not handed a deadline it never asked for.
+    #[test]
+    fn setup_leaves_the_interaction_timeout_unset_unless_the_user_sets_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        wizard.enter(Step::Limits);
+        assert_eq!(
+            wizard.limits[9].value,
+            FieldValue::Number(None),
+            "the field is offered blank"
+        );
+
+        let config = wizard.build_config();
+        assert_eq!(config.limits.interaction_timeout_secs, None);
+        let written = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            !written.contains("interaction_timeout_secs"),
+            "nothing written for an unset timeout: {written}"
+        );
+
+        wizard.limits[9].value = FieldValue::Number(Some(900));
+        assert_eq!(
+            wizard.build_config().limits.interaction_timeout_secs,
+            Some(900),
+            "a number the user typed is stored"
+        );
+    }
+
     #[test]
     fn a_field_of_the_wrong_kind_is_ignored_when_writing_limits() {
         // Defensive: nothing builds this shape today, but a future edit that

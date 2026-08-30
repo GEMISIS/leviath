@@ -44,8 +44,8 @@ pub struct RunArgs {
     /// point declaring `unattended = "ask"` still holds for a person. The
     /// bundled coder's plan approval can, deliberately, because
     /// everything after it writes code. Such a run parks in `Waiting` until
-    /// `[limits] interaction_timeout_secs` (default 3600) releases it. Lower
-    /// that to bound the wait.
+    /// somebody answers; set `[limits] interaction_timeout_secs` to bound the
+    /// wait.
     #[arg(long)]
     pub yolo: bool,
 

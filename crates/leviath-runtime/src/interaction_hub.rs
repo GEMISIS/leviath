@@ -13,10 +13,11 @@
 //! batch it waits [`off_lane`](crate::tool_bridge::off_lane), so a prompt nobody
 //! has answered yet costs the tool lane no capacity.
 //!
-//! "A very long time" used to mean "for ever": a run whose operator had walked
-//! away sat in `WaitingInput` until the daemon died, holding its slot the whole
-//! time (issue #204). [`InteractionHub::set_timeout_secs`] puts a deadline on
-//! that wait.
+//! "A very long time" is, by default, exactly that: a prompt waits until a
+//! person answers it or the run is cancelled, however long that takes. An
+//! operator who wants an unattended run to release its slot instead sets
+//! `[limits] interaction_timeout_secs`, and [`InteractionHub::set_timeout_secs`]
+//! puts that deadline on the wait (issue #204).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -52,17 +53,11 @@ pub struct InteractionHub {
     /// (while otherwise parked) and reflects the change into agent status.
     wake: Arc<OnceLock<Arc<Notify>>>,
     /// How long an open request may go unanswered before the hub resolves it
-    /// itself, in seconds. `0` (the default) waits indefinitely. Set once at
+    /// itself, in seconds. `0` (the default) waits indefinitely: it is how
+    /// [`set_timeout_secs`](Self::set_timeout_secs) stores `None`. Set once at
     /// daemon start from `[limits] interaction_timeout_secs`.
     timeout_secs: Arc<AtomicU64>,
 }
-
-/// The default deadline on an unanswered prompt, in seconds.
-///
-/// An hour is long enough that a person who is actually there answers well
-/// inside it, and short enough that a run whose operator has gone home releases
-/// its slot the same day rather than holding it until the daemon restarts.
-pub const DEFAULT_INTERACTION_TIMEOUT_SECS: u64 = 3600;
 
 impl InteractionHub {
     /// A fresh, empty hub.
@@ -77,25 +72,29 @@ impl InteractionHub {
     }
 
     /// Set how long an open request may go unanswered before the hub resolves it
-    /// itself. `0` waits indefinitely - the behaviour before issue #204.
+    /// itself. `None` waits indefinitely, which is also the default; `Some(0)`
+    /// is read the same way, so a config that spells "no timeout" as `0` is
+    /// not turned into "expire at once".
     ///
     /// Applies to requests opened from here on; a request already parked keeps
     /// the deadline it was opened with.
-    pub fn set_timeout_secs(&self, secs: u64) {
-        self.timeout_secs.store(secs, Ordering::Relaxed);
+    pub fn set_timeout_secs(&self, secs: Option<u64>) {
+        self.timeout_secs
+            .store(secs.unwrap_or(0), Ordering::Relaxed);
     }
 
-    /// The configured deadline in seconds; `0` means the hub waits indefinitely.
-    pub fn timeout_secs(&self) -> u64 {
-        self.timeout_secs.load(Ordering::Relaxed)
+    /// The configured deadline in seconds; `None` means the hub waits
+    /// indefinitely.
+    pub fn timeout_secs(&self) -> Option<u64> {
+        match self.timeout_secs.load(Ordering::Relaxed) {
+            0 => None,
+            secs => Some(secs),
+        }
     }
 
     /// The current deadline, or `None` when the hub waits indefinitely.
     fn timeout(&self) -> Option<Duration> {
-        match self.timeout_secs.load(Ordering::Relaxed) {
-            0 => None,
-            secs => Some(Duration::from_secs(secs)),
-        }
+        self.timeout_secs().map(Duration::from_secs)
     }
 
     /// Wake the tick loop if a handle is attached (no-op otherwise).
@@ -257,9 +256,9 @@ pub struct HubInteractionBackend {
 }
 
 impl HubInteractionBackend {
-    /// The hub's prompt deadline in seconds (`0`: it waits indefinitely), so a
-    /// caller can say in its own words how long an unanswered prompt waited.
-    pub fn timeout_secs(&self) -> u64 {
+    /// The hub's prompt deadline in seconds (`None`: it waits indefinitely), so
+    /// a caller can say in its own words how long an unanswered prompt waited.
+    pub fn timeout_secs(&self) -> Option<u64> {
         self.hub.timeout_secs()
     }
 }

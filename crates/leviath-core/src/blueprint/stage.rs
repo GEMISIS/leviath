@@ -298,8 +298,8 @@ pub enum UnattendedPolicy {
 
     /// Open the prompt anyway and wait for a person, even under `--yolo`. For a
     /// checkpoint whose whole purpose is a human decision - a plan the user
-    /// signs off before any code is written. Pair it with `[limits]
-    /// interaction_timeout_secs` so an unanswered gate still releases.
+    /// signs off before any code is written. The run waits until somebody
+    /// answers; set `[limits] interaction_timeout_secs` to bound that wait.
     Ask,
 }
 
@@ -485,8 +485,8 @@ pub struct Stage {
     /// blocking human tool from the stage's advertised set, because a call to
     /// one can only park the agent until the daemon dies (issue #204). Naming a
     /// tool here says this stage genuinely needs a person and the run should
-    /// wait for one anyway. Pair it with `[limits] interaction_timeout_secs` so
-    /// an unanswered prompt still releases eventually.
+    /// wait for one anyway, for as long as it takes; set `[limits]
+    /// interaction_timeout_secs` to bound that wait.
     ///
     /// Entries must also appear in `available_tools` - listing a tool the stage
     /// can't call in the first place is a validation error, not a silent no-op.

@@ -11863,6 +11863,121 @@ async fn reflect_flips_active_to_waiting_and_back_when_prompt_clears() {
     let _ = asking.await;
 }
 
+/// Time spent waiting on a person is not time the agent spent stuck. An
+/// implement stage with `stuck_after_minutes = 15` whose operator took an hour
+/// to answer a write approval used to trip its stuck edge on the very next tick
+/// after the answer, because the stage clock kept running through the wait.
+/// The wait is now credited back to the clock when the prompt resolves.
+#[tokio::test]
+async fn reflect_keeps_a_wait_on_a_person_off_the_stage_clock() {
+    let hub = InteractionHub::new();
+    let asking = open_request(&hub, "a", "q1").await;
+
+    let mut world = World::new();
+    world.insert_resource(hub.clone());
+    let now = chrono::Utc::now().timestamp();
+    // Two minutes into the stage when the prompt opens.
+    let e = world
+        .spawn((
+            reflect_state("a", AgentStatus::Active),
+            StageProgress {
+                stage_started_at: Some(now - 120),
+                ..Default::default()
+            },
+        ))
+        .id();
+
+    run_reflect(&mut world);
+    let since = world
+        .get::<StageProgress>(e)
+        .unwrap()
+        .waiting_since
+        .expect("parking stamps when the wait began");
+    assert!((since - now).abs() <= 1);
+
+    // The person takes an hour. Backdate both stamps rather than sleep: the
+    // stage clock started two minutes before the prompt opened, an hour ago.
+    {
+        let mut progress = world.get_mut::<StageProgress>(e).unwrap();
+        progress.stage_started_at = Some(now - 3600 - 120);
+        progress.waiting_since = Some(now - 3600);
+    }
+    assert!(
+        hub.answer(leviath_core::interaction::InteractionResponse::text(
+            "q1", "ok"
+        ))
+    );
+    run_reflect(&mut world);
+
+    let progress = world.get::<StageProgress>(e).unwrap();
+    assert_eq!(progress.waiting_since, None, "the wait is over");
+    let started = progress.stage_started_at.expect("the clock is kept");
+    let elapsed = chrono::Utc::now().timestamp() - started;
+    assert!(
+        (0..=3).contains(&(elapsed - 120)),
+        "the stage is still two minutes in, not an hour and two: elapsed {elapsed}s"
+    );
+    let _ = asking.await;
+}
+
+/// A stage that parks before its first inference has no clock yet; the wait
+/// leaves it unset and the lazy stamp gives it a fresh one afterwards.
+#[tokio::test]
+async fn reflect_credits_nothing_to_a_stage_clock_that_was_never_stamped() {
+    let hub = InteractionHub::new();
+    let asking = open_request(&hub, "a", "q1").await;
+
+    let mut world = World::new();
+    world.insert_resource(hub.clone());
+    let e = world
+        .spawn((
+            reflect_state("a", AgentStatus::Active),
+            StageProgress::default(),
+        ))
+        .id();
+    run_reflect(&mut world);
+    assert!(
+        world
+            .get::<StageProgress>(e)
+            .unwrap()
+            .waiting_since
+            .is_some()
+    );
+    hub.cancel("q1");
+    run_reflect(&mut world);
+    let progress = world.get::<StageProgress>(e).unwrap();
+    assert_eq!(progress.waiting_since, None);
+    assert_eq!(progress.stage_started_at, None);
+    let _ = asking.await;
+}
+
+/// The clearing arm on an agent that never parked (no `waiting_since`): there
+/// is no wait to credit and the stage clock is left exactly as it was.
+#[test]
+fn reflect_credits_nothing_when_no_wait_was_recorded() {
+    let hub = InteractionHub::new(); // empty: nothing pending
+    let mut world = World::new();
+    world.insert_resource(hub);
+    let started = chrono::Utc::now().timestamp() - 300;
+    let e = world
+        .spawn((
+            reflect_state("a", AgentStatus::Waiting),
+            AwaitingInteraction,
+            StageProgress {
+                stage_started_at: Some(started),
+                waiting_since: None,
+                ..Default::default()
+            },
+        ))
+        .id();
+
+    run_reflect(&mut world);
+
+    let progress = world.get::<StageProgress>(e).unwrap();
+    assert_eq!(progress.stage_started_at, Some(started));
+    assert_eq!(progress.waiting_since, None);
+}
+
 #[tokio::test]
 async fn reflect_does_not_flip_a_non_active_agent_with_an_open_prompt() {
     // A terminal agent that happens to still have an open hub entry is left

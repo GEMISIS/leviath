@@ -77,7 +77,6 @@ pub(crate) fn held_tools(blueprint: &Blueprint) -> Vec<Held> {
 /// rather than a number to divide.
 fn human_timeout(secs: u64) -> String {
     match secs {
-        0 => "indefinitely".to_string(),
         s if s % 3600 == 0 => format!("{}h", s / 3600),
         s if s % 60 == 0 => format!("{}m", s / 60),
         s => format!("{s}s"),
@@ -87,7 +86,7 @@ fn human_timeout(secs: u64) -> String {
 /// The stderr block for a `--yolo` spawn. Empty when nothing holds.
 ///
 /// Pure, so the wording is testable without a daemon or a manifest on disk.
-pub(crate) fn preflight_lines(blueprint: &Blueprint, timeout_secs: u64) -> Vec<String> {
+pub(crate) fn preflight_lines(blueprint: &Blueprint, timeout_secs: Option<u64>) -> Vec<String> {
     let points = held_points(blueprint);
     let tools = held_tools(blueprint);
     if points.is_empty() && tools.is_empty() {
@@ -106,9 +105,9 @@ pub(crate) fn preflight_lines(blueprint: &Blueprint, timeout_secs: u64) -> Vec<S
     for t in &tools {
         lines.push(format!("  {}: {} (if the model calls it)", t.stage, t.name));
     }
-    lines.push(match timeout_secs {
-        0 => "  nothing expires these; the run waits until somebody answers".to_string(),
-        secs => format!(
+    lines.push(match timeout_secs.filter(|secs| *secs > 0) {
+        None => "  nothing expires these; the run waits until somebody answers".to_string(),
+        Some(secs) => format!(
             "  unanswered after {}, the run stops with an error; `lev respond` lists them",
             human_timeout(secs)
         ),

@@ -265,9 +265,9 @@ pub struct HostParts {
 /// are built once at startup and reused by every agent.
 pub fn build_host(parts: HostParts) -> WorldHost {
     let hub = InteractionHub::new();
-    // How long a prompt may go unanswered before the hub resolves it itself, so
-    // an operator who walked away costs the run a delay rather than its slot
-    // for as long as the daemon lives (issue #204).
+    // A prompt waits for a person until answered unless the operator bounded
+    // the wait with `[limits] interaction_timeout_secs`, in which case the hub
+    // resolves it itself once that passes (issue #204).
     hub.set_timeout_secs(parts.config.limits.interaction_timeout_secs);
     let tool_service = Arc::new(CliToolService::new());
     // The configured global fallback bounds concurrent inference for any model

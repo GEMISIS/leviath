@@ -469,6 +469,24 @@ mod tests {
     /// Every assertion here is an invariant over *all* discovered blueprints.
     /// Naming individual agents would turn adding or renaming one into a test
     /// edit, and would stop testing the property the moment the list drifted.
+    /// No bundled blueprint puts a deadline on a person. A prompt waits until
+    /// somebody answers unless the operator's own `[limits]
+    /// interaction_timeout_secs` says otherwise, and a shipped agent must not
+    /// decide that for them through any key that names the timeout.
+    #[test]
+    fn no_bundled_agent_sets_an_interaction_timeout() {
+        assert!(!BUNDLED_AGENTS.is_empty());
+        for agent in BUNDLED_AGENTS {
+            for (rel, contents) in agent.files {
+                assert!(
+                    !contents.contains("interaction_timeout"),
+                    "bundled agent {} sets an interaction timeout in {rel}",
+                    agent.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_bundled_agent_has_a_name_version_and_manifest() {
         assert!(

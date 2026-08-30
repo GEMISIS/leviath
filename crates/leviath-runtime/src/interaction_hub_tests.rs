@@ -224,7 +224,7 @@ async fn a_prompt_nobody_answers_is_released_when_the_deadline_passes() {
     // because nothing ever aged the request out. Now the hub resolves it
     // itself and the agent goes back to work.
     let hub = InteractionHub::new();
-    hub.set_timeout_secs(60);
+    hub.set_timeout_secs(Some(60));
     let backend = hub.backend_for("agent-a");
     let asking = tokio::spawn(async move { backend.ask(req("q1")).await });
 
@@ -248,7 +248,7 @@ async fn a_deadline_changes_nothing_for_a_prompt_that_is_answered() {
     // Setting a deadline must not alter the ordinary paths. Both of them run
     // here: one prompt answered by a person, one cancelled under it.
     let hub = InteractionHub::new();
-    hub.set_timeout_secs(3600);
+    hub.set_timeout_secs(Some(3600));
 
     let answered_backend = hub.backend_for("agent-a");
     let answered = tokio::spawn(async move { answered_backend.ask(req("q1")).await });
@@ -263,21 +263,74 @@ async fn a_deadline_changes_nothing_for_a_prompt_that_is_answered() {
     assert_eq!(cancelled.await.unwrap().value.as_deref(), Some(""));
 }
 
+/// With no deadline set, a prompt waits for a person however long that takes.
+/// The clock is paused and advanced well past the hour that used to be the
+/// default, and the prompt is still open; the answer that then arrives is the
+/// one the caller gets.
 #[tokio::test(start_paused = true)]
-async fn a_zero_deadline_waits_for_a_person_however_long_it_takes() {
-    // `0` is the explicit "I will be here" setting, and it has to keep the
-    // old behaviour exactly: the prompt stays open until answered.
+async fn with_no_deadline_a_prompt_waits_for_a_person_however_long_it_takes() {
     let hub = InteractionHub::new();
-    hub.set_timeout_secs(0);
+    assert_eq!(hub.timeout_secs(), None, "nothing set: no deadline");
     let backend = hub.backend_for("agent-a");
     let asking = tokio::spawn(async move { backend.ask(req("q1")).await });
 
     settle().await;
     tokio::time::advance(Duration::from_secs(86_400)).await;
+    settle().await;
+    assert_eq!(hub.pending().len(), 1, "a day later, still waiting");
+
+    assert!(hub.answer(InteractionResponse::text("q1", "here I am")));
+    let response = asking.await.unwrap();
+    assert_eq!(response.value.as_deref(), Some("here I am"));
+    assert!(hub.pending().is_empty());
+}
+
+/// `Some(0)` is read as "no deadline", not "expire at once": a config that
+/// spelled the wait as `interaction_timeout_secs = 0` keeps waiting.
+#[tokio::test(start_paused = true)]
+async fn a_zero_deadline_waits_for_a_person_however_long_it_takes() {
+    let hub = InteractionHub::new();
+    hub.set_timeout_secs(Some(0));
+    assert_eq!(hub.timeout_secs(), None);
+    let backend = hub.backend_for("agent-a");
+    let asking = tokio::spawn(async move { backend.ask(req("q1")).await });
+
+    settle().await;
+    tokio::time::advance(Duration::from_secs(86_400)).await;
+    settle().await;
     assert_eq!(hub.pending().len(), 1, "a day later, still waiting");
 
     assert!(hub.answer(InteractionResponse::text("q1", "here I am")));
     assert_eq!(asking.await.unwrap().value.as_deref(), Some("here I am"));
+}
+
+/// A configured deadline still fires when it says: two seconds means two
+/// seconds, not the hour it used to default to and not for ever.
+#[tokio::test(start_paused = true)]
+async fn a_two_second_deadline_fires_at_two_seconds() {
+    let hub = InteractionHub::new();
+    hub.set_timeout_secs(Some(2));
+    let backend = hub.backend_for("agent-a");
+    let asking = tokio::spawn(async move { backend.ask(req("q1")).await });
+
+    settle().await;
+    tokio::time::advance(Duration::from_millis(1_900)).await;
+    settle().await;
+    assert_eq!(
+        hub.pending().len(),
+        1,
+        "still open just short of the deadline"
+    );
+
+    tokio::time::advance(Duration::from_millis(200)).await;
+    settle().await;
+    assert!(
+        hub.pending().is_empty(),
+        "released once two seconds have passed"
+    );
+    let response = asking.await.unwrap();
+    assert_eq!(response.approved, None);
+    assert_eq!(response.value.as_deref(), Some(""));
 }
 
 #[tokio::test(start_paused = true)]
@@ -286,7 +339,7 @@ async fn the_deadline_denies_rather_than_approves() {
     // taint gate both go through `response_approved`, which reads the
     // neutral response as "no".
     let hub = InteractionHub::new();
-    hub.set_timeout_secs(30);
+    hub.set_timeout_secs(Some(30));
     let backend = hub.backend_for("agent-a");
     let asking = tokio::spawn(async move {
         backend
@@ -324,10 +377,12 @@ async fn an_answer_that_lands_as_the_deadline_passes_still_wins() {
 #[test]
 fn the_timeout_reads_back_through_the_hub_and_its_backends() {
     let hub = InteractionHub::new();
-    assert_eq!(hub.timeout_secs(), 0, "a fresh hub waits indefinitely");
-    hub.set_timeout_secs(7);
-    assert_eq!(hub.timeout_secs(), 7);
-    assert_eq!(hub.backend_for("agent-a").timeout_secs(), 7);
+    assert_eq!(hub.timeout_secs(), None, "a fresh hub waits indefinitely");
+    hub.set_timeout_secs(Some(7));
+    assert_eq!(hub.timeout_secs(), Some(7));
+    assert_eq!(hub.backend_for("agent-a").timeout_secs(), Some(7));
+    hub.set_timeout_secs(None);
+    assert_eq!(hub.timeout_secs(), None, "cleared again");
 }
 
 /// A deny that carries feedback comes out of `ask` exactly as it went into

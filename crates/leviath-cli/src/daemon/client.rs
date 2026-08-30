@@ -302,8 +302,8 @@ fn held_checkpoint_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
             .collect();
     if spawn_args.yolo {
         let timeout = crate::config::Config::load()
-            .map(|c| c.limits.interaction_timeout_secs)
-            .unwrap_or(leviath_runtime::interaction_hub::DEFAULT_INTERACTION_TIMEOUT_SECS);
+            .ok()
+            .and_then(|c| c.limits.interaction_timeout_secs);
         lines.extend(crate::held_checkpoints::preflight_lines(
             &blueprint, timeout,
         ));
@@ -1393,9 +1393,9 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
             .is_empty()
         );
 
-        // A config that will not load falls back to the default deadline rather
-        // than saying nothing: the checkpoints still hold, and naming them
-        // matters more than naming the exact timeout.
+        // A config that will not load reads as no deadline, which is also the
+        // default: the checkpoints still hold, and naming them matters more
+        // than naming a timeout the operator may not have set.
         let held = manifest_with_a_held_checkpoint(dir.path());
         crate::config::with_isolated_config_path("spawn-held-broken-config", |fake_dir| {
             std::fs::write(fake_dir.join("config.toml"), "not = valid = toml").unwrap();
@@ -1406,7 +1406,7 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
             })
             .join("\n");
             assert!(joined.contains("plan_approval"), "{joined}");
-            assert!(joined.contains("after 1h"), "{joined}");
+            assert!(joined.contains("until somebody answers"), "{joined}");
         });
     }
 

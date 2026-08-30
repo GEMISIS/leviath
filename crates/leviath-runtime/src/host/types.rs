@@ -62,9 +62,9 @@ pub struct SpawnArgs {
     ///
     /// An interaction point may opt out with `unattended = "ask"`, and then it
     /// parks anyway: the point exists precisely because auto-approving it is
-    /// the wrong answer. Such a run waits for `[limits]
-    /// interaction_timeout_secs` (default 3600) rather than forever, but from
-    /// the outside an hour of `Waiting` is indistinguishable from a hang.
+    /// the wrong answer. Such a run waits until somebody answers (or until
+    /// `[limits] interaction_timeout_secs`, when one is set), and from the
+    /// outside that `Waiting` is indistinguishable from a hang.
     #[serde(default)]
     pub yolo: bool,
     /// Refuse this run's `seed = { command = ... }` regions (the
