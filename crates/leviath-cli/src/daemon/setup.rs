@@ -243,6 +243,35 @@ fn make_reaper(
     })
 }
 
+/// The resume hook installed on the host: re-reads the config layers an agent
+/// resolved at spawn, against `config.toml` as it stands now.
+///
+/// Which is the whole point of the hook. A run parked on a tool it is not
+/// permitted to call, on a path it may not read, or against a write ceiling it
+/// has hit could not be freed by editing the file those come from: the answer
+/// was resolved once at spawn, so the only way out was to cancel the run and
+/// start it again, losing everything it had done. With an unanswered approval
+/// prompt waiting for ever by default, that stall never ends on its own.
+///
+/// A run that is not paused and not being paged in never reaches here, so a
+/// stage under way keeps the snapshot it started on.
+///
+/// Factored out (rather than an inline closure) so its body is exercised by a
+/// unit test - the daemon only ever fires it from the private `serve()` loop.
+fn make_resumer(
+    tool_service: Arc<CliToolService>,
+    reloader: Arc<crate::daemon::config_reload::ConfigReloader>,
+) -> leviath_runtime::host::Resumer {
+    Box::new(move |_world, entity| {
+        let Some(state) = tool_service.state_for(entity) else {
+            // Not every resumed entity has tool state: a fan-out parent that
+            // has been paged back in registers its workers as it goes.
+            return;
+        };
+        state.reread_config(&reloader.current());
+    })
+}
+
 /// Everything the daemon hands its world host at construction.
 ///
 /// A struct rather than eight positional parameters because these are not
@@ -497,6 +526,13 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // state was never released). Factored into `make_reaper` so the closure body
     // is unit-testable - the daemon only ever drives it from `serve()`.
     host.set_reaper(make_reaper(tool_service.clone(), parts.mcp_pool.clone()));
+
+    // Resume hook: a run that starts moving again re-reads the config layers a
+    // person edits to unblock it. A run parked on a denied tool used to have
+    // no way out but a cancel, because its permissions were resolved once at
+    // spawn - and with an unanswered prompt waiting for ever by default, that
+    // stall is permanent.
+    host.set_resumer(make_resumer(tool_service.clone(), reloader.clone()));
 
     // Preprocessor: before the sync spawner runs, connect the blueprint's declared
     // MCP servers into the shared pool (lazy, deduped) so they're warm to advertise -
@@ -829,6 +865,58 @@ mod tests {
         let mut config = Config::default();
         config.providers.anthropic_api_key = Some("test-key".to_string());
         config
+    }
+
+    /// The resume hook the daemon installs, driven the way `serve()` drives
+    /// it. Both arms in one test: an entity with no tool state (a fan-out
+    /// parent paged back in before its workers register) is a no-op, and one
+    /// with state has its config layers re-read.
+    #[tokio::test]
+    async fn make_resumer_rereads_the_config_of_a_registered_agent() {
+        let tool_service = Arc::new(CliToolService::new());
+        let mut world = PipelineWorld::new(
+            ProviderRegistry::new(),
+            tool_service.clone(),
+            leviath_runtime::inference_pool::InferencePoolConfig::new(),
+            1,
+            None,
+            Handle::current(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, toml::to_string(&Config::default()).unwrap()).unwrap();
+        let reloader = Arc::new(crate::daemon::config_reload::ConfigReloader::new(
+            config_path.clone(),
+            Config::default(),
+        ));
+        let mut resumer = make_resumer(tool_service.clone(), reloader);
+
+        let entity = bevy_ecs::entity::Entity::from_raw_u32(1)
+            .expect("a small literal index is always a valid entity id");
+        // No state registered: nothing to re-read, and nothing panics.
+        resumer(&mut world, entity);
+
+        // With state, the layers follow the file. `lev resume` is what makes
+        // the daemon read it again.
+        let state = crate::daemon::tool_service::test_state_for_resume(dir.path());
+        tool_service.register(entity, state.clone());
+        assert!(!state.blueprint_may_loosen());
+        let mut edited = Config::default();
+        edited.security.allow_blueprint_permissions = true;
+        std::fs::write(&config_path, toml::to_string(&edited).unwrap()).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&config_path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+
+        resumer(&mut world, entity);
+        assert!(
+            state.blueprint_may_loosen(),
+            "the resume reads config.toml as it stands now, not as the spawn read it"
+        );
     }
 
     #[tokio::test]

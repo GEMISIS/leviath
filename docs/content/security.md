@@ -170,8 +170,9 @@ last: an individual read is still matched against the real, symlink-resolved pat
 
 You do not need to restart the daemon after editing the grant: it reloads `config.toml` on
 change, so the **next `lev run` picks up the new grant automatically** (see
-[the daemon docs](/docs/daemon#config-changes-take-effect-on-the-next-run)). An agent that just
-failed on a refused read succeeds the next time you run it, once you have added the grant.
+[the daemon docs](/docs/daemon#config-changes-take-effect-on-the-next-run)). The run that was
+refused picks it up too, once you `lev resume` it, so a long run does not have to be thrown away
+over a path you had not granted yet.
 
 The rules that keep this safe:
 

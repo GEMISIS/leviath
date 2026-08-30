@@ -331,6 +331,19 @@ pub(crate) type ForceTerminator = Box<dyn FnMut(&str) -> bool + Send>;
 /// Installed with [`super::WorldHost::set_reaper`]; a no-op when none is set.
 pub type Reaper = Box<dyn FnMut(&mut PipelineWorld, Entity) + Send>;
 
+/// The daemon-installed hook run when a run starts moving again: a `Resume`
+/// control op, an answered approval prompt, or a run paged back in from disk.
+/// It receives the world and the agent's entity.
+///
+/// The runtime has no opinion about what resuming means beyond un-pausing. The
+/// daemon's is that a run re-reads the parts of `config.toml` a person edits to
+/// unblock it - tool permissions, safe commands, read-path grants, write
+/// ceilings - so a run stuck on one of them can be freed without cancelling it
+/// and starting again. A stage that is already running keeps the snapshot it
+/// started on; this fires only at the boundary. Installed with
+/// [`super::WorldHost::set_resumer`]; a no-op when none is set.
+pub type Resumer = Box<dyn FnMut(&mut PipelineWorld, Entity) + Send>;
+
 /// An async hook the host awaits *before* servicing a top-level `Spawn` control
 /// op, so the daemon can do async preparation the sync spawner can't - e.g.
 /// lazily connecting the blueprint's MCP servers into the shared pool so

@@ -11,7 +11,12 @@ pub struct ToolContext {
     /// blueprint declares them and the user's config grants them. Inactive by
     /// default, and never consulted by `write_file`/`edit_file` - writes are
     /// confined to `workdir` unconditionally.
-    pub(crate) read_paths: leviath_core::ReadPathPolicy,
+    ///
+    /// Behind a lock because a run re-reads its grants when it resumes: a
+    /// person who answers a refused read by granting the path in `config.toml`
+    /// has to be able to resume the run rather than start it again. Read once
+    /// per resolve, so the lock is never held across any I/O.
+    read_paths: Mutex<leviath_core::ReadPathPolicy>,
     /// Per-path advisory locks serializing concurrent mutating file operations
     /// (`write_file`/`edit_file`) on the *same* file. Fan-out sub-agent workers
     /// share one process and one workdir, so an in-process lock map keyed by
@@ -81,7 +86,7 @@ impl ToolContext {
         let workdir = std::fs::canonicalize(&workdir).unwrap_or(workdir);
         Self {
             workdir,
-            read_paths: leviath_core::ReadPathPolicy::inactive(),
+            read_paths: Mutex::new(leviath_core::ReadPathPolicy::inactive()),
             file_locks: Arc::new(Mutex::new(HashMap::new())),
             shell_env: ShellEnvPolicy::default(),
         }
@@ -89,9 +94,29 @@ impl ToolContext {
 
     /// Attach a `[read_paths]` policy resolved at spawn. Builder-style, like
     /// [`BuiltinTools::with_shell_executor`].
-    pub fn with_read_paths(mut self, policy: leviath_core::ReadPathPolicy) -> Self {
-        self.read_paths = policy;
+    pub fn with_read_paths(self, policy: leviath_core::ReadPathPolicy) -> Self {
+        self.set_read_paths(policy);
         self
+    }
+
+    /// Replace the `[read_paths]` policy on a context already in service.
+    ///
+    /// What a resume calls: the grants are resolved from `config.toml`, which
+    /// the daemon re-reads, and a run parked on a refused read is exactly the
+    /// case where the person has just gone and granted the path.
+    pub fn set_read_paths(&self, policy: leviath_core::ReadPathPolicy) {
+        *self
+            .read_paths
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = policy;
+    }
+
+    /// The `[read_paths]` policy in force right now.
+    pub(crate) fn read_paths(&self) -> leviath_core::ReadPathPolicy {
+        self.read_paths
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Attach the `[security] shell_env` decision resolved at spawn.

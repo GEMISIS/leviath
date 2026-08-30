@@ -63,6 +63,10 @@ pub(super) struct ToolStateParts<'a> {
     pub(super) unattended: bool,
     /// `[safe_commands]` the blueprint declares, if the user opted in.
     pub(super) blueprint_safe: Option<&'a leviath_core::blueprint::SafeCommandsConfig>,
+    /// `[read_paths]` the blueprint declares, if any.
+    pub(super) blueprint_read_paths: Option<&'a leviath_core::blueprint::ReadPathsConfig>,
+    /// The run's workdir, which read-path entries compile relative to.
+    pub(super) workdir: std::path::PathBuf,
 }
 
 pub(super) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState> {
@@ -84,7 +88,7 @@ pub(super) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
         mcp: parts.mcp,
         builtin_names: parts.builtin_names,
         launch_overrides: Arc::new(parts.launch_overrides),
-        safe_keys: Arc::new(
+        safe_keys: crate::daemon::tool_service::Live::new(
             parts
                 .config
                 .safe_keys_for_agent(parts.agent_name, parts.blueprint_safe)
@@ -99,12 +103,16 @@ pub(super) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
         stage_required: Arc::new(StdMutex::new(entry_required)),
         stage_required_by_index: Arc::new(parts.stage_required_by_index),
         agent_perms: Arc::new(parts.agent_perms),
-        blueprint_may_loosen: parts.config.security.allow_blueprint_permissions,
+        blueprint_may_loosen: Arc::new(std::sync::atomic::AtomicBool::new(
+            parts.config.security.allow_blueprint_permissions,
+        )),
         // The ceiling a blueprint may tighten but not loosen: the user's global
         // `[tool_permissions]` plus any `[agent_tool_permissions.<name>]` grant
-        // they made for this specific agent. Resolved once here so every later
-        // `resolve_policy` reads one flat map.
-        global_perms: Arc::new(parts.config.permissions_for_agent(parts.agent_name)),
+        // they made for this specific agent. Flattened here so every later
+        // `resolve_policy` reads one map, and re-flattened on resume.
+        global_perms: crate::daemon::tool_service::Live::new(
+            parts.config.permissions_for_agent(parts.agent_name),
+        ),
         interaction: parts.hub.backend_for(parts.run_id),
         unattended: parts.unattended,
         stage_name: Arc::new(StdMutex::new(parts.entry_stage.to_string())),
@@ -114,5 +122,13 @@ pub(super) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
         script_tool_names: Arc::new(StdMutex::new(parts.script_tool_names)),
         script_host: parts.script_host,
         dynamic: parts.dynamic,
+        // Everything a resume needs to redo this resolution against the config
+        // as it stands then, rather than the copy this spawn read.
+        config_source: Arc::new(crate::daemon::tool_service::ConfigSource {
+            agent_name: parts.agent_name.to_string(),
+            blueprint_safe: parts.blueprint_safe.cloned(),
+            blueprint_read_paths: parts.blueprint_read_paths.cloned(),
+            workdir: parts.workdir,
+        }),
     })
 }

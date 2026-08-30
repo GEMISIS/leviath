@@ -229,13 +229,14 @@ impl BuiltinTools {
         match resolve_within(requested, &self.ctx.workdir, resolves_within) {
             Ok(path) => Ok(path),
             Err(workdir_err) => {
-                if !self.ctx.read_paths.is_active() {
+                let read_paths = self.ctx.read_paths();
+                if !read_paths.is_active() {
                     return Err(workdir_err);
                 }
                 Self::resolve_outside(
                     requested,
                     &self.ctx.workdir,
-                    &self.ctx.read_paths,
+                    &read_paths,
                     leviath_core::canonicalize_for_match,
                 )
             }

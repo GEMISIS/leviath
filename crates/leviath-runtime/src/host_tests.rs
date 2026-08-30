@@ -2220,6 +2220,145 @@ async fn unregistered_world_agents_are_adopted_and_become_cancellable() {
     );
 }
 
+/// The three ways a run starts moving again all reach the resume hook, which
+/// is what lets the daemon re-read the permissions a person edits to unblock a
+/// run instead of making them cancel it. Recorded per entity, because a
+/// fan-out worker is as capable of being stuck as its parent.
+#[tokio::test]
+async fn the_resume_hook_fires_for_a_resume_and_for_an_answered_prompt() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static RESUMED: AtomicUsize = AtomicUsize::new(0);
+    RESUMED.store(0, Ordering::SeqCst);
+
+    let mut host = host_with(vec![]);
+    host.set_resumer(Box::new(|world, entity| {
+        // Branch-free, so one firing covers the body; the entity has to still
+        // be live or the daemon could not reach its tool state.
+        let live = world.world().get::<AgentState>(entity).is_some();
+        RESUMED.fetch_add(live as usize, Ordering::SeqCst);
+    }));
+    spawn(&mut host, "run-a", "agent-a");
+
+    // Nothing has resumed yet.
+    assert!(
+        ask(&mut host, |reply| ControlOp::Pause {
+            run_id: "run-a".to_string(),
+            reply
+        })
+        .await
+    );
+    assert_eq!(RESUMED.load(Ordering::SeqCst), 0);
+
+    // 1. `lev resume`.
+    assert!(
+        ask(&mut host, |reply| ControlOp::Resume {
+            run_id: "run-a".to_string(),
+            reply
+        })
+        .await
+    );
+    assert_eq!(RESUMED.load(Ordering::SeqCst), 1);
+
+    // 2. An answered prompt. The run is the one that asked, so the hook sees
+    //    the same entity.
+    let backend = host.interactions().backend_for("run-a");
+    let asking = tokio::spawn(async move {
+        backend
+            .ask(leviath_core::interaction::InteractionRequest::free_text(
+                "q-perm", "may I?", "stage", true,
+            ))
+            .await
+    });
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        ask(&mut host, |reply| ControlOp::AnswerInteraction {
+            response: leviath_core::interaction::InteractionResponse::text("q-perm", "yes"),
+            reply,
+        })
+        .await
+    );
+    assert_eq!(asking.await.unwrap().value.as_deref(), Some("yes"));
+    assert_eq!(
+        RESUMED.load(Ordering::SeqCst),
+        2,
+        "answering the prompt is a resume: the person may have changed the permission it was about"
+    );
+
+    // An answer to a request nobody is waiting on resumes nothing, and still
+    // reports the miss.
+    assert!(
+        !ask(&mut host, |reply| ControlOp::AnswerInteraction {
+            response: leviath_core::interaction::InteractionResponse::text("gone", "x"),
+            reply,
+        })
+        .await
+    );
+    assert_eq!(RESUMED.load(Ordering::SeqCst), 2);
+}
+
+/// An answer for an agent the world no longer holds must not look up an entity
+/// that is not there. The reply still says the request was answered - the
+/// waiting `submit` may be a sub-agent the host does not register by run id.
+#[tokio::test]
+async fn an_answer_for_an_unregistered_agent_resumes_nothing() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static RESUMED_ORPHAN: AtomicUsize = AtomicUsize::new(0);
+    RESUMED_ORPHAN.store(0, Ordering::SeqCst);
+
+    let mut host = host_with(vec![]);
+    host.set_resumer(Box::new(|_world, _entity| {
+        RESUMED_ORPHAN.fetch_add(1, Ordering::SeqCst);
+    }));
+    let backend = host.interactions().backend_for("nobody");
+    let asking = tokio::spawn(async move {
+        backend
+            .ask(leviath_core::interaction::InteractionRequest::free_text(
+                "q-orphan", "p", "s", true,
+            ))
+            .await
+    });
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        ask(&mut host, |reply| ControlOp::AnswerInteraction {
+            response: leviath_core::interaction::InteractionResponse::text("q-orphan", "hi"),
+            reply,
+        })
+        .await
+    );
+    assert_eq!(asking.await.unwrap().value.as_deref(), Some("hi"));
+    assert_eq!(RESUMED_ORPHAN.load(Ordering::SeqCst), 0);
+}
+
+/// With no hook installed, resuming is only un-pausing - the behaviour every
+/// embedder that does not install one keeps.
+#[tokio::test]
+async fn resuming_without_a_hook_is_just_unpausing() {
+    let mut host = host_with(vec![]);
+    spawn(&mut host, "run-a", "agent-a");
+    assert!(
+        ask(&mut host, |reply| ControlOp::Pause {
+            run_id: "run-a".to_string(),
+            reply
+        })
+        .await
+    );
+    assert!(
+        ask(&mut host, |reply| ControlOp::Resume {
+            run_id: "run-a".to_string(),
+            reply
+        })
+        .await
+    );
+    assert_eq!(
+        host.world.agent_status(host.by_run_id["run-a"]),
+        Some(AgentStatus::Active)
+    );
+}
+
 #[tokio::test]
 async fn interaction_ops_list_answer_and_cancel() {
     let mut host = host_with(vec![]);

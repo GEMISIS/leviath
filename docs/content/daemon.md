@@ -197,6 +197,27 @@ nothing at all and the gate went on answering from the text it started with.
 service, or turn it off, and the next run emits into what the file says now. The verbosity of the
 daemon's own log is not part of that; it is one of the two things below that still need a restart.
 
+### A run in progress reads them again when it resumes
+
+An agent resolves its permissions when it spawns, so an edit made while it is running does not
+reach the run that is already going. That mattered most in exactly the case you would want it to
+work: a run stopped on a tool it is not permitted to call, a path it may not read, or a write
+ceiling it has hit, with the fix sitting in a file the run was never going to read again.
+
+So a run re-reads four things when it starts moving again: `[tool_permissions]` (including the
+per-agent overlay), `[safe_commands]`, `[security] read_paths`, and the write ceilings. Three
+moments count as starting again:
+
+- `lev resume` on a paused run.
+- Answering an approval prompt, since the person answering may equally have gone and changed the
+  permission the prompt was about.
+- The daemon paging a run back in from disk to act on it.
+
+A stage that is running keeps the snapshot it started on, so nothing is re-judged halfway through a
+batch of tool calls. Nothing the run has already spent or been granted is reset either: the write
+total, the approvals you granted for the run or the stage, and the blueprint's own per-stage
+permissions all stay as they were.
+
 Some changes do still need `lev daemon restart`, and after this release neither of them is a
 setting in `config.toml`. One is how verbose the daemon's own log is: its `tracing` subscriber is
 installed from `--verbose` on the command line before any config is read, and a process can install

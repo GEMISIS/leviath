@@ -189,19 +189,24 @@ impl InteractionHub {
     /// Answer an open request. Returns `false` if no request with that id is
     /// open (already answered, cancelled, or never existed).
     pub fn answer(&self, response: InteractionResponse) -> bool {
+        self.answer_for(response).is_some()
+    }
+
+    /// [`answer`](Self::answer), reporting *whose* request it was.
+    ///
+    /// The host needs the agent id because answering a prompt is one of the
+    /// points a run resumes at, and what a resume does is per-agent.
+    pub(crate) fn answer_for(&self, response: InteractionResponse) -> Option<String> {
         let entry = leviath_core::sync::lock(&self.pending).remove(&response.request_id);
-        match entry {
-            Some(entry) => {
-                // The awaiting `submit` may have gone away (agent despawned); a
-                // failed send is harmless.
-                let _ = entry.responder.send(response);
-                // Wake the driver so it reflects the now-cleared request back
-                // into the agent's status (Waiting → Active).
-                self.nudge();
-                true
-            }
-            None => false,
-        }
+        let entry = entry?;
+        let agent_id = entry.agent_id.clone();
+        // The awaiting `submit` may have gone away (agent despawned); a
+        // failed send is harmless.
+        let _ = entry.responder.send(response);
+        // Wake the driver so it reflects the now-cleared request back
+        // into the agent's status (Waiting → Active).
+        self.nudge();
+        Some(agent_id)
     }
 
     /// Cancel an open request (its `submit` returns the neutral response).

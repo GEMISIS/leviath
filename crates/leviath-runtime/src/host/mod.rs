@@ -49,6 +49,7 @@ pub struct WorldHost {
     reloader: Option<Reloader>,
     force_terminator: Option<ForceTerminator>,
     reaper: Option<Reaper>,
+    resumer: Option<Resumer>,
     events: broadcast::Sender<WorldEvent>,
     emitted: HashMap<String, Emitted>,
     /// The `[limits]` settings the host itself runs on: relief threshold,
@@ -174,6 +175,7 @@ impl WorldHost {
             reloader: None,
             force_terminator: None,
             reaper: None,
+            resumer: None,
             events,
             emitted: HashMap::new(),
             settings: HostSettings::default(),
@@ -369,6 +371,25 @@ impl WorldHost {
         self.reaper = Some(reaper);
     }
 
+    /// Install the hook run when a run starts moving again, so the daemon can
+    /// re-read the config layers a person edits to unblock it. Without one,
+    /// resuming is only un-pausing (the prior behavior).
+    pub fn set_resumer(&mut self, resumer: Resumer) {
+        self.resumer = Some(resumer);
+    }
+
+    /// Run the resume hook for `entity`, if one is installed.
+    ///
+    /// The hook is moved out for the call so it does not borrow `self` while
+    /// the world does, and put straight back - the same shape the reaper uses.
+    pub(super) fn on_resumed(&mut self, entity: Entity) {
+        let mut resumer = self.resumer.take();
+        if let Some(resume) = resumer.as_mut() {
+            resume(&mut self.world, entity);
+        }
+        self.resumer = resumer;
+    }
+
     /// Resolve a run id to a live entity, paging it in from disk if it has been
     /// unloaded (and a reloader is installed). Returns `None` if the run is
     /// neither live nor resumable from disk. Newly-reloaded runs are registered.
@@ -540,7 +561,17 @@ impl WorldHost {
                 let _ = reply.send(self.interactions.pending());
             }
             ControlOp::AnswerInteraction { response, reply } => {
-                let _ = reply.send(self.interactions.answer(response));
+                // Answering a prompt is one of the points a run resumes at: the
+                // person who just said "no, and here is why" may equally have
+                // gone and changed the permission the prompt was about, and
+                // this is where that reaches the run (issue #728 makes an
+                // unanswered prompt wait for ever, so a run stuck behind one
+                // has no other way out but a cancel).
+                let agent = self.interactions.answer_for(response);
+                if let Some(entity) = agent.as_deref().and_then(|id| self.live_entity(id)) {
+                    self.on_resumed(entity.entity());
+                }
+                let _ = reply.send(agent.is_some());
             }
             ControlOp::CancelInteraction { request_id, reply } => {
                 let _ = reply.send(self.interactions.cancel(&request_id));

@@ -247,6 +247,10 @@ impl WorldHost {
             if let Some(mut fan_out) = self.world.world_mut().get_mut::<FanOutWaiting>(e) {
                 acted |= fan_out.set_paused(false);
             }
+            // Every agent in the tree, not just the one that was named: a
+            // fan-out worker is as capable of being stuck on a permission as
+            // its parent, and the pause stopped all of them.
+            self.on_resumed(e);
         }
         acted
     }

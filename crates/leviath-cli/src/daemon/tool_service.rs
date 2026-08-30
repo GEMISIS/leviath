@@ -27,6 +27,8 @@ use leviath_runtime::dynamic_interaction::{
 };
 use leviath_runtime::interaction_hub::HubInteractionBackend;
 use leviath_runtime::pipeline::{ToolProgress, ToolService};
+
+use crate::config::Config;
 use leviath_runtime::tool_bridge::BoxedToolExec;
 use tokio::sync::Mutex;
 
@@ -46,7 +48,10 @@ use crate::tools::resolve_policy;
 /// tracking per-path deltas, which a command writing to a path Leviath cannot
 /// name defeats anyway.
 pub(crate) struct WriteBudget {
-    limits: leviath_core::write_limits::WriteLimits,
+    /// Behind a lock because a run re-reads `[limits]` when it resumes, and a
+    /// run parked against a ceiling the user has since raised is the case that
+    /// matters. Read once per check, never held across I/O.
+    limits: StdMutex<leviath_core::write_limits::WriteLimits>,
     written: std::sync::atomic::AtomicU64,
     /// The filesystem probe, injected so a test can drive the disk-full arm
     /// without one. `fn` rather than a closure: one coverage instance.
@@ -65,10 +70,23 @@ impl WriteBudget {
         available: fn(&std::path::Path) -> Option<u64>,
     ) -> Self {
         Self {
-            limits,
+            limits: StdMutex::new(limits),
             written: std::sync::atomic::AtomicU64::new(0),
             available,
         }
+    }
+
+    /// Raise or lower the ceilings without forgetting what has been spent.
+    ///
+    /// A run resumes against the `[limits]` the file names now, and the
+    /// running total is the whole point of a per-run budget, so it survives.
+    pub(crate) fn set_limits(&self, limits: leviath_core::write_limits::WriteLimits) {
+        *self.limits.lock().unwrap_or_else(PoisonError::into_inner) = limits;
+    }
+
+    /// The ceilings in force right now.
+    fn limits(&self) -> leviath_core::write_limits::WriteLimits {
+        *self.limits.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Whether a write of `bytes` into `workdir` may proceed.
@@ -81,7 +99,7 @@ impl WriteBudget {
         bytes: u64,
     ) -> leviath_core::write_limits::WriteVerdict {
         leviath_core::write_limits::check_write(
-            self.limits,
+            self.limits(),
             self.written.load(std::sync::atomic::Ordering::Relaxed),
             bytes,
             (self.available)(workdir),
@@ -123,13 +141,14 @@ pub(crate) struct AgentToolState {
     /// `--yolo` / `--allow` / `--ask` / `--deny` launch overrides.
     pub launch_overrides: Arc<HashMap<String, ToolPolicy>>,
     /// Keys that need no prompt at all: the shipped safe list plus whatever the
-    /// user's `[safe_commands]` adds. Resolved once at spawn and never mutated,
-    /// so reading it needs no lock.
+    /// user's `[safe_commands]` adds. Re-resolved when the run resumes, so a
+    /// command the person adds to `[safe_commands]` after watching it prompt
+    /// stops prompting in the run that prompted.
     ///
     /// Unlike a grant, a safe entry matches by program as well as exactly:
     /// naming `cat` covers `cat notes.md`, because otherwise it would cover
     /// nothing anybody runs. See [`crate::shell_keys::program_of`].
-    pub safe_keys: Arc<HashSet<String>>,
+    pub safe_keys: Arc<Live<HashSet<String>>>,
     /// Grant keys the user allowed for the rest of the run.
     pub run_allows: Arc<Mutex<HashSet<String>>>,
     /// Grant keys the user allowed for the current stage only, cleared by
@@ -160,12 +179,13 @@ pub(crate) struct AgentToolState {
     pub stage_required_by_index: Arc<Vec<HashSet<String>>>,
     /// Blueprint-level `[tool_permissions]`.
     pub agent_perms: Arc<HashMap<String, String>>,
-    /// Config-level tool permissions.
-    pub global_perms: Arc<HashMap<String, ToolPolicy>>,
+    /// Config-level tool permissions, re-resolved when the run resumes.
+    pub global_perms: Arc<Live<HashMap<String, ToolPolicy>>>,
     /// `[security] allow_blueprint_permissions`: whether this manifest's
     /// `[tool_permissions]` may exceed the built-in default for a tool the user
     /// has not configured. See `BLUEPRINT_LOOSENABLE` in `crate::tools`.
-    pub blueprint_may_loosen: bool,
+    /// Re-read when the run resumes, like the permission maps beside it.
+    pub blueprint_may_loosen: Arc<std::sync::atomic::AtomicBool>,
     /// The agent's interaction backend (ask_user + tool approvals).
     pub interaction: HubInteractionBackend,
     /// `--yolo`: nobody is watching this run, so the tools that block on a
@@ -197,6 +217,68 @@ pub(crate) struct AgentToolState {
     /// Present only for `dynamic_tools` agents: everything needed to re-discover
     /// and re-advertise this agent's tools mid-run.
     pub dynamic: Option<Arc<DynamicToolCtx>>,
+    /// What [`AgentToolState::reread_config`] needs to resolve the config
+    /// layers again: which agent this is, and the blueprint halves of the two
+    /// settings that are a blueprint-plus-config decision.
+    pub config_source: Arc<ConfigSource>,
+}
+
+/// A config-derived layer that is re-read when a run resumes.
+///
+/// A lock around an `Arc` rather than the `Arc` alone: a reader takes a clone
+/// and lets go, so a swap never waits on a tool call and a tool call never
+/// sees half of one.
+pub(crate) struct Live<T>(StdMutex<Arc<T>>);
+
+impl<T> Live<T> {
+    /// Hold `value` until something replaces it.
+    pub(crate) fn new(value: T) -> Arc<Self> {
+        Arc::new(Self(StdMutex::new(Arc::new(value))))
+    }
+
+    /// The value in force right now.
+    pub(crate) fn get(&self) -> Arc<T> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Replace it. An in-flight reader keeps the copy it took.
+    pub(crate) fn set(&self, value: T) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(value);
+    }
+}
+
+/// The parts of a spawn a later config re-read has to resolve against.
+///
+/// Two of these layers are not the config alone: `[safe_commands]` merges with
+/// the blueprint's own list, and `[read_paths]` grants mean nothing without the
+/// blueprint's declarations and the run's workdir. Keeping them here is what
+/// lets a resume redo the resolution the spawn did rather than an
+/// approximation of it.
+pub(crate) struct ConfigSource {
+    /// The blueprint's name, which the per-agent config tables are keyed by.
+    pub agent_name: String,
+    /// The blueprint's `[safe_commands]`, when it declares any.
+    pub blueprint_safe: Option<leviath_core::blueprint::SafeCommandsConfig>,
+    /// The blueprint's `[read_paths]`, when it declares any.
+    pub blueprint_read_paths: Option<leviath_core::blueprint::ReadPathsConfig>,
+    /// The run's workdir, which read-path entries compile relative to.
+    pub workdir: std::path::PathBuf,
+}
+
+/// A minimal [`AgentToolState`] over `workdir`, for the daemon-level test of
+/// the resume hook. Lives here rather than in `setup`'s test module because
+/// the struct's fields are private to this one.
+#[cfg(test)]
+pub(crate) fn test_state_for_resume(workdir: &std::path::Path) -> Arc<AgentToolState> {
+    tests::budgeted_state(
+        &leviath_runtime::interaction_hub::InteractionHub::new(),
+        workdir,
+        WriteBudget::new(Default::default()),
+        HashMap::new(),
+    )
 }
 
 /// The tool result for an approval prompt that resolved with no answer: the
@@ -235,6 +317,56 @@ fn declined_result(tool: &str, feedback: Option<&str>) -> String {
 }
 
 impl AgentToolState {
+    /// Whether this manifest's `[tool_permissions]` may exceed the built-in
+    /// default for a tool the user has not configured.
+    pub(crate) fn blueprint_may_loosen(&self) -> bool {
+        self.blueprint_may_loosen
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Re-resolve every layer that comes from `config.toml` against `config`.
+    ///
+    /// Called when a run resumes: from a pause, after an approval prompt is
+    /// answered, or when the recovery path pages the run back in. A stage that
+    /// is running keeps the snapshot it started on, so nothing under way is
+    /// re-judged halfway through a batch.
+    ///
+    /// The four layers are the ones a person actually edits to unblock a
+    /// stuck run: `[tool_permissions]` (with the per-agent overlay),
+    /// `[safe_commands]`, `[security] read_paths`, and the write ceilings.
+    /// What it deliberately does not touch is what the run has already spent
+    /// or been granted: the write total, the run and stage grants, and the
+    /// stage's own `tool_permissions` from the blueprint, none of which are
+    /// config.
+    pub(crate) fn reread_config(&self, config: &Config) {
+        let source = &self.config_source;
+        self.safe_keys.set(
+            config
+                .safe_keys_for_agent(&source.agent_name, source.blueprint_safe.as_ref())
+                .into_keys()
+                .collect(),
+        );
+        self.global_perms
+            .set(config.permissions_for_agent(&source.agent_name));
+        self.blueprint_may_loosen.store(
+            config.security.allow_blueprint_permissions,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.writes.set_limits(config.limits.write_limits());
+        // The read-path set is the one layer here that can fail to compile, and
+        // dropping the grants the run already had over a typo would tighten it
+        // rather than widen it, which is the wrong direction for a file people
+        // edit to get unstuck. A set that will not compile is left alone.
+        if let Some(policy) = crate::daemon::spawn::read_path_policy_for(
+            &source.agent_name,
+            source.blueprint_read_paths.as_ref(),
+            config,
+            &source.workdir,
+        ) {
+            self.builtins.set_read_paths(policy);
+        }
+    }
+
     /// Whether every key this call needs is already covered, by the safe list or
     /// by a grant.
     ///
@@ -248,7 +380,8 @@ impl AgentToolState {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         let run = self.run_allows.lock().await;
-        crate::shell_keys::all_covered(keys, &|k| self.safe_keys.contains(k), &|k| {
+        let safe = self.safe_keys.get();
+        crate::shell_keys::all_covered(keys, &|k| safe.contains(k), &|k| {
             staged.contains(k) || run.contains(k)
         })
     }
@@ -524,8 +657,8 @@ pub(crate) async fn dispatch_tools(
             &state.launch_overrides,
             &stage_snap,
             &state.agent_perms,
-            &state.global_perms,
-            state.blueprint_may_loosen,
+            &state.global_perms.get(),
+            state.blueprint_may_loosen(),
         );
         // A shell redirect writes a file, and no tool name says so. Clamping by
         // the write tool's own policy is what stops `echo x > f` being a
@@ -537,8 +670,8 @@ pub(crate) async fn dispatch_tools(
                 &state.launch_overrides,
                 &stage_snap,
                 &state.agent_perms,
-                &state.global_perms,
-                state.blueprint_may_loosen,
+                &state.global_perms.get(),
+                state.blueprint_may_loosen(),
             )
         });
         // A grant can only ever collapse `Ask` into `Allow`. It never reaches
@@ -551,7 +684,16 @@ pub(crate) async fn dispatch_tools(
 
         match policy {
             ToolPolicy::Deny => {
-                let result = format!("[denied] Tool '{}' is not permitted.", tc.name);
+                // Says what actually lifts it. The answer used to be "cancel
+                // the run and start it again", because the permission was
+                // resolved once at spawn; now the run re-reads it when it
+                // resumes, and the message has to say the thing that is true.
+                let result = format!(
+                    "[denied] Tool '{}' is not permitted. To allow it, set it to \"allow\" or \
+                     \"ask\" under [tool_permissions] in config.toml and resume this run \
+                     (`lev resume`); the run re-reads them and does not need restarting.",
+                    tc.name
+                );
                 progress(&tc.id, &result);
                 slots.push((tc.id.clone(), Some(result)));
             }
@@ -658,6 +800,16 @@ impl CliToolService {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(entity, state);
+    }
+
+    /// An agent's tool state, for a caller that wants to act on it without
+    /// taking it away. The resume hook's read.
+    pub(crate) fn state_for(&self, entity: Entity) -> Option<Arc<AgentToolState>> {
+        self.states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&entity)
+            .cloned()
     }
 
     /// Drop an agent's tool state.
@@ -843,6 +995,17 @@ mod tests {
     use leviath_runtime::interaction_hub::InteractionHub;
     use leviath_runtime::pipeline::noop_progress;
 
+    /// What a hand-built state re-resolves against: an agent named `tester`
+    /// with no blueprint-side declarations, over a workdir nothing reads.
+    fn test_config_source() -> Arc<ConfigSource> {
+        Arc::new(ConfigSource {
+            agent_name: "tester".to_string(),
+            blueprint_safe: None,
+            blueprint_read_paths: None,
+            workdir: std::env::temp_dir(),
+        })
+    }
+
     /// The three script-tool fields of [`AgentToolState`], as a tuple.
     type ScriptFields = (
         Arc<StdMutex<leviath_scripting::ScriptToolSet>>,
@@ -873,7 +1036,7 @@ mod tests {
 
     /// [`state_with_writes`] with the policies and the interaction hub chosen,
     /// for the tests where the budget and the policy layer meet.
-    fn budgeted_state(
+    pub(super) fn budgeted_state(
         hub: &InteractionHub,
         workdir: &std::path::Path,
         budget: WriteBudget,
@@ -890,7 +1053,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
-            safe_keys: Arc::new(HashSet::new()),
+            safe_keys: Live::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -899,8 +1062,8 @@ mod tests {
             stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
-            global_perms: Arc::new(global),
-            blueprint_may_loosen: false,
+            global_perms: Live::new(global),
+            blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -910,6 +1073,7 @@ mod tests {
             script_tool_names,
             script_host,
             dynamic: None,
+            config_source: test_config_source(),
         })
     }
 
@@ -950,7 +1114,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(mcp)),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
-            safe_keys: Arc::new(HashSet::new()),
+            safe_keys: Live::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -959,8 +1123,8 @@ mod tests {
             stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
-            global_perms: Arc::new(global),
-            blueprint_may_loosen: false,
+            global_perms: Live::new(global),
+            blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -970,6 +1134,7 @@ mod tests {
             script_tool_names,
             script_host,
             dynamic: None,
+            config_source: test_config_source(),
         })
     }
 
@@ -1032,7 +1197,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
-            safe_keys: Arc::new(HashSet::new()),
+            safe_keys: Live::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -1041,8 +1206,8 @@ mod tests {
             stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
-            global_perms: Arc::new(global),
-            blueprint_may_loosen: false,
+            global_perms: Live::new(global),
+            blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -1052,6 +1217,7 @@ mod tests {
             script_tool_names: Arc::new(StdMutex::new(script_tool_names)),
             script_host: host,
             dynamic: None,
+            config_source: test_config_source(),
         });
         (state, dir)
     }
@@ -1077,6 +1243,232 @@ mod tests {
         .await;
         assert_eq!(out[0].0, "c1");
         assert_eq!(out[0].1, "HI");
+    }
+
+    // ── re-reading the config when a run resumes ──
+
+    /// A config naming one policy for `read_file`, and nothing else.
+    fn config_with(tool: &str, policy: ToolPolicy) -> Config {
+        let mut config = Config::default();
+        config.tool_permissions.insert(tool.to_string(), policy);
+        config
+    }
+
+    /// A state over `workdir` whose only permission layer is the config one,
+    /// so a test about re-reading is not also a test about stage policy.
+    fn state_over(
+        workdir: &std::path::Path,
+        global: HashMap<String, ToolPolicy>,
+    ) -> Arc<AgentToolState> {
+        budgeted_state(
+            &InteractionHub::new(),
+            workdir,
+            WriteBudget::new(Default::default()),
+            global,
+        )
+    }
+
+    /// The bug, at the seam it lives at: a run parked on a denied tool could
+    /// not be freed by permitting the tool, because the answer was resolved
+    /// once at spawn. Cancelling and re-running was the only way out, and with
+    /// an unanswered prompt waiting for ever (#728) it is the only way out for
+    /// good.
+    #[tokio::test]
+    async fn a_denied_tool_runs_after_the_permission_is_broadened_and_the_run_resumes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.md"), "hello").unwrap();
+        let mut denied = HashMap::new();
+        denied.insert("read_file".to_string(), ToolPolicy::Deny);
+        let state = state_over(dir.path(), denied);
+
+        let before = dispatch_tools(
+            state.clone(),
+            vec![call(
+                "c1",
+                "read_file",
+                serde_json::json!({"path": "notes.md"}),
+            )],
+            noop_progress(),
+        )
+        .await;
+        let refusal = before[0].1.clone();
+        assert!(refusal.contains("[denied]"), "got: {refusal}");
+        assert!(
+            refusal.contains("resume"),
+            "the refusal has to name what actually lifts it: {refusal}"
+        );
+
+        // What the person does: permit the tool, and resume the run.
+        state.reread_config(&config_with("read_file", ToolPolicy::Allow));
+
+        let after = dispatch_tools(
+            state,
+            vec![call(
+                "c2",
+                "read_file",
+                serde_json::json!({"path": "notes.md"}),
+            )],
+            noop_progress(),
+        )
+        .await;
+        let allowed = after[0].1.clone();
+        assert!(
+            allowed.contains("hello"),
+            "the tool the user just permitted has to run in the run that was refused: {allowed}"
+        );
+    }
+
+    /// The other direction, because a re-read that only ever loosened would be
+    /// a way to keep a permission the user has taken away.
+    #[tokio::test]
+    async fn a_narrowed_permission_takes_effect_on_the_same_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.md"), "hello").unwrap();
+        let mut allowed = HashMap::new();
+        allowed.insert("read_file".to_string(), ToolPolicy::Allow);
+        let state = state_over(dir.path(), allowed);
+
+        state.reread_config(&config_with("read_file", ToolPolicy::Deny));
+        let after = dispatch_tools(
+            state,
+            vec![call(
+                "c1",
+                "read_file",
+                serde_json::json!({"path": "notes.md"}),
+            )],
+            noop_progress(),
+        )
+        .await;
+        let narrowed = after[0].1.clone();
+        assert!(narrowed.contains("[denied]"), "got: {narrowed}");
+    }
+
+    #[test]
+    fn a_reread_picks_up_safe_commands_and_the_blueprint_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_over(dir.path(), HashMap::new());
+        assert!(!state.safe_keys.get().contains("mytool"));
+        assert!(!state.blueprint_may_loosen());
+
+        let mut config = Config::default();
+        config.safe_commands.tools = vec!["mytool".to_string()];
+        config.security.allow_blueprint_permissions = true;
+        state.reread_config(&config);
+
+        assert!(
+            state.safe_keys.get().contains("mytool"),
+            "a command added to [safe_commands] stops prompting in the run that prompted"
+        );
+        assert!(state.blueprint_may_loosen());
+    }
+
+    #[test]
+    fn a_reread_raises_the_write_ceiling_without_forgetting_what_was_spent() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_over(dir.path(), HashMap::new());
+        state.writes.record(600);
+
+        let mut config = Config::default();
+        config.limits.max_run_write_bytes = Some(500);
+        state.reread_config(&config);
+        assert_ne!(
+            state.writes.check(dir.path(), 1),
+            leviath_core::write_limits::WriteVerdict::Allow,
+            "the run is over the ceiling the user just set"
+        );
+
+        config.limits.max_run_write_bytes = Some(5_000);
+        state.reread_config(&config);
+        assert_eq!(
+            state.writes.check(dir.path(), 1),
+            leviath_core::write_limits::WriteVerdict::Allow,
+            "raising it frees the run"
+        );
+        assert_eq!(
+            state.writes.written(),
+            600,
+            "and what the run already spent is still spent"
+        );
+    }
+
+    /// `[security] read_paths` is the fourth layer, and the only one that is a
+    /// blueprint-plus-config decision the resume has to redo rather than
+    /// re-copy.
+    #[tokio::test]
+    async fn a_reread_applies_a_read_path_grant_the_user_just_added() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("shared.txt");
+        std::fs::write(&secret, "from outside").unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+
+        let mut allow = HashMap::new();
+        allow.insert("read_file".to_string(), ToolPolicy::Allow);
+        let state = Arc::new(AgentToolState {
+            config_source: Arc::new(ConfigSource {
+                agent_name: "tester".to_string(),
+                blueprint_safe: None,
+                blueprint_read_paths: Some(leviath_core::blueprint::ReadPathsConfig {
+                    allow: vec![outside.path().to_string_lossy().to_string()],
+                }),
+                workdir: workdir.path().to_path_buf(),
+            }),
+            ..(*state_over(workdir.path(), allow)).clone()
+        });
+
+        let path = secret.to_string_lossy().to_string();
+        let before = dispatch_tools(
+            state.clone(),
+            vec![call(
+                "c1",
+                "read_file",
+                serde_json::json!({"path": path.clone()}),
+            )],
+            noop_progress(),
+        )
+        .await;
+        let refused = before[0].1.clone();
+        assert!(
+            !refused.contains("from outside"),
+            "nothing grants the declaration yet: {refused}"
+        );
+
+        // What the person does after reading that refusal.
+        let mut config = Config::default();
+        config.security.allow_blueprint_read_paths = true;
+        state.reread_config(&config);
+
+        let after = dispatch_tools(
+            state,
+            vec![call("c2", "read_file", serde_json::json!({"path": path}))],
+            noop_progress(),
+        )
+        .await;
+        let granted = after[0].1.clone();
+        assert!(
+            granted.contains("from outside"),
+            "the grant the user just added has to reach the run that was refused: {granted}"
+        );
+    }
+
+    #[test]
+    fn a_read_path_entry_that_will_not_compile_leaves_the_run_with_what_it_had() {
+        let workdir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AgentToolState {
+            config_source: Arc::new(ConfigSource {
+                agent_name: "tester".to_string(),
+                blueprint_safe: None,
+                blueprint_read_paths: Some(leviath_core::blueprint::ReadPathsConfig {
+                    // An empty entry is refused by the compiler, which is the
+                    // arm a resume has to survive.
+                    allow: vec![String::new()],
+                }),
+                workdir: workdir.path().to_path_buf(),
+            }),
+            ..(*state_over(workdir.path(), HashMap::new())).clone()
+        });
+        // The declaration itself will not compile, so the resolution fails and
+        // the run keeps the policy it was spawned with rather than losing it.
+        state.reread_config(&Config::default());
     }
 
     // ── dynamic_tools (issue #97) ──
@@ -1133,7 +1525,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
-            safe_keys: Arc::new(HashSet::new()),
+            safe_keys: Live::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -1142,8 +1534,8 @@ mod tests {
             stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
-            global_perms: Arc::new(allow),
-            blueprint_may_loosen: false,
+            global_perms: Live::new(allow),
+            blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -1161,6 +1553,7 @@ mod tests {
                 unattended,
                 dirty: Arc::new(AtomicBool::new(false)),
             })),
+            config_source: test_config_source(),
         })
     }
 
@@ -1389,7 +1782,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
-            safe_keys: Arc::new(HashSet::new()),
+            safe_keys: Live::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -1398,8 +1791,8 @@ mod tests {
             stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
-            global_perms: Arc::new(allow),
-            blueprint_may_loosen: false,
+            global_perms: Live::new(allow),
+            blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -1409,6 +1802,7 @@ mod tests {
             script_tool_names,
             script_host,
             dynamic: None,
+            config_source: test_config_source(),
         });
         // Must not panic (the mark_dirty early-return path).
         let out = dispatch_tools(
@@ -1763,7 +2157,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
-            safe_keys: Arc::new(HashSet::new()),
+            safe_keys: Live::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -1772,8 +2166,8 @@ mod tests {
             stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
-            global_perms: Arc::new(global),
-            blueprint_may_loosen: false,
+            global_perms: Live::new(global),
+            blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -1783,6 +2177,7 @@ mod tests {
             script_tool_names,
             script_host,
             dynamic: None,
+            config_source: test_config_source(),
         });
         let out = dispatch_tools(
             state,
@@ -1831,7 +2226,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
-            safe_keys: Arc::new(HashSet::new()),
+            safe_keys: Live::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -1840,8 +2235,8 @@ mod tests {
             stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
-            global_perms: Arc::new(global),
-            blueprint_may_loosen: false,
+            global_perms: Live::new(global),
+            blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -1851,6 +2246,7 @@ mod tests {
             script_tool_names,
             script_host,
             dynamic: None,
+            config_source: test_config_source(),
         });
 
         let out = dispatch_tools(
@@ -2250,7 +2646,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
-            safe_keys: Arc::new(HashSet::new()),
+            safe_keys: Live::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -2262,8 +2658,8 @@ mod tests {
                 HashSet::from(["ask_user_text".to_string()]),
             ]),
             agent_perms: Arc::new(HashMap::new()),
-            global_perms: Arc::new(HashMap::new()),
-            blueprint_may_loosen: false,
+            global_perms: Live::new(HashMap::new()),
+            blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -2273,6 +2669,7 @@ mod tests {
             script_tool_names,
             script_host,
             dynamic: None,
+            config_source: test_config_source(),
         });
         service.register(e, state.clone());
 
@@ -2822,7 +3219,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
-            safe_keys: Arc::new(HashSet::new()),
+            safe_keys: Live::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -2831,8 +3228,8 @@ mod tests {
             stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
-            global_perms: Arc::new(HashMap::new()),
-            blueprint_may_loosen: false,
+            global_perms: Live::new(HashMap::new()),
+            blueprint_may_loosen: Arc::new(AtomicBool::new(false)),
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -2842,6 +3239,7 @@ mod tests {
             script_tool_names,
             script_host,
             dynamic: None,
+            config_source: test_config_source(),
         });
         let out = dispatch_tools(
             state,
