@@ -1281,7 +1281,10 @@ system_prompt = "p"
     /// decoded form is what has to be rejected.
     #[tokio::test]
     async fn delete_blueprint_rejects_traversing_names() {
-        let victim = std::env::temp_dir().join("leviath-delete-probe");
+        // Named per process so two checkouts running this test at once
+        // cannot delete each other's probe and fake a traversal.
+        let probe = format!("leviath-delete-probe-{}", std::process::id());
+        let victim = std::env::temp_dir().join(&probe);
         std::fs::create_dir_all(&victim).unwrap();
 
         let app = Router::new().route(
@@ -1290,7 +1293,7 @@ system_prompt = "p"
         );
         let req = Request::builder()
             .method("DELETE")
-            .uri("/api/blueprints/..%2f..%2f..%2f..%2ftmp%2fleviath-delete-probe")
+            .uri(format!("/api/blueprints/..%2f..%2f..%2f..%2ftmp%2f{probe}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();

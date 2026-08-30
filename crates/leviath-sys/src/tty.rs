@@ -97,16 +97,30 @@ mod tests {
     // rather than `/dev/null` keeps these tests - and thus `osc52_write_via`'s
     // tty-success and tty-write-fails branches - covered on every OS, not just
     // Unix.
+    //
+    // Each call gets its own file, named by process id plus a counter, so
+    // parallel tests (or two checkouts sharing one temp dir) never truncate
+    // each other's stand-in mid-write.
+    fn fake_tty_path(kind: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "lev_sys_osc52_fake_tty_{kind}_{}_{n}",
+            std::process::id()
+        ))
+    }
+
     fn open_temp_writable() -> io::Result<File> {
         std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
-            .open(std::env::temp_dir().join("lev_sys_osc52_fake_tty_w"))
+            .open(fake_tty_path("w"))
     }
 
     fn open_temp_readonly() -> io::Result<File> {
-        let path = std::env::temp_dir().join("lev_sys_osc52_fake_tty_ro");
+        let path = fake_tty_path("ro");
         let _ = std::fs::write(&path, b"");
         std::fs::OpenOptions::new().read(true).open(&path)
     }

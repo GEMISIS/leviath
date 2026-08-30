@@ -502,8 +502,8 @@ mod tests {
 
     #[test]
     fn resolve_rejects_path_escape() {
-        let dir = std::env::temp_dir().join("leviath_test_sandbox");
-        fs::create_dir_all(&dir).ok();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let tools = make_tools(&dir);
         let result = tools.resolve("../../etc/passwd");
         assert!(result.is_err());

@@ -266,13 +266,12 @@ mod tests {
 
     #[test]
     fn read_region_value_at_path_reads_and_trims() {
-        let dir = std::env::temp_dir().join("lev-test-region-value");
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let file = dir.join("r.md");
         std::fs::write(&file, "  hello region  \n").unwrap();
         let raw = format!("@{}", file.to_string_lossy());
         assert_eq!(read_region_value(&raw).unwrap(), "hello region");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -283,14 +282,13 @@ mod tests {
 
     #[test]
     fn read_region_value_at_empty_file_errors() {
-        let dir = std::env::temp_dir().join("lev-test-region-empty");
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let file = dir.join("empty.md");
         std::fs::write(&file, "   \n").unwrap();
         let raw = format!("@{}", file.to_string_lossy());
         let err = read_region_value(&raw).unwrap_err();
         assert!(err.to_string().contains("is empty"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -301,29 +299,25 @@ mod tests {
 
     #[test]
     fn resolve_task_with_file_path() {
-        let dir = std::env::temp_dir().join("lev-test-resolve-task");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let file = dir.join("task.txt");
         std::fs::write(&file, "task from file\n").unwrap();
 
         let result = resolve_task(Some(file.to_str().unwrap()), "test", "", &never_a_tty);
         assert_eq!(result.unwrap(), "task from file");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn resolve_task_with_empty_file_errors() {
-        let dir = std::env::temp_dir().join("lev-test-resolve-empty");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let file = dir.join("empty.txt");
         std::fs::write(&file, "   \n  ").unwrap();
 
         let result = resolve_task(Some(file.to_str().unwrap()), "test", "", &never_a_tty);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A bare word that names no file is prompt text. It has no separator, so
@@ -381,29 +375,25 @@ mod tests {
 
     #[test]
     fn resolve_task_file_with_whitespace_only_errors() {
-        let dir = std::env::temp_dir().join("lev-test-resolve-ws");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let file = dir.join("whitespace.txt");
         std::fs::write(&file, "   \n\t\n  \n").unwrap();
 
         let result = resolve_task(Some(file.to_str().unwrap()), "test", "", &never_a_tty);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn resolve_task_file_trims_content() {
-        let dir = std::env::temp_dir().join("lev-test-resolve-trim");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let file = dir.join("trimme.txt");
         std::fs::write(&file, "  hello world  \n\n").unwrap();
 
         let result = resolve_task(Some(file.to_str().unwrap()), "test", "", &never_a_tty);
         assert_eq!(result.unwrap(), "hello world");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -414,8 +404,8 @@ mod tests {
 
     #[test]
     fn resolve_task_multiline_file() {
-        let dir = std::env::temp_dir().join("lev-test-resolve-multiline");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let file = dir.join("multi.txt");
         std::fs::write(&file, "line one\nline two\nline three\n").unwrap();
 
@@ -424,8 +414,6 @@ mod tests {
         assert!(task.contains("line one"));
         assert!(task.contains("line two"));
         assert!(task.contains("line three"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ─── resolve_task: literal string with special chars ────────────────
@@ -454,23 +442,21 @@ mod tests {
 
     #[test]
     fn resolve_task_file_with_multiple_trailing_newlines() {
-        let dir = std::env::temp_dir().join("lev-test-resolve-trail");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let file = dir.join("trail.txt");
         std::fs::write(&file, "task content\n\n\n\n").unwrap();
 
         let result = resolve_task(Some(file.to_str().unwrap()), "test", "", &never_a_tty);
         assert_eq!(result.unwrap(), "task content");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ─── build_provider_registry: model_capabilities propagated ──────────
 
     #[test]
     fn resolve_task_file_with_real_content() {
-        let dir = std::env::temp_dir().join("lev-test-resolve-real");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let file = dir.join("real.txt");
         std::fs::write(&file, "Implement a REST API server\nwith authentication\n").unwrap();
 
@@ -483,8 +469,6 @@ mod tests {
         let task = result.unwrap();
         assert!(task.contains("Implement a REST API server"));
         assert!(task.contains("with authentication"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ─── build_provider_registry: all providers registered ───────────────
@@ -540,8 +524,8 @@ mod tests {
         // A tiny "editor" script that appends a non-comment line to
         // whatever file it's invoked on ($1) - standing in for a real
         // interactive editor session.
-        let dir = std::env::temp_dir().join("lev-test-resolve-task-editor-happy");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let script = dir.join("fake-editor.sh");
         std::fs::write(
             &script,
@@ -555,8 +539,6 @@ mod tests {
         temp_env::with_vars([("VISUAL", Some(&script)), ("EDITOR", None)], || {
             let result = resolve_task_with(None, "test-agent", "a non-empty description", &|| true);
             assert_eq!(result.unwrap(), "task body from editor");
-
-            let _ = std::fs::remove_dir_all(&dir);
         });
     }
 
@@ -688,16 +670,14 @@ mod tests {
         // file it's invoked on (%~1) - standing in for a real interactive
         // editor session. `%~1` strips any surrounding quotes Windows adds
         // around a path containing spaces.
-        let dir = std::env::temp_dir().join("lev-test-resolve-task-editor-happy-win");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let script = dir.join("fake-editor.bat");
         write_bat(&script, "echo task body from editor>>\"%~1\"");
 
         temp_env::with_vars([("VISUAL", Some(&script)), ("EDITOR", None)], || {
             let result = resolve_task_with(None, "test-agent", "a non-empty description", &|| true);
             assert_eq!(result.unwrap(), "task body from editor");
-
-            let _ = std::fs::remove_dir_all(&dir);
         });
     }
 
@@ -707,8 +687,8 @@ mod tests {
         // A no-op batch file "opens" the file and does nothing to it, so
         // only the commented-out template remains - stripped down to an
         // empty task.
-        let dir = std::env::temp_dir().join("lev-test-resolve-task-editor-empty-win");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let ok_bat = dir.join("ok.bat");
         write_bat(&ok_bat, "exit /b 0");
 
@@ -716,8 +696,6 @@ mod tests {
             let result = resolve_task_with(None, "test-agent", "", &|| true);
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("Aborting run"));
-
-            let _ = std::fs::remove_dir_all(&dir);
         });
     }
 
@@ -766,8 +744,8 @@ mod tests {
     #[test]
     fn resolve_task_unreadable_file_returns_error() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join("lev-test-resolve-unreadable");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let file = dir.join("secret.txt");
         std::fs::write(&file, "secret content").unwrap();
         let mut perms = std::fs::metadata(&file).unwrap().permissions();
@@ -779,7 +757,6 @@ mod tests {
         let mut perms2 = std::fs::metadata(&file).unwrap().permissions();
         perms2.set_mode(0o644);
         std::fs::set_permissions(&file, perms2).ok();
-        let _ = std::fs::remove_dir_all(&dir);
 
         assert!(result.is_err());
         assert!(
@@ -802,8 +779,8 @@ mod tests {
         use std::fs::OpenOptions;
         use std::os::windows::fs::OpenOptionsExt;
 
-        let dir = std::env::temp_dir().join("lev-test-resolve-unreadable-win");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let file = dir.join("secret.txt");
         std::fs::write(&file, "secret content").unwrap();
 
@@ -818,7 +795,6 @@ mod tests {
         let result = resolve_task_with(Some(file.to_str().unwrap()), "test-agent", "", &|| false);
 
         drop(_locked);
-        let _ = std::fs::remove_dir_all(&dir);
 
         assert!(result.is_err());
         assert!(
