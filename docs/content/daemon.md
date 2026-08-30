@@ -182,10 +182,16 @@ restart. The scripted half needed this most, because it failed in a way no resta
 the rule sources were read into the compiled checker at boot, so editing a `.rhai` file changed
 nothing at all and the gate went on answering from the text it started with.
 
+`[observability]` reloads too. Turn export on, point it at a different collector, rename the
+service, or turn it off, and the next run emits into what the file says now. The one thing that
+does not move is how verbose the daemon's own log is: the process subscriber is installed before
+any config is read, from `--verbose` on the daemon's command line, and a `tracing` subscriber can
+only be set once per process. Changing that still means restarting the daemon.
+
 Some changes do still need `lev daemon restart`. They set up connections and process-wide state
 once at startup rather than per run:
 
-- `[[mcp_servers]]` (live MCP connections) and `[observability]` (the telemetry pipeline).
+- `[[mcp_servers]]`, which hold live MCP connections.
 - The `[limits]` the world itself is built with: `stall_timeout_secs`, `wedge_timeout_secs`,
   `dead_cycles_before_relief`, `max_concurrent_inferences`, `max_concurrent_tools`,
   `provider_failures_before_open`, `provider_circuit_cooldown_secs`,

@@ -136,6 +136,14 @@ same list.
   so. `lev policy add` printing the rule it just wrote while the gate went on blocking the call was
   the whole of the feedback. A `policy.toml` that will not parse keeps the policy already in force
   and warns once, rather than dropping an allowlist because a save landed half-written.
+- `[observability]` reloads. Turning export on, pointing it at another collector, renaming the
+  service, or turning it off reaches the next run instead of the next daemon restart. The sink and
+  the OTLP log bridge were built once at startup, so the common case failed in the worst way
+  available: you set `enabled = true`, start a run to watch it, and nothing arrives, which looks
+  exactly like a collector that is not listening. The outgoing exporter is flushed before it is
+  replaced, so what it had already recorded still reaches the old collector. The daemon's own log
+  level is not part of this and still needs a restart: the process subscriber is installed from
+  `--verbose` before any config is read.
 - The update check read the GitHub releases answer with no size cap, the one
   buffered remote read left after the daemon's caps landed. It now stops at
   the same 64 MiB as every other buffered body and reports the same
