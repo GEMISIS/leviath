@@ -37,7 +37,7 @@ mod test_support;
 pub use anthropic::AnthropicProvider;
 pub use capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOverride};
 pub use claude_code::ClaudeCodeProvider;
-pub use codex::{ProviderAuthStore, ProviderGrant};
+pub use codex::{CodexProvider, ProviderAuthStore, ProviderGrant};
 pub use endpoint::EndpointProvider;
 pub use gemini::GeminiProvider;
 pub use learned::{LearnedModel, LearnedModels};

@@ -916,6 +916,26 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Whether this provider may only be reached by name.
+    ///
+    /// A blueprint entry that names a model without a provider asks every
+    /// registered provider whether it serves that name, and the first one that
+    /// says yes wins. That is right for providers a user configured to be
+    /// interchangeable, and wrong for one whose selection changes what gets
+    /// billed: enabling a subscription transport must not silently re-route
+    /// existing bare-named stages onto the subscription.
+    ///
+    /// A provider answering `true` is still reachable by an explicit
+    /// `provider/model` reference, an explicit `fallback_order` entry, or by
+    /// being the configured `default_provider`. It is only excluded from
+    /// winning a route nobody asked it to serve.
+    ///
+    /// `false` by default, which is the behaviour every provider had before
+    /// this existed.
+    fn explicit_route_only(&self) -> bool {
+        false
+    }
+
     /// [`Self::serves_model`] answered from the compiled-in capability table.
     ///
     /// Split out so an override can fall back to it: a gateway answers from its

@@ -75,7 +75,12 @@ pub(crate) const MODELS: &[Row] = &[
 
 /// Capabilities for `model`, before any operator override.
 pub(crate) fn capabilities(model: &str) -> ModelCapabilities {
-    crate::capabilities::lookup(MODELS, model).map_or(
+    crate::capabilities::lookup(
+        MODELS,
+        model,
+        // The conservative fallback. Guessing high would size every region
+        // against a window that is not there, and the run would fail at the
+        // far end of a long stage rather than at its start.
         ModelCapabilities {
             supports_temperature: false,
             supports_streaming: true,
@@ -85,7 +90,6 @@ pub(crate) fn capabilities(model: &str) -> ModelCapabilities {
             limits_source: LimitsSource::Builtin,
             supports_system_prompt: true,
         },
-        Row::capabilities,
     )
 }
 

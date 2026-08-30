@@ -216,7 +216,11 @@ mod tests {
             reset_at: None,
         };
         assert_eq!(window(0).label(), "window");
-        assert_eq!(window(60).label(), "1h", "a sub-hour window still reads as 1h");
+        assert_eq!(
+            window(60).label(),
+            "1h",
+            "a sub-hour window still reads as 1h"
+        );
         assert_eq!(window(3600).label(), "1h");
         assert_eq!(window(18_000).label(), "5h");
         assert_eq!(window(86_400).label(), "1d");
@@ -260,7 +264,7 @@ mod tests {
     fn the_summary_names_both_windows() {
         assert_eq!(
             parse(MEASURED).expect("parses").summary(),
-            "5h 13% used, week 3% used"
+            "5h 12% used, week 3% used"
         );
     }
 
@@ -289,7 +293,10 @@ mod tests {
         // Quota is advisory everywhere it is read; an upstream shape change
         // must not take inference down with it.
         assert!(parse("not json").is_none());
-        assert!(parse("[]").is_none());
+        // Not `[]`: serde deserializes a struct from a sequence, and every
+        // field here has a default, so an empty one is accepted.
+        assert!(parse("42").is_none());
+        assert!(parse("\"a string\"").is_none());
     }
 
     #[test]

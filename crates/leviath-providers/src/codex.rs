@@ -35,15 +35,23 @@
 //! - `response.completed` carries usage and status only. Its `output` array is
 //!   always empty, so every output item has to be accumulated from the stream.
 
+pub mod catalog;
 pub mod claims;
+pub mod headers;
+pub mod provider;
+pub mod request;
 pub mod store;
+pub mod stream;
 pub mod token;
+pub mod usage;
 
 pub use claims::CodexClaims;
+pub use provider::CodexProvider;
 pub use store::{ProviderAuthStore, ProviderGrant, grant_account};
 pub use token::{
     CodexTokenSource, Credentials, RefreshError, RefreshTransport, RefreshedTokens, TokenSource,
 };
+pub use usage::{Quota, QuotaWindow};
 
 /// The registry name this provider is known by, and the model prefix a
 /// blueprint writes (`codex/gpt-5.6-sol`).
