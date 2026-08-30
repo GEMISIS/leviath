@@ -41,8 +41,20 @@ fn gateways_of(c: &Config) -> Vec<GatewayInfo> {
 /// Redacted view of a config: booleans for keys, never their values.
 /// `requests` is what this server resolved at start-up, which no config
 /// file alone can say once a flag is involved.
-fn redact(c: &Config, requests: &super::request_limits::RequestLimits) -> RedactedConfig {
+///
+/// `health` is the file behind `c`, which on a broken save is not the file on
+/// disk. Every other field here describes the config in force; without this
+/// one a client had no way to tell "your edit is applied" from "your edit did
+/// not parse and is being ignored".
+fn redact(
+    c: &Config,
+    requests: &super::request_limits::RequestLimits,
+    health: &crate::daemon::config_reload::ConfigHealth,
+) -> RedactedConfig {
+    let (config_error, config_mtime) = super::config_health::report(health);
     RedactedConfig {
+        config_error,
+        config_mtime,
         default_provider: c.default_provider.clone(),
         has_anthropic_key: c.providers.anthropic_api_key.is_some(),
         has_openai_key: c.providers.openai_api_key.is_some(),
@@ -62,10 +74,13 @@ fn redact(c: &Config, requests: &super::request_limits::RequestLimits) -> Redact
 /// made through [`put_config`] - or by anything else on the machine - is
 /// visible to the very next request (issue #532).
 pub(super) async fn get_config(State(state): State<AppState>) -> Json<RedactedConfig> {
-    Json(redact(
-        &state.current_config(),
-        &state.limits.request_limits,
-    ))
+    // One `health()` call rather than a `current_config()` beside it: health
+    // re-checks the file itself and hands back the config in force with its
+    // verdict, so the two halves of one answer cannot disagree about whether a
+    // save has been seen.
+    let health = state.config.health();
+    let config = health.config.clone();
+    Json(redact(&config, &state.limits.request_limits, &health))
 }
 
 /// `PUT /api/config` (admin-only). Loads the on-disk config, applies every
@@ -165,7 +180,13 @@ pub(super) async fn put_config(
             format!("failed to write config: {e}"),
         )
     })?;
-    Ok(Json(redact(&config, &state.limits.request_limits)))
+    // Health read *after* the write, so the answer describes the file this
+    // request just left behind. A write this route made always parses - it
+    // serializes a `Config` and the refusals above ran first - so this is
+    // normally healthy; it is not assumed, because the file could equally have
+    // been broken by hand a moment ago and rewritten by something else.
+    let health = state.config.health();
+    Ok(Json(redact(&config, &state.limits.request_limits, &health)))
 }
 
 /// `POST /api/models/probe` (admin-only): what an OpenAI-compatible server
@@ -449,6 +470,13 @@ mod tests {
     use crate::commands::serve::events::ServerEvent;
     use crate::config::Config;
 
+    /// The health of a reloader with no file to watch: loading, because there
+    /// is nothing that could fail to. For the tests about the *other* fields
+    /// `redact` fills in.
+    fn healthy() -> crate::daemon::config_reload::ConfigHealth {
+        crate::daemon::config_reload::ConfigReloader::fixed(Config::default()).health()
+    }
+
     /// A default config whose ollama endpoint cannot answer.
     ///
     /// Ollama is always registered, so on a machine running `ollama serve` its
@@ -553,6 +581,81 @@ mod tests {
         assert!(!config.has_openai_key);
         assert!(!config.has_openrouter_key);
         assert!(config.ollama_base_url.is_none());
+    }
+
+    /// A broken save is the one thing this route could not previously say. It
+    /// kept answering with the last good config, which reads exactly like an
+    /// edit that was never made.
+    #[tokio::test]
+    async fn get_config_reports_a_broken_file_and_keeps_serving_the_last_good_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let good = crate::config::Config {
+            default_provider: "google".to_string(),
+            ..Default::default()
+        };
+        write_config(&path, &toml::to_string(&good).unwrap());
+        let state = crate::commands::serve::testutil::state_with_config_at(&path);
+
+        // While it loads: no error, and an mtime for the config in force.
+        let config = fetch_config(&state).await;
+        assert!(config.config_error.is_none());
+        let good_mtime = config.config_mtime;
+        assert!(good_mtime.is_some());
+
+        write_config(&path, "default_provider = \"google\"\nbroken : :\n");
+        let config = fetch_config(&state).await;
+
+        let error = config.config_error.expect("the file no longer loads");
+        assert_eq!(error.kind, "parse");
+        assert_eq!(error.line, Some(2));
+        assert_eq!(error.column, Some(8));
+        assert_eq!(error.path, path.display().to_string());
+        assert!(
+            error.note.contains("last one that loaded"),
+            "{}",
+            error.note
+        );
+        assert_eq!(
+            config.config_mtime, good_mtime,
+            "the mtime is the config in force, not the file that failed"
+        );
+        assert_eq!(
+            config.default_provider, "google",
+            "the last good config is still what is served"
+        );
+
+        // Fixed: the error goes away by itself, with no restart.
+        write_config(&path, "default_provider = \"openai\"\n");
+        let config = fetch_config(&state).await;
+        assert!(config.config_error.is_none());
+        assert_eq!(config.default_provider, "openai");
+    }
+
+    /// Write a config file with an mtime strictly newer than the last write,
+    /// so the reloader sees a save even inside one clock tick.
+    fn write_config(path: &std::path::Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+    }
+
+    /// `GET /api/config` against `state`, parsed.
+    async fn fetch_config(state: &AppState) -> RedactedConfig {
+        let app = Router::new()
+            .route("/api/config", get(get_config))
+            .with_state(state.clone());
+        let req = Request::builder()
+            .uri("/api/config")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
     }
 
     /// The console used to feature-detect by calling a route and reading a 404
@@ -828,6 +931,8 @@ mod tests {
             api_version: API_VERSION.to_string(),
             capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
             limits: ApiLimits::current(&Default::default()),
+            config_error: None,
+            config_mtime: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         // Must NOT contain actual key values
@@ -852,6 +957,8 @@ mod tests {
             api_version: API_VERSION.to_string(),
             capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
             limits: ApiLimits::current(&Default::default()),
+            config_error: None,
+            config_mtime: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"ollama_base_url\":\"http://localhost:11434\""));
@@ -1229,6 +1336,34 @@ mod tests {
         assert!(!saved.model_providers["groq"].is_endpoint());
     }
 
+    /// A refused write leaves the file byte for byte as it was.
+    ///
+    /// The test above proves the refused entry is absent, which a partial
+    /// write could still satisfy. This is the stronger claim, and the one that
+    /// matters: a request that answers 400 must not be able to leave the
+    /// machine's config in a state nobody asked for.
+    #[tokio::test]
+    async fn a_refused_put_writes_nothing_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path_public(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        // One request that both edits something valid and asks for something
+        // refused: the valid half must not survive the refusal.
+        let resp = put_config_request(
+            state_with_config_path(path.clone()),
+            r#"{"default_provider":"openai","gateways":[{"name":"bare","kind":"openai-compatible"}]}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a refused write must not touch the file"
+        );
+    }
+
     async fn probe(body: serde_json::Value) -> (axum::http::StatusCode, serde_json::Value) {
         let app = Router::new().route("/api/models/probe", axum::routing::post(probe_models));
         let req = Request::builder()
@@ -1402,7 +1537,7 @@ mod tests {
             },
         );
 
-        let redacted = redact(&config, &Default::default());
+        let redacted = redact(&config, &Default::default(), &healthy());
         let gateway = &redacted.gateways[0];
         assert_eq!(gateway.name, "groq");
         assert_eq!(gateway.kind, "script");

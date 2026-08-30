@@ -1714,14 +1714,15 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        }
+        },
+        "description": "Describes the config in force. When `config.toml` on disk does not load, the server keeps serving the last config that did and reports why here: `config_error` carries `kind` (`parse`, `validation` or `read`), `path`, a one-line `message`, `line` and `column` for a syntax error, `key` for a refused value, `since` in unix seconds, and a `note` saying the running config is the last good one. `config_mtime` is the mtime of that config, so a client can tell whether its own write was picked up. `config_error` is absent while the file loads. Announced as the `config.health` capability."
       },
       "put": {
         "tags": [
           "config"
         ],
         "summary": "Replace the configuration",
-        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed.",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed. The body is validated with the same checks the loader makes, before anything is written, so a request that would produce a config this build refuses to read back answers 400 and leaves the file byte for byte as it was.",
         "responses": {
           "200": {
             "description": "The configuration as written, redacted.",
@@ -1840,7 +1841,7 @@
           "events"
         ],
         "summary": "Event stream for every run",
-        "description": "A WebSocket upgrade, not a JSON response. Authenticate with `?token=` since a browser cannot set a header on the handshake. Each frame is a ServerEvent.",
+        "description": "A WebSocket upgrade, not a JSON response. Authenticate with `?token=` since a browser cannot set a header on the handshake. Each frame is a ServerEvent. Frames about the machine rather than a run - `daemon_link` and `config_health` - arrive here. `config_health` is sent when `config.toml` stops loading, when it loads again, and when it is still broken for a different reason than the last frame gave, carrying the same error shape `GET /api/config` reports.",
         "parameters": [
           {
             "name": "token",

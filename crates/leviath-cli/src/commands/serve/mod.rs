@@ -7,6 +7,7 @@ mod agents;
 mod auth;
 mod blueprints;
 mod config;
+mod config_health;
 mod config_types;
 mod cursor;
 mod doctor;
@@ -392,6 +393,17 @@ async fn execute_with_shutdown(
     let _event_guard = AbortOnDrop(tokio::spawn(polling::event_loop(
         event_state,
         polling::RECONNECT_BACKOFF,
+    )));
+
+    // Config-health watcher, behind the same kind of guard for the same
+    // reason. Separate from the event loop above because it watches a file on
+    // this machine rather than the daemon's stream: a broken `config.toml` is
+    // not something the daemon pushes, and this server holds its own reloader
+    // over the same file.
+    let health_state = state.clone();
+    let _config_health_guard = AbortOnDrop(tokio::spawn(config_health::watch_loop(
+        health_state,
+        config_health::WATCH_INTERVAL,
     )));
 
     // No `--cors` at all: no CORS layer. Programmatic clients are not subject to
