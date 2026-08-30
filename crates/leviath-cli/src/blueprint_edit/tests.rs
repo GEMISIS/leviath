@@ -1381,8 +1381,8 @@ fn odd_content_is_refused_rather_than_clobbered() {
 
 #[test]
 fn check_reports_parse_validate_and_lint_in_that_order() {
-    let dir = std::env::temp_dir().join("lev-blueprint-edit-check");
-    let _ = std::fs::create_dir_all(&dir);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().to_path_buf();
     let parse = check("not = [toml", &dir);
     assert_eq!(parse.error_count(), 1);
     assert_eq!(parse.items[0].code, "parse");
@@ -1466,7 +1466,6 @@ fn check_reports_parse_validate_and_lint_in_that_order() {
     assert_eq!(problems.items[0].severity, Severity::Error);
     assert_eq!(problems.items[0].code, "unknown-tool");
     assert!(problems.items[0].fix.is_some() || problems.items[0].message.contains("no_such_tool"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ─── templates ───────────────────────────────────────────────────────────────
@@ -1505,8 +1504,8 @@ fn the_starter_and_the_clone() {
 
 #[test]
 fn the_layout_store_remembers_per_agent_and_survives_a_reload() {
-    let dir = std::env::temp_dir().join("lev-blueprint-edit-layouts");
-    let _ = std::fs::remove_dir_all(&dir);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().to_path_buf();
     let path = dir.join("nested").join("graph-layouts.json");
     let mut store = LayoutStore::open(path.clone());
     assert_eq!(store.path(), Some(path.as_path()));
@@ -1551,7 +1550,6 @@ fn the_layout_store_remembers_per_agent_and_survives_a_reload() {
     mem.save().unwrap();
     assert_eq!(mem.path(), None);
     assert!(LayoutStore::default_path().is_some_and(|p| p.ends_with("dash/graph-layouts.json")));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ─── catalog ─────────────────────────────────────────────────────────────────

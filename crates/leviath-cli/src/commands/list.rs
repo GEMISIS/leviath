@@ -877,11 +877,9 @@ system = { kind = "pinned", max_tokens = 1000 }
             // test in the crate and restores CWD automatically on drop, so it's
             // safe to hold across the `.await` below.
             let _guard = crate::config::isolate_cwd_for_test();
-            let dir = std::env::temp_dir().join("lev-test-list-cwd-gone");
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            std::env::set_current_dir(&dir).unwrap();
-            std::fs::remove_dir_all(&dir).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            std::env::set_current_dir(dir.path()).unwrap();
+            std::fs::remove_dir_all(dir.path()).unwrap();
 
             let args = ListArgs {
                 filter: ListFilter::All,

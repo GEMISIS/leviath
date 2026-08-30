@@ -482,7 +482,8 @@ mod tests {
     /// A control client pointing at a socket with no daemon behind it; requests
     /// fail fast, which the dashboard treats as "nothing to observe".
     fn no_daemon_control() -> ControlClient {
-        let dir = std::env::temp_dir().join("leviath-dash-no-daemon");
+        let dir =
+            std::env::temp_dir().join(format!("leviath-dash-no-daemon-{}", std::process::id()));
         ControlClient::new(leviath_runtime::control_socket::control_id(&dir))
     }
 

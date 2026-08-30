@@ -73,30 +73,26 @@ mod tests {
 
     #[test]
     fn find_manifest_with_file_path() {
-        let dir = std::env::temp_dir().join("lev-test-find-manifest-file");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let manifest = dir.join("agent.leviath");
         std::fs::write(&manifest, "[agent]\nname = \"test\"").unwrap();
 
         let result = find_manifest(manifest.to_str().unwrap());
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), manifest);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn find_manifest_with_directory_path() {
-        let dir = std::env::temp_dir().join("lev-test-find-manifest-dir");
-        let _ = std::fs::create_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let manifest = dir.join("agent.leviath");
         std::fs::write(&manifest, "[agent]\nname = \"test\"").unwrap();
 
         let result = find_manifest(dir.to_str().unwrap());
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), manifest);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -141,13 +137,11 @@ mod tests {
         let _guard = CWD_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = std::env::temp_dir().join("lev-test-dir-no-manifest-9z7q");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         // No agent.leviath inside - the dir branch falls through to the error.
         let result = find_manifest(dir.to_str().unwrap());
         assert!(result.is_err());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Covers branch 3 (installed agent by name) when the agent is NOT installed.
@@ -167,9 +161,8 @@ mod tests {
     /// Uses `CWD_LOCK` to prevent parallel tests from interfering.
     #[test]
     fn find_manifest_cwd_agent_leviath_found() {
-        let dir = std::env::temp_dir().join("lev-test-cwd-manifest-a1b2");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let manifest = dir.join("agent.leviath");
         std::fs::write(&manifest, "[agent]\nname = \"cwd-test\"").unwrap();
 
@@ -186,7 +179,6 @@ mod tests {
 
         // Always restore CWD before asserting so cleanup runs even on failure.
         std::env::set_current_dir(&original_cwd).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().file_name().unwrap(), "agent.leviath");

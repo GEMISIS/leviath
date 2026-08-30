@@ -1434,6 +1434,13 @@ mod tests {
         );
     }
 
+    /// Pane width for the tests that assert on the file-path hint. The hint
+    /// is a block title, which ratatui clips at the pane's right edge, and it
+    /// carries the run's real on-disk path: under macOS's temp dir
+    /// (`/var/folders/xy/.../T/`) that runs well past 100 columns, which would
+    /// clip the file name the assertion looks for. Wide enough for any OS.
+    const HINT_PANE_WIDTH: u16 = 260;
+
     /// The view shows the bytes `runstate::read_final_output` returns, which
     /// is what the HTTP API serves, under a header naming the submitting
     /// stage and the format, with the sidecar named in the file-path hint.
@@ -1459,9 +1466,16 @@ mod tests {
 
                 let mut dash = make_test_dashboard();
                 dash.stage_content_mode = StageContentMode::FinalOutput;
-                let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+                let mut terminal = Terminal::new(TestBackend::new(HINT_PANE_WIDTH, 20)).unwrap();
                 terminal
-                    .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 100, 20), &agent, 100))
+                    .draw(|f| {
+                        dash.render_content_pane(
+                            f,
+                            Rect::new(0, 0, HINT_PANE_WIDTH, 20),
+                            &agent,
+                            100,
+                        )
+                    })
                     .unwrap();
                 let buf = rendered_buffer(&terminal);
                 assert_eq!(dash.stage_content_mode, StageContentMode::FinalOutput);
@@ -1502,9 +1516,16 @@ mod tests {
                 let agent = setup_run_state_agent_with_logs("final-fallback", &[], Some("plain"));
                 let mut dash = make_test_dashboard();
                 dash.stage_content_mode = StageContentMode::FinalOutput;
-                let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+                let mut terminal = Terminal::new(TestBackend::new(HINT_PANE_WIDTH, 20)).unwrap();
                 terminal
-                    .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 100, 20), &agent, 100))
+                    .draw(|f| {
+                        dash.render_content_pane(
+                            f,
+                            Rect::new(0, 0, HINT_PANE_WIDTH, 20),
+                            &agent,
+                            100,
+                        )
+                    })
                     .unwrap();
                 assert_eq!(dash.stage_content_mode, StageContentMode::Output);
                 let buf = rendered_buffer(&terminal);
@@ -1588,13 +1609,13 @@ mod tests {
                 let run_id = "test-content-output-hint";
                 let agent = setup_run_state_agent_with_logs(run_id, &[], Some("hello output"));
 
-                let backend = TestBackend::new(120, 40);
+                let backend = TestBackend::new(HINT_PANE_WIDTH, 40);
                 let mut terminal = Terminal::new(backend).unwrap();
                 let mut dash = make_test_dashboard();
                 dash.stage_content_mode = StageContentMode::Output;
                 terminal
                     .draw(|f| {
-                        let area = Rect::new(0, 0, 100, 20);
+                        let area = Rect::new(0, 0, HINT_PANE_WIDTH, 20);
                         dash.render_content_pane(f, area, &agent, 100);
                     })
                     .unwrap();
@@ -1836,13 +1857,13 @@ mod tests {
                     setup_run_state_agent_with_final_output(run_id, "present", "the answer");
                 agent.stages = vec![make_stage_record("present")];
 
-                let backend = TestBackend::new(120, 40);
+                let backend = TestBackend::new(HINT_PANE_WIDTH, 40);
                 let mut terminal = Terminal::new(backend).unwrap();
                 let mut dash = make_test_dashboard();
                 dash.stage_content_mode = StageContentMode::Output;
                 terminal
                     .draw(|f| {
-                        let area = Rect::new(0, 0, 100, 20);
+                        let area = Rect::new(0, 0, HINT_PANE_WIDTH, 20);
                         dash.render_content_pane(f, area, &agent, 100);
                     })
                     .unwrap();

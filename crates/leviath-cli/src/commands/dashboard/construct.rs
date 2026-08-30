@@ -44,18 +44,16 @@ impl Dashboard {
     /// Test-only: production always goes through `new_with_log_path`.
     #[cfg(test)]
     pub(super) fn new(cmd_tx: mpsc::UnboundedSender<DaemonCommand>) -> Self {
-        let log_path = std::env::temp_dir()
-            .join("leviath-test-dashboard")
-            .join("dashboard.log");
+        // Per process, so two test binaries (parallel checkouts, or a coverage
+        // run beside a plain one) never append to the same activity log.
+        let base =
+            std::env::temp_dir().join(format!("leviath-test-dashboard-{}", std::process::id()));
+        let log_path = base.join("dashboard.log");
         // A test MCP context: temp paths, a no-op browser, and a fixed clock so
         // no test touches the real home directory, a browser, or the wall clock.
         let ctx = McpContext {
-            config_path: std::env::temp_dir()
-                .join("leviath-test-dashboard")
-                .join("config.toml"),
-            store_path: std::env::temp_dir()
-                .join("leviath-test-dashboard")
-                .join("mcp-auth.json"),
+            config_path: base.join("config.toml"),
+            store_path: base.join("mcp-auth.json"),
             opener: std::sync::Arc::new(|_| false),
             clock: || 1_000,
             // No test built this way reaches a real handshake; the production
@@ -66,15 +64,9 @@ impl Dashboard {
         // the `@` completion never read the real agents dir or working
         // directory. Tests that need either point these at their own tempdir.
         let new_run_ctx = NewRunContext {
-            agents_dir: std::env::temp_dir()
-                .join("leviath-test-dashboard")
-                .join("agents"),
-            config_path: std::env::temp_dir()
-                .join("leviath-test-dashboard")
-                .join("config.toml"),
-            workdir: std::env::temp_dir()
-                .join("leviath-test-dashboard")
-                .join("workdir"),
+            agents_dir: base.join("agents"),
+            config_path: base.join("config.toml"),
+            workdir: base.join("workdir"),
         };
         Self::new_with_log_path(cmd_tx, log_path, |_| false, ctx, new_run_ctx)
     }

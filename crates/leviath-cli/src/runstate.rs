@@ -948,27 +948,25 @@ pub(crate) fn tail_run_logs(
 }
 
 /// Build the isolated base directory for a run-state test and create its
-/// `runs/` subdir. Returned so the caller's closure can plant fixtures under it.
+/// `runs/` subdir. Returned as a [`tempfile::TempDir`] so the tree lives
+/// exactly as long as the closure that uses it and is removed on drop even
+/// when that closure panics.
 ///
-/// Rooted under `~/.leviath-test/rs-<hash>` rather than `std::env::temp_dir()`:
-/// some dashboard render tests display a real on-disk path inside a fixed-width
-/// terminal area and assert on a substring near its *end*, and macOS's real
-/// temp dir (`/var/folders/xy/.../T/`) is long enough to push realistic paths
-/// past the render width and truncate the asserted suffix. `unique` is hashed
-/// short for the same reason (test names run 60+ chars). `.leviath-test` is a
-/// sibling of `.leviath`, never read by `lev dash`/`lev serve`, so even if a
-/// killed test process skips cleanup it can't leak into the real dashboard.
+/// `unique` (the test name, typically) is hashed into the directory prefix so
+/// a stray tree in the temp dir can still be traced back to the test that
+/// left it, without pushing the path length up by the 60+ characters a test
+/// name runs to.
 #[cfg(test)]
-fn make_runs_base_dir(unique: &str) -> std::path::PathBuf {
+fn make_runs_base_dir(unique: &str) -> tempfile::TempDir {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     unique.hash(&mut hasher);
     let short = format!("{:x}", hasher.finish() & 0xffff_ffff);
-    let base_dir = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".leviath-test")
-        .join(format!("rs-{short}"));
-    let _ = std::fs::create_dir_all(base_dir.join("runs"));
+    let base_dir = tempfile::Builder::new()
+        .prefix(&format!("rs-{short}-"))
+        .tempdir()
+        .expect("create an isolated runs dir");
+    let _ = std::fs::create_dir_all(base_dir.path().join("runs"));
     base_dir
 }
 
@@ -997,9 +995,9 @@ fn runs_dir_isolation_vars(
 #[cfg(test)]
 pub(crate) fn with_isolated_runs_dir<R>(unique: &str, f: impl FnOnce(&std::path::Path) -> R) -> R {
     let base_dir = make_runs_base_dir(unique);
-    let result = temp_env::with_vars(runs_dir_isolation_vars(&base_dir), || f(&base_dir));
-    let _ = std::fs::remove_dir_all(&base_dir);
-    result
+    temp_env::with_vars(runs_dir_isolation_vars(base_dir.path()), || {
+        f(base_dir.path())
+    })
 }
 
 /// Async counterpart of [`with_isolated_runs_dir`] for `#[tokio::test]`s.
@@ -1012,10 +1010,11 @@ where
     Fut: std::future::Future<Output = R>,
 {
     let base_dir = make_runs_base_dir(unique);
-    let result =
-        temp_env::async_with_vars(runs_dir_isolation_vars(&base_dir), f(base_dir.clone())).await;
-    let _ = std::fs::remove_dir_all(&base_dir);
-    result
+    temp_env::async_with_vars(
+        runs_dir_isolation_vars(base_dir.path()),
+        f(base_dir.path().to_path_buf()),
+    )
+    .await
 }
 
 #[cfg(test)]
