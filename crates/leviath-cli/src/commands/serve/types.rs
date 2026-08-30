@@ -1277,6 +1277,7 @@ mod tests {
     fn redacted_config_serde_roundtrip() {
         let config = RedactedConfig {
             default_provider: "anthropic".to_string(),
+            default_model: Some("claude-sonnet-5".to_string()),
             has_anthropic_key: true,
             has_openai_key: false,
             has_google_key: false,
@@ -1294,6 +1295,7 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let parsed: RedactedConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.default_provider, "anthropic");
+        assert_eq!(parsed.default_model.as_deref(), Some("claude-sonnet-5"));
         assert!(parsed.has_anthropic_key);
         assert!(!parsed.has_openai_key);
     }

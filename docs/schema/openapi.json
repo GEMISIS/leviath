@@ -1723,6 +1723,98 @@
         ],
         "summary": "Replace the configuration",
         "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed. The body is validated with the same checks the loader makes, before anything is written, so a request that would produce a config this build refuses to read back answers 400 and leaves the file byte for byte as it was.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Every field is optional and an absent one is left untouched, so a console can change one setting without reading the rest back and writing it again.",
+                "properties": {
+                  "default_provider": {
+                    "type": "string"
+                  },
+                  "default_model": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Three states, unlike every other field here. Absent leaves the setting alone; `null` clears it, so each blueprint picks its own model per stage again; a string pins that model across every stage. An empty string is a 400, not a clear: `\"\"` is not a model id, and a form that posts its empty box should be told rather than silently lose the setting."
+                  },
+                  "anthropic_key": {
+                    "type": "string"
+                  },
+                  "openai_key": {
+                    "type": "string"
+                  },
+                  "google_key": {
+                    "type": "string"
+                  },
+                  "openrouter_key": {
+                    "type": "string"
+                  },
+                  "ollama_base_url": {
+                    "type": "string"
+                  },
+                  "gateways": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "name"
+                      ],
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "description": "The `[model_providers]` key. Created when no entry has this name."
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "script",
+                            "openai-compatible"
+                          ],
+                          "description": "Absent leaves the existing kind; an entry created without one is a script."
+                        },
+                        "base_url": {
+                          "type": "string"
+                        },
+                        "api_key": {
+                          "type": "string"
+                        },
+                        "script": {
+                          "type": "string"
+                        },
+                        "headers": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string"
+                          },
+                          "description": "Extra headers for an endpoint, replacing the existing set."
+                        },
+                        "models": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "description": "The ids an endpoint falls back to when its server will not list them."
+                        }
+                      }
+                    },
+                    "description": "Gateways to add or update, by name. A gateway this list does not mention is left as it was."
+                  },
+                  "remove_gateways": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Gateways to delete, by name. Applied after the edits above."
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "The configuration as written, redacted.",
@@ -2927,6 +3019,7 @@
         "description": "The active configuration with every credential reduced to whether one is set, plus what this server can do and how much it accepts.",
         "required": [
           "default_provider",
+          "default_model",
           "has_anthropic_key",
           "has_openai_key",
           "has_google_key",
@@ -2941,6 +3034,13 @@
         "properties": {
           "default_provider": {
             "type": "string"
+          },
+          "default_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model every stage runs on while it is set, as a bare model id on `default_provider`. `null` when nothing is pinned, which is the usual and generally better state: each blueprint then picks its own model per stage. Always sent, so a missing key means the server predates this field rather than meaning nothing is set."
           },
           "has_anthropic_key": {
             "type": "boolean"

@@ -205,6 +205,12 @@ your default still has the blueprint's own entries to fall back to.
 > `default_model` too flattens it, and the cheap stages start paying top-tier prices while the
 > deciding stage loses the model the author chose for it.
 
+Going back is a first-class move, not a repair. Delete the `default_model` line from `config.toml`,
+or over the API send `PUT /api/config` with `{"default_model": null}` - `null` clears it, an absent
+key leaves it alone, and an empty string is refused rather than read as a clear. Either way the next
+run picks per stage again, with no restart. `GET /api/config` reports the current value, `null` when
+nothing is pinned.
+
 Run `lev validate <agent>` to see the result before you spend anything on it. It prints the model
 each stage would actually use on this machine, and, where that differs from the blueprint's own
 order, prints that order underneath so the substitution is visible:
