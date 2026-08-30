@@ -127,6 +127,12 @@ same list.
   got a 408. Those three routes now take an in-flight slot but no deadline;
   each is bounded by its own longer one, and the API guide's Limits section
   lists them.
+- A streamed reply no longer loses text when the transport splits a
+  character across two chunks. The stream reader checked every chunk for
+  UTF-8 on its own and dropped any that failed, so a CJK character, an emoji
+  or a dash cut at a socket boundary took the whole chunk around it with no
+  error. The incomplete bytes are now carried into the next chunk, and bytes
+  that could never be UTF-8 are marked with U+FFFD rather than dropped.
 - The dashboard's run detail strip could show a cache figure over 100%, such
   as `cache 152%`, on a run that was mostly served from the provider's cache.
   The prompt count every provider is normalised to is the fresh input only,

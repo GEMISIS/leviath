@@ -2822,10 +2822,10 @@ mod tests {
         assert_eq!(models[0].id, "llama3-8b");
     }
 
+    /// A character the transport cut in two arrives whole through the framed
+    /// stream, and bytes that could never be UTF-8 are marked, not dropped.
     #[test]
-    fn ndjson_stream_skips_invalid_utf8_chunk_and_continues() {
-        // covers the implicit else of `if let Ok(text) = from_utf8(&bytes)` in
-        // the framed stream
+    fn ndjson_stream_keeps_a_split_character_and_marks_bad_bytes() {
         use futures_core::Stream;
         use std::pin::Pin;
         use std::task::{Context, Poll};
@@ -2850,11 +2850,12 @@ mod tests {
             }
         }
 
-        let invalid_utf8 = vec![0xFF, 0xFE, 0x00];
-        let valid_chunk =
-            b"{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"done\":false}\n".to_vec();
+        let mut first = b"{\"message\":{\"role\":\"assistant\",\"content\":\"o".to_vec();
+        first.extend_from_slice(&[0xFF, 0xF0, 0x9F]);
+        let mut second = vec![0x8E, 0x89];
+        second.extend_from_slice(b"k\"},\"done\":false}\n");
         let stream = StaticStream {
-            data: vec![invalid_utf8, valid_chunk],
+            data: vec![first, second],
             idx: 0,
         };
         let ndjson_stream = ollama_ndjson_stream(stream);
@@ -2863,7 +2864,7 @@ mod tests {
             use tokio_stream::StreamExt;
             let chunks: Vec<_> = ndjson_stream.collect().await;
             assert_eq!(chunks.len(), 1);
-            assert_eq!(chunks[0].as_ref().unwrap().delta, "ok");
+            assert_eq!(chunks[0].as_ref().unwrap().delta, "o\u{FFFD}\u{1F389}k");
         });
     }
 

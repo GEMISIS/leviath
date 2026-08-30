@@ -40,6 +40,74 @@ pub type FrameFn = Box<dyn FnMut(&mut String) -> Option<Option<Result<StreamChun
 /// trailing newline, so its last line can only be read here.
 pub type FlushFn = Box<dyn FnMut(&mut String) -> Option<StreamChunk> + Send>;
 
+/// The bytes of a character the transport cut in half, held until the rest
+/// arrives.
+///
+/// `bytes_stream()` hands over whatever the socket had, and the socket does
+/// not know where a character ends: a four-byte emoji, a CJK character or a
+/// dash inside a delta is routinely split over two chunks. Checking each
+/// chunk on its own and dropping the ones that failed lost the whole chunk
+/// around the split, silently. Decoding the longest valid prefix and carrying
+/// the rest into the next chunk loses nothing; bytes that could never be
+/// UTF-8 become U+FFFD, so a peer that sends garbage is visible in the
+/// output rather than absent from it.
+#[derive(Default)]
+pub(crate) struct Utf8Carry {
+    tail: Vec<u8>,
+}
+
+impl Utf8Carry {
+    /// Decode `bytes` (after whatever was carried) onto `out`, keeping an
+    /// incomplete trailing character back for the next call.
+    pub(crate) fn push(&mut self, bytes: &[u8], out: &mut String) {
+        let owned;
+        let mut input: &[u8] = if self.tail.is_empty() {
+            bytes
+        } else {
+            self.tail.extend_from_slice(bytes);
+            owned = std::mem::take(&mut self.tail);
+            &owned
+        };
+        loop {
+            match std::str::from_utf8(input) {
+                Ok(text) => {
+                    out.push_str(text);
+                    return;
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    // The prefix was checked by the failed call above.
+                    out.push_str(&String::from_utf8_lossy(&input[..valid]));
+                    match e.error_len() {
+                        Some(bad) => {
+                            out.push('\u{FFFD}');
+                            input = &input[valid + bad..];
+                        }
+                        None => {
+                            self.tail = input[valid..].to_vec();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// How many bytes are held back, so a frame cap can count them.
+    pub(crate) fn pending(&self) -> usize {
+        self.tail.len()
+    }
+
+    /// The bytes are over: a character still waiting for its end is not
+    /// coming, so mark it rather than lose it.
+    pub(crate) fn finish(&mut self, out: &mut String) {
+        if !self.tail.is_empty() {
+            self.tail.clear();
+            out.push('\u{FFFD}');
+        }
+    }
+}
+
 /// A byte stream cut into [`StreamChunk`]s by a provider-specific framer.
 ///
 /// One `poll_next` for every provider. Three of them used to carry a copy of
@@ -49,6 +117,8 @@ pub type FlushFn = Box<dyn FnMut(&mut String) -> Option<StreamChunk> + Send>;
 pub struct FramedStream {
     inner: ByteStream,
     buffer: String,
+    /// A character the last chunk ended in the middle of.
+    carry: Utf8Carry,
     parse: FrameFn,
     flush: Option<FlushFn>,
     /// The most `buffer` may hold between frames before the stream fails;
@@ -68,6 +138,7 @@ impl FramedStream {
         Self {
             inner: Box::pin(inner),
             buffer: String::new(),
+            carry: Utf8Carry::default(),
             parse,
             flush,
             frame_cap: STREAM_FRAME_CAP,
@@ -104,15 +175,16 @@ impl Stream for FramedStream {
             }
             match this.inner.as_mut().poll_next(cx) {
                 std::task::Poll::Ready(Some(Ok(bytes))) => {
-                    if let Ok(text) = std::str::from_utf8(&bytes) {
-                        this.buffer.push_str(text);
-                    }
+                    this.carry.push(&bytes, &mut this.buffer);
                     // Checked after the frames were cut (the top of the
                     // loop), so what is measured is one partial frame: a peer
-                    // that never sends a boundary, not a fast one.
-                    if let Err(msg) =
-                        frame_within_cap(this.buffer.len(), this.frame_cap, &this.peer)
-                    {
+                    // that never sends a boundary, not a fast one. The bytes
+                    // held back for the next chunk are part of that frame.
+                    if let Err(msg) = frame_within_cap(
+                        this.buffer.len() + this.carry.pending(),
+                        this.frame_cap,
+                        &this.peer,
+                    ) {
                         this.buffer.clear();
                         return std::task::Poll::Ready(Some(Err(ProviderError::InvalidResponse(
                             msg,
@@ -128,6 +200,7 @@ impl Stream for FramedStream {
                 std::task::Poll::Ready(None) => {
                     // The bytes are over: a frame that arrived whole with the
                     // last of them, then whatever the format does with a tail.
+                    this.carry.finish(&mut this.buffer);
                     if let Some(item) = (this.parse)(&mut this.buffer) {
                         return std::task::Poll::Ready(item);
                     }
@@ -313,6 +386,94 @@ mod tests {
             "Invalid response: stream frame exceeded 4096 bytes from api.example"
         );
         assert!(stream.buffer.is_empty(), "the oversized frame is released");
+    }
+
+    // ─── UTF-8 across chunk boundaries ──────────────────────────────────────
+
+    /// A framed stream over `chunks`, cut on newlines: every line is one text
+    /// chunk, and a last line with no newline is flushed at the end.
+    fn line_framed(chunks: Vec<Vec<u8>>) -> FramedStream {
+        let bytes = chunks
+            .into_iter()
+            .map(|c| Ok::<bytes::Bytes, reqwest::Error>(bytes::Bytes::from(c)));
+        FramedStream::new(
+            tokio_stream::iter(bytes),
+            Box::new(|buffer: &mut String| {
+                let idx = buffer.find('\n')?;
+                let line: String = buffer.drain(..=idx).collect();
+                Some(Some(Ok(text_chunk(line.trim_end_matches('\n')))))
+            }),
+            Some(Box::new(|buffer: &mut String| {
+                if buffer.is_empty() {
+                    None
+                } else {
+                    Some(text_chunk(&std::mem::take(buffer)))
+                }
+            })),
+        )
+    }
+
+    async fn deltas(mut stream: FramedStream) -> Vec<String> {
+        use tokio_stream::StreamExt as _;
+        let mut out = Vec::new();
+        while let Some(item) = stream.next().await {
+            out.push(item.expect("a text chunk").delta);
+        }
+        out
+    }
+
+    /// The transport cuts wherever it likes, including through a character.
+    /// reqwest's `bytes_stream()` hands over whatever the socket had, so a
+    /// four-byte emoji is routinely two bytes in one chunk and two in the
+    /// next; both halves used to be thrown away, and the run lost the whole
+    /// chunk around them with no error.
+    #[tokio::test]
+    async fn a_character_split_across_two_chunks_arrives_whole() {
+        let text = "done 🎉\n".as_bytes();
+        // The emoji is bytes 5..9: split it 2+2.
+        let stream = line_framed(vec![text[..7].to_vec(), text[7..].to_vec()]);
+        assert_eq!(deltas(stream).await, vec!["done 🎉".to_string()]);
+    }
+
+    /// A three-byte CJK character cut 1+2, with the cut chunk carrying more
+    /// text on either side: the neighbours survive with it.
+    #[tokio::test]
+    async fn a_three_byte_character_split_one_and_two_arrives_whole() {
+        let text = "完成\n".as_bytes();
+        let stream = line_framed(vec![text[..4].to_vec(), text[4..].to_vec()]);
+        assert_eq!(deltas(stream).await, vec!["完成".to_string()]);
+    }
+
+    /// A stream that stops inside a character: what came before it is kept,
+    /// and the torn character is marked rather than silently gone.
+    #[tokio::test]
+    async fn a_partial_character_at_stream_end_is_marked_not_dropped() {
+        let text = "done 🎉".as_bytes();
+        let stream = line_framed(vec![text[..7].to_vec()]);
+        assert_eq!(deltas(stream).await, vec!["done \u{FFFD}".to_string()]);
+    }
+
+    /// Bytes that can never be UTF-8 are replaced, one marker per bad
+    /// sequence, and the good text around them is kept. The frame cap counts
+    /// the bytes held back for the next chunk.
+    #[test]
+    fn utf8_carry_replaces_invalid_bytes_and_counts_its_tail() {
+        let mut carry = Utf8Carry::default();
+        let mut out = String::new();
+        carry.push(&[b'a', 0xFF, 0xFE, b'b'], &mut out);
+        assert_eq!(out, "a\u{FFFD}\u{FFFD}b");
+        assert_eq!(carry.pending(), 0);
+        // One lead byte of a three-byte character is held, not decoded.
+        carry.push(&[0xE5], &mut out);
+        assert_eq!(out, "a\u{FFFD}\u{FFFD}b");
+        assert_eq!(carry.pending(), 1);
+        carry.push(&[0xAE, 0x8C], &mut out);
+        assert_eq!(out, "a\u{FFFD}\u{FFFD}b完");
+        assert_eq!(carry.pending(), 0);
+        carry.push(&[0xF0, 0x9F], &mut out);
+        carry.finish(&mut out);
+        assert_eq!(out, "a\u{FFFD}\u{FFFD}b完\u{FFFD}");
+        assert_eq!(carry.pending(), 0);
     }
 
     #[tokio::test]

@@ -25,6 +25,10 @@ Routes:
 Set `LV_MOCK_OVERSIZE_MIB=N` to answer every completion with N MiB of one
 frame that never closes, for probing the daemon's read caps.
 
+Set `LV_MOCK_SPLIT_UTF8=1` to answer a streamed completion with CJK and an
+emoji in the text, written to the socket in two flushes that cut the emoji
+in half, the way a transport boundary lands inside a character.
+
 The count tally is what makes the context-window guard measurable from the
 outside: a run whose request is under half the model's window must show zero
 count calls, and one above it exactly one per inference.
@@ -32,6 +36,7 @@ count calls, and one above it exactly one per inference.
 import json
 import os
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 PORT = int(sys.argv[1])
@@ -42,6 +47,11 @@ ARGS = sys.argv[3] if len(sys.argv) > 3 else "{}"
 # JSON string otherwise), which is what a peer that never stops looks like to
 # the daemon's read caps.
 OVERSIZE_MIB = int(os.environ.get("LV_MOCK_OVERSIZE_MIB", "0"))
+# `LV_MOCK_SPLIT_UTF8=1` makes the streamed answer "done 完成 🎉" and flushes
+# the body in two pieces, the cut two bytes into the four-byte emoji, so the
+# daemon's stream reader sees a chunk that is not UTF-8 on its own.
+SPLIT_UTF8 = os.environ.get("LV_MOCK_SPLIT_UTF8") == "1"
+SPLIT_TEXT = "done 完成 🎉"
 
 
 def tool_calls(streaming):
@@ -185,7 +195,7 @@ class Handler(BaseHTTPRequestHandler):
             delta = {"role": "assistant", "tool_calls": tool_calls(streaming=True)}
             finish = "tool_calls"
         else:
-            delta = {"role": "assistant", "content": "done"}
+            delta = {"role": "assistant", "content": SPLIT_TEXT if SPLIT_UTF8 else "done"}
             finish = "stop"
         chunks = [
             {"id": "c1", "object": "chat.completion.chunk", "model": "gpt-mock",
@@ -194,12 +204,20 @@ class Handler(BaseHTTPRequestHandler):
              "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]},
             {"id": "c1", "object": "chat.completion.chunk", "model": "gpt-mock", "choices": [], "usage": USAGE},
         ]
-        body = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
-        body = body.encode()
+        body = "".join(f"data: {json.dumps(c, ensure_ascii=False)}\n\n" for c in chunks)
+        body = (body + "data: [DONE]\n\n").encode()
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
+        if SPLIT_UTF8 and not want_tool:
+            # Two bytes into the emoji: the first flush ends mid-character.
+            cut = body.index("🎉".encode()) + 2
+            self.wfile.write(body[:cut])
+            self.wfile.flush()
+            time.sleep(0.2)
+            self.wfile.write(body[cut:])
+            return
         self.wfile.write(body)
 
 
