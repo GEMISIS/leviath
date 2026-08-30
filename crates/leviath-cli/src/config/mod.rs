@@ -1495,6 +1495,9 @@ some_custom_thing = \"forwarded to the script\"
     /// The same technique as the `RunMeta` guard in `serve/runs_tests.rs`.
     fn declared_fields(source: &str, struct_name: &str) -> Vec<String> {
         let header = format!("pub struct {struct_name} {{");
+        // A Windows checkout with `core.autocrlf` carries `\r\n`; read it
+        // with `\n` line ends so the header and the closing brace compare.
+        let source = source.replace("\r\n", "\n");
         let body: Vec<&str> = source
             .lines()
             .skip_while(|line| *line != header)
@@ -1515,6 +1518,14 @@ some_custom_thing = \"forwarded to the script\"
             .collect();
         fields.sort();
         fields
+    }
+
+    #[test]
+    fn declared_fields_reads_a_crlf_checkout_the_same() {
+        let unix = "pub struct Thing {\n    pub a: u8,\n    #[serde(flatten)]\n    pub b: u8,\n    pub c: u8,\n}\npub struct Other {\n    pub d: u8,\n}\n";
+        let crlf = unix.replace('\n', "\r\n");
+        assert_eq!(declared_fields(unix, "Thing"), vec!["a", "c"]);
+        assert_eq!(declared_fields(&crlf, "Thing"), vec!["a", "c"]);
     }
 
     /// Every field serde reads on `Config` and each section struct is a key
