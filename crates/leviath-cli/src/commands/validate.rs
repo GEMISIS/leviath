@@ -842,9 +842,42 @@ async fn primed_registry_with(
 /// rather than silently changing which model the output names.
 const VALIDATE_PRIME_TIMEOUT_SECS: u64 = 5;
 
+/// What `lev validate` says about a config file that will not load.
+///
+/// Not a failure: the blueprint is what was asked about, and it checks out or
+/// does not on its own. But the provider and read-path checks below need a
+/// config, and running them against no config at all while saying nothing is
+/// how `validate` came to report a clean blueprint that the daemon then
+/// refused.
+fn broken_config_note(fault: &crate::config::ConfigFault) -> Vec<String> {
+    vec![
+        format!(
+            "warning: {} does not load ({})",
+            fault.path.display(),
+            fault.summary()
+        ),
+        "  the blueprint is still checked; the model and read-path checks that need a config \
+         are skipped"
+            .to_string(),
+    ]
+}
+
 /// Run `lev validate`: check a blueprint and print what is wrong with it.
 pub(crate) async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
-    let config = crate::config::Config::load().ok();
+    // A config that will not load used to be swallowed whole here: `.ok()`
+    // turned it into `None`, and the checks that need a config - which models
+    // an install would use, which read paths are granted - quietly stopped
+    // running. The blueprint still validates without one, so this stays a
+    // warning rather than a refusal, but it is said out loud now.
+    let config = match crate::config::Config::load_faulted() {
+        Ok(config) => Some(config),
+        Err(fault) => {
+            for line in broken_config_note(&fault) {
+                eprintln!("{line}");
+            }
+            None
+        }
+    };
     // Appended to a load failure, and only when the file is an installed copy
     // of a bundled agent this build ships a different version of. Then the
     // answer is "reinstall it", not "debug your graph".
@@ -2195,5 +2228,50 @@ brain = { kind = "custom", script = "hooks/brain.rhai", max_tokens = 1000 }
         // Pass the *file* path directly, not the directory.
         let checked = check_manifest(&manifest_path).unwrap();
         assert_eq!(checked.blueprint.name, "ok-agent");
+    }
+
+    /// The blueprint is still validated when the config file will not load,
+    /// and the warning goes out on the way past.
+    #[tokio::test]
+    async fn execute_warns_about_a_broken_config_and_still_checks_the_blueprint() {
+        crate::config::with_isolated_config_path_async(
+            "validate-broken-config",
+            |dir| async move {
+                std::fs::write(
+                    dir.join("config.toml"),
+                    "default_provider = \"anthropic\"\nbroken : :\n",
+                )
+                .unwrap();
+                let manifest_dir = tempfile::tempdir().unwrap();
+                write_test_agent(manifest_dir.path(), CLEAN_MANIFEST);
+                assert!(
+                    execute(args_for(manifest_dir.path())).await.is_ok(),
+                    "a blueprint is checked whether or not the config loads"
+                );
+            },
+        )
+        .await;
+    }
+
+    /// `lev validate` used to swallow a config that would not load: `.ok()`
+    /// made it `None`, the model and read-path checks silently stopped
+    /// running, and the command reported a clean blueprint the daemon would
+    /// then refuse to run the way it described.
+    #[test]
+    fn a_config_that_does_not_load_is_said_out_loud_rather_than_swallowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_provider = \"anthropic\"\nbroken : :\n").unwrap();
+        let fault = crate::config::ConfigFault::check(&path).expect("it does not load");
+
+        let joined = broken_config_note(&fault).join("\n");
+        assert!(joined.starts_with("warning: "), "{joined}");
+        assert!(joined.contains("does not load"), "{joined}");
+        assert!(joined.contains("line 2, column 8"), "{joined}");
+        assert!(
+            joined.contains("blueprint is still checked"),
+            "it says what still ran: {joined}"
+        );
+        assert!(joined.contains("skipped"), "and what did not: {joined}");
     }
 }

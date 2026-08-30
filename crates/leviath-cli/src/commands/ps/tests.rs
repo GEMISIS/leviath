@@ -1003,3 +1003,55 @@ fn the_title_column_shows_a_generated_title() {
         "an untitled run leaves the cell empty rather than borrowing one: {out}"
     );
 }
+
+/// `lev ps` is where a person looks when a run is not doing what they expect,
+/// so it is where a config that stopped loading has to be visible. It goes
+/// under the table, with the other advisory footers.
+#[test]
+fn a_config_that_does_not_load_gets_a_line_under_the_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+
+    std::fs::write(&path, "default_provider = \"anthropic\"\n").unwrap();
+    assert!(
+        broken_config_footer(&path).is_none(),
+        "a file that loads says nothing"
+    );
+    assert!(
+        broken_config_footer(&dir.path().join("absent.toml")).is_none(),
+        "no config file means defaults, not a broken one"
+    );
+
+    std::fs::write(&path, "default_provider = \"anthropic\"\nbroken : :\n").unwrap();
+    let line = broken_config_footer(&path).expect("a broken file gets a line");
+    assert!(line.contains("does not load"), "{line}");
+    assert!(line.contains("line 2, column 8"), "{line}");
+    assert!(
+        line.contains("last config that did"),
+        "the runs above are not on the file on disk: {line}"
+    );
+    assert!(
+        line.contains("lev doctor"),
+        "and where the detail is: {line}"
+    );
+
+    // …and it reaches the printed listing, under everything else. Printed both
+    // ways round, because the listing must be unchanged when the file loads.
+    let listing = |config_path: &std::path::Path| {
+        print_listing(
+            Listing {
+                runs: &[entry("a", AgentStatus::Active)],
+                finished: &[],
+                health: &healthy_daemon(),
+                offline: None,
+                daemon_reachable: true,
+                config_path,
+            },
+            &PsArgs::default(),
+            0,
+        );
+    };
+    listing(&path);
+    std::fs::write(&path, "default_provider = \"anthropic\"\n").unwrap();
+    listing(&path);
+}
