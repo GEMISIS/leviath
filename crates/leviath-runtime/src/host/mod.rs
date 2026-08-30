@@ -36,6 +36,8 @@ mod events;
 pub use events::*;
 mod types;
 pub use types::*;
+mod settings;
+pub use settings::HostSettings;
 
 /// Owns the world and the run-id map; drives the world and services control ops.
 pub struct WorldHost {
@@ -49,10 +51,11 @@ pub struct WorldHost {
     reaper: Option<Reaper>,
     events: broadcast::Sender<WorldEvent>,
     emitted: HashMap<String, Emitted>,
-    /// Dollar figures the operator wants to hear about, ascending. Empty by
-    /// default, which is the current behaviour: no events, no cost to anyone
-    /// who has not asked.
-    spend_notify_usd: Vec<f64>,
+    /// The `[limits]` settings the host itself runs on: relief threshold,
+    /// listing retention, and the spend figures worth an event. Shared rather
+    /// than owned so a config reload can move them without reaching the host -
+    /// see [`HostSettings`].
+    settings: HostSettings,
     emitted_interactions: HashSet<String>,
     /// Sub-agent world-access requests from tool lanes. The host holds a `tx`
     /// clone so the receiver never closes (its `recv` never yields `None`).
@@ -73,16 +76,10 @@ pub struct WorldHost {
     /// Consecutive re-drives that found the lane healthy (no dead cycles, no
     /// queue) while relief was outstanding - the decay countdown.
     healthy_cycles: u32,
-    /// Dead cycles the daemon tolerates before widening the tool lane. `0`
-    /// disables relief. See [`Self::set_dead_cycles_before_relief`].
-    dead_cycles_before_relief: u32,
     /// Runs unloaded recently enough to still be worth reporting, oldest first,
     /// each paired with the unix second it was unloaded. See
     /// [`Self::record_finished`].
     finished: VecDeque<(i64, RunListEntry)>,
-    /// How long an unloaded run stays in [`Self::finished`]. `0` keeps none.
-    /// See [`Self::set_finished_retention_secs`].
-    finished_retention_secs: u64,
     /// Paused runs the host has paged out of the world, by run id, each holding
     /// its last listing row. A parked run's full state is on disk; `Resume`,
     /// `Message` and `Cancel` all page it back through
@@ -179,7 +176,7 @@ impl WorldHost {
             reaper: None,
             events,
             emitted: HashMap::new(),
-            spend_notify_usd: Vec::new(),
+            settings: HostSettings::default(),
             emitted_interactions: HashSet::new(),
             parked: HashMap::new(),
             subagent_tx,
@@ -189,10 +186,15 @@ impl WorldHost {
             last_progress: None,
             relief_granted: 0,
             healthy_cycles: 0,
-            dead_cycles_before_relief: DEFAULT_DEAD_CYCLES_BEFORE_RELIEF,
             finished: VecDeque::new(),
-            finished_retention_secs: DEFAULT_FINISHED_RETENTION_SECS,
         }
+    }
+
+    /// A handle on the `[limits]` settings this host runs on, for whatever
+    /// keeps them in step with `config.toml`. Every clone reads and writes the
+    /// same values, so a change made through one is the change the host sees.
+    pub fn settings(&self) -> HostSettings {
+        self.settings.clone()
     }
 }
 
@@ -331,11 +333,8 @@ impl WorldHost {
     ///
     /// A threshold is reported once per run, the first time the total passes
     /// it, so a long run does not repeat itself every pass.
-    pub fn set_spend_notify_usd(&mut self, mut thresholds: Vec<f64>) {
-        thresholds.retain(|t| t.is_finite() && *t > 0.0);
-        thresholds.sort_by(|a, b| a.partial_cmp(b).expect("finite, filtered above"));
-        thresholds.dedup();
-        self.spend_notify_usd = thresholds;
+    pub fn set_spend_notify_usd(&mut self, thresholds: Vec<f64>) {
+        self.settings.set_spend_notify_usd(thresholds);
     }
 
     /// Install the spawner used to service `Spawn` control ops. Without one, a

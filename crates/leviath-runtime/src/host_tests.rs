@@ -802,6 +802,27 @@ async fn release_the_lane(host: &mut WorldHost, releases: &[crate::cancel::Cance
     .await;
 }
 
+/// The host's `[limits]` settings live in a shared handle, so whatever keeps
+/// them in step with `config.toml` can change them without reaching the host,
+/// and the host acts on what either side wrote.
+#[tokio::test]
+async fn the_hosts_limits_settings_are_shared_with_whoever_holds_them() {
+    let mut host = host_with_full_pool(1);
+    let settings = host.settings();
+    host.set_dead_cycles_before_relief(7);
+    assert_eq!(settings.dead_cycles_before_relief(), 7);
+
+    // And back the other way, which is the direction that matters: a change
+    // made through the handle is the one the host acts on.
+    settings.set_dead_cycles_before_relief(0);
+    let snapshot = host.world_mut().lane_snapshot();
+    assert_eq!(
+        host.relieve_if_wedged(&snapshot),
+        0,
+        "relief is switched off, so nothing is granted"
+    );
+}
+
 /// The relief valve: a tool lane that has not drained in long enough gets
 /// wider, so whatever is queued behind the jam can run.
 ///

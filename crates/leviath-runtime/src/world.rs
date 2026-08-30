@@ -624,8 +624,11 @@ impl PipelineWorld {
     }
 
     /// Turn streamed inference off (or back on) for this world - see
-    /// `inference_bridge::InferenceJob::stream`. Call once at startup, before
-    /// serving.
+    /// `inference_bridge::InferenceJob::stream`.
+    ///
+    /// Read when a request is assembled, so a change reaches the next
+    /// inference any run makes; the one already on the wire finishes the way
+    /// it started.
     pub fn set_stream_inference(&mut self, enabled: bool) {
         // `InferenceStage` is inserted by every `PipelineWorld::new` path, so it
         // is a hard invariant here - `resource_mut` (which panics if absent) is
@@ -633,6 +636,56 @@ impl PipelineWorld {
         self.world
             .resource_mut::<crate::pipeline::InferenceStage>()
             .stream_inference = enabled;
+    }
+
+    /// Move the inference pools to `config`.
+    ///
+    /// The pools follow `[limits] max_concurrent_inferences` and its per-model
+    /// and per-provider tables, which an operator can change while the daemon
+    /// is running. A raised limit is usable at once; a lowered one narrows as
+    /// the requests in flight finish, never by taking a slot back from one
+    /// (see `InferencePools::reconfigure`).
+    pub fn set_inference_pool_config(&mut self, config: InferencePoolConfig) {
+        // `InferenceStage` is inserted by every `PipelineWorld::new` path, the
+        // same hard invariant `set_stream_inference` relies on.
+        self.world
+            .resource::<crate::pipeline::InferenceStage>()
+            .pools
+            .reconfigure(config);
+    }
+
+    /// The inference limits in force. The reader beside
+    /// [`set_inference_pool_config`](Self::set_inference_pool_config).
+    pub fn inference_pool_config(&self) -> InferencePoolConfig {
+        self.world
+            .resource::<crate::pipeline::InferenceStage>()
+            .pools
+            .config()
+    }
+
+    /// Whether streamed inference is on. The reader beside
+    /// [`set_stream_inference`](Self::set_stream_inference).
+    pub fn stream_inference(&self) -> bool {
+        self.world
+            .resource::<crate::pipeline::InferenceStage>()
+            .stream_inference
+    }
+
+    /// How many tool batches may run at once right now, relief capacity
+    /// included. The reader beside
+    /// [`set_tool_concurrency`](Self::set_tool_concurrency).
+    pub fn tool_concurrency(&self) -> usize {
+        self.tool_lane.workers()
+    }
+
+    /// Set how many tool batches may run at once, which is what `[limits]
+    /// max_concurrent_tools` names.
+    ///
+    /// Widening is immediate. Narrowing waits for the batches already running
+    /// to finish rather than interrupting them, so the lane reaches its new
+    /// width as it drains.
+    pub fn set_tool_concurrency(&mut self, workers: usize) {
+        self.tool_lane.set_configured(workers);
     }
 
     /// Install the shared interaction hub as a world resource and attach this
@@ -1351,6 +1404,25 @@ mod tests {
             None,
             Handle::current(),
         )
+    }
+
+    /// The pools, the tool lane and the streaming switch all move when the
+    /// operator's `[limits]` do, which is what lets a daemon pick up a
+    /// `config.toml` edit without being restarted.
+    #[tokio::test]
+    async fn the_worlds_tuning_can_be_changed_after_it_is_built() {
+        let mut world = build_world(ProviderRegistry::new());
+        assert_eq!(world.inference_pool_config().limit_for("m"), None);
+        assert_eq!(world.tool_concurrency(), 1);
+        assert!(world.stream_inference());
+
+        world.set_inference_pool_config(InferencePoolConfig::new().with_default(Some(3)));
+        world.set_tool_concurrency(4);
+        world.set_stream_inference(false);
+
+        assert_eq!(world.inference_pool_config().limit_for("m"), Some(3));
+        assert_eq!(world.tool_concurrency(), 4);
+        assert!(!world.stream_inference());
     }
 
     #[tokio::test]

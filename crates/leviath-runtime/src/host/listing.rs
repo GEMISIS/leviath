@@ -179,7 +179,7 @@ impl WorldHost {
     /// keeps none, which is how the listing behaved before issue #205. Served
     /// from `[limits] finished_retention_secs`.
     pub fn set_finished_retention_secs(&mut self, secs: u64) {
-        self.finished_retention_secs = secs;
+        self.settings.set_finished_retention_secs(secs);
     }
 
     /// Keep `entry` in the listing as a run that finished at `at`.
@@ -194,7 +194,7 @@ impl WorldHost {
     /// run that failed instantly. For a run being unloaded, the unload is the
     /// last thing that happened to it.
     pub(super) fn record_finished(&mut self, mut entry: RunListEntry, at: i64) {
-        if self.finished_retention_secs == 0 {
+        if self.settings.finished_retention_secs() == 0 {
             return;
         }
         entry.last_progress_at.get_or_insert(at);
@@ -214,7 +214,7 @@ impl WorldHost {
     /// serve loop runs before it handles any control op, so a listing never has
     /// to prune on the way out.
     pub(super) fn prune_finished(&mut self, now: i64) {
-        let window = self.finished_retention_secs as i64;
+        let window = self.settings.finished_retention_secs() as i64;
         while let Some(&(at, _)) = self.finished.front() {
             if now.saturating_sub(at) <= window {
                 break;

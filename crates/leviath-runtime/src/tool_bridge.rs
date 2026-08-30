@@ -191,6 +191,9 @@ impl ToolLaneStats {
 pub struct ToolLane {
     /// One permit per concurrent batch.
     permits: Arc<Semaphore>,
+    /// The width `[limits] max_concurrent_tools` asks for, and how much of a
+    /// shrink is still owed. See [`Width`].
+    width: std::sync::Mutex<Width>,
     /// Shared with the world so `lane_snapshot` can read it.
     stats: Arc<ToolLaneStats>,
     /// Where finished batches report.
@@ -214,6 +217,10 @@ impl ToolLane {
     ) -> Arc<Self> {
         Arc::new(Self {
             permits: Arc::new(Semaphore::new(concurrency.max(1))),
+            width: std::sync::Mutex::new(Width {
+                target: concurrency.max(1),
+                owed: 0,
+            }),
             stats,
             results,
             wake,
@@ -246,6 +253,11 @@ impl ToolLane {
         extra
     }
 
+    /// How wide the lane is right now, relief capacity included.
+    pub(crate) fn workers(&self) -> usize {
+        self.stats.workers()
+    }
+
     /// Take up to `upto` *idle* permits back out of the lane, returning how many
     /// were reclaimed.
     ///
@@ -261,6 +273,63 @@ impl ToolLane {
         self.stats.narrowed(taken);
         taken
     }
+
+    /// Set the lane's configured width, which is what `[limits]
+    /// max_concurrent_tools` names.
+    ///
+    /// Widening is immediate. Narrowing takes back the permits nobody is
+    /// holding and remembers the rest, so a batch already running finishes on
+    /// the capacity it took; [`settle_width`](Self::settle_width) collects the
+    /// remainder as batches return their permits.
+    ///
+    /// Clamped to at least one, matching [`ToolLane::new`]: a lane of zero
+    /// would park every batch for the life of the daemon.
+    ///
+    /// Relief capacity is untouched. This moves the *configured* width, and
+    /// the relief valve accounts for what it granted separately, so a lane
+    /// widened to break a jam stays widened by exactly that much either side
+    /// of a config change.
+    pub(crate) fn set_configured(&self, workers: usize) {
+        let workers = workers.max(1);
+        let mut width = leviath_core::sync::lock(&self.width);
+        let up = workers.saturating_sub(width.target);
+        let down = width.target.saturating_sub(workers);
+        width.target = workers;
+        // A widening first cancels whatever shrink is still owed, since that
+        // debt was recorded against a ceiling that no longer applies.
+        let cancelled = up.min(width.owed);
+        width.owed -= cancelled;
+        if up - cancelled > 0 {
+            self.relieve(up - cancelled);
+        }
+        width.owed += down;
+        self.settle(&mut width);
+    }
+
+    /// Take back as much of an owed shrink as the lane can spare right now.
+    /// Called whenever a batch is handed to the lane, which is the moment
+    /// after finished batches have returned their permits.
+    pub(crate) fn settle_width(&self) {
+        let mut width = leviath_core::sync::lock(&self.width);
+        self.settle(&mut width);
+    }
+
+    fn settle(&self, width: &mut Width) {
+        width.owed -= self.narrow(width.owed);
+    }
+}
+
+/// What the operator asked the tool lane to be, and how far it still has to go.
+///
+/// `owed` is only ever non-zero between lowering `max_concurrent_tools` and the
+/// batches that were running at the time finishing. It exists so a shrink
+/// requested while the lane was full is not silently dropped: the permits are
+/// collected as they come back rather than taken from work in progress.
+struct Width {
+    /// The configured width, relief capacity excluded.
+    target: usize,
+    /// Permits a shrink has not managed to take back yet.
+    owed: usize,
 }
 
 /// Read jobs off the channel, spawning one task per batch, then wait for the
@@ -271,6 +340,11 @@ async fn serve_lane(lane: Arc<ToolLane>, mut jobs: UnboundedReceiver<ToolJob>) {
         tokio::select! {
             job = jobs.recv() => match job {
                 Some(job) => {
+                    // Before the batch goes out, not after: this is the point
+                    // where the permits of everything that has finished are
+                    // back, so a `max_concurrent_tools` cut that could not be
+                    // taken in full when it was made is completed here.
+                    lane.settle_width();
                     batches.spawn_on(run_batch(lane.clone(), job), &lane.runtime);
                 }
                 None => break, // channel closed → shutting down
@@ -961,5 +1035,142 @@ mod tests {
         stats.finished();
         stats.abandoned();
         assert_eq!((stats.queued(), stats.busy()), (0, 0));
+    }
+
+    /// Raising `[limits] max_concurrent_tools` releases a batch that is already
+    /// queued behind the old width, with no daemon restart and nothing rebuilt.
+    #[tokio::test]
+    async fn widening_the_lane_releases_a_batch_already_waiting() {
+        let mut h = Harness::new(1);
+        assert_eq!(h.lane.workers(), 1);
+        let first = Arc::new(Notify::new());
+        let second = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        h.submit(held_job(
+            1,
+            first.clone(),
+            release.clone(),
+            crate::cancel::CancelToken::new(),
+        ));
+        timeout(first.notified()).await;
+        h.submit(held_job(
+            2,
+            second.clone(),
+            release.clone(),
+            crate::cancel::CancelToken::new(),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), second.notified())
+                .await
+                .is_err(),
+            "the lane is one wide, so the second batch cannot have started"
+        );
+
+        h.lane.set_configured(2);
+        timeout(second.notified()).await;
+        assert_eq!(h.lane.workers(), 2);
+        release.notify_waiters();
+        let _ = h.next_indices(2).await;
+        h.drain().await;
+    }
+
+    /// Lowering it takes back what is idle and leaves the rest to the batches
+    /// that are running, which finish on the capacity they took.
+    #[tokio::test]
+    async fn narrowing_the_lane_waits_for_the_batches_already_running() {
+        let mut h = Harness::new(2);
+        let first = Arc::new(Notify::new());
+        let second = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+        let release_second = Arc::new(Notify::new());
+        h.submit(held_job(
+            1,
+            first.clone(),
+            release_first.clone(),
+            crate::cancel::CancelToken::new(),
+        ));
+        h.submit(held_job(
+            2,
+            second.clone(),
+            release_second.clone(),
+            crate::cancel::CancelToken::new(),
+        ));
+        timeout(first.notified()).await;
+        timeout(second.notified()).await;
+
+        h.lane.set_configured(1);
+        assert_eq!(
+            h.lane.workers(),
+            2,
+            "both permits are held, so nothing is taken from work in flight"
+        );
+
+        release_first.notify_waiters();
+        let _ = h.next_outcome().await;
+        h.lane.settle_width();
+        assert_eq!(
+            h.lane.workers(),
+            1,
+            "the permit that came back is collected, not handed out again"
+        );
+
+        release_second.notify_waiters();
+        let _ = h.next_outcome().await;
+        h.drain().await;
+    }
+
+    /// An idle lane narrows the moment it is told to.
+    #[tokio::test]
+    async fn an_idle_lane_narrows_immediately() {
+        let mut h = Harness::new(4);
+        h.lane.set_configured(2);
+        assert_eq!(h.lane.workers(), 2);
+        h.drain().await;
+    }
+
+    /// Widening again cancels a shrink that has not landed, rather than
+    /// applying both and ending up narrower than the operator asked for.
+    #[tokio::test]
+    async fn widening_cancels_a_shrink_that_has_not_landed() {
+        let mut h = Harness::new(2);
+        let first = Arc::new(Notify::new());
+        let second = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        h.submit(held_job(
+            1,
+            first.clone(),
+            release.clone(),
+            crate::cancel::CancelToken::new(),
+        ));
+        h.submit(held_job(
+            2,
+            second.clone(),
+            release.clone(),
+            crate::cancel::CancelToken::new(),
+        ));
+        timeout(first.notified()).await;
+        timeout(second.notified()).await;
+
+        h.lane.set_configured(1); // owed, and unable to land
+        h.lane.set_configured(2); // thought better of it
+        release.notify_waiters();
+        let _ = h.next_indices(2).await;
+        h.lane.settle_width();
+        assert_eq!(
+            h.lane.workers(),
+            2,
+            "the cancelled shrink must not be collected later"
+        );
+        h.drain().await;
+    }
+
+    /// A width of zero would park every batch for the life of the daemon, so
+    /// it is clamped exactly as `ToolLane::new` clamps its own argument.
+    #[tokio::test]
+    async fn a_configured_width_of_zero_is_clamped_to_one() {
+        let mut h = Harness::new(4);
+        h.lane.set_configured(0);
+        assert_eq!(h.lane.workers(), 1);
+        h.drain().await;
     }
 }
