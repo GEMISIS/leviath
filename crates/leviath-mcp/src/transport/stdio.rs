@@ -82,13 +82,13 @@ fn command_candidates(command: &str) -> Vec<String> {
 ///
 /// **Allowlist, not denylist.** An MCP server is third-party code by definition,
 /// and we are choosing what to hand it - so the question is "what does it need",
-/// not "what must we remember to withhold". The previous substring denylist
-/// (`API_KEY`, `SECRET_KEY`, `ACCESS_TOKEN`, …) passed everything whose name
-/// happened not to match: `AWS_SECRET_ACCESS_KEY` matches neither `API_SECRET`
-/// nor `SECRET_KEY`, and `GITHUB_TOKEN`, `GH_TOKEN`, `NPM_TOKEN`,
-/// `DATABASE_URL`, `SSH_AUTH_SOCK` and Leviath's own `LEVIATH_API_TOKEN` were
-/// never on the list at all. A denylist here loses to every credential the
-/// ecosystem invents next.
+/// not "what must we remember to withhold". A substring denylist (`API_KEY`,
+/// `SECRET_KEY`, `ACCESS_TOKEN`, …) passes everything whose name happens not to
+/// match: `AWS_SECRET_ACCESS_KEY` matches neither `API_SECRET` nor
+/// `SECRET_KEY`, and `GITHUB_TOKEN`, `GH_TOKEN`, `NPM_TOKEN`, `DATABASE_URL`,
+/// `SSH_AUTH_SOCK` and Leviath's own `LEVIATH_API_TOKEN` match nothing on such
+/// a list at all. A denylist here loses to every credential the ecosystem
+/// invents next.
 ///
 /// What survives is [`leviath_core::child_env_allowed`]: enough to find an
 /// interpreter and behave like a terminal program. Anything else a server
@@ -145,6 +145,9 @@ impl StdioTransport {
         args: &[&str],
         env: &HashMap<String, String>,
     ) -> std::io::Result<Child> {
+        // The server talks JSON-RPC over its pipes and has no use for a
+        // console. It matters most here: `command_candidates` resolves `npx` to
+        // `npx.cmd`, a batch file, which Windows always runs through `cmd.exe`.
         let mut cmd = leviath_sys::child_command_async(command);
 
         // Build a clean environment, then layer the explicitly configured vars
@@ -157,10 +160,6 @@ impl StdioTransport {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-
-        // The server talks JSON-RPC over those pipes and has no use for a
-        // console. It matters most here: `command_candidates` resolves `npx` to
-        // `npx.cmd`, a batch file, which Windows always runs through `cmd.exe`.
 
         cmd.spawn()
     }
@@ -413,8 +412,8 @@ impl Transport for StdioTransport {
         )
         .await?;
 
-        // Bounded: a server that accepts the request and then goes silent used
-        // to block the caller forever.
+        // Bounded: without a deadline a server that accepts the request and
+        // then goes silent blocks the caller forever.
         match tokio::time::timeout(timeout, self.read_until_response()).await {
             Ok(result) => result,
             Err(_) => {
@@ -649,7 +648,7 @@ mod tests {
     /// ones. `SAFE_VAR` is harmless and still does not reach the child: a server
     /// that needs it declares it in its own `env` block, which the caller applies
     /// after this filter. That is the whole difference between an allowlist and
-    /// the denylist this replaced.
+    /// a denylist.
     #[test]
     fn filter_env_excludes_anything_not_on_the_allowlist() {
         let vars = [
@@ -882,8 +881,8 @@ for line in sys.stdin:
     #[tokio::test]
     async fn closed_connection_is_an_error_not_a_panic() {
         let _guard = always_on_tracing_guard();
-        // Regression guard: an `.expect()` on the read turns a server dying
-        // mid-request into a daemon panic rather than a failed call.
+        // An `.expect()` on the read would turn a server dying mid-request
+        // into a daemon panic rather than a failed call.
         let script = "import sys\nsys.stdin.readline()\nsys.stdout.close()\n";
         let mut t = spawn_stub(script).await;
         let err = t

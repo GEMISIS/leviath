@@ -56,8 +56,8 @@ pub struct ToolResult {
     /// Whether the result represents a *tool execution* error (as opposed to a
     /// JSON-RPC protocol error, which never reaches this type).
     ///
-    /// The wire name is `isError`. Without the rename this never matched, so
-    /// every failing tool call was silently reported to the model as a success.
+    /// The wire name is `isError`; without the rename the field never matches
+    /// and defaults to `false`, so a failing tool call reads as a success.
     #[serde(rename = "isError", default)]
     pub is_error: bool,
 }
@@ -84,8 +84,8 @@ pub struct EmbeddedResource {
 /// Content item in a tool result.
 ///
 /// Every wire field name here is the spec's camelCase spelling (`mimeType`),
-/// not a Rust-style snake_case one - mismatches made whole tool results fail to
-/// deserialize.
+/// not a Rust-style snake_case one - one mismatched name fails the whole tool
+/// result to deserialize.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum ToolResultContent {
@@ -147,10 +147,9 @@ pub enum ToolResultContent {
 /// MCP protocol revisions this client understands, newest first.
 ///
 /// The client offers the newest and adopts whatever the server echoes back.
-/// Pinning a single old revision - as this used to, with `2024-11-05`
-/// hardcoded - locks every connection to the oldest dialect and, on HTTP,
-/// actively misdeclares the connection: the streamable transport postdates
-/// that revision entirely.
+/// Pinning a single old revision locks every connection to the oldest dialect
+/// and, on HTTP, actively misdeclares the connection: the streamable transport
+/// postdates `2024-11-05` entirely.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
@@ -198,13 +197,6 @@ impl MCPClient {
     /// "how long should a person's agent startup hang on a broken server",
     /// and a test suite is not a person: a CI runner that stalls for two
     /// minutes fails a 30s deadline while proving nothing about the server.
-    ///
-    /// That is not hypothetical. On 2026-08-21 a `windows-latest` job froze
-    /// for 159 seconds - zero tests completed, the binary took 241s against a
-    /// normal 40s - and the one test carrying this deadline was the only
-    /// casualty, reported the instant the process was scheduled again. The
-    /// Python stub it was talking to had done nothing wrong; neither had the
-    /// transport.
     ///
     /// Production keeps the 30s: the trade this makes is only that a test may
     /// wait a long time before failing, which costs a slow test rather than a
@@ -303,7 +295,6 @@ impl MCPClient {
             .request_with_timeout("initialize", init_params, self.connect_timeout)
             .await?;
 
-        // Parse server capabilities
         let capabilities: ServerCapabilities = if let Some(caps) = result.get("capabilities") {
             serde_json::from_value(caps.clone()).unwrap_or_default()
         } else {
@@ -313,7 +304,6 @@ impl MCPClient {
         let version = negotiated_version(result.get("protocolVersion"));
         self.protocol_version = Some(version.clone());
 
-        // Send initialized notification
         self.send_notification("notifications/initialized", serde_json::json!({}))
             .await?;
 
@@ -511,8 +501,8 @@ mod tests {
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("Hello"));
-        // Wire name is `isError`, not `is_error` - a mismatch here meant every
-        // failing tool call deserialized as a success.
+        // Wire name is `isError`, not `is_error`: a mismatch makes a failing
+        // tool call read as a success.
         assert!(json.contains("\"isError\":false"), "got: {json}");
         assert!(!json.contains("is_error"), "got: {json}");
     }
@@ -966,7 +956,6 @@ for line in sys.stdin:
     async fn test_mcp_client_spawn_succeeds() {
         let _guard = always_on_tracing_guard();
         let _client = spawn_stub_client(&echo_tool_stub().source()).await;
-        // If we got here, spawn worked
     }
 
     #[tokio::test]
@@ -983,7 +972,6 @@ for line in sys.stdin:
     #[tokio::test]
     async fn test_mcp_client_capabilities_before_connect_is_none() {
         let client = spawn_stub_client(&echo_tool_stub().source()).await;
-        // Before connect, capabilities should be None
         assert!(client.capabilities().is_none());
     }
 
@@ -1017,7 +1005,6 @@ for line in sys.stdin:
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo");
 
-        // cached_tools() should now return them too
         assert_eq!(client.cached_tools().len(), 1);
         assert_eq!(client.cached_tools()[0].name, "echo");
     }
@@ -1247,10 +1234,9 @@ for line in sys.stdin:
 
     #[test]
     fn tool_result_reads_is_error_from_camel_case_wire_name() {
-        // The regression that motivated all of this: the wire field is
-        // `isError`. Reading `is_error` never matched, so `#[serde(default)]`
-        // silently produced `false` and every failed tool call was handed to
-        // the model as a success.
+        // The wire field is `isError`. Reading `is_error` never matches it,
+        // so `#[serde(default)]` silently yields `false` and every failed tool
+        // call reaches the model as a success.
         let json = r#"{"content":[{"type":"text","text":"boom"}],"isError":true}"#;
         let result: ToolResult = serde_json::from_str(json).unwrap();
         assert!(result.is_error, "isError:true must deserialize as an error");

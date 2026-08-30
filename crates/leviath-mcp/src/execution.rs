@@ -122,8 +122,8 @@ impl ToolExecutor {
     /// process. `None` if no such server is registered.
     ///
     /// The pool's idle-disconnect uses this: a per-agent server whose last
-    /// leasing run ended has no caller left, and before this the connection
-    /// (and its child process) lived until the daemon exited.
+    /// leasing run ended has no caller left, and its connection and child
+    /// process would otherwise live until the daemon exits.
     pub fn remove_client(&mut self, server_name: &str) -> Option<MCPClient> {
         let shared = self.clients.remove(server_name)?;
         // A call still in flight holds a clone of the `Arc`. Removing the
@@ -146,13 +146,13 @@ impl ToolExecutor {
     /// Compute a unique, provider-safe advertised name for `original`.
     ///
     /// **Always** `<server>__<tool>`, sanitized. The server is part of the name
-    /// whether or not anything would have collided, because the alternative -
-    /// bare name, prefixed only on a clash - made the name a function of
-    /// registration order. Two servers both advertising `search` gave the bare
-    /// name to whichever appeared first in `config.toml`, so a blueprint saying
-    /// `available_tools = ["search"]` meant a different server's tool depending
-    /// on the order of a file it does not control, and reordering that file
-    /// silently re-pointed the grant.
+    /// whether or not anything would collide, because the alternative -
+    /// bare name, prefixed only on a clash - makes the name a function of
+    /// registration order. Two servers both advertising `search` would give the
+    /// bare name to whichever appears first in `config.toml`, so a blueprint
+    /// saying `available_tools = ["search"]` would mean a different server's
+    /// tool depending on the order of a file it does not control, and
+    /// reordering that file would silently re-point the grant.
     ///
     /// Qualifying every name removes the question. `alpha__search` and
     /// `beta__search` say which server they came from, and neither depends on
@@ -506,8 +506,6 @@ mod tests {
         assert!(result.data.is_array());
     }
 
-    // ─── execute_filtered: allowed tool ────────────────────────────────
-
     // ─── execute: no server ─────────────────────────────────────────────
 
     #[tokio::test]
@@ -558,8 +556,9 @@ mod tests {
     }
 
     /// Two servers, one slow: a batch that names both takes as long as the
-    /// slow one, not the sum. Before the per-server lock the executor's own
-    /// lock serialised every call behind whichever was in flight.
+    /// slow one, not the sum. One lock per server is what allows that; a lock
+    /// around the executor would serialise every call behind whichever is in
+    /// flight.
     #[tokio::test]
     async fn calls_to_different_servers_overlap() {
         let mut executor = ToolExecutor::new();
@@ -661,11 +660,7 @@ mod tests {
     // ─── add_client / execute / execute_on with a live client ───────────
     //
     // Same Python-backed JSON-RPC stub approach used in client.rs/discovery.rs
-    // tests. Note: MCPClient::shutdown() always returns Ok(()) by design (it
-    // swallows failures so a dead server can't block cleanup) - so
-    // shutdown_all()'s error-collection branch is intentionally left
-    // uncovered here; there's no way to make client.shutdown() fail without
-    // changing that documented "always succeeds" behavior.
+    // tests.
 
     async fn spawn_echo_client() -> MCPClient {
         spawn_ready_client(&echo_tool_stub().source()).await
@@ -730,10 +725,8 @@ mod tests {
         assert_eq!(result.text, "hello from tool");
     }
 
-    /// The end-to-end path against a live stub server. This used to go through
-    /// `execute_filtered`, which is gone; the call it actually exercised -
-    /// route by advertised name, dispatch, map the result - is `execute`, so
-    /// the coverage moves rather than disappearing with its wrapper.
+    /// The end-to-end path against a live stub server: `execute` routes by
+    /// advertised name, dispatches, and maps the result.
     #[tokio::test]
     async fn execute_routes_to_a_live_server_and_succeeds() {
         let _guard = always_on_tracing_guard();
@@ -956,8 +949,7 @@ mod tests {
     // ─── unique_advertised_name ───────────────────────────────────────────
 
     /// Every advertised name carries its server, whether or not anything would
-    /// have collided. The old scheme handed out the bare name first, which made
-    /// it depend on which server registered earliest.
+    /// collide, so the name never depends on which server registered first.
     #[test]
     fn unique_name_always_qualifies_with_the_server() {
         let exec = ToolExecutor::new();
