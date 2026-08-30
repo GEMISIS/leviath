@@ -231,7 +231,7 @@ can only improve matters. A region that claims `stable` and then keeps changing 
 log, because a wrong declaration is worse than none - it puts churn at the front of the prompt,
 where it costs the most. See [what caching costs](/docs/context#what-caching-costs).
 
-A stage can override the whole layout for just itself with `[stages.<name>.context.regions]`. The
+A stage can override the whole layout for itself alone with `[stages.<name>.context.regions]`. The
 per-stage layout applies when the stage is entered, and uses the same syntax:
 
 ```toml

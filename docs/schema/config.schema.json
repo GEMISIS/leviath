@@ -212,6 +212,32 @@
             "type": "integer",
             "minimum": 1
           }
+        },
+        "script_http_timeout_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 30,
+          "description": "Seconds a script tool's HTTP request may take."
+        },
+        "script_http_max_per_host": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 4,
+          "description": "Concurrent script-tool HTTP requests allowed per host. 0 is unbounded."
+        },
+        "max_agents_per_run": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Most agents one run may create, sub-agents included. 0 is no ceiling."
+        },
+        "notify_spend_usd": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": 0
+          },
+          "description": "Dollar figures to be told about while a run is still going, each announced once as an agent_spend event."
         }
       }
     },
@@ -596,6 +622,26 @@
           "max_output_tokens": {
             "type": "integer",
             "minimum": 1
+          },
+          "input_per_mtok": {
+            "type": "number",
+            "minimum": 0,
+            "description": "USD per million fresh input tokens. Overrides the shipped rate table; the only place a negotiated price can be recorded."
+          },
+          "cached_input_per_mtok": {
+            "type": "number",
+            "minimum": 0,
+            "description": "USD per million cached input tokens. Defaults to the input rate."
+          },
+          "cache_write_per_mtok": {
+            "type": "number",
+            "minimum": 0,
+            "description": "USD per million tokens written to cache. Defaults to the input rate."
+          },
+          "output_per_mtok": {
+            "type": "number",
+            "minimum": 0,
+            "description": "USD per million output tokens."
           }
         }
       }
@@ -707,6 +753,11 @@
           }
         }
       }
+    },
+    "update_check": {
+      "type": "boolean",
+      "default": true,
+      "description": "Whether lev asks GitHub for a newer release once a day and says so under a command's output. Set false where reaching out is the problem rather than the answer."
     }
   },
   "$defs": {

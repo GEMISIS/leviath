@@ -17,7 +17,8 @@ symptom, and `lev doctor` checks the usual causes for you.
 `-v` / `--verbose` is global and works on every subcommand.
 
 Scripting against the CLI? `--json` is on `run`, `ps`, `doctor`, `validate`, `list`, `models list`,
-`context`, `result`, `respond`, `stages`, `tools`, `approvals safe`, and `mcp list`. Everything else prints
+`context`, `result`, `respond`, `stages`, `timeline`, `tools`, `update`, `approvals safe`, and `mcp
+list`. Everything else prints
 for a person. Warnings go to stderr, so stdout parses on its own. A service that would rather
 speak HTTP should use [`lev serve`](/docs/api) instead.
 
@@ -313,7 +314,7 @@ a stage keeps in `required_tools`. Both are deliberate wherever they appear. It 
 | `--deny-warnings` | Exit non-zero on warnings too. Notes still never fail. |
 | `--json` | Print the report as one JSON object with `valid`, `blueprint`, `error`, and `findings` |
 | `--graph` | Draw the stage graph after the report, as plain text: the same picture the dashboard's stage explorer shows, escape edges included. Ignored with `--json` |
-| `--width <COLS>` | How many columns `--graph` may use (default 120); a wider graph is shrunk to fit |
+| `--width <COLS>` | How many columns `--graph` may use (default 120); a wider graph is shrunk to fit. Only with `--graph`: on its own it is refused |
 
 The same findings are written to `daemon.log` when a run spawns, so a blueprint that was never
 validated still says what is wrong with it. Nothing there refuses a spawn.
@@ -370,8 +371,8 @@ it returns `false`.
 
 | Command | Flags |
 |---|---|
-| `lev models list` | `-p/--provider <NAME>`, `--offline` (this build's table only, no network), `-a/--all` (include providers with no credential here), `--json` |
-| `lev models show <MODEL>` | `-p/--provider <NAME>` (ask only this provider), `--offline` |
+| `lev models list` | `-p/--provider <NAME>`, `--offline` (this build's table only, no network), `-a/--all` (include providers with no credential here), `--json`. `-r/--remote` is accepted and changes nothing: asking the providers is the default |
+| `lev models show <MODEL>` | `-p/--provider <NAME>` (ask only this provider), `--offline`. `-r/--remote` is accepted and changes nothing, as above |
 
 Both ask every configured provider for its own listing by default, waiting up to five seconds each,
 and print what the provider said: the columns include the release date and the input and output
@@ -736,7 +737,7 @@ nothing about what gets written.
 | `--anthropic-key`, `--openai-key`, `--google-key`, `--openrouter-key <KEY>` | Provider API keys |
 | `--ollama-url <URL>` | Ollama base URL |
 | `--default-model <MODEL>` | Default model override |
-| `--claude-code <true\|false>` | Enable the Claude Code CLI transport. Off unless set |
+| `--claude-code <true\|false>` | Enable the Claude Code CLI transport. Off unless set, and the wizard does not ask about it: this flag is the way to turn it on |
 | `--claude-code-effort <LEVEL>` | `low`, `medium`, `high`, `xhigh`, or `max` |
 | `--install-agents` | Install the bundled blueprints without asking |
 

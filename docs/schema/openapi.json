@@ -139,6 +139,15 @@
           },
           "400": {
             "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       },
@@ -173,6 +182,21 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -211,6 +235,15 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -230,6 +263,18 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       },
@@ -241,6 +286,24 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       },
@@ -250,8 +313,23 @@
         ],
         "summary": "Uninstall a blueprint",
         "responses": {
-          "200": {
-            "$ref": "#/components/responses/Ok"
+          "204": {
+            "description": "Done. No body."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -374,6 +452,15 @@
           },
           "400": {
             "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       },
@@ -415,6 +502,15 @@
           },
           "400": {
             "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -450,11 +546,20 @@
           "204": {
             "description": "Deleted. No body."
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/Error"
           },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
           "409": {
             "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -480,6 +585,15 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       },
@@ -512,6 +626,21 @@
           },
           "400": {
             "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -525,6 +654,15 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -544,8 +682,17 @@
           "200": {
             "$ref": "#/components/responses/Ok"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       },
@@ -555,8 +702,17 @@
         ],
         "summary": "Cancel a run",
         "responses": {
-          "200": {
-            "$ref": "#/components/responses/Ok"
+          "204": {
+            "description": "Done. No body."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -575,6 +731,15 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -593,6 +758,18 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -650,8 +827,17 @@
           "400": {
             "$ref": "#/components/responses/Error"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -715,14 +901,29 @@
           "200": {
             "$ref": "#/components/responses/Ok"
           },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "403": {
             "$ref": "#/components/responses/Error"
           },
           "404": {
             "$ref": "#/components/responses/Error"
           },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
           "416": {
             "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -778,6 +979,18 @@
           },
           "400": {
             "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -803,6 +1016,18 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -821,6 +1046,18 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -837,8 +1074,17 @@
         ],
         "summary": "Pause a run after its in-flight step",
         "responses": {
-          "200": {
-            "$ref": "#/components/responses/Ok"
+          "204": {
+            "description": "Done. No body."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -855,8 +1101,17 @@
         ],
         "summary": "Un-pause a run",
         "responses": {
-          "200": {
-            "$ref": "#/components/responses/Ok"
+          "204": {
+            "description": "Done. No body."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -891,8 +1146,17 @@
           }
         },
         "responses": {
-          "200": {
-            "$ref": "#/components/responses/Ok"
+          "202": {
+            "description": "Accepted: the daemon holds it, and the work happens after the response."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -911,6 +1175,18 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       },
@@ -920,8 +1196,23 @@
         ],
         "summary": "Answer the pending question",
         "responses": {
-          "200": {
-            "$ref": "#/components/responses/Ok"
+          "202": {
+            "description": "Accepted: the daemon holds it, and the work happens after the response."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         },
         "description": "Body: `request_id` (the open request's id) plus one of `value`, `choice_index`, or `approved` with an optional `scope` (`once`, `stage`, `session`). A deny (`approved: false`) may carry `feedback`, a string the model reads inside the tool result for the refused call: `[denied] User declined tool call '<tool>'. Feedback: <text>`. `feedback` beside `approved: true` is a 400. 202 once the daemon holds the answer, 404 when nothing with that id is open. Announced as `interaction.feedback`."
@@ -936,6 +1227,18 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       },
@@ -946,8 +1249,29 @@
         "summary": "Add an MCP server",
         "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because adding a stdio server is arbitrary code execution by construction.",
         "responses": {
-          "200": {
-            "$ref": "#/components/responses/Ok"
+          "201": {
+            "description": "Created."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotMounted"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -965,8 +1289,23 @@
         "summary": "Remove an MCP server",
         "description": "Admin only. See POST /api/mcp/servers.",
         "responses": {
-          "200": {
-            "$ref": "#/components/responses/Ok"
+          "204": {
+            "description": "Done. No body."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -985,6 +1324,21 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1003,6 +1357,27 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         },
         "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because it opens the operator's browser on the host running the server and completes an OAuth flow there. Returns `{\"status\": \"authenticated\"}` when the browser flow completed and credentials were stored, or `{\"status\": \"not_required\"}` when the server answered a probe carrying its configured headers, which means there is no OAuth flow to run."
@@ -1022,6 +1397,24 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         },
         "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because it connects to the server and, for a stdio server, spawns its configured command."
@@ -1037,6 +1430,15 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1052,8 +1454,17 @@
           "200": {
             "$ref": "#/components/responses/Ok"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
           "409": {
             "description": "Another live doctor run is already in progress"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1068,6 +1479,15 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       },
@@ -1106,8 +1526,20 @@
           "400": {
             "$ref": "#/components/responses/Error"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotMounted"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
           "409": {
             "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1134,8 +1566,17 @@
           "200": {
             "$ref": "#/components/responses/Ok"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1166,6 +1607,24 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       },
@@ -1201,6 +1660,30 @@
         "responses": {
           "201": {
             "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1213,7 +1696,23 @@
         "summary": "The active configuration, with credentials redacted",
         "responses": {
           "200": {
-            "$ref": "#/components/responses/Ok"
+            "description": "The configuration, redacted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RedactedConfig"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       },
@@ -1225,7 +1724,32 @@
         "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed.",
         "responses": {
           "200": {
-            "$ref": "#/components/responses/Ok"
+            "description": "The configuration as written, redacted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RedactedConfig"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotMounted"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1246,6 +1770,15 @@
               }
             },
             "description": "Whether the key and value are usable."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1259,6 +1792,15 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1277,8 +1819,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
           "502": {
             "$ref": "#/components/responses/BadGateway"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1303,6 +1854,9 @@
         "responses": {
           "101": {
             "description": "Switching protocols."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           }
         }
       }
@@ -1332,6 +1886,9 @@
         "responses": {
           "101": {
             "description": "Switching protocols."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           }
         }
       }
@@ -1359,6 +1916,9 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "description": "No run with that id.",
             "content": {
@@ -1368,6 +1928,12 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1392,6 +1958,15 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1416,6 +1991,15 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1430,6 +2014,18 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1477,6 +2073,15 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       },
@@ -1523,6 +2128,21 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotMounted"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       },
@@ -1569,6 +2189,18 @@
         "responses": {
           "204": {
             "description": "Deleted."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/NotMounted"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
           }
         }
       }
@@ -1614,6 +2246,46 @@
       },
       "Error": {
         "description": "The request failed.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "The bearer token is missing or wrong. Every route, the websocket included.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "NotMounted": {
+        "description": "The method is mounted only with `lev serve --allow-admin`; without it the path exists for its other methods and this one is refused.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Timeout": {
+        "description": "The request ran past `[serve] request_timeout_secs` and its work was dropped. Not on the websocket routes.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Overloaded": {
+        "description": "More requests in flight than `[serve] max_concurrent_requests` allows, or the daemon is not answering. Retry after a moment.",
         "content": {
           "application/json": {
             "schema": {
@@ -2127,6 +2799,180 @@
               "$ref": "#/components/schemas/SkippedRun"
             },
             "description": "Ids that were left alone, each with a reason. A live run and a run that was already gone are both non-deletions, and a caller needs to tell them apart."
+          }
+        }
+      },
+      "ApiLimits": {
+        "type": "object",
+        "description": "The caps this server enforces, so a client can size its requests instead of discovering a 400.",
+        "required": [
+          "max_limit",
+          "max_ids",
+          "max_file_bytes",
+          "max_listing_entries",
+          "max_search_scan",
+          "search_log_tail_bytes",
+          "max_history_limit",
+          "max_tracked_modified_files",
+          "max_concurrent_requests",
+          "request_timeout_secs"
+        ],
+        "properties": {
+          "max_limit": {
+            "type": "integer",
+            "description": "Largest `limit` on a paginated listing."
+          },
+          "max_ids": {
+            "type": "integer",
+            "description": "Most ids one bulk request may name."
+          },
+          "max_file_bytes": {
+            "type": "integer",
+            "description": "Largest file `GET /api/agents/{id}/files` serves whole."
+          },
+          "max_listing_entries": {
+            "type": "integer",
+            "description": "Most entries a directory listing returns."
+          },
+          "max_search_scan": {
+            "type": "integer",
+            "description": "Most runs a search reads before it stops."
+          },
+          "search_log_tail_bytes": {
+            "type": "integer",
+            "description": "How much of each log a search reads, from the end."
+          },
+          "max_history_limit": {
+            "type": "integer",
+            "description": "Largest `limit` on the context history route."
+          },
+          "max_tracked_modified_files": {
+            "type": "integer",
+            "description": "Most modified files a run reports."
+          },
+          "max_concurrent_requests": {
+            "type": "integer",
+            "description": "Requests in flight before a 503; 0 is no cap."
+          },
+          "request_timeout_secs": {
+            "type": "integer",
+            "description": "Seconds before a request is dropped with a 408; 0 is no deadline."
+          }
+        }
+      },
+      "GatewayInfo": {
+        "type": "object",
+        "description": "One `[model_providers.<name>]` entry, with its credential reduced to whether one is set.",
+        "required": [
+          "name",
+          "has_api_key",
+          "kind"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": "string",
+            "description": "Absent when the entry has none."
+          },
+          "has_api_key": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "script",
+              "openai-compatible"
+            ],
+            "description": "How the entry reaches its provider: a Rhai script, or an OpenAI-compatible endpoint spoken to directly."
+          },
+          "script": {
+            "type": "string",
+            "description": "The script path, for `kind = \"script\"`."
+          },
+          "header_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names of the extra headers an endpoint sends, never their values. Absent when there are none."
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The model ids the entry declares it serves. Absent when it declares none."
+          }
+        }
+      },
+      "RedactedConfig": {
+        "type": "object",
+        "description": "The active configuration with every credential reduced to whether one is set, plus what this server can do and how much it accepts.",
+        "required": [
+          "default_provider",
+          "has_anthropic_key",
+          "has_openai_key",
+          "has_google_key",
+          "has_openrouter_key",
+          "gateways",
+          "agent_paths",
+          "mcp_server_count",
+          "api_version",
+          "capabilities",
+          "limits"
+        ],
+        "properties": {
+          "default_provider": {
+            "type": "string"
+          },
+          "has_anthropic_key": {
+            "type": "boolean"
+          },
+          "has_openai_key": {
+            "type": "boolean"
+          },
+          "has_google_key": {
+            "type": "boolean"
+          },
+          "has_openrouter_key": {
+            "type": "boolean"
+          },
+          "ollama_base_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gateways": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GatewayInfo"
+            }
+          },
+          "agent_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mcp_server_count": {
+            "type": "integer"
+          },
+          "api_version": {
+            "type": "string",
+            "description": "The version of this document the server implements; equal to `info.version` here."
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Feature names a client may rely on. Each is explained in the API guide."
+          },
+          "limits": {
+            "$ref": "#/components/schemas/ApiLimits"
           }
         }
       }

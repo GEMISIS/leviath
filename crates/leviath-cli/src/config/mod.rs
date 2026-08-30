@@ -1489,6 +1489,221 @@ some_custom_thing = \"forwarded to the script\"
         assert_eq!(parsed.mcp_servers.len(), 2);
     }
 
+    /// The `pub` fields of `struct_name` as serde reads them, from `source`:
+    /// the struct's lines from its declaration to the first column-zero `}`,
+    /// minus a field marked `#[serde(flatten)]`, which is not a key of its own.
+    /// The same technique as the `RunMeta` guard in `serve/runs_tests.rs`.
+    fn declared_fields(source: &str, struct_name: &str) -> Vec<String> {
+        let header = format!("pub struct {struct_name} {{");
+        let body: Vec<&str> = source
+            .lines()
+            .skip_while(|line| *line != header)
+            .skip(1)
+            .take_while(|line| *line != "}")
+            .map(str::trim)
+            .collect();
+        let mut fields: Vec<String> = body
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                !i.checked_sub(1)
+                    .is_some_and(|p| body[p].contains("flatten"))
+            })
+            .filter_map(|(_, line)| line.strip_prefix("pub "))
+            .filter_map(|rest| rest.split_once(':'))
+            .map(|(name, _)| name.trim().to_string())
+            .collect();
+        fields.sort();
+        fields
+    }
+
+    /// Every field serde reads on `Config` and each section struct is a key
+    /// the published schema allows, and, where the schema closes the table,
+    /// every key it allows is a field. The example config only proves the
+    /// keys it happens to set, and four `[limits]` keys the daemon read for
+    /// months were refused by the schema because nothing set them there.
+    #[test]
+    fn every_config_field_is_in_the_published_schema() {
+        let schema: serde_json::Value =
+            serde_json::from_str(CONFIG_SCHEMA).expect("the schema is JSON");
+        let keys_at = |path: &[&str]| -> Vec<String> {
+            let mut node = &schema;
+            for step in path {
+                node = &node[step];
+            }
+            let mut keys: Vec<String> = node
+                .as_object()
+                .expect("an object of properties")
+                .keys()
+                .cloned()
+                .collect();
+            keys.sort();
+            keys
+        };
+        let crate_dir = env!("CARGO_MANIFEST_DIR");
+        // (struct, its source file, where its keys sit in the schema, whether
+        // the schema closes the table so the two lists must be equal)
+        let sections: Vec<(&str, &str, &[&str], bool)> = vec![
+            ("Config", "src/config/mod.rs", &["properties"], true),
+            (
+                "LimitsConfig",
+                "src/config/limits.rs",
+                &["properties", "limits", "properties"],
+                true,
+            ),
+            (
+                "WebhookConfig",
+                "src/config/limits.rs",
+                &["properties", "webhook", "properties"],
+                true,
+            ),
+            (
+                "ProviderConfig",
+                "src/config/providers.rs",
+                &["properties", "providers", "properties"],
+                true,
+            ),
+            // `[model_providers.<name>]` forwards unknown keys to a script,
+            // so the schema leaves it open and only the declared fields are
+            // held to it.
+            (
+                "ModelProviderConfig",
+                "src/config/providers.rs",
+                &[
+                    "properties",
+                    "model_providers",
+                    "additionalProperties",
+                    "properties",
+                ],
+                false,
+            ),
+            (
+                "SecurityConfig",
+                "src/config/security.rs",
+                &["properties", "security", "properties"],
+                true,
+            ),
+            (
+                "ReadPathGrants",
+                "src/config/security.rs",
+                &[
+                    "properties",
+                    "agent_read_paths",
+                    "additionalProperties",
+                    "properties",
+                ],
+                true,
+            ),
+            (
+                "ServeConfig",
+                "src/config/serve.rs",
+                &["properties", "serve", "properties"],
+                true,
+            ),
+            (
+                "ScriptToolPermissions",
+                "src/config/policy.rs",
+                &["properties", "tool_script_permissions", "properties"],
+                true,
+            ),
+            (
+                "SafeCommands",
+                "src/approvals.rs",
+                &["properties", "safe_commands", "properties"],
+                true,
+            ),
+            (
+                "AgentSafeCommands",
+                "src/approvals.rs",
+                &[
+                    "properties",
+                    "agent_safe_commands",
+                    "additionalProperties",
+                    "properties",
+                ],
+                true,
+            ),
+            (
+                "TitleConfig",
+                "../leviath-core/src/config.rs",
+                &["properties", "title", "properties"],
+                true,
+            ),
+            (
+                "ObservabilityConfig",
+                "../leviath-core/src/config.rs",
+                &["properties", "observability", "properties"],
+                true,
+            ),
+            (
+                "NudgeConfig",
+                "../leviath-core/src/blueprint/transition.rs",
+                &["properties", "nudge", "properties"],
+                true,
+            ),
+            (
+                "ToolSandboxConfig",
+                "../leviath-core/src/sandbox.rs",
+                &["properties", "sandbox", "properties"],
+                true,
+            ),
+            (
+                "RateLimitConfig",
+                "../leviath-providers/src/provider.rs",
+                &[
+                    "properties",
+                    "rate_limits",
+                    "additionalProperties",
+                    "properties",
+                ],
+                true,
+            ),
+            (
+                "ModelCapabilityOverride",
+                "../leviath-providers/src/capabilities.rs",
+                &[
+                    "properties",
+                    "model_capabilities",
+                    "additionalProperties",
+                    "properties",
+                ],
+                true,
+            ),
+            (
+                "MCPServerConfig",
+                "../leviath-mcp/src/discovery.rs",
+                &["properties", "mcp_servers", "items", "properties"],
+                true,
+            ),
+        ];
+        let mut problems = Vec::new();
+        for (struct_name, file, path, closed) in sections {
+            let source = std::fs::read_to_string(format!("{crate_dir}/{file}"))
+                .expect("the struct's source file");
+            let declared = declared_fields(&source, struct_name);
+            assert!(!declared.is_empty());
+            let allowed = keys_at(path);
+            // Filtered rather than pushed inside an `if`: a branch only a
+            // failure reaches is a region the coverage gate reports.
+            let not_in_schema: Vec<String> = declared
+                .iter()
+                .filter(|field| !allowed.contains(field))
+                .cloned()
+                .collect();
+            let read_by_nothing: Vec<String> = allowed
+                .iter()
+                .filter(|key| closed && !declared.contains(key))
+                .cloned()
+                .collect();
+            problems.push((struct_name, not_in_schema, read_by_nothing));
+        }
+        let problems: Vec<_> = problems
+            .into_iter()
+            .filter(|(_, missing, stray)| !missing.is_empty() || !stray.is_empty())
+            .collect();
+        assert_eq!(problems, Vec::new());
+    }
+
     #[test]
     fn the_config_schema_rejects_a_key_that_is_not_a_setting() {
         // Without `additionalProperties: false` the schema would accept any

@@ -183,12 +183,71 @@ fn api_router() -> Router<AppState> {
 /// The same technique `xtask/src/docs.rs` uses on the docs.
 #[cfg(test)]
 fn declared_routes() -> Vec<(String, String)> {
+    routes_in(production_source())
+}
+
+/// This file above its test module. The tests below declare routes of their
+/// own as fixtures for the reader, and those are not served by anything;
+/// reading the whole file counted them as production routes.
+#[cfg(test)]
+fn production_source() -> &'static str {
     const SOURCE: &str = include_str!("mod.rs");
-    // Only the half above the test module. The tests below declare routes of
-    // their own as fixtures for the reader, and those are not served by
-    // anything. Reading the whole file counted them as production routes.
-    let production = SOURCE.split("\nmod tests {").next().unwrap_or(SOURCE);
-    routes_in(production)
+    SOURCE.split("\nmod tests {").next().unwrap_or(SOURCE)
+}
+
+/// [`routes_in`] with the handler each method names: every
+/// `(path, METHOD, module, function)` in `source`, for the test that holds
+/// the spec's status codes to what the handler can answer. A route whose
+/// handler is not written `module::function` is left out.
+#[cfg(test)]
+fn handlers_in(source: &str) -> Vec<(String, String, String, String)> {
+    let mut handlers = Vec::new();
+    for chunk in source.split(".route(").skip(1) {
+        let mut depth = 1usize;
+        let mut body = String::new();
+        for ch in chunk.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            body.push(ch);
+        }
+        let Some(path) = body
+            .split_once('"')
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(path, _)| path)
+        else {
+            continue;
+        };
+        if !path.starts_with('/') {
+            continue;
+        }
+        for method in ["get", "post", "put", "delete", "patch"] {
+            // `get(blueprints::list_blueprints)`: the call's argument up to
+            // its closing parenthesis, split at the path separator.
+            let call = format!("{method}(");
+            let named = body
+                .split(call.as_str())
+                .skip(1)
+                .filter_map(|rest| rest.split_once(')'))
+                .filter_map(|(target, _)| target.split_once("::"));
+            for (module, function) in named {
+                handlers.push((
+                    path.to_string(),
+                    method.to_uppercase(),
+                    module.trim().to_string(),
+                    function.trim().to_string(),
+                ));
+            }
+        }
+    }
+    handlers
 }
 
 /// The route reader itself, over arbitrary source text.
@@ -721,6 +780,158 @@ mod tests {
         let (missing, extra) = spec_drift();
         assert!(missing.is_empty());
         assert!(extra.is_empty());
+    }
+
+    /// The production half of every module that owns a handler, by name.
+    const HANDLER_SOURCES: &[(&str, &str)] = &[
+        ("agents", include_str!("agents.rs")),
+        ("blueprints", include_str!("blueprints.rs")),
+        ("config", include_str!("config.rs")),
+        ("doctor", include_str!("doctor.rs")),
+        ("fs", include_str!("fs.rs")),
+        ("interactions", include_str!("interactions.rs")),
+        ("mcp", include_str!("mcp.rs")),
+        ("runs", include_str!("runs.rs")),
+        ("scripts", include_str!("scripts.rs")),
+        ("tools", include_str!("tools.rs")),
+        ("tree", include_str!("tree.rs")),
+        ("update", include_str!("update.rs")),
+        ("websocket", include_str!("websocket.rs")),
+    ];
+
+    /// The `StatusCode::` constants a handler can name, as numbers. A
+    /// constant not listed here fails the lookup below, which is the prompt
+    /// to add it rather than a reason to guess.
+    const STATUS_CONSTANTS: &[(&str, u16)] = &[
+        ("OK", 200),
+        ("CREATED", 201),
+        ("ACCEPTED", 202),
+        ("NO_CONTENT", 204),
+        ("BAD_REQUEST", 400),
+        ("UNAUTHORIZED", 401),
+        ("FORBIDDEN", 403),
+        ("NOT_FOUND", 404),
+        ("METHOD_NOT_ALLOWED", 405),
+        ("REQUEST_TIMEOUT", 408),
+        ("CONFLICT", 409),
+        ("UNSUPPORTED_MEDIA_TYPE", 415),
+        ("RANGE_NOT_SATISFIABLE", 416),
+        ("INTERNAL_SERVER_ERROR", 500),
+        ("BAD_GATEWAY", 502),
+        ("SERVICE_UNAVAILABLE", 503),
+    ];
+
+    /// Every `StatusCode::` constant named in the body of `function` in
+    /// `module`: the text from `async fn <function>(` to the first
+    /// column-zero `}`.
+    fn handler_status_codes(module: &str, function: &str) -> Vec<u16> {
+        let (_, source) = HANDLER_SOURCES
+            .iter()
+            .find(|(name, _)| *name == module)
+            .expect("a handler module with a source entry");
+        let production = source.split("\nmod tests {").next().unwrap_or(source);
+        let (_, rest) = production
+            .split_once(&format!("async fn {function}("))
+            .expect("the handler is declared in its module");
+        let body = rest.split("\n}\n").next().unwrap_or(rest);
+        let mut codes: Vec<u16> = body
+            .split("StatusCode::")
+            .skip(1)
+            .map(|rest| {
+                rest.chars()
+                    .take_while(|c| c.is_ascii_uppercase() || *c == '_')
+                    .collect::<String>()
+            })
+            .map(|name| {
+                STATUS_CONSTANTS
+                    .iter()
+                    .find(|(known, _)| *known == name)
+                    .map(|(_, code)| *code)
+                    .expect("a StatusCode constant the table knows")
+            })
+            .collect();
+        codes.sort_unstable();
+        codes.dedup();
+        codes
+    }
+
+    /// Every status a route can answer is one the spec lists for it: the
+    /// constants its handler names, plus what the layers around every handler
+    /// add (401 from auth on all of them; 408 and 503 from the request limits
+    /// on all but the websocket; 405 on an admin method of a path that is
+    /// mounted without `--allow-admin`, where axum answers for the missing
+    /// method). The spec may list more, since a handler can answer through a
+    /// helper this reader cannot see into.
+    #[test]
+    fn the_openapi_spec_documents_every_status_a_handler_can_answer() {
+        let spec: serde_json::Value = serde_json::from_str(OPENAPI).expect("the spec is JSON");
+        let (open, admin) = production_source()
+            .split_once("match args.allow_admin")
+            .expect("the admin routes are mounted on allow_admin");
+        let open_routes = handlers_in(open);
+        let admin_routes = handlers_in(admin);
+        assert!(open_routes.len() > 25);
+        assert!(admin_routes.len() > 5);
+        let mut problems = Vec::new();
+        for (routes, is_admin) in [(&open_routes, false), (&admin_routes, true)] {
+            for (path, method, module, function) in routes {
+                let documented: Vec<u16> =
+                    spec["paths"][path.as_str()][method.to_lowercase()]["responses"]
+                        .as_object()
+                        .expect("the operation lists responses")
+                        .keys()
+                        .map(|code| code.parse::<u16>().expect("a status code"))
+                        .collect();
+                let mut required = handler_status_codes(module, function);
+                required.push(401);
+                if !path.starts_with("/ws") {
+                    required.push(408);
+                    required.push(503);
+                }
+                if is_admin && open_routes.iter().any(|(open, ..)| open == path) {
+                    required.push(405);
+                }
+                // Filtered rather than pushed inside an `if`: a branch only a
+                // failure reaches is a region the coverage gate reports.
+                let undocumented: Vec<u16> = required
+                    .into_iter()
+                    .filter(|code| !documented.contains(code))
+                    .collect();
+                problems.push((format!("{method} {path}"), undocumented));
+            }
+        }
+        let problems: Vec<(String, Vec<u16>)> = problems
+            .into_iter()
+            .filter(|(_, undocumented)| !undocumented.is_empty())
+            .collect();
+        assert_eq!(problems, Vec::new());
+    }
+
+    #[test]
+    fn the_handler_reader_names_the_function_behind_each_method() {
+        let source = concat!(
+            ".route(\"/a\", get(agents::list_agents).post(agents::spawn_agent))\n",
+            ".route(\"not a path\", get(h))\n",
+            ".route(\"/b\", delete(closure_handler))\n"
+        );
+        assert_eq!(
+            handlers_in(source),
+            vec![
+                (
+                    "/a".to_string(),
+                    "GET".to_string(),
+                    "agents".to_string(),
+                    "list_agents".to_string()
+                ),
+                (
+                    "/a".to_string(),
+                    "POST".to_string(),
+                    "agents".to_string(),
+                    "spawn_agent".to_string()
+                ),
+            ]
+        );
+        assert_eq!(handlers_in("fn main() {}"), Vec::new());
     }
 
     #[test]

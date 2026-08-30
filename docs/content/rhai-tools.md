@@ -34,7 +34,7 @@ object. The recognized directives:
   schema type: `string`, `integer`, `number`, `boolean`, `array`, `object`. A typo here produces a
   schema that does not compile, which switches off
   [argument validation](/docs/tools#argument-validation) for the tool (the daemon logs a warning);
-  calls still run, just unchecked.
+  calls still run, with no argument check.
 - `// @requires <cap> [<cap>...]` lists platform capabilities the tool needs (`network`, `shell`,
   `filesystem`), comma or space separated and repeatable. Leviath drops the tool where the platform
   cannot provide one.

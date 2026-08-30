@@ -12,6 +12,7 @@ openrouter_api_key = "sk-or-example"
 ollama_base_url = "http://localhost:11434"
 request_timeout_secs = 600
 taint_tracking = false
+update_check = true
 batch_tool_hint = true
 shell_hint = true
 
@@ -39,6 +40,9 @@ max_concurrent_tools = 8
 default_max_iterations = 50
 stream_inference = true
 script_shell_timeout_secs = 60
+script_http_timeout_secs = 30
+script_http_max_per_host = 4
+mcp_idle_disconnect_secs = 60
 stall_timeout_secs = 60
 dead_cycles_before_relief = 10
 finished_retention_secs = 300
@@ -48,6 +52,8 @@ provider_circuit_cooldown_secs = 300
 interaction_timeout_secs = 3600
 inference_retry_attempts = 4
 inference_retry_base_ms = 1000
+max_agents_per_run = 0
+notify_spend_usd = [1.0, 5.0]
 # How much an agent may write to disk. Unset in code and written by `lev setup`:
 # delete either line to remove that limit. Running out of disk is refused
 # separately and is not configurable.
@@ -66,6 +72,7 @@ max_run_write_bytes = 10737418240
 cerebras = 1
 
 [security]
+allowed_workdirs = ["~/work"]
 allow_seed_commands = true
 allow_local_network = false
 allow_env_vars = ["MY_BUILD_TOKEN"]
@@ -144,7 +151,6 @@ allow_blueprint = true
 
 [rate_limits.anthropic]
 requests_per_minute = 50
-# Parsed and recorded, not yet enforced: only requests_per_minute throttles.
 tokens_per_minute = 100000
 
 # Every field is optional: name only what you are correcting, and the rest keeps
