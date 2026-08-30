@@ -580,8 +580,8 @@ pub(crate) fn dispatch_interaction_point(
         // Unless the point declares `unattended = "ask"`: some checkpoints exist
         // precisely because a person has to look - a plan signed off before any
         // code is written - and their author would rather the run wait than have
-        // it wave itself through. `[limits] interaction_timeout_secs` is what
-        // keeps that wait from lasting for ever.
+        // it wave itself through. That wait lasts until somebody answers,
+        // unless `[limits] interaction_timeout_secs` bounds it.
         if auto_approve.is_some() && point.unattended == UnattendedPolicy::AutoApprove {
             tracing::info!(
                 agent = %state.agent_id,

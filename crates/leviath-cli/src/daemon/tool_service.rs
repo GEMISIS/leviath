@@ -199,6 +199,27 @@ pub(crate) struct AgentToolState {
     pub dynamic: Option<Arc<DynamicToolCtx>>,
 }
 
+/// The tool result for an approval prompt that resolved with no answer: the
+/// prompt was cancelled, or a configured `[limits] interaction_timeout_secs`
+/// ran out. The timeout is named only when there is one; with none set a
+/// prompt cannot expire, and blaming a timeout would send the operator looking
+/// for a setting that does not exist in their config.
+fn unanswered_approval_result(tool: &str, timeout_secs: Option<u64>) -> String {
+    match timeout_secs {
+        Some(secs) => format!(
+            "[denied] no one answered the approval prompt for '{tool}' before the \
+             interaction timeout ({secs} s, `[limits] interaction_timeout_secs`); \
+             the call did not run. Answer prompts in `lev dash`, raise the \
+             timeout, or set this tool to \"allow\" for the stage."
+        ),
+        None => format!(
+            "[denied] the approval prompt for '{tool}' was closed without an answer; \
+             the call did not run. Answer prompts in `lev dash`, or set this tool \
+             to \"allow\" for the stage."
+        ),
+    }
+}
+
 /// The tool result a declined approval hands the model.
 ///
 /// Without feedback it is the exact sentence it has always been (tests and
@@ -559,24 +580,19 @@ pub(crate) async fn dispatch_tools(
                         progress(&tc.id, &result);
                         slots.push((tc.id.clone(), Some(result)));
                     }
-                    // The hub's neutral answer: the prompt was cancelled or
-                    // nobody answered it before the interaction timeout. Saying
-                    // "declined" here blamed a person who never saw the prompt.
+                    // The hub's neutral answer: the prompt was cancelled, or
+                    // (only when a timeout is configured) nobody answered it in
+                    // time. Saying "declined" here blamed a person who never
+                    // saw the prompt.
                     None => {
-                        let secs = state.interaction.timeout_secs();
+                        let timeout = state.interaction.timeout_secs();
                         tracing::warn!(
                             tool = %tc.name,
                             stage = %stage_name,
-                            timeout_secs = secs,
-                            "approval prompt expired unanswered; the call did not run"
+                            timeout_secs = timeout,
+                            "approval prompt resolved unanswered; the call did not run"
                         );
-                        let result = format!(
-                            "[denied] no one answered the approval prompt for '{}' before the \
-                             interaction timeout ({secs} s, `[limits] interaction_timeout_secs`); \
-                             the call did not run. Answer prompts in `lev dash`, raise the \
-                             timeout, or set this tool to \"allow\" for the stage.",
-                            tc.name
-                        );
+                        let result = unanswered_approval_result(&tc.name, timeout);
                         progress(&tc.id, &result);
                         slots.push((tc.id.clone(), Some(result)));
                     }
@@ -1431,6 +1447,49 @@ mod tests {
         assert!(out[0].1.contains("[denied]"));
     }
 
+    /// With nothing configured, a tool approval waits for a person. The clock
+    /// is paused and advanced past the hour that used to be the default, and
+    /// the prompt is still open; the answer that then arrives runs the call.
+    #[tokio::test(start_paused = true)]
+    async fn an_approval_with_no_timeout_configured_waits_past_the_old_default() {
+        let hub = InteractionHub::new();
+        hub.set_timeout_secs(
+            crate::config::Config::default()
+                .limits
+                .interaction_timeout_secs,
+        );
+        let mut ask = HashMap::new();
+        ask.insert("echo".to_string(), ToolPolicy::Ask);
+        let names: HashSet<String> = ["echo".to_string()].into_iter().collect();
+        let (state, _dir) =
+            script_state(&hub, &[("echo", "\"x\"")], names, no_script_fields().2, ask);
+        let task = tokio::spawn(async move {
+            dispatch_tools(
+                state,
+                vec![call("c1", "echo", serde_json::json!({}))],
+                noop_progress(),
+            )
+            .await
+        });
+        while hub.pending().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(std::time::Duration::from_secs(3600 + 1)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        let pending = hub.pending();
+        assert_eq!(pending.len(), 1, "an hour later the approval is still open");
+        assert!(hub.answer(InteractionResponse::approval(
+            &pending[0].1.id,
+            true,
+            leviath_core::interaction::ApprovalScope::Once
+        )));
+        let out = task.await.unwrap();
+        let result = &out[0].1;
+        assert!(!result.contains("[denied]"), "{result}");
+    }
+
     /// A prompt nobody answered before `[limits] interaction_timeout_secs`
     /// comes back as the hub's neutral response (`approved: None`). That is
     /// not a decline, and the tool result must not say the user declined:
@@ -1439,7 +1498,7 @@ mod tests {
     #[tokio::test]
     async fn an_unanswered_approval_says_so_instead_of_blaming_the_user() {
         let hub = InteractionHub::new();
-        hub.set_timeout_secs(3600);
+        hub.set_timeout_secs(Some(3600));
         let mut ask = HashMap::new();
         ask.insert("echo".to_string(), ToolPolicy::Ask);
         let names: HashSet<String> = ["echo".to_string()].into_iter().collect();
@@ -1460,6 +1519,38 @@ mod tests {
                 && result.contains("3600")
                 && result.contains("interaction_timeout_secs"),
             "{result}"
+        );
+    }
+
+    /// With no timeout configured a prompt cannot expire, so the neutral
+    /// answer means it was closed (cancelled) and the result must not send
+    /// the operator chasing a timeout that is not set.
+    #[tokio::test]
+    async fn a_closed_approval_with_no_timeout_does_not_mention_one() {
+        let hub = InteractionHub::new();
+        let mut ask = HashMap::new();
+        ask.insert("echo".to_string(), ToolPolicy::Ask);
+        let names: HashSet<String> = ["echo".to_string()].into_iter().collect();
+        let (state, _dir) =
+            script_state(&hub, &[("echo", "\"x\"")], names, no_script_fields().2, ask);
+        let out = dispatch_answering(
+            state,
+            vec![call("c1", "echo", serde_json::json!({}))],
+            |req| InteractionResponse::text(&req.id, ""),
+            hub,
+        )
+        .await;
+        let result = &out[0].1;
+        assert!(result.starts_with("[denied]"), "{result}");
+        assert!(!result.contains("declined"), "not a decline: {result}");
+        assert!(
+            result.contains("closed without an answer") && !result.contains("timeout"),
+            "{result}"
+        );
+        assert_eq!(
+            unanswered_approval_result("echo", None),
+            result.as_str(),
+            "the wording is the helper's, verbatim"
         );
     }
 

@@ -72,10 +72,6 @@ fn default_provider_circuit_cooldown_secs() -> u64 {
     leviath_runtime::pipeline::DEFAULT_CIRCUIT_COOLDOWN_SECS
 }
 
-fn default_interaction_timeout_secs() -> u64 {
-    leviath_runtime::interaction_hub::DEFAULT_INTERACTION_TIMEOUT_SECS
-}
-
 /// Streamed inference is on unless the operator says otherwise.
 fn default_stream_inference() -> bool {
     true
@@ -263,20 +259,27 @@ pub struct LimitsConfig {
     ///
     /// Covers every prompt that waits on a person: an agent's `ask_user_*` /
     /// `present_for_review` call, a tool-approval prompt, a taint gate, and a
-    /// blueprint interaction point. Before this existed, a run whose operator
-    /// had walked away sat in `WaitingInput` holding its slot until the daemon
-    /// restarted - hours, in the report that prompted it (issue #204).
+    /// blueprint interaction point.
+    ///
+    /// Unset, a prompt waits for a person for as long as it takes: a run that
+    /// needs you is still waiting when you get back, whether that is in ten
+    /// minutes or on Monday. Nothing else in the daemon fails, reaps, or marks
+    /// stuck a run that is waiting on a person; only cancelling it ends the
+    /// wait. Set this to bound the wait for a run nobody will be watching
+    /// (issue #204).
     ///
     /// Expiry resolves the prompt exactly as cancelling it would: a tool
     /// approval and a taint gate **deny**, an `ask_user_*` call is told nobody
     /// answered, and an interaction point proceeds with no user text. Nothing is
     /// approved on the strength of a timeout.
     ///
-    /// Defaults to `3600` (one hour); `0` waits indefinitely.
+    /// Unset by default. `0` is read as unset (wait indefinitely), never as
+    /// "expire at once", so a config that spelled the wait that way keeps
+    /// working.
     ///
     /// Read once at daemon start, so a change needs a daemon restart.
-    #[serde(default = "default_interaction_timeout_secs")]
-    pub interaction_timeout_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_timeout_secs: Option<u64>,
 
     /// How many times an inference is attempted, the first try included,
     /// before the agent is failed with whatever the provider last said.
@@ -524,7 +527,7 @@ impl Default for LimitsConfig {
             wedge_timeout_secs: default_wedge_timeout_secs(),
             provider_failures_before_open: default_provider_failures_before_open(),
             provider_circuit_cooldown_secs: default_provider_circuit_cooldown_secs(),
-            interaction_timeout_secs: default_interaction_timeout_secs(),
+            interaction_timeout_secs: None,
             inference_retry_attempts: default_inference_retry_attempts(),
             inference_retry_base_ms: default_inference_retry_base_ms(),
             max_concurrent_inferences_by_model: BTreeMap::new(),

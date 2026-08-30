@@ -114,6 +114,7 @@ type ReflectInteractionStatusQuery = (
     Entity,
     &'static mut AgentState,
     Option<&'static AwaitingInteraction>,
+    Option<&'static mut StageProgress>,
 );
 
 /// Copy the scripts a run could not use onto its flags.
@@ -158,6 +159,12 @@ fn fold_broken_scripts(
 /// set it, and the clearing arm below would otherwise walk them back to `Active`
 /// the moment an unrelated prompt of theirs resolved, un-parking a run whose
 /// children are still going.
+///
+/// The wait is also kept off the stage clock. A prompt waits for a person for
+/// as long as it takes, and `stuck_after_minutes` measures the agent, not the
+/// person: when the prompt resolves, the stage's `stage_started_at` moves
+/// forward by however long it was parked, so the next `detect_stuck_stage` sees
+/// the same elapsed time it would have seen had the answer been instant.
 pub(crate) fn reflect_interaction_status(
     hub: Option<Res<InteractionHub>>,
     mut agents: Query<
@@ -170,7 +177,8 @@ pub(crate) fn reflect_interaction_status(
     let Some(hub) = hub else { return };
     let pending: std::collections::HashSet<String> =
         hub.pending().into_iter().map(|(id, _)| id).collect();
-    for (entity, mut state, marked) in agents.iter_mut() {
+    let now = chrono::Utc::now().timestamp();
+    for (entity, mut state, marked, progress) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         match (pending.contains(&state.agent_id), marked.is_some()) {
             // Newly blocked on a prompt: surface it as Waiting.
@@ -178,6 +186,9 @@ pub(crate) fn reflect_interaction_status(
                 if state.status == AgentStatus::Active {
                     state.status = AgentStatus::Waiting;
                     commands.entity(entity).insert(AwaitingInteraction);
+                    if let Some(mut progress) = progress {
+                        progress.waiting_since = Some(now);
+                    }
                 }
             }
             // Request cleared (answered / cancelled): return to Active, unless
@@ -187,9 +198,27 @@ pub(crate) fn reflect_interaction_status(
                 if state.status == AgentStatus::Waiting {
                     state.status = AgentStatus::Active;
                 }
+                if let Some(mut progress) = progress {
+                    credit_wait_to_stage_clock(&mut progress, now);
+                }
             }
             _ => {}
         }
+    }
+}
+
+/// Move the stage clock past a wait on a person that has just ended.
+///
+/// `stage_started_at` is stamped lazily by `detect_stuck_stage`, so a stage
+/// that parked before its first inference has no clock yet and nothing to
+/// credit. Only a wait that actually started (`waiting_since` set) counts.
+fn credit_wait_to_stage_clock(progress: &mut StageProgress, now: i64) {
+    let Some(since) = progress.waiting_since.take() else {
+        return;
+    };
+    let waited = (now - since).max(0);
+    if let Some(started) = progress.stage_started_at.as_mut() {
+        *started += waited;
     }
 }
 

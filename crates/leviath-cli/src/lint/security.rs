@@ -197,9 +197,10 @@ pub(super) fn lint_held_checkpoints(blueprint: &Blueprint) -> Vec<LintFinding> {
         )
         .in_stage(&h.stage)
         .with_fix(
-            "this is deliberate if the checkpoint needs a person. `[limits] \
-             interaction_timeout_secs` bounds the wait, and an unanswered \
-             checkpoint stops the run with an error rather than approving it",
+            "this is deliberate if the checkpoint needs a person; the run waits \
+             until one answers. Set `[limits] interaction_timeout_secs` to bound \
+             the wait, and an unanswered checkpoint then stops the run with an \
+             error rather than approving it",
         )
     })
     .collect()

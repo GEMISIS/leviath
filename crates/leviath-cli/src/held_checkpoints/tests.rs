@@ -78,12 +78,15 @@ fn only_a_blocking_tool_counts_as_held() {
 /// checkpoints must not print a block explaining that it has none.
 #[test]
 fn a_blueprint_that_holds_nothing_prints_nothing() {
-    assert!(preflight_lines(&parse("", ""), 3600).is_empty());
+    assert!(preflight_lines(&parse("", ""), Some(3600)).is_empty());
 }
 
 #[test]
 fn the_preflight_names_every_checkpoint_and_the_deadline() {
-    let lines = preflight_lines(&parse(r#"unattended = "ask""#, r#""ask_user_text""#), 3600);
+    let lines = preflight_lines(
+        &parse(r#"unattended = "ask""#, r#""ask_user_text""#),
+        Some(3600),
+    );
     let block = lines.join("\n");
     assert!(block.contains("2 checkpoints"), "{block}");
     assert!(block.contains("plan: plan_approval"), "{block}");
@@ -92,22 +95,26 @@ fn the_preflight_names_every_checkpoint_and_the_deadline() {
     assert!(block.contains("lev respond"), "{block}");
 
     // One checkpoint reads as one, not "1 checkpoints".
-    let one = preflight_lines(&parse(r#"unattended = "ask""#, ""), 3600).join("\n");
+    let one = preflight_lines(&parse(r#"unattended = "ask""#, ""), Some(3600)).join("\n");
     assert!(one.contains("1 checkpoint:"), "{one}");
 }
 
-/// `interaction_timeout_secs = 0` means wait forever, and saying "after 0s"
-/// would be the opposite of the truth.
+/// No `interaction_timeout_secs` means the run waits for a person, and so
+/// does an explicit `0`; saying "after 0s" would be the opposite of the truth.
 #[test]
 fn a_disabled_timeout_says_the_run_waits() {
-    let block = preflight_lines(&parse(r#"unattended = "ask""#, ""), 0).join("\n");
-    assert!(block.contains("until somebody answers"), "{block}");
-    assert!(!block.contains("stops with an error"), "{block}");
+    for unset in [None, Some(0)] {
+        let block = preflight_lines(&parse(r#"unattended = "ask""#, ""), unset).join("\n");
+        assert!(
+            block.contains("until somebody answers"),
+            "{unset:?}: {block}"
+        );
+        assert!(!block.contains("stops with an error"), "{unset:?}: {block}");
+    }
 }
 
 #[test]
 fn a_timeout_reads_as_the_operator_wrote_it() {
-    assert_eq!(human_timeout(0), "indefinitely");
     assert_eq!(human_timeout(7200), "2h");
     assert_eq!(human_timeout(300), "5m");
     assert_eq!(human_timeout(45), "45s");

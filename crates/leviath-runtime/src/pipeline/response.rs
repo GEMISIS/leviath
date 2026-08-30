@@ -596,6 +596,12 @@ pub(crate) struct StageProgress {
     /// [`force_transition`] all get a fresh clock from the `Default` reset
     /// without threading a clock through their signatures.
     pub stage_started_at: Option<i64>,
+    /// Unix seconds at which the agent last parked on a person (a tool
+    /// approval, an `ask_user_*` question, a checkpoint). Stamped and cleared
+    /// by `reflect_interaction_status`, which moves `stage_started_at` forward
+    /// by the time the wait took when the prompt resolves: a person's hour is
+    /// not the agent's, and a `stuck_after_minutes` edge must not fire on it.
+    pub waiting_since: Option<i64>,
     /// `write_file`/`edit_file` calls made in this stage, keyed by target path.
     /// Feeds the `stuck_after_same_file_edits` threshold.
     pub edits_by_path: std::collections::HashMap<String, usize>,

@@ -57,8 +57,8 @@ pub(super) fn limits_fields(config: &Config) -> Vec<Field> {
         },
         Field {
             label: "Interaction timeout (seconds)",
-            help: "Resolve a prompt nobody answered after this long, so the run carries on. 0 waits for ever.",
-            value: FieldValue::Number(Some(config.limits.interaction_timeout_secs)),
+            help: "Leave empty and a run waits for you however long it takes. Set it to resolve a prompt nobody answered after this long instead.",
+            value: FieldValue::Number(config.limits.interaction_timeout_secs),
         },
         // The two write ceilings are unset in code and offered with a value
         // here, so a fresh install has one written down where it can be seen
@@ -142,12 +142,10 @@ pub(super) fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
                 config.limits.wedge_timeout_secs =
                     n.unwrap_or(Config::default().limits.wedge_timeout_secs)
             }
-            // Same rule again: unset keeps the default hour, 0 is an explicit
-            // "wait for a person however long it takes".
-            (9, FieldValue::Number(n)) => {
-                config.limits.interaction_timeout_secs =
-                    n.unwrap_or(Config::default().limits.interaction_timeout_secs)
-            }
+            // Unset is the default and means "wait for a person however long
+            // it takes"; a number bounds the wait. Nothing is written unless
+            // the user typed one, so a fresh install carries no timeout.
+            (9, FieldValue::Number(n)) => config.limits.interaction_timeout_secs = *n,
             // The write ceilings break the rule above, and deliberately: here
             // an unset field means *no limit*, not "keep the default". They are
             // the only two settings whose absence is a real choice a user makes
