@@ -618,9 +618,15 @@ pub(super) struct Toast {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum ToastLevel {
+    /// Something finished well; drawn with the completion check.
     Info,
+    /// Something to notice, such as a setting that runs tools unasked.
     Warning,
     Error,
+    /// Something has been asked for and not yet answered: a run starting, a
+    /// login or a connection test in flight. Its own glyph, so a toast
+    /// that says "Starting…" does not wear the check of one that is done.
+    Progress,
 }
 
 #[cfg(test)]

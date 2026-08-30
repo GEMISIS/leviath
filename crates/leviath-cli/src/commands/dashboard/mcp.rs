@@ -124,7 +124,7 @@ impl Dashboard {
     pub(super) fn mcp_login_selected(&mut self) {
         if let Some(row) = self.mcp_rows.get(self.mcp_selected) {
             let name = row.name.clone();
-            self.toast(format!("Logging in to '{name}'…"), ToastLevel::Info);
+            self.toast(format!("Logging in to '{name}'…"), ToastLevel::Progress);
             let _ = self.mcp_cmd_tx.send(McpCommand::Login { name });
         }
     }
@@ -133,7 +133,7 @@ impl Dashboard {
     pub(super) fn mcp_test_selected(&mut self) {
         if let Some(row) = self.mcp_rows.get(self.mcp_selected) {
             let name = row.name.clone();
-            self.toast(format!("Testing '{name}'…"), ToastLevel::Info);
+            self.toast(format!("Testing '{name}'…"), ToastLevel::Progress);
             let _ = self.mcp_cmd_tx.send(McpCommand::Test { name });
         }
     }
@@ -600,6 +600,17 @@ mod tests {
             McpCommand::Test {
                 name: "remote".to_string()
             }
+        );
+        // Both are in flight, not done: neither toast wears the check.
+        let in_flight: Vec<_> = dash
+            .toasts
+            .iter()
+            .filter(|t| t.message.ends_with('…'))
+            .collect();
+        assert_eq!(in_flight.len(), 2, "{:?}", dash.toasts);
+        assert!(
+            in_flight.iter().all(|t| t.level == ToastLevel::Progress),
+            "{in_flight:?}"
         );
     }
 

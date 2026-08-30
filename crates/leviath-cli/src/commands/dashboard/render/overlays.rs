@@ -9,9 +9,32 @@ use ratatui::widgets::{Clear, Paragraph};
 use crate::commands::dashboard::helpers::truncate;
 use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
-use crate::commands::dashboard::types::MainPane;
+use crate::commands::dashboard::types::{MainPane, ToastLevel};
 use crate::tui::widgets::help::{HelpSection, draw_help};
 use crate::tui::widgets::markdown_edit::{MODE_CHORD, shortcut_help};
+
+/// The widest a toast gets, and the narrowest one worth drawing: a glyph,
+/// its padding and a few characters of message.
+const TOAST_MAX_W: u16 = 40;
+const TOAST_MIN_W: u16 = 12;
+
+/// How wide a toast is on a frame `frame_width` columns across: one column
+/// of margin each side, capped at [`TOAST_MAX_W`], and zero when the frame
+/// is too narrow for [`TOAST_MIN_W`].
+fn toast_width(frame_width: u16) -> u16 {
+    let w = frame_width.saturating_sub(2).min(TOAST_MAX_W);
+    if w < TOAST_MIN_W { 0 } else { w }
+}
+
+/// The glyph and colour a toast level wears.
+fn toast_glyph(level: &ToastLevel) -> (&'static str, Color) {
+    match level {
+        ToastLevel::Info => ("✓", C_SUCCESS),
+        ToastLevel::Warning => ("!", C_WARN),
+        ToastLevel::Error => ("✗", C_ERROR),
+        ToastLevel::Progress => ("◌", C_ACTIVE),
+    }
+}
 
 impl Dashboard {
     pub(in crate::commands::dashboard) fn draw_toasts(&self, frame: &mut Frame) {
@@ -19,8 +42,15 @@ impl Dashboard {
             return;
         }
         let area = frame.area();
-        let toast_w: u16 = 40;
-        let toast_h: u16 = self.toasts.len() as u16;
+        // Sized to the frame: the usual width where there is room, narrower
+        // on a small terminal, and nothing at all where a toast could not
+        // hold its glyph and a word. A fixed 40 spilled past the right edge
+        // of anything under 41 columns.
+        let toast_w = toast_width(area.width);
+        if toast_w == 0 || area.height < 2 {
+            return;
+        }
+        let toast_h = (self.toasts.len() as u16).min(area.height - 1);
         let x = area.width.saturating_sub(toast_w + 1);
         let y: u16 = 1;
         let toast_area = Rect {
@@ -30,17 +60,8 @@ impl Dashboard {
             height: toast_h,
         };
         frame.render_widget(Clear, toast_area);
-        for (i, toast) in self.toasts.iter().enumerate() {
-            let color = match toast.level {
-                super::super::types::ToastLevel::Info => C_SUCCESS,
-                super::super::types::ToastLevel::Warning => C_WARN,
-                super::super::types::ToastLevel::Error => C_ERROR,
-            };
-            let icon = match toast.level {
-                super::super::types::ToastLevel::Info => "✓",
-                super::super::types::ToastLevel::Warning => "!",
-                super::super::types::ToastLevel::Error => "✗",
-            };
+        for (i, toast) in self.toasts.iter().take(toast_h as usize).enumerate() {
+            let (icon, color) = toast_glyph(&toast.level);
             let msg = truncate(&toast.message, (toast_w - 4) as usize);
             let line = Line::from(vec![
                 Span::styled(
@@ -351,6 +372,8 @@ fn detail_sections() -> Vec<HelpSection> {
                     "open a box for what the run should do instead; ^Enter or the Send button sends it with the deny, esc goes back to the prompt",
                 ),
                 ("g", "the stage graph explorer"),
+                ("t", "the band: the run's path, or the whole blueprint"),
+                ("R", "snake the path again, undoing boxes you moved"),
                 (", / .", "older / newer context point; opens Context"),
                 ("x", "kill the run (asks first)"),
                 ("p / r", "pause / resume"),
@@ -517,7 +540,6 @@ fn shared_sections() -> Vec<HelpSection> {
                 ("← → / tab", "choose a button"),
                 ("enter", "the focused button; it starts on the safe one"),
                 ("y / n", "answer without moving first"),
-                ("space", "tick \"don't ask again\", where offered"),
                 ("esc", "decline"),
             ],
         },
@@ -553,6 +575,7 @@ fn shared_sections() -> Vec<HelpSection> {
 
 #[cfg(test)]
 mod tests {
+    use super::{toast_glyph, toast_width};
     use crate::commands::dashboard::test_support::{make_test_dashboard, rendered_buffer};
     use crate::commands::dashboard::types::*;
     use crossterm::event::KeyCode;
@@ -897,5 +920,150 @@ mod tests {
         dash.handle_key(key(KeyCode::Char('?')));
         assert!(!dash.show_help);
         assert_eq!(dash.new_run_filter, "?");
+    }
+
+    /// Since #708 the unattended warning has no "don't ask again" box, so
+    /// the Questions section must not offer a key for it.
+    #[test]
+    fn the_questions_help_offers_no_dont_ask_again_box() {
+        let backend = TestBackend::new(120, 60);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        terminal.draw(|f| dash.draw_help_overlay(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("y / n"), "the section is there: {buf}");
+        assert!(!buf.contains("don't ask again"), "{buf}");
+    }
+
+    /// `t` and `R` are bound in the detail view (`input.rs`), so its help
+    /// lists them the way the docs page does.
+    #[test]
+    fn the_detail_help_lists_the_band_keys() {
+        let backend = TestBackend::new(120, 80);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.detail_view = true;
+        terminal.draw(|f| dash.draw_help_overlay(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("the whole blueprint"), "t: {buf}");
+        assert!(buf.contains("snake the path again"), "R: {buf}");
+    }
+
+    /// Work in flight wears its own glyph, not the check of work that is done.
+    #[test]
+    fn a_progress_toast_does_not_wear_the_completion_check() {
+        assert_eq!(toast_glyph(&ToastLevel::Progress).0, "◌");
+        assert_eq!(toast_glyph(&ToastLevel::Info).0, "✓");
+        assert_eq!(toast_glyph(&ToastLevel::Warning).0, "!");
+        assert_eq!(toast_glyph(&ToastLevel::Error).0, "✗");
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.toasts.push(Toast {
+            message: "Starting 'x'…".to_string(),
+            remaining_ticks: 25,
+            level: ToastLevel::Progress,
+        });
+        terminal.draw(|f| dash.draw_toasts(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("◌ Starting 'x'…"), "{buf}");
+        assert!(!buf.contains("✓"), "{buf}");
+    }
+
+    /// The toast is sized to the frame: 40 where there is room, narrower on
+    /// a small terminal, gone where it could not hold a word.
+    #[test]
+    fn the_toast_fits_the_frame() {
+        assert_eq!(toast_width(200), 40);
+        assert_eq!(toast_width(42), 40);
+        assert_eq!(toast_width(38), 36);
+        assert_eq!(toast_width(14), 12);
+        assert_eq!(toast_width(13), 0);
+        assert_eq!(toast_width(0), 0);
+
+        let mut dash = make_test_dashboard();
+        dash.toasts.push(Toast {
+            message: "Starting 'writer' unattended…".to_string(),
+            remaining_ticks: 25,
+            level: ToastLevel::Warning,
+        });
+        // At 38 columns the fixed width of 40 started past the left edge
+        // and ran off the right; now the message sits inside the frame.
+        let mut terminal = Terminal::new(TestBackend::new(38, 20)).unwrap();
+        terminal.draw(|f| dash.draw_toasts(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("! Starting 'writer' unattended…"), "{buf}");
+        let cells = terminal.backend().buffer();
+        assert_eq!(cells[(0, 1)].symbol(), " ", "one column of margin");
+        assert_eq!(cells[(1, 1)].symbol(), " ", "the toast's own padding");
+        assert_eq!(cells[(2, 1)].symbol(), "!", "then the glyph");
+
+        // Too narrow for a toast: nothing is drawn and nothing panics.
+        let mut terminal = Terminal::new(TestBackend::new(10, 20)).unwrap();
+        terminal.draw(|f| dash.draw_toasts(f)).unwrap();
+        assert!(rendered_buffer(&terminal).trim().is_empty());
+        // Too short for the row under the title: the same.
+        let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
+        terminal.draw(|f| dash.draw_toasts(f)).unwrap();
+        assert!(rendered_buffer(&terminal).trim().is_empty());
+        // Four toasts on three rows: the last one waits its turn.
+        for i in 0..3 {
+            dash.toasts.push(Toast {
+                message: format!("toast {i}"),
+                remaining_ticks: 25,
+                level: ToastLevel::Info,
+            });
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 3)).unwrap();
+        terminal.draw(|f| dash.draw_toasts(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("toast 0"), "{buf}");
+        assert!(!buf.contains("toast 2"), "{buf}");
+    }
+
+    /// The kill and delete dialogs carry the whole run id and title; the
+    /// widget wraps them to its popup instead of the caller guessing a width.
+    #[test]
+    fn the_kill_and_delete_dialogs_carry_the_whole_id() {
+        let long_id = "run-20260829-abcdefghijklmnopqrstuvwxyz-0123456789";
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent(long_id, AgentDisplayStatus::Active);
+        agent.title = None;
+        agent.blueprint_name = "a-blueprint-name-well-past-twenty-four-columns".to_string();
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.request_kill();
+        let (_, dialog) = dash.pending_confirm.take().expect("kill dialog");
+        let body: String = dialog.body[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(body.contains(long_id), "{body}");
+        assert!(
+            body.contains("a-blueprint-name-well-past-twenty-four-columns"),
+            "{body}"
+        );
+        assert!(!body.contains('…'), "{body}");
+
+        dash.request_delete();
+        let (_, dialog) = dash.pending_confirm.take().expect("delete dialog");
+        let body: String = dialog.body[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(body.contains(long_id), "{body}");
+
+        // On a narrow terminal the popup wraps it rather than losing it.
+        let mut terminal = Terminal::new(TestBackend::new(38, 20)).unwrap();
+        terminal.draw(|f| dialog.draw(f, f.area())).unwrap();
+        let text = rendered_buffer(&terminal);
+        assert!(text.contains("Delete run?"), "{text}");
+        assert!(
+            text.contains("0123456789"),
+            "the id's tail is on screen: {text}"
+        );
     }
 }
