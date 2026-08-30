@@ -265,6 +265,35 @@ fn spawn_warning_lines(
     lines
 }
 
+/// Say, before the run starts, that the config file on disk does not load.
+///
+/// This is the one warning here that is not about the blueprint. The daemon
+/// keeps serving the last config that loaded, so the run *works* - on settings
+/// the user may have edited an hour ago and believes are in force. Every other
+/// warning on this path exists because the daemon only said it in its own log;
+/// this one existed nowhere at all.
+fn warn_broken_config() {
+    for line in broken_config_warning(&crate::config::Config::config_path()) {
+        eprintln!("{line}");
+    }
+}
+
+/// The warning for a config file at `path`. Empty when it loads, which is why
+/// this is pure: the wording is worth a test and a real `~/.leviath` is not.
+fn broken_config_warning(path: &std::path::Path) -> Vec<String> {
+    let Some(fault) = crate::config::ConfigFault::check(path) else {
+        return Vec::new();
+    };
+    vec![
+        format!(
+            "warning: '{}' does not load ({}); this run uses the last config that did",
+            path.display(),
+            fault.summary()
+        ),
+        "  fix the file and the next run picks it up; nothing needs restarting".to_string(),
+    ]
+}
+
 /// Say, before the run starts, that `--yolo` will still stop for a person.
 ///
 /// `--yolo` means "run without me", so a run that stops anyway reads as a hang.
@@ -379,6 +408,7 @@ pub(crate) async fn send_spawn(
     spawn_args: SpawnArgs,
     json: bool,
 ) -> anyhow::Result<()> {
+    warn_broken_config();
     warn_ungranted_read_paths(&spawn_args);
     warn_held_checkpoints(&spawn_args);
     let spawned = spawn_once(client, spawn_args).await?;
@@ -410,7 +440,9 @@ pub async fn send_spawn_batch(
     if count == 1 {
         return send_spawn(client, spawn_args, json).await;
     }
-    // The warnings describe the blueprint, not the individual run: once.
+    // The warnings describe the blueprint and the machine, not the individual
+    // run: once.
+    warn_broken_config();
     warn_ungranted_read_paths(&spawn_args);
     warn_held_checkpoints(&spawn_args);
     let mut spawned = Vec::with_capacity(count);
@@ -1200,6 +1232,54 @@ allow = ["/data/runs"]
         assert!(joined.contains("agent 'cto'"), "{joined}");
         assert!(joined.contains("[agent_read_paths.cto]"), "{joined}");
         assert!(joined.contains(r#"allow = ["/data/runs"]"#), "{joined}");
+    }
+
+    /// A run started against a broken config file works, on settings that are
+    /// not the ones on disk. Nothing said so before this.
+    #[test]
+    fn a_config_that_does_not_load_warns_once_before_the_run_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        std::fs::write(&path, "default_provider = \"anthropic\"\n").unwrap();
+        assert!(
+            broken_config_warning(&path).is_empty(),
+            "a file that loads says nothing"
+        );
+        assert!(
+            broken_config_warning(&dir.path().join("absent.toml")).is_empty(),
+            "no config file means defaults, not a broken one"
+        );
+
+        std::fs::write(&path, "default_provider = \"anthropic\"\nbroken : :\n").unwrap();
+        let joined = broken_config_warning(&path).join("\n");
+        assert!(joined.starts_with("warning: "), "{joined}");
+        assert!(joined.contains("does not load"), "{joined}");
+        assert!(joined.contains("line 2, column 8"), "{joined}");
+        assert!(
+            joined.contains("last config that did"),
+            "it says which config the run is actually on: {joined}"
+        );
+        assert!(
+            joined.contains("nothing needs restarting"),
+            "and what to do about it: {joined}"
+        );
+    }
+
+    /// The wrapper the spawn path actually calls, driven against an isolated
+    /// config so it never reads the developer's real `~/.leviath`.
+    #[test]
+    fn the_spawn_path_warning_reads_the_configured_path() {
+        crate::config::with_isolated_config_path("client-broken-config", |dir| {
+            std::fs::write(dir.join("config.toml"), "broken : :").unwrap();
+            // Prints to stderr; the wording is asserted above, and this is
+            // about the wrapper reaching the right file.
+            warn_broken_config();
+            assert!(
+                !broken_config_warning(&crate::config::Config::config_path()).is_empty(),
+                "the isolated config is what it read"
+            );
+        });
     }
 
     #[test]

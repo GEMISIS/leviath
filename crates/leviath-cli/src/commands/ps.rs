@@ -616,18 +616,40 @@ fn annotated(runs: &[RunListEntry], now: i64) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Everything one `lev ps` invocation has to print.
+///
+/// A struct rather than six parameters: the list grew to the point where a
+/// caller could transpose two of them without the compiler noticing, and the
+/// `bool` in the middle was the one most likely to be got wrong.
+struct Listing<'a> {
+    /// The runs the daemon is hosting.
+    runs: &'a [RunListEntry],
+    /// The ones it has finished with and is still holding.
+    finished: &'a [RunListEntry],
+    /// What the daemon says about itself.
+    health: &'a DaemonHealth,
+    /// The runs on disk nothing is hosting, under `--all`.
+    offline: Option<&'a [OfflineRun]>,
+    /// Whether the daemon answered at all.
+    daemon_reachable: bool,
+    /// The config file to report on. Passed in rather than read here so a test
+    /// can point it at a file of its own instead of the developer's real
+    /// `~/.leviath`.
+    config_path: &'a std::path::Path,
+}
+
 /// Print the live listing, optionally followed by the runs on disk the daemon is
 /// not hosting. Pure formatting/serialization, so the shape is testable without
 /// a daemon.
-fn print_listing(
-    runs: &[RunListEntry],
-    finished: &[RunListEntry],
-    health: &DaemonHealth,
-    offline: Option<&[OfflineRun]>,
-    daemon_reachable: bool,
-    args: &PsArgs,
-    now: i64,
-) {
+fn print_listing(listing: Listing<'_>, args: &PsArgs, now: i64) {
+    let Listing {
+        runs,
+        finished,
+        health,
+        offline,
+        daemon_reachable,
+        config_path,
+    } = listing;
     if args.json {
         let mut body = serde_json::json!({
             "runs": annotated(runs, now),
@@ -655,6 +677,29 @@ fn print_listing(
     if let Some(block) = offline.and_then(|o| format_offline(o, now)) {
         println!("\n{block}");
     }
+    // Last, under everything else, because it is about the machine rather than
+    // any run in the table. It belongs here at all because every run listed
+    // above may be running on settings the user edited and believes are in
+    // force: the daemon keeps the last config that loaded, silently.
+    //
+    // The path is passed in rather than read here so a test can point it at a
+    // file of its own instead of the developer's real `~/.leviath`.
+    if let Some(line) = broken_config_footer(config_path) {
+        println!("\n{line}");
+    }
+}
+
+/// One line saying the config file does not load, for under the run table.
+/// `None` while it loads, and pure so the wording is testable without a daemon
+/// or a real `~/.leviath`.
+fn broken_config_footer(path: &std::path::Path) -> Option<String> {
+    let fault = crate::config::ConfigFault::check(path)?;
+    Some(format!(
+        "{} does not load ({}); these runs are on the last config that did - `lev doctor` \
+         has the detail",
+        path.display(),
+        fault.summary()
+    ))
 }
 
 /// Query the daemon for its runs and print the listing.
@@ -687,11 +732,14 @@ pub async fn send_list(client: &ControlClient, args: &PsArgs) -> anyhow::Result<
                 .collect();
             let offline = all.then(|| offline_runs(runstate::list_runs(), Some(&shown), now));
             print_listing(
-                &runs,
-                &finished,
-                &health,
-                offline.as_deref(),
-                true,
+                Listing {
+                    runs: &runs,
+                    finished: &finished,
+                    health: &health,
+                    offline: offline.as_deref(),
+                    daemon_reachable: true,
+                    config_path: &crate::config::Config::config_path(),
+                },
                 args,
                 now,
             );
@@ -701,11 +749,14 @@ pub async fn send_list(client: &ControlClient, args: &PsArgs) -> anyhow::Result<
         (Err(_), true) => {
             let offline = offline_runs(runstate::list_runs(), None, now);
             print_listing(
-                &[],
-                &[],
-                &DaemonHealth::default(),
-                Some(&offline),
-                false,
+                Listing {
+                    runs: &[],
+                    finished: &[],
+                    health: &DaemonHealth::default(),
+                    offline: Some(&offline),
+                    daemon_reachable: false,
+                    config_path: &crate::config::Config::config_path(),
+                },
                 args,
                 now,
             );

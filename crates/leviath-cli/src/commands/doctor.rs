@@ -401,6 +401,26 @@ fn config_check(config: &Config, registry: &ProviderRegistry) -> Check {
     )
 }
 
+/// The `config` check for a file that will not load.
+///
+/// It says three things, and the third is the one nothing said before: where
+/// in the file the problem is, that the file is not being read, and that a
+/// daemon already running is *still serving the last config that loaded* - so
+/// runs keep working on settings that are not the ones on disk, which is
+/// exactly why a broken config went unnoticed for as long as it did.
+fn broken_config_check(fault: &crate::config::ConfigFault) -> Check {
+    Check::fail(
+        "config",
+        format!(
+            "{} does not load ({}). Fix the file: a running daemon keeps serving the last \
+             config that loaded, so runs still work and your edits do not - and it picks the \
+             file up on the next spawn, with no restart",
+            fault.path.display(),
+            fault.summary()
+        ),
+    )
+}
+
 // ─── Check 2: resolve ─────────────────────────────────────────────────────────
 
 /// What check 2 settled on, when it settled on something usable. The handle is
@@ -875,10 +895,10 @@ pub(crate) async fn run_checks_with(
 
     // A config that will not parse is itself a finding, and the most common
     // one there is - reporting it as `config FAIL` beats the bare load error.
-    let config = match Config::load() {
+    let config = match Config::load_faulted() {
         Ok(config) => config,
-        Err(e) => {
-            checks.push(Check::fail("config", e.to_string()));
+        Err(fault) => {
+            checks.push(broken_config_check(&fault));
             return checks;
         }
     };
