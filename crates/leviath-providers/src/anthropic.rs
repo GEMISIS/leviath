@@ -37,8 +37,8 @@ fn maybe_dump_request(body: &serde_json::Value) {
 /// is the permissive bound: on Haiku a marker that clears it may still be
 /// declined, which costs nothing beyond the slot. A name-keyed table would be
 /// the alternative and is the shape of thing that goes stale silently - the
-/// Ollama context window was guessed from model names and was wrong by 4x
-/// (#475), which is the failure this deliberately avoids.
+/// Ollama context window guessed from model names is wrong by 4x, which is
+/// the failure this deliberately avoids.
 const MIN_CACHEABLE_TOKENS: usize = 1024;
 
 /// How far back Anthropic looks for a usable cache entry, in content blocks.
@@ -49,12 +49,11 @@ const MIN_CACHEABLE_TOKENS: usize = 1024;
 /// request's entry than this never finds it, however byte-identical the prefix
 /// is - the request reads nothing and rewrites the conversation at 1.25x.
 ///
-/// This is the fault behind #474, and it is why every earlier attempt in that
-/// thread moved the collapse around without removing it: the marker rolled
-/// forward with the conversation, and a workload appending a dozen content
-/// blocks a turn outran the lookback within a few turns and never got back
-/// inside it. Measured by the reporter across a run: reads climbed while the
-/// gap stayed at or below 21 blocks and died permanently at 25.
+/// This is what makes a marker that rolls forward with the conversation
+/// collapse rather than merely drift: a workload appending a dozen content
+/// blocks a turn outruns the lookback within a few turns and never gets back
+/// inside it. Measured across a run: reads climbed while the gap stayed at or
+/// below 21 blocks and died permanently at 25.
 ///
 /// Kept a little under the documented figure. Being wrong low costs one extra
 /// marker; being wrong high costs the entire conversation cache.
@@ -132,9 +131,8 @@ fn message_cache_breakpoints(block_counts: &[usize], budget: usize) -> Vec<usize
 /// match, and creating it is charged at the 1.25x write rate. So a block whose
 /// region declared itself `rewritten`, or that the runtime clears every
 /// iteration, is not a candidate - a prefix ending there is invalid by
-/// construction. This is the fix for a measured case where the sole marker sat
-/// on a six-token status line at the end of the system array, making the whole
-/// prompt uncacheable (#474).
+/// construction. Without this the sole marker can sit on a six-token status
+/// line at the end of the system array, making the whole prompt uncacheable.
 ///
 /// **Several markers cost nothing extra and find the longest match.** The API
 /// takes up to four and reads back the longest stored prefix that still
@@ -551,7 +549,7 @@ impl AnthropicProvider {
         const MAX_BREAKPOINTS: usize = 4;
 
         // Consolidate system-block cache breakpoints so a blueprint with many
-        // pinned/cached regions stays within the limit (issue #12): one
+        // pinned/cached regions stays within the limit: one
         // `cache_control` per contiguous run of same-hint cacheable blocks,
         // capped at the total budget.
         let system_breakpoints: std::collections::HashSet<usize> =
@@ -1162,7 +1160,7 @@ mod tests {
     fn a_breakpoint_on_a_tool_turn_reaches_the_wire() {
         // In an agent run nearly every message is a tool turn, and the
         // breakpoint is chosen by index, so this is where it usually lands.
-        // It used to decrement a budget of four and write nothing.
+        // Decrementing a budget of four and writing nothing is the failure.
         let content = crate::MessageContent::Blocks(vec![
             crate::provider::ContentBlock::Text {
                 text: "thinking".to_string(),
@@ -1381,7 +1379,7 @@ mod tests {
         let body = provider.build_request_body(&request);
         assert_eq!(body["model"], "claude-sonnet-4-6");
         // A single *cacheable* system block is emitted in array form so its
-        // cache_control annotation survives (issue #12 fix); the plain-string
+        // cache_control annotation survives; the plain-string
         // form is reserved for a single uncached block.
         let system = body["system"]
             .as_array()
@@ -1505,7 +1503,7 @@ mod tests {
     ///     tool_use.thought_signature: Extra inputs are not permitted
     ///
     /// Observed as a Gemini stage followed by an Anthropic one dying on its
-    /// first request, with the failing model not the one under test (#575).
+    /// first request, with the failing model not the one under test.
     #[test]
     fn a_foreign_thought_signature_never_reaches_anthropic() {
         // As a Gemini turn left it in history.
@@ -1797,7 +1795,7 @@ mod tests {
         assert!(bp_count <= 4, "never more than the API accepts: {bp_count}");
     }
 
-    // ── issue #12: system-block cache_control budget ──────────────────────────
+    // ── system-block cache_control budget ─────────────────────────────────────
 
     /// Blocks carrying only the hints under test, all eligible - these tests
     /// are about how runs are grouped, not about what held still.
@@ -1848,7 +1846,7 @@ mod tests {
 
     /// A block that changes every turn can never be the end of a readable
     /// prefix, so a marker there is a 1.25x write for an entry nothing reads.
-    /// This is the measured case from #474: the sole marker sat past the churn.
+    /// The measured case: the sole marker sits past the churn.
     #[test]
     fn a_rewritten_block_is_never_a_candidate() {
         let mut blocks = blocks_of(&[leviath_core::CacheHint::Always; 3]);
@@ -1922,7 +1920,7 @@ mod tests {
     #[test]
     fn build_request_body_caps_total_cache_control_at_4_with_many_system_regions() {
         use leviath_core::CacheHint;
-        // issue #12 regression: 5 cacheable system regions (architecture/
+        // 5 cacheable system regions (architecture/
         // program_flows/plan/task pinned + files hashmap) must consolidate
         // within the 4-block total `cache_control` budget; emitting 5
         // `cache_control` blocks is a hard Anthropic 400.
@@ -3347,7 +3345,7 @@ mod tests {
         let provider = provider_with_url(url);
         let err = provider.list_models().await.unwrap_err();
         // A rejected key is the provider's problem, not a flaky connection:
-        // it must not classify as transient (issue #201).
+        // it must not classify as transient.
         assert_eq!(
             err.unavailable_reason(),
             Some(crate::provider::UnavailableReason::AuthFailed)
@@ -3654,7 +3652,7 @@ mod tests {
     /// A marker placed relative to the *end* fails this - it moves every turn by
     /// however much the turn appended, and once that step exceeds the lookback
     /// the lookup can never reach the previous entry again. That is absorbing,
-    /// because the step does not shrink, and it is the fault behind #474.
+    /// because the step does not shrink, and it is what the anchoring avoids.
     #[test]
     fn a_growing_conversation_keeps_a_marker_where_the_last_one_was() {
         // Each turn appends a dozen-plus content blocks, as a parallel read
@@ -3880,9 +3878,9 @@ mod learned_tests {
         .with_base_url(Some(url))
     }
 
-    /// The endpoint pages at twenty by default and this used to read one page,
-    /// so a catalogue past that was silently short. Both pages land now, and
-    /// the limits the listing reports outrank the table's.
+    /// The endpoint pages at twenty by default, so reading one page leaves a
+    /// catalogue past that silently short. Both pages have to land, and the
+    /// limits the listing reports outrank the table's.
     #[tokio::test]
     async fn priming_reads_every_page_and_what_each_says() {
         let page_one = br#"{"data":[

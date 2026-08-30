@@ -1308,7 +1308,7 @@ mod tests {
 
     /// The window holding nothing but the assistant's own prose. No tool call,
     /// so `satisfy_call_turn_order` does not fire and this is the shape that
-    /// reached Ollama without a user turn (issue #469).
+    /// reaches Ollama without a user turn.
     #[test]
     fn a_conversation_of_only_assistant_prose_gains_a_user_turn() {
         let request = InferenceRequest {
@@ -1445,12 +1445,12 @@ mod tests {
         assert_eq!(roles, vec!["user", "assistant"]);
     }
 
-    /// The shape issue #469 dies on, and the one the other two passes miss.
+    /// The shape the other two passes miss.
     ///
     /// A sliding window that has evicted a call turn but kept its response
     /// leaves that response stranded at the head. It is normally dropped as an
     /// orphan - except against Ollama, which restarts tool-call ids at
-    /// `ollama_0` every turn (#470), so a *later* turn's call puts that id in
+    /// `ollama_0` every turn, so a *later* turn's call puts that id in
     /// `called` and the stranded response looks answered.
     ///
     /// The conversation then opens on a `tool` message, so when the first real
@@ -1891,8 +1891,8 @@ mod tests {
                 "prompt_tokens_details": {
                     "cached_tokens": 80,
                     // Reported by gateways fronting a provider that charges a
-                    // write premium. It used to be dropped, so a run paying the
-                    // 1.25x rate recorded none of it.
+                    // write premium. Dropping it leaves a run paying the
+                    // 1.25x rate recording none of it.
                     "cache_write_tokens": 15
                 }
             }
@@ -2243,8 +2243,8 @@ mod tests {
         // A stream is where OpenRouter reports a failure it only found after
         // committing to a 200 - the upstream provider going down, or the
         // account draining between chunks. It has no `choices` and no `usage`,
-        // so it used to fall through to `continue` and simply end the stream:
-        // a truncated answer with nothing anywhere saying why.
+        // so without this it falls through to `continue` and simply ends the
+        // stream: a truncated answer with nothing anywhere saying why.
         let mut buf = format!(
             "data: {}\n\n",
             serde_json::json!({
@@ -3027,8 +3027,8 @@ mod tests {
         );
     }
 
-    /// One block list carrying both a call and its result must emit both; the
-    /// results used to be dropped, producing the unanswered-call shape.
+    /// One block list carrying both a call and its result must emit both;
+    /// dropping the result produces the unanswered-call shape.
     #[test]
     fn a_block_with_both_a_call_and_its_result_emits_both() {
         let content = MessageContent::Blocks(vec![

@@ -98,8 +98,7 @@ pub(crate) fn lookup(table: &[Row], model: &str, fallback: ModelCapabilities) ->
 /// enumerate anything; a listing wants rows. Each provider names the handful
 /// of models worth showing when its listing cannot be reached, and resolves
 /// their capabilities through its own table, so a row here and an inference
-/// against the same id cannot disagree. This replaced a second, hand-kept
-/// table in the CLI whose numbers had drifted from these (#568).
+/// against the same id cannot disagree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogEntry {
     /// The provider that serves it.
@@ -202,9 +201,9 @@ pub enum LimitsSource {
     ///
     /// The default, and the honest answer for a provider whose API does not
     /// report limits at all: OpenAI's `/v1/models` returns an id, a date and
-    /// an owner and nothing about size. (Anthropic's used to say nothing
-    /// either; measured in 2026-08 it reports `max_input_tokens` and
-    /// `max_tokens`, and `crate::anthropic` reads them.) It is also the answer
+    /// an owner and nothing about size. (Anthropic's does report
+    /// `max_input_tokens` and `max_tokens`, and `crate::anthropic` reads
+    /// them.) It is also the answer
     /// when a provider that *could* say has not been asked yet, since
     /// `prime_capabilities` runs at daemon start-up and a short-lived command
     /// may not have waited for it.
@@ -240,9 +239,9 @@ impl Default for ModelCapabilities {
 ///
 /// Every field is optional and unset means "leave it alone", so an entry names
 /// only what it is correcting. The alternative - deserializing straight into
-/// [`ModelCapabilities`] - has two failure modes, and this repo has now seen
-/// both. Without field defaults a partial table fails to deserialize and the
-/// override is dropped in silence (#338). With `#[serde(default)]` it succeeds
+/// [`ModelCapabilities`] - has two failure modes. Without field defaults a
+/// partial table fails to deserialize and the override is dropped in
+/// silence. With `#[serde(default)]` it succeeds
 /// and quietly substitutes [`ModelCapabilities::default`] for everything the
 /// operator did not mention, so correcting one boolean would drop a 400 000
 /// token window to 8 192.

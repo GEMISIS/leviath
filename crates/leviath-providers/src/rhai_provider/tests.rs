@@ -967,8 +967,8 @@ fn check_source_reports_a_syntax_error() {
     );
 }
 
-/// The gap this exists to close: a script with no `inference` used to compile,
-/// initialize and cache, then fail at the first real inference.
+/// The gap this exists to close: a script with no `inference` otherwise
+/// compiles, initializes and caches, then fails at the first real inference.
 #[test]
 fn check_source_rejects_a_script_with_no_inference() {
     let message = refusal(check_source("mock.rhai", "fn initialize(config) { #{} }").unwrap_err());
@@ -1035,8 +1035,8 @@ fn from_source_rejects_a_script_with_no_inference() {
 ///
 /// The default `serves_model` reads the compiled-in capability table, which a
 /// script does not have: `capabilities` answers the same base for every model
-/// it has no override for, so the default said "no" to everything and a local
-/// model could never win a blueprint entry that named it (issue #598). Refusing
+/// it has no override for, so the default says "no" to everything and a local
+/// model can never win a blueprint entry that names it. Refusing
 /// is still the right answer when there is no evidence - a provider that
 /// claimed every model would be far worse - so this pins that floor.
 #[test]

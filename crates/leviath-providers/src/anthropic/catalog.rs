@@ -7,8 +7,7 @@
 //! default page is twenty entries and the cap is a thousand, so a reader that
 //! takes one page at the default silently truncates once the catalogue grows.
 //!
-//! This build's comment on `LimitsSource::Builtin` used to say the endpoint
-//! reports nothing about size. It does now, and this is where that is read.
+//! The endpoint does report size, and this is where it is read.
 
 use crate::learned::{LearnedModel, unix_seconds_from_rfc3339};
 

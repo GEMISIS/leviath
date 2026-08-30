@@ -70,8 +70,8 @@ fn register_pure_fns(engine: &mut Engine, env_allowlist: Arc<Vec<String>>) {
     engine.register_fn("to_json", to_json_fn);
     // Rhai's own `map_basic` package registers `to_json(&mut Map)`. An object
     // map is the argument every provider script actually passes, and that
-    // signature is more specific than the `Dynamic` one above, so it used to
-    // win overload resolution and the serde encoder here was never reached.
+    // signature is more specific than the `Dynamic` one above, so it wins
+    // overload resolution and the serde encoder here is never reached.
     // Rhai's formatter (`format_map_as_json`) writes strings with Rust's
     // `Debug`, which escapes any non-printable character as `\u{202f}`. That is
     // not a JSON escape, so the request body stopped being JSON the moment a

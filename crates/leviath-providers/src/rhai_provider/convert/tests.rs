@@ -163,7 +163,7 @@ fn map_err_kinds() {
 }
 
 /// A script talking to an OpenAI-compatible endpoint must fail over and trip
-/// the breaker exactly as a built-in provider does (issue #201). It throws one
+/// the breaker exactly as a built-in provider does. It throws one
 /// formatted string, so the classification has to come out of the message.
 #[test]
 fn a_scripts_payment_error_classifies_like_a_built_in_providers() {

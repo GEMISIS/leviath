@@ -20,7 +20,7 @@ pub type Result<T> = std::result::Result<T, ProviderError>;
 /// to a smaller request will fix: the account is out of money, or the key is
 /// wrong. Keeping them apart from a generic [`ProviderError::ApiError`] is what
 /// lets the runtime fail over to another provider and trip a circuit breaker
-/// instead of killing every run with a raw JSON blob (issue #201).
+/// instead of killing every run with a raw JSON blob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnavailableReason {
@@ -110,8 +110,7 @@ impl UnavailableReason {
     /// A Rhai script provider throws `#{ kind: "api", message: "HTTP 402 ..." }`
     /// and hands us the whole thing as one string, so the status has to be read
     /// back out of it. A script talking to an OpenAI-compatible endpoint must
-    /// fail over and trip the breaker exactly as the built-in providers do
-    /// (issue #201).
+    /// fail over and trip the breaker exactly as the built-in providers do.
     pub fn from_message(message: &str) -> Option<Self> {
         Self::classify(leading_http_status(message).unwrap_or(0), message)
     }
@@ -185,7 +184,7 @@ pub enum ProviderError {
     RateLimitExceeded {
         /// What the provider's `Retry-After` header asked for, in seconds, when
         /// it sent one. Carried out of the provider layer so the retry loop can
-        /// wait as long as the server said instead of guessing (issue #417).
+        /// wait as long as the server said instead of guessing.
         retry_after_secs: Option<u64>,
     },
 
@@ -213,8 +212,8 @@ pub enum ProviderError {
 /// Kept apart from [`SERVER_ERROR_SIGNALS`] because the two deserve different
 /// waits. A 500 or a dropped connection is a blip that a second or two clears;
 /// a capacity refusal is a window that lasts minutes, and retrying it on
-/// blip-sized backoff just spends the attempts without ever leaving the window
-/// (issue #417).
+/// blip-sized backoff just spends the attempts without ever leaving the
+/// window.
 const CAPACITY_SIGNALS: [&str; 5] = [
     // Rate limiting (a provider that maps 429 to ApiError rather than
     // RateLimitExceeded, e.g. Ollama).
@@ -251,7 +250,7 @@ fn mentions_any(message: &str, signals: &[&str]) -> bool {
 /// provider running out of capacity and whether the server said when to come
 /// back, and neither survives being flattened into an error string. Carrying
 /// both here is what lets the dispatch layer honor a `Retry-After` and back off
-/// on a capacity-sized schedule rather than a blip-sized one (issue #417).
+/// on a capacity-sized schedule rather than a blip-sized one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RetryAdvice {
     /// Whether the provider refused for want of capacity (429, or a 529
@@ -476,15 +475,15 @@ pub enum ContentBlock {
         /// which, with per-stage models, is routinely a different one. Anthropic
         /// rejects the unknown key outright (`tool_use.thought_signature: Extra
         /// inputs are not permitted`), so a Gemini stage followed by an
-        /// Anthropic stage died on its first request (issue #575).
+        /// Anthropic stage dies on its first request.
         ///
         /// A provider that wants it emits it deliberately rather than getting
         /// it by default: `openai_compat` already does exactly that when
         /// building its tool calls, which is why the OpenAI-shaped path
         /// (Gemini included) keeps working. The field stays on the struct - it
         /// is still needed in memory and still persisted through
-        /// `SerializedToolCall` - it just no longer leaks into a body nobody
-        /// asked to put it in.
+        /// `SerializedToolCall` - it just never reaches a body nobody asked to
+        /// put it in.
         #[serde(default, skip_serializing)]
         thought_signature: Option<String>,
     },
@@ -973,8 +972,6 @@ pub(crate) fn parse_tool_arguments(raw: &str) -> serde_json::Value {
 /// What a provider learns about a model by being refused (no temperature,
 /// no tools over a reasoning effort) or by warning about it once is worth
 /// keeping across requests, and clones of the provider share the same set.
-/// Five fields across three providers used to spell this out as
-/// `Arc<Mutex<HashSet<String>>>` with a pair of lock-and-look helpers each.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ModelMemo(std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>);
 
@@ -1037,7 +1034,7 @@ pub(crate) async fn check_http_response(
         }
         // The hint rides along on the error: the client-side limiter paces the
         // *next* request, while the dispatch layer's retry loop is what decides
-        // how long this one waits before trying again (issue #417).
+        // how long this one waits before trying again.
         return Err(ProviderError::RateLimitExceeded {
             retry_after_secs: retry_after,
         });
@@ -1190,7 +1187,7 @@ mod tests {
         // round-tripping form is the number itself, not a rounded one.
         assert_eq!(json_number(0.125f32).to_string(), "0.125");
 
-        // What it used to do, and what Z.AI refused.
+        // What the plain conversion produces, and what Z.AI refused.
         let widened = serde_json::json!(0.7f32);
         assert_eq!(widened.to_string(), "0.699999988079071");
         assert_ne!(json_number(0.7f32).to_string(), widened.to_string());
@@ -1395,7 +1392,7 @@ mod tests {
         );
     }
 
-    // ─── Retry advice (issue #417) ──────────────────────────────────────────
+    // ─── Retry advice ───────────────────────────────────────────────────────
 
     #[test]
     fn a_capacity_refusal_is_told_apart_from_an_ordinary_server_failure() {
@@ -1458,7 +1455,7 @@ mod tests {
         assert_eq!(advice.retry_after_secs, None);
     }
 
-    // ─── Provider-fatal classification (issue #201) ─────────────────────────
+    // ─── Provider-fatal classification ──────────────────────────────────────
 
     /// A labelled message still classifies. The `[kind]` prefix goes in front
     /// of the status, and a prefix that hid it would have silently stopped a 402
@@ -1484,13 +1481,13 @@ mod tests {
 
     /// A resolver that answers every name with a lookup failure.
     ///
-    /// The DNS half of the test below used to ask the real resolver for a name
-    /// under `.invalid`. That is a network round trip, and on a macOS runner
-    /// whose resolver was slow the two-second request deadline fired first, so
-    /// the error came back as `Timeout` and the test failed on nothing to do
-    /// with the code under test. What the test needs is the error `reqwest`
-    /// builds when a lookup fails, and the resolver hook produces exactly that
-    /// one, on the same wrapper the system resolver's failure travels in.
+    /// Asking the real resolver for a name under `.invalid` is a network round
+    /// trip, and on a macOS runner whose resolver is slow the two-second
+    /// request deadline fires first: the error comes back as `Timeout` and the
+    /// test fails on nothing to do with the code under test. What the test
+    /// needs is the error `reqwest` builds when a lookup fails, and the
+    /// resolver hook produces exactly that one, on the same wrapper the system
+    /// resolver's failure travels in.
     struct NeverResolves;
 
     impl reqwest::dns::Resolve for NeverResolves {
@@ -1502,9 +1499,9 @@ mod tests {
         }
     }
 
-    /// Against the real client stack, because this is the whole point: these
-    /// used to arrive as one string and `Display` on a `reqwest::Error` says the
-    /// same sentence for both of them.
+    /// Against the real client stack, because this is the whole point: untold
+    /// apart these arrive as one string, and `Display` on a `reqwest::Error`
+    /// says the same sentence for both of them.
     ///
     /// Which kind a dead port produces is the OS's business and not the same
     /// everywhere - a Windows runner drops the SYN and the request times out
@@ -1794,8 +1791,8 @@ mod tests {
 
     #[test]
     fn unavailable_display_leads_with_the_remedy_and_keeps_the_detail() {
-        // The whole complaint in issue #201 was a raw JSON blob as the run's
-        // status. The message must say what to do; the blob stays available.
+        // A raw JSON blob is not a run status. The message must say what to
+        // do; the blob stays available.
         let err = ProviderError::Unavailable {
             reason: UnavailableReason::CreditsExhausted,
             detail: "HTTP 402 Payment Required: {\"error\":{}}".into(),
@@ -2295,9 +2292,9 @@ mod tests {
 
     #[tokio::test]
     async fn check_http_response_402_becomes_unavailable_not_api_error() {
-        // The exact shape from issue #201: OpenRouter answering 402 with its
-        // credit-balance JSON. Before, this was an `ApiError` whose whole
-        // message was the blob, and one of them killed the run.
+        // The shape that matters: OpenRouter answering 402 with its
+        // credit-balance JSON. As an `ApiError` the whole message is the blob,
+        // and it kills the run.
         let body = br#"{"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 28."}}"#;
         let response = spawn_mock_response(402, "Payment Required", &[], body).await;
         let err = check_http_response(response, None).await.unwrap_err();
@@ -2383,7 +2380,7 @@ mod tests {
             .unwrap_err();
         // The header reaches the limiter *and* the error: the limiter paces the
         // next request, the error tells the retry loop how long to wait before
-        // repeating this one (issue #417).
+        // repeating this one.
         assert_eq!(
             err.retry_advice(),
             RetryAdvice {
@@ -2578,10 +2575,10 @@ mod tests {
 
     /// A body that stops early is a *transport* failure, not a parse failure.
     ///
-    /// This is the regression the whole split exists for: a socket that dies
-    /// mid-body (a reset, or a machine that slept through the response) used to
-    /// surface as `InvalidResponse`, which `is_transient` calls permanent - so a
-    /// run with dozens of iterations of work behind it died without one retry.
+    /// This is what the whole split exists for: a socket that dies mid-body (a
+    /// reset, or a machine that slept through the response) surfacing as
+    /// `InvalidResponse` - which `is_transient` calls permanent - kills a run
+    /// with dozens of iterations of work behind it without one retry.
     #[tokio::test]
     async fn decode_json_reports_a_truncated_body_as_a_transport_failure() {
         // Declares 200 bytes, sends 9, then hangs up.

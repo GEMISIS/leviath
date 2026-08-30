@@ -33,8 +33,8 @@ pub const DEFAULT_INFERENCE_TIMEOUT_SECS: u64 = 900;
 /// The deadline for a call that is *about* inference rather than inference
 /// itself: counting a prompt's tokens, listing what a provider serves.
 ///
-/// These carried the 15-minute inference ceiling, which is the wrong number for
-/// them by two orders of magnitude. Nothing generates here, so the whole answer
+/// The 15-minute inference ceiling is the wrong number for these by two orders
+/// of magnitude. Nothing generates here, so the whole answer
 /// is one small body that either comes back promptly or is not coming, and both
 /// callers already cope with not getting one - `count_tokens` falls back to the
 /// local heuristic, a failed model list is reported and the provider is asked
@@ -43,8 +43,8 @@ pub const DEFAULT_INFERENCE_TIMEOUT_SECS: u64 = 900;
 /// Getting it wrong is not academic: `count_tokens` runs on the dispatch path,
 /// *before* the request is sent and outside the `job_timeout` that bounds the
 /// call itself, so a provider that accepts the connection and never answers
-/// used to freeze the run there for fifteen minutes with nothing in flight to
-/// show for it.
+/// would otherwise freeze the run there for fifteen minutes with nothing in
+/// flight to show for it.
 pub const SIDE_CALL_TIMEOUT_SECS: u64 = 30;
 
 /// Apply the per-call inference deadline to an outbound provider request.

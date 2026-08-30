@@ -709,8 +709,8 @@ mod cost_tests {
         assert_eq!(totals.unpriced_calls, 1);
     }
 
-    /// Every count arrives from a provider response. A gateway reporting a
-    /// nonsense `prompt_tokens` used to abort the daemon in the constructor.
+    /// Every count arrives from a provider response, so a gateway reporting a
+    /// nonsense `prompt_tokens` must not abort the daemon in the constructor.
     #[test]
     fn token_usage_saturates_instead_of_aborting() {
         let usage = TokenUsage::new(usize::MAX, 1, 1, 1);

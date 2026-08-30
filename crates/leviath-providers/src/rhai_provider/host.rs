@@ -368,9 +368,9 @@ pub(crate) fn unsupported_content_type(content_type: Option<&str>) -> Option<Str
 ///
 /// This is the shape a compressed body takes after a lossy UTF-8 decode, and it
 /// is the last line of defence behind the `gzip`/`brotli`/`zstd` features: a
-/// server that compresses unsolicited (finance.yahoo.com does) used to land a
-/// whole gzip member in a research agent's sources region, and nothing noticed
-/// because the tool's own emptiness check only catches *short* output.
+/// server that compresses unsolicited (finance.yahoo.com does) otherwise lands
+/// a whole gzip member in a research agent's sources region, and nothing else
+/// notices because the tool's own emptiness check only catches *short* output.
 ///
 /// The ratio, not a count: a legitimate page may carry a stray replacement
 /// character from a genuinely malformed byte, but not one in ten.

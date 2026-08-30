@@ -36,18 +36,17 @@ pub struct OllamaProvider {
 
 /// A tool-call id unique for the life of a conversation.
 ///
-/// Ollama sends no ids of its own, so these are minted here - and the mint used
-/// to be the call's index within one response, which restarts at 0 every turn.
-/// A window ten turns deep therefore held ten distinct calls all named
-/// `ollama_0`.
+/// Ollama sends no ids of its own, so these are minted here, and they have to
+/// be unique across the conversation rather than within one response: a
+/// per-response index restarts at 0 every turn, so a window ten turns deep
+/// holds ten distinct calls all named `ollama_0`.
 ///
 /// That is not cosmetic. `drop_unpaired_tool_turns` pairs a call with its
 /// response *by id*, to keep a window that has evicted half a pair from putting
-/// a malformed conversation on the wire. With every id equal, every call looked
-/// answered and every response looked called, so the guard never removed
-/// anything for this provider (issue #470) - and a response stranded by
-/// eviction survived at the head of the conversation, which is what suppressed
-/// the inserted user turn in #469.
+/// a malformed conversation on the wire. With every id equal, every call looks
+/// answered and every response looks called, the guard removes nothing, and a
+/// response stranded by eviction survives at the head of the conversation,
+/// where it suppresses the inserted user turn.
 ///
 /// The sequence is process-wide rather than per-response, and carries a prefix
 /// minted once per process, because a run outlives the daemon: a pause and
@@ -312,9 +311,8 @@ impl OllamaProvider {
     /// A request past `num_ctx` is not refused. The server truncates it from the
     /// front until it fits, and when what falls off the front is the last user
     /// turn it then reports `no user query found in messages` - a message about
-    /// the shape of the conversation, describing a failure of its size. That
-    /// sent two separate investigations after message-shape bugs before a wire
-    /// capture settled it (issues #469, #475, #485).
+    /// the shape of the conversation, describing a failure of its size. It
+    /// reads as a message-shape bug and is not one.
     ///
     /// The test is exact rather than a threshold: if this request carried a user
     /// message and the server says it received none, the server dropped it, and
@@ -754,7 +752,7 @@ impl Provider for OllamaProvider {
     /// four times the 32768 it is actually served at. Budgets sized against the
     /// larger number never evict, the request overflows, and Ollama front-
     /// truncates it and then answers `no user query found in messages`, which
-    /// names neither the size nor the truncation (issue #475).
+    /// names neither the size nor the truncation.
     ///
     /// Failure is a warning upstream, not an error: a daemon whose Ollama is not
     /// running must still start, with the compiled table in charge.
@@ -958,7 +956,7 @@ fn ollama_chunk(json: &serde_json::Value) -> StreamChunk {
 /// NDJSON promises a newline between records, not after the last one, so a
 /// final `done` record can be sitting in the buffer with nothing to frame
 /// it. It is read as text and the stream is marked complete; the usage on it
-/// is not recovered, which is what the old loop did too.
+/// is not recovered.
 fn ollama_flush(buffer: &mut String) -> Option<StreamChunk> {
     let remaining = buffer.trim().to_string();
     if remaining.is_empty() {
@@ -2871,9 +2869,9 @@ mod tests {
     /// `think` is Ollama's top-level switch for a reasoning model, not a
     /// sampling knob - buried under `options` it would be silently ignored,
     /// and the model would keep spending its budget reasoning.
-    /// The bug in #470: two *different* turns each naming their first call
-    /// `ollama_0`, so a conversation held distinct calls that were
-    /// indistinguishable by id.
+    /// Two *different* turns must not each name their first call `ollama_0`,
+    /// or a conversation holds distinct calls that are indistinguishable by
+    /// id.
     #[test]
     fn ids_do_not_repeat_across_responses() {
         let provider = OllamaProvider::new(
@@ -2913,11 +2911,11 @@ mod tests {
         );
     }
 
-    /// What the unique ids buy downstream, and the reason #470 mattered rather
-    /// than merely being untidy: with the index-based mint, a response stranded
-    /// by eviction shared an id with an unrelated later call, so
-    /// `drop_unpaired_tool_turns` considered it answered and kept it. Keeping it
-    /// is what put a `tool` message at the head of the conversation in #469.
+    /// What the unique ids buy downstream, and why a repeated id is more than
+    /// untidy: a response stranded by eviction that shares an id with an
+    /// unrelated later call makes `drop_unpaired_tool_turns` consider it
+    /// answered and keep it, which puts a `tool` message at the head of the
+    /// conversation.
     #[test]
     fn a_stranded_response_is_dropped_now_that_ids_differ() {
         let provider = OllamaProvider::new(
@@ -3488,7 +3486,7 @@ mod tests {
     }
 
     /// The trap this exists to avoid. `model_info` names the architecture's
-    /// ceiling, which on the model that prompted #475 is 262144 against a real
+    /// ceiling, which on the model in this fixture is 262144 against a real
     /// window of 32768 - so reading the obvious field would replace one
     /// overestimate with a bigger one.
     #[test]
