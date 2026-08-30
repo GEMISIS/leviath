@@ -457,7 +457,7 @@ impl Provider for RhaiProvider {
 
         let response = parse_inference_dynamic(dynamic)?;
         if let Some(rl) = &self.rate_limiter {
-            rl.record_tokens(response.tokens_used.total_tokens).await;
+            rl.record_tokens(response.tokens_used.total_tokens);
         }
         Ok(response)
     }
@@ -524,8 +524,11 @@ impl Provider for RhaiProvider {
             // err_tx dropped here → chunk stream ends.
         });
 
-        Ok(Box::pin(
-            tokio_stream::wrappers::UnboundedReceiverStream::new(chunk_rx),
+        Ok(crate::rate_limit::meter_stream(
+            self.rate_limiter.as_ref(),
+            Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(
+                chunk_rx,
+            )),
         ))
     }
 

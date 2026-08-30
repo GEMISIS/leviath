@@ -618,7 +618,7 @@ impl Provider for OpenRouterProvider {
         let result = parse_openai_response(&response_body)?;
 
         if let Some(limiter) = &self.rate_limiter {
-            limiter.record_tokens(result.tokens_used.total_tokens).await;
+            limiter.record_tokens(result.tokens_used.total_tokens);
         }
 
         Ok(result)
@@ -654,7 +654,10 @@ impl Provider for OpenRouterProvider {
         let byte_stream = response.bytes_stream();
         let stream = openai_sse_stream(byte_stream).sent_by(peer);
 
-        Ok(Box::pin(stream))
+        Ok(crate::rate_limit::meter_stream(
+            self.rate_limiter.as_ref(),
+            Box::pin(stream),
+        ))
     }
 
     async fn count_tokens(&self, text: &str, _model: &str) -> usize {

@@ -3,11 +3,13 @@
 //! Prevents hammering provider APIs with configurable RPM and TPM limits,
 //! automatic backoff, and Retry-After header support.
 
-use crate::provider::{ProviderError, RateLimitConfig};
+use crate::provider::{ProviderError, RateLimitConfig, StreamChunk};
+use futures_core::Stream;
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 
 /// Rate limiter for controlling API request frequency.
 ///
@@ -25,8 +27,23 @@ pub struct RateLimiter {
     /// tests inject a short one so a wait can be observed in real time.
     window: Duration,
 
-    /// Current window state
+    /// Current window state. A plain mutex, never held across an await: the
+    /// waits below release it first, and [`MeteredStream`] has to book its
+    /// tokens from a `Drop`, where there is nothing to await on.
     state: Arc<Mutex<RateLimiterState>>,
+}
+
+/// What one pass of [`RateLimiter::acquire`] decided.
+enum Admission {
+    /// Under both limits; the request has been counted.
+    Now,
+    /// A window is full: sleep `wait`, then look again. The counts are for
+    /// the log line.
+    Wait {
+        wait: Duration,
+        requests: u32,
+        tokens: usize,
+    },
 }
 
 struct RateLimiterState {
@@ -56,66 +73,31 @@ impl RateLimiter {
         }
     }
 
+    /// The window state, recovered from a poisoned lock: a panic while the
+    /// state was held cannot have left a count that is worse than stale.
+    fn state(&self) -> MutexGuard<'_, RateLimiterState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Wait until we are allowed to make a request, then record it.
     ///
     /// This may sleep if we are at or near the rate limit.
     pub async fn acquire(&self) -> Result<(), ProviderError> {
-        let window = self.window;
-
         loop {
-            let now = Instant::now();
-            let mut state = self.state.lock().await;
-
-            // Prune old entries outside the 1-minute window. `duration_since`
-            // rather than `now - window`: an `Instant` cannot go before the
-            // platform's epoch, and `Instant - Duration` panics when it would -
-            // on Linux the epoch is boot, so a daemon started under a service
-            // manager within 60s of boot hit that on its first request.
-            while state
-                .request_timestamps
-                .front()
-                .is_some_and(|t| now.duration_since(*t) > window)
-            {
-                state.request_timestamps.pop_front();
-            }
-            while state
-                .token_counts
-                .front()
-                .is_some_and(|(t, _)| now.duration_since(*t) > window)
-            {
-                state.token_counts.pop_front();
-            }
-
-            let current_rpm = state.request_timestamps.len() as u32;
-            let current_tpm: usize = state.token_counts.iter().map(|(_, t)| t).sum();
-            // A zero limit on either key is no limit at all, the way a
-            // provider without a `[rate_limits]` table has none. Without the
-            // guard a zero `requests_per_minute` could never be satisfied and
-            // this loop never returned.
-            let rpm_ok = self.rpm_limit == 0 || current_rpm < self.rpm_limit;
-            let tpm_ok = self.tpm_limit == 0 || current_tpm < self.tpm_limit as usize;
-
-            if rpm_ok && tpm_ok {
-                state.request_timestamps.push_back(now);
-                return Ok(());
-            }
-
-            // Wait until whichever window is full has let its oldest entry out.
-            // The tokens a request spent are recorded after it answers, so the
-            // token window lags the request window by one call; that is the
-            // right side to err on, since the provider counts them the same way.
-            let mut until = now;
-            if !rpm_ok {
-                let oldest = state.request_timestamps.front().copied().unwrap_or(now);
-                until = until.max(oldest + window);
-            }
-            if !tpm_ok {
-                let oldest = state.token_counts.front().map(|(t, _)| *t).unwrap_or(now);
-                until = until.max(oldest + window);
-            }
-            let wait = until.saturating_duration_since(now) + Duration::from_millis(50);
-
-            drop(state);
+            // The lock lives in this block and is gone before the sleep: a
+            // guard still in scope across the await would make the future
+            // `!Send`, even after an explicit drop.
+            let (wait, current_rpm, current_tpm) = {
+                let mut state = self.state();
+                match self.admit(&mut state) {
+                    Admission::Now => return Ok(()),
+                    Admission::Wait {
+                        wait,
+                        requests,
+                        tokens,
+                    } => (wait, requests, tokens),
+                }
+            };
             tracing::debug!(
                 wait_ms = wait.as_millis(),
                 requests = current_rpm,
@@ -126,10 +108,74 @@ impl RateLimiter {
         }
     }
 
+    /// One pass over the windows: prune, then admit or say how long to wait.
+    fn admit(&self, state: &mut RateLimiterState) -> Admission {
+        let now = Instant::now();
+        let window = self.window;
+
+        // Prune old entries outside the 1-minute window. `duration_since`
+        // rather than `now - window`: an `Instant` cannot go before the
+        // platform's epoch, and `Instant - Duration` panics when it would -
+        // on Linux the epoch is boot, so a daemon started under a service
+        // manager within 60s of boot hit that on its first request.
+        while state
+            .request_timestamps
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > window)
+        {
+            state.request_timestamps.pop_front();
+        }
+        while state
+            .token_counts
+            .front()
+            .is_some_and(|(t, _)| now.duration_since(*t) > window)
+        {
+            state.token_counts.pop_front();
+        }
+
+        let current_rpm = state.request_timestamps.len() as u32;
+        let current_tpm: usize = state.token_counts.iter().map(|(_, t)| t).sum();
+        // A zero limit on either key is no limit at all, the way a
+        // provider without a `[rate_limits]` table has none. Without the
+        // guard a zero `requests_per_minute` could never be satisfied and
+        // `acquire` never returned.
+        let rpm_ok = self.rpm_limit == 0 || current_rpm < self.rpm_limit;
+        let tpm_ok = self.tpm_limit == 0 || current_tpm < self.tpm_limit as usize;
+
+        if rpm_ok && tpm_ok {
+            state.request_timestamps.push_back(now);
+            return Admission::Now;
+        }
+
+        // Wait until whichever window is full has let its oldest entry out.
+        // The tokens a request spent are recorded after it answers, so the
+        // token window lags the request window by one call; that is the
+        // right side to err on, since the provider counts them the same way.
+        let mut until = now;
+        if !rpm_ok {
+            let oldest = state.request_timestamps.front().copied().unwrap_or(now);
+            until = until.max(oldest + window);
+        }
+        if !tpm_ok {
+            let oldest = state.token_counts.front().map(|(t, _)| *t).unwrap_or(now);
+            until = until.max(oldest + window);
+        }
+        Admission::Wait {
+            wait: until.saturating_duration_since(now) + Duration::from_millis(50),
+            requests: current_rpm,
+            tokens: current_tpm,
+        }
+    }
+
     /// Record token usage for TPM tracking.
-    pub async fn record_tokens(&self, tokens: usize) {
-        let mut state = self.state.lock().await;
-        state.token_counts.push_back((Instant::now(), tokens));
+    ///
+    /// The buffered path calls this with the response in hand; a streamed
+    /// call goes through [`meter_stream`], which calls it once the stream is
+    /// done and the usage frame has named the total.
+    pub fn record_tokens(&self, tokens: usize) {
+        self.state()
+            .token_counts
+            .push_back((Instant::now(), tokens));
     }
 
     /// Handle a 429 rate limit response.
@@ -137,19 +183,19 @@ impl RateLimiter {
     /// If a Retry-After header value is provided (in seconds), sleep for that
     /// duration. Otherwise, apply exponential backoff.
     pub async fn handle_rate_limit(&self, retry_after_secs: Option<u64>) {
-        let mut state = self.state.lock().await;
-        state.consecutive_429s += 1;
-
-        let wait = if let Some(secs) = retry_after_secs {
-            Duration::from_secs(secs)
-        } else {
-            // Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 60s
-            let base = Duration::from_secs(1);
-            let multiplier = 2u64.pow(state.consecutive_429s.min(6) - 1);
-            (base * multiplier as u32).min(Duration::from_secs(60))
+        // The guard is scoped away before the sleep; see `acquire`.
+        let wait = {
+            let mut state = self.state();
+            state.consecutive_429s += 1;
+            if let Some(secs) = retry_after_secs {
+                Duration::from_secs(secs)
+            } else {
+                // Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 60s
+                let base = Duration::from_secs(1);
+                let multiplier = 2u64.pow(state.consecutive_429s.min(6) - 1);
+                (base * multiplier as u32).min(Duration::from_secs(60))
+            }
         };
-
-        drop(state);
         tracing::warn!(
             wait_secs = wait.as_secs(),
             "Rate limited (429), backing off"
@@ -159,15 +205,75 @@ impl RateLimiter {
 
     /// Reset the consecutive 429 counter (call after a successful request).
     pub async fn reset_backoff(&self) {
-        let mut state = self.state.lock().await;
+        let mut state = self.state();
         state.consecutive_429s = 0;
+    }
+}
+
+/// The chunk stream every `infer_stream` hands back.
+pub type ChunkStream =
+    Pin<Box<dyn Stream<Item = std::result::Result<StreamChunk, ProviderError>> + Send>>;
+
+/// Book `stream`'s tokens on `limiter` once the stream is done.
+///
+/// A provider without a limiter gets its stream back untouched. With one, the
+/// usage a streamed call reports, which only arrives on its last frames, lands
+/// in the token window the same way a buffered call's does; without this the
+/// daemon's default path never fed `tokens_per_minute` at all.
+pub fn meter_stream(limiter: Option<&RateLimiter>, stream: ChunkStream) -> ChunkStream {
+    match limiter {
+        Some(limiter) => Box::pin(MeteredStream {
+            inner: stream,
+            limiter: limiter.clone(),
+            tokens: 0,
+        }),
+        None => stream,
+    }
+}
+
+/// A chunk stream that spends what its usage frames name on a limiter.
+///
+/// The total is booked when the stream is dropped rather than on its final
+/// poll, so a stream that fails or is abandoned midway still books whatever
+/// the provider had counted by then, which is what the provider bills.
+pub struct MeteredStream {
+    inner: ChunkStream,
+    limiter: RateLimiter,
+    /// The running total across the usage frames seen so far.
+    tokens: usize,
+}
+
+impl Stream for MeteredStream {
+    type Item = std::result::Result<StreamChunk, ProviderError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let item = std::task::ready!(this.inner.as_mut().poll_next(cx));
+        if let Some(Ok(chunk)) = &item
+            && let Some(usage) = &chunk.tokens
+        {
+            this.tokens = this.tokens.saturating_add(usage.total_tokens);
+        }
+        Poll::Ready(item)
+    }
+}
+
+impl Drop for MeteredStream {
+    fn drop(&mut self) {
+        // A stream that named no usage (a refusal before the first frame, a
+        // server that does not report it) has nothing to book.
+        if self.tokens > 0 {
+            self.limiter.record_tokens(self.tokens);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::TokenUsage;
     use crate::test_support::always_on_tracing_guard;
+    use tokio_stream::StreamExt;
 
     #[tokio::test]
     async fn test_rate_limiter_basic() {
@@ -207,7 +313,7 @@ mod tests {
     #[tokio::test]
     async fn acquire_waits_for_tpm_capacity() {
         let limiter = short_window(60, 100);
-        limiter.record_tokens(100).await;
+        limiter.record_tokens(100);
         let started = Instant::now();
         let waiting = {
             let limiter = limiter.clone();
@@ -247,7 +353,7 @@ mod tests {
     #[tokio::test]
     async fn a_zero_tokens_per_minute_is_no_token_limit() {
         let limiter = short_window(60, 0);
-        limiter.record_tokens(1_000_000).await;
+        limiter.record_tokens(1_000_000);
         let started = Instant::now();
         limiter.acquire().await.expect("nothing to wait for");
         assert!(started.elapsed() < Duration::from_millis(300), "no wait");
@@ -264,7 +370,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         // The token spend lands 200 ms after the request, so its window opens
         // 200 ms later than the request window does.
-        limiter.record_tokens(10).await;
+        limiter.record_tokens(10);
         let started = Instant::now();
         let waiting = {
             let limiter = limiter.clone();
@@ -304,12 +410,12 @@ mod tests {
         // Simulate a 429
         limiter.handle_rate_limit(Some(0)).await;
         {
-            let state = limiter.state.lock().await;
+            let state = limiter.state();
             assert_eq!(state.consecutive_429s, 1);
         }
         limiter.reset_backoff().await;
         {
-            let state = limiter.state.lock().await;
+            let state = limiter.state();
             assert_eq!(state.consecutive_429s, 0);
         }
     }
@@ -325,7 +431,7 @@ mod tests {
         });
         limiter.handle_rate_limit(Some(0)).await;
         limiter.handle_rate_limit(Some(0)).await;
-        let state = limiter.state.lock().await;
+        let state = limiter.state();
         assert_eq!(state.consecutive_429s, 2);
     }
 
@@ -336,9 +442,9 @@ mod tests {
             tokens_per_minute: 100_000,
         });
         let clone = limiter.clone();
-        limiter.record_tokens(500).await;
+        limiter.record_tokens(500);
         // Clone should see the same tokens
-        let state = clone.state.lock().await;
+        let state = clone.state();
         assert_eq!(state.token_counts.len(), 1);
     }
 
@@ -368,7 +474,7 @@ mod tests {
         limiter.handle_rate_limit(Some(0)).await;
         limiter.handle_rate_limit(Some(0)).await;
         {
-            let state = limiter.state.lock().await;
+            let state = limiter.state();
             assert_eq!(state.consecutive_429s, 3);
         }
     }
@@ -402,12 +508,12 @@ mod tests {
         });
         limiter.acquire().await.unwrap();
         {
-            let state = limiter.state.lock().await;
+            let state = limiter.state();
             assert_eq!(state.request_timestamps.len(), 1);
         }
         limiter.acquire().await.unwrap();
         {
-            let state = limiter.state.lock().await;
+            let state = limiter.state();
             assert_eq!(state.request_timestamps.len(), 2);
         }
     }
@@ -426,13 +532,13 @@ mod tests {
         // call is already at the RPM limit and must take the "wait" branch
         // before the entry ages out of the 60s window and gets pruned.
         {
-            let mut state = limiter.state.lock().await;
+            let mut state = limiter.state();
             state
                 .request_timestamps
                 .push_back(Instant::now() - Duration::from_millis(59_950));
         }
         limiter.acquire().await.unwrap();
-        let state = limiter.state.lock().await;
+        let state = limiter.state();
         assert_eq!(state.request_timestamps.len(), 1);
     }
 
@@ -446,13 +552,127 @@ mod tests {
             tokens_per_minute: 100_000,
         });
         {
-            let mut state = limiter.state.lock().await;
+            let mut state = limiter.state();
             state
                 .token_counts
                 .push_back((Instant::now() - Duration::from_secs(61), 500));
         }
         limiter.acquire().await.unwrap();
-        let state = limiter.state.lock().await;
+        let state = limiter.state();
         assert!(state.token_counts.is_empty());
+    }
+
+    fn chunks(items: Vec<StreamChunk>) -> ChunkStream {
+        Box::pin(tokio_stream::iter(items.into_iter().map(Ok)))
+    }
+
+    fn usage_chunk(total: usize) -> StreamChunk {
+        StreamChunk {
+            delta: String::new(),
+            tool_calls: vec![],
+            tokens: Some(TokenUsage::new(total, 0, 0, 0)),
+            finish_reason: None,
+        }
+    }
+
+    fn text_chunk() -> StreamChunk {
+        StreamChunk {
+            delta: "hi".to_string(),
+            tool_calls: vec![],
+            tokens: None,
+            finish_reason: None,
+        }
+    }
+
+    /// Usage split across frames is summed, and booked once the stream is
+    /// dropped: nothing lands while it is still being read.
+    #[tokio::test]
+    async fn a_metered_stream_books_its_usage_when_dropped() {
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 1000,
+        });
+        let mut stream = meter_stream(
+            Some(&limiter),
+            chunks(vec![text_chunk(), usage_chunk(100), usage_chunk(50)]),
+        );
+        while stream.next().await.is_some() {}
+        assert!(limiter.state().token_counts.is_empty(), "not yet booked");
+        drop(stream);
+        let state = limiter.state();
+        assert_eq!(state.token_counts.len(), 1);
+        assert_eq!(state.token_counts[0].1, 150);
+    }
+
+    /// A stream abandoned after its usage frame still books what it saw.
+    #[tokio::test]
+    async fn an_abandoned_metered_stream_books_what_it_saw() {
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 1000,
+        });
+        let mut stream = meter_stream(Some(&limiter), chunks(vec![usage_chunk(70), text_chunk()]));
+        stream.next().await.expect("the usage frame").expect("ok");
+        drop(stream);
+        assert_eq!(limiter.state().token_counts[0].1, 70);
+    }
+
+    /// A stream that fails midway passes the error through and books the
+    /// usage seen before it.
+    #[tokio::test]
+    async fn a_metered_stream_passes_errors_through() {
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 1000,
+        });
+        let inner: ChunkStream = Box::pin(tokio_stream::iter(vec![
+            Ok(usage_chunk(30)),
+            Err(ProviderError::InvalidResponse("torn".to_string())),
+        ]));
+        let mut stream = meter_stream(Some(&limiter), inner);
+        stream.next().await.expect("the usage frame").expect("ok");
+        assert!(stream.next().await.expect("the error").is_err());
+        assert!(stream.next().await.is_none());
+        drop(stream);
+        assert_eq!(limiter.state().token_counts[0].1, 30);
+    }
+
+    /// A frame that has not arrived yet leaves the poll pending, and the
+    /// usage is still summed once it does. The sender runs on a task the
+    /// current-thread runtime has not scheduled at the first poll, so that
+    /// poll is pending by construction.
+    #[tokio::test]
+    async fn a_metered_stream_waits_for_a_frame_that_is_not_there_yet() {
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 1000,
+        });
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let inner: ChunkStream = Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx));
+        let mut stream = meter_stream(Some(&limiter), inner);
+        tokio::spawn(async move {
+            tx.send(Ok(usage_chunk(40))).expect("the receiver is alive");
+        });
+        stream.next().await.expect("the usage frame").expect("ok");
+        assert!(stream.next().await.is_none());
+        drop(stream);
+        assert_eq!(limiter.state().token_counts[0].1, 40);
+    }
+
+    /// No usage frame, nothing booked; no limiter, the stream is untouched.
+    #[tokio::test]
+    async fn a_stream_without_usage_or_limiter_books_nothing() {
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 1000,
+        });
+        let stream = meter_stream(Some(&limiter), chunks(vec![text_chunk()]));
+        let collected = crate::collect_stream(stream).await;
+        assert!(collected.is_err(), "no finish reason");
+        assert!(limiter.state().token_counts.is_empty());
+
+        let mut bare = meter_stream(None, chunks(vec![usage_chunk(5)]));
+        assert!(bare.next().await.is_some());
+        assert!(bare.next().await.is_none());
     }
 }
