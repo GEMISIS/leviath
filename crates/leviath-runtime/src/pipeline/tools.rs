@@ -500,34 +500,6 @@ pub(crate) fn dispatch_tools(
                 context_results.push((c.tool_id.clone(), text));
                 continue;
             }
-            // Applied inline for the same reason the context tools are: it
-            // writes the live window and an ECS component, neither of which the
-            // async lane can reach. Recorded here and committed after the loop,
-            // because `commands` cannot be borrowed inside it.
-            if crate::output_tool::is_output_tool(&c.name) {
-                let stage_names: Vec<String> = blueprint
-                    .map(|bp| bp.0.stages.iter().map(|s| s.name.clone()).collect())
-                    .unwrap_or_default();
-                let (text, output) = crate::output_tool::handle_output_tool(
-                    &c.arguments,
-                    &crate::output_tool::OutputContext {
-                        spec: stage_inf.output.as_ref(),
-                        validators,
-                        stage: &state.current_stage,
-                        stage_names: &stage_names,
-                        workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
-                    },
-                    chrono::Utc::now().timestamp(),
-                    &mut window,
-                );
-                // A refused submission leaves any earlier one alone: a bad
-                // correction must not erase a good answer.
-                if let Some(output) = output {
-                    submitted = Some(output);
-                }
-                context_results.push((c.tool_id.clone(), text));
-                continue;
-            }
             // Read inline, started after the loop. Like `submit_output` it needs
             // world access the async lane does not have - it parks this agent on
             // its workers - and like the context tools it is applied here rather
@@ -554,23 +526,20 @@ pub(crate) fn dispatch_tools(
                 }
                 continue;
             }
-            // A call the user already resolved in a prior prompt round.
+            // A call the user already resolved in a prior prompt round. An
+            // approved one skips the gate and lands where it would have
+            // landed the first time: the lane, or the inline submission below.
+            let mut cleared = false;
             if let Some(resolved) = resolved {
                 if let Some(msg) = resolved.denied.get(&c.tool_id) {
                     context_results.push((c.tool_id.clone(), msg.clone()));
                     continue;
                 }
-                if resolved.approved.contains(&c.tool_id) {
-                    lane_calls.push(leviath_providers::ToolCall {
-                        id: c.tool_id.clone(),
-                        name: c.name.clone(),
-                        arguments: c.arguments.clone(),
-                        thought_signature: c.thought_signature.clone(),
-                    });
-                    continue;
-                }
+                cleared = resolved.approved.contains(&c.tool_id);
             }
-            if let Some(gate) = gate.as_deref_mut() {
+            if let Some(gate) = gate.as_deref_mut()
+                && !cleared
+            {
                 let decision = gate.check_with_policy(
                     &state.agent_id,
                     &c.name,
@@ -613,6 +582,41 @@ pub(crate) fn dispatch_tools(
                         continue;
                     }
                 }
+            }
+            // Applied inline for the same reason the context tools are: it
+            // writes the live window and an ECS component, neither of which the
+            // async lane can reach. Recorded here and committed after the loop,
+            // because `commands` cannot be borrowed inside it.
+            //
+            // After the gate, not before it with the other inline tools: the
+            // submitted answer leaves the machine (`GET /api/agents/{id}/result`,
+            // the dashboard), so `submit_output` is classified outbound, and a
+            // classification the gate never sees gates nothing. It used to be
+            // applied above the gate, which is what let a Private region reach a
+            // remote reader with no prompt however it was classified.
+            if crate::output_tool::is_output_tool(&c.name) {
+                let stage_names: Vec<String> = blueprint
+                    .map(|bp| bp.0.stages.iter().map(|s| s.name.clone()).collect())
+                    .unwrap_or_default();
+                let (text, output) = crate::output_tool::handle_output_tool(
+                    &c.arguments,
+                    &crate::output_tool::OutputContext {
+                        spec: stage_inf.output.as_ref(),
+                        validators,
+                        stage: &state.current_stage,
+                        stage_names: &stage_names,
+                        workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
+                    },
+                    chrono::Utc::now().timestamp(),
+                    &mut window,
+                );
+                // A refused submission leaves any earlier one alone: a bad
+                // correction must not erase a good answer.
+                if let Some(output) = output {
+                    submitted = Some(output);
+                }
+                context_results.push((c.tool_id.clone(), text));
+                continue;
             }
             lane_calls.push(leviath_providers::ToolCall {
                 id: c.tool_id.clone(),

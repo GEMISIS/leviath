@@ -224,10 +224,13 @@ flowchart TD
 
 Taint recovers as entries evict, and an unrecognized tool **fails closed**: an MCP or script tool
 with no classification of its own is treated as outbound and gated. Every built-in tool carries its
-own classification, so only the ones that can carry bytes out (`shell`, `web_search`, `web_fetch`
-and the HTTP tools) are ever gated; the file, context, todo, sub-agent and interaction tools are
-not. Configure with a `[security]` block, layer on allowlists and Rhai policy rules, and dry-run
-any tool:
+own classification, so only the ones that can carry bytes out (`shell`, `web_search`, `web_fetch`,
+the HTTP tools, and `submit_output`) are ever gated; the file, context, todo, sub-agent and
+interaction tools are not. `submit_output` is on that list because the final output counts as
+leaving the machine: `lev serve` hands it to whoever reads `GET /api/agents/{id}/result` and the
+dashboard shows it, so a Private region in a submitted answer raises the same prompt a `shell`
+call would. Configure with a `[security]` block, layer on allowlists and Rhai policy rules, and
+dry-run any tool:
 
 ```bash
 lev policy list

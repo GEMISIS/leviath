@@ -156,6 +156,14 @@ same list.
   server that never answered kept the form waiting 30 s. The entry's
   `request_timeout_secs` now bounds the listing too, with the 30 s default
   only for an entry that set none.
+- With taint tracking on, `submit_output` was classified with the context
+  and todo tools as internal, and was applied before the taint gate ran at
+  all, so a Private region could be submitted as the run's answer and read
+  off-host through `GET /api/agents/{id}/result` or the dashboard with no
+  prompt. It is now an outbound tool with Public clearance, and the gate
+  runs before the submission is applied: a tainted answer raises the leak
+  prompt (or the policy's verdict) like a `shell` call would, and an
+  approved one is applied on the re-run.
 - The dashboard's run detail strip could show a cache figure over 100%, such
   as `cache 152%`, on a run that was mostly served from the provider's cache.
   The prompt count every provider is normalised to is the fresh input only,
