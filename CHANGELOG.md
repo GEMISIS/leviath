@@ -125,6 +125,43 @@ same list.
   `200` on routes that answer `201`, `202` or `204`, and gave `GET /api/config`
   no shape. Each gap now has a test that reads the parser and holds the schema
   to it.
+- `lev setup` no longer offers the Claude Code transport on its provider
+  list, and with it the reasoning-effort row, the terms dialog on save, and
+  the review-screen warning are gone. The transport itself stays: the
+  `claude_code_enabled`, `claude_code_effort` and `claude_code_binary` keys,
+  the `--claude-code` and `--claude-code-effort` flags, and the MCP import
+  from Claude Code's own config all work as before, and a config that
+  already has it on comes out of the wizard with it still on.
+- A blueprint with a negative integer, or an unknown key under `[sandbox]`,
+  no longer loads; the error names the key. `max_items = -1` used to read as
+  the largest possible cap, and a few keys (a gate's `max_attempts`, a nudge
+  `max`, `request_timeout_secs`, a `stuck_after_*` threshold) dropped the
+  value without a word. A misspelled sandbox key such as `netwrok = false`
+  was ignored, so the sandbox ran looser than the file said.
+- Every read from a remote peer is capped. A provider's buffered JSON reply is
+  cut at 64 MiB, one streamed frame (SSE or NDJSON) at 8 MiB, and one line
+  from an MCP stdio server at 1 MiB; the same caps cover MCP HTTP replies and
+  their event streams. Past a cap the inference or tool call fails with a
+  message naming the cap and the peer instead of the daemon buffering until
+  it is killed. The rest of an oversized MCP line is drained, so the next
+  call to that server still works. The caps are constants in
+  `leviath_net::read_caps`, not configuration.
+- `gpt-realtime-*`, `gpt-*-transcribe`, `gpt-*-tts` and `gpt-image-*` no
+  longer appear in the chat catalogue or route as chat models. They start
+  with `gpt-` and speak other endpoints, and the name rule that routes a
+  bare model id took them along.
+- The script and tool routes' `?agent=<name>` is resolved through the same
+  catalog `GET /api/blueprints` lists, so an agent under a configured
+  `agent_paths` entry now shows its `tools/`, opens its hooks, and takes a
+  `PUT` into its own directory rather than an empty one under
+  `~/.leviath/agents`. `GET /api/runs?fields=waiting_on` was refused as an
+  unknown field; every `RunMeta` field is allowed, and a test reads the
+  struct so the next one cannot slip past (#643, #656).
+- A blueprint's `[sandbox]` table reads `mounts` as well as `mount`. The
+  schema and the `config.toml` docs both spell it `mounts`, and the parser
+  read only `mount`, so a list copied from the config docs was silently
+  ignored. Both with different lists is a load error naming the conflict, and
+  a test now holds the schema to the parser's key lists table by table.
 - `requests_per_minute = 0` under `[rate_limits.<provider>]` hung every call
   to that provider: the limiter waited for the request count to drop under
   zero, which it never could, and the wait sat in front of any HTTP timeout.
@@ -287,6 +324,30 @@ same list.
   it is killed. The rest of an oversized MCP line is drained, so the next
   call to that server still works. The caps are constants in
   `leviath_net::read_caps`, not configuration.
+- `lev models list` and `lev models show` ask the configured providers what
+  they serve, by default. Each provider is asked side by side, within five
+  seconds; what it says replaces the compiled-in rows for it, and one that
+  could not be asked keeps them with a warning naming it. The table gains
+  RELEASED and per-million price columns, sorts newest first within a
+  provider, and ends with a line saying how many rows came from a listing and
+  how many from this build. `show` no longer needs `--provider`: every
+  provider is asked and the first to carry the id answers, saying whether its
+  numbers came from the listing or the table. The way back is `--offline`,
+  which prints this build's table alone and touches no network; `-r/--remote`
+  is still accepted and does nothing, for scripts written when the listing
+  was opt-in. `GET /api/models` carries `supports_temperature`, `learned`,
+  `released`, `retires` and `pricing` beside what it had (#568).
+- What a provider's models can do is learned from that provider's own
+  listing, one shape for all of them, and merged under the operator's
+  overrides. A compiled table said `gpt-5.5` took a temperature after the
+  model had started refusing one, and had no `claude-*-5` on OpenRouter while
+  the gateway served them. Measured per provider rather than assumed:
+  OpenRouter fills both limits, the supported parameters and the prices;
+  Anthropic's listing is read past its first page of twenty and fills the
+  limits and release dates; OpenAI fills ids and dates only; Google fills the
+  limits and whether sampling is allowed; Ollama fills the window and whether
+  the model calls tools. A model that refuses a temperature is not sent one
+  again, whatever the table or an override says.
 - The published list prices for OpenAI, Anthropic and Google live in
   `crates/leviath-providers/pricing/rates.toml` rather than in Rust, and each
   row names where it came from. `lev models list` prints `n/a` where nothing
@@ -320,6 +381,25 @@ same list.
 
 ### Added
 
+- `POST /api/update` carries out the update `GET /api/update` describes,
+  behind `--allow-admin`: the same plan, run in the background. It answers
+  202 with a job id, sends every step as `update_progress` on `/ws` with
+  `update_finished` last, and `GET /api/update/jobs/{id}` answers the same
+  record for a client that polls; the last eight jobs are kept, and a second
+  POST while one runs is a 409 naming it. The body chooses `binary`, `agents`
+  and `migrations`, each on unless set false. A `cargo install` copy is
+  advised rather than rebuilt, a blueprint you edited locally is left alone
+  and counted, and the restart is reported (`restart_required`,
+  `restart_hint`) rather than performed, since the running server and daemon
+  keep the old binary until they restart (#638).
+- `lev.exe` carries a version resource (product, version, publisher,
+  description) and, on the alpha build where the signing account's secrets
+  are set, an Authenticode signature through Azure Artifact Signing; beta and
+  stable promote the alpha artifacts, so the signature travels with them. A
+  fork or a PR build still produces an unsigned binary and says so. An
+  unsigned console exe with no version block that talks to the network and
+  spawns processes is the shape antivirus heuristics score worst, and an
+  install Defender quarantines is not an install.
 - `lev serve` holds at most 64 requests in flight and gives each 30 seconds; the
   65th is answered 503 at once and a request past its deadline 408, both in the
   usual `{"error": ...}` shape. `--max-concurrent-requests` and
@@ -367,7 +447,6 @@ same list.
   cannot differ; the Output pane keeps showing what the stage wrote along the
   way, which for a model that chatted one answer and submitted another is
   different text.
-
 
 ## 0.5.5 - 2026-08-27
 
