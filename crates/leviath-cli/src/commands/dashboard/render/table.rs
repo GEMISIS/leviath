@@ -421,6 +421,21 @@ impl Dashboard {
                 .and_then(|a| a.pending_request.as_ref())
                 .map(|r| r.kind.clone());
             match kind {
+                // The feedback box under an approval prompt: the response
+                // box's keys, and Esc is back to the choices, not out.
+                _ if self.deny_feedback_open => Line::from(vec![
+                    Span::styled(
+                        "[^Enter]",
+                        Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" send with the deny  "),
+                    Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" newline  "),
+                    Span::styled("[Tab]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" Send button  "),
+                    Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" back to the prompt"),
+                ]),
                 Some(InteractionKind::FreeText) | None => Line::from(vec![
                     Span::styled(
                         "[Enter]",
@@ -1225,6 +1240,38 @@ mod tests {
             .unwrap();
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("select"), "{buf}");
+    }
+
+    /// With the feedback box open the bar names the box's keys, and says
+    /// where Esc goes, because it does not go where it goes on the prompt.
+    #[test]
+    fn draw_help_bar_deny_feedback_box() {
+        let backend = TestBackend::new(120, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-df", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(interaction::InteractionRequest::tool_approval(
+            "ta1",
+            "bash",
+            serde_json::json!({"command": "ls"}),
+            "main",
+            &[],
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.deny_feedback_open = true;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 1);
+                dash.draw_help_bar(f, area);
+            })
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("[^Enter] send with the deny"), "{buf}");
+        assert!(buf.contains("[Esc] back to the prompt"), "{buf}");
+        assert!(!buf.contains("select"), "{buf}");
     }
 
     #[test]
