@@ -2212,6 +2212,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
                 path.to_path_buf(),
                 boot,
             ))),
+            provider_reload: None,
         })
     }
 

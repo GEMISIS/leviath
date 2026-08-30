@@ -194,29 +194,52 @@ the rule sources were read into the compiled checker at boot, so editing a `.rha
 nothing at all and the gate went on answering from the text it started with.
 
 `[observability]` reloads too. Turn export on, point it at a different collector, rename the
-service, or turn it off, and the next run emits into what the file says now. The one thing that
-does not move is how verbose the daemon's own log is: the process subscriber is installed before
-any config is read, from `--verbose` on the daemon's command line, and a `tracing` subscriber can
-only be set once per process. Changing that still means restarting the daemon.
+service, or turn it off, and the next run emits into what the file says now. The verbosity of the
+daemon's own log is not part of that; it is one of the two things below that still need a restart.
 
-Some changes do still need `lev daemon restart`. They set up connections and process-wide state
-once at startup rather than per run:
+Some changes do still need `lev daemon restart`, and after this release neither of them is a
+setting in `config.toml`. One is how verbose the daemon's own log is: its `tracing` subscriber is
+installed from `--verbose` on the command line before any config is read, and a process can install
+one only once. The other is a provider key you exported as an environment variable instead of
+writing it to the file: the daemon inherited its environment when it started, and an export in your
+shell afterwards never reaches it.
 
-- The `[limits]` the world itself is built with: `stall_timeout_secs`, `wedge_timeout_secs`,
-  `dead_cycles_before_relief`, `max_concurrent_inferences`, `max_concurrent_tools`,
-  `provider_failures_before_open`, `provider_circuit_cooldown_secs`,
-  `interaction_timeout_secs`, and `finished_retention_secs`.
+`[providers] fallback_order` needs no restart either. It is per-run policy, so it reloads like
+everything else and a new fallback provider applies on the next `lev run`.
 
-`[providers] fallback_order` is not one of them. It is per-run policy, so it reloads like everything
-else and a new fallback provider applies on the next `lev run`.
-
-Neither is the outbound-network policy. `[security] allow_local_network` and the two script-HTTP
+Nor does the outbound-network policy. `[security] allow_local_network` and the two script-HTTP
 limits, `script_http_timeout_secs` and `script_http_max_per_host`, are copied into process-wide
 state because the shared HTTP client has no handle on your config by the time a script tool calls
 through it. That copy is now refreshed on every reload, so all three follow the file. It matters
 most in the direction nobody tests: turning `allow_local_network` **off** used to stop a script
 naming a loopback URL at once, while a redirect from a permitted URL down to loopback carried on
 being followed until you restarted the daemon.
+
+### The `[limits]` the world is built with
+
+These used to need a restart and no longer do, as of this release: the inference pools
+(`max_concurrent_inferences` and its `_by_model` and `_by_provider` tables), the tool lane
+(`max_concurrent_tools`), `stream_inference`, the two watchdogs (`stall_timeout_secs`,
+`wedge_timeout_secs`), the provider circuit breaker (`provider_failures_before_open`,
+`provider_circuit_cooldown_secs`), the inference retry schedule (`inference_retry_attempts`,
+`inference_retry_base_ms`), `dead_cycles_before_relief`, `notify_spend_usd`, `max_agents_per_run`,
+`finished_retention_secs`, `interaction_timeout_secs`, and the whole `[title]` section.
+
+Most of them reach the runs already going, not only the next one, because the engine reads them on
+every pass: lower `stall_timeout_secs` and the watchdog is stricter with the run in front of it,
+lower `max_agents_per_run` and the next fan-out split stops at the new ceiling. The ones that only
+apply to what starts next are the ones nothing can retroactively change: a request already on the
+wire keeps the streaming setting, the retry schedule and the pool slot it started with, and a prompt
+already waiting keeps the deadline it opened with.
+
+Lowering a concurrency limit never interrupts anything. The slots nobody is holding are taken back
+at once and the rest as the requests and tool batches in flight finish, so the pool narrows by
+draining rather than by cancelling work you are paying for.
+
+`[title]` had a worse failure than doing nothing. Turning it on marked each new run for a title,
+because spawn already read a fresh config, and then the part that actually makes titles read the
+value from boot, saw titling switched off, and dropped the marker without a word. Both halves read
+the same file now.
 
 ## Control surface
 
