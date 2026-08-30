@@ -144,6 +144,21 @@ same list.
   replaced, so what it had already recorded still reaches the old collector. The daemon's own log
   level is not part of this and still needs a restart: the process subscriber is installed from
   `--verbose` before any config is read.
+- A global `[[mcp_servers]]` entry added, edited or removed under a running
+  daemon reaches the next run. The servers were connected once at boot and the
+  tools they advertise were cloned into the spawner, so `lev mcp add` and `POST
+  /api/mcp/servers` wrote the file and stopped there: the server was in the
+  config, `lev mcp list` showed it, and no run could call it until someone
+  restarted the daemon, with nothing anywhere saying so. A run already under
+  way keeps the servers it started with; a removed one stays connected for
+  `[limits] mcp_idle_disconnect_secs` so nothing loses a tool mid-call, and an
+  edited entry's old connection is replaced before the new one opens.
+- `[security] allow_env_vars` and `credential_store` are read when an MCP
+  server is connected rather than copied at boot, so a variable you have just
+  allowed reaches an MCP `${VAR}` header. `daemon.md` said the allowlist took
+  effect on the next load, which was true of script providers and not of MCP.
+  A global server whose headers interpolate is reconnected when the list moves,
+  which is what puts the new value in front of the next run.
 - The update check read the GitHub releases answer with no size cap, the one
   buffered remote read left after the daemon's caps landed. It now stops at
   the same 64 MiB as every other buffered body and reports the same
