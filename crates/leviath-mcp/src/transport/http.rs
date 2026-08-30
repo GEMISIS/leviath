@@ -587,7 +587,7 @@ impl HttpTransport {
             .unwrap_or("")
             .to_string();
 
-        let mut parsed = if content_type.starts_with("text/event-stream") {
+        let parsed = if content_type.starts_with("text/event-stream") {
             self.read_sse_reply(response, id).await?
         } else if content_type.starts_with("application/json") {
             Self::read_json_reply(response).await?
@@ -599,7 +599,6 @@ impl HttpTransport {
         };
 
         self.learn_session(&response_headers, &parsed);
-        parsed.id.take();
         Ok(parsed)
     }
 }
