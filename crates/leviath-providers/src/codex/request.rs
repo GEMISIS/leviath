@@ -44,8 +44,7 @@ use crate::provider::{ContentBlock, InferenceRequest, Message, MessageContent, T
 /// `instructions` is optional as far as the backend is concerned, but it is the
 /// first bytes of the cached prefix, so it must be byte-identical on every
 /// request from every stage.
-const DEFAULT_INSTRUCTIONS: &str =
-    "You are running inside Leviath, a multi-stage agent runtime. The developer \
+const DEFAULT_INSTRUCTIONS: &str = "You are running inside Leviath, a multi-stage agent runtime. The developer \
      messages that follow carry the structured context regions for this stage. \
      Treat them as authoritative.";
 
@@ -192,7 +191,12 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
                         }
                         text.push_str(t);
                     }
-                    ContentBlock::ToolUse { id, name, input: args, .. } => {
+                    ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input: args,
+                        ..
+                    } => {
                         if !text.is_empty() {
                             input.push(text_item(&message.role, &std::mem::take(&mut text)));
                         }
@@ -206,7 +210,11 @@ fn push_message(input: &mut Vec<Value>, message: &Message, replay_reasoning: boo
                             "arguments": args.to_string(),
                         }));
                     }
-                    ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
                         if !text.is_empty() {
                             input.push(text_item(&message.role, &std::mem::take(&mut text)));
                         }

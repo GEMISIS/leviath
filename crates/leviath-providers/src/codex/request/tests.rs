@@ -50,7 +50,12 @@ fn developer_texts(body: &Value) -> Vec<String> {
         .expect("input is an array")
         .iter()
         .filter(|item| item["role"] == "developer")
-        .map(|item| item["content"][0]["text"].as_str().unwrap_or("").to_string())
+        .map(|item| {
+            item["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        })
         .collect()
 }
 
@@ -88,7 +93,10 @@ fn each_region_keeps_its_own_item_and_its_heading() {
         vec![user("go")],
     );
     let texts = developer_texts(&build_default(&req));
-    assert_eq!(texts, vec!["## task\nA".to_string(), "## notes\nB".to_string()]);
+    assert_eq!(
+        texts,
+        vec!["## task\nA".to_string(), "## notes\nB".to_string()]
+    );
 }
 
 #[test]
@@ -103,7 +111,10 @@ fn block_order_is_left_exactly_as_assembly_sorted_it() {
         ],
         vec![user("go")],
     );
-    assert_eq!(developer_texts(&build_default(&req)), vec!["third", "first", "second"]);
+    assert_eq!(
+        developer_texts(&build_default(&req)),
+        vec!["third", "first", "second"]
+    );
 }
 
 #[test]
@@ -133,7 +144,10 @@ fn framework_hints_become_the_instructions_and_regions_do_not() {
 #[test]
 fn instructions_fall_back_to_a_fixed_preamble() {
     // Never varies by stage: it is the first bytes of the cached prefix.
-    let req = request(vec![block("task", "x", Volatility::Stable)], vec![user("go")]);
+    let req = request(
+        vec![block("task", "x", Volatility::Stable)],
+        vec![user("go")],
+    );
     assert_eq!(build_default(&req)["instructions"], DEFAULT_INSTRUCTIONS);
 }
 
@@ -147,7 +161,10 @@ fn hint_blocks_join_on_a_blank_line() {
         ],
         vec![user("go")],
     );
-    assert_eq!(build_default(&req)["instructions"], "## one\nA\n\n## two\nB");
+    assert_eq!(
+        build_default(&req)["instructions"],
+        "## one\nA\n\n## two\nB"
+    );
 }
 
 #[test]
@@ -177,7 +194,10 @@ fn a_system_role_message_becomes_a_developer_item() {
         .iter()
         .filter_map(|i| i["role"].as_str())
         .collect();
-    assert!(!roles.contains(&"system"), "a system role reached the wire: {roles:?}");
+    assert!(
+        !roles.contains(&"system"),
+        "a system role reached the wire: {roles:?}"
+    );
 }
 
 #[test]
@@ -257,7 +277,10 @@ fn a_tool_call_round_trips_with_the_call_id_and_string_arguments() {
     );
     let items = build_default(&req)["input"].as_array().unwrap().clone();
 
-    let call = items.iter().find(|i| i["type"] == "function_call").expect("call");
+    let call = items
+        .iter()
+        .find(|i| i["type"] == "function_call")
+        .expect("call");
     assert_eq!(call["call_id"], "call_abc");
     assert_eq!(call["name"], "read_file");
     // A JSON string, not an object: the backend rejects an object here.
@@ -289,7 +312,10 @@ fn a_failed_tool_result_keeps_saying_so() {
         }],
     );
     let items = build_default(&req)["input"].as_array().unwrap().clone();
-    let out = items.iter().find(|i| i["type"] == "function_call_output").unwrap();
+    let out = items
+        .iter()
+        .find(|i| i["type"] == "function_call_output")
+        .unwrap();
     assert_eq!(out["output"], "[error] permission denied");
 }
 
@@ -300,7 +326,9 @@ fn assistant_text_beside_a_tool_call_survives_as_its_own_item() {
         vec![Message {
             role: "assistant".to_string(),
             content: MessageContent::Blocks(vec![
-                ContentBlock::Text { text: "Let me look.".to_string() },
+                ContentBlock::Text {
+                    text: "Let me look.".to_string(),
+                },
                 ContentBlock::ToolUse {
                     id: "call_1".to_string(),
                     name: "read_file".to_string(),
@@ -332,7 +360,9 @@ fn trailing_assistant_text_after_a_tool_call_is_not_lost() {
                     input: json!({}),
                     thought_signature: None,
                 },
-                ContentBlock::Text { text: "and then this".to_string() },
+                ContentBlock::Text {
+                    text: "and then this".to_string(),
+                },
             ]),
             cache_breakpoint: false,
             reasoning: None,
@@ -380,7 +410,10 @@ fn a_replayed_reasoning_item_precedes_the_turn_it_belongs_to() {
     assert_eq!(items[0]["type"], "reasoning");
     assert_eq!(items[0]["encrypted_content"], "sealed-blob");
     assert_eq!(items[1]["content"][0]["text"], "42");
-    assert_eq!(build_default(&req)["include"], json!(["reasoning.encrypted_content"]));
+    assert_eq!(
+        build_default(&req)["include"],
+        json!(["reasoning.encrypted_content"])
+    );
 }
 
 #[test]
@@ -473,7 +506,10 @@ fn the_cache_key_holds_still_across_a_stage_and_fits_the_limit() {
         ],
         vec![user("turn one"), user("turn two")],
     );
-    let key = build_default(&first)["prompt_cache_key"].as_str().unwrap().to_string();
+    let key = build_default(&first)["prompt_cache_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(build_default(&second)["prompt_cache_key"], key.as_str());
     assert!(key.len() <= 64, "key is {} chars: {key}", key.len());
     assert!(key.starts_with("lev-"));
@@ -508,10 +544,17 @@ fn a_long_region_name_cannot_overflow_the_cache_key() {
     // Fixed width by construction; this pins that the construction is what it
     // claims rather than a length that happens to fit today.
     let req = request(
-        vec![block(&"r".repeat(4096), &"x".repeat(50_000), Volatility::Stable)],
+        vec![block(
+            &"r".repeat(4096),
+            &"x".repeat(50_000),
+            Volatility::Stable,
+        )],
         vec![],
     );
-    let key = build_default(&req)["prompt_cache_key"].as_str().unwrap().to_string();
+    let key = build_default(&req)["prompt_cache_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(key.len(), 20, "got {key}");
 }
 
@@ -541,5 +584,8 @@ fn a_tool_call_from_a_response_maps_by_call_id() {
     );
     let items = build_default(&req)["input"].as_array().unwrap().clone();
     assert_eq!(items[0]["call_id"], "call_from_stream");
-    assert!(items[0].get("id").is_none(), "the item id must not be echoed");
+    assert!(
+        items[0].get("id").is_none(),
+        "the item id must not be echoed"
+    );
 }

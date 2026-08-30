@@ -19,7 +19,7 @@ use futures_core::Stream;
 
 /// State carried across events within one response.
 #[derive(Default)]
-struct Turn {
+pub(super) struct Turn {
     /// Whether any function call was seen, which decides the finish reason:
     /// the terminal event reports `completed` either way.
     saw_tool_call: bool,
@@ -69,7 +69,10 @@ pub(super) fn parse_event(
 
     // The `type` inside the payload, not the `event:` line. Both are sent, and
     // the JSON is the one that is always present and always authoritative.
-    let kind = json.get("type").and_then(|t| t.as_str()).unwrap_or_default();
+    let kind = json
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default();
 
     match kind {
         "response.output_text.delta" => {
@@ -103,7 +106,10 @@ pub(super) fn parse_event(
                         .get("call_id")
                         .and_then(|v| v.as_str())
                         .map(str::to_string),
-                    name: item.get("name").and_then(|v| v.as_str()).map(str::to_string),
+                    name: item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
                     arguments_delta: String::new(),
                     thought_signature: None,
                 }],

@@ -8,7 +8,11 @@ use super::*;
 
 /// Frame `value` as one server-sent event, the way the route sends it.
 fn event(value: serde_json::Value) -> String {
-    format!("event: {}\ndata: {}\n\n", value["type"].as_str().unwrap_or(""), value)
+    format!(
+        "event: {}\ndata: {}\n\n",
+        value["type"].as_str().unwrap_or(""),
+        value
+    )
 }
 
 /// Run one event through the parser with a fresh turn.
@@ -95,7 +99,10 @@ fn argument_deltas_are_indexed_by_output_index() {
     let delta = &c.tool_calls[0];
     assert_eq!(delta.index, 3);
     assert_eq!(delta.arguments_delta, "{\"path\":");
-    assert!(delta.id.is_none(), "a later delta must not re-assign the id");
+    assert!(
+        delta.id.is_none(),
+        "a later delta must not re-assign the id"
+    );
     assert!(delta.name.is_none());
 }
 
@@ -420,7 +427,10 @@ async fn a_whole_tool_calling_turn_collects_into_one_response() {
     let call = &response.tool_calls[0];
     assert_eq!(call.id, "call_1");
     assert_eq!(call.name, "read_file");
-    assert_eq!(call.arguments, serde_json::json!({ "path": "/etc/hostname" }));
+    assert_eq!(
+        call.arguments,
+        serde_json::json!({ "path": "/etc/hostname" })
+    );
     assert!(matches!(response.finish_reason, FinishReason::ToolCall));
     assert_eq!(response.tokens_used.completion_tokens, 21);
 }
