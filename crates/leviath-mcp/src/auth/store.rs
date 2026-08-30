@@ -669,8 +669,8 @@ mod tests {
 
     /// Access *and refresh* tokens for every MCP server. Written with the mode
     /// already applied, so there is no window - however brief - where another
-    /// local user could read them. The previous `fs::write` + `chmod` left the
-    /// file at the umask default (typically 0644) in between, on every save.
+    /// local user could read them. An `fs::write` followed by a `chmod` leaves
+    /// the file at the umask default (typically 0644) in between, on every save.
     #[cfg(unix)]
     #[test]
     fn saving_never_leaves_the_token_store_group_or_world_readable() {

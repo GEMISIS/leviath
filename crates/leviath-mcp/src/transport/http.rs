@@ -92,9 +92,9 @@ fn build_http_client() -> reqwest::Client {
 /// be sent as if it were the credential.
 ///
 /// A credential-shaped variable is refused unless the user named it, exactly as
-/// a Rhai script tool's `env_var` is. Without this the two transports disagreed:
-/// a stdio server got a filtered environment, while an HTTP server's `headers`
-/// could interpolate *any* variable the daemon held -
+/// a Rhai script tool's `env_var` is. Without it the two transports disagree:
+/// a stdio server gets a filtered environment, while an HTTP server's `headers`
+/// can interpolate *any* variable the daemon holds -
 ///
 /// ```toml
 /// headers = { X-A = "${ANTHROPIC_API_KEY}" }
@@ -209,8 +209,8 @@ pub(crate) struct HttpTransport {
     legacy: Option<LegacyStream>,
     /// How long a notification's POST may take. `send_request` takes its
     /// deadline as an argument; the trait gives a notification none, and a
-    /// server that accepts the connection and stalls used to hold it open
-    /// for the full read-stall timeout. A field so a test can shorten it.
+    /// server that accepts the connection and stalls would otherwise hold it
+    /// open for the full read-stall timeout. A field so a test can shorten it.
     notification_timeout: Duration,
     /// Re-auths the bearer on a mid-session `401`, if configured.
     refresher: Option<Arc<dyn BearerRefresher>>,
@@ -599,7 +599,6 @@ impl HttpTransport {
         };
 
         self.learn_session(&response_headers, &parsed);
-        // Take the id out of the borrow so `learn_session` can mutate self.
         parsed.id.take();
         Ok(parsed)
     }
@@ -691,8 +690,8 @@ enum SseEnd {
 /// Keepalive frames (an event with empty data) are skipped here, so a caller
 /// only ever sees an event worth decoding. The two readers of an MCP event
 /// stream - the reply reader, which fails the request when the stream ends,
-/// and the legacy pump, which logs and stops - used to carry this loop each;
-/// what they do about an ending is theirs, how bytes become events is not.
+/// and the legacy pump, which logs and stops - share it: what they do about an
+/// ending is theirs, how bytes become events is not.
 async fn next_sse_event<S, B>(
     stream: &mut S,
     buffer: &mut String,
@@ -1257,7 +1256,7 @@ mod tests {
     }
 
     /// A legacy server announces where to POST. `Url::join` with an absolute
-    /// URL replaces the base entirely, so an unchecked endpoint event let the
+    /// URL replaces the base entirely, so an unchecked endpoint event lets the
     /// server redirect every later request - each carrying its OAuth bearer and
     /// any configured secret headers - to a host of its choosing.
     ///
@@ -1352,12 +1351,11 @@ mod tests {
         // test claims: a leak is by definition a request holding the header, so
         // narrowing the count cannot hide the regression this exists to catch.
         //
-        // Counting every request made the test answerable by traffic that has
-        // nothing to do with it. The port is ephemeral and this binary runs its
-        // tests in parallel, so a connection from another test - against a port
-        // the OS has since recycled into this listener - lands on the fallback
-        // and reads as a stolen header. That is how it failed once on
-        // ubuntu-24.04-arm with `left: 1, right: 0`.
+        // Counting every request would make the test answerable by traffic
+        // that has nothing to do with it. The port is ephemeral and this binary
+        // runs its tests in parallel, so a connection from another test -
+        // against a port the OS has since recycled into this listener - lands
+        // on the fallback and would read as a stolen header.
         let leaked = Arc::new(AtomicUsize::new(0));
         let thief = Router::new().fallback({
             let leaked = leaked.clone();
@@ -1401,8 +1399,8 @@ mod tests {
 
         // The property that makes the count trustworthy: traffic reaching this
         // port without the header is not a leak and must not read as one. This
-        // is the stray connection - another test's client against a recycled
-        // ephemeral port - that used to fail the assertion above.
+        // stray connection - another test's client against a recycled
+        // ephemeral port - must leave the assertion above green.
         reqwest::Client::new()
             .get(format!("{thief_base}/unrelated"))
             .send()
@@ -1618,9 +1616,9 @@ mod tests {
         assert!(err.to_string().contains("did not respond"), "got: {err}");
     }
 
-    /// A notification has no reply to wait for, which is exactly why it had
-    /// no deadline: a server that took the POST and never answered held the
-    /// connection for the whole read-stall timeout.
+    /// A notification has no reply to wait for, so its POST carries a deadline
+    /// of its own: without one a server that takes the POST and never answers
+    /// holds the connection for the whole read-stall timeout.
     #[tokio::test]
     async fn a_slow_server_times_out_a_notification_too() {
         let _guard = always_on_tracing_guard();
@@ -2327,7 +2325,7 @@ mod tests {
         // reaching the `post()?` arm inside `legacy_request`.
         //
         // The endpoint stays on the server's own origin. Naming a closed port
-        // on another host would be shorter, but the transport now refuses a
+        // on another host would be shorter, but the transport refuses a
         // cross-origin endpoint event before it ever posts, so that version of
         // this test would pass while exercising none of what it describes.
         let (app, _tx) = legacy_app("/messages");

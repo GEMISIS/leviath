@@ -64,10 +64,9 @@ pub(crate) fn resource_metadata_url(www_authenticate: Option<&str>) -> Option<St
 /// `https://host/.well-known/oauth-protected-resource/mcp/`, and only a
 /// resource at the root has its document at the bare well-known path.
 ///
-/// Dropping the path instead is what made every path-hosted server 404 here
-/// whenever it did not send a `resource_metadata` hint. GitHub's MCP server is
-/// the case that surfaced it: it serves the document at the suffixed URL, and
-/// nothing at the bare one.
+/// Dropping the path instead 404s on every path-hosted server that sends no
+/// `resource_metadata` hint: GitHub's MCP server serves the document at the
+/// suffixed URL and nothing at the bare one.
 pub(crate) fn well_known_resource_url(mcp_url: &Url) -> Url {
     let mut url = mcp_url.clone();
     // A path of "/" is the root case, where the suffix would add a stray

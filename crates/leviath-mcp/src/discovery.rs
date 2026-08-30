@@ -229,7 +229,6 @@ impl ToolDiscovery {
 
     /// Discover tools by spawning a client from a server config.
     ///
-    /// Spawns the server process, connects, and discovers tools.
     /// Returns the tools and the live client (caller keeps it alive for tool calls).
     pub async fn discover_from_config(
         &mut self,
@@ -337,7 +336,6 @@ mod tests {
         let meta: ToolMetadata = serde_json::from_str(json).unwrap();
         assert_eq!(meta.schema, serde_json::json!({"type": "string"}));
 
-        // Serializes back as inputSchema
         let serialized = serde_json::to_value(&meta).unwrap();
         assert!(serialized.get("inputSchema").is_some());
         assert!(serialized.get("schema").is_none());

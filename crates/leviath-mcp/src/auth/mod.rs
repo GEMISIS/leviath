@@ -130,8 +130,8 @@ impl OAuthClient {
     /// Returns [`LoginOutcome::NotRequired`] when the server answers a probe
     /// carrying `headers` without demanding credentials. A server configured
     /// with its own API token is the ordinary case: there is no OAuth flow to
-    /// run, and pushing one anyway is what sent every such server into a
-    /// discovery request it does not serve.
+    /// run, and pushing one anyway sends such a server into a discovery
+    /// request it does not serve.
     ///
     /// `now` (Unix seconds) is passed in rather than read from the clock so the
     /// computed `expires_at` is deterministic under test. `reuse_client_id`
@@ -329,7 +329,7 @@ impl OAuthClient {
         // it names is then fetched by us, from inside the user's network. Bind it
         // to the MCP server's own origin: a server may point at its own metadata
         // document, which is the legitimate use, and may not point at anything
-        // else. Without this, connecting to a hostile MCP server was enough to
+        // else. Without this, connecting to a hostile MCP server is enough to
         // make Leviath fetch an arbitrary URL - cloud metadata included.
         let resource_meta_url = match hinted {
             Some(hint) => {
@@ -383,11 +383,11 @@ impl OAuthClient {
 
     /// Fetch AS metadata, trying RFC 8414 then the OpenID fallback.
     ///
-    /// The returned document is validated against `issuer` before use. RFC 8414
-    /// §3.3 requires the `issuer` in the metadata to match the one that was
-    /// requested, and this never checked - so a hostile
-    /// `authorization_servers[0]` in the resource document could redirect the
-    /// entire flow to an attacker's authorization server and harvest the code.
+    /// The returned document is validated against `issuer` before use: RFC 8414
+    /// §3.3 requires the metadata's `issuer` to match the one that was
+    /// requested. Without that check a hostile `authorization_servers[0]` in
+    /// the resource document redirects the whole flow to an attacker's
+    /// authorization server and harvests the code.
     async fn fetch_auth_server_metadata(&self, issuer: &str) -> anyhow::Result<AuthServerMetadata> {
         let mut last_err = None;
         // Parsed once here and passed down: `auth_server_metadata_urls` already
@@ -632,8 +632,8 @@ pub struct StoredTokenRefresher {
     store_path: std::path::PathBuf,
     /// Current Unix time; a fn so a long-lived transport stays current.
     clock: fn() -> u64,
-    /// Built once: every 401 used to construct a fresh `reqwest::Client`,
-    /// with its own connection pool, to make one token request.
+    /// Built once and reused: a client per 401 would stand up a whole
+    /// connection pool to make one token request.
     oauth: OAuthClient,
 }
 
@@ -793,10 +793,9 @@ async fn handle_callback_connection(
         return Err(anyhow::anyhow!("authorization server returned: {}", error));
     }
     match (params.get("code"), params.get("state")) {
-        // Constant-time: the state is 128 bits of fresh entropy over loopback, so
-        // a timing oracle here is theoretical - but it was the one secret
-        // comparison in the codebase still using `==`, and "theoretical" is not
-        // a reason for the comparison to differ from every other one.
+        // Constant-time: a timing oracle on 128 bits of fresh entropy over
+        // loopback is theoretical, but every secret comparison in this
+        // workspace goes through the same primitive.
         (Some(code), Some(state)) if leviath_core::constant_time_eq(state, expected_state) => {
             write_response(
                 &mut stream,
@@ -921,11 +920,10 @@ mod tests {
         assert_eq!(params["resource"], "https://mcp.example.com/mcp");
     }
 
-    // `authorize_url_rejects_a_bad_endpoint` is gone with the `&str` parameter:
-    // `build_authorize_url` now takes an already-parsed `Url`, because
+    // `build_authorize_url` takes an already-parsed `Url`, because
     // `validate_auth_server_metadata` parses and origin-checks the endpoint
-    // before login ever gets here. An unparseable endpoint is covered end to end
-    // by `login_fails_when_the_authorize_endpoint_is_malformed`.
+    // before login gets here. An unparseable endpoint is covered end to end by
+    // `login_fails_when_the_authorize_endpoint_is_malformed`.
 
     // ─── expires_at ───────────────────────────────────────────────────────
 
@@ -2281,10 +2279,9 @@ mod tests {
             )
             .await
             .expect_err("a bad authorize endpoint must fail");
-        // Caught during metadata validation now, which runs before the URL is
-        // built - so the message names the field rather than the later
-        // build-the-authorize-URL step. Earlier is better: the endpoint never
-        // reaches the browser opener.
+        // Metadata validation runs before the URL is built, so the message
+        // names the field rather than the later build-the-authorize-URL step,
+        // and the endpoint never reaches the browser opener.
         assert!(
             err.to_string().contains("authorization_endpoint"),
             "got: {err}"
@@ -2521,8 +2518,8 @@ mod tests {
     }
 
     /// The case this whole path exists for. A server holding its own API token
-    /// answers the probe normally, so there is no OAuth flow to run, and the
-    /// old code went looking for a discovery document such a server does not
+    /// answers the probe normally, so there is no OAuth flow to run: skipping
+    /// the probe goes looking for a discovery document such a server does not
     /// publish.
     #[tokio::test]
     async fn probe_with_headers_the_server_accepts_is_satisfied() {
@@ -2566,8 +2563,8 @@ mod tests {
 
     /// The probe has to send what the transport will send, `${VAR}` expanded
     /// and all. A server that checks the *value* of the credential rejects a
-    /// literal `${TOKEN}`, and a correctly configured client was being sent
-    /// into an OAuth flow on the strength of that rejection.
+    /// literal `${TOKEN}`, which would send a correctly configured client into
+    /// an OAuth flow it does not need.
     #[tokio::test]
     async fn the_probe_expands_variables_the_way_the_transport_will() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
