@@ -15,8 +15,8 @@ impl WorldHost {
     /// capacity with work queued behind it and no run observably moved. Both
     /// halves matter. Pressure on its own is just a busy daemon. Stillness on its
     /// own is an idle one, or one agent in a long inference with nobody waiting.
-    /// Together they are the shape issue #191 reported: work to do, no capacity to
-    /// do it with, and no sign of that ever changing.
+    /// Together they are the wedge: work to do, no capacity to do it with, and
+    /// no sign of that ever changing.
     pub(super) fn observe_redrive(&mut self) {
         let snapshot = self.world.lane_snapshot();
         let progress = self.progress_fingerprint();
@@ -38,7 +38,7 @@ impl WorldHost {
     /// back at its configured width.
     ///
     /// The guards are what keep this on the safe side of the wedge detection
-    /// that granted the relief in the first place (issue #191): nothing is
+    /// that granted the relief in the first place: nothing is
     /// reclaimed while `dead_cycles` is non-zero (a wedge may be forming),
     /// nothing is reclaimed while the extra capacity is in use (`narrow` only
     /// takes *idle* permits), and the width can never drop below what the
@@ -73,9 +73,9 @@ impl WorldHost {
     /// Deliberately additive. The tempting reading of "force-reclaim stuck
     /// slots" is to kill whatever is holding them, and that is the wrong move
     /// here: a run parked on an `ask_user` is doing exactly what it should, and
-    /// an operator who mistook `waiting` for `stuck` and started killing healthy
-    /// runs is the story behind issue #184. Handing out more capacity unwedges a
-    /// jammed lane without having to be right about which run deserves to die.
+    /// an operator who mistakes `waiting` for `stuck` and starts killing healthy
+    /// runs only makes it worse. Handing out more capacity unwedges a jammed
+    /// lane without having to be right about which run deserves to die.
     ///
     /// Only the tool lane is widened. A full inference pool is a deliberate cap
     /// on requests in flight to a provider, and forcing extra ones past it would
@@ -142,7 +142,7 @@ impl WorldHost {
             });
         // Sampled on the same tick, and unconditionally: a collector needs the
         // empty sample to see that a provider came *back*, not just that it
-        // went away (issue #201).
+        // went away.
         let down: Vec<leviath_core::telemetry::ProviderHealth> = self
             .world
             .open_circuits()
@@ -209,7 +209,7 @@ impl WorldHost {
     /// The daemon otherwise logs nothing per tick, by design - observation goes
     /// through the telemetry sink. But a wedged daemon emits no telemetry either,
     /// precisely because nothing is happening, so "frozen for hours" left no
-    /// trace at all (issue #189). This is the one periodic line that can answer
+    /// trace at all. This is the one periodic line that can answer
     /// "is anything running, and what is it queued behind?".
     ///
     /// Quiet by default: `warn` once the daemon has been going nowhere, `info`

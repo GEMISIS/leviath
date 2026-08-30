@@ -27,7 +27,7 @@ pub(super) const CACHE_CHUNK_TOKENS: usize = 2048;
 /// after the region's newest content - so the moment the region grows, the entry
 /// named there is unreadable and every call rewrites the lot at the write
 /// premium. Measured before this: 456,860 cache-write tokens across twelve
-/// calls with zero reads (issue #474).
+/// calls with zero reads.
 ///
 /// Chunking gives the region interior boundaries. Entries are packed greedily
 /// and a full chunk is never repacked, so a boundary that existed last turn
@@ -135,14 +135,13 @@ pub(super) fn push_bracketed(
 /// rather than how it changes.
 ///
 /// `temporary` and `clearable` are lifecycle kinds: one is dropped at stage
-/// exit, the other on demand. Both used to be tagged `Never`, which reads that
-/// lifecycle as "this content never holds still" - and for the boundary it is
-/// right, since caching across a wholesale drop would buy nothing. Between
-/// those boundaries it is wrong. A stage that reads a corpus into a `temporary`
-/// region and then works through it for forty calls has an append-mostly region
-/// that changes at the tail, which is the shape chunking exists for; tagging it
-/// `Never` re-sent the whole corpus at full rate on every one of those calls
-/// (issue #490: 5.36M tokens across 46 calls, the largest cost line in the run).
+/// exit, the other on demand. Tagging them `Never` reads that lifecycle as
+/// "this content never holds still" - right at the boundary, since caching
+/// across a wholesale drop buys nothing, and wrong between them. A stage that
+/// reads a corpus into a `temporary` region and then works through it for forty
+/// calls has an append-mostly region that changes at the tail, which is the
+/// shape chunking exists for; `Never` re-sends the whole corpus at full rate on
+/// every one of those calls, measured once at 5.36M tokens across 46 calls.
 ///
 /// The kind cannot answer this and the author can, so it is read from the
 /// declaration. `Rewritten` is the default, so a region that says nothing keeps
@@ -241,10 +240,10 @@ pub(super) fn system_prefix_hash(blocks: &[leviath_providers::SystemBlock]) -> u
 /// that pays is stable content first and churn last, whatever those blocks are
 /// otherwise made of.
 ///
-/// The cache hint breaks ties within a tier. It used to lead, and it is derived
-/// from the region's *kind*, which is why this needed changing: a pinned region
-/// sounds immutable and is written constantly, so ordering by kind put churn at
-/// the front of the prefix and invalidated everything behind it (issue #474).
+/// The cache hint breaks ties within a tier rather than leading. It is derived
+/// from the region's *kind*, and a pinned region sounds immutable while being
+/// written constantly, so leading with it puts churn at the front of the prefix
+/// and invalidates everything behind it.
 pub(super) fn block_sort_priority(block: &leviath_providers::SystemBlock) -> (u8, u8) {
     let volatility = match block.volatility {
         leviath_core::Volatility::Stable => 0,
@@ -489,7 +488,7 @@ mod tests {
     }
 
     /// Nothing is lost or reordered by splitting: the chunks rejoin into exactly
-    /// the text a single block used to carry.
+    /// the text one unsplit block carries.
     #[test]
     fn chunking_preserves_the_content_exactly() {
         let all = entries(25, &"word ".repeat(120));

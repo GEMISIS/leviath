@@ -9,7 +9,7 @@
 //! silently. If the job panics before its send, no outcome is ever produced -
 //! and the marker it is waiting on is one of the `has_async_inflight` states, so
 //! the driver treats the agent as busy rather than quiescent and it waits for a
-//! completion that can no longer happen (issue #190). The panic guard around the
+//! completion that can no longer happen. The panic guard around the
 //! tick schedule (`world::run_isolated`) does not help here: these panics happen
 //! on a tokio worker, not in a system.
 //!

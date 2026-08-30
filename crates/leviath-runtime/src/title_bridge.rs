@@ -9,9 +9,9 @@
 //!
 //! Titling is still best-effort in that it never fails the agent: the outcome
 //! carries a `Result`, and a run whose name could not be generated keeps
-//! showing its task text. What it is no longer is *silent* - the outcome's
-//! error reaches `collect_title`, which either moves the run to the next
-//! candidate provider or records why the run has no name.
+//! showing its task text. It is not *silent*, though: the outcome's error
+//! reaches `collect_title`, which either moves the run to the next candidate
+//! provider or records why the run has no name.
 
 use std::sync::Arc;
 
@@ -68,12 +68,11 @@ pub(crate) struct TitleOutcome {
 ///
 /// `retry` is the same policy the dispatch lane uses, and for the same two
 /// reasons. Its schedule retries a transient refusal - a reset connection, a
-/// 429, a 5xx - instead of surrendering the run's name to one unlucky moment;
-/// this call used to be a single naked `infer`, so a provider having a bad
-/// minute left the run permanently untitled and said so only to a debug log.
+/// 429, a 5xx - instead of surrendering the run's name to one unlucky moment: a
+/// naked `infer` here leaves a run permanently untitled over one bad minute.
 /// Its `job_timeout` is the outer bound: the permit must be released within a
 /// fixed time even when the provider's own timer is missing (script providers)
-/// or defeated. A hung title call once held its pool slot forever.
+/// or defeated, or a hung title call holds its pool slot forever.
 pub(crate) async fn run_title_job(
     job: TitleJob,
     retry: crate::inference_bridge::RetryPolicy,

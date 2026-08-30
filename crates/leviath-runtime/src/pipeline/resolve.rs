@@ -2,10 +2,10 @@
 //! [`ModelConfig`] and `available_tools` into concrete [`ResolvedStage`]s
 //! against whatever providers and tools the host actually has.
 //!
-//! Lives in the runtime (rather than the CLI daemon, where it started) so an
-//! embedding host resolves stages exactly the way `lev run` does. The one
-//! policy input the CLI used to read from its config file - the user's default
-//! provider/model - arrives as a plain [`ModelDefaults`] value instead.
+//! Lives in the runtime rather than the CLI daemon so an embedding host
+//! resolves stages exactly the way `lev run` does. The one policy input that
+//! comes from the CLI's config file - the user's default provider/model -
+//! arrives as a plain [`ModelDefaults`] value.
 
 use leviath_core::Blueprint;
 use leviath_core::blueprint::{ModelConfig, ModelEntry};
@@ -28,9 +28,9 @@ pub struct ModelDefaults {
     ///
     /// Appended after a stage's own entries and the user default, so a
     /// blueprint that names exactly one model still has somewhere to go when
-    /// that provider stops answering. This is the case issue #201 reported:
-    /// every stage named a single OpenRouter model, so there was nothing to
-    /// fall back to when the account ran out of credits.
+    /// that provider stops answering. The case it covers: every stage names a
+    /// single OpenRouter model, so there is nothing to fall back to when the
+    /// account runs out of credits.
     pub fallback_order: Vec<ModelEntry>,
 }
 
@@ -38,8 +38,7 @@ pub struct ModelDefaults {
 /// the registered providers. Honors a `--model` override (`provider/model` or a
 /// bare `model`), otherwise picks the first listed model whose provider is
 /// registered, then falls back to the user default (when `allow_user_default`),
-/// and finally to the config's first listed entry. (Ported from the executor's
-/// inline resolution.)
+/// and finally to the config's first listed entry.
 pub fn resolve_stage_model(
     model_cfg: &ModelConfig,
     model_override: Option<&str>,
@@ -56,10 +55,10 @@ pub fn resolve_stage_model(
 /// Every provider/model this stage may run on, best first.
 ///
 /// [`resolve_stage_model`] is this list's head. The tail is what the runtime
-/// fails over to when a provider turns out to be unusable mid-run: the ordered
-/// list in `ModelConfig.models` was only ever consulted for *registration* at
-/// spawn time, so a provider that was configured but out of credits was picked
-/// and then never abandoned (issue #201).
+/// fails over to when a provider turns out to be unusable mid-run. Consult the
+/// ordered list in `ModelConfig.models` only for *registration* at spawn time
+/// and a provider that is configured but out of credits gets picked and then
+/// never abandoned.
 ///
 /// Order: the stage's own registered entries, then the user default, then the
 /// host-wide `fallback_order`. Deduplicated, because the same pair reaching the
@@ -70,17 +69,17 @@ pub fn resolve_stage_model(
 /// The same model is spelled differently depending on the provider serving it:
 /// `gpt-5.5` on OpenAI is `openai/gpt-5.5` on OpenRouter, and
 /// `claude-opus-5` is `anthropic/claude-opus-5`. Comparing the raw strings
-/// makes one model look like two, which is what let a route preference be read
-/// as a model preference (issue #578).
+/// makes one model look like two, which is what lets a route preference be read
+/// as a model preference.
 ///
 /// The last segment is the model; anything before it is the vendor namespace a
 /// gateway prefixes. A local model with no slash (`qwen3.5:9b`) is already its
 /// own key.
 ///
 /// Public because every layer that compares two model names has to compare them
-/// the same way. `lev validate` and the provider registry both grew their own
-/// copy of this rule, and three copies of "what counts as the same model" would
-/// not have stayed equal.
+/// the same way: `lev validate` and the provider registry call this rather than
+/// each keeping a copy of "what counts as the same model", which would not stay
+/// equal.
 pub fn model_key(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model)
 }
@@ -191,9 +190,9 @@ pub(crate) fn resolve_stage_candidates(
         let mut candidates_for_model = registry.native_providers();
         candidates_for_model.sort_by_key(|(name, _)| *name != defaults.provider);
         // A script provider is not in `native_providers` - it is compiled on
-        // demand rather than enumerated - so an open route could never land on
-        // one, and a local box serving one fast model was unreachable however
-        // the machine set `default_provider` (issue #598). The *default*
+        // demand rather than enumerated - so without this an open route can
+        // never land on one, and a local box serving one fast model is
+        // unreachable however the machine sets `default_provider`. The *default*
         // provider is asked as well, which costs one compile of a script this
         // machine has explicitly chosen, and leaves every other script on disk
         // untouched. Put first, because being the default is what it means.
@@ -255,7 +254,7 @@ pub(crate) fn resolve_stage_candidates(
         // run should go, which is a statement about routes; letting it reorder
         // across models turns it into a statement about which model to use, and
         // a blueprint that deliberately chose one per stage silently gets
-        // another (issue #578).
+        // another.
         //
         // Models keep blueprint order, except that the user's own
         // `default_model` leads - that IS a model preference, and someone who
@@ -478,11 +477,10 @@ pub(crate) fn filter_tools_by_available(all: &[Tool], available: &[String]) -> V
 /// MCP tools named without their server, matched to the qualified name when
 /// exactly one server offers them.
 ///
-/// MCP tools were advertised bare until they became `<server>__<tool>`, so a
-/// blueprint written against the old naming says `create_issue` where the tool
-/// is now `github__create_issue`. Left alone that grant matches nothing and the
-/// tool is silently not offered - the failure issue #454 was about, and not one
-/// worth introducing while fixing it.
+/// MCP tools are advertised as `<server>__<tool>`, so a blueprint written
+/// against bare names says `create_issue` where the tool is
+/// `github__create_issue`. Left alone that grant matches nothing and the tool
+/// is silently not offered.
 ///
 /// Three things keep this from doing harm:
 ///
@@ -491,8 +489,8 @@ pub(crate) fn filter_tools_by_available(all: &[Tool], available: &[String]) -> V
 ///   the grant.
 /// - It requires exactly one candidate. Two servers offering `create_issue`
 ///   leave the name unresolved, because it genuinely is ambiguous and the
-///   manifest has to say which - the old naming's silent "whichever registered
-///   first" is what is being removed, not reproduced.
+///   manifest has to say which. A silent "whichever registered first" is what
+///   qualified names exist to prevent.
 /// - It matches on the qualified shape, so `create_issue` finds
 ///   `github__create_issue` and not some unrelated tool ending in those
 ///   characters.
@@ -616,10 +614,10 @@ pub fn providers_tried(
 /// The last fallback in [`resolve_stage_model`] is unchecked - it hands back
 /// the blueprint's own first entry whether or not anything answers to that
 /// name, and a full `provider/model` override skips the registry outright. So
-/// a stage could resolve to a provider that does not exist, and the agent
-/// spawned anyway: `Active`, iteration 0, and unable to take a single turn for
-/// as long as the host lived (issue #190). Catching it here turns a silently
-/// wedged run into an error the caller sees.
+/// a stage can resolve to a provider that does not exist, and the agent spawns
+/// anyway: `Active`, iteration 0, unable to take a single turn for as long as
+/// the host lives. Catching it here turns a silently wedged run into an error
+/// the caller sees.
 ///
 /// `unattended` is the run's `--yolo` setting: it decides whether a stage's
 /// human-in-the-loop tools are advertised at all (see
@@ -791,12 +789,12 @@ mod tests {
         )
     }
 
-    /// The whole of issue #598: a stage naming a model with no provider resolves
-    /// to the script provider the machine named as its default.
+    /// A stage naming a model with no provider resolves to the script provider
+    /// the machine named as its default.
     ///
-    /// Before this, `native_providers` was the only thing asked and it does not
-    /// enumerate script providers, so a local box serving exactly the model the
-    /// blueprint asked for won nothing and the stage went elsewhere.
+    /// `native_providers` does not enumerate script providers, so asking it
+    /// alone sends the stage elsewhere even when a local box serves exactly
+    /// the model the blueprint asked for.
     #[tokio::test]
     async fn a_script_provider_named_as_default_wins_an_open_route() {
         let (registry, _dir) = registry_with_script_default(&["local-fast"]);
@@ -1173,9 +1171,9 @@ mod tests {
 
     #[test]
     fn resolve_stages_refuses_a_stage_with_no_usable_provider() {
-        // Issue #190: the last fallback in `resolve_stage_model` is unchecked,
-        // so this used to resolve to "ghost" and produce an agent that could
-        // never take a turn. It has to be an error the caller sees.
+        // The last fallback in `resolve_stage_model` is unchecked, so "ghost"
+        // resolves and would spawn an agent that can never take a turn. It has
+        // to be an error the caller sees.
         let stage = leviath_core::Stage::new("plan".to_string(), model_cfg(vec![("ghost", "m")]));
         let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
@@ -1229,7 +1227,7 @@ mod tests {
 
     /// The same shape, against a provider that publishes nothing. A provider
     /// that will not say what it serves cannot refuse anything, so the stage
-    /// resolves exactly as it did before this check existed.
+    /// resolves exactly as it would with no check at all.
     #[test]
     fn resolve_stages_allows_a_model_an_unpublishing_provider_never_denied() {
         let stage = leviath_core::Stage::new(
@@ -1364,7 +1362,7 @@ mod tests {
         assert_eq!(selected, vec!["shell"]);
     }
 
-    // ── failover candidates (issue #201) ──────────────────────────────────
+    // ── failover candidates ───────────────────────────────────────────────
 
     /// `[(provider, model), ...]` for readable assertions.
     fn pairs(entries: &[ModelEntry]) -> Vec<(&str, &str)> {
@@ -1384,7 +1382,7 @@ mod tests {
         let registry = registry_with(&["openrouter", "anthropic", "openai"]);
         let got = resolve_stage_candidates(&cfg, None, &ModelDefaults::default(), &registry);
         // The head is what `resolve_stage_model` picks; the tail is where
-        // failover goes. Before this, the tail was discarded at spawn.
+        // failover goes.
         assert_eq!(
             pairs(&got),
             vec![
@@ -1395,7 +1393,7 @@ mod tests {
         );
     }
 
-    // ─── the unattended cut (issue #204) ─────────────────────────────────────
+    // ─── the unattended cut ──────────────────────────────────────────────────
 
     /// A stage's tool defs for the three tools every one of these tests uses.
     fn ask_and_read_defs() -> Vec<Tool> {
@@ -1525,7 +1523,7 @@ mod tests {
     /// `default_provider` is a statement about a route and reorders routes
     /// within a model. So the blueprint's own first model stays ahead of the
     /// blueprint's later ones, and only falls through when nothing registered
-    /// can serve it (issue #578).
+    /// can serve it.
     #[test]
     fn the_users_default_model_leads_the_blueprints_entry_on_the_same_provider() {
         let cfg = model_cfg(vec![
@@ -1553,7 +1551,7 @@ mod tests {
         // A default that repeats the blueprint's own entry moves that model to
         // the head and is listed once. The models behind it keep the
         // blueprint's order rather than the provider's: `default_provider`
-        // reorders the routes to a model, not the models themselves (#578).
+        // reorders the routes to a model, not the models themselves.
         let repeated = ModelDefaults {
             provider: "ollama".to_string(),
             model: Some("qwen3.6:27b".to_string()),
@@ -1572,10 +1570,10 @@ mod tests {
 
     #[test]
     fn the_default_provider_outranks_the_stages_own_list() {
-        // `default_provider = "openrouter"` used to buy nothing: the bundled
-        // blueprints all name anthropic/openai/ollama, ollama registers with no
-        // key, so an OpenRouter-only install dispatched every stage at a
-        // localhost server that was not running.
+        // Why it has to: the bundled blueprints all name
+        // anthropic/openai/ollama, and ollama registers with no key, so an
+        // OpenRouter-only install would otherwise dispatch every stage at a
+        // localhost server that is not running.
         let cfg = model_cfg(vec![
             ("anthropic", "claude-sonnet-5"),
             ("ollama", "qwen3.5:9b"),
@@ -1673,8 +1671,8 @@ mod tests {
 
     /// A bare `--model` override replaces the model on every entry and leaves
     /// each entry's provider alone, so it invents pairs nobody asked for. One
-    /// that no provider serves used to sit in the fallback list until a failover
-    /// reached it and moved the run onto a route that cannot answer.
+    /// that no provider serves is dropped rather than left in the fallback
+    /// list for a failover to land on a route that cannot answer.
     #[test]
     fn a_rename_onto_a_provider_that_does_not_serve_it_is_dropped() {
         let cfg = model_cfg(vec![("anthropic", "sonnet"), ("openrouter", "gpt")]);
@@ -1769,8 +1767,8 @@ mod tests {
 
     #[test]
     fn an_unattended_run_loses_the_tools_that_wait_on_a_person() {
-        // The whole point of issue #204: with nobody watching, a call to
-        // `ask_user_text` can only park the agent, so the model never sees it.
+        // With nobody watching, a call to `ask_user_text` can only park the
+        // agent, so the model never sees it.
         let available = vec![
             "read_file".to_string(),
             "ask_user_text".to_string(),
@@ -2278,8 +2276,8 @@ mod tests {
 
     /// Two servers offering it means the name really is ambiguous, and there is
     /// nothing to choose between them. It resolves to no tool rather than to
-    /// one of them - the old naming's silent "whichever registered first" is
-    /// the behaviour being removed, not reproduced.
+    /// one of them: a silent "whichever registered first" is what qualified
+    /// names exist to prevent.
     #[test]
     fn an_ambiguous_unqualified_grant_resolves_to_nothing() {
         let defs = defs_named(&["github__create_issue", "gitlab__create_issue"]);

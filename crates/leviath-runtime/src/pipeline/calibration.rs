@@ -32,12 +32,12 @@
 //!   of them drift. Until a call is observed costing more, the arithmetic is
 //!   exactly what it was.
 //!
-//! Issue #485: a 27B model pinned to `num_ctx 32768` assembled 32,497 real
-//! tokens on a Python-heavy corpus while the estimator believed it was inside
-//! the region budgets. The next call appended three more read results, crossed
-//! the window, and Ollama front-truncated from the start - taking the last user
-//! turn with it and answering `no user query found in messages`, which names
-//! neither the size nor the truncation.
+//! The failure this exists for: a 27B model pinned to `num_ctx 32768` assembles
+//! 32,497 real tokens on a Python-heavy corpus while the estimator believes it
+//! is inside the region budgets. The next call appends three more read results,
+//! crosses the window, and Ollama front-truncates from the start - taking the
+//! last user turn with it and answering `no user query found in messages`,
+//! which names neither the size nor the truncation.
 
 use bevy_ecs::prelude::Component;
 
@@ -122,8 +122,8 @@ impl PromptCalibration {
 
 /// The correction for an agent that may not have been calibrated yet.
 ///
-/// Absent means an agent spawned before this existed, or one in a test that
-/// builds its components by hand. Both should behave exactly as they did.
+/// Absent means an agent that has not dispatched a measured call yet, or one
+/// in a test that builds its components by hand. Both take no correction.
 pub(crate) fn shortfall_of(calibration: Option<&PromptCalibration>) -> usize {
     calibration.map_or(0, PromptCalibration::shortfall)
 }

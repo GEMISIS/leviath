@@ -108,14 +108,11 @@ pub fn bind_control_listener(id: &Path) -> std::io::Result<ControlListener> {
     let _ = leviath_sys::secure_dir_perms(parent);
 
     let listener = tokio::net::UnixListener::bind(id)?;
-    // Owner-only on the socket itself. On Linux the mode is enforced on
-    // `connect`; on macOS and the BSDs it historically is not, which is why the
-    // per-connection peer check in `accept_authorized` is the real gate and this
-    // is defence in depth rather than the whole story.
-    // Best-effort, like the directory above: `chmod` on a socket we just created
-    // and own does not realistically fail, and the peer check in `accept` - not
-    // this mode - is what actually holds on macOS and the BSDs, where socket
-    // permissions are not consulted at `connect` time.
+    // Owner-only on the socket itself. Linux enforces the mode on `connect`;
+    // macOS and the BSDs do not consult socket permissions there at all, which
+    // is why the per-connection peer check in `accept_authorized` is the real
+    // gate and this is defence in depth. Best-effort, like the directory above:
+    // `chmod` on a socket we just created and own does not realistically fail.
     let _ = leviath_sys::secure_file_perms(id);
     Ok(ControlListener(listener))
 }

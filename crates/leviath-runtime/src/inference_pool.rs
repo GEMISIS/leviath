@@ -220,8 +220,7 @@ impl InferencePools {
     /// slot-starved agent `ReadyToInfer` to be retried "on a later tick", and
     /// the loop is event-driven: a later tick only happens when something wakes
     /// it. So every path that frees a permit owes the loop a wake, or the freed
-    /// slot is invisible and everything queued behind it stays parked (issue
-    /// #189).
+    /// slot is invisible and everything queued behind it stays parked.
     ///
     /// Hanging the wake off the permit's `Drop` rather than off each release
     /// site is the point: the obligation can't be forgotten by a new call site,
@@ -667,8 +666,8 @@ mod tests {
         assert_eq!(cfg.provider_limit_for("anthropic"), None);
     }
 
-    /// The motivating case in issue #522: one provider capped at 1 while every
-    /// other provider keeps the global cap.
+    /// The motivating case: one provider capped at 1 while every other provider
+    /// keeps the global cap.
     #[test]
     fn a_provider_cap_bounds_its_models_together_and_nobody_else() {
         let mut cfg = InferencePoolConfig::new().with_default(Some(8));
@@ -807,7 +806,7 @@ mod tests {
         let _ = expect_permit(sem.acquire_owned().await);
     }
 
-    /// The issue #189 contract, at its narrowest: handing a slot back has to wake
+    /// The contract, at its narrowest: handing a slot back has to wake
     /// the driver. `dispatch_inference` parks a slot-starved agent to be retried
     /// "on a later tick", and the loop is event-driven - so a silent release
     /// leaves the freed capacity invisible.

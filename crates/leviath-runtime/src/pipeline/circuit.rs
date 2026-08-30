@@ -3,9 +3,9 @@
 //!
 //! Failing over (see [`super::response::collect_inference`]) rescues one run.
 //! It does nothing for the *next* run, which starts on the same dead provider
-//! and burns its own failure discovering the same thing. Issue #201 is what
-//! that looks like at scale: ten consecutive workers, every one of them dying
-//! at iteration 0 against an OpenRouter account with no credits left.
+//! and burns its own failure discovering the same thing. At scale that is ten
+//! consecutive workers, every one of them dying at iteration 0 against an
+//! OpenRouter account with no credits left.
 //!
 //! So failures are counted per provider. Past a threshold the circuit opens and
 //! dispatch stops choosing that provider at all, which turns a silent stream of
@@ -180,7 +180,7 @@ impl ProviderCircuits {
     ///
     /// The stall watchdog asks this to tell "out of credits" apart from the
     /// other ways a provider leaves service: the former pauses the run for a
-    /// resume instead of failing it (issue #413).
+    /// resume instead of failing it.
     pub(crate) fn last_reason(&self, provider: &str) -> Option<UnavailableReason> {
         self.0.get(provider).map(|c| c.reason)
     }
@@ -500,7 +500,7 @@ mod tests {
     #[test]
     fn reset_forgets_every_circuit() {
         // What an explicit resume relies on: after a reset the next dispatch
-        // is a real probe rather than a wait for the cooldown (issue #413).
+        // is a real probe rather than a wait for the cooldown.
         let mut circuits = ProviderCircuits::default();
         let mut now = 0;
         while !fail(&mut circuits, now) {
@@ -768,7 +768,8 @@ mod tests {
 
     #[test]
     fn rotation_is_a_no_op_without_the_breaker_installed() {
-        // An embedder that never inserts the resource keeps the old behavior.
+        // No `ProviderCircuits` resource, so the stage keeps the provider it
+        // was given: an embedder that never inserts one gets no rotation.
         let mut world = World::new();
         let e = world
             .spawn((

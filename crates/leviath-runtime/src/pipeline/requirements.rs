@@ -222,10 +222,9 @@ pub(crate) fn require_context_regions(
                 "required context regions still empty after re-run attempts; proceeding"
             );
             // Recorded as well as logged. A log line is not readable after the
-            // fact, so "the agent wrote its plan" and "we asked twice and moved
-            // on" both finished `complete` and nothing downstream could tell
-            // them apart - which is how this went unnoticed across four
-            // benchmark rounds (#371).
+            // fact, so without this "the agent wrote its plan" and "we asked
+            // twice and moved on" both finish `complete` and nothing
+            // downstream can tell them apart.
             if let Some(mut flags) = flags {
                 for name in &names {
                     if !flags

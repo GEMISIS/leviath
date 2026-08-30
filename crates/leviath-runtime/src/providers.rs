@@ -93,9 +93,9 @@ impl ProviderRegistry {
     /// models, before the first inference asks.
     ///
     /// Bounded and never fatal. A provider that cannot reach its API keeps its
-    /// built-in table, which is exactly the behaviour that existed before any
-    /// of this, so the worst case is the old answer rather than a daemon that
-    /// will not start. `timeout` covers each provider separately: this runs on
+    /// built-in table, so the worst case is a stale capability list rather
+    /// than a daemon that will not start. `timeout` covers each provider
+    /// separately: this runs on
     /// the start-up path, and an unreachable endpoint must cost a bounded wait
     /// rather than however long a connect takes to give up.
     ///
@@ -106,7 +106,7 @@ impl ProviderRegistry {
     /// not a run touches one; priming the ones a caller has actually named
     /// costs a compile of a script that is about to be used anyway, and it is
     /// what lets that provider answer [`Provider::serves_model`] and so win an
-    /// open route (issue #598).
+    /// open route.
     pub async fn prime_capabilities(&self, timeout: std::time::Duration, also: &[&str]) {
         let mut targets: Vec<(String, Arc<dyn Provider>)> = self
             .providers
@@ -316,9 +316,9 @@ impl ProviderRegistry {
     ///
     /// This is what an *enumeration* wants - "list every model I can reach" -
     /// where [`provider_names`](Self::provider_names) answers "what is
-    /// registered". Building the list on `provider_names` alone is what hid
-    /// script providers from `lev models list` (#523) and then, in the same
-    /// shape, from `GET /api/models` (#531).
+    /// registered". An enumeration built on `provider_names` alone silently
+    /// omits every script provider, which is what `lev models list` and
+    /// `GET /api/models` both need from here.
     ///
     /// A script name here is a candidate: [`get`](Self::get) compiles it on
     /// demand and returns `None` if it will not load, so a caller iterating
@@ -479,9 +479,9 @@ mod tests {
     }
 
     /// What an *enumeration* needs, and what `provider_names` cannot give it:
-    /// the script providers too. Building `GET /api/models` and
-    /// `lev models list --remote` on `provider_names` is what hid them
-    /// (issues #523, #531).
+    /// the script providers too. `GET /api/models` and
+    /// `lev models list --remote` both read this list, so a script provider
+    /// has to appear in it.
     #[test]
     fn resolvable_names_adds_the_script_layer_without_duplicating_a_native() {
         let dir = tempfile::tempdir().unwrap();
@@ -767,7 +767,7 @@ mod tests {
     }
 
     /// Priming reaches the script provider a machine names as its default, so
-    /// it can answer what it serves on the synchronous resolve path (#598).
+    /// it can answer what it serves on the synchronous resolve path.
     /// A script provider is compiled on demand rather than enumerated, so the
     /// ones on disk are invisible to the loop above. The machine's default is
     /// reached the same way priming reaches it - otherwise a run whose models

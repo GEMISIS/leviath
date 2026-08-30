@@ -86,11 +86,10 @@ pub(super) fn build_report(
 
 /// Add `text` to the parent's results region, trimming it to fit.
 ///
-/// The write used to be best-effort in the worst sense: `add_entry` rejects an
-/// over-budget entry outright, and the error was discarded, so a report too big
-/// for the region left the merge stage with nothing and said nothing about it.
-/// Trimming first means the merge always receives *something*, and a report that
-/// had to be cut says so where the model will read it.
+/// `add_entry` rejects an over-budget entry outright, so a report too big for
+/// the region would leave the merge stage with nothing at all. Trimming first
+/// means the merge always receives *something*, and a report that had to be cut
+/// says so where the model will read it.
 pub(super) fn inject_results(world: &mut World, parent: Entity, region: &str, text: &str) {
     let Some(mut window) = world.get_mut::<ContextWindow>(parent) else {
         return;

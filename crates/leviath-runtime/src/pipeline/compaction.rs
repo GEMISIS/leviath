@@ -97,7 +97,7 @@ pub(crate) fn dispatch_compaction(
         // Against the corrected estimate, not the raw one. The threshold is
         // there to leave room between "nearly full" and "over the window", and
         // an estimate measured running light spends that room without ever
-        // reporting it (issue #485).
+        // reporting it.
         if !crate::pipeline::needs_eviction_calibrated(
             window.current_tokens,
             window.max_tokens,
@@ -215,9 +215,9 @@ pub(crate) fn collect_compaction(
         // Billed to the stage the run was in when the window filled up, the same
         // way its own turns are. Compaction is not free and not incidental - a
         // stage that compacts twice can spend more on summarizing its context
-        // than on the work - so leaving it out of the ledger left the one
-        // question the ledger exists to answer, which stage cost that,
-        // answerable only for the cheap half of the bill (#630).
+        // than on the work - so leaving it out of the ledger would leave the
+        // one question the ledger exists to answer, which stage cost that,
+        // answerable only for the cheap half of the bill.
         for usage in &outcome.usage {
             crate::inference_usage::record_call(
                 totals.as_deref_mut(),
@@ -241,9 +241,9 @@ pub(crate) fn collect_compaction(
                 // one that found nothing worth keeping - and writing it would
                 // trade the region's real contents for a blank. Measured on a
                 // 32k window, where the transcript being summarized was small
-                // enough that the model returned an empty string; the blank was
-                // stored and later reached a provider as a zero-length turn,
-                // which is a 400 (issue #495). Leave the region as written and
+                // enough that the model returned an empty string; a stored
+                // blank reaches a provider as a zero-length turn, which is a
+                // 400. Leave the region as written and
                 // say so: eviction has other phases, and losing the content is
                 // worse than staying over budget for another tick.
                 if summary.trim().is_empty() {
@@ -354,7 +354,7 @@ pub(crate) fn apply_edge_transform(
         }
         // Kind cannot tell a transcript from a table of results, so a region
         // whose author said its content does not survive a paraphrase is left
-        // alone however the edge is spelled (#369).
+        // alone however the edge is spelled.
         EdgeTransform::Compact { .. } => window
             .regions
             .iter()
@@ -439,7 +439,7 @@ pub(crate) fn dispatch_edge_compact(
         // transform that quietly does nothing is a transform that behaves
         // differently on different runs of the same blueprint, with no signal
         // either way - and the un-compacted run looks identical to a compacted
-        // one from outside (#369).
+        // one from outside.
         let started = settings
             .and_then(|s| {
                 let config = &s.0;

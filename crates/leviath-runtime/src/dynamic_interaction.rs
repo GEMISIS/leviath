@@ -946,9 +946,9 @@ mod tests {
 
     #[tokio::test]
     async fn unattended_answers_every_prompt_without_a_hub() {
-        // Issue #107: `--yolo` means "run without a human", so a prompt that
-        // waits for one parks the run forever. Every dynamic-interaction tool
-        // must come back with something the model can act on.
+        // `--yolo` means "run without a human", so a prompt that waits for one
+        // parks the run forever. Every dynamic-interaction tool must come back
+        // with something the model can act on.
         let backend = UnattendedInteraction;
 
         // A confirmation is approved - that is what the flag promises.

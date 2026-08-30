@@ -13,13 +13,13 @@
 //! each task holds a permit for as long as it is executing, so
 //! `max_concurrent_tools` batches run at a time.
 //!
-//! It used to be a fixed pool of worker tasks, and that deadlocked. Several
-//! things a batch can await have no time bound at all: a tool-approval prompt, an
-//! `ask_user`, a `wait_for_agent` poll that only ends when some other run
-//! finishes. A worker sitting in one of those was a unit of capacity spent on
-//! waiting rather than working, and a parent waiting on a child it had spawned
-//! was holding capacity that child needed to finish. Eight of those and no
-//! agent's tools ran again, for as long as the daemon lived (issue #191).
+//! A fixed pool of worker tasks cannot do this job. Several things a batch can
+//! await have no time bound at all: a tool-approval prompt, an `ask_user`, a
+//! `wait_for_agent` poll that only ends when some other run finishes. A worker
+//! sitting in one of those is a unit of capacity spent on waiting rather than
+//! working, and a parent waiting on a child it spawned holds the capacity that
+//! child needs to finish. Enough of those and no agent's tools run again for
+//! the life of the daemon.
 //!
 //! A permit, unlike a worker, can be handed back in the middle of a batch. That
 //! is what [`off_lane`] does, and it is what makes the deadlock impossible:
@@ -240,10 +240,9 @@ impl ToolLane {
     ///
     /// The relief valve under a lane that has stopped draining: handing out more
     /// capacity lets the queued batches run without cancelling anything. Returns
-    /// how many were added. No longer "for good": once the jam is over,
-    /// [`Self::narrow`] hands the extra capacity back, so a single historical
-    /// wedge does not raise the daemon's peak concurrency (and with it, peak
-    /// memory) for the rest of its life.
+    /// how many were added. The extra is not permanent: once the jam is over,
+    /// [`Self::narrow`] hands it back, so one wedge does not raise the daemon's
+    /// peak concurrency (and with it, peak memory) for the rest of its life.
     pub(crate) fn relieve(&self, extra: usize) -> usize {
         if extra == 0 {
             return 0;
@@ -490,7 +489,7 @@ impl Drop for LaneTicket {
 /// this returns, so a batch waiting on a person (a tool-approval prompt, an
 /// `ask_user`) or on another run (`wait_for_agent`) occupies no capacity while it
 /// waits. That is what stops a lane full of waiters from starving the very runs
-/// they are waiting for (issue #191).
+/// they are waiting for.
 ///
 /// Outside a lane task - the embedded runtime, tests driving an executor
 /// directly - there is no ticket and this is just `fut.await`.
@@ -702,7 +701,7 @@ mod tests {
         assert!(h.outcomes.try_recv().is_err(), "no more outcomes");
     }
 
-    /// The issue #191 regression, at its narrowest.
+    /// The deadlock the permit design exists to rule out, at its narrowest.
     ///
     /// A one-wide lane, a batch parked on something only a *later* batch can
     /// deliver. With a fixed worker pool this is a deadlock: the waiter owns the

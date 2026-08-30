@@ -152,8 +152,8 @@ type TransitionChoiceQuery = (
 /// the stage request's prefix - every provider caches the tool definitions
 /// as part of it - and this is what stops the model from answering the
 /// "which stage next?" question with a tool call instead of a name. A
-/// provider this cannot vouch for gets the old request with no tools, which
-/// is a cold prefix but a safe one.
+/// provider this cannot vouch for gets a request with no tools at all,
+/// which is a cold prefix but a safe one.
 fn routing_tool_choice(provider: &str) -> Option<serde_json::Value> {
     match provider {
         "anthropic" => Some(serde_json::json!({ "type": "none" })),
@@ -165,10 +165,11 @@ fn routing_tool_choice(provider: &str) -> Option<serde_json::Value> {
 /// The routing request: the stage's own request, built by the same code, with
 /// a short answer budget, a fixed temperature, and tool use switched off.
 ///
-/// It used to be assembled separately - no hint blocks, no stage metadata,
-/// no tools - so its prompt differed from the stage's from the first byte
-/// and every routing call was a cold read of the whole context: on a
-/// 170,000-token window that was a full re-send to get one word back.
+/// Building it through the stage's own builder is what keeps the two
+/// prompts byte-identical up to the last block. Assemble it separately and
+/// they diverge at the first byte, so every routing call is a cold read of
+/// the whole context: on a 170,000-token window, a full re-send to get one
+/// word back.
 pub(crate) fn routing_request(
     window: &ContextWindow,
     config: Option<&crate::components::InferenceConfig>,
@@ -228,7 +229,7 @@ pub(crate) fn dispatch_transition_choice(
         }
         // Same bookkeeping as the inference lane: an agent parked here is
         // runnable with nothing outstanding, so a decline that never resolves
-        // wedges the run just as thoroughly (issue #190).
+        // wedges the run just as thoroughly.
         let Some(provider) = providers.0.get(&si.provider_name) else {
             commands
                 .entity(entity)
@@ -399,8 +400,8 @@ pub(crate) fn collect_transition_choice(
                 // An empty account or a network that is down is not this run's
                 // fault, and it was not a moment ago either - the same failure
                 // one call earlier, on the stage's own inference, parks the run
-                // for a resume. Landing it at a stage boundary used to kill the
-                // run instead, throwing away every completed stage over a blip
+                // for a resume. Landing it at a stage boundary parks it too:
+                // failing here throws away every completed stage over a blip
                 // that is usually gone in seconds.
                 let provider = &stage_infs.0[cursor.index].provider_name;
                 if let Some((blocker, message)) =

@@ -1,11 +1,11 @@
 //! Swapping the world's provider registry for one built from a newer config.
 //!
-//! The daemon builds its registry from `config.toml` once at boot and holds
-//! it as the [`Providers`] resource. A user who then ran `lev setup` to move
-//! to another provider, or removed a key, found every new run still resolving
-//! against the boot-time set: the file had changed, the registry had not, and
-//! nothing short of a daemon restart rebuilt it. [`PipelineWorld::replace_providers`]
-//! is the seam that rebuild goes through.
+//! The registry lives as the [`Providers`] resource, built from `config.toml`.
+//! Nothing re-reads that file on its own, so a config change - `lev setup`
+//! moving to another provider, a key removed - reaches new runs only by
+//! replacing the resource. [`PipelineWorld::replace_providers`] is the one
+//! seam that replacement goes through, which is why the retiring and
+//! circuit-forgetting rules below live there and not at each caller.
 
 use super::*;
 use crate::pipeline::ProviderCircuits;

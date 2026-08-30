@@ -99,7 +99,7 @@ pub(crate) fn gate_blocks(
     // Conjunctive, and checked before `require_modifications` so it holds
     // whatever else the gate asks for. `gate.region` below is one of several
     // *alternative* ways to satisfy `require_modifications`, which is why it
-    // cannot express "do not leave without writing this" (#371).
+    // cannot express "do not leave without writing this".
     let missing: Vec<&str> = gate
         .require_regions
         .iter()

@@ -269,8 +269,8 @@ impl WorldHost {
             self.world.world_mut().despawn(entity);
             self.by_run_id.remove(&run_id);
             self.emitted.remove(&run_id);
-            // The run leaves memory but not the listing: for a while yet it can
-            // still say how it ended, which is the whole of issue #205.
+            // The run leaves memory but not the listing: for a while yet it
+            // can still say how it ended.
             self.record_finished(entry, now);
         }
         // Park paused runs: same teardown as a reap (the reap hook drops the

@@ -234,8 +234,8 @@ pub(crate) fn apply_one_tool_result(
     // back to a truncated (then omitted) entry if the region is full.
     //
     // Reports which of the three happened, because the pointer left in the
-    // conversation describes this write and used to describe it wrongly:
-    // it promised the full result whatever the region had actually kept.
+    // conversation describes this write: it must not promise the full result
+    // when the region kept less than that.
     let add_kind = |window: &mut ContextWindow,
                     region: &str,
                     kind: leviath_core::EntryKind,
@@ -319,19 +319,19 @@ pub(crate) fn apply_one_tool_result(
         );
         // What this text asks the model to do is the whole point of it.
         //
-        // It used to say "read that region for the full result", which is
-        // an instruction with no tool behind it: the region is rendered
-        // into the system prompt already, and `context_read` is not granted
-        // by most stages that route. Models did the only thing left and
-        // pointed `read_file` at the region name - across 152 local runs,
-        // 90 of 168 failed `read_file` calls were a region name where a path
-        // belongs, one run spending five turns on five spellings of
-        // `raw_findings`. So the pointer now names the `## region` heading
-        // the assembler emits and says no call is needed.
+        // "Read that region for the full result" is an instruction with no
+        // tool behind it: the region is rendered into the system prompt
+        // already, and `context_read` is not granted by most stages that
+        // route. Models do the only thing left and point `read_file` at the
+        // region name - across 152 local runs, 90 of 168 failed `read_file`
+        // calls were a region name where a path belongs, one run spending
+        // five turns on five spellings of `raw_findings`. So the pointer
+        // names the `## region` heading the assembler emits and says no call
+        // is needed.
         //
         // A region this stage does not render is the other half: the model
         // cannot go and read it, so telling it to is worse than saying
-        // nothing (#370). `lev validate` refuses a blueprint that routes
+        // nothing. `lev validate` refuses a blueprint that routes
         // that way, so reaching here means a layout swapped underneath a
         // routing rule rather than an author mistake - but the model still
         // needs to be told the truth about where its output went.
@@ -654,7 +654,7 @@ pub(crate) fn collect_tools(
             parts.extend(ctx.0.iter().cloned());
         }
         let mut merged = merge_in_call_order(&infer.tool_calls, &parts);
-        // Modification accounting (issue #107): count the file-writing calls this
+        // Modification accounting: count the file-writing calls this
         // stage actually landed, so a `require_modifications` transition gate can
         // tell "analyzed the code and wrote nothing" from "made the change".
         // Done before file tracking, which rewrites successful results.

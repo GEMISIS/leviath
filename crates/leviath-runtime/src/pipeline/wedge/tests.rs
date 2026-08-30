@@ -289,9 +289,9 @@ fn a_finished_run_with_no_record_is_a_no_op() {
     assert!(world.get::<Wedged>(e).is_none());
 }
 
-/// Issue #204's territory, not this watchdog's. A run parked on a question
-/// somebody may still answer holds an interaction marker, and killing it is a
-/// worse failure than leaving the slot occupied.
+/// Not this watchdog's territory. A run parked on a question somebody may
+/// still answer holds an interaction marker, and killing it is a worse failure
+/// than leaving the slot occupied.
 #[test]
 fn a_run_blocked_on_a_person_is_left_to_issue_204() {
     let mut world = World::new();
@@ -363,8 +363,8 @@ fn a_zero_timeout_disables_the_watchdog() {
     assert_eq!(status_of(&world, e), AgentStatus::Active);
 }
 
-/// A world that never installed the resource gets the default, which is off. An
-/// embedded runtime therefore behaves exactly as it did before this existed.
+/// A world that never installed the resource gets the default, which is off,
+/// so an embedded runtime never has a run failed by this watchdog.
 ///
 /// Off by default is deliberate, not an oversight: this watchdog fails runs, and
 /// an upgrade that starts killing work nobody asked it to kill is worse than the

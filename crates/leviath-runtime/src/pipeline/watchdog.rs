@@ -117,7 +117,7 @@ pub(crate) fn enforce_max_iterations(
         let max = stage.max_iterations.unwrap_or(0);
         if max > 0 && progress.iterations >= max {
             // Record it on the run: a stage that ran out of iterations is one of
-            // the ways a run ends up with nothing to show (issue #107).
+            // the ways a run ends up with nothing to show.
             if let Some(mut flags) = flags {
                 flags.0.max_iterations_hit += 1;
             }

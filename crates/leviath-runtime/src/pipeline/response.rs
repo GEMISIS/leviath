@@ -48,12 +48,12 @@ const UNREACHABLE_REMEDY: &str = "check the network connection, then `lev resume
 /// `None` means the run itself is what went wrong and the caller should fail it.
 ///
 /// Two lanes ask - the stage call in [`collect_inference`] and the routing call
-/// at a stage boundary in `collect_transition_choice` - and they used to answer
-/// differently: the stage lane parked, the routing lane killed the run outright.
-/// The same blip, a different outcome, decided by which call happened to be in
-/// flight when the network went. The decision and the wording live here so the
-/// two cannot drift again; what each lane must do to keep its own continuation
-/// alive is still its own business, because those genuinely differ.
+/// at a stage boundary in `collect_transition_choice` - and they have to answer
+/// the same way. Split the decision between them and one blip parks a run or
+/// kills it depending on which call happened to be in flight when the network
+/// went. The decision and the wording live here so the two cannot drift; what
+/// each lane must do to keep its own continuation alive is still its own
+/// business, because those genuinely differ.
 pub(super) fn setup_park(
     err: &leviath_providers::ProviderError,
     provider: &str,
@@ -66,7 +66,7 @@ pub(super) fn setup_park(
         // the operator tops up and resumes. Failing here would make the run
         // permanently unresumable and throw away every iteration it has already
         // paid for, to punish somebody for a billing lapse. Unattended included
-        // - a harness that cannot rescue a run cancels it instead (issue #456).
+        // - a harness that cannot rescue a run cancels it instead.
         UnavailableReason::CreditsExhausted => Some((
             SetupBlocker::CreditsExhausted,
             format!("out of credits ({err}): top up the account, then `lev resume` this run"),
@@ -205,15 +205,15 @@ pub(crate) fn collect_inference(
             let failed = outcome.result.as_ref().err();
             match failed.and_then(|e| e.unavailable_reason()) {
                 Some(reason) => {
-                    // The kind travels with the reason now: a provider that
+                    // The kind travels with the reason: a provider that
                     // accepted the connection and then answered slowly is not
                     // the same as one that refused it, and the breaker gives the
                     // first far more rope before taking it away from every run.
                     let kind = failed.and_then(|e| e.failure_kind());
                     if circuits.record_failure(&called_provider, reason, kind, now, &policy) {
-                        // Loud and once, on the transition only. This is the
-                        // alert issue #201 asked for: without it, ten dead
-                        // runs in a row look like ten unrelated failures.
+                        // Loud and once, on the transition only: without it,
+                        // ten dead runs in a row look like ten unrelated
+                        // failures.
                         tracing::error!(
                             provider = %called_provider,
                             reason = reason.label(),
@@ -290,7 +290,7 @@ pub(crate) fn collect_inference(
                 // what the window believed it would cost, that is the only
                 // measurement of the estimator's drift there is - and on a
                 // provider whose window is a hard ceiling, drift is what
-                // decides whether the run finishes (issue #485).
+                // decides whether the run finishes.
                 calibrate(
                     &mut commands,
                     outcome.entity,
@@ -339,14 +339,13 @@ pub(crate) fn collect_inference(
                 // A provider that is out of credits or holding a rejected key
                 // is not this request's problem: every later request to it
                 // fails the same way. Move the stage to the next candidate and
-                // try again rather than killing the run (issue #201).
+                // try again rather than killing the run.
                 // Logged before the failover decision, and for every failure
                 // rather than only the ones that fail over. A call that dies
                 // without a fallback is exactly the one somebody has to
-                // diagnose, and it used to leave nothing but the error text -
-                // which for a transport failure is the same sentence whether
-                // the hostname was wrong, the port was closed, or the
-                // certificate had expired.
+                // diagnose, and the error text on its own is the same sentence
+                // for every transport failure, whether the hostname was wrong,
+                // the port was closed, or the certificate had expired.
                 tracing::warn!(
                     provider = %called_provider,
                     model = %called_model,
@@ -796,12 +795,12 @@ pub(crate) fn handle_empty_response(
         if progress.total_tool_calls > 0 || !nudge.enabled || progress.text_only_nudges >= nudge.max
         {
             // The reply is accepted as the stage's last word, so it goes into
-            // the conversation like every other turn. It used to be dropped
-            // here, which meant a transition gate that bounced the stage back
-            // was answered by a model with no memory of what it had just
-            // said - and a stage told "you have not written the file yet"
-            // with its own unwritten draft in front of it can split it; one
-            // with nothing in front of it drafts the whole thing again.
+            // the conversation like every other turn. Drop it here and a
+            // transition gate that bounces the stage back is answered by a
+            // model with no memory of what it had just said - and a stage
+            // told "you have not written the file yet" with its own unwritten
+            // draft in front of it can split it; one with nothing in front of
+            // it drafts the whole thing again.
             store_text_reply(&mut window, &infer.response);
             commands
                 .entity(entity)

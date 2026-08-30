@@ -209,7 +209,7 @@ pub struct StageInference {
     pub tool_filter: Option<Vec<String>>,
     /// Providers to fail over to, best first, when the current one turns out
     /// to be unusable. Consumed from the front by `collect_inference`, so an
-    /// exhausted list means "nowhere left to go" (issue #201).
+    /// exhausted list means "nowhere left to go".
     pub fallbacks: Vec<leviath_core::blueprint::ModelEntry>,
     /// The output shape resolved for this stage, carried alongside the tools it
     /// was already folded into. Dispatch reads it to know which format label to

@@ -129,12 +129,11 @@ pub struct ContextWindow {
 
     /// Regions the current stage does not attend to.
     ///
-    /// Held, not deleted. A stage layout that omits a region used to have it
-    /// dropped from the window entirely, so re-declaring it in a later stage
-    /// brought it back empty - which made the feature unusable for the thing it
-    /// looks designed for, narrowing what one stage sees in a pipeline whose
-    /// later stages still need the data. Omission now means "not assembled for
-    /// this stage" and nothing else.
+    /// Held, not deleted. Dropping an omitted region from the window entirely
+    /// brings it back empty when a later stage re-declares it, which makes the
+    /// feature unusable for the thing it looks designed for: narrowing what one
+    /// stage sees in a pipeline whose later stages still need the data.
+    /// Omission means "not assembled for this stage" and nothing else.
     ///
     /// Reset on every stage entry by `crate::context_setup::apply_layout`, so
     /// it describes the stage in front of it rather than accumulating.
@@ -416,7 +415,7 @@ impl ContextWindow {
         let mut system_blocks = Vec::new();
         let mut messages: Vec<leviath_providers::Message> = Vec::new();
         // Messages a custom region rendered. Held apart from the conversation
-        // and spliced in front of it after the loop (issue #486).
+        // and spliced in front of it after the loop.
         let mut preamble: Vec<leviath_providers::Message> = Vec::new();
         // One entry per `UntilChanged` system block, in assembly order, holding
         // the newest entry timestamp of the region that produced it. Feeds the
@@ -591,7 +590,7 @@ impl ContextWindow {
                 }
                 // Both say when the region is thrown away, not how it moves
                 // in between, so the hint comes from the declaration - see
-                // `lifecycle_cache_hint` (issue #490).
+                // `lifecycle_cache_hint`.
                 leviath_core::RegionKind::Temporary | leviath_core::RegionKind::Clearable => {
                     let hint = lifecycle_cache_hint(region.volatility);
                     push_bracketed(&mut system_blocks, region, hint);
@@ -667,13 +666,12 @@ impl ContextWindow {
         // thing that is now is the dialogue it is having. Every other region is
         // reference material, however recently it was written.
         //
-        // Only a custom region can render into the conversation at all, and it
-        // rendered wherever its author happened to declare it - so a region
-        // declared after the conversation put its contents *behind* the last
-        // user turn. On a small region that is untidy; on one holding a document
-        // corpus it replaces the dialogue in the position the model weighs most
-        // heavily, and the agent stops behaving like it is in a conversation
-        // (issue #486).
+        // Only a custom region can render into the conversation at all, and
+        // rendering it wherever its author happened to declare it puts a region
+        // declared after the conversation *behind* the last user turn. On a
+        // small region that is untidy; on one holding a document corpus it
+        // replaces the dialogue in the position the model weighs most heavily,
+        // and the agent stops behaving like it is in a conversation.
         //
         // Splicing rather than sorting: a region declared before the
         // conversation already rendered in front of it and stays exactly where
@@ -827,7 +825,7 @@ impl ContextWindow {
         // one request. A block-shaped message that emptied out is already
         // dropped by the tool-pair sanitizer above; this catches the text-shaped
         // ones, and it runs before the two guards below so that a conversation
-        // left empty by the drop still gets its fallback turn (issue #495).
+        // left empty by the drop still gets its fallback turn.
         messages.retain(|m| match &m.content {
             leviath_providers::MessageContent::Text(text) => !text.trim().is_empty(),
             leviath_providers::MessageContent::Blocks(blocks) => !blocks.is_empty(),

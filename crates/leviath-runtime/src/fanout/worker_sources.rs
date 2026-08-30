@@ -2,7 +2,7 @@
 //!
 //! A fan-out worker builds its own `sources_index` and then goes away. Without
 //! this the parent's bibliography describes only the part of the run the parent
-//! did itself, and the report cannot cite anything a worker found (issue #574).
+//! did itself, and the report cannot cite anything a worker found.
 //!
 //! Kept apart from [`super`] because it is a different subject: that module is
 //! how a fan-out is split, run and merged, this one is bibliographies and
@@ -87,10 +87,9 @@ pub(super) fn merge_worker_sources(
         .unwrap_or(0);
 
     // As many of them as there is room for, rather than all or nothing.
-    // `add_to_region` refuses an entry that does not fit, whole, and the refusal
-    // used to be discarded - so a worker arriving at a nearly full region lost
-    // every source it found. Measured on a 7-worker run: four bibliographies
-    // landed, three vanished, and the run reported success.
+    // `add_to_region` refuses an entry that does not fit, whole, so offering the
+    // batch as one entry costs a worker arriving at a nearly full region every
+    // source it found.
     let mut taking = Vec::with_capacity(fresh.len());
     let mut used = 0usize;
     for line in &fresh {

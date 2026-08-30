@@ -38,9 +38,9 @@ pub const DEFAULT_RETRY_BASE_DELAY_MS: u64 = 1_000;
 /// the provider gave no `Retry-After` for, in seconds.
 ///
 /// Deliberately much larger than [`DEFAULT_RETRY_BASE_DELAY_MS`]. An overload
-/// window lasts minutes, so a second of waiting only buys another refusal: the
-/// reported run (issue #417) spent all three of its retries inside one 529
-/// window and was failed with 44 iterations of finished work in hand.
+/// window lasts minutes, so a second of waiting only buys another refusal: a
+/// run can otherwise spend all three of its retries inside one 529 window and
+/// be failed with dozens of iterations of finished work in hand.
 pub const CAPACITY_BASE_DELAY_SECS: u64 = 15;
 
 /// The longest one capacity backoff may last, in seconds, and the ceiling on a
@@ -308,7 +308,7 @@ pub(crate) fn backoff_after(
         // The provider said when to come back, so come back then.
         (true, Some(secs)) => Duration::from_secs(secs).min(policy.capacity_max_delay),
         // At capacity with no hint: the slow schedule, since the window this
-        // failure describes outlasts a blip-sized wait (issue #417).
+        // failure describes outlasts a blip-sized wait.
         (true, None) => {
             exponential(policy.capacity_base_delay, attempt).min(policy.capacity_max_delay)
         }
@@ -381,8 +381,8 @@ pub(crate) async fn run_inference_job(
     // never-completing (stalled-stream) call cannot hold the pool slot forever.
     //
     // `infer` borrows the request, so every attempt reuses the one assembled
-    // copy. It used to be cloned per attempt, which doubled the live footprint
-    // of every in-flight request for the whole (possibly minutes-long) call.
+    // copy. Cloning it per attempt doubles the live footprint of every
+    // in-flight request for the whole (possibly minutes-long) call.
     let attempts = async {
         // The pre-flight guard, inside the cancel and the job timeout with the
         // call it protects: a count that hangs is bounded by the same deadline
@@ -429,7 +429,7 @@ pub(crate) async fn run_inference_job(
     // Note this arm sends no outcome and so never reaches the `wake` below: the
     // tick loop learns the slot is free from the permit's own `Drop` (see
     // `InferencePools::with_wake`). Without that, this return frees a slot in
-    // silence and every agent queued on this model stays parked (issue #189).
+    // silence and every agent queued on this model stays parked.
     let result = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
@@ -439,13 +439,13 @@ pub(crate) async fn run_inference_job(
         outcome = tokio::time::timeout(retry.job_timeout, attempts) => match outcome {
             Ok(result) => result,
             // A timeout, said the same way the provider's own would have said
-            // it. This used to be `ProviderError::Other`, which is neither
-            // transient nor `Unreachable`, so the two ways a call can run out of
-            // time ended in opposite places: a provider-side timeout failed
-            // over and then parked the run for a resume, while sitting out the
-            // whole job deadline - the *worse* of the two - killed it outright
-            // and threw away every stage it had finished. The wall is the same
-            // wall; only which timer noticed differs.
+            // it. `ProviderError::Other` is neither transient nor
+            // `Unreachable`, so labelling it that way sends the two ways a call
+            // can run out of time to opposite places: a provider-side timeout
+            // fails over and then parks the run for a resume, while sitting out
+            // the whole job deadline - the *worse* of the two - kills it
+            // outright and throws away every stage it finished. The wall is the
+            // same wall; only which timer noticed differs.
             Err(_elapsed) => Err(leviath_providers::ProviderError::labelled(
                 leviath_providers::FailureKind::Timeout,
                 "waiting for the provider",
@@ -985,7 +985,7 @@ mod tests {
         Ok(String),
         Transient,
         /// The reported failure: a 529 the provider reports as a plain API
-        /// error, which is a capacity refusal rather than a blip (issue #417).
+        /// error, which is a capacity refusal rather than a blip.
         Overloaded,
         Permanent,
         /// Never returns - a stalled/hung call, for the job-timeout test.

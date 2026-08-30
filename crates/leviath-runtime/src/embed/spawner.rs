@@ -105,8 +105,8 @@ impl EmbedSpawner {
 
         let agent_name = blueprint.name.clone();
         let num_stages = blueprint.stages.len();
-        // Fixed for the run, so it is answered while the blueprint is in hand
-        // (issue #192). Embedders get the same treatment as daemon runs.
+        // Fixed for the run, so it is answered while the blueprint is in
+        // hand. Embedders get the same treatment as daemon runs.
         let outcome_flags = RunOutcomeFlags::for_blueprint(&blueprint);
         let model_label = stages
             .first()
@@ -583,8 +583,8 @@ conversation = { kind = "sliding_window", max_items = 10, max_tokens = 2000 }
 
     #[tokio::test]
     async fn a_stage_with_no_registered_provider_is_a_spawn_error() {
-        // Issue #190: an embedder that never registered the provider a stage
-        // names used to get a live agent that could not take a single turn.
+        // An embedder that never registered the provider a stage names must
+        // not get a live agent that cannot take a single turn.
         let dir = tempfile::tempdir().unwrap();
         let manifest = r#"[agent]
 name = "ghostly"

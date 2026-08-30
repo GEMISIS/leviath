@@ -2,12 +2,12 @@
 //! world rather than re-read from disk.
 //!
 //! [`wait_reason`](WorldHost::wait_reason) is the interesting part. A status of
-//! `Waiting` says nothing about whether a person is needed, which is what issue
-//! #184 was about, so the row carries why.
+//! `Waiting` says nothing about whether a person is needed, so the row carries
+//! why.
 //!
 //! Retention lives here too, and deliberately: a finished run stays listable for
 //! a while after it ends, so how long the list keeps one is a property of the
-//! list rather than of the health bookkeeping it used to sit beside.
+//! list rather than of the health bookkeeping next door.
 
 use super::*;
 
@@ -176,8 +176,7 @@ impl WorldHost {
     }
 
     /// How long a run stays in the listing after the daemon unloads it. `0`
-    /// keeps none, which is how the listing behaved before issue #205. Served
-    /// from `[limits] finished_retention_secs`.
+    /// keeps none. Served from `[limits] finished_retention_secs`.
     pub fn set_finished_retention_secs(&mut self, secs: u64) {
         self.settings.set_finished_retention_secs(secs);
     }

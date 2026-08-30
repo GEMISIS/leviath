@@ -20,7 +20,7 @@ pub(crate) enum StallReason {
     PoolFull,
     /// Every provider this stage could use has an open circuit: they have each
     /// failed enough consecutive times to be taken out of service, and the
-    /// stage has no candidate left to move to (issue #201).
+    /// stage has no candidate left to move to.
     ///
     /// Unlike `PoolFull` this will not clear on its own within a tick or two -
     /// somebody has to top up an account or fix a key - so the watchdog fails
@@ -189,10 +189,10 @@ type StalledDispatchQuery = (
 
 /// A run parked until the machine is fixed, and what to do about it.
 ///
-/// The message is the same one that used to be the run's epitaph. It is now
-/// attached to a run that is still alive, which is the whole change: every
-/// reason this marker exists for is deterministic, outside the run's control,
-/// and undone by one edit somewhere else.
+/// The message names what somebody has to fix, and it hangs on a run that is
+/// still alive rather than on its epitaph: every reason this marker exists for
+/// is deterministic, outside the run's control, and undone by one edit
+/// somewhere else.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct PausedForSetup {
     /// Which kind of problem, so a client can offer the right remedy rather
@@ -242,12 +242,12 @@ pub(crate) enum HeldLane {
 /// Dispatch-stall watchdog: fail any agent whose dispatch has been declining for
 /// an unresolvable reason longer than [`StallTimeout`].
 ///
-/// This is the backstop under issue #190. A stage pointing at a provider that
-/// isn't registered leaves the agent `Active` and `ReadyToInfer` with nothing in
-/// flight - so from the outside it reads as a healthy running run, for ever, at
-/// iteration 0. The daemon now re-ticks on a heartbeat, which makes the retry
-/// real, but retrying a provider that will never exist just means failing
-/// quietly for ever instead of loudly once.
+/// A stage pointing at a provider that isn't registered leaves the agent
+/// `Active` and `ReadyToInfer` with nothing in flight - so from the outside it
+/// reads as a healthy running run, for ever, at iteration 0. The daemon
+/// re-ticks on a heartbeat, which makes the retry real, but retrying a provider
+/// that will never exist just means failing quietly for ever instead of loudly
+/// once.
 ///
 /// Only [`StallReason::ProviderMissing`] is failed. A full pool is deliberately
 /// exempt: it is what backpressure is supposed to look like, and a run waiting
@@ -315,9 +315,9 @@ pub(crate) fn fail_stalled_dispatch(
             _ => SetupBlocker::ProviderMissing,
         };
         // What to fix, and - separately - whether this run will still be there
-        // to pick it up. The two were one string, so a run the branch below
-        // *failed* was told to `lev resume` it, which is not a thing that
-        // works on a failed run (issue #456).
+        // to pick it up. One string for both tells a run the branch below
+        // *failed* to `lev resume` it, which is not a thing that works on a
+        // failed run.
         let remedy = match blocker {
             SetupBlocker::CreditsExhausted => {
                 format!(
@@ -336,14 +336,13 @@ pub(crate) fn fail_stalled_dispatch(
             ),
             _ => stall.reason.give_up_message(&si.provider_name),
         };
-        // Every run parks, unattended included. This used to fail an
-        // unattended one on the reasoning that a scheduler watches for a
-        // terminal status and would wait for ever for one that never comes.
-        // That undersold harnesses: `paused` is visible in `meta.json` and
-        // `lev ps --json`, and one that can top up an account and `lev resume`
-        // gets its work back. One that cannot is no worse off than before -
-        // it cancels the run, which is a decision it can make in a second,
-        // where a failed run's work is gone for good (issue #456).
+        // Every run parks, unattended included. Failing an unattended one on
+        // the reasoning that a scheduler watches for a terminal status and
+        // would wait for ever undersells harnesses: `paused` is visible in
+        // `meta.json` and `lev ps --json`, and one that can top up an account
+        // and `lev resume` gets its work back. One that cannot is no worse
+        // off - it cancels the run, a decision it can make in a second, where
+        // a failed run's work is gone for good.
         tracing::warn!(
             provider = %si.provider_name,
             reason = stall.reason.label(),
@@ -510,13 +509,12 @@ mod tests {
 
     /// Nobody watching is not a reason to throw the work away.
     ///
-    /// This used to fail, on the reasoning that a scheduler polls for a
-    /// terminal status and would wait for ever for one that never came. A
-    /// benchmark round lost 31 runs and a tier to that (issue #456): the
-    /// account needed topping up, which is one edit elsewhere, and every one
-    /// of those runs had already done real work. A harness that can rescue a
-    /// paused run now gets to; one that cannot cancels it, which costs a
-    /// second, where a failed run's work is gone.
+    /// Failing it instead, on the reasoning that a scheduler polls for a
+    /// terminal status and would wait for ever, throws away real work: one
+    /// benchmark round lost 31 runs and a tier that way, over an account that
+    /// needed topping up. A harness that can rescue a paused run gets to; one
+    /// that cannot cancels it, which costs a second, where a failed run's
+    /// work is gone.
     #[test]
     fn an_unattended_run_parks_like_any_other_rather_than_losing_its_work() {
         let mut world = World::new();
@@ -751,7 +749,7 @@ mod tests {
 
     #[test]
     fn a_run_with_every_provider_out_of_service_is_failed_not_left_running() {
-        // The end state of issue #201: nothing left to fail over to. Waiting
+        // The end state of failover: nothing left to fail over to. Waiting
         // for ever reads as a healthy run that is going nowhere.
         let mut world = World::new();
         world.insert_resource(StallTimeout(60));
@@ -764,8 +762,8 @@ mod tests {
 
     #[test]
     fn a_run_out_of_credits_is_paused_for_a_resume_not_failed() {
-        // Issue #413: exhausted credits are an account state the operator can
-        // fix, so the watchdog pauses the run instead of ending it. The
+        // Exhausted credits are an account state the operator can fix, so
+        // the watchdog pauses the run instead of ending it. The
         // `ReadyToInfer` marker stays, so a resume re-dispatches the same
         // inference.
         let mut world = World::new();

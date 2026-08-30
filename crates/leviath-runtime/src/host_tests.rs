@@ -365,7 +365,7 @@ fn is_inferring(host: &mut WorldHost, entity: Entity) -> bool {
         .is_some()
 }
 
-/// Regression for #189 ("slots=0 for hours, in_progress frozen").
+/// Regression: slots at zero for hours with `in_progress` frozen.
 ///
 /// Releasing an inference permit has to wake the tick loop, because
 /// `dispatch_inference` leaves a slot-starved agent `ReadyToInfer` to be
@@ -524,8 +524,7 @@ fn tool_call(id: &str) -> InferenceResponse {
     }
 }
 
-/// Regression for #197 ("entering the next stage waits for the re-drive
-/// tick").
+/// Regression: entering the next stage waits for the re-drive tick.
 ///
 /// `serve` is event-driven; its 30s re-drive is a correctness backstop for a
 /// wake that never came, not the mechanism ordinary work runs on. A stage
@@ -590,7 +589,7 @@ fn host_with_capped_provider(limit: usize) -> WorldHost {
 
 /// A run parked on a full provider pool sees every model pool with room in it,
 /// so the heartbeat has to name the provider's own number or the line reads as
-/// "waiting on nothing" (issue #522).
+/// "waiting on nothing".
 #[tokio::test]
 async fn the_heartbeat_names_a_full_provider_pool() {
     leviath_testkit::with_tracing(|| async {
@@ -644,9 +643,9 @@ async fn the_lane_heartbeat_distinguishes_pressure_from_idle() {
     .await;
 }
 
-/// A daemon with work queued and nothing moving is what issue #191 reported,
-/// and until now it looked identical to a busy one. Each re-drive that finds
-/// the lanes full and the world unchanged is one dead cycle.
+/// A daemon with work queued and nothing moving is the wedge, and from outside
+/// it looks identical to a busy one. Each re-drive that finds the lanes full
+/// and the world unchanged is one dead cycle.
 #[tokio::test]
 async fn re_drives_that_go_nowhere_under_pressure_count_as_dead_cycles() {
     leviath_testkit::with_tracing(|| async {
@@ -829,7 +828,7 @@ async fn the_hosts_limits_settings_are_shared_with_whoever_holds_them() {
 /// Additive on purpose. Killing whatever holds the lane is the tempting
 /// reading of "reclaim stuck slots", and it is wrong: a run parked on an
 /// `ask_user` is behaving correctly, and an operator killing healthy
-/// `waiting` runs is the story behind issue #184.
+/// `waiting` runs only makes it worse.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lane_that_never_drains_is_widened_rather_than_emptied() {
     leviath_testkit::with_tracing(|| async {
@@ -858,9 +857,9 @@ async fn a_lane_that_never_drains_is_widened_rather_than_emptied() {
 }
 
 /// The give-back half: once the jam is over and the lane has been healthy
-/// for the decay margin, the granted capacity is reclaimed - a historical
-/// wedge no longer raises the daemon's concurrency ceiling (and with it,
-/// its peak memory) for the rest of its life.
+/// for the decay margin, the granted capacity is reclaimed, so one wedge does
+/// not raise the daemon's concurrency ceiling (and with it, its peak memory)
+/// for the rest of its life.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn relief_decays_back_once_the_lane_is_healthy_again() {
     leviath_testkit::with_tracing(|| async {
@@ -997,7 +996,7 @@ async fn each_re_drive_reports_lane_health_to_the_telemetry_sink() {
 
 /// The same tick reports which providers are out of service, and reports
 /// the empty case too: a collector needs that to see a provider come back,
-/// not merely stop being mentioned (issue #201).
+/// not merely stop being mentioned.
 #[tokio::test]
 async fn each_re_drive_reports_providers_out_of_service() {
     let sink = Arc::new(leviath_core::telemetry::MemorySink::default());
@@ -2742,8 +2741,8 @@ async fn a_completed_event_without_an_answer_carries_none() {
 
 /// A run announces each spend threshold once, as it passes it.
 ///
-/// The run that motivated this spent $274 while looking, from outside, exactly
-/// like one making ordinary progress (#573).
+/// The motivating case: a run spent $274 while looking, from outside, exactly
+/// like one making ordinary progress.
 #[tokio::test]
 async fn a_run_announces_each_spend_threshold_once_as_it_passes_it() {
     let mut host = host_with(vec![text("done")]);
@@ -2934,9 +2933,9 @@ async fn emit_events_broadcasts_agent_changes() {
 }
 
 /// A run is created untitled and named a moment later, once the titling call
-/// lands. Nothing on the wire used to say so, so a subscriber showed the
-/// prompt's first line until an unrelated re-read replaced it. Both halves are
-/// asserted here: the `Renamed` frame that announces the moment, and the title
+/// lands. Nothing else on the wire says so, so without this a subscriber shows
+/// the prompt's first line until an unrelated re-read replaces it. Both halves
+/// are asserted here: the `Renamed` frame that announces the moment, and the
 /// riding the status frames that follow, which is what a subscriber that joined
 /// after the moment reads instead of fetching the run.
 #[tokio::test]
@@ -3327,12 +3326,11 @@ fn unload_with(host: &mut WorldHost, run_id: &str, status: AgentStatus) {
     host.emit_events();
 }
 
-/// The failure behind issue #205: a run that died on its first inference was
-/// unloaded a pass later and vanished, so a scheduler polling the listing
-/// could not tell it from a run that had never been spawned. It now keeps
-/// its place, and keeps the whole error rather than the status word - which
-/// is the reason the row is built from the world and not from `Emitted`,
-/// whose `status` is a `&'static str`.
+/// A run that died on its first inference is unloaded a pass later, and with no
+/// retention it vanishes, leaving a scheduler polling the listing unable to tell
+/// it from a run that was never spawned. It keeps its place, and keeps the whole
+/// error rather than the status word, which is why the row is built from the
+/// world and not from `Emitted`, whose `status` is a `&'static str`.
 #[tokio::test]
 async fn an_unloaded_run_stays_in_the_listing_with_the_reason_it_ended() {
     let mut host = host_with(vec![]);
@@ -3368,7 +3366,7 @@ async fn an_unloaded_run_leaves_the_listing_once_it_is_stale() {
     assert!(host.finished().is_empty());
 }
 
-/// `0` is how an operator asks for the old behaviour back.
+/// `0` is how an operator asks for no retention at all.
 #[tokio::test]
 async fn a_zero_window_keeps_nothing() {
     let mut host = host_with(vec![]);
@@ -3524,8 +3522,8 @@ async fn emit_events_never_unloads_waiting_agents() {
 /// failed while the run was already going again, and the obvious next move on
 /// being told that is to start the work over.
 ///
-/// Caught live, not here: the unit tests for #576 passed while `lev resume`
-/// still exited 1.
+/// Caught live, not here: the per-agent unit tests pass while `lev resume`
+/// exits 1.
 #[tokio::test]
 async fn resuming_a_run_that_had_to_be_loaded_reports_success() {
     let mut host = host_with(vec![]);
@@ -4152,7 +4150,7 @@ async fn list_reports_blueprint_shape_and_unattended() {
 }
 
 /// A run that stopped having produced nothing says so in the listing -
-/// otherwise it is indistinguishable from one that did the work (#192).
+/// otherwise it is indistinguishable from one that did the work.
 #[tokio::test]
 async fn list_reports_a_finished_run_that_produced_nothing() {
     let mut host = host_with(vec![]);

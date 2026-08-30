@@ -99,8 +99,8 @@ const HEALTHY_CYCLES_BEFORE_DECAY: u32 = 4;
 /// How often the serve loop re-drives the world on its own.
 ///
 /// The loop is event-driven, so a missed wake anywhere parks it indefinitely -
-/// the daemon looks alive while nothing progresses, which is what issue #189
-/// reported as hours of frozen agents. This bounds any such wedge to one
+/// the daemon looks alive while nothing progresses, which reads from outside as
+/// hours of frozen agents. This bounds any such wedge to one
 /// interval instead of "until something unrelated happens", and gives the lane
 /// heartbeat a place to run.
 ///
@@ -119,12 +119,11 @@ pub const DEFAULT_DEAD_CYCLES_BEFORE_RELIEF: u32 = 10;
 
 /// How long a run stays in the listing after the daemon unloads it.
 ///
-/// A terminal agent is unloaded a pass or two after it finishes, and until now
-/// it vanished from the listing at that moment. A run that died on its first
-/// inference was therefore indistinguishable from one that had never been
-/// spawned, which is what left the scheduler in issue #205 with nothing to go on
-/// but a stopwatch: it could not tell a dead spawn from a slow one, so it
-/// reverted the work and spawned again, for forty minutes.
+/// A terminal agent is unloaded a pass or two after it finishes. With no
+/// retention window it leaves the listing at that moment, and a run that died on
+/// its first inference is then indistinguishable from one that was never
+/// spawned: an external scheduler has nothing to go on but a stopwatch, cannot
+/// tell a dead spawn from a slow one, and reverts the work and spawns again.
 ///
 /// Five minutes covers several polls of any scheduler that checks in about once
 /// a minute, so a single missed or slow poll does not lose the evidence. It is
@@ -133,8 +132,7 @@ pub const DEFAULT_DEAD_CYCLES_BEFORE_RELIEF: u32 = 10;
 /// [`DEFAULT_DEAD_CYCLES_BEFORE_RELIEF`] at the 30-second re-drive works out to
 /// the same five minutes.
 ///
-/// Served from `[limits] finished_retention_secs`; `0` keeps nothing and
-/// restores the old behaviour.
+/// Served from `[limits] finished_retention_secs`; `0` keeps nothing.
 pub const DEFAULT_FINISHED_RETENTION_SECS: u64 = 300;
 
 /// How many unloaded runs [`WorldHost::finished`] holds before the oldest are
@@ -293,9 +291,9 @@ impl WorldHost {
             // An outstanding provider call is a live, unpersisted continuation
             // just like a blocked `ask`: parking despawns the entity, and the
             // response then lands on a dead one and is dropped on the collect
-            // system's stale path. So pausing a run mid-inference used to throw
-            // the call away silently - the run came back from its page-in as
-            // `ReadyToInfer` and paid for the same turn twice.
+            // system's stale path. So pausing a run mid-inference without this
+            // check throws the call away silently: the run comes back from its
+            // page-in as `ReadyToInfer` and pays for the same turn twice.
             //
             // `InFlightWork` covers the call still being out; `HeldInference`
             // covers it having landed and being kept for the resume to apply.
@@ -462,7 +460,7 @@ impl WorldHost {
                 // A failed spawn must leave a trace daemon-side: the error goes
                 // back over the socket to a client that may have already exited,
                 // and nothing is written to disk, so without this log line the
-                // failure is invisible (issue #107).
+                // failure is invisible.
                 if let Err(error) = &result {
                     tracing::error!(
                         run_id = %args.run_id,
@@ -564,9 +562,9 @@ impl WorldHost {
                 // Answering a prompt is one of the points a run resumes at: the
                 // person who just said "no, and here is why" may equally have
                 // gone and changed the permission the prompt was about, and
-                // this is where that reaches the run (issue #728 makes an
-                // unanswered prompt wait for ever, so a run stuck behind one
-                // has no other way out but a cancel).
+                // this is where that reaches the run (an unanswered prompt
+                // waits for ever, so a run stuck behind one has no other way
+                // out but a cancel).
                 let agent = self.interactions.answer_for(response);
                 if let Some(entity) = agent.as_deref().and_then(|id| self.live_entity(id)) {
                     self.on_resumed(entity.entity());

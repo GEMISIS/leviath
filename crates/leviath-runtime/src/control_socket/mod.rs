@@ -644,7 +644,7 @@ where
 }
 
 /// The reply to a successful `authenticate`: `Welcome` when the client asked
-/// who it reached, the historical bare `Ok` when it did not.
+/// who it reached, the bare `Ok` an older client expects when it did not.
 fn authenticated_reply(hello: bool, identity: &DaemonIdentity) -> ControlResponse {
     match hello {
         true => ControlResponse::Welcome {
@@ -1039,9 +1039,9 @@ mod tests {
         let (read_half, mut write_half) = tokio::io::split(stream);
         let mut lines = BufReader::new(read_half).lines();
 
-        // Several requests down one connection. Each is well under the cap, but
-        // together they exceed a budget that is never refilled - which is what
-        // the old shape did.
+        // Several requests down one connection. Each is well under the cap,
+        // but together they exceed it, so the cap has to be per request and not
+        // a connection budget that is never refilled.
         let req = ControlRequest::List;
         let mut line = serde_json::to_string(&req).unwrap();
         line.push('\n');
@@ -1313,9 +1313,9 @@ mod tests {
     }
 
     /// A subscriber that closes its half of the connection ends the stream
-    /// even when no event ever arrives - previously the daemon-side task (and
-    /// its broadcast receiver) lived until the next write failed, which on an
-    /// idle daemon is never.
+    /// even when no event ever arrives. Waiting for the next write to fail
+    /// instead keeps the daemon-side task, and its broadcast receiver, alive
+    /// for ever on an idle daemon.
     #[tokio::test]
     async fn stream_events_returns_on_client_eof_without_any_event() {
         let (tx, rx) = broadcast::channel::<WorldEvent>(4);
@@ -1551,11 +1551,10 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// The regression that mattered in production: every real daemon requires
-    /// a token, and `subscribe` used to skip the handshake entirely - so the
-    /// serve gateway's event stream was refused on every connect, read the
-    /// refusal as a closed stream, and re-subscribed twice a second forever
-    /// while no live event ever reached a WebSocket.
+    /// Every real daemon requires a token, so `subscribe` has to do the
+    /// handshake. Skipping it gets the serve gateway's event stream refused on
+    /// every connect, read as a closed stream, and re-subscribed twice a second
+    /// forever while no live event reaches a WebSocket.
     #[tokio::test]
     async fn subscribe_authenticates_against_a_tokened_daemon() {
         let (events, _r) = broadcast::channel::<WorldEvent>(16);

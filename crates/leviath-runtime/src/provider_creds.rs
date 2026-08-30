@@ -85,11 +85,11 @@ impl EndpointSpec {
     ///
     /// An option that is there but does not read back is an error, not an
     /// absence. The runtime wrote these from the config, so a failure is a
-    /// bug, and reading past it used to change what the entry meant: a
-    /// `models` list that did not parse became "the config did not say",
-    /// which lets the endpoint route any id where the list would have
-    /// refused the rest, and a header with a bad position was a header the
-    /// server never saw. The error names the entry and the option.
+    /// bug, and reading past it changes what the entry means: a `models` list
+    /// that does not parse reads as "the config did not say", which lets the
+    /// endpoint route any id where the list would have refused the rest, and a
+    /// header with a bad position is a header the server never sees. The error
+    /// names the entry and the option.
     pub fn from_creds(
         creds: &ProviderCreds,
     ) -> Result<Option<Self>, leviath_providers::ProviderError> {
@@ -278,14 +278,14 @@ const OLLAMA_DEFAULT_PORT: u16 = 11434;
 ///
 /// Ollama is the one provider with nothing to check: every other entry
 /// registers only when it has an API key, and a key is a cheap stand-in for
-/// "the user configured this". Ollama needs no key, so it used to register
-/// unconditionally, and an install with no local server still advertised a
-/// working provider. Blueprint order then sent stages to a localhost port
-/// nothing answered on.
+/// "the user configured this". Ollama needs no key, so registering it
+/// unconditionally makes an install with no local server advertise a working
+/// provider, and blueprint order then sends stages to a localhost port nothing
+/// answers on.
 ///
 /// A connect is the equivalent cheap stand-in: it does not prove Ollama is
 /// there, only that the address is not dead, which is exactly the case that
-/// was misreporting. The timeout is deliberately short - this runs while the
+/// misreports. The timeout is deliberately short - this runs while the
 /// daemon is starting, and a loopback address either answers immediately or
 /// is not there at all.
 pub fn tcp_reachable(base_url: &str) -> bool {

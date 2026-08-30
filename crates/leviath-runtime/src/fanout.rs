@@ -666,16 +666,15 @@ pub(crate) fn fan_out_collect(world: &mut World) {
         // components are dead weight - mark it for `slim_merged_workers`, which
         // drops them once the terminal snapshot has reached the persistence
         // lane. The entity itself stays (the host only despawns it when the
-        // parent goes terminal), but without its context window: previously
-        // every finished fan-out worker kept a full window resident for the
-        // whole remainder of the parent's run.
+        // parent goes terminal), but without its context window, which would
+        // otherwise stay resident for the whole remainder of the parent's run.
         let mut still_active = Vec::with_capacity(w.active.len());
         for aw in std::mem::take(&mut w.active) {
             match worker_terminal_result(world, aw.entity) {
                 Some(result) => {
                     // Before the marker below hands this worker to
                     // `slim_merged_workers`, which drops its context window:
-                    // after that its bibliography is only on disk (issue #574).
+                    // after that its bibliography is only on disk.
                     merge_worker_sources(world, parent, aw.entity, &aw.item_id);
                     match result {
                         Ok(content) => w.summaries.push((aw.item_id, content)),
@@ -996,14 +995,13 @@ fn start_worker(
 ///
 /// A worker that called `submit_output` contributes exactly what it submitted.
 /// Otherwise this falls back to the text of its last assistant message, which is
-/// what every worker used to contribute and is usually wrong: a worker whose
-/// final turn was a tool call has no trailing text, so the merge stage received
-/// an empty string, which is silently indistinguishable from a worker that had
-/// nothing to say.
+/// usually wrong: a worker whose final turn was a tool call has no trailing
+/// text, so the merge stage gets an empty string, silently indistinguishable
+/// from a worker that had nothing to say.
 ///
-/// The fallback stays because it costs nothing and an existing blueprint that
-/// happens to end on a text turn keeps working. A blueprint that wants the
-/// guarantee sets `require_output` on its worker stage.
+/// The fallback stays because it costs nothing and a blueprint that happens to
+/// end on a text turn keeps working. A blueprint that wants the guarantee sets
+/// `require_output` on its worker stage.
 ///
 /// A worker whose stage set `require_output` and that finished without one is
 /// reported as a **failure**, not as a success with empty content. It reached
@@ -2287,9 +2285,8 @@ mod tests {
     }
 
     /// A merged worker keeps its heavy components until its terminal snapshot
-    /// has been dispatched, then sheds them - previously every finished
-    /// fan-out worker kept a full context window resident until the parent
-    /// went terminal.
+    /// has been dispatched, then sheds them, so a finished worker does not hold
+    /// a full context window resident until the parent goes terminal.
     #[test]
     fn merged_workers_are_slimmed_once_their_terminal_state_is_persisted() {
         let mut world = World::new();
@@ -2623,11 +2620,10 @@ mod tests {
 
     // ── worker_terminal_result / build_report / inject_conversation ───────────
 
-    /// The bug this feature exists to fix. A worker's contribution used to be
-    /// the text of its last assistant message, so a worker whose final turn was
-    /// a tool call contributed an empty string - and the shipped
-    /// a worker told to report what it did writes that report into exactly that
-    /// channel.
+    /// A submitted output beats the last assistant message. A worker whose
+    /// final turn is a tool call has no trailing text, so the fallback alone
+    /// hands the merge stage an empty string; `submit_output` is the channel a
+    /// worker told to report what it did writes into.
     #[test]
     fn a_submitted_answer_beats_the_last_assistant_text() {
         let mut world = World::new();
@@ -2635,8 +2631,8 @@ mod tests {
             .spawn((
                 parent_state(),
                 InferenceResult {
-                    // What the old code would have handed the merge stage: the
-                    // trailing aside, not the deliverable.
+                    // What the last-turn fallback alone would hand the merge
+                    // stage: the trailing aside, not the deliverable.
                     response: "Let me run the tests one more time.".to_string(),
                     tool_calls: vec![],
                     tokens_used: 0,
@@ -2783,9 +2779,9 @@ mod tests {
         assert!(!worker_requires_output(&world, past_end));
     }
 
-    /// A blueprint that never opted in keeps the old fallback, empty text and
-    /// all. Turning that into a failure would break every fan-out written before
-    /// `require_output` existed.
+    /// A blueprint that never opted in keeps the last-turn fallback, empty text
+    /// and all. Turning that into a failure would break every fan-out that does
+    /// not declare `require_output`.
     #[test]
     fn a_worker_that_owes_nothing_keeps_the_last_turn_fallback() {
         let mut world = World::new();
