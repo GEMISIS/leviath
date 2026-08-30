@@ -19,7 +19,8 @@ pub mod transport;
 mod test_support;
 
 pub use auth::{
-    AuthStore, BrowserOpener, LoginOutcome, OAuthClient, ServerAuth, StoredTokenRefresher,
+    AuthStore, BrowserOpener, CALLBACK_PATH, LoginOutcome, OAuthClient, Pkce, ServerAuth,
+    StoredTokenRefresher, wait_for_callback,
 };
 pub use client::{EmbeddedResource, MCPClient, ToolResult};
 pub use discovery::{MCPServerConfig, MCPTransport, ResolvedTransport, ToolDiscovery};
