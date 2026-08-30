@@ -654,6 +654,39 @@ This shapes request *rate*. `[limits] max_concurrent_inferences` and
 configure their rate limit under `[model_providers.<name>.rate_limit]` instead; their concurrency
 cap goes in `[limits.max_concurrent_inferences_by_provider]` with everyone else's.
 
+## When the file will not load
+
+A key Leviath does not recognize is a warning. A file it cannot *parse* is different: there is no
+config to read at all, so nothing can be applied.
+
+Leviath never falls back to defaults there, and never stops. **The last version of the file that
+loaded stays in force**, so runs in flight keep going and new ones still start. What changes is that
+your edits are not being read - and that is the part that used to be silent, which is what made a
+single typo cost an afternoon.
+
+Every surface now says so, and each one clears itself when the file parses again. Nothing has to be
+restarted:
+
+| Where | What you see |
+|---|---|
+| `lev run` | One line before the run starts: the file, where in it the problem is, and that this run is on the last config that loaded |
+| `lev ps` | The same fact under the run table |
+| `lev doctor` | The `config` check fails, with the line and column, or with the key |
+| `lev dash` | A warning across the top of the screen for as long as the file is broken |
+| `lev validate` | A warning that the model and read-path checks were skipped; the blueprint is still checked |
+| `GET /api/config` | A `config_error` object, and a `config_health` frame on `/ws`. See [the API reference](/docs/api#when-the-config-file-will-not-load) |
+
+Two kinds of problem are reported differently, because they are found differently:
+
+- A **syntax error**, or a value of the wrong type for its key, has a place in the file: it is
+  reported with a line and a column.
+- A **refused value** parsed fine and was then turned down - an `openai-compatible` gateway with no
+  `base_url`, an `[[mcp_servers]]` entry with neither a `command` nor a `url`. There is no position
+  to point at, so it is reported with the dotted key it is about, such as `model_providers.local`.
+
+The file is read once per save. A broken file nobody has touched since costs one `stat`, not a
+re-read and a fresh warning on every command.
+
 ## Keys nothing reads
 
 A key Leviath does not recognize is named at start-up rather than ignored, wherever it sits:

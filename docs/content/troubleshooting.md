@@ -17,6 +17,36 @@ resolution, one real inference, and the daemon handoff, in that order, and repor
 check that fails tells you which section below you need. In particular it separates "my keys are
 wrong" from "the daemon is stuck", which look identical from the outside.
 
+## I edited config.toml and nothing changed
+
+The daemon picks up `~/.leviath/config.toml` on its own, so an edit that does nothing almost always
+means the file no longer parses. When that happens Leviath keeps serving **the last version of the
+file that loaded**: runs still start and still work, on the settings from before your edit. That is
+deliberate - a half-typed save should not break a spawn - and it is why the symptom is "nothing
+changed" rather than an error.
+
+Any of these will tell you:
+
+```bash
+lev doctor        # the `config` check fails, with the line and column, or the key
+lev ps            # a line under the run table
+lev run ...       # one line before the run starts
+lev dash          # a warning across the top of the screen, for as long as it lasts
+```
+
+The message names the file and where in it the problem is. A syntax error, or a value of the wrong
+type, comes with a line and a column. A value that parsed and was then refused - an
+`openai-compatible` gateway with no `base_url`, an `[[mcp_servers]]` entry with neither a `command`
+nor a `url` - comes with the key instead, such as `model_providers.local`.
+
+Fix the file and save it. Everything above clears on its own and the next run uses the new config;
+nothing needs restarting. If you would rather see it over HTTP, `GET /api/config` carries the same
+thing as a `config_error` object, and `/ws` sends a `config_health` frame each time the answer
+changes.
+
+A key Leviath simply does not recognize is a *different* problem: the file still loads, and the key
+is reported as one nothing reads. See [keys nothing reads](/docs/configuration#keys-nothing-reads).
+
 ## The install worked, but `lev` is not found
 
 The installer finished, and `lev --version` says `command not found`. Almost always the shell just

@@ -188,6 +188,12 @@ same list.
   A stage that is running keeps the snapshot it started on, and nothing the run has already spent
   or been granted is reset. The refusal a denied tool hands the model now says which setting lifts
   it and that resuming is enough.
+- The daemon re-read, re-parsed and re-warned about a broken `config.toml` on
+  every spawn and every `lev serve` request. The comment claimed the failing
+  mtime was kept to avoid exactly that; the code only recorded it on a
+  successful load. It is recorded either way now, so a broken file costs one
+  `stat` per call and produces one log line per save. Loading again is logged
+  too, which it never was.
 - The update check read the GitHub releases answer with no size cap, the one
   buffered remote read left after the daemon's caps landed. It now stops at
   the same 64 MiB as every other buffered body and reports the same
@@ -477,6 +483,24 @@ same list.
   unsigned console exe with no version block that talks to the network and
   spawns processes is the shape antivirus heuristics score worst, and an
   install Defender quarantines is not an install.
+- A `config.toml` that will not load is now something Leviath reports rather
+  than a fact it keeps to itself. The daemon has always kept serving the last
+  config that loaded when a save did not parse, which is right, but the only
+  sign of it was one line in `daemon.log` - so a typo made every later edit do
+  nothing, silently, and the file looked applied. It is now a state with a shape
+  and five places that show it: `lev run` prints one line before the run starts,
+  `lev ps` puts it under the run table, `lev doctor` fails its `config` check
+  with the position or the key, `lev dash` holds a warning across the top row
+  for as long as the file is broken, and `lev validate` says which of its checks
+  it had to skip. A syntax error carries a line and a column; a value that
+  parsed and was then refused carries the dotted key it belongs to. Everything
+  clears itself when the file parses again, with nothing restarted.
+- `GET /api/config` carries a `config_error` object with the kind, path,
+  one-line message, line and column or key, when it was first seen, and a note
+  saying the running config is the last one that loaded, plus `config_mtime` for
+  the config actually in force, so a client that just wrote the file can tell
+  whether the write was picked up. `/ws` sends a `config_health` frame on each
+  edge - broken, and loading again. Announced as the `config.health` capability.
 - `lev serve` holds at most 64 requests in flight and gives each 30 seconds; the
   65th is answered 503 at once and a request past its deadline 408, both in the
   usual `{"error": ...}` shape. `--max-concurrent-requests` and
