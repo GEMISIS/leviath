@@ -49,7 +49,9 @@ finished_retention_secs = 300
 wedge_timeout_secs = 0
 provider_failures_before_open = 3
 provider_circuit_cooldown_secs = 300
-interaction_timeout_secs = 3600
+# Unset, a prompt waits for a person until answered. Set this to bound the
+# wait for a run nobody will be watching; an expiry denies, never approves.
+# interaction_timeout_secs = 3600
 inference_retry_attempts = 4
 inference_retry_base_ms = 1000
 max_agents_per_run = 0

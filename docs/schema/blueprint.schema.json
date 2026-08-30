@@ -893,7 +893,7 @@
           "default": true
         },
         "unattended": {
-          "description": "What a --yolo run does here. `auto_approve` (the default) resolves it without asking. `ask` holds for a person even unattended, and the run then waits for [limits] interaction_timeout_secs.",
+          "description": "What a --yolo run does here. `auto_approve` (the default) resolves it without asking. `ask` holds for a person even unattended, and the run then waits until somebody answers (or until [limits] interaction_timeout_secs, if set).",
           "enum": [
             "ask",
             "auto_approve"

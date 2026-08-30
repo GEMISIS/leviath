@@ -76,11 +76,15 @@ call until the answer comes back, then continues with it:
 
 ## When nobody answers
 
-Every prompt on this page waits on a person, and nobody is always there. A run whose operator has
-gone home should not sit in `WaitingInput` holding its slot until the daemon restarts.
+Every prompt on this page waits on a person, and by default it waits until one answers. A run
+parked on an approval is still parked when you get back, whether that is ten minutes or a weekend
+later; it is not failed, reaped, or marked stuck by any timer while it waits, and it survives a
+daemon restart still waiting. The only things that end the wait are an answer and `lev cancel`.
 
-`[limits] interaction_timeout_secs` puts a deadline on that wait: one hour by default, and `0`
-waits indefinitely. When it passes, the prompt resolves exactly as cancelling it would:
+That is the right default for a person at a keyboard and the wrong one for a run nobody is
+watching, where a prompt would hold a slot until the daemon restarts. For those, `[limits]
+interaction_timeout_secs` puts a deadline on the wait. Unset means no deadline (`0` is read the same
+way). When a deadline passes, the prompt resolves exactly as cancelling it would:
 
 | Prompt | What an expiry means |
 |---|---|
@@ -92,7 +96,8 @@ waits indefinitely. When it passes, the prompt resolves exactly as cancelling it
 An interaction point that declared `unattended = "ask"` behaves differently on a timeout: the run
 **stops with an error**, rather than approving a checkpoint nobody made.
 
-The deadline is read once when the daemon starts, so changing it needs a daemon restart.
+The deadline is read once when the daemon starts, so changing it needs a daemon restart. Neither
+`lev setup` nor any bundled agent sets one for you.
 
 ## Tool approval
 
@@ -224,9 +229,9 @@ as approved without opening a prompt: nobody is watching, and a checkpoint that 
 the run. Set it to `ask` for a gate whose whole purpose is a human decision, such as a plan signed
 off before any code is written. The prompt then opens even under `--yolo`. The bundled `coder`
 leaves its plan checkpoint on the default, so an unattended run proceeds; set `ask` on your own
-blueprint when the decision genuinely cannot be made without you. Give a run like that an
-[`interaction_timeout_secs`](/docs/configuration#limits), so an unanswered gate releases on its own
-terms instead of waiting for ever.
+blueprint when the decision genuinely cannot be made without you. Such a run waits until you
+answer; give it an [`interaction_timeout_secs`](/docs/configuration#limits) if you would rather an
+unanswered gate released on its own terms.
 
 Know what that looks like before you meet it. A `--yolo` run holding an `ask` gate shows
 `waiting: checkpoint` in `lev ps` (the JSON wait reason is `interaction_point`), and does nothing
