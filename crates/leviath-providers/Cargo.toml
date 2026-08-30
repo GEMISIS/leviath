@@ -31,12 +31,19 @@ serde_json = { workspace = true }
 # The shipped price table is a TOML file compiled in with `include_str!`.
 toml = { workspace = true }
 thiserror = { workspace = true }
+# The grant store's IO and parse failures, which are reported to a person
+# rather than matched on. `ProviderError` is the inference vocabulary and
+# has no arm that fits "the file on disk is corrupt".
+anyhow = { workspace = true }
 tracing = { workspace = true }
 tiktoken-rs = { workspace = true }
 async-trait = { workspace = true }
 futures-core = { workspace = true }
 tokio-stream = { workspace = true }
 bytes = "1"
+# Decoding the `exp` and plan-tier claims out of the ChatGPT id and access
+# tokens. Payload only: the signature is the issuer's to verify, not ours.
+base64 = { workspace = true }
 # Ollama sends no tool-call ids, so Leviath mints them and they have to be
 # unique for the life of a conversation - which outlives the process, since
 # a pause and resume restores a window full of ids from the last one.
