@@ -88,9 +88,11 @@ impl RateLimiter {
 
             let current_rpm = state.request_timestamps.len() as u32;
             let current_tpm: usize = state.token_counts.iter().map(|(_, t)| t).sum();
-            let rpm_ok = current_rpm < self.rpm_limit;
-            // A zero `tokens_per_minute` is no token limit at all, the way a
-            // provider without a `[rate_limits]` table has none.
+            // A zero limit on either key is no limit at all, the way a
+            // provider without a `[rate_limits]` table has none. Without the
+            // guard a zero `requests_per_minute` could never be satisfied and
+            // this loop never returned.
+            let rpm_ok = self.rpm_limit == 0 || current_rpm < self.rpm_limit;
             let tpm_ok = self.tpm_limit == 0 || current_tpm < self.tpm_limit as usize;
 
             if rpm_ok && tpm_ok {
@@ -128,25 +130,6 @@ impl RateLimiter {
     pub async fn record_tokens(&self, tokens: usize) {
         let mut state = self.state.lock().await;
         state.token_counts.push_back((Instant::now(), tokens));
-    }
-
-    /// Check current TPM usage against limit.
-    pub async fn check_tpm(&self) -> bool {
-        let now = Instant::now();
-        let window = self.window;
-        let mut state = self.state.lock().await;
-
-        // Prune old entries; see `acquire` for why this is not `now - window`.
-        while state
-            .token_counts
-            .front()
-            .is_some_and(|(t, _)| now.duration_since(*t) > window)
-        {
-            state.token_counts.pop_front();
-        }
-
-        let current_tpm: usize = state.token_counts.iter().map(|(_, t)| t).sum();
-        current_tpm < self.tpm_limit as usize
     }
 
     /// Handle a 429 rate limit response.
@@ -199,20 +182,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rate_limiter_tpm_check() {
-        let limiter = RateLimiter::new(&RateLimitConfig {
-            requests_per_minute: 100,
-            tokens_per_minute: 1000,
-        });
-
-        assert!(limiter.check_tpm().await);
-        limiter.record_tokens(500).await;
-        assert!(limiter.check_tpm().await);
-        limiter.record_tokens(600).await;
-        assert!(!limiter.check_tpm().await);
-    }
-
-    #[tokio::test]
     async fn a_fresh_limiter_admits_the_first_request() {
         let limiter = RateLimiter::new(&RateLimitConfig {
             requests_per_minute: 60,
@@ -258,6 +227,20 @@ mod tests {
             started.elapsed() >= Duration::from_millis(350),
             "waited for the window"
         );
+    }
+
+    /// A zero `requests_per_minute` means no request limit; only tokens
+    /// count. Without the guard `acquire` loops on a limit no count can stay
+    /// under, so the test is bounded rather than left to hang.
+    #[tokio::test]
+    async fn a_zero_requests_per_minute_is_no_request_limit() {
+        let limiter = short_window(0, 0);
+        for _ in 0..3 {
+            tokio::time::timeout(Duration::from_secs(1), limiter.acquire())
+                .await
+                .expect("a zero request limit admits the call at once")
+                .expect("acquire succeeds");
+        }
     }
 
     /// A zero `tokens_per_minute` means no token limit; only requests count.
@@ -359,29 +342,6 @@ mod tests {
         assert_eq!(state.token_counts.len(), 1);
     }
 
-    #[tokio::test]
-    async fn tpm_check_empty_is_under_limit() {
-        let limiter = RateLimiter::new(&RateLimitConfig {
-            requests_per_minute: 60,
-            tokens_per_minute: 100,
-        });
-        assert!(limiter.check_tpm().await);
-    }
-
-    #[tokio::test]
-    async fn record_tokens_accumulates() {
-        let limiter = RateLimiter::new(&RateLimitConfig {
-            requests_per_minute: 60,
-            tokens_per_minute: 1000,
-        });
-        limiter.record_tokens(300).await;
-        limiter.record_tokens(400).await;
-        limiter.record_tokens(200).await;
-        assert!(limiter.check_tpm().await); // 900 < 1000
-        limiter.record_tokens(200).await;
-        assert!(!limiter.check_tpm().await); // 1100 >= 1000
-    }
-
     // ── Additional coverage tests ──────────────────────────────────────────
 
     #[tokio::test]
@@ -422,16 +382,6 @@ mod tests {
         let clone = limiter.clone();
         assert_eq!(clone.rpm_limit, 42);
         assert_eq!(clone.tpm_limit, 12345);
-    }
-
-    #[tokio::test]
-    async fn record_tokens_zero() {
-        let limiter = RateLimiter::new(&RateLimitConfig {
-            requests_per_minute: 60,
-            tokens_per_minute: 100,
-        });
-        limiter.record_tokens(0).await;
-        assert!(limiter.check_tpm().await);
     }
 
     #[tokio::test]
@@ -488,11 +438,9 @@ mod tests {
 
     #[tokio::test]
     async fn acquire_prunes_expired_token_count_entries() {
-        // acquire()'s pruning loop also prunes `token_counts` (shared state
-        // with check_tpm()'s own, separate pruning loop) - no other test
-        // seeds an expired token_counts entry before calling acquire()
-        // itself, so that pop_front() call is otherwise unexercised from this
-        // function.
+        // acquire()'s pruning loop also prunes `token_counts`; no other test
+        // seeds an expired token_counts entry before calling acquire(), so
+        // that pop_front() call is otherwise unexercised.
         let limiter = RateLimiter::new(&RateLimitConfig {
             requests_per_minute: 60,
             tokens_per_minute: 100_000,
@@ -504,25 +452,6 @@ mod tests {
                 .push_back((Instant::now() - Duration::from_secs(61), 500));
         }
         limiter.acquire().await.unwrap();
-        let state = limiter.state.lock().await;
-        assert!(state.token_counts.is_empty());
-    }
-
-    #[tokio::test]
-    async fn check_tpm_prunes_expired_token_entries() {
-        let limiter = RateLimiter::new(&RateLimitConfig {
-            requests_per_minute: 60,
-            tokens_per_minute: 100,
-        });
-        {
-            let mut state = limiter.state.lock().await;
-            state
-                .token_counts
-                .push_back((Instant::now() - Duration::from_secs(61), 90));
-        }
-        // The stale entry is outside the 60s window and should be pruned,
-        // leaving the limiter under its TPM limit.
-        assert!(limiter.check_tpm().await);
         let state = limiter.state.lock().await;
         assert!(state.token_counts.is_empty());
     }

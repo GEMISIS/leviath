@@ -109,6 +109,11 @@ same list.
 
 ### Fixed
 
+- `requests_per_minute = 0` under `[rate_limits.<provider>]` hung every call
+  to that provider: the limiter waited for the request count to drop under
+  zero, which it never could, and the wait sat in front of any HTTP timeout.
+  A zero on either key now means no limit on that side, as
+  `tokens_per_minute = 0` already did, and the config schema accepts it.
 - The dashboard's run detail strip could show a cache figure over 100%, such
   as `cache 152%`, on a run that was mostly served from the provider's cache.
   The prompt count every provider is normalised to is the fresh input only,
